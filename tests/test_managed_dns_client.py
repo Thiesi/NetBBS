@@ -271,3 +271,4 @@ def test_rename_and_cancel_round_trip_against_a_real_server(db):
     assert cancelled.name == "newboard"
     assert cancelled.previous_name == "oldboard"
     assert cancelled.status == "cancelled"
+    assert cancelled.previous_last_known_address is None

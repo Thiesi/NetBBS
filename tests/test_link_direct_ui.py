@@ -13,11 +13,13 @@ import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
+
 from netbbs.auth.users import create_user
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_identity import bootstrap_node_identity
-from netbbs.link.protocol import LinkNode
+from netbbs.link.protocol import LinkNode, LinkProtocolError
 from netbbs.link.realtime_channels import LiveChannelBridge
 from netbbs.link.realtime_direct import DirectChatUnreachable, IncomingDirectMessage
 from netbbs.link.transport import LINK_REALTIME_PROTOCOL_TAG, LinkRealtimeSessionRegistry
@@ -117,10 +119,11 @@ def test_exact_active_session_fingerprint_cannot_be_shadowed_by_a_peer_name(tmp_
     active_identity = bootstrap_node_identity("active-only")
     claiming_identity = bootstrap_node_identity("claiming-peer")
     claiming_node = LinkNode(identity=claiming_identity)
-    rig.link_node.handle_hello(claiming_node.build_hello(
-        addresses=None, outgoing_only=True, created_at=utc_now_iso(),
-        friendly_name=active_identity.fingerprint,
-    ))
+    with pytest.raises(LinkProtocolError, match="invalid profile claims"):
+        rig.link_node.handle_hello(claiming_node.build_hello(
+            addresses=None, outgoing_only=True, created_at=utc_now_iso(),
+            friendly_name=active_identity.fingerprint,
+        ))
     rig.registry._sessions[active_identity.fingerprint] = SimpleNamespace(
         remote_fingerprint=active_identity.fingerprint
     )

@@ -40,7 +40,6 @@ from netbbs.managed_dns.state import (
     set_cancelled_rename_state,
     set_dynamic,
     set_opt_in,
-    get_previous_published,
     get_published,
     set_published,
     set_registered_name,
@@ -394,7 +393,7 @@ async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> No
         await session.write_line(colored(f"Cancellation failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
         return
     restored_status = RegistrationStatus(result.previous_status) if result.previous_status else old_status
-    restored_published = await lane.run(get_previous_published)
+    restored_published = result.previous_last_known_address is not None
     await lane.run(
         set_cancelled_rename_state,
         name=result.previous_name,

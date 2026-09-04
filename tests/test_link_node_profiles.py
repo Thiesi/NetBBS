@@ -114,6 +114,7 @@ def test_friendly_name_reserves_label_delimiter_and_invisible_controls():
     assert normalize_friendly_name('The "Rusty" Anchor') is None
     assert normalize_friendly_name("Unnamed linked node") is None
     assert normalize_friendly_name("UNNAMED LINKED NODE") is None
+    assert normalize_friendly_name("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") is None
 
 
 def test_unseen_technical_identity_requires_a_complete_node_fingerprint():
@@ -123,14 +124,9 @@ def test_unseen_technical_identity_requires_a_complete_node_fingerprint():
     assert not is_node_fingerprint("abcd")
 
 
-def test_exact_fingerprint_cannot_be_shadowed_by_a_friendly_name(db, tmp_path):
+def test_exact_fingerprint_cannot_be_advertised_as_a_friendly_name(db, tmp_path):
     alice = _peer(tmp_path, "alice", "Alice", "alice.example.org")
-    impostor = _peer(tmp_path, "impostor", alice.fingerprint, "impostor.example.org")
-    save_peer(db, alice)
-    save_peer(db, impostor)
-
-    assert resolve_peer_reference([alice, impostor], alice.fingerprint) is alice
-    assert resolve_stored_peer_reference(db, alice.fingerprint) == alice.fingerprint
+    assert normalize_friendly_name(alice.fingerprint) is None
 
 
 def test_blank_reference_never_resolves_to_the_only_peer(db, tmp_path):
@@ -350,6 +346,26 @@ def test_peer_adopting_the_last_advertised_local_name_before_the_next_hello_is_s
     assert notice.kind == "cryptographic_identity_changed"
     assert notice.severity == "security"
     assert notice.previous_fingerprint == "abcdefghijklmnopqrstuvwxyz234567"
+
+
+def test_unchanged_peer_is_rechecked_after_local_friendly_name_changes(db, tmp_path):
+    peer = _peer(tmp_path, "peer", "Familiar", "peer.example.org")
+    set_node_display_name(db, "Original Local")
+    set_node_fingerprint(db, "abcdefghijklmnopqrstuvwxyz234567")
+    remember_own_identity_claims(db, canonical_dns_name="local.example.org")
+    save_peer(db, peer)
+
+    set_node_display_name(db, "Familiar")
+    save_peer(db, peer)
+    save_peer(db, peer)
+
+    notices = [
+        item for item in list_identity_observations(db)
+        if item.kind == "cryptographic_identity_changed"
+    ]
+    assert len(notices) == 1
+    assert notices[0].node_fingerprint == peer.fingerprint
+    assert notices[0].previous_fingerprint == "abcdefghijklmnopqrstuvwxyz234567"
 
 
 def test_new_peer_adopting_a_retained_previous_name_is_security_notice(db, tmp_path):

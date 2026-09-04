@@ -9,17 +9,25 @@ import asyncio
 
 import pytest
 
-from netbbs.managed_dns.credential import credential_path_for, load_credential, previous_credential_path_for
+from netbbs.managed_dns.credential import (
+    credential_path_for, load_credential, previous_credential_path_for, save_credential,
+)
 from netbbs.managed_dns.state import (
     OptIn,
     RegistrationStatus,
     get_opt_in,
     get_previous_name,
+    get_published,
     get_registered_name,
     get_registration_status,
     get_service_url,
     set_node_fingerprint,
     set_opt_in,
+    set_previous_name,
+    set_previous_published,
+    set_previous_status,
+    set_registered_name,
+    set_registration_status,
     set_service_url,
 )
 from netbbs.net.managed_dns_flow import (
@@ -423,6 +431,35 @@ def test_managed_name_change_and_cancel_preserve_the_old_registration(tmp_path, 
     assert get_previous_name(db) is None
     assert load_credential(credential_path_for(db.path)) == old_credential
     assert load_credential(previous_credential_path_for(db.path)) is None
+    db.close()
+
+
+def test_cancel_rename_does_not_restore_stale_publication_state(tmp_path, monkeypatch):
+    from netbbs.managed_dns.client import CancelRenameResult
+
+    db = Database(tmp_path / "node.db")
+    set_service_url(db, "https://dns.example")
+    set_registered_name(db, "new-name")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+    save_credential(credential_path_for(db.path), "replacement-secret")
+    save_credential(previous_credential_path_for(db.path), "old-secret")
+    lane = DatabaseLane(db.path)
+
+    async def fake_cancel(*_args, **_kwargs):
+        return CancelRenameResult(
+            "new-name", "old-name", "cancelled", "matured", None,
+        )
+
+    monkeypatch.setattr("netbbs.managed_dns.client.cancel_rename", fake_cancel)
+    asyncio.run(cancel_registration_rename(FakeSession(["y"]), lane))
+
+    assert get_registered_name(db) == "old-name"
+    assert get_registration_status(db) is RegistrationStatus.MATURED
+    assert not get_published(db)
+    lane.close()
     db.close()
 
 

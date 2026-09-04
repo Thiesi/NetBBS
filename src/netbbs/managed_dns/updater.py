@@ -24,22 +24,22 @@ from aiohttp import ClientSession
 from netbbs.managed_dns.client import HeartbeatResult, ManagedDnsError, heartbeat
 from netbbs.managed_dns.credential import (
     credential_path_for, delete_credential, load_credential, previous_credential_path_for,
-    recover_credential_transition, save_credential,
+    recover_credential_transition, stage_credential_cancellation,
 )
 from netbbs.managed_dns.state import (
     OptIn,
     RegistrationStatus,
     get_opt_in,
     get_previous_name,
+    get_previous_published,
+    get_previous_status,
     get_registered_name,
     get_registration_status,
     get_service_url,
-    set_last_contact_at,
-    set_previous_name,
+    set_heartbeat_reconciliation_state,
     set_previous_published,
     set_previous_status,
     set_published,
-    set_registered_name,
     set_registration_status,
 )
 from netbbs.storage.database import Database
@@ -117,14 +117,17 @@ async def run_scheduled_managed_dns_updater(
                             previous_inactive=previous_inactive,
                         )
                     elif primary_inactive and previous_result is not None and previous_credential is not None:
-                        save_credential(credential_path_for(db.path), previous_credential)
-                        delete_credential(previous_credential_path_for(db.path))
-                        set_previous_name(db, None)
-                        set_previous_status(db, None)
                         _apply_heartbeat_result(
                             db, previous_result, previous_result=None,
                             has_previous_credential=False,
                         )
+                        # Commit the recovered service truth while both files
+                        # still exist, then journal the reverse swap. A crash
+                        # at any point leaves either the fallback credential or
+                        # a replayable journal, never an active DB identity with
+                        # its only working secret already deleted.
+                        stage_credential_cancellation(db.path, previous_credential)
+                        recover_credential_transition(db.path)
                     elif primary_inactive:
                         # A 401 is authoritative service state, unlike a
                         # transient transport/provider failure. Preserve the
@@ -162,36 +165,45 @@ def _apply_heartbeat_result(
     has_previous_credential: bool, previous_inactive: bool = False,
 ) -> None:
     """Apply authoritative service state and repair an interrupted local rename."""
-    set_registered_name(db, result.name)
-    set_registration_status(db, RegistrationStatus(result.status))
-    # A reported address is the service's confirmation that a record is
-    # actually published; `matured` alone is not (see state.get_published).
-    set_published(db, result.last_known_address is not None)
-    set_last_contact_at(db, utc_now_iso())
-
     previous_name = result.previous_name
     if previous_name is None and previous_result is not None and previous_result.name != result.name:
         previous_name = previous_result.name
 
+    previous_status = get_previous_status(db)
+    previous_published = get_previous_published(db)
+    delete_previous_credential = False
     if result.status == RegistrationStatus.MATURED.value:
-        set_previous_name(db, None)
-        set_previous_status(db, None)
-        set_previous_published(db, False)
-        if has_previous_credential:
-            delete_credential(previous_credential_path_for(db.path))
+        previous_name = None
+        previous_status = None
+        previous_published = False
+        delete_previous_credential = has_previous_credential
     elif previous_name is not None:
-        set_previous_name(db, previous_name)
         if previous_inactive:
-            set_previous_status(db, RegistrationStatus.ABANDONED)
-            set_previous_published(db, False)
+            previous_status = RegistrationStatus.ABANDONED
+            previous_published = False
         elif previous_result is not None:
-            set_previous_status(db, RegistrationStatus(previous_result.status))
-            set_previous_published(db, previous_result.last_known_address is not None)
+            previous_status = RegistrationStatus(previous_result.status)
+            previous_published = previous_result.last_known_address is not None
     elif has_previous_credential:
         # The file can be left behind if a crash happens after copying the old
         # credential but before installing a replacement. Both heartbeats then
         # authenticate the same registration, so the extra copy is redundant.
-        set_previous_name(db, None)
-        set_previous_status(db, None)
-        set_previous_published(db, False)
+        previous_name = None
+        previous_status = None
+        previous_published = False
+        delete_previous_credential = True
+
+    set_heartbeat_reconciliation_state(
+        db,
+        name=result.name,
+        status=RegistrationStatus(result.status),
+        # A reported address is the service's confirmation that a record is
+        # actually published; `matured` alone is not.
+        published=result.last_known_address is not None,
+        last_contact_at=utc_now_iso(),
+        previous_name=previous_name,
+        previous_status=previous_status,
+        previous_published=previous_published,
+    )
+    if delete_previous_credential:
         delete_credential(previous_credential_path_for(db.path))

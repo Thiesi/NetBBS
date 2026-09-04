@@ -137,3 +137,8 @@ def test_node_display_name_is_stored_in_unicode_nfc(tmp_path):
     assert get_node_display_name(db) == "Caf\u00e9 Node"
     assert canonical_node_display_name("Caf\u00e9 Node") == "Caf\u00e9 Node"
     db.close()
+
+
+def test_node_display_name_cannot_be_a_complete_fingerprint():
+    with pytest.raises(ValueError, match="must not look like a node fingerprint"):
+        canonical_node_display_name("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")

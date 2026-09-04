@@ -233,6 +233,34 @@ def test_lost_rename_retry_reclaims_an_abandoned_replacement(db):
     assert heartbeat_body["name"] == "new-name"
 
 
+def test_lost_rename_retry_refreshes_contact_before_the_next_sweep(db):
+    clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, abandonment_seconds=60, cooldown_seconds=600,
+        )
+        try:
+            original = await _register(server, name="old-name")
+            await _rename(server, credential=original["credential"], name="new-name")
+            mark_abandoned(db, "new-name", released_at=clock.now.isoformat())
+            clock.now += timedelta(seconds=120)
+            status, _ = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            await server._sweep_once()
+            return status
+        finally:
+            await server.stop()
+
+    status = asyncio.run(scenario())
+    replacement = get_registration_by_name(db, "new-name")
+    assert status == 201
+    assert replacement.status == "pending"
+    assert replacement.last_contact_at == clock.now.isoformat()
+    assert replacement.contact_started_at == clock.now.isoformat()
+
+
 def test_lost_rename_retry_cannot_revive_an_abandoned_replacement_after_cooldown(db):
     now = datetime(2026, 9, 4, tzinfo=timezone.utc)
 
@@ -333,6 +361,78 @@ def test_cancel_rename_revives_a_matured_previous_name_and_republishes_it(db):
     assert heartbeat_body["name"] == "old-name"
     assert get_registration_by_name(db, "old-name").status == "matured"
     assert "old-name.netbbs.org." in provider.records
+
+
+class _FailOldNamePublishProvider(LoggingDnsProvider):
+    def upsert_record(self, name, kind, address):
+        if name == "old-name.netbbs.org.":
+            raise DnsProviderError("old record cannot be restored")
+        super().upsert_record(name, kind, address)
+
+
+def test_cancel_rename_reports_failed_previous_name_republication(db):
+    clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
+    provider = _FailOldNamePublishProvider()
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, min_age_seconds=60, dns_provider=provider,
+        )
+        try:
+            original = await _register(server, name="old-name")
+            await _heartbeat(server, credential=original["credential"])
+            clock.now += timedelta(seconds=61)
+            await _heartbeat(server, credential=original["credential"])
+            _, replacement = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            mark_abandoned(db, "old-name", released_at=clock.now.isoformat())
+            return await _cancel_rename(server, credential=replacement["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["previous_status"] == "matured"
+    assert body["previous_last_known_address"] is None
+
+
+def test_rename_completion_does_not_release_a_reissued_previous_name(db):
+    clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
+    provider = LoggingDnsProvider()
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, min_age_seconds=60, cooldown_seconds=30,
+            dns_provider=provider,
+        )
+        try:
+            original = await _register(
+                server, name="old-name", node_fingerprint="fp-original"
+            )
+            _, replacement = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            await _heartbeat(server, credential=replacement["credential"])
+            mark_abandoned(db, "old-name", released_at=clock.now.isoformat())
+            clock.now += timedelta(seconds=61)
+            reissued = await _register(
+                server, name="old-name", node_fingerprint="fp-new-owner"
+            )
+            completed = await _heartbeat(
+                server, credential=replacement["credential"]
+            )
+            return reissued, completed
+        finally:
+            await server.stop()
+
+    reissued, (_, completed) = asyncio.run(scenario())
+    old = get_registration_by_name(db, "old-name")
+    assert reissued["status"] == "pending"
+    assert completed["status"] == "matured"
+    assert old.node_fingerprint == "fp-new-owner"
+    assert old.status == "pending"
+    assert "old-name.netbbs.org." not in provider.deletes
 
 
 def test_cancel_rename_reviving_an_abandoned_name_obeys_the_cumulative_cap(db):

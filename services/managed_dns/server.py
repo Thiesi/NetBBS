@@ -557,7 +557,11 @@ class ManagedDnsServer:
                         return web.json_response(
                             {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
                         )
-                    reclaim(self._db, existing_replacement.name, matured=False)
+                    retry_at = self._clock().isoformat()
+                    reclaim(
+                        self._db, existing_replacement.name, matured=False,
+                        last_contact_at=retry_at, contact_started_at=retry_at,
+                    )
                     replacement_status = "pending"
                 replace_registration_credential(
                     self._db, existing_replacement.name, hash_credential(secret)
@@ -721,10 +725,15 @@ class ManagedDnsServer:
                         and await self._best_effort_publish(previous_name, observed_address)
                     ):
                         clear_last_known_address(self._db, previous_name)
+            authoritative_previous = get_registration_by_name(self._db, previous_name)
             return web.json_response(
                 {
                     "name": replacement.name, "previous_name": previous_name,
                     "previous_status": previous_status,
+                    "previous_last_known_address": (
+                        authoritative_previous.last_known_address
+                        if authoritative_previous is not None else None
+                    ),
                     "status": "cancelled",
                 }
             )
@@ -790,7 +799,10 @@ class ManagedDnsServer:
                 observed_address = self._observed_address(request)
                 if observed_address and await self._best_effort_publish(registration.name, observed_address):
                     old = get_registration_by_name(self._db, registration.replaces_name)
-                    if old is not None and old.status == "matured":
+                    if (
+                        old is not None and old.status == "matured"
+                        and old.node_fingerprint == registration.node_fingerprint
+                    ):
                         # Clear before the provider mutation: if the process
                         # exits after deletion, the old credential's next
                         # heartbeat must republish instead of trusting a stale
@@ -805,6 +817,7 @@ class ManagedDnsServer:
                             )
                     complete_rename(
                         self._db, registration.name, registration.replaces_name,
+                        node_fingerprint=registration.node_fingerprint,
                         matured_at=now_iso, released_at=now_iso,
                     )
                     status = "matured"

@@ -3807,3 +3807,26 @@ Live backup double-collects all three credential artifacts around the SQLite
 snapshot and compares the snapshot's `managed_dns_*` rows with live state;
 retry a moving generation rather than combining database and secrets from
 opposite sides of a rename or cancellation.
+
+Heartbeat reconciliation commits the managed-DNS active and previous names,
+statuses, publication flags, and contact timestamp as one transaction. When an
+inactive replacement makes the retained previous credential authoritative,
+commit that state before journaling and applying the reverse credential swap;
+never delete the only working fallback secret ahead of the database commit.
+Cancellation likewise consumes the service's authoritative revived-publication
+state instead of restoring a cached flag which may predate a failed republish.
+
+A rename's `replaces_name` is not proof that the row currently at that name still
+belongs to the same node: cooldown expiry permits reissue. Check the previous
+row's node fingerprint before provider deletion or release, and guard the store
+mutation as well. Reactivating an abandoned replacement restarts both contact
+timestamps so the next sweep cannot immediately abandon the recovered row.
+
+Complete fingerprint-shaped strings are reserved friendly names at both local
+configuration and signed-profile admission. Unchanged peer hellos still
+re-evaluate collisions with current local claims after a local rename, while
+identical recorded collisions are deduplicated. Where a user picker contains
+identical remote node presentation labels, put the full fingerprint first so
+terminal truncation cannot hide the distinction. Durable channel rendering
+recovers the signed author fingerprint from the retained Link event for both the
+friendly label and any undismissed cryptographic-identity warning.

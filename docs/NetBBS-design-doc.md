@@ -523,7 +523,10 @@ friendly claim is ambiguous rather than silently preferring either. Friendly
 names are compared in one Unicode normalization form (NFC), so canonically
 equivalent spellings are one name, never two claims. UI delimiters, invisible
 control/format characters, and the `Unnamed linked node` fallback label are
-reserved and cannot be claimed as friendly names.
+reserved and cannot be claimed as friendly names. A complete 32-character
+base32 node fingerprint is reserved too: exact fingerprint lookup has precedence,
+so allowing the same shape as a friendly name would make that claim unreachable
+or misleading.
 
 Peers retain authenticated observations of all three values. A friendly-name
 change under the same fingerprint is an informational continuity notice. A DNS
@@ -5718,15 +5721,23 @@ service-wide token-bucket state survives backend restarts.
 
 Node-side rename state is one local database transaction: the replacement name,
 pending/unpublished state, and previous-name presentation state never become
-visible in a partial combination. Cancellation first commits the remotely
-revived previous name as a coherent local state, then uses the credential
-transition journal in reverse to restore the previous bearer secret and remove
-the replacement-era extra secret. A crash on either side remains recoverable by
+visible in a partial combination. Heartbeat reconciliation follows the same
+rule for the active and previous names, statuses, publication flags, and contact
+time. Cancellation and updater-led recovery first commit the remotely revived
+previous name as a coherent local state, then use the credential transition
+journal in reverse to restore the previous bearer secret and remove the
+replacement-era extra secret. The service's cancellation response supplies the
+revived name's authoritative publication state; a failed republish cannot revive
+a stale local publication claim. A crash on either side remains recoverable by
 the retained two credentials and the updater. Point-in-time restore likewise
 removes any primary, previous, or journal credential artifact absent from the
 backup generation. A replacement abandoned during a rename remains eligible
 for credential-recovery retry only while its own release/abandonment cooldown
-is still open. If its heartbeat becomes authoritatively inactive while the old
+is still open, and reactivation restarts its contact window at the retry time.
+Rename completion releases or deletes the previous row only when it still belongs
+to the same node fingerprint; a cooldown-expired name reissued to another node is
+never mutated through the stale replacement link. If its heartbeat becomes
+authoritatively inactive while the old
 name's heartbeat fails transiently, the node continues heartbeating the retained
 old credential on later passes rather than letting the still-live name expire.
 

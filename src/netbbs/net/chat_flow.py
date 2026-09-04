@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
 
@@ -786,6 +787,22 @@ def _resolve_message_author(db: Database, author_label: str) -> User | None:
         return None
 
 
+def _durable_link_author(db: Database, message: ChannelMessage) -> tuple[str, str] | None:
+    """Return a materialized Link message's authenticated author and home key."""
+    if message.link_content_id is None or message.link_event_json is not None:
+        return None
+    try:
+        row = db.connection.execute(
+            "SELECT envelope_json FROM link_events WHERE content_id = ?",
+            (message.link_content_id,),
+        ).fetchone()
+        payload = json.loads(row["envelope_json"])["envelope"]["payload"]
+        remote_author = payload["author"]
+        return remote_author["local_user_id"], remote_author["home_node_fingerprint"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _message_author_label(db: Database, channel: Channel, message: ChannelMessage) -> str:
     """
     The author label to show for one `ChannelMessage` of kind
@@ -803,19 +820,11 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
     string, even one that once came from a verified user, must never
     itself be treated as proof.
     """
-    if message.link_content_id is not None and message.link_event_json is None:
-        try:
-            row = db.connection.execute(
-                "SELECT envelope_json FROM link_events WHERE content_id = ?",
-                (message.link_content_id,),
-            ).fetchone()
-            payload = json.loads(row["envelope_json"])["envelope"]["payload"]
-            remote_author = payload["author"]
-            fingerprint = remote_author["home_node_fingerprint"]
-            node_label = identity_for_fingerprint(db, fingerprint).label
-            return sanitize_text(f"{remote_author['local_user_id']}@{node_label}")
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            pass
+    durable_author = _durable_link_author(db, message)
+    if durable_author is not None:
+        local_user_id, fingerprint = durable_author
+        node_label = identity_for_fingerprint(db, fingerprint).label
+        return sanitize_text(f"{local_user_id}@{node_label}")
     author = _resolve_message_author(db, message.author_label)
     if author is None:
         return sanitize_text(message.author_label)
@@ -896,8 +905,13 @@ def _render_channel_message(
         color = SELF_COLOR if self_message else effective_accent_color_256(db)
         label = _colored_around("<", author_label, ">", fg_color=color, bold=self_message)
         line = f"{label} {sanitize_text(message.body)}"
-    if message.author_fingerprint:
-        identity_notice = latest_identity_observation(db, message.author_fingerprint)
+    durable_author = _durable_link_author(db, message)
+    author_fingerprint = (
+        message.author_fingerprint
+        or (durable_author[1] if durable_author is not None else None)
+    )
+    if author_fingerprint:
+        identity_notice = latest_identity_observation(db, author_fingerprint)
         if identity_notice is not None and identity_notice.severity == "security":
             warning = colored(
                 "Caution: this familiar node name has a different cryptographic identity. ",

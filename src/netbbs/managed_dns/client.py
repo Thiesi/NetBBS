@@ -193,6 +193,7 @@ class CancelRenameResult:
     previous_name: str
     status: str
     previous_status: str
+    previous_last_known_address: str | None
 
 
 async def cancel_rename(
@@ -216,13 +217,18 @@ async def cancel_rename(
         raise ManagedDnsError(f"malformed cancel-rename response from {url}: expected an object")
     name_value, previous_name = body.get("name"), body.get("previous_name")
     previous_status = body.get("previous_status")
+    previous_last_known_address = body.get("previous_last_known_address")
     if (
         not isinstance(name_value, str) or not name_value or not isinstance(previous_name, str)
         or not previous_name or body.get("status") != "cancelled"
         or previous_status not in ("pending", "matured")
+        or (previous_last_known_address is not None and not isinstance(previous_last_known_address, str))
     ):
         raise ManagedDnsError(f"malformed cancel-rename response from {url}: invalid fields")
-    return CancelRenameResult(name_value, previous_name, "cancelled", previous_status)
+    return CancelRenameResult(
+        name_value, previous_name, "cancelled", previous_status,
+        previous_last_known_address,
+    )
 
 
 @dataclass(frozen=True)

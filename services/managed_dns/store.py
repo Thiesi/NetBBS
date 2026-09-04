@@ -330,18 +330,21 @@ def mark_released(db: Database, name: str, *, released_at: str) -> None:
     db.connection.commit()
 
 
-def complete_rename(db: Database, new_name: str, old_name: str, *, matured_at: str, released_at: str) -> None:
+def complete_rename(
+    db: Database, new_name: str, old_name: str, *, node_fingerprint: str,
+    matured_at: str, released_at: str,
+) -> None:
     """Commit the local half of a provider-completed DNS rename atomically."""
     with db.connection:
         db.connection.execute(
             "UPDATE registrations SET status = 'matured', matured_at = ?, replaces_name = NULL "
-            "WHERE name = ? AND status = 'pending' AND replaces_name = ?",
-            (matured_at, new_name, old_name),
+            "WHERE name = ? AND node_fingerprint = ? AND status = 'pending' AND replaces_name = ?",
+            (matured_at, new_name, node_fingerprint, old_name),
         )
         db.connection.execute(
             "UPDATE registrations SET status = 'released', released_at = ? "
-            "WHERE name = ? AND status IN ('pending', 'matured')",
-            (released_at, old_name),
+            "WHERE name = ? AND node_fingerprint = ? AND status IN ('pending', 'matured')",
+            (released_at, old_name, node_fingerprint),
         )
 
 

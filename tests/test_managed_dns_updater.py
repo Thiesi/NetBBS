@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 import aiohttp
+import pytest
 
 from netbbs.managed_dns.client import cancel_rename, register, rename
 from netbbs.managed_dns.credential import (
@@ -296,6 +297,46 @@ def test_updater_retries_the_previous_name_after_replacement_abandonment_and_a_t
     assert get_previous_name(db) is None
     assert load_credential(credential_path_for(db.path)) == "old-secret"
     assert load_credential(previous_credential_path_for(db.path)) is None
+    db.close()
+
+
+def test_updater_commits_promoted_state_before_journaling_credential_swap(tmp_path, monkeypatch):
+    from netbbs.managed_dns.client import HeartbeatResult
+
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_service_url(db, "https://dns.example")
+    set_registered_name(db, "new-name")
+    set_registration_status(db, RegistrationStatus.ABANDONED)
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    save_credential(credential_path_for(db.path), "inactive-new-secret")
+    save_credential(previous_credential_path_for(db.path), "working-old-secret")
+
+    async def fake_send_heartbeat(_base_url, credential):
+        if credential == "working-old-secret":
+            return HeartbeatResult("old-name", "matured", "127.0.0.1"), False
+        return None, True
+
+    def crash_before_journal(*_args, **_kwargs):
+        raise RuntimeError("simulated crash before credential journal")
+
+    monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", fake_send_heartbeat)
+    monkeypatch.setattr(
+        "netbbs.managed_dns.updater.stage_credential_cancellation", crash_before_journal,
+    )
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="before credential journal"):
+            await run_scheduled_managed_dns_updater(db)
+
+    asyncio.run(scenario())
+
+    assert get_registered_name(db) == "old-name"
+    assert get_registration_status(db) is RegistrationStatus.MATURED
+    assert get_previous_name(db) is None
+    assert load_credential(credential_path_for(db.path)) == "inactive-new-secret"
+    assert load_credential(previous_credential_path_for(db.path)) == "working-old-secret"
     db.close()
 
 

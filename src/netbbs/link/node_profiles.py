@@ -10,14 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from ipaddress import ip_address
 import json
-import re
 import unicodedata
 
 from netbbs.managed_dns.state import (
     RegistrationStatus, get_node_fingerprint, get_previous_name, get_previous_published, get_previous_status,
     get_published, get_registered_name, get_registration_status,
 )
-from netbbs.config import get_config, get_node_display_name, set_config
+from netbbs.config import get_config, get_node_display_name, is_node_fingerprint_shape, set_config
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -26,7 +25,6 @@ MAX_NODE_FRIENDLY_NAME_LENGTH = 64
 MAX_CANONICAL_DNS_NAME_LENGTH = 253
 MAX_IDENTITY_OBSERVATIONS_PER_PEER = 20
 MAX_IDENTITY_OBSERVATIONS_TOTAL = 5000
-_NODE_FINGERPRINT_RE = re.compile(r"^[a-z2-7]{32}$")
 _MAX_OWN_IDENTITY_CLAIM_HISTORY = 40
 _OWN_FRIENDLY_NAME_CONFIG_KEY = "link_own_friendly_name_claim"
 _OWN_CANONICAL_DNS_CONFIG_KEY = "link_own_canonical_dns_claim"
@@ -87,6 +85,7 @@ def normalize_friendly_name(value: object) -> str | None:
     if (
         not value or len(value) > MAX_NODE_FRIENDLY_NAME_LENGTH
         or name_key(value) == name_key(UNNAMED_NODE_NAME)
+        or is_node_fingerprint_shape(value)
     ):
         return None
     if "·" in value or '"' in value or any(unicodedata.category(char) in {"Cc", "Cf"} for char in value):
@@ -125,7 +124,7 @@ def profile_claims_are_canonical(payload: dict) -> bool:
 
 
 def is_node_fingerprint(value: str) -> bool:
-    return bool(_NODE_FINGERPRINT_RE.fullmatch(value.strip().lower()))
+    return is_node_fingerprint_shape(value)
 
 
 def identity_for_peer(peer) -> NodeDisplayIdentity:
@@ -274,12 +273,11 @@ def record_peer_identity_observation(db: Database, peer) -> None:
         _identity_from_descriptor_json(peer.fingerprint, existing_row["descriptor_json"])
         if existing_row is not None else None
     )
-    if (
+    presentation_unchanged = (
         previous is not None
         and previous.friendly_name == current.friendly_name
         and previous.dns_name == current.dns_name
-    ):
-        return
+    )
 
     kind = "first_seen"
     severity = "info"
@@ -359,11 +357,24 @@ def record_peer_identity_observation(db: Database, peer) -> None:
                 break
 
     if collision is not None:
+        if presentation_unchanged and db.connection.execute(
+            """
+            SELECT 1 FROM link_node_identity_observations
+            WHERE node_fingerprint = ? AND previous_fingerprint = ?
+              AND friendly_name = ? AND canonical_dns_name IS ?
+              AND kind = 'cryptographic_identity_changed'
+            LIMIT 1
+            """,
+            (current.fingerprint, collision.fingerprint, current.friendly_name, current.dns_name),
+        ).fetchone() is not None:
+            return
         kind = "cryptographic_identity_changed"
         severity = "security"
         previous_fingerprint = collision.fingerprint
         previous_name = collision.friendly_name
         previous_dns = collision.dns_name
+    elif presentation_unchanged:
+        return
     elif previous is not None:
         name_changed = previous.friendly_name != current.friendly_name
         dns_changed = previous.dns_name != current.dns_name

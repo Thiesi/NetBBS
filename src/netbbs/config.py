@@ -18,6 +18,7 @@ for where that resolution order already lives.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 from enum import Enum
@@ -139,6 +140,12 @@ _DEFAULT_NODE_DISPLAY_NAME = "NetBBS"
 # netbbs.boards.boards' own board-name length cap, just sized for a
 # string shown on every single screen rather than one board listing.
 MAX_NODE_DISPLAY_NAME_LENGTH = 32
+_NODE_FINGERPRINT_RE = re.compile(r"^[a-z2-7]{32}$")
+
+
+def is_node_fingerprint_shape(value: str) -> bool:
+    """Whether ``value`` could be mistaken for a complete Link fingerprint."""
+    return bool(_NODE_FINGERPRINT_RE.fullmatch(value.strip().lower()))
 
 
 def get_node_display_name(db: Database) -> str:
@@ -177,6 +184,8 @@ def canonical_node_display_name(name: str) -> str:
         raise ValueError(f"node display name cannot exceed {MAX_NODE_DISPLAY_NAME_LENGTH} characters, got {len(name)}")
     if name.lower() == "unnamed linked node":
         raise ValueError("node display name is reserved for nodes without a friendly name")
+    if is_node_fingerprint_shape(name):
+        raise ValueError("node display name must not look like a node fingerprint")
     if "·" in name or '"' in name or any(unicodedata.category(char) in {"Cc", "Cf"} for char in name):
         raise ValueError("node display name contains a reserved or invisible character")
     return name

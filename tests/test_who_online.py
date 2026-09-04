@@ -16,6 +16,9 @@ import re
 
 from netbbs.auth.users import create_user
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+from netbbs.link.node_identity import bootstrap_node_identity
+from netbbs.link.protocol import LinkNode
+from netbbs.link.store import save_peer
 from netbbs.messaging_preferences import accepts_direct_messages, set_accepts_direct_messages
 from netbbs.net.char_input import InputHistory
 from netbbs.net.main_menu import _main_menu
@@ -405,6 +408,45 @@ def test_who_screen_includes_users_online_on_a_linked_node(tmp_path):
         assert "on linked node remote-node-fingerprint-abc123" in who_screen
 
     asyncio.run(scenario())
+    database.close()
+
+
+def test_who_screen_shows_fingerprints_when_remote_node_labels_collide(tmp_path):
+    database = db(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+
+    def peer(label):
+        node = LinkNode(identity=bootstrap_node_identity(tmp_path / label))
+        return node.handle_hello(node.build_hello(
+            addresses=None, outgoing_only=True, created_at="2026-09-04T00:00:00+00:00",
+            friendly_name="Shared Node", canonical_dns_name="shared.example.org",
+        ))
+
+    first = peer("first")
+    second = peer("second")
+    save_peer(database, first)
+    save_peer(database, second)
+
+    async def scenario():
+        node_controls = _node_controls()
+        link_context = _FakeLinkContext(_FakeBridge({
+            first.fingerprint: {"erin": "erin"},
+            second.fingerprint: {"erin": "erin"},
+        }))
+        session = FakeSession(["w", "b", "l", "y"])
+        node_controls.session_registry.enter(session)
+        node_controls.session_registry.mark_authenticated(session, "alice")
+        try:
+            await _run_main_menu(
+                session, database, alice, node_controls, link_context=link_context,
+            )
+        finally:
+            node_controls.session_registry.leave(session)
+        return _written_text(session).split("Who's online", 1)[1].split("Choice: ")[0]
+
+    who_screen = asyncio.run(scenario())
+    assert first.fingerprint in who_screen
+    assert second.fingerprint in who_screen
     database.close()
 
 
