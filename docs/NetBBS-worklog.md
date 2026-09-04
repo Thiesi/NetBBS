@@ -2762,7 +2762,7 @@ source checkout) has to live under `src/netbbs/...` and be listed in
 computed relative to the repo root.
 
 This was a real, previously-unnoticed product gap, not just a style
-preference: the welcome-banner/masthead sample `.ans` files used to
+preference: the banner/masthead sample `.ans` files used to
 live only in `examples/`, so a SysOp running the actually-supported
 install path (a release wheel) had no sample files on their filesystem
 to copy into place at all -- `[E]nable` was reachable but had nothing
@@ -2774,6 +2774,13 @@ source checkout) -- see that module's own docstring. Do not duplicate
 this kind of bundled asset back into `examples/` alongside the package
 copy: a second, stale copy of the same files re-documents the exact
 manual-copy workflow the packaged version exists to make unnecessary.
+
+Every banner/masthead surface with a Gallery owns a separate preset
+registry and package-data directory under `netbbs.net.banner_presets`.
+Keep the registry, its loader directory, and `pyproject.toml`'s package-
+data globs aligned. Curate for materially different composition, density,
+and silhouette within each registry; palette-only recolors create the
+illusion of choice and should not be retained as separate samples.
 
 ### Self-update: checking is wired up, applying is not (issue #82)
 

@@ -1,5 +1,5 @@
 """
-Bundled welcome-banner/masthead sample presets (issue #169).
+Bundled banner and masthead sample presets.
 
 Shipped as real installed package data -- the same mechanism `pyproject.
 toml` already uses for `netbbs.web`'s own `static/*` -- specifically
@@ -11,17 +11,17 @@ files on their filesystem to `cp` into place in the first place -- the
 gap this closes is bigger than "manual copying is annoying," it's "the
 samples were unreachable from a real install."
 
-`netbbs.net.admin_flow`'s `[G]allery` screens (welcome banner and
-masthead) list these, preview one through the exact same preview call
-the screen's own `[P]review` already uses, and apply it by writing its
-bytes directly to `banner_path(db)`/`main_menu_banner_path(db)` -- zero
-filesystem access needed, identical behavior for a wheel install or a
-source checkout.
+Every `[G]allery` screen has a deliberately screen-specific collection:
+welcome, main menu, logoff, both registration moments, and the three
+section pickers do not masquerade the same generic strips as distinct
+samples.  The gallery previews a preset through the same path as its
+own `[P]review`, then writes the selected bytes to that surface's
+singleton file -- zero operator filesystem access needed and identical
+behavior for a wheel install or a source checkout.
 
-Descriptions originate from `examples/README.md`'s own former
-"Welcome banners"/"Main-menu mastheads" sections, which described these
-same samples as loose files before this module existed; that README
-now just points here instead of duplicating the list.
+The collections are curated for visibly different silhouettes, density,
+and visual rhythm as well as different palettes.  Near-identical template
+recolors do not belong in the library.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class BannerPreset:
     name: str
     depth: str  # "truecolor (24-bit RGB)" or "256-color extended ANSI"
     description: str
-    resource: str  # filename within this package's welcome/ or masthead/ subdirectory
+    resource: str  # filename within the collection's package-data subdirectory
 
 
 WELCOME_BANNER_PRESETS: tuple[BannerPreset, ...] = (
@@ -203,6 +203,15 @@ WELCOME_BANNER_PRESETS: tuple[BannerPreset, ...] = (
         ),
         resource="c64_nostalgia_cyan.ans",
     ),
+    BannerPreset(
+        key="cathedral_of_signals", name="Cathedral of Signals / Rose-Window Spectrum",
+        depth="truecolor (24-bit RGB)",
+        description=(
+            "A luminous packet rose-window, soaring signal arches, jewel-tone stained-glass "
+            "gradients, and a dramatic node gateway rendered as terminal architecture."
+        ),
+        resource="cathedral_of_signals.ans",
+    ),
 )
 
 MAIN_MENU_BANNER_PRESETS: tuple[BannerPreset, ...] = (
@@ -222,14 +231,6 @@ MAIN_MENU_BANNER_PRESETS: tuple[BannerPreset, ...] = (
             "(⟦ ⟧ ═ ║), star accents (★ ✦), and live node telemetry indicators."
         ),
         resource="aurora_violet_emerald.ans",
-    ),
-    BannerPreset(
-        key="sunset_orange_purple", name="Cyber Sunset / Orange & Purple", depth="truecolor (24-bit RGB)",
-        description=(
-            "Vivid sunset magenta to amber-gold header (6 lines) with heavy block frames (┏━┓), "
-            "gradient mesh status, and compact service navigation pills."
-        ),
-        resource="sunset_orange_purple.ans",
     ),
     BannerPreset(
         key="deep_ocean_sapphire_aqua", name="Abyssal Crest / Sapphire & Aqua", depth="truecolor (24-bit RGB)",
@@ -272,22 +273,6 @@ MAIN_MENU_BANNER_PRESETS: tuple[BannerPreset, ...] = (
         resource="matrix_phosphor_green.ans",
     ),
     BannerPreset(
-        key="dracula_purple_cyan", name="Dracula Ribbon / Purple & Cyan", depth="256-color extended ANSI",
-        description=(
-            "Dracula vampire theme header (6 lines) with purple-to-pink gradient dither ribbon "
-            "and dark mode pastel navigation pills."
-        ),
-        resource="dracula_purple_cyan.ans",
-    ),
-    BannerPreset(
-        key="tokyo_night_magenta_cyan", name="Tokyo Night / Shibuya Cyan-Magenta", depth="256-color extended ANSI",
-        description=(
-            "Tokyo metropolis cyber header (6 lines) with Japanese brackets (⟦ 東京 ⟧), "
-            "high-tech status line, and crisp service matrix."
-        ),
-        resource="tokyo_night_magenta_cyan.ans",
-    ),
-    BannerPreset(
         key="outrun_sunset_strip", name="Outrun Sunset Strip / Pink-Orange", depth="truecolor (24-bit RGB)",
         description="6-line high-speed synthwave horizon with vector sunset ribbon and turbo navigation tags.",
         resource="outrun_sunset_strip.ans",
@@ -306,16 +291,6 @@ MAIN_MENU_BANNER_PRESETS: tuple[BannerPreset, ...] = (
         key="crimson_samurai_strip", name="Cyber Samurai Blade / Crimson-Gold", depth="truecolor (24-bit RGB)",
         description="6-line shadow relay header with torii gate icons, katana blade ribbon, and dojo navigation.",
         resource="crimson_samurai_strip.ans",
-    ),
-    BannerPreset(
-        key="glacier_crystal_strip", name="Glacial Crystal Header / Frost Cyan", depth="truecolor (24-bit RGB)",
-        description="6-line cryogenic arctic header with snowflake diamond markers and ice crystal half-block rule.",
-        resource="glacier_crystal_strip.ans",
-    ),
-    BannerPreset(
-        key="gruvbox_retro_header", name="Gruvbox Retro Header / Warm Gold", depth="256-color extended ANSI",
-        description="6-line mechanical console header with warm amber-to-green dither meter and retro arcade tabs.",
-        resource="gruvbox_retro_header.ans",
     ),
     BannerPreset(
         key="solarized_technical_header", name="Solarized Technical / Clean Cyan", depth="256-color extended ANSI",
@@ -337,12 +312,229 @@ MAIN_MENU_BANNER_PRESETS: tuple[BannerPreset, ...] = (
         description="5-line authentic 8-bit PETSCII header with solid C64 blue background and retro command prompt.",
         resource="c64_vintage_header.ans",
     ),
+    BannerPreset(
+        key="quantum_prism", name="Quantum Prism / Spectral Glass",
+        depth="truecolor (24-bit RGB)",
+        description=(
+            "A faceted spectral-glass wordmark with ultraviolet-to-gold refraction, compact "
+            "service glyphs, and an asymmetric six-line silhouette."
+        ),
+        resource="quantum_prism.ans",
+    ),
 )
 
 
+BOARD_LIST_MASTHEAD_PRESETS: tuple[BannerPreset, ...] = (
+    BannerPreset(
+        key="aurora_violet_emerald", name="Constellation Exchange / Violet-Emerald",
+        depth="truecolor (24-bit RGB)",
+        description="Message constellations connected by luminous reply paths around a compact board index.",
+        resource="aurora_violet_emerald.ans",
+    ),
+    BannerPreset(
+        key="cyberpunk_sunset_gold", name="Megacity Bulletin Wall / Sunset Gold",
+        depth="truecolor (24-bit RGB)",
+        description="A stacked neon skyline whose lit windows become boards, posts, and live mesh routes.",
+        resource="cyberpunk_sunset_gold.ans",
+    ),
+    BannerPreset(
+        key="matrix_phosphor_green", name="Thread Matrix / Phosphor Green",
+        depth="256-color extended ANSI",
+        description="Branching discussion threads rendered as a crisp green routing tree and activity meter.",
+        resource="matrix_phosphor_green.ans",
+    ),
+    BannerPreset(
+        key="c64_nostalgia_cyan", name="C64 Message Base / Vintage Blue",
+        depth="256-color extended ANSI",
+        description="An unmistakable Commodore directory screen with numbered message bases and a READY prompt.",
+        resource="c64_nostalgia_cyan.ans",
+    ),
+)
+
+
+FILE_AREA_MASTHEAD_PRESETS: tuple[BannerPreset, ...] = (
+    BannerPreset(
+        key="deep_ocean_sapphire_teal", name="Abyssal Archive / Sapphire-Teal",
+        depth="truecolor (24-bit RGB)",
+        description="A sonar-lit submarine archive with descending shelves and bioluminescent file beacons.",
+        resource="deep_ocean_sapphire_teal.ans",
+    ),
+    BannerPreset(
+        key="glacier_aurora_ice", name="Crystal Data Vault / Arctic Cyan",
+        depth="truecolor (24-bit RGB)",
+        description="A fractured ice-vault silhouette with crystalline facets surrounding the file index.",
+        resource="glacier_aurora_ice.ans",
+    ),
+    BannerPreset(
+        key="gruvbox_warm_retro", name="Card Catalogue / Warm Gruvbox",
+        depth="256-color extended ANSI",
+        description="A tactile amber card catalogue with drawers, index tabs, and an old-library archive rhythm.",
+        resource="gruvbox_warm_retro.ans",
+    ),
+    BannerPreset(
+        key="c64_nostalgia_cyan", name="Disk Directory / C64 Blue",
+        depth="256-color extended ANSI",
+        description="A compact LOAD-and-LIST disk directory that turns the file-area picker into a retro drive.",
+        resource="c64_nostalgia_cyan.ans",
+    ),
+)
+
+
+CHAT_CHANNEL_PICKER_MASTHEAD_PRESETS: tuple[BannerPreset, ...] = (
+    BannerPreset(
+        key="synthwave_magenta_cyan", name="Neon Voiceprint / Magenta-Cyan",
+        depth="truecolor (24-bit RGB)",
+        description="A bright live-audio waveform crossing a sunset horizon with room activity pulses.",
+        resource="synthwave_magenta_cyan.ans",
+    ),
+    BannerPreset(
+        key="aurora_violet_emerald", name="Conversation Constellations / Aurora",
+        depth="truecolor (24-bit RGB)",
+        description="Channel nodes orbit across an aurora field, connected as a small social star chart.",
+        resource="aurora_violet_emerald.ans",
+    ),
+    BannerPreset(
+        key="matrix_phosphor_green", name="Signal Multiplexer / Phosphor Green",
+        depth="256-color extended ANSI",
+        description="Four live carriers converge through a central multiplex bus with scanline telemetry.",
+        resource="matrix_phosphor_green.ans",
+    ),
+    BannerPreset(
+        key="vaporwave_pastel_dream", name="Dreamwave Lounge / Pastel",
+        depth="truecolor (24-bit RGB)",
+        description="Floating speech bubbles and a checkerboard cloudline in lilac, peach, and sky blue.",
+        resource="vaporwave_pastel_dream.ans",
+    ),
+    BannerPreset(
+        key="orbital_comms", name="Orbital Comms / Electric Cyan",
+        depth="truecolor (24-bit RGB)",
+        description="A satellite ring, pulsing channel orbits, and a luminous carrier lock across five compact rows.",
+        resource="orbital_comms.ans",
+    ),
+)
+
+
+LOGOFF_BANNER_PRESETS: tuple[BannerPreset, ...] = (
+    BannerPreset(
+        key="synthwave_magenta_cyan", name="Neon Sunset / Carrier Down",
+        depth="truecolor (24-bit RGB)",
+        description="The mesh road falls into a magenta sunset while the caller's carrier fades cleanly away.",
+        resource="synthwave_magenta_cyan.ans",
+    ),
+    BannerPreset(
+        key="deep_ocean_sapphire_teal", name="Deep Dive / Quiet Waters",
+        depth="truecolor (24-bit RGB)",
+        description="A small submersible descends beneath the last cyan signal rings into a calm dark ocean.",
+        resource="deep_ocean_sapphire_teal.ans",
+    ),
+    BannerPreset(
+        key="amber_monochrome_arcade", name="Carrier Drop / Amber CRT",
+        depth="256-color extended ANSI",
+        description="A warm diagnostic CRT winds the baud meter to zero and closes the terminal session.",
+        resource="amber_monochrome_arcade.ans",
+    ),
+    BannerPreset(
+        key="c64_nostalgia_cyan", name="READY. / Commodore Farewell",
+        depth="256-color extended ANSI",
+        description="A playful C64 signoff program returns the caller to a blinking READY prompt.",
+        resource="c64_nostalgia_cyan.ans",
+    ),
+    BannerPreset(
+        key="last_light_express", name="Last Light Express / Rose-Gold Night",
+        depth="truecolor (24-bit RGB)",
+        description="A luminous night train carries the final packet beyond the horizon until the next call.",
+        resource="last_light_express.ans",
+    ),
+)
+
+
+NEW_ACCOUNT_BANNER_BEFORE_PRESETS: tuple[BannerPreset, ...] = (
+    BannerPreset(
+        key="aurora_violet_emerald", name="Aurora Identity Gate / Violet-Emerald",
+        depth="truecolor (24-bit RGB)",
+        description="A constellation gate frames the three steps from callsign to verified new identity.",
+        resource="aurora_violet_emerald.ans",
+    ),
+    BannerPreset(
+        key="cyberpunk_sunset_gold", name="Citizen Access Portal / Neon Gold",
+        depth="truecolor (24-bit RGB)",
+        description="A high-energy city checkpoint opens an identity lane toward the federated mesh.",
+        resource="cyberpunk_sunset_gold.ans",
+    ),
+    BannerPreset(
+        key="nord_frost_slate", name="Polar Identity Briefing / Frost",
+        depth="256-color extended ANSI",
+        description="A calm, minimal briefing card makes the upcoming signup steps exceptionally clear.",
+        resource="nord_frost_slate.ans",
+    ),
+    BannerPreset(
+        key="c64_nostalgia_cyan", name="NEW USER Generator / C64 Blue",
+        depth="256-color extended ANSI",
+        description="A friendly BASIC program invites the caller to initialize a new user record.",
+        resource="c64_nostalgia_cyan.ans",
+    ),
+)
+
+
+NEW_ACCOUNT_BANNER_AFTER_PRESETS: tuple[BannerPreset, ...] = (
+    BannerPreset(
+        key="solar_flare_crimson_amber", name="Identity Ignition / Solar Gold",
+        depth="truecolor (24-bit RGB)",
+        description="A brilliant stellar ignition celebrates the new account joining the carrier mesh.",
+        resource="solar_flare_crimson_amber.ans",
+    ),
+    BannerPreset(
+        key="vaporwave_pastel_dream", name="Pastel Arrival / Dreamwave",
+        depth="truecolor (24-bit RGB)",
+        description="Soft marble steps, rising palms, and a pastel sun welcome the caller into the community.",
+        resource="vaporwave_pastel_dream.ans",
+    ),
+    BannerPreset(
+        key="glacier_aurora_ice", name="Crystal Activation / Arctic Cyan",
+        depth="truecolor (24-bit RGB)",
+        description="An identity crystal blooms into a symmetric snowflake when provisioning completes.",
+        resource="glacier_aurora_ice.ans",
+    ),
+    BannerPreset(
+        key="matrix_phosphor_green", name="Account Provisioned / Matrix Green",
+        depth="256-color extended ANSI",
+        description="A precise terminal transaction resolves into a bold ACCESS GRANTED confirmation.",
+        resource="matrix_phosphor_green.ans",
+    ),
+)
+
+
+def _load_preset(directory: str, preset: BannerPreset) -> bytes:
+    return (resources.files(__package__) / directory / preset.resource).read_bytes()
+
+
 def load_welcome_banner_preset(preset: BannerPreset) -> bytes:
-    return (resources.files(__package__) / "welcome" / preset.resource).read_bytes()
+    return _load_preset("welcome", preset)
 
 
 def load_main_menu_banner_preset(preset: BannerPreset) -> bytes:
-    return (resources.files(__package__) / "masthead" / preset.resource).read_bytes()
+    return _load_preset("masthead", preset)
+
+
+def load_board_list_masthead_preset(preset: BannerPreset) -> bytes:
+    return _load_preset("board_list", preset)
+
+
+def load_file_area_masthead_preset(preset: BannerPreset) -> bytes:
+    return _load_preset("file_area", preset)
+
+
+def load_chat_channel_picker_masthead_preset(preset: BannerPreset) -> bytes:
+    return _load_preset("chat_channel_picker", preset)
+
+
+def load_logoff_banner_preset(preset: BannerPreset) -> bytes:
+    return _load_preset("logoff", preset)
+
+
+def load_new_account_banner_before_preset(preset: BannerPreset) -> bytes:
+    return _load_preset("new_account_before", preset)
+
+
+def load_new_account_banner_after_preset(preset: BannerPreset) -> bytes:
+    return _load_preset("new_account_after", preset)

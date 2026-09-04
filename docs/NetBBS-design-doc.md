@@ -306,7 +306,10 @@ the protocol layer with no such screen of its own. Each of the three is
 its own independent singleton, reachable from Settings > Session
 banners, with no built-in default art -- disabled is a complete
 non-event, unlike the welcome banner's own always-renders-something
-default.
+default. Each singleton's Gallery is purpose-specific: registration
+before, registration after, and logoff use distinct compositions and
+copy suited to that moment rather than re-labeling the main-menu
+masthead collection.
 
 The main-menu masthead (issue #161) also extends to the three top-level
 index/listing screens -- board list, file areas, and the chat channel
@@ -330,6 +333,10 @@ categorically different rendering model, respectively, not simply "one
 level deeper." Each of the three is its own independent singleton,
 reachable from Settings > Section mastheads, with the same no-default-
 art/complete-non-event-when-disabled shape issue #177's own banners use.
+The main-menu, board-list, file-area, and chat-picker Galleries are four
+separate curated libraries. Their sample art must identify the surface
+through silhouette and content as well as color; one generic strip
+presented under four category names is not a valid sample set.
 
 The project intentionally provides two composition paths:
 
