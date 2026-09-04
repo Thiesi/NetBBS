@@ -902,3 +902,58 @@ def test_malformed_lines_are_charged_to_the_inbound_bucket(db, lane, lobby, alic
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_bridging_disclosure_survives_a_full_participant_queue(db, lane, lobby, alice):
+    """Review of #275: the disclosure is mandatory, so on a full bounded
+    queue it must take a slot from chat rather than be replaced by an
+    overflow notice."""
+    from netbbs.chat.hub import QueueOverflowNotice
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        hub = ChatHub(queue_maxsize=1)
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        await hub.broadcast(lobby.name, "older chat line")
+        assert queue.full()
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            set_mrc_room(db, lobby, "lobby")
+            await bridge.refresh_channel_mappings()
+            delivered = queue.get_nowait()
+            assert not isinstance(delivered, QueueOverflowNotice)
+            assert "now bridged to MRC room #lobby" in delivered
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_private_message_notices_are_per_sender_site(db, lane, lobby, alice):
+    """Review of #275: two remote users sharing a nickname on different
+    sites are two senders; each gets the one promised notice."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await fake.send_line("bob~Other~lobby~alice~~lobby~psst~")
+            await fake.send_line("bob~Third~lobby~alice~~lobby~psst~")
+            await fake.send_line("bob~Other~lobby~alice~~lobby~psst again~")
+            first = await asyncio.wait_for(queue.get(), timeout=2)
+            second = await asyncio.wait_for(queue.get(), timeout=2)
+            assert "bob@Other tried to message you" in first
+            assert "bob@Third tried to message you" in second
+            await asyncio.sleep(0.1)
+            assert queue.empty()
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())

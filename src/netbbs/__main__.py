@@ -1082,6 +1082,12 @@ async def run(
                 "the network-facing server; a node with no SysOp could "
                 "never be administered once it's running"
             )
+        # Issue #275 follow-up: the MRC bridge loads its mappings before
+        # any caller can be accepted, so a caller entering a mapped
+        # channel in the first moments after start-up sees the same
+        # bridging disclosure as everyone after -- `is_bridged()` is
+        # never false merely because the listeners came up first.
+        await mrc_bridge.start()
         servers = await _start_servers(
             config, db, session_handler, ssh_session_handler, throttle, link_node, background_lane,
             link_realtime_registry, link_realtime_bridge, link_realtime_relay, _live_relays_provider,
@@ -1215,7 +1221,6 @@ async def run(
         # journal needs to know the node is actually up and taking
         # callers now, not just that individual listeners logged their
         # own "listening on..." lines along the way.
-        await mrc_bridge.start()
         _logger.info("NetBBS is ready to accept connections")
         await shutdown_event.wait()
     finally:

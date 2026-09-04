@@ -783,7 +783,8 @@ class MrcBridge:
                 )
             notice = colored(text, fg_color=MUTED_COLOR)
             for participant in self._hub.participants_for_username(mapping.channel.name, username):
-                await self._hub.send_to(mapping.channel.name, participant, notice)
+                # Mandatory: a full queue must evict chat, not this.
+                await self._hub.send_to(mapping.channel.name, participant, notice, priority=True)
 
     # --- inbound -----------------------------------------------------------
 
@@ -917,7 +918,9 @@ class MrcBridge:
             for username, nick in nicks.items():
                 if nick.lower() != target:
                     continue
-                key = (packet.from_user.lower(), channel_id, username)
+                # An MRC identity is nick *and* site, exactly as the notice
+                # below names it.
+                key = (packet.from_user.lower(), packet.from_site.lower(), channel_id, username)
                 if key in self._private_notified:
                     return
                 if len(self._private_notified) >= MAX_TRACKED_PRIVATE_SENDERS:

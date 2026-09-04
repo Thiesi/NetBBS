@@ -108,3 +108,42 @@ def test_mrc_warnings_reach_the_diagnostic_log_without_link(tmp_path):
         assert "MRC hub 127.0.0.1:1" in row[2]
 
     asyncio.run(scenario())
+
+
+def test_run_starts_the_bridge_before_accepting_callers(tmp_path, monkeypatch):
+    """Review of #275: a caller entering a mapped channel in the first
+    moments after start-up must find the bridge already loaded, or they
+    get no bridging disclosure."""
+    import netbbs.__main__ as main_module
+    from netbbs.mrc.bridge import MrcBridge
+
+    order: list[str] = []
+    real_start, real_servers = MrcBridge.start, main_module._start_servers
+
+    async def _recording_start(self):
+        order.append("bridge.start")
+        await real_start(self)
+
+    async def _recording_servers(*args, **kwargs):
+        order.append("_start_servers")
+        return await real_servers(*args, **kwargs)
+
+    monkeypatch.setattr(MrcBridge, "start", _recording_start)
+    monkeypatch.setattr(main_module, "_start_servers", _recording_servers)
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        try:
+            config = _config(tmp_path, seed_sysop=False)
+            _seed(config, hub_port=fake.port)
+            shutdown_event = asyncio.Event()
+            task = asyncio.create_task(main_module.run(config, shutdown_event=shutdown_event))
+            await fake.wait_for(lambda p: p.body.startswith("IMALIVE:"), timeout=5)
+            shutdown_event.set()
+            await asyncio.wait_for(task, timeout=15)
+        finally:
+            await fake.close()
+
+    asyncio.run(scenario())
+    assert order[:2] == ["bridge.start", "_start_servers"]
