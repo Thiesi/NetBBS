@@ -775,6 +775,51 @@ def test_trust_override_rejected_save_keeps_the_draft(db, lane, sysop):
     assert state.explanation["override_reason"] == "resource abuse reviewed"
 
 
+def test_trust_anchor_picker_selection_still_warns_about_a_reused_familiar_name(db, lane, sysop):
+    """Codex review on #290: picking a stored peer from the node picker
+    must go through the same changed-identity confirmation a typed
+    name does, and declining it keeps the draft without a node."""
+    from netbbs.link.events import build_endpoint_descriptor
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import PeerRecord
+    from netbbs.link.store import save_peer
+    from netbbs.link.trust import list_trust_anchors
+
+    original = bootstrap_node_identity("original-familiar-node")
+    replacement = bootstrap_node_identity("replacement-familiar-node")
+
+    def save_profile(identity, *, friendly_name, created_at):
+        save_peer(
+            db,
+            PeerRecord(
+                fingerprint=identity.fingerprint,
+                root_public_key=bytes(identity.root.verify_key),
+                transitions=identity.transitions,
+                descriptor=build_endpoint_descriptor(
+                    signing_identity=identity.signing_key,
+                    subject_fingerprint=identity.fingerprint,
+                    addresses=None,
+                    outgoing_only=True,
+                    created_at=created_at,
+                    friendly_name=friendly_name,
+                ),
+            ),
+        )
+
+    save_profile(original, friendly_name="Familiar Node", created_at="2026-09-04T08:00:00+00:00")
+    save_profile(original, friendly_name="Renamed Original", created_at="2026-09-04T08:01:00+00:00")
+    save_profile(replacement, friendly_name="Familiar Node", created_at="2026-09-04T08:02:00+00:00")
+
+    # [A]dd -> [N]ode -> pick the replacement (most recently contacted, entry 02) -> warning -> "n".
+    session = FakeSession(["s", "p", "a", "a", "n", "0", "2", "n", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "different cryptographic identity" in text
+    assert "No trust policy change made." in text
+    assert "Node: (not chosen)" in _visible(text)
+    assert list_trust_anchors(db) == []
+
+
 # -- create user ----------------------------------------------------------
 
 

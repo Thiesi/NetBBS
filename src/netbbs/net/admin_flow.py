@@ -2209,16 +2209,23 @@ def _node_reference_field(
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         def _known(db: Database) -> list[tuple[str, str | None]]:
             contact = load_peer_last_contact(db)
-            ordered = sorted(contact, key=lambda fp: contact[fp], reverse=True)
-            return [(identity_for_fingerprint(db, fp).label, fp) for fp in ordered]
+            items = [(identity_for_fingerprint(db, fp).label, fp) for fp in contact]
+            # Most recently contacted first; ties (peers stored in the same
+            # instant) broken by label so the list order is deterministic.
+            items.sort(key=lambda item: item[0])
+            items.sort(key=lambda item: contact[item[1]], reverse=True)
+            return items
 
-        choices: list[tuple[str, str | None]] = [("(type a name, DNS name, or technical identity)", None)]
-        choices += await lane.run(_known)
+        choices: list[tuple[int, str, str | None]] = [(0, "(type a name, DNS name, or technical identity)", None)]
+        choices += [(index, label, fp) for index, (label, fp) in enumerate(await lane.run(_known), start=1)]
         selected = await pick_item(
             session, choices,
-            name_of=lambda item: item[0],
-            stable_id_of=lambda item: 0 if item[1] is None else (hash(item[1]) & 0x7FFFFFFF),
-            description_of=lambda item: item[1],
+            name_of=lambda item: item[1],
+            # Position in the last-contact ordering, like the gallery
+            # screens' own `enumerate` ids -- deterministic, unlike a
+            # per-process-salted hash() (Codex review on #290).
+            stable_id_of=lambda item: item[0],
+            description_of=lambda item: item[2],
             title="Which node?",
             empty_message="No linked nodes are stored yet.",
             redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
@@ -2227,9 +2234,11 @@ def _node_reference_field(
         )
         if selected is None:
             return
-        if selected[1] is not None:
-            draft[key] = selected[1]
-            draft[key + "_label"] = selected[0]
+        if selected[2] is not None:
+            if not await _confirm_node_despite_identity_warning(session, lane, selected[2]):
+                return
+            draft[key] = selected[2]
+            draft[key + "_label"] = selected[1]
             return
         await write_prompt(session, "Node name, DNS name, or technical identity (blank = keep): ")
         raw = (await session.read_line()).strip()
@@ -2250,15 +2259,25 @@ def _node_render(key: str) -> Callable[[dict], str]:
 
 async def _trust_editor(
     session: Session, lane: DatabaseLane, actor: User, *, title: str, fields: list[FieldSpec],
-    draft: dict, save, error_type: type[Exception] = ValueError,
+    draft: dict, save, error_type: type[Exception] = ValueError, node_key: str | None = None,
 ) -> object | None:
     """The one `edit_resource_draft` call shape every trust editor
     shares -- preferences resolved here so the seven screens don't each
-    repeat the same six lookups."""
+    repeat the same six lookups. `node_key`, if given, names the draft
+    field holding a node fingerprint: Save re-runs the changed-identity
+    confirmation for it, so a warning that appeared while the draft was
+    open cannot be missed (Codex review on #290)."""
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+
+    async def guarded_save(draft: dict):
+        if node_key is not None and draft.get(node_key) is not None:
+            if not await _confirm_node_despite_identity_warning(session, lane, draft[node_key]):
+                raise ValueError("No change made. The draft is kept; [B]ack discards it.")
+        return await save(draft)
+
     return await edit_resource_draft(
         session, lane,
-        title=title, fields=fields, draft=draft, save=save, error_type=error_type,
+        title=title, fields=fields, draft=draft, save=guarded_save, error_type=error_type,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
@@ -2516,6 +2535,36 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
         await _trust_editor(session, lane, actor, title="Trust domain", fields=fields, draft=draft, save=save)
 
 
+async def _confirm_node_despite_identity_warning(session: Session, lane: DatabaseLane, fingerprint: str) -> bool:
+    """A node whose familiar name now carries a different cryptographic
+    identity (an undismissed security-severity observation) must be
+    confirmed explicitly, default no, before any trust-policy role is
+    granted to it -- whether the node was typed by name, picked from
+    the stored-peer list, or is about to be saved after sitting in a
+    draft while the warning appeared (Codex review on #290). Returns
+    `True` when there is no such warning or the SysOp confirmed."""
+    observation = await lane.run(latest_identity_observation, fingerprint)
+    if observation is None or observation.severity != "security":
+        return True
+    await session.write_line(
+        colored(
+            "Caution: this familiar node name now has a different "
+            "cryptographic identity. Recovery or replacement may be "
+            "legitimate, but impersonation is possible.",
+            fg_color=ERROR_COLOR,
+            bold=True,
+        )
+    )
+    if not await prompt_yes_no(
+        session,
+        f"Continue with technical identity {sanitize_text(fingerprint)}?",
+        default=False,
+    ):
+        await session.write_line("No trust policy change made.")
+        return False
+    return True
+
+
 async def _resolve_admin_node_reference(
     session: Session, lane: DatabaseLane, reference: str,
 ) -> str | None:
@@ -2534,24 +2583,8 @@ async def _resolve_admin_node_reference(
             await session.write_line(
                 f"Technical identity: {sanitize_text(resolved)}"
             )
-            observation = await lane.run(latest_identity_observation, resolved)
-            if observation is not None and observation.severity == "security":
-                await session.write_line(
-                    colored(
-                        "Caution: this familiar node name now has a different "
-                        "cryptographic identity. Recovery or replacement may be "
-                        "legitimate, but impersonation is possible.",
-                        fg_color=ERROR_COLOR,
-                        bold=True,
-                    )
-                )
-                if not await prompt_yes_no(
-                    session,
-                    f"Continue with technical identity {sanitize_text(resolved)}?",
-                    default=False,
-                ):
-                    await session.write_line("No trust policy change made.")
-                    return None
+            if not await _confirm_node_despite_identity_warning(session, lane, resolved):
+                return None
         return resolved
     if resolved:
         candidates = []
@@ -2598,9 +2631,9 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             return
         if choice == "r":
             selected = await pick_item(
-                session, anchors,
-                name_of=lambda a: labels[a.fingerprint], stable_id_of=lambda a: hash(a.fingerprint) & 0x7FFFFFFF,
-                description_of=lambda a: a.reason,
+                session, list(enumerate(anchors, start=1)),
+                name_of=lambda pair: labels[pair[1].fingerprint], stable_id_of=lambda pair: pair[0],
+                description_of=lambda pair: pair[1].reason,
                 title="Remove which trust anchor?", empty_message="No trust anchors are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -2608,6 +2641,7 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             )
             if selected is None:
                 continue
+            selected = selected[1]
             if not await prompt_yes_no(
                 session, f"Remove {sanitize_text(labels[selected.fingerprint])} as a trust anchor?", default=False
             ):
@@ -2649,7 +2683,9 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             await session.write_line(colored("Trust anchor changed and audited.", fg_color=SUCCESS_COLOR))
             return True
 
-        await _trust_editor(session, lane, actor, title="Trust anchor", fields=fields, draft=draft, save=save)
+        await _trust_editor(
+            session, lane, actor, title="Trust anchor", fields=fields, draft=draft, save=save, node_key="node",
+        )
 
 
 def _parse_reporter_scopes(value: str) -> list[tuple[TrustDimension, str]]:
@@ -2690,9 +2726,9 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             return
         if choice == "r":
             selected = await pick_item(
-                session, reporters,
-                name_of=lambda r: labels[r.fingerprint], stable_id_of=lambda r: hash(r.fingerprint) & 0x7FFFFFFF,
-                description_of=lambda r: f"domain {r.domain_id}",
+                session, list(enumerate(reporters, start=1)),
+                name_of=lambda pair: labels[pair[1].fingerprint], stable_id_of=lambda pair: pair[0],
+                description_of=lambda pair: f"domain {pair[1].domain_id}",
                 title="Remove which trusted reporter?", empty_message="No trusted reporters are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -2700,6 +2736,7 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             )
             if selected is None:
                 continue
+            selected = selected[1]
             if not await prompt_yes_no(
                 session, f"Remove {sanitize_text(labels[selected.fingerprint])} as a trusted reporter?", default=False
             ):
@@ -2774,7 +2811,9 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             await session.write_line(colored("Trusted reporter changed and audited.", fg_color=SUCCESS_COLOR))
             return True
 
-        await _trust_editor(session, lane, actor, title="Trusted reporter", fields=fields, draft=draft, save=save)
+        await _trust_editor(
+            session, lane, actor, title="Trusted reporter", fields=fields, draft=draft, save=save, node_key="node",
+        )
 
 
 async def _attestation_authorities_screen(
@@ -2810,9 +2849,9 @@ async def _attestation_authorities_screen(
             return
         if choice == "r":
             selected = await pick_item(
-                session, authorities,
-                name_of=lambda a: labels[a.fingerprint], stable_id_of=lambda a: hash(a.fingerprint) & 0x7FFFFFFF,
-                description_of=lambda a: ",".join(a.attributes),
+                session, list(enumerate(authorities, start=1)),
+                name_of=lambda pair: labels[pair[1].fingerprint], stable_id_of=lambda pair: pair[0],
+                description_of=lambda pair: ",".join(pair[1].attributes),
                 title="Remove which attestation authority?", empty_message="No attestation authorities are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -2820,6 +2859,7 @@ async def _attestation_authorities_screen(
             )
             if selected is None:
                 continue
+            selected = selected[1]
             if not await prompt_yes_no(
                 session,
                 f"Remove {sanitize_text(labels[selected.fingerprint])} as an attestation authority?",
@@ -2881,6 +2921,7 @@ async def _attestation_authorities_screen(
 
         await _trust_editor(
             session, lane, actor, title="Attestation authority", fields=fields, draft=draft, save=save,
+            node_key="node",
         )
 
 
@@ -3035,10 +3076,10 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
             return
         if choice == "r":
             selected = await pick_item(
-                session, exceptions,
-                name_of=lambda item: f"{labels[item.reporter_fingerprint]} {item.dimension.value}:{item.category}",
-                stable_id_of=lambda item: hash((item.reporter_fingerprint, item.dimension.value, item.category)) & 0x7FFFFFFF,
-                description_of=lambda item: item.reason,
+                session, list(enumerate(exceptions, start=1)),
+                name_of=lambda pair: f"{labels[pair[1].reporter_fingerprint]} {pair[1].dimension.value}:{pair[1].category}",
+                stable_id_of=lambda pair: pair[0],
+                description_of=lambda pair: pair[1].reason,
                 title="Remove which safety deviation?", empty_message="No safety deviations are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -3046,6 +3087,7 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
             )
             if selected is None:
                 continue
+            selected = selected[1]
             if not await prompt_yes_no(
                 session,
                 f"Remove the sole-authority deviation for {sanitize_text(labels[selected.reporter_fingerprint])} "
@@ -3123,6 +3165,7 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
 
         await _trust_editor(
             session, lane, actor, title="Sole-authority safety deviation", fields=fields, draft=draft, save=save,
+            node_key="node",
         )
 
 
