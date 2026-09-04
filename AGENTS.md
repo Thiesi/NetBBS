@@ -132,6 +132,22 @@ The standing principle is:
   CLI prose uses `print_wrapped`; errors must measure stderr when stderr receives them.
   Self-contained bundled doors enforce the same boundary in their local
   `out_line`/`out_prompt` helpers.
+- **Menus and screens follow design doc §3.5 (issue #282); no dialog
+  chains.** A hotkey-reached screen shows its content first and can be
+  left with `[B]ack` (or a "Press any key" pause) without answering a
+  question and without writing anything. Actions are action-bar hotkeys,
+  `edit_resource_draft` fields, or `pick_item` entries. A yes/no prompt is
+  only ever the last keystroke behind a hotkey the caller chose,
+  immediately before an irreversible, destructive, or network-touching
+  action. A toggle toggles. A "blank keeps the current value" prompt
+  writes nothing else. Anything gathering more than two values is a draft
+  editor or a picker and persists nothing before `[S]ave`; a `save` that
+  must reject raises the editor's `error_type` so the draft survives (a
+  bare `return None` closes the editor). The only exceptions are once-only
+  first-run decisions (Link participation, node name, managed-DNS opt-in,
+  the Unicode-style probe) and type-the-name confirmations before
+  deletes. Never add a prompt chain, and never hide one behind an extra
+  hotkey instead of converting it.
 - **Fail clearly.** Administrative lockout, identity ambiguity, incompatible
   databases, protocol rejection, and resource exhaustion should not degrade
   silently.
