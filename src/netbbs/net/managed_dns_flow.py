@@ -46,8 +46,9 @@ from netbbs.managed_dns.state import (
     set_pending_rename_state,
 )
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.resource_editor import FieldSpec, choice_field, choice_step, edit_resource_draft
 from netbbs.net.session import Session, write_prompt
-from netbbs.rendering import MUTED_COLOR, colored, sanitize_text, wrap_to_width
+from netbbs.rendering import menu_key, MUTED_COLOR, colored, sanitize_text, wrap_to_width
 from netbbs.storage.execution import DatabaseLane
 
 _OPT_IN_BLURB = (
@@ -148,40 +149,94 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
         return
 
     previous_name = await lane.run(get_registered_name)
-    if previous_name is not None:
-        await write_prompt(
-            session,
-            f"Desired subdomain name (letters, digits, hyphens; Enter for {previous_name!r}): "
-        )
-    else:
-        await write_prompt(
-            session,
-            "Desired subdomain name (letters, digits, hyphens; leave blank to skip for now): ",
-        )
-    raw_name = (await session.read_line()).strip()
-    if not raw_name:
-        if previous_name is None:
-            return
-        raw_name = previous_name
+    stored_credential = load_credential(credential_path_for(lane.path))
 
-    # Design doc §16 Decision 6: Telnet/SSH are always assumed to sit on
-    # their standard ports as part of the caller-facing promise; web is
-    # the one exception, since a bare A/AAAA record can't itself say
-    # which port/transport a caller should use, and this node's own web
-    # listener has no TLS of its own (nodeconfig's own docstring) -- it
-    # only means something as part of that promise behind a real
-    # HTTPS-terminating reverse proxy on 443. This is purely informational:
-    # neither this node nor the managed service can verify a reverse
-    # proxy's existence, so a "no" here changes nothing about what gets
-    # sent, only sets the SysOp's own expectations up front.
-    web_behind_proxy = await prompt_yes_no(
-        session,
-        f"If callers should reach this board's web interface at {sanitize_text(raw_name)}.netbbs.org, "
-        "is it served through an HTTPS-terminating reverse proxy on port 443? "
-        "(Telnet/SSH are always assumed to be on their standard ports.)",
-        default=False,
+    # Issue #282: this used to be a fixed chain -- name, then a yes/no
+    # about a reverse proxy that (by its own comment) changed nothing,
+    # then the dynamic-IP yes/no, then the credential-replacement
+    # confirm -- with no cancel at all once a previous name existed. Now
+    # a draft editor: [N]ame (prefilled with the previous registration,
+    # so reclaiming is just [R]egister), [D]ynamic IP (on by default),
+    # [W]eb behind an HTTPS proxy (informational: sets expectations, not
+    # the request), then [R]egister; [B]ack sends nothing. The
+    # credential-replacement confirmation stays inside the register step
+    # because it forfeits a reclaim window.
+    draft: dict = {"name": previous_name or "", "dynamic": True, "web_behind_proxy": False}
+    outcome: dict = {"submit": False}
+
+    async def _name_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        await write_prompt(
+            session,
+            f"Desired subdomain name (letters, digits, hyphens) [{draft['name'] or '(none)'}] (blank = keep): ",
+        )
+        raw = (await session.read_line()).strip()
+        if raw:
+            draft["name"] = raw
+
+    fields = [
+        FieldSpec(
+            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Subdomain name",
+            render=lambda d: f"{sanitize_text(d['name'])}.netbbs.org" if d["name"] else "(required)",
+            prompt=_name_prompt,
+            brief="The <name>.netbbs.org to register",
+            help=(
+                "Letters, digits, and hyphens. A name this node registered before is prefilled, so "
+                "reclaiming it is just [R]egister."
+            ),
+        ),
+        FieldSpec(
+            key="dynamic", hotkey="d", menu_text=menu_key("D", "ynamic IP"), label="Follow address changes",
+            render=lambda d: "yes" if d["dynamic"] else "no",
+            prompt=choice_field("dynamic", [True, False]), step=choice_step("dynamic", [True, False]),
+            brief="Keep the record pointed at this node",
+            help="Keep the managed record pointed at this node's current address if it changes (dynamic IP).",
+        ),
+        FieldSpec(
+            key="web_behind_proxy", hotkey="w", menu_text=menu_key("W", "eb behind HTTPS proxy"),
+            label="Web served via an HTTPS proxy on 443",
+            render=lambda d: "yes" if d["web_behind_proxy"] else "no (web address is not part of the promise)",
+            prompt=choice_field("web_behind_proxy", [False, True]), step=choice_step("web_behind_proxy", [False, True]),
+            brief="Sets expectations only",
+            help=(
+                "Telnet/SSH are always assumed to be on their standard ports. A bare A/AAAA record can't "
+                "say which port a web caller should use, and this node's own web listener has no TLS, so "
+                "the web address only counts as part of the promise behind an HTTPS-terminating reverse "
+                "proxy on 443. Neither this node nor the service can verify one; this only sets your own "
+                "expectations."
+            ),
+        ),
+    ]
+
+    async def save(draft: dict) -> bool | None:
+        if not draft["name"]:
+            raise ValueError("a subdomain name is required")
+        if (
+            stored_credential is not None and previous_name is not None
+            and draft["name"].lower() != previous_name.lower()
+        ):
+            replace = await prompt_yes_no(
+                session,
+                f"Registering a different name will replace this node's saved credential for "
+                f"{sanitize_text(previous_name)}.netbbs.org and forfeit its reclaim window. Continue?",
+                default=False,
+            )
+            if not replace:
+                raise ValueError("No change made. The draft is kept; [B]ack discards it.")
+        outcome["submit"] = True
+        return True
+
+    await edit_resource_draft(
+        session, lane,
+        title="Managed DNS registration",
+        subtitle="Register (or reclaim) this node's netbbs.org subdomain.",
+        fields=fields, draft=draft, save=save, error_type=ValueError,
+        save_menu_text=menu_key("R", "egister"), save_hotkey="r", back_menu_text=menu_key("B", "ack"),
     )
-    if not web_behind_proxy:
+    if not outcome["submit"]:
+        return
+    raw_name = draft["name"]
+    dynamic = draft["dynamic"]
+    if not draft["web_behind_proxy"]:
         for wrapped in wrap_to_width(
             "(Noting that -- the managed record still tracks this node's address, "
             "but a bare web address won't be part of the promise; telling callers "
@@ -189,21 +244,6 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
             session.terminal_width,
         ):
             await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
-
-    dynamic = await prompt_yes_no(
-        session, "Keep this pointed at your node's current address if it changes (dynamic IP)?", default=True
-    )
-
-    stored_credential = load_credential(credential_path_for(lane.path))
-    if stored_credential is not None and previous_name is not None and raw_name.lower() != previous_name.lower():
-        replace = await prompt_yes_no(
-            session,
-            f"Registering a different name will replace this node's saved credential for "
-            f"{sanitize_text(previous_name)}.netbbs.org and forfeit its reclaim window. Continue?",
-            default=False,
-        )
-        if not replace:
-            return
 
     # Lazy: netbbs.managed_dns.client requires aiohttp, which this
     # module must not require merely to import itself -- see this
