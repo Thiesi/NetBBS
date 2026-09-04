@@ -212,11 +212,6 @@ def _identity_from_descriptor_json(fingerprint: str, raw: str) -> NodeDisplayIde
     payload = data.get("envelope", {}).get("payload", {})
     friendly = normalize_friendly_name(payload.get("friendly_name")) or UNNAMED_NODE_NAME
     dns_name = normalize_dns_name(payload.get("canonical_dns_name"))
-    if dns_name is None:
-        for address in payload.get("addresses") or ():
-            dns_name = normalize_dns_name(address.get("address")) if isinstance(address, dict) else None
-            if dns_name:
-                break
     return NodeDisplayIdentity(fingerprint, friendly, dns_name)
 
 
@@ -305,7 +300,10 @@ def record_peer_identity_observation(db: Database, peer) -> None:
     local_claims = {
         name_key(value)
         for value in (
-            get_node_display_name(db), get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY), *local_history,
+            get_node_display_name(db),
+            get_config(db, _OWN_FRIENDLY_NAME_CONFIG_KEY),
+            get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY),
+            *local_history,
         ) if isinstance(value, str) and value
     }
     if current_claims & local_claims:

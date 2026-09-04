@@ -221,7 +221,10 @@ def test_live_channel_message_and_presence_reach_a_locally_connected_participant
             assert delivered.kind == "message"
             assert delivered.body == "hello from origin"
             assert delivered.author_label == f"origin-speaker@{origin.identity.fingerprint}"
-            assert delivered.author_fingerprint is None  # never treated as locally verified
+            # This is the authenticated sending *node*, retained only so the
+            # UI can surface node-identity collisions; it is never treated as
+            # a locally verified user identity.
+            assert delivered.author_fingerprint == origin.identity.fingerprint
 
             await origin.bridge.broadcast_local_presence_live(
                 origin_channel, change="join", username="origin-speaker"
@@ -229,6 +232,7 @@ def test_live_channel_message_and_presence_reach_a_locally_connected_participant
             presence_event = await asyncio.wait_for(queue.get(), timeout=2.0)
             assert presence_event.kind == "join"
             assert presence_event.author_label == f"origin-speaker@{origin.identity.fingerprint}"
+            assert presence_event.author_fingerprint == origin.identity.fingerprint
 
             # Never persisted -- live delivery stays purely in-memory.
             assert origin.db.connection.execute(

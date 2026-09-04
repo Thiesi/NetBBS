@@ -3791,3 +3791,19 @@ as board-origin transfer expose the full fingerprint when presentation labels
 collide, with the fingerprint placed first so terminal truncation cannot hide it.
 Status screens which describe current authenticated presentation load the live
 node name from configuration rather than a session's login-time breadcrumb cache.
+The last locally advertised friendly claim participates in collision detection
+until the next own-hello build moves it into bounded history. Parse persisted
+peer descriptors by their explicit `canonical_dns_name` only; endpoint hosts
+remain transport data after restart as well as in memory. Live linked-channel
+events retain their authenticated sending-node fingerprint in memory so an
+undismissed identity collision can be rendered at that interaction boundary.
+
+An abandoned managed-DNS replacement may be retried only inside its cooldown;
+after expiry the old credential has no privileged reclaim path while the sweep
+waits to delete the row. Keep servicing a retained previous credential when the
+replacement is locally abandoned, since a transient old-name failure followed
+by a definitive replacement 401 must not stop all later old-name heartbeats.
+Live backup double-collects all three credential artifacts around the SQLite
+snapshot and compares the snapshot's `managed_dns_*` rows with live state;
+retry a moving generation rather than combining database and secrets from
+opposite sides of a rename or cancellation.

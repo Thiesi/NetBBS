@@ -25,6 +25,14 @@ from netbbs.backup import (
 )
 from netbbs import backup as backup_module
 from netbbs.link.node_identity import NodeIdentity, bootstrap_node_identity
+from netbbs.managed_dns.state import (
+    RegistrationStatus,
+    get_previous_name,
+    get_registered_name,
+    get_registration_status,
+    set_cancelled_rename_state,
+    set_pending_rename_state,
+)
 from netbbs.storage.database import Database
 
 _BLOB_CONTENT = b"blob content"
@@ -142,6 +150,59 @@ def test_create_backup_captures_a_staged_credential_transition(tmp_path, db_path
     )
 
     assert (destination / _managed_dns_transition_credential_path(db_path).name).read_text() == "staged secrets"
+
+
+def test_create_backup_retries_when_cancellation_overlaps_the_database_and_credential_snapshot(
+    tmp_path, db_path, identity_dir, monkeypatch,
+):
+    live_db = Database(db_path)
+    set_pending_rename_state(
+        live_db,
+        name="new-name",
+        previous_name="old-name",
+        previous_status=RegistrationStatus.MATURED,
+        previous_published=True,
+    )
+    primary = _managed_dns_credential_path(db_path)
+    previous = _managed_dns_previous_credential_path(db_path)
+    transition = _managed_dns_transition_credential_path(db_path)
+    primary.write_text("replacement-secret")
+    previous.write_text("old-secret")
+    transition.write_text('{"primary":"replacement-secret","previous":"old-secret"}')
+
+    real_snapshot = backup_module.snapshot_database
+    snapshot_calls = 0
+
+    def cancellation_after_first_snapshot(source, target):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        real_snapshot(source, target)
+        if snapshot_calls == 1:
+            set_cancelled_rename_state(
+                live_db, name="old-name", status=RegistrationStatus.MATURED, published=True,
+            )
+            primary.write_text("old-secret")
+            previous.unlink()
+            transition.unlink()
+
+    monkeypatch.setattr(backup_module, "snapshot_database", cancellation_after_first_snapshot)
+
+    destination = create_backup(
+        db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup-raced"
+    )
+
+    assert snapshot_calls == 2
+    backed_up_db = Database(destination / "netbbs.db")
+    try:
+        assert get_registered_name(backed_up_db) == "old-name"
+        assert get_registration_status(backed_up_db) is RegistrationStatus.MATURED
+        assert get_previous_name(backed_up_db) is None
+    finally:
+        backed_up_db.close()
+        live_db.close()
+    assert (destination / primary.name).read_text() == "old-secret"
+    assert not (destination / previous.name).exists()
+    assert not (destination / transition.name).exists()
 
 
 def test_create_backup_captures_all_ordinary_artifacts(tmp_path, db_path, identity_dir):

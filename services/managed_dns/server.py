@@ -544,6 +544,15 @@ class ManagedDnsServer:
                 secret = secrets.token_urlsafe(_CREDENTIAL_BYTES)
                 replacement_status = existing_replacement.status
                 if existing_replacement.status == "abandoned":
+                    if (
+                        existing_replacement.released_at is None
+                        or self._clock() - datetime.fromisoformat(existing_replacement.released_at)
+                        >= timedelta(seconds=self._cooldown_seconds)
+                    ):
+                        return web.json_response(
+                            {"error": "the replacement name is no longer within its reclaim cooldown"},
+                            status=409,
+                        )
                     if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
                         return web.json_response(
                             {"error": "the managed-DNS service is at capacity -- try again later"}, status=503

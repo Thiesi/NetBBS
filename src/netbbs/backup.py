@@ -87,6 +87,7 @@ from netbbs.link.node_identity import NodeIdentity, NodeIdentityError
 from netbbs.managed_dns.credential import (
     credential_path_for as _managed_dns_credential_path_for,
     previous_credential_path_for as _managed_dns_previous_credential_path_for,
+    save_credential as _save_managed_dns_credential,
     transition_credential_path_for as _managed_dns_transition_credential_path_for,
 )
 from netbbs.operational_history import record_operational_run
@@ -110,6 +111,7 @@ _LAST_BACKUP_PATH_CONFIG_KEY = "last_backup_path"
 _RESTORE_STAGING_PREFIX = ".netbbs-restore-staging-"
 _RESTORE_ROLLBACK_PREFIX = ".netbbs-restore-rollback-"
 _RESTORE_STATE_FILENAME = ".netbbs-restore-state.json"
+_MANAGED_DNS_SNAPSHOT_ATTEMPTS = 3
 
 
 class BackupError(Exception):
@@ -197,6 +199,74 @@ def _is_content_addressed_name(name: str) -> bool:
     return len(name) == 64 and all(c in "0123456789abcdef" for c in name)
 
 
+def _read_optional_file(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _managed_dns_credential_generation(db_path: Path) -> tuple[bytes | None, ...]:
+    """One ordered view of all mutable managed-DNS credential artifacts."""
+    return tuple(_read_optional_file(path) for path in (
+        _managed_dns_credential_path_for(db_path),
+        _managed_dns_previous_credential_path_for(db_path),
+        _managed_dns_transition_credential_path_for(db_path),
+    ))
+
+
+def _managed_dns_config_generation(db_path: Path) -> tuple[tuple[str, str], ...]:
+    """The managed-DNS configuration stored in one SQLite generation."""
+    connection = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        return tuple(connection.execute(
+            "SELECT key, value FROM node_config WHERE key GLOB 'managed_dns_*' ORDER BY key"
+        ))
+    finally:
+        connection.close()
+
+
+def _snapshot_database_and_managed_dns_credentials(
+    db_path: Path, destination: Path,
+) -> None:
+    """Capture the database and its three mutable DNS secrets coherently.
+
+    Credential swaps are journaled and each individual file write is atomic,
+    but the database and three files cannot be replaced in one filesystem
+    transaction. Double-collect both sides around SQLite's online snapshot and
+    retry whenever a transition overlaps the collection window.
+    """
+    staged_snapshot = destination / f".{_DB_FILENAME}.managed-dns-snapshot"
+    credential_paths = (
+        _managed_dns_credential_path_for(db_path),
+        _managed_dns_previous_credential_path_for(db_path),
+        _managed_dns_transition_credential_path_for(db_path),
+    )
+    for _attempt in range(_MANAGED_DNS_SNAPSHOT_ATTEMPTS):
+        before_credentials = _managed_dns_credential_generation(db_path)
+        staged_snapshot.unlink(missing_ok=True)
+        snapshot_database(db_path, staged_snapshot)
+        captured_credentials = _managed_dns_credential_generation(db_path)
+        snapshot_config = _managed_dns_config_generation(staged_snapshot)
+        live_config = _managed_dns_config_generation(db_path)
+        after_credentials = _managed_dns_credential_generation(db_path)
+        if (
+            before_credentials == captured_credentials == after_credentials
+            and snapshot_config == live_config
+        ):
+            staged_snapshot.replace(destination / _DB_FILENAME)
+            for source_path, contents in zip(credential_paths, captured_credentials, strict=True):
+                if contents is not None:
+                    _save_managed_dns_credential(
+                        destination / source_path.name, contents.decode("utf-8")
+                    )
+            return
+    staged_snapshot.unlink(missing_ok=True)
+    raise BackupError(
+        "managed-DNS state kept changing while the backup was captured; retry shortly"
+    )
+
+
 def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Path:
     """
     Create a complete, self-contained backup of one node's recoverable
@@ -206,8 +276,10 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Pa
 
     Safe to run against a live, running node: the database step uses
     SQLite's own online backup API (`netbbs.selfupdate.
-    snapshot_database`), and every other artifact is either static once
-    created or already rewritten via its own atomic-replace pattern --
+    snapshot_database`), the mutable managed-DNS credential set is checked
+    against that database generation and retried if it moved, and every
+    other artifact is either static once created or already rewritten via
+    its own atomic-replace pattern --
     see the module docstring for the accepted exceptions (every banner/
     masthead singleton -- the welcome banner, the main-menu masthead,
     the logoff banner, both new-account banners, and the three submenu
@@ -234,8 +306,16 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Pa
 
     destination.mkdir(parents=True)
 
-    snapshot_database(db_path, destination / _DB_FILENAME)
+    _snapshot_database_and_managed_dns_credentials(db_path, destination)
     checksums = {_DB_FILENAME: _sha256_of_file(destination / _DB_FILENAME)}
+    for credential_path in (
+        _managed_dns_credential_path_for(db_path),
+        _managed_dns_previous_credential_path_for(db_path),
+        _managed_dns_transition_credential_path_for(db_path),
+    ):
+        captured_path = destination / credential_path.name
+        if captured_path.exists():
+            checksums[captured_path.name] = _sha256_of_file(captured_path)
 
     storage_root = _storage_root_for(db_path)
     if storage_root.is_dir():
@@ -251,9 +331,6 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Pa
 
     for extra_path in (
         _ssh_host_key_path_for(db_path),
-        _managed_dns_credential_path_for(db_path),
-        _managed_dns_previous_credential_path_for(db_path),
-        _managed_dns_transition_credential_path_for(db_path),
         _welcome_banner_path_for(db_path),
         _main_menu_banner_path_for(db_path),
         _logoff_banner_path_for(db_path),

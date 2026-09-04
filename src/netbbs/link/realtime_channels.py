@@ -538,7 +538,11 @@ class LiveChannelBridge:
         message = LocalChannelMessage(
             id=-1, channel_id=channel.id, kind="message",
             author_label=f"{frame.payload['user_id']}@{node_label}",
-            author_fingerprint=None, body=frame.payload["body"], created_at=frame.payload["created_at"],
+            # The authenticated Noise peer is the technical identity behind
+            # this ephemeral assertion. Keep it for collision warnings while
+            # continuing to render the friendly label by default.
+            author_fingerprint=session.remote_fingerprint,
+            body=frame.payload["body"], created_at=frame.payload["created_at"],
         )
         await self._hub.broadcast(channel.name, message)
 
@@ -552,7 +556,7 @@ class LiveChannelBridge:
         message = LocalChannelMessage(
             id=-1, channel_id=channel.id, kind=kind,
             author_label=f"{frame.payload['user_id']}@{node_label}",
-            author_fingerprint=None, body=None, created_at=utc_now_iso(),
+            author_fingerprint=session.remote_fingerprint, body=None, created_at=utc_now_iso(),
         )
         await self._hub.broadcast(channel.name, message)
 

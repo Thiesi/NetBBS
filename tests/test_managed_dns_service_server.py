@@ -233,6 +233,34 @@ def test_lost_rename_retry_reclaims_an_abandoned_replacement(db):
     assert heartbeat_body["name"] == "new-name"
 
 
+def test_lost_rename_retry_cannot_revive_an_abandoned_replacement_after_cooldown(db):
+    now = datetime(2026, 9, 4, tzinfo=timezone.utc)
+
+    class Clock:
+        def __call__(self):
+            return now
+
+    async def scenario():
+        server = await _start_server(db, clock=Clock(), cooldown_seconds=60)
+        try:
+            original = await _register(server, name="old-name")
+            await _rename(server, credential=original["credential"], name="new-name")
+            mark_abandoned(
+                db, "new-name", released_at=(now - timedelta(seconds=60)).isoformat()
+            )
+            return await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+
+    assert status == 409
+    assert "cooldown" in body["error"]
+    assert get_registration_by_name(db, "new-name").status == "abandoned"
+
+
 def test_abandoned_rename_retry_obeys_the_active_registration_cap(db):
     async def scenario():
         server = await _start_server(db, cumulative_cap=2)

@@ -237,6 +237,68 @@ def test_updater_marks_an_authoritatively_inactive_primary_unpublished(tmp_path)
     db.close()
 
 
+def test_updater_retries_the_previous_name_after_replacement_abandonment_and_a_transient_old_failure(
+    tmp_path, monkeypatch,
+):
+    from netbbs.managed_dns.client import HeartbeatResult
+
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_service_url(db, "https://dns.example")
+    set_registered_name(db, "new-name")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+    save_credential(credential_path_for(db.path), "replacement-secret")
+    save_credential(previous_credential_path_for(db.path), "old-secret")
+
+    calls: list[str] = []
+
+    async def fake_send_heartbeat(_base_url, credential):
+        calls.append(credential)
+        if calls == ["old-secret"]:
+            return None, False
+        if calls == ["old-secret", "replacement-secret"]:
+            return None, True
+        if calls == ["old-secret", "replacement-secret", "old-secret"]:
+            return HeartbeatResult("old-name", "matured", "127.0.0.1"), False
+        return None, True
+
+    monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", fake_send_heartbeat)
+    sleep_calls: list[float] = []
+    parked = asyncio.Event()
+
+    async def run_two_passes(seconds: float):
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 2:
+            await parked.wait()
+
+    async def scenario():
+        task = asyncio.create_task(run_scheduled_managed_dns_updater(
+            db, sleep=run_two_passes, interval_seconds=900.0,
+        ))
+        for _ in range(200):
+            if len(sleep_calls) >= 2 or task.done():
+                break
+            await asyncio.sleep(0.01)
+        if task.done():
+            await task
+        assert len(sleep_calls) == 2
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+    assert calls == ["old-secret", "replacement-secret", "old-secret", "replacement-secret"]
+    assert get_registered_name(db) == "old-name"
+    assert get_registration_status(db) is RegistrationStatus.MATURED
+    assert get_previous_name(db) is None
+    assert load_credential(credential_path_for(db.path)) == "old-secret"
+    assert load_credential(previous_credential_path_for(db.path)) is None
+    db.close()
+
+
 def test_updater_repairs_a_rename_interrupted_before_local_state_commit(tmp_path):
     async def scenario():
         backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")

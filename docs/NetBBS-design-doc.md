@@ -539,7 +539,10 @@ only SysOp acknowledgement dismisses it. Bounded observation pruning therefore
 retains undismissed security warnings ahead of newer benign observations. The
 local node likewise retains a bounded history of its previous friendly and DNS
 claims so another fingerprint cannot adopt a just-renamed local identity without
-raising the same warning.
+raising the same warning. The last friendly/DNS pair actually advertised in an
+outbound hello remains part of that collision namespace until it has been moved
+into history; an inbound hello racing the local rename therefore cannot claim
+the just-replaced name in the gap before the next outbound descriptor is built.
 
 ### 4.5 Identity tiers
 
@@ -1897,7 +1900,11 @@ attributes them to the sending node, and the UI renders the human identity as
 a personal signing key. The sending node remains responsible for enforcing its
 local membership, mute, and moderation rules before transmission; the
 receiving node independently enforces its own node/user/content policy before
-display.
+display. The receiving node retains the authenticated sending-node fingerprint
+on the in-memory message even though ordinary rendering shows the friendly
+label. If that fingerprint has an undismissed cryptographic-identity collision,
+the live channel line carries the same non-blocking caution used at mail and
+direct-message interaction boundaries.
 
 Presence is leased, scoped to subscribed linked channels, and advisory. A
 snapshot establishes current state after subscription; deltas update it.
@@ -3199,10 +3206,16 @@ of "the operator/an external trigger drives it, not a built-in timer").
 
 `create_backup(*, db_path, identity_dir, destination)`:
 
-1. **Database**: reuses `netbbs.selfupdate.snapshot_database` verbatim
+1. **Database and managed-DNS credential generation**: reuses
+   `netbbs.selfupdate.snapshot_database` verbatim
    (`sqlite3.Connection.backup()`, already proven safe against a live WAL
    database in `test_snapshot_and_restore_database_round_trip`) — written to
-   `destination/netbbs.db`. Never a raw file copy.
+   `destination/netbbs.db`. Never a raw file copy. The primary, previous, and
+   transition-journal credentials are double-collected around that snapshot,
+   and the snapshot's `managed_dns_*` configuration is compared with the live
+   database afterward. Any detected overlap with a credential/name transition
+   retries the bounded collection, so a backup cannot pair one transition generation's
+   database with another generation's bearer secrets.
 2. **Content blobs**: `shutil.copytree` of the blob root into
    `destination/files/`, `.incoming/` excluded. Must run strictly *after*
    step 1, not before or concurrently — this is what makes the DB-then-
@@ -5711,7 +5724,11 @@ transition journal in reverse to restore the previous bearer secret and remove
 the replacement-era extra secret. A crash on either side remains recoverable by
 the retained two credentials and the updater. Point-in-time restore likewise
 removes any primary, previous, or journal credential artifact absent from the
-backup generation.
+backup generation. A replacement abandoned during a rename remains eligible
+for credential-recovery retry only while its own release/abandonment cooldown
+is still open. If its heartbeat becomes authoritatively inactive while the old
+name's heartbeat fails transiently, the node continues heartbeating the retained
+old credential on later passes rather than letting the still-live name expire.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 

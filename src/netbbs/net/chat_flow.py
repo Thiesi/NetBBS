@@ -139,7 +139,11 @@ from netbbs.communities import get_community, get_effective_min_age, get_effecti
 from netbbs.directory import VCard, get_vcard
 from netbbs.link.boards import LinkContext
 from netbbs.link.channels import queue_channel_message_if_linked
-from netbbs.link.node_profiles import identity_for_fingerprint, identity_for_peer
+from netbbs.link.node_profiles import (
+    identity_for_fingerprint,
+    identity_for_peer,
+    latest_identity_observation,
+)
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer, reject_unhandled_key
@@ -892,6 +896,15 @@ def _render_channel_message(
         color = SELF_COLOR if self_message else effective_accent_color_256(db)
         label = _colored_around("<", author_label, ">", fg_color=color, bold=self_message)
         line = f"{label} {sanitize_text(message.body)}"
+    if message.author_fingerprint:
+        identity_notice = latest_identity_observation(db, message.author_fingerprint)
+        if identity_notice is not None and identity_notice.severity == "security":
+            warning = colored(
+                "Caution: this familiar node name has a different cryptographic identity. ",
+                fg_color=MUTED_COLOR,
+                bold=True,
+            )
+            line = warning + line
     return format_with_preference(db, viewer, line, message.created_at)
 
 

@@ -69,6 +69,8 @@ def test_transport_endpoint_host_is_not_a_presentation_identity_claim(db):
 
     assert all(identity_for_peer(peer).dns_name is None for peer in peers)
     assert resolve_peer_reference(peers, "shared.example.org") == []
+    assert all(identity_for_fingerprint(db, peer.fingerprint).dns_name is None for peer in peers)
+    assert resolve_stored_peer_reference(db, "shared.example.org") == []
     assert not any(item.severity == "security" for item in list_identity_observations(db))
 
 
@@ -325,6 +327,24 @@ def test_peer_adopting_a_retained_previous_local_claim_is_security_notice(
     remember_own_identity_claims(db, canonical_dns_name="new-local.example.org")
 
     save_peer(db, _peer(tmp_path, "impostor", friendly_name, dns_name))
+
+    notice = list_identity_observations(db)[0]
+    assert notice.kind == "cryptographic_identity_changed"
+    assert notice.severity == "security"
+    assert notice.previous_fingerprint == "abcdefghijklmnopqrstuvwxyz234567"
+
+
+def test_peer_adopting_the_last_advertised_local_name_before_the_next_hello_is_security_notice(
+    db, tmp_path,
+):
+    """The last advertised claim bridges a local rename until the own-hello
+    provider has moved that claim into bounded history."""
+    set_node_display_name(db, "Old Local")
+    set_node_fingerprint(db, "abcdefghijklmnopqrstuvwxyz234567")
+    remember_own_identity_claims(db, canonical_dns_name="local.example.org")
+    set_node_display_name(db, "New Local")
+
+    save_peer(db, _peer(tmp_path, "impostor", "Old Local", "other.example.org"))
 
     notice = list_identity_observations(db)[0]
     assert notice.kind == "cryptographic_identity_changed"
