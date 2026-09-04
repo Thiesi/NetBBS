@@ -24,7 +24,8 @@ from pathlib import Path
 
 from netbbs.managed_dns.credential import (
     credential_path_for, delete_credential, load_credential, previous_credential_path_for,
-    recover_credential_transition, save_credential, stage_credential_cancellation,
+    managed_dns_transition_lock, recover_credential_transition, save_credential,
+    stage_credential_cancellation,
     stage_credential_transition,
     transition_credential_path_for,
 )
@@ -214,47 +215,53 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
         )
         return
 
-    try:
-        async with ClientSession(trust_env=True) as http_session:
-            result = await register(
-                http_session, base_url, name=raw_name, node_fingerprint=node_fingerprint,
-                dynamic=dynamic, credential=stored_credential,
+    async with managed_dns_transition_lock(lane.path):
+        # The prompt may have been open while another transition completed.
+        # Reload the credential generation that this request will replace.
+        stored_credential = load_credential(credential_path_for(lane.path))
+        try:
+            async with ClientSession(trust_env=True) as http_session:
+                result = await register(
+                    http_session, base_url, name=raw_name, node_fingerprint=node_fingerprint,
+                    dynamic=dynamic, credential=stored_credential,
+                )
+        except ManagedDnsError as exc:
+            await session.write_line(
+                colored(f"Registration failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR)
             )
-    except ManagedDnsError as exc:
-        await session.write_line(colored(f"Registration failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
-        return
+            return
 
-    # A reclaim always returns the exact same credential the caller
-    # already had (services.managed_dns.server._reclaim never mints a
-    # new one); a fresh registration always mints a brand new one. This
-    # is a reliable signal for which one just happened -- unlike the
-    # resulting `status`, which reclaiming a registration that was
-    # released *before* it ever matured correctly still reports as
-    # "pending," identical to a genuinely fresh registration's own
-    # status.
-    was_reclaim = stored_credential is not None and result.credential == stored_credential
+        # A reclaim always returns the exact same credential the caller
+        # already had (services.managed_dns.server._reclaim never mints a
+        # new one); a fresh registration always mints a brand new one. This
+        # is a reliable signal for which one just happened -- unlike the
+        # resulting `status`, which reclaiming a registration that was
+        # released *before* it ever matured correctly still reports as
+        # "pending," identical to a genuinely fresh registration's own
+        # status.
+        was_reclaim = stored_credential is not None and result.credential == stored_credential
 
-    save_credential(credential_path_for(lane.path), result.credential)
-    await lane.run(set_registered_name, result.name)
-    await lane.run(set_registration_status, RegistrationStatus(result.status))
-    # Publication is only ever confirmed by a heartbeat's reported
-    # address -- a reclaim that comes back `matured` may still have had
-    # its republish fail, so the next heartbeat decides.
-    await lane.run(set_published, False)
-    await lane.run(set_dynamic, dynamic)
-    await lane.run(set_opt_in, OptIn.ACCEPTED)
+        save_credential(credential_path_for(lane.path), result.credential)
+        await lane.run(set_registered_name, result.name)
+        await lane.run(set_registration_status, RegistrationStatus(result.status))
+        # Publication is only ever confirmed by a heartbeat's reported
+        # address -- a reclaim that comes back `matured` may still have had
+        # its republish fail, so the next heartbeat decides.
+        await lane.run(set_published, False)
+        await lane.run(set_dynamic, dynamic)
+        await lane.run(set_opt_in, OptIn.ACCEPTED)
 
-    if was_reclaim:
-        if result.status == "matured":
-            message = f"Reclaimed {result.name}.netbbs.org -- it's live again."
+        if was_reclaim:
+            if result.status == "matured":
+                message = f"Reclaimed {result.name}.netbbs.org -- it's live again."
+            else:
+                message = f"Reclaimed {result.name}.netbbs.org -- it will resume maturing from where it left off."
         else:
-            message = f"Reclaimed {result.name}.netbbs.org -- it will resume maturing from where it left off."
-    else:
-        message = (
-            f"Registered {result.name}.netbbs.org -- it will go live once this "
-            "node has stayed in contact for a little while (this prevents abuse, "
-            "not a fault on your end)."
-        )
+            message = (
+                f"Registered {result.name}.netbbs.org -- it will go live once this "
+                "node has stayed in contact for a little while (this prevents abuse, "
+                "not a fault on your end)."
+            )
     await session.write_line(colored(message, fg_color=MUTED_COLOR))
 
 
@@ -275,14 +282,6 @@ async def release_registration(session: Session, lane: DatabaseLane) -> None:
     if not confirmed:
         return
 
-    base_url = await lane.run(get_service_url)
-    stored_credential = load_credential(credential_path_for(lane.path))
-    if base_url is None or stored_credential is None:
-        await session.write_line(
-            colored("Cannot release -- missing service URL or credential.", fg_color=MUTED_COLOR)
-        )
-        return
-
     try:
         from aiohttp import ClientSession
         from netbbs.managed_dns.client import ManagedDnsError, release
@@ -290,14 +289,23 @@ async def release_registration(session: Session, lane: DatabaseLane) -> None:
         await session.write_line(colored("Release requires NetBBS's optional HTTP support.", fg_color=MUTED_COLOR))
         return
 
-    try:
-        async with ClientSession(trust_env=True) as http_session:
-            result = await release(http_session, base_url, credential=stored_credential)
-    except ManagedDnsError as exc:
-        await session.write_line(colored(f"Release failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
-        return
+    async with managed_dns_transition_lock(lane.path):
+        current_name = await lane.run(get_registered_name)
+        base_url = await lane.run(get_service_url)
+        stored_credential = load_credential(credential_path_for(lane.path))
+        if current_name != name or base_url is None or stored_credential is None:
+            await session.write_line(
+                colored("Cannot release -- managed-DNS state changed; review it and try again.", fg_color=MUTED_COLOR)
+            )
+            return
+        try:
+            async with ClientSession(trust_env=True) as http_session:
+                result = await release(http_session, base_url, credential=stored_credential)
+        except ManagedDnsError as exc:
+            await session.write_line(colored(f"Release failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
+            return
 
-    await lane.run(set_registration_status, RegistrationStatus(result.status))
+        await lane.run(set_registration_status, RegistrationStatus(result.status))
     await session.write_line(colored(f"Released {name}.netbbs.org.", fg_color=MUTED_COLOR))
 
 
@@ -322,36 +330,47 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
         default=False,
     ):
         return
-    base_url = await lane.run(get_service_url)
-    primary_path = credential_path_for(lane.path)
-    old_credential = load_credential(primary_path)
-    if base_url is None or old_credential is None:
-        await session.write_line(colored("Cannot change name -- missing service URL or credential.", fg_color=MUTED_COLOR))
-        return
     try:
         from aiohttp import ClientSession
         from netbbs.managed_dns.client import ManagedDnsError, rename
     except ModuleNotFoundError:
         await session.write_line(colored("Changing a name requires NetBBS's optional HTTP support.", fg_color=MUTED_COLOR))
         return
-    try:
-        async with ClientSession(trust_env=True) as http_session:
-            result = await rename(http_session, base_url, name=new_name, credential=old_credential)
-    except ManagedDnsError as exc:
-        await session.write_line(colored(f"Name change failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
-        return
-    stage_credential_transition(lane.path, old_credential, result.credential)
-    save_credential(previous_credential_path_for(lane.path), old_credential)
-    save_credential(primary_path, result.credential)
-    previous_published = await lane.run(get_published)
-    await lane.run(
-        set_pending_rename_state,
-        name=result.name,
-        previous_name=result.previous_name,
-        previous_status=RegistrationStatus(result.previous_status),
-        previous_published=previous_published,
-    )
-    delete_credential(transition_credential_path_for(lane.path))
+    async with managed_dns_transition_lock(lane.path):
+        recover_credential_transition(lane.path)
+        current_name = await lane.run(get_registered_name)
+        current_previous = await lane.run(get_previous_name)
+        if current_name != old_name or current_previous is not None:
+            await session.write_line(
+                colored("Cannot change name -- managed-DNS state changed; review it and try again.", fg_color=MUTED_COLOR)
+            )
+            return
+        base_url = await lane.run(get_service_url)
+        primary_path = credential_path_for(lane.path)
+        old_credential = load_credential(primary_path)
+        if base_url is None or old_credential is None:
+            await session.write_line(
+                colored("Cannot change name -- missing service URL or credential.", fg_color=MUTED_COLOR)
+            )
+            return
+        try:
+            async with ClientSession(trust_env=True) as http_session:
+                result = await rename(http_session, base_url, name=new_name, credential=old_credential)
+        except ManagedDnsError as exc:
+            await session.write_line(colored(f"Name change failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
+            return
+        stage_credential_transition(lane.path, old_credential, result.credential)
+        save_credential(previous_credential_path_for(lane.path), old_credential)
+        save_credential(primary_path, result.credential)
+        previous_published = await lane.run(get_published)
+        await lane.run(
+            set_pending_rename_state,
+            name=result.name,
+            previous_name=result.previous_name,
+            previous_status=RegistrationStatus(result.previous_status),
+            previous_published=previous_published,
+        )
+        delete_credential(transition_credential_path_for(lane.path))
     await session.write_line(
         colored(
             f"Reserved {result.name}.netbbs.org. {result.previous_name}.netbbs.org remains active "
@@ -365,7 +384,6 @@ async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> No
     recover_credential_transition(lane.path)
     new_name = await lane.run(get_registered_name)
     old_name = await lane.run(get_previous_name)
-    old_status = await lane.run(get_previous_status)
     if new_name is None or old_name is None:
         await session.write_line(colored("No managed-DNS name change is pending.", fg_color=MUTED_COLOR))
         return
@@ -373,36 +391,48 @@ async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> No
         session, f"Cancel the change to {sanitize_text(new_name)}.netbbs.org?", default=False,
     ):
         return
-    base_url = await lane.run(get_service_url)
-    primary_path = credential_path_for(lane.path)
-    replacement_credential = load_credential(primary_path)
-    old_credential = load_credential(previous_credential_path_for(lane.path))
-    if base_url is None or replacement_credential is None or old_credential is None:
-        await session.write_line(colored("Cannot cancel -- required service or credential state is missing.", fg_color=MUTED_COLOR))
-        return
     try:
         from aiohttp import ClientSession
         from netbbs.managed_dns.client import ManagedDnsError, cancel_rename
     except ModuleNotFoundError:
         await session.write_line(colored("Cancelling a name change requires NetBBS's optional HTTP support.", fg_color=MUTED_COLOR))
         return
-    try:
-        async with ClientSession(trust_env=False) as http_session:
-            result = await cancel_rename(http_session, base_url, credential=replacement_credential)
-    except ManagedDnsError as exc:
-        await session.write_line(colored(f"Cancellation failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
-        return
-    restored_status = RegistrationStatus(result.previous_status) if result.previous_status else old_status
-    restored_published = result.previous_last_known_address is not None
-    await lane.run(
-        set_cancelled_rename_state,
-        name=result.previous_name,
-        status=restored_status,
-        published=restored_published,
-    )
-    # The database now describes the remotely revived old name. Until
-    # this reverse file swap completes, the still-retained previous
-    # secret lets the updater recover by heartbeating both credentials.
-    stage_credential_cancellation(lane.path, old_credential)
-    recover_credential_transition(lane.path)
+    async with managed_dns_transition_lock(lane.path):
+        recover_credential_transition(lane.path)
+        current_name = await lane.run(get_registered_name)
+        current_previous = await lane.run(get_previous_name)
+        old_status = await lane.run(get_previous_status)
+        if current_name != new_name or current_previous != old_name:
+            await session.write_line(
+                colored("Cannot cancel -- managed-DNS state changed; review it and try again.", fg_color=MUTED_COLOR)
+            )
+            return
+        base_url = await lane.run(get_service_url)
+        primary_path = credential_path_for(lane.path)
+        replacement_credential = load_credential(primary_path)
+        old_credential = load_credential(previous_credential_path_for(lane.path))
+        if base_url is None or replacement_credential is None or old_credential is None:
+            await session.write_line(
+                colored("Cannot cancel -- required service or credential state is missing.", fg_color=MUTED_COLOR)
+            )
+            return
+        try:
+            async with ClientSession(trust_env=False) as http_session:
+                result = await cancel_rename(http_session, base_url, credential=replacement_credential)
+        except ManagedDnsError as exc:
+            await session.write_line(colored(f"Cancellation failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
+            return
+        restored_status = RegistrationStatus(result.previous_status) if result.previous_status else old_status
+        restored_published = result.previous_last_known_address is not None
+        await lane.run(
+            set_cancelled_rename_state,
+            name=result.previous_name,
+            status=restored_status,
+            published=restored_published,
+        )
+        # The database now describes the remotely revived old name. Until
+        # this reverse file swap completes, the still-retained previous
+        # secret lets the updater recover by heartbeating both credentials.
+        stage_credential_cancellation(lane.path, old_credential)
+        recover_credential_transition(lane.path)
     await session.write_line(colored(f"Kept {result.previous_name}.netbbs.org; the name change was cancelled.", fg_color=MUTED_COLOR))

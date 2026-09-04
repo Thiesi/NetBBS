@@ -796,12 +796,14 @@ class ManagedDnsServer:
 
         newly_matured = False
         status = registration.status
+        last_known_address = registration.last_known_address
+        observed_address = self._observed_address(request)
         if status == "pending" and now - datetime.fromisoformat(contact_started_at) >= timedelta(
             seconds=self._min_age_seconds
         ):
             if registration.replaces_name is not None:
-                observed_address = self._observed_address(request)
                 if observed_address and await self._best_effort_publish(registration.name, observed_address):
+                    last_known_address = observed_address
                     old = get_registration_by_name(self._db, registration.replaces_name)
                     if (
                         old is not None and old.status == "matured"
@@ -838,8 +840,6 @@ class ManagedDnsServer:
                 status = "matured"
                 newly_matured = True
 
-        last_known_address = registration.last_known_address
-        observed_address = self._observed_address(request)
         # Publish on the transition to matured (the record must exist
         # at all once a registration goes live, regardless of whether
         # this is a "dynamic" registration) or, for a dynamic

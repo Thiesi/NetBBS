@@ -93,9 +93,22 @@ async def _cancel_rename(server: ManagedDnsServer, *, credential: str):
 def test_rename_keeps_old_name_active_until_replacement_matures(db):
     now = datetime(2026, 9, 3, tzinfo=timezone.utc)
 
+    class RejectDuplicateReplacementPublish(LoggingDnsProvider):
+        def __init__(self):
+            super().__init__()
+            self.replacement_attempts = 0
+
+        def upsert_record(self, name, kind, address):
+            if name == "new-name.netbbs.org.":
+                self.replacement_attempts += 1
+                if self.replacement_attempts > 1:
+                    raise DnsProviderError("duplicate replacement publish")
+            super().upsert_record(name, kind, address)
+
+    provider = RejectDuplicateReplacementPublish()
+
     async def scenario():
         nonlocal now
-        provider = LoggingDnsProvider()
         server = await _start_server(db, dns_provider=provider, clock=lambda: now, min_age_seconds=60)
         try:
             original = await _register(server, name="old-name", dynamic=True)
@@ -117,6 +130,8 @@ def test_rename_keeps_old_name_active_until_replacement_matures(db):
     assert old_during.status == "matured"
     assert replacement["previous_name"] == "old-name"
     assert completed["status"] == "matured"
+    assert completed["last_known_address"] == "127.0.0.1"
+    assert provider.replacement_attempts == 1
     assert get_registration_by_name(db, "old-name").status == "released"
     assert get_registration_by_name(db, "new-name").status == "matured"
 

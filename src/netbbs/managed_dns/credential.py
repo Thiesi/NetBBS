@@ -22,10 +22,30 @@ artifacts; restore must preserve each artifact's presence and absence.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import json
 import stat
 from pathlib import Path
+from weakref import WeakKeyDictionary
+
+
+_transition_locks: WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[Path, asyncio.Lock]
+] = WeakKeyDictionary()
+
+
+def managed_dns_transition_lock(db_path: Path) -> asyncio.Lock:
+    """One process-local lock for remote/local DNS transitions per node.
+
+    Locks are scoped by event loop as well as database path so isolated
+    ``asyncio.run`` calls in tests never reuse a lock bound to an earlier loop.
+    Prompts stay outside this lock; callers hold it only across the remote call
+    and the corresponding credential/database reconciliation.
+    """
+    loop = asyncio.get_running_loop()
+    locks = _transition_locks.setdefault(loop, {})
+    return locks.setdefault(db_path.resolve(), asyncio.Lock())
 
 
 def credential_path_for(db_path: Path) -> Path:

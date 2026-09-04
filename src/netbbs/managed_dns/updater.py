@@ -24,7 +24,7 @@ from aiohttp import ClientSession
 from netbbs.managed_dns.client import HeartbeatResult, ManagedDnsError, heartbeat
 from netbbs.managed_dns.credential import (
     credential_path_for, delete_credential, load_credential, previous_credential_path_for,
-    recover_credential_transition, stage_credential_cancellation,
+    managed_dns_transition_lock, recover_credential_transition, stage_credential_cancellation,
 )
 from netbbs.managed_dns.state import (
     OptIn,
@@ -83,63 +83,71 @@ async def run_scheduled_managed_dns_updater(
     failures.
     """
     while True:
-        if get_opt_in(db) is OptIn.ACCEPTED:
-            recover_credential_transition(db.path)
-            name = get_registered_name(db)
-            base_url = get_service_url(db)
-            status = get_registration_status(db)
-            previous_credential = load_credential(previous_credential_path_for(db.path))
-            # An abandoned replacement can coexist with a still-live previous
-            # name after the old heartbeat failed transiently. Keep servicing
-            # that outstanding rename so the next successful old heartbeat
-            # can restore the usable registration instead of stranding it.
-            has_outstanding_rename = previous_credential is not None and get_previous_name(db) is not None
-            if (
-                name is not None and base_url is not None
-                and status is not RegistrationStatus.RELEASED
-                and (status is not RegistrationStatus.ABANDONED or has_outstanding_rename)
-            ):
-                credential = load_credential(credential_path_for(db.path))
-                if credential is not None:
-                    previous_result = None
-                    previous_inactive = False
-                    if previous_credential is not None:
-                        previous_result, previous_inactive = await _send_heartbeat(
-                            base_url, previous_credential
-                        )
-                    result, primary_inactive = await _send_heartbeat(base_url, credential)
-                    if result is not None:
-                        _apply_heartbeat_result(
-                            db, result, previous_result=previous_result,
-                            has_previous_credential=previous_credential is not None,
-                            previous_inactive=previous_inactive,
-                        )
-                    elif primary_inactive and previous_result is not None and previous_credential is not None:
-                        _apply_heartbeat_result(
-                            db, previous_result, previous_result=None,
-                            has_previous_credential=False,
-                        )
-                        # Commit the recovered service truth while both files
-                        # still exist, then journal the reverse swap. A crash
-                        # at any point leaves either the fallback credential or
-                        # a replayable journal, never an active DB identity with
-                        # its only working secret already deleted.
-                        stage_credential_cancellation(db.path, previous_credential)
-                        recover_credential_transition(db.path)
-                    elif primary_inactive or previous_inactive:
-                        # Each 401 is authoritative independently of the other
-                        # request's outcome. Reconcile both cached identities in
-                        # one transaction, even if the other heartbeat merely
-                        # failed transiently.
-                        _apply_inactive_heartbeat_results(
-                            db,
-                            name=name,
-                            primary_inactive=primary_inactive,
-                            previous_inactive=(
-                                previous_inactive and previous_credential is not None
-                            ),
-                        )
+        async with managed_dns_transition_lock(db.path):
+            await _run_managed_dns_update_pass(db)
         await sleep(interval_seconds)
+
+
+async def _run_managed_dns_update_pass(db: Database) -> None:
+    """Heartbeat and reconcile one credential generation under its lock."""
+    if get_opt_in(db) is not OptIn.ACCEPTED:
+        return
+    recover_credential_transition(db.path)
+    name = get_registered_name(db)
+    base_url = get_service_url(db)
+    status = get_registration_status(db)
+    previous_credential = load_credential(previous_credential_path_for(db.path))
+    # An abandoned replacement can coexist with a still-live previous
+    # name after the old heartbeat failed transiently. Keep servicing
+    # that outstanding rename so the next successful old heartbeat
+    # can restore the usable registration instead of stranding it.
+    has_outstanding_rename = previous_credential is not None and get_previous_name(db) is not None
+    if (
+        name is None or base_url is None or status is RegistrationStatus.RELEASED
+        or (status is RegistrationStatus.ABANDONED and not has_outstanding_rename)
+    ):
+        return
+    credential = load_credential(credential_path_for(db.path))
+    if credential is None:
+        return
+    previous_result = None
+    previous_inactive = False
+    if previous_credential is not None:
+        previous_result, previous_inactive = await _send_heartbeat(
+            base_url, previous_credential
+        )
+    result, primary_inactive = await _send_heartbeat(base_url, credential)
+    if result is not None:
+        _apply_heartbeat_result(
+            db, result, previous_result=previous_result,
+            has_previous_credential=previous_credential is not None,
+            previous_inactive=previous_inactive,
+        )
+    elif primary_inactive and previous_result is not None and previous_credential is not None:
+        _apply_heartbeat_result(
+            db, previous_result, previous_result=None,
+            has_previous_credential=False,
+        )
+        # Commit the recovered service truth while both files
+        # still exist, then journal the reverse swap. A crash
+        # at any point leaves either the fallback credential or
+        # a replayable journal, never an active DB identity with
+        # its only working secret already deleted.
+        stage_credential_cancellation(db.path, previous_credential)
+        recover_credential_transition(db.path)
+    elif primary_inactive or previous_inactive:
+        # Each 401 is authoritative independently of the other
+        # request's outcome. Reconcile both cached identities in
+        # one transaction, even if the other heartbeat merely
+        # failed transiently.
+        _apply_inactive_heartbeat_results(
+            db,
+            name=name,
+            primary_inactive=primary_inactive,
+            previous_inactive=(
+                previous_inactive and previous_credential is not None
+            ),
+        )
 
 
 async def _send_heartbeat(

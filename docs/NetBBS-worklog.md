@@ -3844,3 +3844,19 @@ transiently, and simultaneous inactive results update both cached registrations
 in one transaction. Before cancellation performs any provider deletion, verify
 that the row named by `replaces_name` still has the replacement's node
 fingerprint even when that previous row is active rather than abandoned.
+
+Managed-DNS updater passes and interactive registration, release, rename, and
+cancellation transitions share a process-local lock scoped by event loop and
+node database. Hold it across the remote mutation and local reconciliation, but
+never across a human prompt; otherwise a heartbeat begun from stale local state
+can overwrite the result of a completed SysOp transition. On the service,
+successful replacement maturation is one publication operation: carry its
+observed address into the remaining heartbeat logic so the generic address
+change path cannot publish the same replacement twice.
+
+The `Unnamed linked node` and `Unknown linked node` presentation fallbacks are
+both reserved, case-insensitive friendly-name sentinels at local configuration
+and signed-profile admission. Bounded local identity-claim history is ordered by
+most recent retirement or reuse: remove an existing normalized claim before
+appending it again, so pruning does not discard a recently reused name merely
+because it first appeared early.

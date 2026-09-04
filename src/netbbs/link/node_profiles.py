@@ -84,7 +84,9 @@ def normalize_friendly_name(value: object) -> str | None:
     value = unicodedata.normalize("NFC", value.strip())
     if (
         not value or len(value) > MAX_NODE_FRIENDLY_NAME_LENGTH
-        or name_key(value) == name_key(UNNAMED_NODE_NAME)
+        or name_key(value) in {
+            name_key(UNNAMED_NODE_NAME), name_key(UNKNOWN_NODE_NAME),
+        }
         or is_node_fingerprint_shape(value)
     ):
         return None
@@ -175,7 +177,14 @@ def remember_own_identity_claims(db: Database, *, canonical_dns_name: str | None
         history = []
     if any(previous) and previous != current:
         for value in previous:
-            if value and value not in history:
+            if value:
+                # A claim may be reused and retired more than once. Move its
+                # existing occurrence to the newest end so bounded pruning
+                # reflects when it was last advertised, not first retired.
+                history = [
+                    item for item in history
+                    if not isinstance(item, str) or name_key(item) != name_key(value)
+                ]
                 history.append(value)
     history = [
         value for value in history if isinstance(value, str)

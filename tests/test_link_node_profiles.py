@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from netbbs.link.node_identity import bootstrap_node_identity
@@ -23,7 +25,7 @@ from netbbs.managed_dns.state import (
     RegistrationStatus, set_previous_name, set_previous_published, set_previous_status,
     set_node_fingerprint, set_published, set_registered_name, set_registration_status,
 )
-from netbbs.config import set_node_display_name
+from netbbs.config import get_config, set_node_display_name
 from netbbs.link.protocol import LinkNode, LinkProtocolError
 from netbbs.link.store import save_peer
 from netbbs.storage.database import Database
@@ -114,6 +116,8 @@ def test_friendly_name_reserves_label_delimiter_and_invisible_controls():
     assert normalize_friendly_name('The "Rusty" Anchor') is None
     assert normalize_friendly_name("Unnamed linked node") is None
     assert normalize_friendly_name("UNNAMED LINKED NODE") is None
+    assert normalize_friendly_name("Unknown linked node") is None
+    assert normalize_friendly_name("UNKNOWN LINKED NODE") is None
     assert normalize_friendly_name("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") is None
 
 
@@ -346,6 +350,23 @@ def test_peer_adopting_the_last_advertised_local_name_before_the_next_hello_is_s
     assert notice.kind == "cryptographic_identity_changed"
     assert notice.severity == "security"
     assert notice.previous_fingerprint == "abcdefghijklmnopqrstuvwxyz234567"
+
+
+def test_reused_local_claims_move_to_the_recent_end_of_bounded_history(db):
+    set_node_display_name(db, "First Local")
+    remember_own_identity_claims(db, canonical_dns_name="first.example.org")
+
+    set_node_display_name(db, "Second Local")
+    remember_own_identity_claims(db, canonical_dns_name="second.example.org")
+    set_node_display_name(db, "First Local")
+    remember_own_identity_claims(db, canonical_dns_name="first.example.org")
+    set_node_display_name(db, "Third Local")
+    remember_own_identity_claims(db, canonical_dns_name="third.example.org")
+
+    history = json.loads(get_config(db, "link_own_identity_claim_history"))
+    assert history[-4:] == [
+        "Second Local", "second.example.org", "First Local", "first.example.org",
+    ]
 
 
 def test_unchanged_peer_is_rechecked_after_local_friendly_name_changes(db, tmp_path):

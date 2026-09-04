@@ -142,3 +142,9 @@ def test_node_display_name_is_stored_in_unicode_nfc(tmp_path):
 def test_node_display_name_cannot_be_a_complete_fingerprint():
     with pytest.raises(ValueError, match="must not look like a node fingerprint"):
         canonical_node_display_name("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+
+
+@pytest.mark.parametrize("name", ["Unknown linked node", "UNKNOWN LINKED NODE"])
+def test_node_display_name_reserves_the_unknown_profile_sentinel(name):
+    with pytest.raises(ValueError, match="without an authenticated profile"):
+        canonical_node_display_name(name)

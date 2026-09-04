@@ -522,8 +522,9 @@ namespace, so a reference matching one node's DNS claim and another node's
 friendly claim is ambiguous rather than silently preferring either. Friendly
 names are compared in one Unicode normalization form (NFC), so canonically
 equivalent spellings are one name, never two claims. UI delimiters, invisible
-control/format characters, and the `Unnamed linked node` fallback label are
-reserved and cannot be claimed as friendly names. A complete 32-character
+control/format characters, and the `Unnamed linked node` and `Unknown linked
+node` fallback labels are reserved and cannot be claimed as friendly names. A
+complete 32-character
 base32 node fingerprint is reserved too: exact fingerprint lookup has precedence,
 so allowing the same shape as a friendly name would make that claim unreachable
 or misleading.
@@ -542,7 +543,9 @@ only SysOp acknowledgement dismisses it. Bounded observation pruning therefore
 retains undismissed security warnings ahead of newer benign observations. The
 local node likewise retains a bounded history of its previous friendly and DNS
 claims so another fingerprint cannot adopt a just-renamed local identity without
-raising the same warning. The last friendly/DNS pair actually advertised in an
+raising the same warning. Reusing a retired claim moves it to the recent end of
+that bounded history, so retention follows the latest use rather than the claim's
+first retirement. The last friendly/DNS pair actually advertised in an
 outbound hello remains part of that collision namespace until it has been moved
 into history; an inbound hello racing the local rename therefore cannot claim
 the just-replaced name in the gap before the next outbound descriptor is built.
@@ -5724,10 +5727,17 @@ heartbeat, release, or reclaim therefore cannot commit from state made
 stale by another provider await; concurrent HTTP transitions receive a
 retryable rejection before entering the worker queue. Publication and
 deletion failures remain retryable state (release is not finalized until
-deletion succeeds, and a failed static publication is retried), and the
-service-wide token-bucket state survives backend restarts.
+deletion succeeds, and a failed static publication is retried). Successful
+replacement maturation carries that publication result through the rest of the
+heartbeat and never issues a second publication from the stale pre-transition
+row. The service-wide token-bucket state survives backend restarts.
 
-Node-side rename state is one local database transaction: the replacement name,
+Node-side updater passes and interactive registration, release, rename, and
+cancellation transitions share one process-local transition lock per node
+database. The lock covers the remote mutation and its local reconciliation, but
+never a human prompt, so a heartbeat response from an older snapshot cannot
+overwrite a completed SysOp transition. Node-side rename state is one local
+database transaction: the replacement name,
 pending/unpublished state, and previous-name presentation state never become
 visible in a partial combination. Heartbeat reconciliation follows the same
 rule for the active and previous names, statuses, publication flags, and contact

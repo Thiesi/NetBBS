@@ -463,6 +463,78 @@ def test_cancel_rename_does_not_restore_stale_publication_state(tmp_path, monkey
     db.close()
 
 
+def test_cancellation_waits_for_inflight_heartbeat_reconciliation(tmp_path, monkeypatch):
+    from netbbs.managed_dns.client import CancelRenameResult
+    from netbbs.managed_dns.updater import run_scheduled_managed_dns_updater
+
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_service_url(db, "https://dns.example")
+    set_registered_name(db, "new-name")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+    save_credential(credential_path_for(db.path), "replacement-secret")
+    save_credential(previous_credential_path_for(db.path), "old-secret")
+    lane = DatabaseLane(db.path)
+
+    primary_started = asyncio.Event()
+    allow_primary_result = asyncio.Event()
+    pass_finished = asyncio.Event()
+    park_updater = asyncio.Event()
+    cancellation_called = asyncio.Event()
+
+    async def fake_heartbeat(_base_url, credential):
+        if credential == "old-secret":
+            return None, False
+        primary_started.set()
+        await allow_primary_result.wait()
+        return None, True
+
+    async def fake_cancel(*_args, **_kwargs):
+        cancellation_called.set()
+        return CancelRenameResult(
+            "new-name", "old-name", "cancelled", "matured", "127.0.0.1",
+        )
+
+    async def stop_after_pass(_seconds):
+        pass_finished.set()
+        await park_updater.wait()
+
+    monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", fake_heartbeat)
+    monkeypatch.setattr("netbbs.managed_dns.client.cancel_rename", fake_cancel)
+
+    async def scenario():
+        updater = asyncio.create_task(
+            run_scheduled_managed_dns_updater(db, sleep=stop_after_pass)
+        )
+        await asyncio.wait_for(primary_started.wait(), timeout=2)
+        cancelling = asyncio.create_task(
+            cancel_registration_rename(FakeSession(["y"]), lane)
+        )
+        await asyncio.sleep(0)
+        assert not cancellation_called.is_set()
+
+        allow_primary_result.set()
+        await asyncio.wait_for(pass_finished.wait(), timeout=2)
+        await asyncio.wait_for(cancelling, timeout=2)
+        updater.cancel()
+        await asyncio.gather(updater, return_exceptions=True)
+
+    try:
+        asyncio.run(scenario())
+        assert get_registered_name(db) == "old-name"
+        assert get_previous_name(db) is None
+        assert get_registration_status(db) is RegistrationStatus.MATURED
+        assert get_published(db)
+        assert load_credential(credential_path_for(db.path)) == "old-secret"
+        assert load_credential(previous_credential_path_for(db.path)) is None
+    finally:
+        lane.close()
+        db.close()
+
+
 def test_cancelled_rename_is_recoverable_if_reverse_credential_journaling_crashes(
     tmp_path, monkeypatch,
 ):

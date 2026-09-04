@@ -184,6 +184,8 @@ def canonical_node_display_name(name: str) -> str:
         raise ValueError(f"node display name cannot exceed {MAX_NODE_DISPLAY_NAME_LENGTH} characters, got {len(name)}")
     if name.lower() == "unnamed linked node":
         raise ValueError("node display name is reserved for nodes without a friendly name")
+    if name.lower() == "unknown linked node":
+        raise ValueError("node display name is reserved for nodes without an authenticated profile")
     if is_node_fingerprint_shape(name):
         raise ValueError("node display name must not look like a node fingerprint")
     if "·" in name or '"' in name or any(unicodedata.category(char) in {"Cc", "Cf"} for char in name):
