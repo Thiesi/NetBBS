@@ -3470,15 +3470,25 @@ def test_create_sub_category_via_the_parent_picker(db, lane, sysop):
     assert [c.name for c in list_subcategories(db, parents[0].id)] == ["Amiga"]
 
 
-def test_create_category_back_creates_nothing_and_blank_name_is_rejected_at_save(db, lane, sysop):
+def test_create_category_blank_name_is_rejected_at_save_and_the_draft_survives(db, lane, sysop):
     from netbbs.boards.categories import list_top_level_categories
 
-    session = FakeSession(["m", "c", "m", "c", "s", "b", "b", "b", "b", "b"])
+    # [S]ave with a blank name is rejected and the editor stays open with
+    # the description intact (Codex review on #289): filling the name in
+    # and saving again succeeds. Then a second create backs out.
+    session = FakeSession([
+        "m", "c", "m",
+        "c", "d", "Old computers", "s", "n", "Vintage", "s",
+        "c", "b",
+        "b", "b", "b", "b",
+    ])
     _run(session, lane, sysop)
-    text = _written_text(session)
-    assert "Name cannot be blank." in text
+    text = _visible(_written_text(session))
+    assert "Could not save: name cannot be blank" in text
     assert "Make this a sub-category" not in text
-    assert list_top_level_categories(db) == []
+    assert "Created category 'Vintage'." in text
+    created = list_top_level_categories(db)
+    assert [(c.name, c.description) for c in created] == [("Vintage", "Old computers")]
 
 
 def test_grant_moderator_back_discards_a_half_built_grant(db, lane, sysop):
@@ -3492,14 +3502,18 @@ def test_grant_moderator_back_discards_a_half_built_grant(db, lane, sysop):
     assert list_grants_for_user(db, alice) == []
 
 
-def test_grant_moderator_save_without_a_scope_explains_instead_of_granting(db, lane, sysop):
+def test_grant_moderator_save_without_a_scope_keeps_the_draft(db, lane, sysop):
     from netbbs.moderation.roles import list_grants_for_user
 
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["m", "g", "u", "0", "1", "s", "b", "y", "b", "b"])
+    # The rejected [S]ave keeps the editor open with the user still
+    # chosen (Codex review on #289): adding the scope and saving works.
+    session = FakeSession(["m", "g", "u", "0", "1", "s", "o", "x", "s", "b", "b"])
     _run(session, lane, sysop)
-    assert "Choose a [U]ser and a scope under [O]n first." in _visible(_written_text(session))
-    assert list_grants_for_user(db, alice) == []
+    text = _visible(_written_text(session))
+    assert "Could not save: choose a [U]ser and a scope under [O]n first" in text
+    assert "Granted" in text
+    assert [g.object_type for g in list_grants_for_user(db, alice)] == ["board"]
 
 
 def test_grant_blanket_scoped_to_a_community_via_the_community_field(db, lane, sysop):

@@ -13292,8 +13292,10 @@ async def _create_category_screen(
 
     async def save(draft: dict) -> object:
         if not draft["name"]:
-            await session.write_line(colored("Name cannot be blank.", fg_color=MUTED_COLOR))
-            return None
+            # Raised, not returned: a bare `return None` would close the
+            # editor and discard the description/parent already entered
+            # (Codex review on #289); the caught error keeps the draft up.
+            raise error_type("name cannot be blank")
         parent = draft["parent"]
         category = await lane.run(
             create, draft["name"], description=draft["description"],
@@ -13581,10 +13583,9 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
 
     async def save(draft: dict) -> bool | None:
         if draft["user"] is None or draft["object_type"] is None:
-            await session.write_line(
-                colored("Choose a [U]ser and a scope under [O]n first.", fg_color=MUTED_COLOR)
-            )
-            return None
+            # Raised so the editor redraws with the draft intact (Codex
+            # review on #289) rather than closing on a bare `return None`.
+            raise ModeratorGrantError("choose a [U]ser and a scope under [O]n first")
         community = draft["community"]
         label = draft["label"]
         if community is not None:
