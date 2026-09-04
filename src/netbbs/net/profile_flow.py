@@ -934,19 +934,35 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         await session.write_line("Birthdate updated.")
 
     def _link_share_toggle(attribute: str) -> Callable[[Session, DatabaseLane, Draft], Awaitable[None]]:
-        # One keystroke flips `link_visible` either way. Re-reads the
-        # attestation before acting so a SysOp re-attesting (which
-        # clears `link_visible`) or revoking mid-screen is reported as
-        # the current state rather than acted on from a stale draft.
+        # One keystroke flips `link_visible` either way -- but only the
+        # state the caller is actually looking at. The attestation is
+        # re-read before acting; if a SysOp re-attested (which clears
+        # `link_visible`) or revoked it since the screen was drawn, the
+        # keypress refreshes and reports that instead of toggling, so a
+        # press meant to switch a displayed "on" off can never enable
+        # sharing of a replacement attestation the caller hasn't seen
+        # (Codex review, PR #284).
         key = f"{attribute}_attestation"
 
         async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
+            shown = draft.get(key)
             attestation = await lane.run(get_attestation, user, attribute)
             draft[key] = attestation
             if attestation is None:
                 await session.write_line(
                     colored(
-                        f"No {attribute} attestation exists -- nothing to share until a SysOp verifies it.",
+                        f"No {attribute} attestation exists -- nothing to share until a SysOp verifies it."
+                        if shown is None
+                        else f"The {attribute} attestation was removed since this screen was drawn -- nothing to share now.",
+                        fg_color=MUTED_COLOR,
+                    )
+                )
+                return
+            if attestation != shown:
+                await session.write_line(
+                    colored(
+                        f"The {attribute} attestation changed since this screen was drawn -- refreshed, "
+                        "not toggled. Press again to change sharing for the current one.",
                         fg_color=MUTED_COLOR,
                     )
                 )

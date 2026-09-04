@@ -250,12 +250,67 @@ def test_remote_sharing_toggles_both_ways_without_a_question(db, lane, alice):
     assert "Share verified name over Link: off" in _visible(session)
 
 
-def test_remote_sharing_acts_on_the_current_attestation_state(db, lane, alice):
-    # A re-attestation clears link_visible (worklog invariant); the toggle
-    # re-reads before acting so it never flips from a stale draft value.
+def test_remote_sharing_refreshes_instead_of_toggling_a_changed_attestation(db, lane, alice):
+    # Codex review (PR #284): the screen shows sharing "on", then a SysOp
+    # re-attests while it is open -- which clears link_visible (worklog
+    # invariant). The caller's press was meant to turn the displayed
+    # "on" off; re-reading and blindly negating would instead *enable*
+    # sharing of the replacement attestation they have never seen. The
+    # toggle must refresh and report, and only act on a second press.
     verifier = create_user(db, "sysop", password="hunter2", user_level=255)
     attest_age(db, alice, date(1990, 5, 1), verifier=verifier)
     set_attestation_link_visible(db, alice, "age", True)
+
+    class ReattestingSession(FakeSession):
+        """Re-attests between the first draw and the first keypress."""
+
+        def __init__(self, inputs):
+            super().__init__(inputs)
+            self.reattested = False
+
+        async def read_key(self, echo: bool = True) -> str:
+            if not self.reattested:
+                self.reattested = True
+                attest_age(db, alice, date(1991, 6, 2), verifier=verifier)
+            return await super().read_key(echo)
+
+    session = ReattestingSession(["s", "b"])
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
+    text = _visible(session)
+    assert "Share verified age over Link: on" in text  # what the caller saw first
+    assert "changed since this screen was drawn" in text
+    assert get_attestation(db, alice, "age").link_visible is False
+    assert get_attestation(db, alice, "age").attested_value == "1991-06-02"
+    # The redraw now shows the real state; a second press acts on it.
     session = FakeSession(["s", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
-    assert get_attestation(db, alice, "age").link_visible is False
+    assert get_attestation(db, alice, "age").link_visible is True
+
+
+def test_remote_sharing_reports_an_attestation_removed_since_the_draw(db, lane, alice):
+    verifier = create_user(db, "sysop", password="hunter2", user_level=255)
+    attest_name(db, alice, "Alice Wonderland", verifier=verifier)
+
+    class RevokingSession(FakeSession):
+        def __init__(self, inputs):
+            super().__init__(inputs)
+            self.revoked = False
+
+        async def read_key(self, echo: bool = True) -> str:
+            if not self.revoked:
+                self.revoked = True
+                # No removal API exists yet (a re-attestation replaces in
+                # place); model a SysOp-side deletion at the storage level.
+                db.connection.execute(
+                    "DELETE FROM user_attestations WHERE subject_user_id = ? AND attribute = 'name'",
+                    (alice.id,),
+                )
+                db.connection.commit()
+            return await super().read_key(echo)
+
+    session = RevokingSession(["h", "b"])
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
+    text = _visible(session)
+    assert "was removed since this screen was drawn" in text
+    assert "Share verified name over Link: (not verified)" in text
+    assert get_attestation(db, alice, "name") is None
