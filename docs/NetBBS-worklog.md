@@ -2561,6 +2561,14 @@ nominally successful backup would make it non-recoverable. Standalone admin
 therefore remains status-only; custom destinations and scheduling use the
 CLI, and restore remains offline/CLI-only.
 
+Revalidate that configured identity directory in the backup worker immediately
+before creating the destination. Because cancellation cannot stop an
+`asyncio.to_thread` filesystem operation, the live session must keep ownership
+of that task, await and retrieve its outcome, and only then propagate session
+cancellation. Once the backup primitive returns, report success before writing
+the ancillary SysOp audit row; an audit write failure must not make a completed
+filesystem backup look unsuccessful.
+
 Back up in this order:
 
 1. database snapshot;

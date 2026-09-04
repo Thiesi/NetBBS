@@ -47,8 +47,11 @@ The live `[K] Backup` screen can now create a complete backup without SSH or
 other OS access. It uses the running node's actual database and configured
 identity paths, asks for confirmation, and writes a fresh timestamped directory
 under `<db-stem>_backups/` beside the database. The blocking SQLite snapshot and
-file copies run off the event loop, completion is audit-logged, and the screen
-refreshes its status and recent-run history afterward.
+file copies run off the event loop while remaining owned through session
+cancellation. The live flow refuses to create a nominally complete backup if
+the configured identity directory is unavailable. Completion is reported even
+if its ancillary audit write fails, and the screen refreshes its status and
+recent-run history afterward.
 
 These are local backups; off-node transfer and retention remain operator
 responsibilities. `python -m netbbs.backup create` remains available for custom
@@ -119,7 +122,7 @@ where it is used.
 
 ## Validation
 
-- The complete pytest suite passes at release preparation: 5,326 passed and 7
+- The complete pytest suite passes at release preparation: 5,330 passed and 7
   skipped.
 - `python -m netbbs --version` reports v5.7.0 and schema version 61.
 - Backup creation is tested against a live database lane with a non-default

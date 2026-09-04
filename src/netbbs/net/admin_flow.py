@@ -4583,6 +4583,53 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
 # -- backup status (design doc §13.4, issue #60's first operational slice) --
 
 
+def _create_live_backup(
+    *, db_path: Path, identity_dir: Path, destination: Path
+) -> Path:
+    """Create a live-node backup only while its configured identity exists."""
+    if not identity_dir.is_dir():
+        raise BackupError(
+            f"configured identity directory is unavailable: {identity_dir}"
+        )
+    return create_backup(
+        db_path=db_path,
+        identity_dir=identity_dir,
+        destination=destination,
+    )
+
+
+async def _create_live_backup_owned(
+    *, db_path: Path, identity_dir: Path, destination: Path
+) -> Path:
+    """Keep the uncancellable worker owned until it finishes on cancellation."""
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            _create_live_backup,
+            db_path=db_path,
+            identity_dir=identity_dir,
+            destination=destination,
+        )
+    )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        # Cancelling an asyncio.to_thread awaiter cannot stop the underlying
+        # filesystem work.  Keep retrieving cancellation until that worker is
+        # done, then retrieve its outcome before propagating the first cancel.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        try:
+            task.result()
+        except Exception:
+            _logger.exception("live backup failed after its SysOp session was cancelled")
+        raise cancelled
+
+
 async def _backup_status_screen(
     session: Session,
     lane: DatabaseLane,
@@ -4683,7 +4730,7 @@ async def _backup_status_screen(
                 width=session.terminal_width,
             )
         )
-        await session.write("Choice: ")
+        await write_prompt(session, "Choice: ")
         choice = (await session.read_key()).lower()
         if choice == "b":
             await session.write_line("")
@@ -4710,8 +4757,7 @@ async def _backup_status_screen(
 
         await session.write_line(colored("Creating backup...", fg_color=MUTED_COLOR))
         try:
-            created = await asyncio.to_thread(
-                create_backup,
+            created = await _create_live_backup_owned(
                 db_path=db_path,
                 identity_dir=identity_dir,
                 destination=destination,
@@ -4729,11 +4775,6 @@ async def _backup_status_screen(
                     )
                 )
         else:
-            await lane.run(
-                lambda db: record_action(
-                    db, actor=actor, action="create_backup", detail=str(created)
-                )
-            )
             await session.write_line(
                 status_badge("BACKUP COMPLETE", tone="success", unicode_style=unicode_style)
             )
@@ -4741,6 +4782,20 @@ async def _backup_status_screen(
                 colored("Created: ", fg_color=LABEL_COLOR)
                 + colored(sanitize_text(str(created)), fg_color=METADATA_COLOR)
             )
+            try:
+                await lane.run(
+                    lambda db: record_action(
+                        db, actor=actor, action="create_backup", detail=str(created)
+                    )
+                )
+            except sqlite3.Error as exc:
+                _logger.warning("could not audit completed backup %s: %s", created, exc)
+                await session.write_line(
+                    colored(
+                        "The backup completed, but its SysOp audit entry could not be recorded.",
+                        fg_color=MUTED_COLOR,
+                    )
+                )
         await session.write_line(
             colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
         )

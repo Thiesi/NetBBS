@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
+import threading
 
 import nacl.signing
 import pytest
@@ -6759,7 +6760,9 @@ def test_live_backup_screen_surfaces_a_backup_failure(db, lane, sysop, monkeypat
         raise admin_flow.BackupError("disk is full")
 
     monkeypatch.setattr(admin_flow, "create_backup", fail_backup)
-    controls = _node_controls(backup_identity_dir=db.path.parent / "identity")
+    identity_dir = db.path.parent / "identity"
+    identity_dir.mkdir()
+    controls = _node_controls(backup_identity_dir=identity_dir)
     session = FakeSession(["k", "c", "y", " ", "b", "b"])
 
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
@@ -6767,6 +6770,104 @@ def test_live_backup_screen_surfaces_a_backup_failure(db, lane, sysop, monkeypat
     text = _visible(_written_text(session))
     assert "BACKUP FAILED" in text
     assert "disk is full" in text
+
+
+def test_live_backup_screen_uses_the_width_aware_choice_prompt(
+    db, lane, sysop, monkeypatch,
+):
+    from netbbs.net import admin_flow
+
+    prompts = []
+    original_write_prompt = admin_flow.write_prompt
+
+    async def recording_write_prompt(session, text):
+        prompts.append(text)
+        await original_write_prompt(session, text)
+
+    monkeypatch.setattr(admin_flow, "write_prompt", recording_write_prompt)
+    controls = _node_controls(backup_identity_dir=db.path.parent / "identity")
+    session = FakeSession(["k", "b", "b"])
+
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
+
+    assert "Choice: " in prompts
+
+
+def test_live_backup_screen_refuses_a_missing_configured_identity(
+    db, lane, sysop,
+):
+    identity_dir = db.path.parent / "missing-identity"
+    controls = _node_controls(backup_identity_dir=identity_dir)
+    session = FakeSession(["k", "c", "y", " ", "b", "b"])
+
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
+
+    text = _visible(_written_text(session))
+    assert "BACKUP FAILED" in text
+    assert "configured identity directory is unavailable" in text
+    assert not (db.path.parent / f"{db.path.stem}_backups").exists()
+
+
+def test_live_backup_remains_owned_until_its_worker_finishes_after_cancellation(
+    db, lane, sysop, monkeypatch,
+):
+    from netbbs.net import admin_flow
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_backup(**kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+        return kwargs["destination"]
+
+    monkeypatch.setattr(admin_flow, "create_backup", slow_backup)
+    identity_dir = db.path.parent / "identity"
+    identity_dir.mkdir()
+    controls = _node_controls(backup_identity_dir=identity_dir)
+    session = FakeSession(["k", "c", "y"])
+
+    async def scenario():
+        task = asyncio.create_task(
+            admin_menu(session, lane, sysop, node_controls=controls)
+        )
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert started.is_set()
+
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_live_backup_reports_success_when_audit_logging_fails(
+    db, lane, sysop, monkeypatch,
+):
+    from netbbs.net import admin_flow
+
+    def fail_audit(*args, **kwargs):
+        raise admin_flow.sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(admin_flow, "record_action", fail_audit)
+    identity_dir = db.path.parent / "identity"
+    identity_dir.mkdir()
+    controls = _node_controls(backup_identity_dir=identity_dir)
+    session = FakeSession(["k", "c", "y", " ", "b", "b"])
+
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
+
+    text = _visible(_written_text(session))
+    assert "BACKUP COMPLETE" in text
+    assert "audit entry could not be recorded" in text
+    assert len(list((db.path.parent / f"{db.path.stem}_backups").iterdir())) == 1
 
 
 # -- managed DNS status (design doc §16, issue #201) -----------------------
