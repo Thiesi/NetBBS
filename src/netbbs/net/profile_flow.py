@@ -52,6 +52,7 @@ from netbbs.directory import (
 )
 from netbbs.files.categories import get_category_by_id as get_file_area_category_by_id
 from netbbs.messaging_preferences import accepts_direct_messages, set_accepts_direct_messages
+from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled, set_breadcrumb_collapsed_enabled
 from netbbs.net.color_depth_preference import color_depth_override, set_color_depth_override
 from netbbs.net.composition import edit_line_body
@@ -1109,45 +1110,90 @@ def _verification_status_description(db: Database, user: User) -> str:
 
 
 async def _verify_user(session: Session, db: Database, verifier: User, subject: User) -> None:
-    await session.write_line(
-        colored(f"\r\nVerifying {sanitize_text(subject.username)!r}:", fg_color=effective_header_color(session, db), bold=True)
-    )
+    """
+    One user's attestation status plus the two attest actions. Issue
+    #282: this used to print the status and then ask "Attest a
+    birthdate?" and "Attest a real name?" in turn, with no other way
+    off the screen -- a verifier who drilled in from the picker purely
+    to *check* whether someone was already verified (which is exactly
+    what the picker's "age verified / not verified" descriptions
+    invite) had to decline twice to leave. Now the status is followed
+    by an action bar, `[B]ack` is one silent keystroke, and each attest
+    action redraws the status so the result is visible where it was
+    read from. A blank value at either prompt cancels that action.
+    """
+    header_color = effective_header_color(session, db)
 
-    self_birthdate = get_birthdate(db, subject)
-    self_display_name = get_display_name(db, subject)
-    await session.write_line(
-        f"Self-reported birthdate: {self_birthdate.isoformat() if self_birthdate else '(not set)'}"
-    )
-    await session.write_line(
-        f"Self-reported display name: {sanitize_text(self_display_name) if self_display_name else '(not set)'}"
-    )
+    async def _draw() -> None:
+        await session.write_line(
+            colored(f"\r\nVerifying {sanitize_text(subject.username)!r}:", fg_color=header_color, bold=True)
+        )
+        self_birthdate = get_birthdate(db, subject)
+        self_display_name = get_display_name(db, subject)
+        await session.write_line(
+            f"Self-reported birthdate: {self_birthdate.isoformat() if self_birthdate else '(not set)'}"
+        )
+        await session.write_line(
+            f"Self-reported display name: {sanitize_text(self_display_name) if self_display_name else '(not set)'}"
+        )
+        existing_age = get_attestation(db, subject, "age")
+        await session.write_line(
+            "Attested birthdate: "
+            + (existing_age.attested_value if existing_age is not None else "(not attested)")
+        )
+        existing_name = get_attestation(db, subject, "name")
+        await session.write_line(
+            "Attested real name: "
+            + (sanitize_text(existing_name.attested_value) if existing_name is not None else "(not attested)")
+        )
+        await session.write_line(
+            "\r\n"
+            + action_bar(
+                [
+                    menu_key("A", "ttest age"),
+                    menu_key("N", "ame", prefix="Attest ", capitalize=True),
+                    menu_key("B", "ack"),
+                ],
+                width=session.terminal_width,
+            )
+        )
+        await session.write("Choice: ")
 
-    existing_age = get_attestation(db, subject, "age")
-    if existing_age is not None:
-        await session.write_line(f"Currently attested birthdate: {existing_age.attested_value}")
-    existing_name = get_attestation(db, subject, "name")
-    if existing_name is not None:
-        await session.write_line(f"Currently attested real name: {sanitize_text(existing_name.attested_value)}")
+    await _draw()
+    while True:
+        choice = (await session.read_key()).lower()
 
-    if await prompt_yes_no(session, "\r\nAttest a birthdate?", default=False):
-        await session.write("Attested birthdate (YYYY-MM-DD): ")
-        raw = (await session.read_line()).strip()
-        try:
-            birthdate = date.fromisoformat(raw)
-            attest_age(db, subject, birthdate, verifier=verifier)
-        except (ValueError, AttestationError) as exc:
-            await session.write_line(colored(f"Could not attest age: {exc}", fg_color=MUTED_COLOR))
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "a":
+            await session.write_line("")
+            await write_prompt(session, "Attested birthdate (YYYY-MM-DD, blank to cancel): ")
+            raw = (await session.read_line()).strip()
+            if not raw:
+                await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+            else:
+                try:
+                    birthdate = date.fromisoformat(raw)
+                    attest_age(db, subject, birthdate, verifier=verifier)
+                except (ValueError, AttestationError) as exc:
+                    await session.write_line(colored(f"Could not attest age: {exc}", fg_color=MUTED_COLOR))
+                else:
+                    await session.write_line("Age attested.")
+            await _draw()
+        elif choice == "n":
+            await session.write_line("")
+            await write_prompt(session, "Attested real name (blank to cancel): ")
+            raw = (await session.read_line()).strip()
+            if not raw:
+                await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+            else:
+                try:
+                    attest_name(db, subject, raw, verifier=verifier)
+                except AttestationError as exc:
+                    await session.write_line(colored(f"Could not attest name: {exc}", fg_color=MUTED_COLOR))
+                else:
+                    await session.write_line("Real name attested.")
+            await _draw()
         else:
-            await session.write_line("Age attested.")
-
-    if await prompt_yes_no(session, "Attest a real name?", default=False):
-        await session.write("Attested real name: ")
-        raw = (await session.read_line()).strip()
-        try:
-            attest_name(db, subject, raw, verifier=verifier)
-        except AttestationError as exc:
-            await session.write_line(colored(f"Could not attest name: {exc}", fg_color=MUTED_COLOR))
-        else:
-            await session.write_line("Real name attested.")
-    else:
-        await session.write_line("")
+            await session.write(reject_unhandled_key(choice))

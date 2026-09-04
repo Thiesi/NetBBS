@@ -492,7 +492,7 @@ def test_who_screen_remote_entry_sends_a_live_direct_message(tmp_path):
         )
         # (presence for that node is present, so the honest-delivery guard passes)
         lane = DatabaseLane(database.path)
-        session = FakeSession(["w", "0", "1", "hello erin", "l", "y"])
+        session = FakeSession(["w", "0", "1", "m", "hello erin", "l", "y"])
         node_controls.session_registry.enter(session)
         node_controls.session_registry.mark_authenticated(session, "alice")
         try:
@@ -507,6 +507,39 @@ def test_who_screen_remote_entry_sends_a_live_direct_message(tmp_path):
         assert direct.sent[0][1]["to_user_id"] == "erin"
         assert direct.sent[0][1]["body"] == "hello erin"
         assert "(sent to erin@" in text
+
+    asyncio.run(scenario())
+    database.close()
+
+
+def test_who_screen_remote_entry_back_sends_nothing(tmp_path):
+    """Issue #282: a remote entry used to drop straight into the message
+    prompt; it now offers [M]essage/[B]ack like a local one."""
+    database = db(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    fingerprint = "abcdefghijklmnopqrstuvwxyz234567"
+
+    async def scenario():
+        node_controls = _node_controls()
+        direct = _FakeDirectChat()
+        link_context = _FakeLinkContext(
+            _FakeBridge({fingerprint: {"erin": "erin"}}), direct_chat=direct, known_fingerprints=(fingerprint,),
+        )
+        lane = DatabaseLane(database.path)
+        session = FakeSession(["w", "0", "1", "b", "l", "y"])
+        node_controls.session_registry.enter(session)
+        node_controls.session_registry.mark_authenticated(session, "alice")
+        try:
+            await _run_main_menu(session, database, alice, node_controls, lane=lane, link_context=link_context)
+        finally:
+            node_controls.session_registry.leave(session)
+            lane.close()
+
+        text = _written_text(session)
+        assert "Message to erin@" not in text
+        visible = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        assert "[M]essage" in visible and "[B]ack" in visible
+        assert not direct.sent
 
     asyncio.run(scenario())
     database.close()

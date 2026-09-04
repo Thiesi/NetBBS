@@ -308,6 +308,42 @@ async def _caller_who_screen(
             )
             return
         node_label = _remote_who_node_label(db, selected)
+        # Issue #282: selecting a remote caller used to drop straight
+        # into the message prompt, so someone who picked the name only
+        # to see where they were connected had to Enter past a blank
+        # line to get out. Same [M]essage/[B]ack shape as a local entry
+        # (minus the chat invite, which stays local-only).
+        await session.write_line(
+            "\r\n" + screen_title(
+                f"{sanitize_text(selected.username)}@{sanitize_text(node_label)}",
+                breadcrumb=(session.node_display_name, "Who's online"),
+                subtitle="Connected to a different linked node -- a live one-off message is available.",
+                width=session.terminal_width,
+                clear=redraw_in_place_enabled(db, user),
+                unicode_style=unicode_style_enabled(db, user),
+                collapsed=breadcrumb_collapsed_enabled(db, user),
+                header_color=effective_header_color(session, db),
+                node_name_gradient=session.node_name_gradient,
+            )
+        )
+        await session.write_line(
+            menu_row(
+                [
+                    MenuEntry(label=menu_key("M", "essage"), brief="Send a one-off live message"),
+                    MenuEntry(label=menu_key("B", "ack"), brief="Return to Who's online"),
+                ],
+                width=session.terminal_width, height=session.terminal_height,
+                description_level=menu_description_level(db, user),
+            )
+        )
+        await session.write("Choice: ")
+        action = (await session.read_key()).lower()
+        await session.write_line("")
+        if action == "b":
+            return
+        if action != "m":
+            await session.write(reject_unhandled_key(action))
+            return
         await write_prompt(
             session, f"Message to {sanitize_text(selected.username)}@{sanitize_text(node_label)}: "
         )

@@ -15,6 +15,7 @@ this codebase's existing per-file convention.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -87,6 +88,9 @@ class FakeSession(Session):
         raise NotImplementedError
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def _written_text(session: FakeSession) -> str:
     return "".join(session.written)
 
@@ -153,16 +157,20 @@ def test_keep_draft_from_the_fullscreen_editor_saves_and_does_not_post(db, alice
 # -- board-entry recovery prompt --------------------------------------------
 
 
-def test_reentering_the_board_offers_edit_delete_or_ignore(db, alice):
+def test_reentering_the_board_shows_a_draft_entry_instead_of_interrupting(db, alice):
+    # Issue #282: the draft used to be a modal "[E]dit it, [D]elete it,
+    # or [I]gnore for now?" fired before anything else on every entry.
+    # Now it's a notice plus a [D]raft entry on the board's own menu.
     board = create_board(db, "general", creator=alice)
     exit_session = FakeSession(["p", "Subject", "saved body", "/exit", "b"])
     asyncio.run(board_flow._show_board(exit_session, db, board, alice))
 
-    reentry_session = FakeSession(["i", "b", ""])
+    reentry_session = FakeSession(["b", ""])
     asyncio.run(board_flow._show_board(reentry_session, db, board, alice))
     text = _written_text(reentry_session)
     assert "saved post draft for this message board" in text
-    assert "[E]dit it, [D]elete it, or [I]gnore" in text
+    assert "[E]dit it, [D]elete it, or [I]gnore" not in text
+    assert "[D]raft" in _ANSI_RE.sub("", text)
 
 
 def test_resuming_a_draft_via_edit_prefills_the_body_and_can_post(db, alice):
@@ -170,9 +178,9 @@ def test_resuming_a_draft_via_edit_prefills_the_body_and_can_post(db, alice):
     exit_session = FakeSession(["p", "Subject", "saved body", "/exit", "b"])
     asyncio.run(board_flow._show_board(exit_session, db, board, alice))
 
-    # "e" resumes -> subject prompt again -> /done finishes with the
+    # [D]raft -> [R]esume -> subject prompt again -> /done finishes with the
     # pre-filled body unchanged -> "p" confirms the post -> "b" exits.
-    resume_session = FakeSession(["e", "Resumed subject", "/done", "p", "b"])
+    resume_session = FakeSession(["d", "r", "Resumed subject", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(resume_session, db, board, alice))
     assert "Posted" in _written_text(resume_session)
     saved = list_posts_page(db, board, alice).posts[0]
@@ -216,7 +224,7 @@ def test_resuming_a_draft_does_not_append_the_signature_a_second_time(db, alice)
     exit_session = FakeSession(["p", "Subject", "saved body", "/exit", "b"])
     asyncio.run(board_flow._show_board(exit_session, db, board, alice))
 
-    resume_session = FakeSession(["e", "Resumed subject", "/done", "p", "b"])
+    resume_session = FakeSession(["d", "r", "Resumed subject", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(resume_session, db, board, alice))
 
     saved = list_posts_page(db, board, alice).posts[0]
@@ -228,7 +236,7 @@ def test_deleting_a_saved_draft_stops_it_being_offered_again(db, alice):
     exit_session = FakeSession(["p", "Subject", "saved body", "/exit", "b"])
     asyncio.run(board_flow._show_board(exit_session, db, board, alice))
 
-    delete_session = FakeSession(["d", "b", ""])
+    delete_session = FakeSession(["d", "d", "b", ""])  # [D]raft -> [D]iscard
     asyncio.run(board_flow._show_board(delete_session, db, board, alice))
     assert "Draft deleted" in _written_text(delete_session)
 
@@ -237,19 +245,17 @@ def test_deleting_a_saved_draft_stops_it_being_offered_again(db, alice):
     assert "saved post draft" not in _written_text(reentry_session)
 
 
-def test_ignoring_a_saved_draft_offers_it_again_next_time(db, alice):
+def test_leaving_a_saved_draft_alone_offers_it_again_next_time(db, alice):
     board = create_board(db, "general", creator=alice)
     exit_session = FakeSession(["p", "Subject", "saved body", "/exit", "b"])
     asyncio.run(board_flow._show_board(exit_session, db, board, alice))
 
-    ignore_session = FakeSession(["i", "b", ""])
-    asyncio.run(board_flow._show_board(ignore_session, db, board, alice))
-    assert "Draft deleted" not in _written_text(ignore_session)
+    # [D]raft -> [B]ack leaves it in place; plain [B]ack never touches it.
+    leave_session = FakeSession(["d", "b", "b", ""])
+    asyncio.run(board_flow._show_board(leave_session, db, board, alice))
+    assert "Draft deleted" not in _written_text(leave_session)
 
-    # The draft is still there, so re-entering offers it again -- "i"
-    # here answers *that* prompt a second time, not the board's own
-    # [P]ost/[B]ack choice.
-    reentry_session = FakeSession(["i", "b", ""])
+    reentry_session = FakeSession(["b", ""])
     asyncio.run(board_flow._show_board(reentry_session, db, board, alice))
     assert "saved post draft" in _written_text(reentry_session)
 
