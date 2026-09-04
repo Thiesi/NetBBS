@@ -299,6 +299,12 @@ async def run_link_sync(
     that gap is what this issue closes.
     """
     while stop_event is None or not stop_event.is_set():
+        refresh = getattr(own_hello_provider, "refresh", None)
+        if refresh is not None:
+            # Mutable friendly/DNS claims are read once per pass through the
+            # database lane; the synchronous provider remains DB-free at each
+            # individual handshake call below.
+            await refresh(lane)
         # Design doc §16 (issue #219): the reliable-nodes roster joins the
         # dial list only once the SysOp has accepted participation --
         # never merely because the list exists. Re-read from the lane

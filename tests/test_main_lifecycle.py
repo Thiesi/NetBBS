@@ -24,6 +24,7 @@ import pytest
 
 from netbbs.__main__ import (
     StartupError,
+    _build_own_hello_provider,
     _create_log_file_handler,
     _install_signal_handlers,
     run,
@@ -34,7 +35,9 @@ from netbbs.config import get_node_display_name, set_config, set_node_display_na
 from netbbs.link.onboarding import Participation, set_participation
 from netbbs.link.enforcement import ensure_node_subject
 from netbbs.link.node_identity import bootstrap_node_identity
+from netbbs.link.node_profiles import list_identity_observations
 from netbbs.link.protocol import LinkNode, RealtimeFrame
+from netbbs.link.store import save_peer
 from netbbs.link.transport import (
     dial_hello,
     establish_noise_xx_initiator,
@@ -45,6 +48,7 @@ from netbbs.link.trust import TrustDimension, TrustState, TrustSubject, set_trus
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import LinkConfig, NodeConfig, ShutdownConfig, TransportConfig
 from netbbs.net.session_registry import ActiveSessionRegistry
+from netbbs.managed_dns.state import set_node_fingerprint
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_telnet import skip_initial_negotiation
@@ -89,6 +93,55 @@ async def _run_until_ready_then_shut_down(config, ready_delay=0.1):
     await asyncio.sleep(ready_delay)
     shutdown_event.set()
     await task
+
+
+def test_own_hello_provider_primes_local_dns_before_any_peer_is_saved(tmp_path):
+    db = Database(tmp_path / "claims.db")
+    set_node_display_name(db, "Local Node")
+    local_identity = bootstrap_node_identity("local-claims")
+    set_node_fingerprint(db, local_identity.fingerprint)
+    local_node = LinkNode(identity=local_identity)
+    provider = _build_own_hello_provider(
+        local_node,
+        LinkConfig(
+            enabled=True, outgoing_only=False,
+            advertised_host="local.example.org",
+        ),
+        db,
+    )
+
+    remote_node = LinkNode(identity=bootstrap_node_identity("dns-impostor"))
+    peer = local_node.handle_hello(remote_node.build_hello(
+        addresses=None,
+        outgoing_only=True,
+        created_at="2026-09-04T00:00:00+00:00",
+        friendly_name="Different Friendly Name",
+        canonical_dns_name="local.example.org",
+    ))
+    save_peer(db, peer)
+
+    notice = list_identity_observations(db)[0]
+    assert notice.kind == "cryptographic_identity_changed"
+    assert notice.previous_fingerprint == local_identity.fingerprint
+    assert provider().descriptor.payload["canonical_dns_name"] == "local.example.org"
+    db.close()
+
+
+def test_own_hello_provider_refreshes_through_lane_and_builds_without_database_io(tmp_path):
+    db = Database(tmp_path / "provider-cache.db")
+    set_node_display_name(db, "Old Name")
+    node = LinkNode(identity=bootstrap_node_identity("provider-cache"))
+    provider = _build_own_hello_provider(node, LinkConfig(enabled=True), db)
+    lane = DatabaseLane(db.path)
+    try:
+        set_node_display_name(db, "New Name")
+        asyncio.run(provider.refresh(lane))
+    finally:
+        lane.close()
+        db.close()
+
+    # The synchronous handshake call must remain usable with no open DB.
+    assert provider().descriptor.payload["friendly_name"] == "New Name"
 
 
 async def _open_connection_when_ready(host: str, port: int, *, timeout: float = 5.0):

@@ -107,19 +107,23 @@ def set_cancelled_rename_state(
 
 def set_heartbeat_reconciliation_state(
     db: Database, *, name: str, status: RegistrationStatus, published: bool,
-    last_contact_at: str, previous_name: str | None,
+    last_contact_at: str | None, previous_name: str | None,
     previous_status: RegistrationStatus | None, previous_published: bool,
 ) -> None:
     """Commit one heartbeat's complete authoritative local view atomically."""
-    _set_config_values(db, (
+    values = (
         (NAME_CONFIG_KEY, name),
         (STATUS_CONFIG_KEY, status.value),
         (PUBLISHED_CONFIG_KEY, "1" if published else "0"),
-        (LAST_CONTACT_AT_CONFIG_KEY, last_contact_at),
         (PREVIOUS_NAME_CONFIG_KEY, previous_name or ""),
         (PREVIOUS_STATUS_CONFIG_KEY, previous_status.value if previous_status else ""),
         (PREVIOUS_PUBLISHED_CONFIG_KEY, "1" if previous_published else "0"),
-    ))
+    )
+    # None means preserve an absent/existing contact timestamp; inactive-only
+    # reconciliation has no successful contact to record.
+    if last_contact_at is not None:
+        values += ((LAST_CONTACT_AT_CONFIG_KEY, last_contact_at),)
+    _set_config_values(db, values)
 
 
 def get_opt_in(db: Database) -> OptIn:

@@ -123,6 +123,36 @@ def test_sync_completes_a_hello_and_pushes_events_to_a_real_seed(tmp_path):
         seed.close()
 
 
+def test_sync_refreshes_mutable_hello_claims_before_the_first_provider_call(tmp_path):
+    node = LinkNode(identity=bootstrap_node_identity("refreshing-sync"))
+    node_db = _NodeDb(tmp_path, "refreshing-sync")
+    stop_event = asyncio.Event()
+    events: list[str] = []
+
+    class RefreshableHello:
+        async def refresh(self, lane):
+            assert lane is node_db.lane
+            events.append("refresh")
+
+        def __call__(self):
+            events.append("provide")
+            stop_event.set()
+            return _hello_for(node)
+
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            await run_link_sync(
+                node, session, [], RefreshableHello(), node_db.lane,
+                interval_seconds=60.0, stop_event=stop_event,
+            )
+
+    try:
+        asyncio.run(scenario())
+        assert events == ["refresh", "provide"]
+    finally:
+        node_db.close()
+
+
 def test_sync_requests_and_persists_a_seeds_peer_list(tmp_path):
     """_sync_one_seed also asks the seed who else it knows, right
     after the hello -- the seed here already has carol as a

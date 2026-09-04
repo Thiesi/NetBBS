@@ -883,6 +883,7 @@ def test_scrollback_snapshot_reconstructs_author_label_from_attested_identity(tm
                 subscriber_channel.channel_id, request_id
             )
             assert message.author_label == f"alice@{origin.identity.fingerprint}"
+            assert message.author_fingerprint == origin.identity.fingerprint
         finally:
             await origin.teardown()
             await subscriber.teardown()
@@ -977,9 +978,9 @@ def test_scrollback_snapshot_is_delivered_once_from_the_origins_recent_scrollbac
     arrives as a sibling of the presence_snapshot `test_remote_channel_
     presence_is_populated_from_the_origins_initial_snapshot` above already
     proves, sourced from the origin's own `get_scrollback`, with origin-
-    local labels qualified by the authenticated origin and `author_
-    fingerprint` still `None` on the receiving side (never treated as a
-    locally verified account) -- and popped exactly once."""
+    local labels qualified by the authenticated origin and the authenticated
+    home-node fingerprint retained for identity-warning presentation -- and
+    popped exactly once."""
     async def scenario():
         origin = _Node(tmp_path, "origin-scrollback")
         subscriber = _Node(tmp_path, "subscriber-scrollback")
@@ -1032,7 +1033,10 @@ def test_scrollback_snapshot_is_delivered_once_from_the_origins_recent_scrollbac
                 ("message", f"alice@{origin.identity.fingerprint}", "second message"),
             ]
             assert all(entry.id == -1 for entry in entries)
-            assert all(entry.author_fingerprint is None for entry in entries)
+            assert all(
+                entry.author_fingerprint == origin.identity.fingerprint
+                for entry in entries
+            )
             assert [entry.link_content_id for entry in entries] == [
                 first_event.content_id, None, second_event.content_id,
             ]

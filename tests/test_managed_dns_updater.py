@@ -8,6 +8,7 @@ periodic task.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 
 import aiohttp
 import pytest
@@ -235,6 +236,82 @@ def test_updater_marks_an_authoritatively_inactive_primary_unpublished(tmp_path)
     assert get_registration_status(db) is RegistrationStatus.ABANDONED
     assert not get_published(db)
     assert load_credential(credential_path_for(db.path)) == credential
+    db.close()
+
+
+def test_updater_marks_an_inactive_previous_name_when_primary_transiently_fails(
+    tmp_path, monkeypatch,
+):
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_service_url(db, "https://dns.example")
+    set_registered_name(db, "new-name")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_published(db, False)
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+    save_credential(credential_path_for(db.path), "new-secret")
+    save_credential(previous_credential_path_for(db.path), "old-secret")
+
+    async def fake_send_heartbeat(_base_url, credential):
+        return (None, credential == "old-secret")
+
+    monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", fake_send_heartbeat)
+
+    async def scenario():
+        sleep_calls = _fake_sleep_recorder()
+        await _run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1]))
+
+    asyncio.run(scenario())
+
+    assert get_registration_status(db) is RegistrationStatus.PENDING
+    assert not get_published(db)
+    assert get_previous_status(db) is RegistrationStatus.ABANDONED
+    assert not get_previous_published(db)
+    assert get_last_contact_at(db) is None
+    db.close()
+
+
+def test_updater_rolls_back_both_inactive_credential_updates_together(tmp_path, monkeypatch):
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_service_url(db, "https://dns.example")
+    set_registered_name(db, "new-name")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_published(db, True)
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+    save_credential(credential_path_for(db.path), "new-secret")
+    save_credential(previous_credential_path_for(db.path), "old-secret")
+    db.connection.execute(
+        """
+        CREATE TRIGGER reject_previous_abandonment
+        BEFORE UPDATE ON node_config
+        WHEN OLD.key = 'managed_dns_previous_status' AND NEW.value = 'abandoned'
+        BEGIN
+            SELECT RAISE(ABORT, 'simulated reconciliation failure');
+        END
+        """
+    )
+    db.connection.commit()
+
+    async def both_inactive(_base_url, _credential):
+        return None, True
+
+    monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", both_inactive)
+
+    async def scenario():
+        with pytest.raises(sqlite3.IntegrityError, match="simulated reconciliation failure"):
+            await run_scheduled_managed_dns_updater(db)
+
+    asyncio.run(scenario())
+
+    assert get_registration_status(db) is RegistrationStatus.PENDING
+    assert get_published(db)
+    assert get_previous_status(db) is RegistrationStatus.MATURED
+    assert get_previous_published(db)
     db.close()
 
 

@@ -3830,3 +3830,17 @@ identical remote node presentation labels, put the full fingerprint first so
 terminal truncation cannot hide the distinction. Durable channel rendering
 recovers the signed author fingerprint from the retained Link event for both the
 friendly label and any undismissed cryptographic-identity warning.
+
+Ephemeral live-scrollback snapshots must likewise keep each authenticated
+author's home-node fingerprint in memory; the durable event may not have arrived
+yet, but identity-collision warnings still apply. Prime this node's current DNS
+claim before opening the Link listener, then refresh the shared own-hello cache
+through the background database lane before inbound peer persistence and once
+per outbound sync pass. The synchronous hello builder must never touch SQLite.
+
+Treat each managed-DNS credential's structured HTTP 401 independently: a
+previous-name 401 remains authoritative when the replacement heartbeat fails
+transiently, and simultaneous inactive results update both cached registrations
+in one transaction. Before cancellation performs any provider deletion, verify
+that the row named by `replaces_name` still has the replacement's node
+fingerprint even when that previous row is active rather than abandoned.

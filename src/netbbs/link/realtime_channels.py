@@ -188,7 +188,8 @@ def _accept_scrollback_snapshot(
             author_label = entry["author_label"]
         messages.append(LocalChannelMessage(
             id=-1, channel_id=channel.id, kind=entry["kind"],
-            author_label=author_label, author_fingerprint=None,
+            author_label=author_label,
+            author_fingerprint=(entry["author_node_fingerprint"] if authored else None),
             body=entry["body"], created_at=entry["created_at"],
             link_content_id=entry["content_id"], body_truncated=entry["body_truncated"],
         ))

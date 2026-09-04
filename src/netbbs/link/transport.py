@@ -1666,6 +1666,13 @@ class LinkServer:
             return self._policy_rejection(decision)
         if self._enforce_trust_policy:
             await self._lane.run(ensure_node_subject, peer.fingerprint)
+        refresh = getattr(self._own_hello_provider, "refresh", None)
+        if refresh is not None:
+            # Refresh the local claims through the background lane before
+            # persisting this peer, so a newly-configured local DNS name wins
+            # collision chronology and no synchronous SQLite work blocks the
+            # event loop while constructing the response.
+            await refresh(self._lane)
         await self._lane.run(save_peer, peer)
         return web.json_response(self._own_hello_provider().to_dict())
 

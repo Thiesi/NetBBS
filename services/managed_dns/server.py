@@ -633,6 +633,10 @@ class ManagedDnsServer:
             previous = get_registration_by_name(self._db, previous_name)
             if previous is None:
                 return web.json_response({"error": "previous registration no longer exists"}, status=409)
+            if previous.node_fingerprint != replacement.node_fingerprint:
+                return web.json_response(
+                    {"error": "previous registration no longer belongs to this node"}, status=409
+                )
             revive_previous = previous.status == "abandoned"
             if revive_previous:
                 if (

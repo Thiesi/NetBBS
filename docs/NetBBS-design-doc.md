@@ -546,6 +546,14 @@ raising the same warning. The last friendly/DNS pair actually advertised in an
 outbound hello remains part of that collision namespace until it has been moved
 into history; an inbound hello racing the local rename therefore cannot claim
 the just-replaced name in the gap before the next outbound descriptor is built.
+Startup primes the current local friendly/DNS pair before opening the Link
+listener. Thereafter the shared own-hello cache is refreshed through the
+background database lane before an inbound peer is persisted and once per
+outbound sync pass; building the signed response itself performs no synchronous
+database I/O on the event loop. Authenticated live scrollback snapshots retain
+their authors' home-node fingerprints in memory as well as their friendly
+labels, so the same non-blocking identity warnings remain available even before
+the corresponding durable event has arrived.
 
 ### 4.5 Identity tiers
 
@@ -5723,7 +5731,10 @@ Node-side rename state is one local database transaction: the replacement name,
 pending/unpublished state, and previous-name presentation state never become
 visible in a partial combination. Heartbeat reconciliation follows the same
 rule for the active and previous names, statuses, publication flags, and contact
-time. Cancellation and updater-led recovery first commit the remotely revived
+time. A credential-specific HTTP 401 is authoritative independently of the
+other credential's transient result, and all inactive outcomes from one pass
+are applied in that single transaction. Cancellation and updater-led recovery
+first commit the remotely revived
 previous name as a coherent local state, then use the credential transition
 journal in reverse to restore the previous bearer secret and remove the
 replacement-era extra secret. The service's cancellation response supplies the
@@ -5736,7 +5747,9 @@ for credential-recovery retry only while its own release/abandonment cooldown
 is still open, and reactivation restarts its contact window at the retry time.
 Rename completion releases or deletes the previous row only when it still belongs
 to the same node fingerprint; a cooldown-expired name reissued to another node is
-never mutated through the stale replacement link. If its heartbeat becomes
+never mutated through the stale replacement link. Cancellation performs the
+same ownership check before any provider deletion, including when the reissued
+previous row is already active. If its heartbeat becomes
 authoritatively inactive while the old
 name's heartbeat fails transiently, the node continues heartbeating the retained
 old credential on later passes rather than letting the still-live name expire.

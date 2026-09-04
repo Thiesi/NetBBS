@@ -29,18 +29,16 @@ from netbbs.managed_dns.credential import (
 from netbbs.managed_dns.state import (
     OptIn,
     RegistrationStatus,
+    get_last_contact_at,
     get_opt_in,
     get_previous_name,
     get_previous_published,
     get_previous_status,
+    get_published,
     get_registered_name,
     get_registration_status,
     get_service_url,
     set_heartbeat_reconciliation_state,
-    set_previous_published,
-    set_previous_status,
-    set_published,
-    set_registration_status,
 )
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -128,16 +126,19 @@ async def run_scheduled_managed_dns_updater(
                         # its only working secret already deleted.
                         stage_credential_cancellation(db.path, previous_credential)
                         recover_credential_transition(db.path)
-                    elif primary_inactive:
-                        # A 401 is authoritative service state, unlike a
-                        # transient transport/provider failure. Preserve the
-                        # bearer secrets for reclaim/cancellation, but stop
-                        # advertising registrations the service withdrew.
-                        set_registration_status(db, RegistrationStatus.ABANDONED)
-                        set_published(db, False)
-                        if previous_inactive and previous_credential is not None:
-                            set_previous_status(db, RegistrationStatus.ABANDONED)
-                            set_previous_published(db, False)
+                    elif primary_inactive or previous_inactive:
+                        # Each 401 is authoritative independently of the other
+                        # request's outcome. Reconcile both cached identities in
+                        # one transaction, even if the other heartbeat merely
+                        # failed transiently.
+                        _apply_inactive_heartbeat_results(
+                            db,
+                            name=name,
+                            primary_inactive=primary_inactive,
+                            previous_inactive=(
+                                previous_inactive and previous_credential is not None
+                            ),
+                        )
         await sleep(interval_seconds)
 
 
@@ -158,6 +159,35 @@ async def _send_heartbeat(
         _logger.warning("Managed-DNS heartbeat failed: %s", exc)
         return None, exc.status_code == 401
     return result, False
+
+
+def _apply_inactive_heartbeat_results(
+    db: Database, *, name: str, primary_inactive: bool, previous_inactive: bool,
+) -> None:
+    """Atomically apply independently authoritative inactive responses."""
+    previous_name = get_previous_name(db)
+    previous_was_inactive = previous_inactive and previous_name is not None
+    set_heartbeat_reconciliation_state(
+        db,
+        name=name,
+        status=(
+            RegistrationStatus.ABANDONED
+            if primary_inactive else get_registration_status(db)
+        ),
+        published=False if primary_inactive else get_published(db),
+        # No heartbeat succeeded, so preserve the last successful-contact
+        # timestamp while atomically withdrawing whichever registrations the
+        # service authoritatively rejected.
+        last_contact_at=get_last_contact_at(db),
+        previous_name=previous_name,
+        previous_status=(
+            RegistrationStatus.ABANDONED
+            if previous_was_inactive else get_previous_status(db)
+        ),
+        previous_published=(
+            False if previous_was_inactive else get_previous_published(db)
+        ),
+    )
 
 
 def _apply_heartbeat_result(

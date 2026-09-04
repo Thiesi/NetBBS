@@ -1176,6 +1176,49 @@ def test_dial_hello_completes_a_real_http_handshake(tmp_path):
         bob.close()
 
 
+def test_hello_server_refreshes_local_claims_before_persisting_the_peer(tmp_path, monkeypatch):
+    alice_node = LinkNode(identity=bootstrap_node_identity("ordered-alice"))
+    bob_node = LinkNode(identity=bootstrap_node_identity("ordered-bob"))
+    alice = _NodeDb(tmp_path, "ordered-alice")
+    bob = _NodeDb(tmp_path, "ordered-bob")
+    events: list[str] = []
+
+    class RefreshableHello:
+        async def refresh(self, lane):
+            assert lane is bob.lane
+            events.append("refresh")
+
+        def __call__(self):
+            events.append("provide")
+            return _hello_for(bob_node)
+
+    real_save_peer = link_transport.save_peer
+
+    def recording_save_peer(db, peer):
+        events.append("save")
+        return real_save_peer(db, peer)
+
+    monkeypatch.setattr(link_transport, "save_peer", recording_save_peer)
+
+    async def scenario():
+        server = await _run_server(bob_node, RefreshableHello(), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{server.port}",
+                    _hello_for(alice_node), alice.lane,
+                )
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert events[:3] == ["refresh", "save", "provide"]
+    finally:
+        alice.close()
+        bob.close()
+
+
 def test_trust_subscription_pull_uses_real_transport_and_persists_restart_safe_state(tmp_path):
     alice_identity = bootstrap_node_identity("trust-subscriber")
     reporter_identity = bootstrap_node_identity("trust-reporter")
