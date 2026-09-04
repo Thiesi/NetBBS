@@ -64,3 +64,24 @@ def test_fetched_link_file_uploader_is_presented_by_the_origin_nodes_current_ide
     entry = SimpleNamespace(uploader_user_id=None, uploader_label=f"remote@{origin.fingerprint}")
 
     assert _uploader_display_name(db, entry, name_requirement=None) == "remote@File Vault · vault.netbbs.org"
+
+
+def test_durable_link_content_surfaces_an_undismissed_node_identity_collision(db):
+    familiar = _admitted_peer("familiar", "Familiar Node", "familiar.netbbs.org")
+    changed = _admitted_peer("changed", "Familiar Node", "familiar.netbbs.org")
+    save_peer(db, familiar)
+    save_peer(db, changed)
+
+    post = SimpleNamespace(
+        author_user_id=None, author_label=f"alice@{changed.fingerprint}"
+    )
+    entry = SimpleNamespace(
+        uploader_user_id=None, uploader_label=f"remote@{changed.fingerprint}"
+    )
+
+    for rendered in (
+        _author_display_name(db, post, name_requirement=None),
+        _uploader_display_name(db, entry, name_requirement=None),
+    ):
+        assert "Caution: familiar node name has a different cryptographic identity" in rendered
+        assert changed.fingerprint in rendered

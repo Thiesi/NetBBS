@@ -510,7 +510,10 @@ The underlying address and every protocol/persistence relationship remain
 `user@node-fingerprint`. Durable linked content -- channel scrollback, mail,
 carried board posts, fetched Link files -- therefore persists the fingerprint
 and resolves the home node's *current* friendly identity when rendered, so a
-benign rename is followed and nothing stored has to be rewritten. A node with
+benign rename is followed and nothing stored has to be rewritten. When that
+technical author identity has an undismissed cryptographic-identity warning,
+durable board and file attribution shows the warning and full fingerprint
+alongside the friendly label; browsing remains available. A node with
 no authenticated profile (one that has never been admitted, or is known only by
 an administratively configured fingerprint) is shown by that fingerprint rather
 than a shared placeholder. A full fingerprint is available as **Technical
@@ -556,11 +559,18 @@ the just-replaced name in the gap before the next outbound descriptor is built.
 Startup primes the current local friendly/DNS pair before opening the Link
 listener. Thereafter the shared own-hello cache is refreshed through the
 background database lane before an inbound peer is persisted and once per
-outbound sync pass; building the signed response itself performs no synchronous
+outbound sync pass. Every endpoint which accepts a signed hello, including
+relay-mailbox pickup, performs that refresh before peer persistence; building
+the signed response itself performs no synchronous
 database I/O on the event loop. Authenticated live scrollback snapshots retain
 their authors' home-node fingerprints in memory as well as their friendly
 labels, so the same non-blocking identity warnings remain available even before
 the corresponding durable event has arrived.
+
+High-impact consent screens retain the same non-blocking model but disclose
+security context before confirmation. In particular, accepting a board-origin
+transfer from a node with an undismissed cryptographic-identity warning shows
+the offering node's full technical identity before the default-no prompt.
 
 ### 4.5 Identity tiers
 

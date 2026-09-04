@@ -243,7 +243,14 @@ def present_link_author_label(db: Database, label: str) -> str:
     user_id, separator, node = label.rpartition("@")
     if not separator or not is_node_fingerprint(node):
         return label
-    return f"{user_id}@{identity_for_fingerprint(db, node).label}"
+    rendered = f"{user_id}@{identity_for_fingerprint(db, node).label}"
+    observation = latest_identity_observation(db, node)
+    if observation is not None and observation.severity == "security":
+        return (
+            f"{rendered} [Caution: familiar node name has a different "
+            f"cryptographic identity; technical identity: {node}]"
+        )
+    return rendered
 
 
 def resolve_stored_peer_reference(db: Database, reference: str) -> str | list[str]:

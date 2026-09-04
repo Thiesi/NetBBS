@@ -10352,6 +10352,17 @@ async def _accept_board_origin_transfer_screen(
     old_label = sanitize_text(
         identity_for_peer(old_peer).label if old_peer is not None else "an unknown linked node"
     )
+    if isinstance(old_origin, str):
+        identity_notice = await lane.run(latest_identity_observation, old_origin)
+        if identity_notice is not None and identity_notice.severity == "security":
+            await session.write_line(
+                colored(
+                    "Caution: this familiar node name now has a different cryptographic identity. "
+                    f"The offering node's technical identity is {sanitize_text(old_origin)}.",
+                    fg_color=MUTED_COLOR,
+                    bold=True,
+                )
+            )
     if not await prompt_yes_no(session, f"Accept origin of {board.name!r} from {old_label}?", default=False):
         await session.write_line("Cancelled.")
         return

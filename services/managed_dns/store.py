@@ -236,6 +236,16 @@ def get_replacement_for_name(db: Database, name: str) -> Registration | None:
     return _row_to_registration(row) if row is not None else None
 
 
+def detach_replacement_from_name(db: Database, replacement_name: str, previous_name: str) -> None:
+    """Detach a stale replacement relationship without changing ownership."""
+    db.connection.execute(
+        "UPDATE registrations SET replaces_name = NULL "
+        "WHERE name = ? AND replaces_name = ? AND status IN ('pending', 'abandoned')",
+        (replacement_name, previous_name),
+    )
+    db.connection.commit()
+
+
 def get_registration_by_credential_hash(db: Database, credential_hash: str) -> Registration | None:
     row = db.connection.execute(
         "SELECT * FROM registrations WHERE credential_hash = ?", (credential_hash,)

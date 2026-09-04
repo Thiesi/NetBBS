@@ -2951,6 +2951,58 @@ def test_accept_board_origin_transfer_flow(db, lane, sysop):
     assert board_origin_fingerprint(db, board) == link_context.node_identity.fingerprint
 
 
+def test_accept_board_origin_transfer_warns_about_a_changed_cryptographic_identity(
+    db, lane, sysop,
+):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board, offer_board_origin_transfer
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+    from netbbs.net.admin_flow import _accept_board_origin_transfer_screen
+
+    familiar_node = LinkNode(identity=bootstrap_node_identity("familiar-origin"))
+    changed_node = LinkNode(identity=bootstrap_node_identity("changed-origin"))
+
+    def admitted(node):
+        return node.handle_hello(
+            node.build_hello(
+                addresses=None,
+                outgoing_only=True,
+                created_at="2026-09-04T09:00:00+00:00",
+                friendly_name="Familiar Origin",
+                canonical_dns_name="familiar-origin.example.org",
+            )
+        )
+
+    save_peer(db, admitted(familiar_node))
+    changed_peer = admitted(changed_node)
+    save_peer(db, changed_peer)
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=changed_node.identity)
+    offer = offer_board_origin_transfer(
+        db,
+        board,
+        node_identity=changed_node.identity,
+        new_origin_fingerprint=link_context.node_identity.fingerprint,
+    )
+    link_context.link_node.peers[changed_peer.fingerprint] = changed_peer
+    link_context.link_node.pending_origin_transfers[board.board_id] = offer
+
+    session = FakeSession(["n"])
+    asyncio.run(
+        _accept_board_origin_transfer_screen(session, lane, board, link_context)
+    )
+
+    text = _written_text(session)
+    assert "different cryptographic identity" in text
+    assert changed_peer.fingerprint in text
+    assert "Cancelled." in text
+    assert board.board_id in link_context.link_node.pending_origin_transfers
+
+
 def test_approving_a_pending_post_on_a_linked_board_queues_a_board_post(db, lane, sysop):
     from netbbs.boards.boards import create_board
     from netbbs.boards.posts import create_post

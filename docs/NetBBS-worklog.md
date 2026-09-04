@@ -3883,3 +3883,17 @@ a fresh rename subject to normal limits. Cancellation is authenticated contact
 for the retained previous registration: refresh `last_contact_at` even when that
 row is still pending or matured, while preserving a pending row's original
 `contact_started_at` so cancellation does not reset maturation progress.
+
+Every hello-bearing ingress must refresh the lane-backed local identity claims
+before `save_peer`; the ordinary hello endpoint and relay-mailbox pickup share
+that ordering invariant. Durable Link post/file attribution must retain its
+technical suffix long enough to query undismissed identity observations and
+render a caution plus the full fingerprint when the current friendly label is
+cryptographically ambiguous. Board-origin acceptance is likewise a high-impact
+consent boundary and discloses the warned origin fingerprint before confirmation.
+
+When cooldown reissue leaves another fingerprint's pending replacement pointing
+at the newly owned previous name, ignoring the stale row in memory is
+insufficient: detach its `replaces_name` in SQLite before inserting the new
+owner's replacement, or the partial unique index still denies an unrelated
+rename. Detachment changes neither the stale row's owner nor its credential.

@@ -526,6 +526,46 @@ def test_reissued_previous_name_cannot_rotate_the_former_replacement_credential(
     ) == stale_replacement
 
 
+def test_reissued_previous_name_detaches_the_former_replacement_before_a_new_rename(db):
+    clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, cooldown_seconds=30)
+        try:
+            original = await _register(
+                server, name="old-name", node_fingerprint="fp-original"
+            )
+            _, former_replacement = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            mark_abandoned(db, "old-name", released_at=clock.now.isoformat())
+            clock.now += timedelta(seconds=31)
+            reissued = await _register(
+                server, name="old-name", node_fingerprint="fp-new-owner"
+            )
+            renamed = await _rename(
+                server, credential=reissued["credential"], name="another-name"
+            )
+            return former_replacement, reissued, renamed
+        finally:
+            await server.stop()
+
+    former_replacement, reissued, (status, body) = asyncio.run(scenario())
+    detached = get_registration_by_name(db, "new-name")
+    replacement = get_registration_by_name(db, "another-name")
+
+    assert reissued["status"] == "pending"
+    assert status == 201
+    assert body["previous_name"] == "old-name"
+    assert detached.node_fingerprint == "fp-original"
+    assert detached.replaces_name is None
+    assert get_registration_by_credential_hash(
+        db, hash_credential(former_replacement["credential"])
+    ) == detached
+    assert replacement.node_fingerprint == "fp-new-owner"
+    assert replacement.replaces_name == "old-name"
+
+
 def test_cancel_rename_does_not_remove_a_replacement_for_a_reissued_previous_name(db):
     clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
     provider = LoggingDnsProvider()

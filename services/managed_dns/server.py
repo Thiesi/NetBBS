@@ -59,6 +59,7 @@ from services.managed_dns.store import (
     complete_rename,
     delete_expired_registrations,
     delete_registration,
+    detach_replacement_from_name,
     cancel_pending_replacement,
     get_registration_by_credential_hash,
     get_registration_by_name,
@@ -545,8 +546,12 @@ class ManagedDnsServer:
                 # The old name may have passed cooldown and been reissued while
                 # its former replacement remained pending or abandoned. That
                 # stale relationship gives the new owner no authority over the
-                # other node's credential; handle the requested target through
-                # the ordinary availability/admission path below.
+                # other node's credential. Detach it in storage too: otherwise
+                # the partial unique index would still block the new owner's
+                # unrelated replacement even after Python forgets this row.
+                detach_replacement_from_name(
+                    self._db, existing_replacement.name, current.name
+                )
                 existing_replacement = None
             if (
                 existing_replacement is not None

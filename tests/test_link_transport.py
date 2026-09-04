@@ -1219,6 +1219,57 @@ def test_hello_server_refreshes_local_claims_before_persisting_the_peer(tmp_path
         bob.close()
 
 
+def test_relay_mailbox_pickup_refreshes_local_claims_before_persisting_the_peer(tmp_path):
+    from netbbs.config import set_node_display_name
+    from netbbs.link.node_profiles import latest_identity_observation, remember_own_identity_claims
+    from netbbs.managed_dns.state import set_node_fingerprint
+
+    caller_node = LinkNode(identity=bootstrap_node_identity("pickup-caller"))
+    relay_node = LinkNode(identity=bootstrap_node_identity("pickup-relay"))
+    caller = _NodeDb(tmp_path, "pickup-caller")
+    relay = _NodeDb(tmp_path, "pickup-relay")
+    set_node_display_name(relay.db, "Relay")
+    set_node_fingerprint(relay.db, relay_node.identity.fingerprint)
+
+    class RefreshableHello:
+        async def refresh(self, lane):
+            await lane.run(
+                remember_own_identity_claims,
+                canonical_dns_name="fresh-relay.example.org",
+            )
+
+        def __call__(self):
+            return _hello_for(relay_node)
+
+    caller_hello = caller_node.build_hello(
+        addresses=None,
+        outgoing_only=True,
+        created_at="2026-09-04T09:00:00+00:00",
+        friendly_name="Caller",
+        canonical_dns_name="fresh-relay.example.org",
+    )
+
+    async def scenario():
+        server = await _run_server(relay_node, RefreshableHello(), relay.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                assert await pickup_from_relay_mailbox(
+                    session, f"http://127.0.0.1:{server.port}", caller_hello
+                ) == []
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        notice = latest_identity_observation(relay.db, caller_node.identity.fingerprint)
+        assert notice is not None
+        assert notice.kind == "cryptographic_identity_changed"
+        assert notice.previous_fingerprint == relay_node.identity.fingerprint
+    finally:
+        caller.close()
+        relay.close()
+
+
 def test_trust_subscription_pull_uses_real_transport_and_persists_restart_safe_state(tmp_path):
     alice_identity = bootstrap_node_identity("trust-subscriber")
     reporter_identity = bootstrap_node_identity("trust-reporter")

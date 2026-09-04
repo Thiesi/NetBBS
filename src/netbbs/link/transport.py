@@ -1648,6 +1648,15 @@ class LinkServer:
             return None
         return await self._lane.run(decide_node_action, fingerprint, action)
 
+    async def _refresh_own_claims_before_peer_persistence(self) -> None:
+        """Refresh lane-backed local claims before any hello saves its peer."""
+        refresh = getattr(self._own_hello_provider, "refresh", None)
+        if refresh is not None:
+            # A newly-configured local DNS name must win collision chronology,
+            # while the synchronous provider remains an in-memory read on the
+            # event loop. Both hello-bearing endpoints use this helper.
+            await refresh(self._lane)
+
     async def _handle_hello(self, request: web.Request) -> web.Response:
         try:
             body = await request.json(loads=strict_json_loads)
@@ -1666,13 +1675,7 @@ class LinkServer:
             return self._policy_rejection(decision)
         if self._enforce_trust_policy:
             await self._lane.run(ensure_node_subject, peer.fingerprint)
-        refresh = getattr(self._own_hello_provider, "refresh", None)
-        if refresh is not None:
-            # Refresh the local claims through the background lane before
-            # persisting this peer, so a newly-configured local DNS name wins
-            # collision chronology and no synchronous SQLite work blocks the
-            # event loop while constructing the response.
-            await refresh(self._lane)
+        await self._refresh_own_claims_before_peer_persistence()
         await self._lane.run(save_peer, peer)
         return web.json_response(self._own_hello_provider().to_dict())
 
@@ -2101,6 +2104,7 @@ class LinkServer:
         decision = await self._decide(peer.fingerprint, LinkPolicyAction.RELAY)
         if decision is not None and not decision.allowed:
             return self._policy_rejection(decision)
+        await self._refresh_own_claims_before_peer_persistence()
         await self._lane.run(save_peer, peer)
 
         envelopes = await self._lane.run(pickup_relay_mailbox_envelopes, peer.fingerprint)
