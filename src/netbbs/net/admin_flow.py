@@ -49,6 +49,7 @@ established independently).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -2169,6 +2170,15 @@ async def _pick_trust_dimension(session: Session) -> TrustDimension | None:
     }.get(choice)
 
 
+def _stable_id_for(key: str) -> int:
+    """A permanent `pick_item` `#N` for a record that has no persisted
+    numeric id of its own -- derived from its identity (a fingerprint or
+    a composite key) through SHA-256, so it neither changes with the
+    list's display order nor with the interpreter's per-process hash
+    salt (Codex review on #290)."""
+    return int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:4], "big") & 0x7FFFFFFF
+
+
 def _float_field(
     key: str, *, label: str, minimum: float | None = None, maximum: float | None = None
 ) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
@@ -2221,10 +2231,9 @@ def _node_reference_field(
         selected = await pick_item(
             session, choices,
             name_of=lambda item: item[1],
-            # Position in the last-contact ordering, like the gallery
-            # screens' own `enumerate` ids -- deterministic, unlike a
-            # per-process-salted hash() (Codex review on #290).
-            stable_id_of=lambda item: item[0],
+            # Identity-derived: a peer's `#N` must survive the list being
+            # reordered by later contact (Codex review on #290).
+            stable_id_of=lambda item: 0 if item[2] is None else _stable_id_for(item[2]),
             description_of=lambda item: item[2],
             title="Which node?",
             empty_message="No linked nodes are stored yet.",
@@ -2631,9 +2640,9 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             return
         if choice == "r":
             selected = await pick_item(
-                session, list(enumerate(anchors, start=1)),
-                name_of=lambda pair: labels[pair[1].fingerprint], stable_id_of=lambda pair: pair[0],
-                description_of=lambda pair: pair[1].reason,
+                session, anchors,
+                name_of=lambda a: labels[a.fingerprint], stable_id_of=lambda a: _stable_id_for(a.fingerprint),
+                description_of=lambda a: a.reason,
                 title="Remove which trust anchor?", empty_message="No trust anchors are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -2641,7 +2650,6 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             )
             if selected is None:
                 continue
-            selected = selected[1]
             if not await prompt_yes_no(
                 session, f"Remove {sanitize_text(labels[selected.fingerprint])} as a trust anchor?", default=False
             ):
@@ -2655,13 +2663,24 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             continue
 
         draft: dict = {"node": None, "node_label": None, "reason": ""}
+        existing_anchors = {a.fingerprint: a for a in anchors}
+        node_field = _node_reference_field(
+            "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+        )
+
+        async def _node_then_seed(session: Session, lane: DatabaseLane, draft: dict) -> None:
+            # Updating an existing anchor starts from its stored reason
+            # rather than a blank (Codex review on #290).
+            await node_field(session, lane, draft)
+            existing = existing_anchors.get(draft["node"])
+            if existing is not None and not draft["reason"]:
+                draft["reason"] = existing.reason
+
         fields = [
             FieldSpec(
                 key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Node",
                 render=_node_render("node"),
-                prompt=_node_reference_field(
-                    "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-                ),
+                prompt=_node_then_seed,
                 brief="Which linked node to anchor",
                 help="A stored peer, or a name/DNS name/technical identity typed in.",
             ),
@@ -2726,9 +2745,9 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             return
         if choice == "r":
             selected = await pick_item(
-                session, list(enumerate(reporters, start=1)),
-                name_of=lambda pair: labels[pair[1].fingerprint], stable_id_of=lambda pair: pair[0],
-                description_of=lambda pair: f"domain {pair[1].domain_id}",
+                session, reporters,
+                name_of=lambda r: labels[r.fingerprint], stable_id_of=lambda r: _stable_id_for(r.fingerprint),
+                description_of=lambda r: f"domain {r.domain_id}",
                 title="Remove which trusted reporter?", empty_message="No trusted reporters are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -2736,7 +2755,6 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             )
             if selected is None:
                 continue
-            selected = selected[1]
             if not await prompt_yes_no(
                 session, f"Remove {sanitize_text(labels[selected.fingerprint])} as a trusted reporter?", default=False
             ):
@@ -2753,13 +2771,28 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             "node": None, "node_label": None, "domain_id": "", "scopes": "",
             "can_vouch_nodes": False, "can_vouch_users": False,
         }
+        existing_reporters = {r.fingerprint: r for r in reporters}
+        node_field = _node_reference_field(
+            "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+        )
+
+        async def _node_then_seed(session: Session, lane: DatabaseLane, draft: dict) -> None:
+            # Updating an existing reporter starts from its stored
+            # configuration, so an untouched field keeps its value
+            # instead of being silently reset (Codex review on #290).
+            await node_field(session, lane, draft)
+            existing = existing_reporters.get(draft["node"])
+            if existing is not None:
+                draft["domain_id"] = draft["domain_id"] or existing.domain_id
+                draft["scopes"] = draft["scopes"] or ", ".join(f"{d.value}:{c}" for d, c in existing.scopes)
+                draft["can_vouch_nodes"] = existing.can_vouch_nodes
+                draft["can_vouch_users"] = existing.can_vouch_users
+
         fields = [
             FieldSpec(
                 key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Node",
                 render=_node_render("node"),
-                prompt=_node_reference_field(
-                    "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-                ),
+                prompt=_node_then_seed,
                 brief="Which linked node reports",
                 help="A stored peer, or a name/DNS name/technical identity typed in.",
             ),
@@ -2849,9 +2882,9 @@ async def _attestation_authorities_screen(
             return
         if choice == "r":
             selected = await pick_item(
-                session, list(enumerate(authorities, start=1)),
-                name_of=lambda pair: labels[pair[1].fingerprint], stable_id_of=lambda pair: pair[0],
-                description_of=lambda pair: ",".join(pair[1].attributes),
+                session, authorities,
+                name_of=lambda a: labels[a.fingerprint], stable_id_of=lambda a: _stable_id_for(a.fingerprint),
+                description_of=lambda a: ",".join(a.attributes),
                 title="Remove which attestation authority?", empty_message="No attestation authorities are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -2859,7 +2892,6 @@ async def _attestation_authorities_screen(
             )
             if selected is None:
                 continue
-            selected = selected[1]
             if not await prompt_yes_no(
                 session,
                 f"Remove {sanitize_text(labels[selected.fingerprint])} as an attestation authority?",
@@ -2879,13 +2911,26 @@ async def _attestation_authorities_screen(
             continue
 
         draft: dict = {"node": None, "node_label": None, "attributes": "age,name", "reason": ""}
+        existing_authorities = {a.fingerprint: a for a in authorities}
+        node_field = _node_reference_field(
+            "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+        )
+
+        async def _node_then_seed(session: Session, lane: DatabaseLane, draft: dict) -> None:
+            # Updating an existing authority starts from its stored scope
+            # and reason -- an untouched Attributes field must not widen
+            # an age-only authority to age,name (Codex review on #290).
+            await node_field(session, lane, draft)
+            existing = existing_authorities.get(draft["node"])
+            if existing is not None:
+                draft["attributes"] = ",".join(existing.attributes)
+                draft["reason"] = draft["reason"] or existing.reason
+
         fields = [
             FieldSpec(
                 key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Node",
                 render=_node_render("node"),
-                prompt=_node_reference_field(
-                    "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-                ),
+                prompt=_node_then_seed,
                 brief="Which linked node may attest",
                 help="A stored peer, or a name/DNS name/technical identity typed in.",
             ),
@@ -3076,10 +3121,12 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
             return
         if choice == "r":
             selected = await pick_item(
-                session, list(enumerate(exceptions, start=1)),
-                name_of=lambda pair: f"{labels[pair[1].reporter_fingerprint]} {pair[1].dimension.value}:{pair[1].category}",
-                stable_id_of=lambda pair: pair[0],
-                description_of=lambda pair: pair[1].reason,
+                session, exceptions,
+                name_of=lambda item: f"{labels[item.reporter_fingerprint]} {item.dimension.value}:{item.category}",
+                stable_id_of=lambda item: _stable_id_for(
+                    f"{item.reporter_fingerprint}|{item.dimension.value}|{item.category}"
+                ),
+                description_of=lambda item: item.reason,
                 title="Remove which safety deviation?", empty_message="No safety deviations are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -3087,7 +3134,6 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
             )
             if selected is None:
                 continue
-            selected = selected[1]
             if not await prompt_yes_no(
                 session,
                 f"Remove the sole-authority deviation for {sanitize_text(labels[selected.reporter_fingerprint])} "

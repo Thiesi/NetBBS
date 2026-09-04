@@ -820,6 +820,23 @@ def test_trust_anchor_picker_selection_still_warns_about_a_reused_familiar_name(
     assert list_trust_anchors(db) == []
 
 
+def test_attestation_authority_update_keeps_its_existing_scope(db, lane, sysop):
+    """Codex review on #290: choosing a node that is already an authority
+    seeds the draft from its record, so changing only the reason cannot
+    silently widen an age-only scope to age,name."""
+    identity_node = "abcdefghijklmnopqrstuvwxyz234567"
+    configure_attestation_authority(
+        db, identity_node, attributes=["age"], reason="age only", now_iso="2026-09-04T12:00:00.000000Z",
+    )
+    # [A]dd/update -> [N]ode -> "(type it)" -> the fingerprint -> [R]eason -> [S]ave.
+    session = FakeSession(["s", "p", "i", "a", "n", "0", "1", identity_node, "r", "re-reviewed", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    authority = list_attestation_authorities(db)[0]
+    assert authority.attributes == ("age",)
+    assert authority.reason == "re-reviewed"
+    assert "Attributes: age" in _visible(_written_text(session))
+
+
 # -- create user ----------------------------------------------------------
 
 
