@@ -74,6 +74,11 @@ class ChannelMessage:
     link_content_id: str | None = None
     link_event_json: str | None = None
     body_truncated: bool = False
+    # Which outside network a line came from (`"mrc"`), or `None` for a
+    # local or Link-carried row. Issue #275: such a row is never this
+    # node's attested content -- trusted-scrollback snapshots skip it and
+    # Link queueing refuses to sign it.
+    external_source: str | None = None
 
 
 def get_scrollback_limit(db: Database) -> int:
@@ -112,10 +117,14 @@ def record_message(
     author_label: str,
     author_fingerprint: str | None = None,
     body: str | None = None,
+    external_source: str | None = None,
 ) -> ChannelMessage:
     """
     Append an event to `channel`'s scrollback and trim it back down to the
     configured limit.
+
+    `external_source` marks a line that arrived from an outside network
+    (issue #275's MRC bridge records `"mrc"`); see `ChannelMessage`.
 
     `body` is required for `kind="message"` and `kind="daybreak"`
     -- the announcement text itself, since a
@@ -130,15 +139,38 @@ def record_message(
         raise ValueError(f"body is required for kind={kind!r}")
 
     created_at = utc_now_iso()
-    cursor = db.connection.execute(
-        """
-        INSERT INTO channel_messages
-            (channel_id, kind, author_label, author_fingerprint, body, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (channel.id, kind, author_label, author_fingerprint, body, created_at),
-    )
+    if external_source is None:
+        # Migration tests exercise historical schemas from before the
+        # external_source column existed (the same tolerance
+        # `_row_to_message` has); a local row never needs the column.
+        cursor = db.connection.execute(
+            """
+            INSERT INTO channel_messages
+                (channel_id, kind, author_label, author_fingerprint, body, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (channel.id, kind, author_label, author_fingerprint, body, created_at),
+        )
+    else:
+        cursor = db.connection.execute(
+            """
+            INSERT INTO channel_messages
+                (channel_id, kind, author_label, author_fingerprint, body, created_at, external_source)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (channel.id, kind, author_label, author_fingerprint, body, created_at, external_source),
+        )
     message_id = cursor.lastrowid
+    # Capture *this* row now, inside the transaction and before the trim:
+    # never "the channel's newest row" (a background writer -- issue
+    # #275's MRC bridge on the background lane -- can land another row
+    # around this one, and the caller would sign and propagate someone
+    # else's line as its own), and never after the commit either (with a
+    # scrollback limit of 1 that other writer's own trim can delete this
+    # row before it is read back).
+    row = db.connection.execute(
+        "SELECT * FROM channel_messages WHERE id = ?", (message_id,)
+    ).fetchone()
     limit = get_scrollback_limit(db)
     db.connection.execute(
         """
@@ -161,11 +193,6 @@ def record_message(
     index_channel_message(db, channel.id, message_id, kind, body)
     prune_channel_message_search(db, channel.id)
     db.connection.commit()
-
-    row = db.connection.execute(
-        "SELECT * FROM channel_messages WHERE channel_id = ? ORDER BY id DESC LIMIT 1",
-        (channel.id,),
-    ).fetchone()
     return _row_to_message(row)
 
 
@@ -217,4 +244,5 @@ def _row_to_message(row: sqlite3.Row) -> ChannelMessage:
         # same semantic state as NULL on a current local-only row.
         link_content_id=row["link_content_id"] if "link_content_id" in columns else None,
         link_event_json=row["link_event_json"] if "link_event_json" in columns else None,
+        external_source=row["external_source"] if "external_source" in columns else None,
     )

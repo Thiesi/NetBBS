@@ -28,7 +28,9 @@ from netbbs.config import is_node_display_name_placeholder
 from netbbs.files.storage import purge_incoming_staging
 from netbbs.session_history import reconcile_interrupted_sessions
 from netbbs.link.boards import LinkConfigSnapshot, LinkContext
+from netbbs import __version__
 from netbbs.link.diagnostics import LINK_LOGGER_NAME, LinkDiagnosticLogHandler
+from netbbs.mrc.bridge import MRC_LOGGER_NAME, MrcBridge
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.onboarding import participation_accepted
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
@@ -616,6 +618,12 @@ async def run(
     presence = PresenceRegistry()
     mailbox = MessageMailbox()
     direct_invites = DirectChatInvites()
+    # Issue #275 (design doc §16, issue #165 Decision 1): one MRC bridge
+    # per node, constructed whether or not Link is configured -- it is
+    # independent of `link_context` by design. Whether it actually dials
+    # the hub is a DB-backed SysOp decision (`netbbs.mrc.settings`),
+    # read by `start()` below once the node is otherwise up.
+    mrc_bridge = MrcBridge(hub=hub, lane=background_lane, version=__version__)
     throttle = _build_throttle(config)
     throttle_config = config.throttle
     if session_registry is None:
@@ -750,6 +758,7 @@ async def run(
                 ) if link_node is not None else None
             ),
             direct_invites=direct_invites,
+            mrc_bridge=mrc_bridge,
         )
 
     async def ssh_session_handler(session):
@@ -773,6 +782,7 @@ async def run(
                 ) if link_node is not None else None
             ),
             direct_invites=direct_invites,
+            mrc_bridge=mrc_bridge,
         )
 
     servers: list = []
@@ -1026,19 +1036,22 @@ async def run(
                 link_node, config.link, db, _live_relays_provider
             )
 
-        # Design doc §13.11, issue #60: attached once, here, only when
-        # Link is actually enabled -- a disabled node has no netbbs.link
-        # activity to ever log a warning about in the first place.
+        # Design doc §13.11, issue #60: attached once, here, on every run.
+        # It used to be gated on Link being enabled (a Link-disabled node
+        # had nothing to log), but issue #275's MRC bridge writes to the
+        # same bounded log and is switched on live from the SysOp screens,
+        # independently of Link -- an MRC-only node needs its hub warnings
+        # persisted just as much. A handler nothing logs to costs nothing.
         # Removed in the matching finally block below via handler.close()
         # (also closes its own independent sqlite3 connection -- see that
         # class's own docstring for why it doesn't share db.connection).
-        if config.link.enabled:
-            link_diagnostic_log_handler = LinkDiagnosticLogHandler(
-                config.db_path,
-                max_age_days=config.link.diagnostic_log_max_age_days,
-                max_rows=config.link.diagnostic_log_max_rows,
-            )
-            logging.getLogger(LINK_LOGGER_NAME).addHandler(link_diagnostic_log_handler)
+        link_diagnostic_log_handler = LinkDiagnosticLogHandler(
+            config.db_path,
+            max_age_days=config.link.diagnostic_log_max_age_days,
+            max_rows=config.link.diagnostic_log_max_rows,
+        )
+        logging.getLogger(LINK_LOGGER_NAME).addHandler(link_diagnostic_log_handler)
+        logging.getLogger(MRC_LOGGER_NAME).addHandler(link_diagnostic_log_handler)
 
         # Issue #60's SysOp Link-status screen needs a handful of
         # netbbs.net.nodeconfig.LinkConfig fields for display -- built
@@ -1202,6 +1215,7 @@ async def run(
         # journal needs to know the node is actually up and taking
         # callers now, not just that individual listeners logged their
         # own "listening on..." lines along the way.
+        await mrc_bridge.start()
         _logger.info("NetBBS is ready to accept connections")
         await shutdown_event.wait()
     finally:
@@ -1311,11 +1325,16 @@ async def run(
             await link_realtime_registry.close_all(reason="node_shutdown")
         if link_realtime_bridge is not None:
             await link_realtime_bridge.close()
+        # Issue #275: LOGOFF every announced caller, SHUTDOWN, and cancel/
+        # gather the connector, reader, writer and keepalive tasks --
+        # bounded internally, so a dead hub can't stall the drain.
+        await mrc_bridge.close()
         foreground_lane.close()
         background_lane.close()
         db.close()
         if link_diagnostic_log_handler is not None:
             logging.getLogger(LINK_LOGGER_NAME).removeHandler(link_diagnostic_log_handler)
+            logging.getLogger(MRC_LOGGER_NAME).removeHandler(link_diagnostic_log_handler)
             link_diagnostic_log_handler.close()
         remove_pid_file(config.db_path)
         _logger.info("NetBBS node shut down cleanly")

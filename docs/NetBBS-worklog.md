@@ -67,6 +67,8 @@ Phases 1 and 2 are complete as working software. The local node includes:
   moderation, aliases, presence, online private messages, command completion,
   editable input, pinned status/input rows, timestamps, and verified-name
   display;
+- an opt-in, per-channel bridge to the external MRC (Multi Relay Chat)
+  network (issue #275), configured live from the SysOp console;
 - local asynchronous personal mail with inbox/sent state, quotas, reply and
   deletion semantics;
 - topic-first local Communities above boards, channels, and file areas,
@@ -183,6 +185,10 @@ Keep domain logic in its subsystem and transport/session orchestration in
 - `netbbs.identity`: cryptographic identity primitives;
 - `netbbs.link`: Link event, identity, protocol, transport, persistence, sync,
   and local-to-Link bridge logic;
+- `netbbs.mrc`: the MRC (Multi Relay Chat) wire protocol, DB-backed settings,
+  and the one-per-node `MrcBridge`; attached from `netbbs.net.chat_flow` at
+  the same join/send/leave sites as the live-Link bridge, never imported by
+  `netbbs.chat` or `netbbs.link`;
 - `netbbs.boards`, `netbbs.files`, `netbbs.chat`, `netbbs.mail`: domain state;
 - `netbbs.communities`: Community CRUD and inherited-value resolution;
 - `netbbs.moderation`: shared permission and audit primitives;
@@ -588,6 +594,81 @@ channel is re-joined. Hit twice already: `_meets_live_participation_
 requirements` (age/name gates) and `_render_chat_status_line` (topic).
 Anything new that reads channel-level mutable state from a long-lived chat
 session needs the same treatment.
+
+### MRC bridge (issue #275)
+
+- The MRC hub echoes a site's own room traffic back to it. `MrcBridge` drops
+  every inbound packet whose `from_site` equals its own wire site name
+  (case-insensitively) before anything else; without that, every local line
+  would be recorded twice.
+- The hub knows callers only through `NEWROOM`/`IAMHERE`/`LOGOFF` from this
+  node. The set of announced callers is derived from `ChatHub.participant_ids`
+  at connect time and on every mapping refresh, and `local_leave` must run
+  *after* `hub.leave` so a second session of the same account keeps the one
+  MRC user alive. A caller who enters a bridged channel through a path that
+  passes no `mrc_bridge` (only `mrc_bridge=None` callers -- tests, the admin
+  CLI) is still announced on the next reconcile, not never.
+- Wire bounds are the hub's, not ours: names 30 chars / ASCII 33-125 with
+  spaces underscored, bodies 140 chars / ASCII 32-125, lines 512 bytes, no
+  escaping for the `~` delimiter. `netbbs.mrc.protocol.parse_line` strips
+  ANSI and control bytes from every field at the parse boundary; nothing
+  downstream may assume otherwise, and pipe codes (`|NN`) are stripped from
+  every field at parse time, identity fields included, rather than translated.
+- Inbound room lines are recorded through the ordinary `record_message`
+  (author label `user@site (MRC)`, `author_fingerprint=NULL`,
+  `external_source='mrc'`) and so are bounded by the scrollback limit and
+  search-indexed; server notices, topics and join/part chatter are broadcast
+  as plain strings and never stored. Private (`to_user`) lines are never
+  delivered. Join/part chatter is recognised only by the hub's anchored
+  templates (`*** ...`, `- nick has joined|left|timed out`, `- nick was
+  renamed`), never by bare keywords: a caller's "I'm leaving after dinner" is
+  a chat line with an author.
+- Provenance boundary: `channel_messages.external_source` (migration 61) is
+  the one marker that a row is not this node's own content. Trusted-scrollback
+  snapshots filter such rows *before* applying their entry cap, Link queueing
+  refuses to sign them, and `record_message` captures the inserted row by id
+  inside its own transaction -- never "the channel's newest row" (a bridge
+  write on the background lane can land beside it) and never after the commit
+  (with a scrollback limit of 1 the other writer's trim can delete it first).
+- Disclosure invariant: a caller is told that their handle and words leave the
+  node before their first relayed line, whichever way the channel became
+  bridged -- on joining a bridged channel, when a SysOp maps or remaps an
+  occupied channel, and on the first connection after MRC is enabled
+  node-wide. Reconnects re-announce silently.
+- Announced callers are tracked together with the room they were announced
+  in, so a remap moves them (`NEWROOM old:new`) instead of leaving the hub
+  roster in the old room. The bridge re-reads its mappings once per keepalive
+  tick because the standalone admin CLI edits them in SQLite with no way to
+  signal the running node; pause, unmap, delete and rename therefore converge
+  within a tick, and the standalone screens say so. A storage error while
+  recording an inbound line drops that mapping, never the connection.
+- Inbound bound: every non-empty line is charged to the inbound bucket before
+  it is parsed, before and after HELLO alike; only HELLO itself is recognised
+  ahead of the bucket, or a flood during the handshake could block it forever.
+  USERLIST state is retained only for mapped rooms. The remote roster hides an
+  entry only when nick *and* site match this node. A multi-chunk local line is
+  relayed all-or-nothing under the per-caller bucket, and local delivery
+  precedes the relay notice so a sender's dropped socket cannot take the
+  already-recorded message from other readers.
+- Reconnect "stability" is judged from the connected-at timestamp:
+  `_connect_and_serve` never returns normally, so a flag set on return could
+  never fire. USERLIST request timestamps are cleared with the rosters, or a
+  reconnect inside the request guard shows an empty room until the next
+  refresh. The diagnostic log handler is attached on every run because MRC can
+  be enabled without Link.
+- Known limitations: one account with simultaneous sessions in two different
+  bridged channels appears in only one hub room (a node-wide per-account
+  identity would be a design change); renaming an occupied channel splits
+  `ChatHub` membership for all delivery, MRC included, which is a chat
+  subsystem question rather than a bridge one.
+- `OLDVERSION` from the hub stops the connector until `reload_settings()`;
+  retrying would open a fresh rejected session each time. The advertised
+  protocol version (`netbbs.mrc.protocol.PROTOCOL_VERSION`) tracks the MRC
+  protocol revision the reference clients send, not NetBBS's release number.
+- `tests/mrc_fake_hub.py` is the only MRC test double: a real loopback TCP
+  server speaking the tilde protocol (HELLO, PING, echo, USERLIST,
+  OLDVERSION). Bridge, chat-flow, admin-screen and `run()` lifecycle tests all
+  drive it over real sockets; there is no in-memory transport stub.
 
 ### Read cursors and follows (issue #56)
 

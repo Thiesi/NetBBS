@@ -144,3 +144,46 @@ def test_trimming_does_not_affect_other_channels(db, alice):
 
     assert [m.body for m in get_scrollback(db, other)] == ["keep me"]
     assert [m.body for m in get_scrollback(db, lobby)] == ["msg 2"]
+
+
+def test_record_message_returns_its_own_row_when_another_writer_lands_first(db, lobby):
+    """Review of #275 (security): the MRC bridge records inbound lines on
+    the background lane, so a row can land between a local caller's
+    commit and its re-read. "The channel's newest row" then handed the
+    caller someone else's line to sign and push over Link. A trigger
+    stands in for that concurrent writer."""
+    db.connection.execute(
+        """
+        CREATE TRIGGER shadow_insert AFTER INSERT ON channel_messages
+        BEGIN
+            INSERT INTO channel_messages
+                (channel_id, kind, author_label, author_fingerprint, body, created_at, external_source)
+            SELECT NEW.channel_id, 'message', 'bob@Other (MRC)', NULL, 'from the hub', NEW.created_at, 'mrc'
+            WHERE NEW.external_source IS NULL;
+        END
+        """
+    )
+    recorded = record_message(db, lobby, kind="message", author_label="alice", body="mine")
+    assert (recorded.author_label, recorded.body, recorded.external_source) == ("alice", "mine", None)
+    assert [m.body for m in get_scrollback(db, lobby)] == ["mine", "from the hub"]
+
+
+def test_external_source_round_trips(db, lobby):
+    recorded = record_message(
+        db, lobby, kind="message", author_label="bob@Other (MRC)", body="hi", external_source="mrc",
+    )
+    assert recorded.external_source == "mrc"
+    assert get_scrollback(db, lobby)[-1].external_source == "mrc"
+    local = record_message(db, lobby, kind="message", author_label="alice", body="hello")
+    assert local.external_source is None
+
+
+def test_record_message_returns_the_row_even_when_the_limit_is_one(db, lobby):
+    """Review of #275: the row is captured inside the transaction, before
+    the trim, so a limit of 1 plus another writer's trim cannot delete it
+    before it is read back."""
+    set_scrollback_limit(db, 1)
+    first = record_message(db, lobby, kind="message", author_label="alice", body="first")
+    second = record_message(db, lobby, kind="message", author_label="alice", body="second")
+    assert (first.body, second.body) == ("first", "second")
+    assert [m.body for m in get_scrollback(db, lobby)] == ["second"]

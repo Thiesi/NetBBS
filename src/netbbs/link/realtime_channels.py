@@ -116,7 +116,15 @@ def _snapshot_entries(db: Database, channel: Channel) -> list[dict]:
     if origin_fingerprint is None:
         return []
     entries: list[dict] = []
-    for message in get_scrollback(db, channel)[-_MAX_SCROLLBACK_SNAPSHOT_ENTRIES:]:
+    # Issue #275: an MRC line is unauthenticated text from another
+    # network, not this origin's attested content -- exporting it under
+    # the origin's fingerprint would apply the subscriber's trust policy
+    # to the wrong identity. Filtered *before* the cap, so a chatty MRC
+    # room cannot consume the whole snapshot budget with nothing to show.
+    eligible = [
+        message for message in get_scrollback(db, channel) if message.external_source is None
+    ]
+    for message in eligible[-_MAX_SCROLLBACK_SNAPSHOT_ENTRIES:]:
         author_node_fingerprint: str | None = None
         author_user_id: str | None = None
         author_label = message.author_label

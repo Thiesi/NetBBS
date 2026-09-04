@@ -56,6 +56,12 @@ class _TokenBucket:
         self._refill()
         return self._tokens >= 1.0
 
+    def has_tokens(self, count: float) -> bool:
+        """Whether `count` tokens are available *right now* -- for a
+        caller that must send all-or-nothing rather than a prefix."""
+        self._refill()
+        return self._tokens >= count
+
     def consume(self) -> None:
         self._tokens -= 1.0
 

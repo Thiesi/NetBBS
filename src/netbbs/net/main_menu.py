@@ -530,7 +530,8 @@ async def _main_menu(
             # unread-count queries.
             if lane is not None:
                 await _new_scan_screen(
-                    session, db, lane, hub, presence, mailbox, history, user, link_context=link_context
+                    session, db, lane, hub, presence, mailbox, history, user, link_context=link_context,
+                    mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None
                 )
             else:
                 await session.write_line(
@@ -541,7 +542,8 @@ async def _main_menu(
             await session.write_line("")
             if lane is not None:
                 await _find_screen(
-                    session, db, lane, hub, presence, mailbox, history, user, link_context=link_context
+                    session, db, lane, hub, presence, mailbox, history, user, link_context=link_context,
+                    mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None
                 )
             else:
                 await session.write_line(
@@ -838,6 +840,7 @@ async def _resource_type_menu(
                     session, lane, hub, presence, mailbox, history, user, session_registry=session_registry,
                     community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
                     link_context=link_context, direct_invites=direct_invites,
+                    mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
                 )
             else:
                 await session.write_line(

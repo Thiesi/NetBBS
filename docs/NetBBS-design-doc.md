@@ -925,6 +925,21 @@ are sanitized and styled as separate spans using semantic theme colors.
 Phase 2 uses one active channel per session. Multiple simultaneous memberships,
 background delivery, and Link-wide presence wait for Phase 5.
 
+A channel may additionally be bridged, per channel and only by explicit
+SysOp choice, to one room on the external MRC (Multi Relay Chat) network
+(§16, issue #165 / #275). Bridging changes nothing about the channel's
+own model: local traffic is recorded and delivered exactly as before and
+then relayed; inbound MRC lines are recorded as external, unverifiable
+authors (`user@site (MRC)`) that never enter trust evaluation; private
+MRC messages are never delivered. The caller is told on joining that
+their handle becomes visible on that network, and a caller already inside
+a channel when the SysOp maps or remaps it is told before anything they
+say leaves the node. An inbound MRC line is stored with an explicit
+external-source marker: it is never exported in a trusted-scrollback
+snapshot under the origin's identity and never signed for Link
+propagation, and a locally recorded message is always re-read by its own
+row id so a concurrent bridge write cannot be mistaken for it.
+
 ### 6.4 Personal mail
 
 Local asynchronous mail is a persistent domain distinct from chat `/msg`.
@@ -5038,7 +5053,7 @@ gate (§5.1) and sits safely below `SYSOP_LEVEL = 255`. This only works if:
   constant, so a future SysOp level-preset feature cannot hand that range to a
   real user by accident.
 
-### Issue #165 — MRC gateway scoping
+### Issue #165 — MRC gateway scoping — closed
 
 **Goal:** let NetBBS callers reach the existing cross-BBS MRC (Multi Relay
 Chat) network without coupling NetBBS's own premium chat model — Noise
@@ -5081,8 +5096,11 @@ everything through the same `netbbs.chat.hub.ChatHub.broadcast()` a
 purely local participant's own message already goes through. Its own
 `_handle_channel_message` already renders a remote-authored message with
 `author_fingerprint=None` and a descriptive `author_label` (`f"{user_id}
-@{fingerprint}"`) — the exact shape an MRC-authored message needs, no new
-`channel_messages` column or storage rule required. The outbound hook
+@{fingerprint}"`) — the shape an MRC-authored message reuses, with one
+storage rule added on review: `channel_messages.external_source` marks
+such a row so it is never attested as this node's own content (§6.3;
+trusted-scrollback snapshots skip it and Link queueing refuses to sign
+it). The outbound hook
 point already exists too: `netbbs.net.chat_flow`'s per-message send path
 calls `link_context.realtime_bridge.broadcast_local_message_live(channel,
 recorded_message)` immediately after `record_message`/`hub.broadcast` —
@@ -5135,13 +5153,57 @@ it's sent; inbound Mystic `|NN` pipe-color codes are stripped, never
 rendered as NetBBS's own ANSI — matches "sanitize before styling," and
 treats them as untrusted input either way.
 
-**Left open for a future implementation pass, deliberately not decided
-here:** the exact SysOp-facing configuration screen shape (a new Settings
-leaf, or folded into an existing per-channel settings surface); what a
-live bridge's connected/disconnected status looks like to a SysOp; and
-whether/how a SysOp can disable one misbehaving bridge without touching
-MRC node-wide. This scoping pass answers architecture and trust-boundary
-questions; it does not itself authorize implementation to begin.
+**Implemented as issue #275** (`netbbs.mrc`), with every decision above
+as specified and the three questions this scoping pass left open
+answered as follows. Two further choices were made at implementation
+time, both verified against four independent MRC implementations
+(ENiGMA½, Synchronet, uMRC, ANetBBS) since the hub operator's own spec
+page is not publicly reachable:
+
+- **Identity on the MRC side is one MRC user per caller** — the
+  caller's canonical username sanitized to MRC's rules (spaces to
+  underscores, printable ASCII, 30 characters, reserved routing names
+  suffixed), presented at this node's site name, with `NEWROOM` on
+  entering a bridged channel, `IAMHERE` every minute and `LOGOFF` on
+  leaving. Every reference implementation multiplexes this way; a
+  single relay identity prefixing each line with the handle was
+  rejected because MRC users could not see who is present or address
+  anyone. The announced set is derived from the `ChatHub` roster, so a
+  channel mapped while callers are inside it, or a reconnect after a
+  hub outage, re-announces exactly who is there. The join banner tells a
+  caller their handle is about to appear on a public network before
+  the announcement is sent.
+- **Inbound room messages are recorded into the channel's scrollback**
+  (`record_message`, `author_fingerprint=NULL`, label `user@site (MRC)`),
+  bounded by the existing scrollback limit and search-indexed like a
+  carried Link message, so a caller joining later sees a coherent
+  conversation rather than only the local half; the hub's own echo of
+  this node's traffic is dropped by site name. Presence chatter, room
+  topics and server notices stay ephemeral. Private (`to_user`) lines
+  are never delivered; the addressed caller gets one muted notice per
+  sender.
+- **Configuration is DB-backed and edited live**, not a TOML section:
+  Settings › Inter-BBS chat (MRC) holds the node-wide hub settings
+  (enabled, host, port, TLS on by default with certificate
+  verification, site name, INFO fields) and saving asks the running
+  bridge to reload and reconnect; a channel's own detail screen holds
+  its `[M]RC room` mapping and a `[P]ause` that keeps the mapping while
+  relaying nothing — the per-bridge disable asked for above; Node ›
+  Chat bridge (MRC) shows link state, hub, last error, attempt and drop
+  counters and every bridged channel with the hub's roster, with
+  `[R]econnect now`. Inside a bridged channel, the status line carries
+  an `[MRC]` badge, `/who` and `/names` list the room's MRC users, and
+  `/mrc` shows room, hub, link state and roster.
+- **Bounds as shipped:** reconnect backoff 1–60 s with jitter, reset
+  after 30 s stable; outbound queue of 200 lines (oldest dropped) behind
+  a node-wide 5 lines/s bucket and a 3-line burst / 1 line/s bucket per
+  caller (the sender is told quietly when a line was not relayed);
+  inbound 40-line burst / 20 lines/s ahead of any database write, 4 KiB
+  line cap; a local line is split into at most three 140-character
+  wire chunks. An `OLDVERSION` rejection from the hub is fatal until a
+  SysOp changes settings, since every retry would start a fresh
+  rejected session. Bridge warnings land in the same bounded
+  diagnostic log Link already uses.
 
 ### Issue #194 — trusted scrollback-on-join — closed
 

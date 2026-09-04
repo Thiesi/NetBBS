@@ -486,3 +486,15 @@ def test_carried_channel_count_excludes_self_originated(db, alice, node_identity
     materialize_carried_channel(db, carried_genesis)
 
     assert carried_channel_count(db, node_identity.fingerprint) == 1
+
+
+def test_queue_channel_message_if_linked_never_signs_an_external_line(db, alice, node_identity):
+    """Review of #275: an MRC line recorded into a Linked channel is
+    not this node's content to sign."""
+    channel = create_channel(db, "lobby", creator=alice)
+    link_channel(db, channel, node_identity=node_identity)
+    message = record_message(
+        db, channel, kind="message", author_label="bob@Other (MRC)", body="hi", external_source="mrc",
+    )
+
+    assert queue_channel_message_if_linked(db, message, channel, node_identity=node_identity) is None

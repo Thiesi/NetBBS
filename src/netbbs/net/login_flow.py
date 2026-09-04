@@ -41,6 +41,7 @@ from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegi
 from netbbs.config import RegistrationMode, get_node_display_name, get_registration_mode
 from netbbs.link.boards import LinkContext
 from netbbs.moderation import is_blocked
+from netbbs.mrc.bridge import MrcBridge
 from netbbs.net.char_input import InputHistory
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.logoff_banner import load_logoff_banner
@@ -186,6 +187,7 @@ async def handle_session(
     lane: DatabaseLane | None = None,
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> None:
     """
     Top-level per-connection entry point.
@@ -281,6 +283,7 @@ async def handle_session(
         graceful_delay_seconds=graceful_delay_seconds,
         drain_scheduler=drain_scheduler if drain_scheduler is not None else SequenceScheduler(),
         shutdown_scheduler=shutdown_scheduler if shutdown_scheduler is not None else SequenceScheduler(),
+        mrc_bridge=mrc_bridge,
     )
 
     session_registry.enter(session)
@@ -794,6 +797,7 @@ async def handle_ssh_session(
     lane: DatabaseLane | None = None,
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> None:
     """
     SSH-specific top-level entry point (GitHub issue #25) — the
@@ -846,6 +850,7 @@ async def handle_ssh_session(
         graceful_delay_seconds=graceful_delay_seconds,
         drain_scheduler=drain_scheduler if drain_scheduler is not None else SequenceScheduler(),
         shutdown_scheduler=shutdown_scheduler if shutdown_scheduler is not None else SequenceScheduler(),
+        mrc_bridge=mrc_bridge,
     )
 
     session_registry.enter(session)
