@@ -2038,6 +2038,9 @@ async def _trust_subjects_screen(session: Session, lane: DatabaseLane, actor: Us
         await session.write_line(
             colored(f"Technical identity: {selected.node_fingerprint}", fg_color=METADATA_COLOR)
         )
+        await _warn_about_changed_node_identity(
+            session, lane, selected.node_fingerprint, role="This subject's"
+        )
         for state in states:
             await session.write_line(
                 f"{state.dimension.value}: {status_badge(state.state.value, tone=_TRUST_STATE_TONE[state.state], unicode_style=unicode_style)} ({state.reason_code})"
@@ -2171,6 +2174,33 @@ async def _set_trust_override_screen(
         if not confirmed:
             await session.write_line(colored("No change made.", fg_color=MUTED_COLOR))
             return
+    while True:
+        identity_notice = await lane.run(
+            latest_identity_observation, subject.node_fingerprint
+        )
+        if identity_notice is None or identity_notice.severity != "security":
+            break
+        await _warn_about_changed_node_identity(
+            session, lane, subject.node_fingerprint, role="This subject's"
+        )
+        confirmed = await prompt_yes_no(
+            session,
+            "Apply this trust override to technical identity "
+            f"{sanitize_text(subject.node_fingerprint)} despite the identity warning?",
+            default=False,
+        )
+        if not confirmed:
+            await session.write_line(colored("No change made.", fg_color=MUTED_COLOR))
+            return
+        refreshed_notice = await lane.run(
+            latest_identity_observation, subject.node_fingerprint
+        )
+        if (
+            refreshed_notice is None
+            or refreshed_notice.severity != "security"
+            or refreshed_notice.id == identity_notice.id
+        ):
+            break
     try:
         await lane.run(
             set_trust_override, subject, dimension, state,

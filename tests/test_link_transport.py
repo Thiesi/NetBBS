@@ -2135,6 +2135,69 @@ def test_request_peer_list_records_a_real_peers_candidates_over_http(tmp_path):
         bob.close()
 
 
+def test_request_peer_list_refreshes_local_claims_before_persisting_known_peer(tmp_path):
+    from netbbs.config import set_node_display_name
+    from netbbs.link.node_profiles import (
+        latest_identity_observation, remember_own_identity_claims,
+    )
+    from netbbs.link.store import save_peer
+
+    alice_identity = bootstrap_node_identity("claim-refresh-alice")
+    bob_identity = bootstrap_node_identity("claim-refresh-bob")
+    carol_identity = bootstrap_node_identity("claim-refresh-carol")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    carol_node = LinkNode(identity=carol_identity)
+    alice = _NodeDb(tmp_path, "claim-refresh-alice")
+    bob = _NodeDb(tmp_path, "claim-refresh-bob")
+
+    old_carol = carol_node.handle_hello(carol_node.build_hello(
+        addresses=None, outgoing_only=True,
+        created_at="2026-09-04T09:00:00+00:00",
+        friendly_name="Carol Before Rename",
+    ))
+    alice_node.peers[old_carol.fingerprint] = old_carol
+    save_peer(alice.db, old_carol)
+    bob_node.handle_hello(carol_node.build_hello(
+        addresses=None, outgoing_only=True,
+        created_at="2026-09-04T09:01:00+00:00",
+        friendly_name="Alice's New Local Name",
+    ))
+
+    async def refresh_local_claims(lane):
+        def refresh(db):
+            set_node_display_name(db, "Alice's New Local Name")
+            remember_own_identity_claims(db, canonical_dns_name=None)
+
+        await lane.run(refresh)
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}",
+                    _hello_for(alice_node), alice.lane,
+                )
+                return await request_peer_list(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}",
+                    bob_identity.fingerprint, alice.lane,
+                    refresh_identity_claims=refresh_local_claims,
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        recorded = asyncio.run(scenario())
+        assert recorded == [carol_identity.fingerprint]
+        observation = latest_identity_observation(alice.db, carol_identity.fingerprint)
+        assert observation is not None
+        assert observation.severity == "security"
+    finally:
+        alice.close()
+        bob.close()
+
+
 # -- relay consent: a real synchronous request/response round trip --------
 
 

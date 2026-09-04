@@ -522,7 +522,11 @@ advanced/backward-compatible input. Friendly-name resolution must be unique;
 an ambiguous presentation name is refused with a request to use an unambiguous
 DNS name or the technical identity. DNS and friendly claims share that one
 namespace, so a reference matching one node's DNS claim and another node's
-friendly claim is ambiguous rather than silently preferring either. When
+friendly claim is ambiguous rather than silently preferring either. Presentation
+claims and abbreviated fingerprint input likewise resolve as one candidate set:
+a name which equals another node's fingerprint prefix is ambiguous rather than
+silently shadowing that technical address. Exact full fingerprints retain
+precedence. When
 ambiguity remains because friendly and DNS claims collide, the refusal
 shows each candidate's full technical identity; it never repeats the unusable
 advice to enter the already-ambiguous DNS claim. Fingerprints remain hidden in
@@ -548,6 +552,11 @@ An undismissed cryptographic-identity warning continues to be shown at
 interaction boundaries even if a newer benign profile change is observed;
 only SysOp acknowledgement dismisses it. Bounded observation pruning therefore
 retains undismissed security warnings ahead of newer benign observations. The
+file catalogue re-reads the selected origin's warning after the picker returns,
+before asking for fetch consent. Trust-subject details show the same warning and
+full technical identity; applying an override to a warned subject requires a
+fresh, default-no confirmation of that fingerprint immediately before mutation.
+Neither warning prevents continued interaction. The
 local node likewise retains a bounded history of its previous friendly and DNS
 claims so another fingerprint cannot adopt a just-renamed local identity without
 raising the same warning. Reusing a retired claim moves it to the recent end of
@@ -559,7 +568,9 @@ the just-replaced name in the gap before the next outbound descriptor is built.
 Startup primes the current local friendly/DNS pair before opening the Link
 listener. Thereafter the shared own-hello cache is refreshed through the
 background database lane before an inbound peer is persisted and once per
-outbound sync pass. Every endpoint which accepts a signed hello, including
+outbound sync pass. A verified peer-list refresh repeats that local-claim refresh
+after its network wait and immediately before persisting any updated known peer.
+Every endpoint which accepts a signed hello, including
 relay-mailbox pickup, performs that refresh before peer persistence; building
 the signed response itself performs no synchronous
 database I/O on the event loop. Authenticated live scrollback snapshots retain

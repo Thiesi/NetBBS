@@ -431,6 +431,93 @@ def test_sysop_can_apply_reasoned_override_through_real_menu_path(db, lane, syso
     assert "Trust override applied and audited." in _written_text(session)
 
 
+def test_warned_node_requires_technical_identity_confirmation_for_trust_override(
+    db, lane, sysop,
+):
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+
+    familiar = LinkNode(identity=bootstrap_node_identity("trust-familiar"))
+    changed = LinkNode(identity=bootstrap_node_identity("trust-changed"))
+
+    def admitted(node, *, minute):
+        return node.handle_hello(node.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at=f"2026-09-04T09:{minute:02d}:00+00:00",
+            friendly_name="Familiar Trust Node",
+        ))
+
+    save_peer(db, admitted(familiar, minute=0))
+    changed_peer = admitted(changed, minute=1)
+    save_peer(db, changed_peer)
+    subject = TrustSubject.node(changed_peer.fingerprint)
+    register_subject(db, subject, first_accepted_at="2026-09-04T09:01:00.000000Z")
+    session = FakeSession([
+        "s", "p", "s", "0", "1",
+        "o", "r", "b", "reviewed but identity changed", "n",
+        "b", "b", "b", "b",
+    ])
+
+    _run(session, lane, sysop)
+
+    output = _written_text(session)
+    state = get_effective_trust_state(db, subject, TrustDimension.RESOURCE_BEHAVIOR)
+    assert "different cryptographic identity" in output
+    assert changed_peer.fingerprint in output
+    assert "despite the identity warning" in output
+    assert "Trust override applied and audited." not in output
+    assert state.state == TrustState.PROBATIONARY
+
+
+def test_trust_override_reconfirms_when_identity_warning_changes_during_prompt(
+    db, lane, sysop, monkeypatch,
+):
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+    from netbbs.net import admin_flow
+
+    first_familiar = LinkNode(identity=bootstrap_node_identity("first-trust-name"))
+    second_familiar = LinkNode(identity=bootstrap_node_identity("second-trust-name"))
+    changed = LinkNode(identity=bootstrap_node_identity("changing-trust-subject"))
+
+    def admitted(node, *, name, minute):
+        return node.handle_hello(node.build_hello(
+            addresses=None, outgoing_only=True,
+            created_at=f"2026-09-04T10:{minute:02d}:00+00:00",
+            friendly_name=name,
+        ))
+
+    save_peer(db, admitted(first_familiar, name="First Familiar", minute=0))
+    save_peer(db, admitted(second_familiar, name="Second Familiar", minute=0))
+    current = admitted(changed, name="First Familiar", minute=1)
+    save_peer(db, current)
+    subject = TrustSubject.node(current.fingerprint)
+    register_subject(db, subject, first_accepted_at="2026-09-04T10:01:00.000000Z")
+    confirmations = 0
+
+    async def confirm(session, prompt, *, default):
+        nonlocal confirmations
+        confirmations += 1
+        assert default is False
+        if confirmations == 1:
+            save_peer(db, admitted(changed, name="Second Familiar", minute=2))
+            return True
+        return False
+
+    monkeypatch.setattr(admin_flow, "prompt_yes_no", confirm)
+    session = FakeSession(["r", "b", "identity changed again"])
+
+    asyncio.run(admin_flow._set_trust_override_screen(session, lane, sysop, subject))
+
+    state = get_effective_trust_state(db, subject, TrustDimension.RESOURCE_BEHAVIOR)
+    assert confirmations == 2
+    assert state.state == TrustState.PROBATIONARY
+    assert "Trust override applied and audited." not in _written_text(session)
+
+
 def test_sysop_can_clear_a_trust_override_and_view_decision_history_through_real_menu_path(
     db, lane, sysop
 ):

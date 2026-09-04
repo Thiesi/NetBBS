@@ -877,7 +877,10 @@ async def _browse_remote_files(
     await session.write_line(
         f"\r\n{sanitize_text(selected.filename)!r} ({_format_size(selected.size_bytes)}), not yet fetched."
     )
-    if selected.origin_fingerprint in identity_warnings:
+    identity_notice = await lane.run(
+        latest_identity_observation, selected.origin_fingerprint
+    )
+    if identity_notice is not None and identity_notice.severity == "security":
         await session.write_line(
             colored(
                 "Caution: this familiar origin name now has a different cryptographic identity. "

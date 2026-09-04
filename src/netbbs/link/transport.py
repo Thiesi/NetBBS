@@ -2529,6 +2529,7 @@ async def request_peer_list(
     peer_fingerprint: str,
     lane: DatabaseLane,
     *,
+    refresh_identity_claims: Callable[[DatabaseLane], Awaitable[None]] | None = None,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> list[str]:
     """
@@ -2546,6 +2547,11 @@ async def request_peer_list(
     `LinkProtocolError` unwrapped if `peer_fingerprint` turns out not to
     be a completed peer after all — same division of responsibility
     `dial_hello`'s own `node.handle_hello` call already has.
+
+    When supplied, `refresh_identity_claims` is awaited after the network
+    response has been verified and immediately before any descriptor is
+    persisted, so local presentation changes made while the request was in
+    flight participate in collision detection.
     """
     url = f"{base_url}{LINK_PATH_PREFIX}/peers/{node.identity.fingerprint}"
     authorization = await lane.run(
@@ -2572,6 +2578,11 @@ async def request_peer_list(
         raise LinkTransportError(f"malformed peer list response from {url}: {exc}") from exc
 
     recorded = node.handle_peer_list(peer_fingerprint, message)
+    if recorded and refresh_identity_claims is not None:
+        # The network request above may have left a picker-sized window for
+        # local friendly/DNS configuration to change. Refresh those claims
+        # immediately before save_peer evaluates secondhand descriptors.
+        await refresh_identity_claims(lane)
     for candidate_fingerprint in recorded:
         if candidate_fingerprint in node.peers:
             # Issue #270: a known peer's descriptor refreshed secondhand

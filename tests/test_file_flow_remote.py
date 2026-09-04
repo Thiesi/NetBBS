@@ -194,6 +194,50 @@ def test_remote_fetch_warns_before_confirming_a_changed_origin_identity(
     assert "Cancelled" in output
 
 
+def test_remote_fetch_refreshes_identity_warning_after_the_picker(
+    db, lane, alice, node_identity, remote_node_identity, monkeypatch,
+):
+    from netbbs.link.store import save_peer
+
+    area, remote_file = _carried_area_with_one_remote_file(
+        db, node_identity, remote_node_identity
+    )
+    familiar_node = LinkNode(identity=bootstrap_node_identity("picker-race-familiar"))
+    origin_node = LinkNode(identity=remote_node_identity)
+
+    def admitted(node, *, friendly_name, minute):
+        return node.handle_hello(node.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at=f"2026-09-04T09:{minute:02d}:00+00:00",
+            friendly_name=friendly_name,
+        ))
+
+    save_peer(db, admitted(familiar_node, friendly_name="Familiar Origin", minute=0))
+    original = admitted(origin_node, friendly_name="Original Origin", minute=0)
+    save_peer(db, original)
+    link_context = _link_context_for(node_identity)
+    link_context.link_node.peers[original.fingerprint] = original
+
+    async def pick_after_identity_change(*args, **kwargs):
+        changed = admitted(origin_node, friendly_name="Familiar Origin", minute=1)
+        save_peer(db, changed)
+        link_context.link_node.peers[changed.fingerprint] = changed
+        return remote_file
+
+    monkeypatch.setattr(file_flow, "pick_item", pick_after_identity_change)
+    session = FakeSession(["n"])
+
+    asyncio.run(
+        file_flow._browse_remote_files(session, lane, area, alice, link_context)
+    )
+
+    output = _written(session)
+    assert "different cryptographic identity" in output
+    assert remote_file.origin_fingerprint in output
+    assert "Cancelled" in output
+
+
 def test_remote_command_reports_an_already_fetched_entry_without_offering_to_fetch(
     db, lane, alice, node_identity, remote_node_identity
 ):

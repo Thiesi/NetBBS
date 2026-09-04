@@ -3838,6 +3838,15 @@ claim before opening the Link listener, then refresh the shared own-hello cache
 through the background database lane before inbound peer persistence and once
 per outbound sync pass. The synchronous hello builder must never touch SQLite.
 
+Long-lived user and network waits invalidate identity-warning snapshots. Re-read
+a selected file origin after its picker returns, and re-read a warned trust
+subject immediately before applying an override; the latter requires explicit
+default-no confirmation of the full fingerprint. Resolve presentation claims and
+fingerprint prefixes as one ambiguity set after exact-full-fingerprint
+precedence. Verified peer-list refreshes must reload local presentation claims
+after the HTTP wait and before persisting an updated known peer, so a local rename
+during that wait still participates in collision detection.
+
 Treat each managed-DNS credential's structured HTTP 401 independently: a
 previous-name 401 remains authoritative when the replacement heartbeat fails
 transiently, and simultaneous inactive results update both cached registrations

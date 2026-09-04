@@ -444,7 +444,10 @@ async def _sync_one_seed(
     # candidate pool `_try_candidate_fallback` (below) draws from.
     if peer_state == TrustState.ESTABLISHED:
         try:
-            await request_peer_list(node, session, seed_url, seed_peer.fingerprint, lane)
+            await request_peer_list(
+                node, session, seed_url, seed_peer.fingerprint, lane,
+                refresh_identity_claims=getattr(own_hello_provider, "refresh", None),
+            )
         except LinkTransportError as exc:
             _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
 

@@ -97,6 +97,22 @@ def test_resolver_refuses_a_reference_shared_across_dns_and_friendly_name(db, tm
     ]
 
 
+def test_resolver_refuses_a_reference_shared_by_name_and_fingerprint_prefix(db, tmp_path):
+    technical = _peer(tmp_path, "technical", "Technical Node", "technical.example.org")
+    named = _peer(
+        tmp_path, "named", technical.fingerprint[:12], "named.example.org"
+    )
+    save_peer(db, named)
+    save_peer(db, technical)
+
+    assert resolve_peer_reference([named, technical], technical.fingerprint[:12]) == [
+        named, technical,
+    ]
+    assert set(resolve_stored_peer_reference(db, technical.fingerprint[:12])) == {
+        named.fingerprint, technical.fingerprint,
+    }
+
+
 def test_resolver_preserves_terminal_periods_in_friendly_names(db, tmp_path):
     dotted = _peer(tmp_path, "dotted", "The Anchor.", "dotted.example.org")
     plain = _peer(tmp_path, "plain", "The Anchor", "plain.example.org")

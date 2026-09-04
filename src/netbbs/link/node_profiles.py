@@ -204,15 +204,13 @@ def resolve_peer_reference(peers, reference: str):
     exact_fingerprint = [peer for peer in values if peer.fingerprint.lower() == name_needle]
     if exact_fingerprint:
         return exact_fingerprint[0]
-    presentation_matches = [
+    matches = [
         peer for peer in values
         if identity_for_peer(peer).dns_name == dns_needle
         or name_key(identity_for_peer(peer).friendly_name) == name_needle
+        or peer.fingerprint.lower().startswith(name_needle)
     ]
-    if presentation_matches:
-        return presentation_matches[0] if len(presentation_matches) == 1 else presentation_matches
-    fingerprints = [peer for peer in values if peer.fingerprint.lower().startswith(name_needle)]
-    return fingerprints[0] if len(fingerprints) == 1 else fingerprints
+    return matches[0] if len(matches) == 1 else matches
 
 
 def _identity_from_descriptor_json(fingerprint: str, raw: str) -> NodeDisplayIdentity:
@@ -266,17 +264,12 @@ def resolve_stored_peer_reference(db: Database, reference: str) -> str | list[st
     exact_fingerprint = [item.fingerprint for item in identities if item.fingerprint.lower() == name_needle]
     if exact_fingerprint:
         return exact_fingerprint[0]
-    presentation_matches = [
+    matches = [
         item.fingerprint for item in identities
         if item.dns_name == dns_needle or name_key(item.friendly_name) == name_needle
+        or item.fingerprint.lower().startswith(name_needle)
     ]
-    if presentation_matches:
-        return presentation_matches[0] if len(presentation_matches) == 1 else presentation_matches
-    fingerprint_matches = [
-        item.fingerprint for item in identities
-        if item.fingerprint.lower().startswith(name_needle)
-    ]
-    return fingerprint_matches[0] if len(fingerprint_matches) == 1 else fingerprint_matches
+    return matches[0] if len(matches) == 1 else matches
 
 
 def record_peer_identity_observation(db: Database, peer) -> None:
