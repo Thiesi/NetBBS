@@ -944,10 +944,26 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         # (Codex review, PR #284).
         key = f"{attribute}_attestation"
 
+        def _toggle_if_unchanged(db: Database, shown):
+            # Compare and mutate inside one lane call so the record the
+            # caller saw is the record that gets toggled -- a re-attest
+            # or removal landing between a separate read and write
+            # could otherwise enable sharing of an unseen replacement
+            # (Codex review, PR #284, second round).
+            current = get_attestation(db, user, attribute)
+            if current is None or current != shown:
+                return False, current
+            try:
+                return True, set_attestation_link_visible(db, user, attribute, not current.link_visible)
+            except AttestationError:
+                return False, get_attestation(db, user, attribute)
+
         async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
             shown = draft.get(key)
-            attestation = await lane.run(get_attestation, user, attribute)
+            toggled, attestation = await lane.run(_toggle_if_unchanged, shown)
             draft[key] = attestation
+            if toggled:
+                return
             if attestation is None:
                 await session.write_line(
                     colored(
@@ -958,17 +974,13 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
                     )
                 )
                 return
-            if attestation != shown:
-                await session.write_line(
-                    colored(
-                        f"The {attribute} attestation changed since this screen was drawn -- refreshed, "
-                        "not toggled. Press again to change sharing for the current one.",
-                        fg_color=MUTED_COLOR,
-                    )
+            await session.write_line(
+                colored(
+                    f"The {attribute} attestation changed since this screen was drawn -- refreshed, "
+                    "not toggled. Press again to change sharing for the current one.",
+                    fg_color=MUTED_COLOR,
                 )
-                return
-            await lane.run(set_attestation_link_visible, user, attribute, not attestation.link_visible)
-            draft[key] = await lane.run(get_attestation, user, attribute)
+            )
 
         return prompt
 
