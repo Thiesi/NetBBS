@@ -338,9 +338,21 @@ from netbbs.net.welcome_banner import (
     welcome_banner_status,
 )
 from netbbs.net.banner_presets import (
+    BOARD_LIST_MASTHEAD_PRESETS,
+    CHAT_CHANNEL_PICKER_MASTHEAD_PRESETS,
+    FILE_AREA_MASTHEAD_PRESETS,
+    LOGOFF_BANNER_PRESETS,
     MAIN_MENU_BANNER_PRESETS,
+    NEW_ACCOUNT_BANNER_AFTER_PRESETS,
+    NEW_ACCOUNT_BANNER_BEFORE_PRESETS,
     WELCOME_BANNER_PRESETS,
+    load_board_list_masthead_preset,
+    load_chat_channel_picker_masthead_preset,
+    load_file_area_masthead_preset,
+    load_logoff_banner_preset,
     load_main_menu_banner_preset,
+    load_new_account_banner_after_preset,
+    load_new_account_banner_before_preset,
     load_welcome_banner_preset,
 )
 from netbbs.net.main_menu_banner import (
@@ -7682,10 +7694,9 @@ async def _main_menu_banner_filesystem_screen(
 # originally shipped with no [G]allery/[F]rom disk -- issue #169's own
 # curated preset library didn't extend to them yet, so preview/enable/
 # disable/edit alone covered their acceptance criteria. Dogfood follow-
-# up: closed that gap by reusing `MAIN_MENU_BANNER_PRESETS` for these
-# three too, rather than standing up a third dedicated library -- the
-# samples are already generic compact banner strips, not anything
-# main-menu-specific.
+# up: each surface now has its own curated preset collection. Their
+# timing and purpose are different enough that generic main-menu strips
+# made misleading and visually repetitive lifecycle banners.
 
 
 async def _banners_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -7930,18 +7941,12 @@ async def _logoff_banner_gallery_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
     redraw_in_place: bool, unicode_style: bool, collapsed: bool,
 ) -> None:
-    """Dogfood follow-up to issue #177: this banner used to ship with
-    only Preview/Enable/Disable/Edit -- unlike the welcome banner/
-    main-menu masthead, it had no curated preset library of its own to
-    draw a Gallery from at the time. Reusing `MAIN_MENU_BANNER_PRESETS`
-    now closes that gap without inventing a third library: these are
-    already generic compact banner strips, just as suited to a logoff
-    moment as to the main menu."""
+    """Preview and apply a farewell-specific bundled banner."""
     last_stable_id: int | None = None
     while True:
         selection = await pick_item(
             session,
-            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            list(enumerate(LOGOFF_BANNER_PRESETS, start=1)),
             name_of=lambda pair: pair[1].name,
             stable_id_of=lambda pair: pair[0],
             description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
@@ -7957,7 +7962,7 @@ async def _logoff_banner_gallery_screen(
             return
         last_stable_id = selection[0]
         preset = selection[1]
-        data = load_main_menu_banner_preset(preset)
+        data = load_logoff_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
@@ -8229,14 +8234,12 @@ async def _new_account_banner_before_gallery_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
     redraw_in_place: bool, unicode_style: bool, collapsed: bool,
 ) -> None:
-    """Same reasoning as `_logoff_banner_gallery_screen` -- dogfood
-    follow-up to issue #177, reusing `MAIN_MENU_BANNER_PRESETS` rather
-    than a bespoke library for this screen."""
+    """Preview and apply a pre-registration bundled banner."""
     last_stable_id: int | None = None
     while True:
         selection = await pick_item(
             session,
-            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            list(enumerate(NEW_ACCOUNT_BANNER_BEFORE_PRESETS, start=1)),
             name_of=lambda pair: pair[1].name,
             stable_id_of=lambda pair: pair[0],
             description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
@@ -8252,7 +8255,7 @@ async def _new_account_banner_before_gallery_screen(
             return
         last_stable_id = selection[0]
         preset = selection[1]
-        data = load_main_menu_banner_preset(preset)
+        data = load_new_account_banner_before_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
@@ -8528,14 +8531,12 @@ async def _new_account_banner_after_gallery_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
     redraw_in_place: bool, unicode_style: bool, collapsed: bool,
 ) -> None:
-    """Same reasoning as `_logoff_banner_gallery_screen` -- dogfood
-    follow-up to issue #177, reusing `MAIN_MENU_BANNER_PRESETS` rather
-    than a bespoke library for this screen."""
+    """Preview and apply a post-registration bundled banner."""
     last_stable_id: int | None = None
     while True:
         selection = await pick_item(
             session,
-            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            list(enumerate(NEW_ACCOUNT_BANNER_AFTER_PRESETS, start=1)),
             name_of=lambda pair: pair[1].name,
             stable_id_of=lambda pair: pair[0],
             description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
@@ -8551,7 +8552,7 @@ async def _new_account_banner_after_gallery_screen(
             return
         last_stable_id = selection[0]
         preset = selection[1]
-        data = load_main_menu_banner_preset(preset)
+        data = load_new_account_banner_after_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
@@ -8899,20 +8900,12 @@ async def _board_list_masthead_gallery_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
     redraw_in_place: bool, unicode_style: bool, collapsed: bool,
 ) -> None:
-    """Dogfood follow-up to issue #176: this masthead used to ship with
-    only Preview/Enable/Disable/Edit, unlike the welcome banner/main-menu
-    masthead's own Gallery+From-disk pair (issue #169/#170) -- reusing
-    `MAIN_MENU_BANNER_PRESETS` rather than a bespoke library for this
-    screen, since these are already generic compact masthead strips (not
-    anything main-menu-specific), and a second curated set of samples
-    just for this one screen would be pure duplication for no visible
-    difference. Same decline/apply/re-highlight shape as
-    `_main_menu_banner_gallery_screen`."""
+    """Preview and apply a message-board-specific masthead."""
     last_stable_id: int | None = None
     while True:
         selection = await pick_item(
             session,
-            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            list(enumerate(BOARD_LIST_MASTHEAD_PRESETS, start=1)),
             name_of=lambda pair: pair[1].name,
             stable_id_of=lambda pair: pair[0],
             description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
@@ -8928,7 +8921,7 @@ async def _board_list_masthead_gallery_screen(
             return
         last_stable_id = selection[0]
         preset = selection[1]
-        data = load_main_menu_banner_preset(preset)
+        data = load_board_list_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
@@ -9196,14 +9189,12 @@ async def _file_area_masthead_gallery_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
     redraw_in_place: bool, unicode_style: bool, collapsed: bool,
 ) -> None:
-    """Same reasoning as `_board_list_masthead_gallery_screen` -- dogfood
-    follow-up to issue #176, reusing `MAIN_MENU_BANNER_PRESETS` rather
-    than a bespoke library for this screen."""
+    """Preview and apply a file-archive-specific masthead."""
     last_stable_id: int | None = None
     while True:
         selection = await pick_item(
             session,
-            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            list(enumerate(FILE_AREA_MASTHEAD_PRESETS, start=1)),
             name_of=lambda pair: pair[1].name,
             stable_id_of=lambda pair: pair[0],
             description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
@@ -9219,7 +9210,7 @@ async def _file_area_masthead_gallery_screen(
             return
         last_stable_id = selection[0]
         preset = selection[1]
-        data = load_main_menu_banner_preset(preset)
+        data = load_file_area_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
@@ -9489,14 +9480,12 @@ async def _chat_channel_picker_masthead_gallery_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
     redraw_in_place: bool, unicode_style: bool, collapsed: bool,
 ) -> None:
-    """Same reasoning as `_board_list_masthead_gallery_screen` -- dogfood
-    follow-up to issue #176, reusing `MAIN_MENU_BANNER_PRESETS` rather
-    than a bespoke library for this screen."""
+    """Preview and apply a live-chat-specific masthead."""
     last_stable_id: int | None = None
     while True:
         selection = await pick_item(
             session,
-            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            list(enumerate(CHAT_CHANNEL_PICKER_MASTHEAD_PRESETS, start=1)),
             name_of=lambda pair: pair[1].name,
             stable_id_of=lambda pair: pair[0],
             description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
@@ -9512,7 +9501,7 @@ async def _chat_channel_picker_masthead_gallery_screen(
             return
         last_stable_id = selection[0]
         preset = selection[1]
-        data = load_main_menu_banner_preset(preset)
+        data = load_chat_channel_picker_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 

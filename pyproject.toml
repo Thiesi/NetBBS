@@ -53,7 +53,16 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "netbbs.web" = ["static/*"]
-"netbbs.net" = ["banner_presets/welcome/*.ans", "banner_presets/masthead/*.ans"]
+"netbbs.net" = [
+    "banner_presets/welcome/*.ans",
+    "banner_presets/masthead/*.ans",
+    "banner_presets/logoff/*.ans",
+    "banner_presets/new_account_before/*.ans",
+    "banner_presets/new_account_after/*.ans",
+    "banner_presets/board_list/*.ans",
+    "banner_presets/file_area/*.ans",
+    "banner_presets/chat_channel_picker/*.ans",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

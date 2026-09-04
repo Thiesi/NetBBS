@@ -5317,17 +5317,16 @@ def test_logoff_banner_edit_round_trips_into_logoff_banner_path(db, lane, sysop)
 
 
 def test_logoff_banner_gallery_applies_a_bundled_preset(db, lane, sysop):
-    """Dogfood follow-up to issue #177: this banner used to have no
-    Gallery at all -- now reuses `MAIN_MENU_BANNER_PRESETS`."""
-    from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
+    from netbbs.net.banner_presets import LOGOFF_BANNER_PRESETS, load_logoff_banner_preset
     from netbbs.net.logoff_banner import is_logoff_banner_enabled, logoff_banner_path
 
     session = FakeSession(["s", "m", "n", "l", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
+    assert "Neon Sunset / Carrier Down" in text
     assert is_logoff_banner_enabled(db) is True
-    assert logoff_banner_path(db).read_bytes() == load_main_menu_banner_preset(MAIN_MENU_BANNER_PRESETS[0])
+    assert logoff_banner_path(db).read_bytes() == load_logoff_banner_preset(LOGOFF_BANNER_PRESETS[0])
 
 
 def test_logoff_banner_from_disk_loads_and_enables_a_local_file(db, lane, sysop, tmp_path):
@@ -5408,7 +5407,10 @@ def test_new_account_banner_before_preview_shows_resolved_content(db, lane, syso
 
 
 def test_new_account_banner_before_gallery_applies_a_bundled_preset(db, lane, sysop):
-    from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
+    from netbbs.net.banner_presets import (
+        NEW_ACCOUNT_BANNER_BEFORE_PRESETS,
+        load_new_account_banner_before_preset,
+    )
     from netbbs.net.new_account_banner_before import (
         is_new_account_banner_before_enabled,
         new_account_banner_before_path,
@@ -5418,8 +5420,11 @@ def test_new_account_banner_before_gallery_applies_a_bundled_preset(db, lane, sy
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
+    assert "Aurora Identity Gate / Violet-Emerald" in text
     assert is_new_account_banner_before_enabled(db) is True
-    assert new_account_banner_before_path(db).read_bytes() == load_main_menu_banner_preset(MAIN_MENU_BANNER_PRESETS[0])
+    assert new_account_banner_before_path(db).read_bytes() == load_new_account_banner_before_preset(
+        NEW_ACCOUNT_BANNER_BEFORE_PRESETS[0]
+    )
 
 
 def test_new_account_banner_before_from_disk_loads_and_enables_a_local_file(db, lane, sysop, tmp_path):
@@ -5490,7 +5495,10 @@ def test_new_account_banner_after_preview_shows_resolved_content(db, lane, sysop
 
 
 def test_new_account_banner_after_gallery_applies_a_bundled_preset(db, lane, sysop):
-    from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
+    from netbbs.net.banner_presets import (
+        NEW_ACCOUNT_BANNER_AFTER_PRESETS,
+        load_new_account_banner_after_preset,
+    )
     from netbbs.net.new_account_banner_after import (
         is_new_account_banner_after_enabled,
         new_account_banner_after_path,
@@ -5500,8 +5508,11 @@ def test_new_account_banner_after_gallery_applies_a_bundled_preset(db, lane, sys
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
+    assert "Identity Ignition / Solar Gold" in text
     assert is_new_account_banner_after_enabled(db) is True
-    assert new_account_banner_after_path(db).read_bytes() == load_main_menu_banner_preset(MAIN_MENU_BANNER_PRESETS[0])
+    assert new_account_banner_after_path(db).read_bytes() == load_new_account_banner_after_preset(
+        NEW_ACCOUNT_BANNER_AFTER_PRESETS[0]
+    )
 
 
 def test_new_account_banner_after_from_disk_loads_and_enables_a_local_file(db, lane, sysop, tmp_path):
@@ -5628,17 +5639,18 @@ def test_board_list_masthead_edit_round_trips_into_board_list_banner_path(db, la
 
 
 def test_board_list_masthead_gallery_applies_a_bundled_preset(db, lane, sysop):
-    """Dogfood follow-up to issue #176: this masthead used to have no
-    Gallery at all -- now reuses `MAIN_MENU_BANNER_PRESETS`."""
-    from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
+    from netbbs.net.banner_presets import BOARD_LIST_MASTHEAD_PRESETS, load_board_list_masthead_preset
     from netbbs.net.board_list_banner import board_list_banner_path, is_board_list_banner_enabled
 
     session = FakeSession(["s", "m", "m", "o", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
+    assert "Constellation Exchange / Violet-Emerald" in text
     assert is_board_list_banner_enabled(db) is True
-    assert board_list_banner_path(db).read_bytes() == load_main_menu_banner_preset(MAIN_MENU_BANNER_PRESETS[0])
+    assert board_list_banner_path(db).read_bytes() == load_board_list_masthead_preset(
+        BOARD_LIST_MASTHEAD_PRESETS[0]
+    )
 
 
 def test_board_list_masthead_from_disk_loads_and_enables_a_local_file(db, lane, sysop, tmp_path):
@@ -5710,15 +5722,18 @@ def test_file_area_masthead_preview_shows_resolved_content(db, lane, sysop):
 
 
 def test_file_area_masthead_gallery_applies_a_bundled_preset(db, lane, sysop):
-    from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
+    from netbbs.net.banner_presets import FILE_AREA_MASTHEAD_PRESETS, load_file_area_masthead_preset
     from netbbs.net.file_area_banner import file_area_banner_path, is_file_area_banner_enabled
 
     session = FakeSession(["s", "m", "m", "f", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
+    assert "Abyssal Archive / Sapphire-Teal" in text
     assert is_file_area_banner_enabled(db) is True
-    assert file_area_banner_path(db).read_bytes() == load_main_menu_banner_preset(MAIN_MENU_BANNER_PRESETS[0])
+    assert file_area_banner_path(db).read_bytes() == load_file_area_masthead_preset(
+        FILE_AREA_MASTHEAD_PRESETS[0]
+    )
 
 
 def test_file_area_masthead_from_disk_loads_and_enables_a_local_file(db, lane, sysop, tmp_path):
@@ -5786,7 +5801,10 @@ def test_chat_channel_picker_masthead_preview_shows_resolved_content(db, lane, s
 
 
 def test_chat_channel_picker_masthead_gallery_applies_a_bundled_preset(db, lane, sysop):
-    from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
+    from netbbs.net.banner_presets import (
+        CHAT_CHANNEL_PICKER_MASTHEAD_PRESETS,
+        load_chat_channel_picker_masthead_preset,
+    )
     from netbbs.net.chat_channel_picker_banner import (
         chat_channel_picker_banner_path,
         is_chat_channel_picker_banner_enabled,
@@ -5796,8 +5814,11 @@ def test_chat_channel_picker_masthead_gallery_applies_a_bundled_preset(db, lane,
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
+    assert "Neon Voiceprint / Magenta-Cyan" in text
     assert is_chat_channel_picker_banner_enabled(db) is True
-    assert chat_channel_picker_banner_path(db).read_bytes() == load_main_menu_banner_preset(MAIN_MENU_BANNER_PRESETS[0])
+    assert chat_channel_picker_banner_path(db).read_bytes() == load_chat_channel_picker_masthead_preset(
+        CHAT_CHANNEL_PICKER_MASTHEAD_PRESETS[0]
+    )
 
 
 def test_chat_channel_picker_masthead_from_disk_loads_and_enables_a_local_file(db, lane, sysop, tmp_path):
