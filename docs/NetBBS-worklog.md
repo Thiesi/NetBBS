@@ -4021,3 +4021,13 @@ running node, since MRC can be enabled without Link. The case-insensitive
 one-room-one-channel rule is now the index itself (`lower(mrc_room)`). Local
 delivery precedes the MRC relay notice, as `/me` already did. Declined: two
 32-character usernames sharing their first 30 characters colliding on the wire.
+
+Second MRC review pass (5 findings, 4 addressed). The reconnect backoff is
+reset from how long a session was actually up, since `_connect_and_serve`
+never returns normally and the old "stable" flag could never be set; USERLIST
+request timestamps are cleared with the rosters so a quick reconnect asks
+again; roster state is retained only for mapped rooms; renaming a mapped
+channel refreshes the running bridge like deleting one. Deferred: one account
+with simultaneous sessions parked in two different bridged channels appears
+in only one hub room, which needs a node-wide per-account identity rather
+than a patch, and has not been seen in use.

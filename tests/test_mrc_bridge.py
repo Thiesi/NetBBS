@@ -736,3 +736,92 @@ def test_oldversion_on_a_live_session_stops_relaying_immediately(db, lane, lobby
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_backoff_resets_after_a_connection_that_stayed_up(db, lane, lobby):
+    """Review of #275: `_connect_and_serve` always exits by raising, so
+    the documented stable-connection reset never happened and one bad
+    spell made every later hub restart wait the full maximum backoff."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        now = [1000.0]
+        backoffs: list[float] = []
+        attempts = [0]
+
+        async def _refuse_then_connect(host, port, **kwargs):
+            attempts[0] += 1
+            if attempts[0] <= 3:
+                raise ConnectionRefusedError("nobody home yet")
+            return await asyncio.open_connection(host, port, **kwargs)
+
+        bridge = _bridge(
+            ChatHub(), lane, clock=lambda: now[0], stable_after_seconds=1.0,
+            min_backoff_seconds=0.05, max_backoff_seconds=0.2, open_connection=_refuse_then_connect,
+        )
+
+        async def _observed_sleep(backoff: float) -> None:
+            backoffs.append(backoff)
+            await asyncio.sleep(0.02)
+
+        bridge._backoff_sleep = _observed_sleep
+        await bridge.start()
+        try:
+            await _wait_until(lambda: bridge.state is MrcState.CONNECTED)
+            assert backoffs == [0.05, 0.1, 0.2]
+            now[0] += 5.0  # well past stable_after
+            await fake.drop_clients()
+            await _wait_until(lambda: len(backoffs) > 3)
+            assert backoffs[3] == 0.05
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_roster_is_requested_again_after_a_quick_reconnect(db, lane, lobby, alice):
+    """Review of #275: teardown cleared the roster but kept the request
+    timestamp, so a reconnect inside the five-second guard showed an
+    empty MRC room for five minutes."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body == "USERLIST")
+            await fake.drop_clients()
+            await fake.wait_for_connections(2)
+            await fake.wait_for(lambda p: len(fake.packets(body_prefix="USERLIST")) >= 2)
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_userlist_for_an_unmapped_room_is_not_retained(db, lane, lobby, alice):
+    """Review of #275: the hub names the room in USERLIST, so roster
+    state is kept only for rooms this node actually mapped."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body == "USERLIST")
+            await fake.send_line("SERVER~~~alice~~elsewhere~USERLIST:carol@third~")
+            await fake.send_line("SERVER~~~alice~~lobby~USERLIST:bob@other~")
+            await _wait_until(lambda: bridge.remote_roster(lobby) == ["bob@other"])
+            assert "elsewhere" not in bridge._rosters
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())

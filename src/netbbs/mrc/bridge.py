@@ -212,6 +212,7 @@ class MrcBridge:
         self._fatal_error: str | None = None
         self._last_error: str | None = None
         self._connected_since: str | None = None
+        self._connected_at_monotonic: float | None = None
         self._attempts = 0
         self._dropped_outbound = 0
         self._dropped_inbound = 0
@@ -300,6 +301,7 @@ class MrcBridge:
         self._announced.clear()
         self._announced_rooms.clear()
         self._rosters.clear()
+        self._last_userlist_request.clear()
         if self._state is not MrcState.ERROR:
             self._state = MrcState.DISABLED
 
@@ -351,11 +353,9 @@ class MrcBridge:
                 return
             self._attempts += 1
             self._state = MrcState.CONNECTING
-            connected_at = self._clock()
-            stable = False
+            self._connected_at_monotonic = None
             try:
                 await self._connect_and_serve(settings)
-                stable = self._clock() - connected_at >= self._stable_after
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -366,6 +366,14 @@ class MrcBridge:
                 self._announced.clear()
                 self._announced_rooms.clear()
                 self._rosters.clear()
+                self._last_userlist_request.clear()
+            # `_connect_and_serve` never returns normally -- a finished
+            # session always raises -- so "stable" is judged from how long
+            # the session was actually up, not from a normal return.
+            stable = (
+                self._connected_at_monotonic is not None
+                and self._clock() - self._connected_at_monotonic >= self._stable_after
+            )
             if self._stopping:
                 return
             if self._fatal_error is not None:
@@ -375,8 +383,13 @@ class MrcBridge:
             if stable:
                 backoff = self._min_backoff
             self._state = MrcState.BACKOFF
-            await asyncio.sleep(self._rng.uniform(0, backoff))
+            await self._backoff_sleep(backoff)
             backoff = min(backoff * 2, self._max_backoff)
+
+    async def _backoff_sleep(self, backoff: float) -> None:
+        """The jittered wait before the next attempt -- a seam tests can
+        observe instead of timing real sleeps."""
+        await asyncio.sleep(self._rng.uniform(0, backoff))
 
     async def _connect_and_serve(self, settings: MrcSettings) -> None:
         ssl_context = ssl.create_default_context() if settings.tls else None
@@ -398,6 +411,7 @@ class MrcBridge:
 
         self._state = MrcState.CONNECTED
         self._connected_since = utc_now_iso()
+        self._connected_at_monotonic = self._clock()
         self._last_error = None
         _logger.info("Connected to MRC hub %s:%d as %r", settings.host, settings.port, settings.site_name)
         self._drain_outbound_queue()
@@ -828,7 +842,10 @@ class MrcBridge:
             raise ConnectionError("hub is closing the connection")
         if command == "USERLIST":
             room_key = self._room_key_for_server_packet(packet)
-            if room_key is not None:
+            # Only rooms this node has mapped: the hub names the room, and
+            # an unbounded remotely-named dictionary is exactly what the
+            # inbound rate limit cannot bound on its own.
+            if room_key is not None and room_key in self._by_room:
                 self._rosters[room_key] = tuple(protocol.parse_userlist(params))
             return
         if command == "ROOMTOPIC":

@@ -12598,6 +12598,11 @@ async def _channel_detail_screen(
             updated = await _channel_screen(session, lane, actor, existing=channel)
             if updated is not None:
                 channel = updated
+                if mrc_bridge is not None and mrc_mapping is not None:
+                    # The bridge caches the mapped channel's name for hub
+                    # delivery; a rename must reach it now (issue #275).
+                    await mrc_bridge.refresh_channel_mappings()
+                    mrc_mapping = await lane.run(get_mrc_mapping, channel)
             await _redraw()
         elif choice == "d":
             await session.write_line("")

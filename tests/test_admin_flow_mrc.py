@@ -284,3 +284,32 @@ def test_operations_offers_diagnostics_on_a_running_node_without_link(db, lane, 
     text = _visible(_written_text(session))
     assert "[D]iagnostics" in text
     assert "Nothing logged yet." in text  # the screen actually opened
+
+
+def test_renaming_a_mapped_channel_refreshes_the_running_bridge(db, lane, sysop, lobby):
+    """Review of #275: the bridge kept delivering inbound lines to the
+    old ChatHub key after a SysOp renamed the channel."""
+    from netbbs.chat.hub import ParticipantId
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        save_mrc_settings(db, MrcSettings(enabled=True, host="127.0.0.1", port=fake.port, tls=False, site_name="Board"))
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        bridge = _bridge(lane, hub)
+        await bridge.start()
+        try:
+            await _wait_state(bridge, MrcState.CONNECTED)
+            session = FakeSession(["e", "n", "lounge", "s", "b"])
+            await _open_channel_detail(session, lane, sysop, lobby, mrc_bridge=bridge)
+            assert "Updated 'lounge'" in _visible(_written_text(session))
+            assert bridge.mapping_for(lobby).channel.name == "lounge"
+            queue = hub.join("lounge", ParticipantId("alice", 1))
+            await fake.send_line("bob~Other~lobby~~~lobby~still reaching you?~")
+            delivered = await asyncio.wait_for(queue.get(), timeout=2)
+            assert getattr(delivered, "body", None) == "still reaching you?"
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())

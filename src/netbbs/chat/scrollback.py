@@ -139,14 +139,27 @@ def record_message(
         raise ValueError(f"body is required for kind={kind!r}")
 
     created_at = utc_now_iso()
-    cursor = db.connection.execute(
-        """
-        INSERT INTO channel_messages
-            (channel_id, kind, author_label, author_fingerprint, body, created_at, external_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (channel.id, kind, author_label, author_fingerprint, body, created_at, external_source),
-    )
+    if external_source is None:
+        # Migration tests exercise historical schemas from before the
+        # external_source column existed (the same tolerance
+        # `_row_to_message` has); a local row never needs the column.
+        cursor = db.connection.execute(
+            """
+            INSERT INTO channel_messages
+                (channel_id, kind, author_label, author_fingerprint, body, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (channel.id, kind, author_label, author_fingerprint, body, created_at),
+        )
+    else:
+        cursor = db.connection.execute(
+            """
+            INSERT INTO channel_messages
+                (channel_id, kind, author_label, author_fingerprint, body, created_at, external_source)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (channel.id, kind, author_label, author_fingerprint, body, created_at, external_source),
+        )
     message_id = cursor.lastrowid
     limit = get_scrollback_limit(db)
     db.connection.execute(
