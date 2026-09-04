@@ -53,7 +53,7 @@ from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.node_theme import effective_accent_color, effective_header_color_256, effective_node_name_gradient
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.redraw_preference import set_redraw_in_place_enabled
-from netbbs.net.session import Session, SessionClosedError
+from netbbs.net.session import Session, SessionClosedError, write_preformatted_line, write_prompt
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, SequenceScheduler, format_remaining_seconds
 from netbbs.net.throttle import LoginThrottle
@@ -342,7 +342,9 @@ async def _run_authenticated_session(
         return
 
     try:
-        await session.write_line(load_welcome_banner(db, truecolor=session.supports_truecolor))
+        await write_preformatted_line(
+            session, load_welcome_banner(db, truecolor=session.supports_truecolor)
+        )
         # Design doc -- node management, Thiesi's own request: shown to
         # *every* connecting client, SysOp-to-be or not -- account level
         # isn't known until credentials verify below, so this can't be
@@ -724,7 +726,7 @@ async def run_authenticated_session(
     # unrelated call site.
     logoff_banner = load_logoff_banner(db)
     if logoff_banner:
-        await session.write_line(logoff_banner)
+        await write_preformatted_line(session, logoff_banner)
     await _write_connection_notice(session, db, "Signed out", "Goodbye!", tone="success")
 
 
@@ -992,7 +994,7 @@ async def _login(
 
     for attempt in range(max_attempts):
         try:
-            await session.write(prompt)
+            await write_prompt(session, prompt)
             username = (await asyncio.wait_for(session.read_line(), timeout=idle_timeout)).strip()
         except asyncio.TimeoutError:
             return LoginOutcome.IDLE_TIMEOUT
@@ -1157,7 +1159,7 @@ async def _register_new_account(
     """
     before_banner = load_new_account_banner_before(db)
     if before_banner:
-        await session.write_line(before_banner)
+        await write_preformatted_line(session, before_banner)
     for attempt in range(1, _REGISTRATION_MAX_ATTEMPTS + 1):
         await session.write_line(
             "\r\n"
@@ -1174,12 +1176,15 @@ async def _register_new_account(
             )
         )
         try:
-            await session.write(colored("Desired username: ", fg_color=LABEL_COLOR, bold=True))
+            await write_prompt(
+                session, colored("Desired username: ", fg_color=LABEL_COLOR, bold=True)
+            )
             username = (await asyncio.wait_for(session.read_line(), timeout=idle_timeout)).strip()
             if not username:
                 return None
 
-            await session.write(
+            await write_prompt(
+                session,
                 colored(
                     f"Password (min {MIN_REGISTRATION_PASSWORD_LENGTH} characters): ",
                     fg_color=LABEL_COLOR,
@@ -1187,7 +1192,9 @@ async def _register_new_account(
                 )
             )
             password = await asyncio.wait_for(session.read_line(echo=False), timeout=idle_timeout)
-            await session.write(colored("Confirm password: ", fg_color=LABEL_COLOR, bold=True))
+            await write_prompt(
+                session, colored("Confirm password: ", fg_color=LABEL_COLOR, bold=True)
+            )
             confirm = await asyncio.wait_for(session.read_line(echo=False), timeout=idle_timeout)
         except asyncio.TimeoutError:
             return None
@@ -1255,7 +1262,7 @@ async def _register_new_account(
         # here.
         after_banner = load_new_account_banner_after(db)
         if after_banner:
-            await session.write_line(after_banner)
+            await write_preformatted_line(session, after_banner)
 
         if require_approval:
             await session.write_line(

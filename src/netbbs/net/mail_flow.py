@@ -72,7 +72,7 @@ from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_prompt
 from netbbs.signature import append_signature, get_signature
 from netbbs.rendering import (
     ERROR_COLOR,
@@ -472,7 +472,7 @@ async def _compose_mail(
     else:
         prompt = "username or user@node-name-or-dns" if link_context is not None else "username"
         while True:
-            await session.write(f"\r\nTo ({prompt}): ")
+            await write_prompt(session, f"\r\nTo ({prompt}): ")
             recipient_text = (await session.read_line()).strip()
             if not recipient_text:
                 await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
@@ -495,7 +495,7 @@ async def _compose_mail(
             break
 
     if prefill_subject:
-        await session.write(f"Subject [{sanitize_text(prefill_subject)}] (Enter to keep): ")
+        await write_prompt(session, f"Subject [{sanitize_text(prefill_subject)}] (Enter to keep): ")
         subject = (await session.read_line()).strip() or prefill_subject
     else:
         await session.write("Subject: ")
@@ -545,11 +545,11 @@ async def _compose_mail(
             await session.write_line(colored("Message cancelled.", fg_color=MUTED_COLOR))
             return
         if action is ReviewAction.EDIT_RECIPIENT:
-            await session.write(f"To [{sanitize_text(recipient_text)}] (Enter to keep): ")
+            await write_prompt(session, f"To [{sanitize_text(recipient_text)}] (Enter to keep): ")
             recipient_text = (await session.read_line()).strip() or recipient_text
             continue
         if action is ReviewAction.EDIT_SUBJECT:
-            await session.write(f"Subject [{sanitize_text(subject)}] (Enter to keep): ")
+            await write_prompt(session, f"Subject [{sanitize_text(subject)}] (Enter to keep): ")
             subject = (await session.read_line()).strip() or subject
             continue
         if action is ReviewAction.EDIT_BODY:

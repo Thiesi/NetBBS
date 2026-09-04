@@ -64,11 +64,14 @@ def test_draw_help_never_overflows_its_own_declared_width():
     for width in (40, 60, 78):
         written: list[str] = []
         original_out = wd.out
+        original_width = wd._OUTPUT_WIDTH
         try:
+            wd._OUTPUT_WIDTH = width
             wd.out = written.append
             wd.draw_help(wd.Palette(truecolor=False), width)
         finally:
             wd.out = original_out
+            wd._OUTPUT_WIDTH = original_width
         text = _ANSI_RE.sub("", "".join(written))
         for line in text.split("\r\n"):
             assert len(line) <= width, f"line exceeds width={width}: {line!r}"

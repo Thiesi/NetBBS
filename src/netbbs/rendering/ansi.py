@@ -242,7 +242,7 @@ def reject_keystroke(count: int = 1) -> str:
 #     in alternation order, so a literal `[`/`]` immediately after ESC
 #     is never mistaken for this branch's own final byte -- CSI/OSC's
 #     dedicated branches already claim that position first.
-_ANSI_ESCAPE_RE = re.compile(
+ANSI_ESCAPE_RE = re.compile(
     ESC + r"(?:\[[0-?]*[ -/]*[@-~]" r"|\][^\x07\x1b]*(?:\x07|\x1b\\)" r"|[\x20-\x2f]*[\x30-\x7e])"
 )
 
@@ -268,7 +268,7 @@ def strip_ansi(text: str) -> str:
     such guarantee (it only ever removes complete, well-formed escape
     sequences, not the injection risk a lone/malformed ESC byte poses).
     """
-    return _ANSI_ESCAPE_RE.sub("", text)
+    return ANSI_ESCAPE_RE.sub("", text)
 
 
 def _validate_color(color: int) -> None:

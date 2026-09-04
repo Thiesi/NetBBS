@@ -27,7 +27,7 @@ import nacl.signing
 from netbbs.auth.users import AuthError, User, add_ssh_key, list_ssh_keys, remove_ssh_key
 from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.net.confirm import prompt_yes_no
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import ERROR_COLOR, LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -83,7 +83,7 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
         options = [menu_key("A", "dd a key"), menu_key("B", "ack")]
         if keys:
             options.insert(1, menu_key("R", "emove a key"))
-        await session.write(f"\r\n{action_bar(options, width=session.terminal_width)}: ")
+        await write_prompt(session, f"\r\n{action_bar(options, width=session.terminal_width)}: ")
         choice = (await session.read_key()).lower()
 
         if choice == "b":
@@ -98,11 +98,11 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
 
 async def _add_key(session: Session, lane: DatabaseLane, target: User, *, changed_by: User) -> User:
     await session.write_line("")
-    await session.write("Label for this key (e.g. \"phone\", \"laptop\", blank to cancel): ")
+    await write_prompt(session, 'Label for this key (e.g. "phone", "laptop", blank to cancel): ')
     label = (await session.read_line()).strip()
     if not label:
         return target
-    await session.write("Public key (base64, or an ssh-ed25519 line, blank to cancel): ")
+    await write_prompt(session, "Public key (base64, or an ssh-ed25519 line, blank to cancel): ")
     text = (await session.read_line()).strip()
     if not text:
         return target
@@ -122,7 +122,7 @@ async def _add_key(session: Session, lane: DatabaseLane, target: User, *, change
 
 async def _remove_key(session: Session, lane: DatabaseLane, target: User, keys: list, *, changed_by: User) -> User:
     await session.write_line("")
-    await session.write(f"Remove which key? (1-{len(keys)}, blank to cancel): ")
+    await write_prompt(session, f"Remove which key? (1-{len(keys)}, blank to cancel): ")
     text = (await session.read_line()).strip()
     if not text:
         return target

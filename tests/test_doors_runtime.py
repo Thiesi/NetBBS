@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import importlib.util
 import json
 import os
 import sys
@@ -20,6 +21,8 @@ from netbbs.auth.users import create_user
 from netbbs.doors import create_door
 from netbbs.doors.runtime import DoorRunResult, run_door
 from netbbs.net.session import Session, SessionClosedError
+from netbbs.rendering.ansi import strip_ansi
+from netbbs.rendering.width import display_width
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -244,9 +247,44 @@ _BUNDLED_DOORS_DIR = Path(__file__).resolve().parent.parent / "src" / "netbbs" /
 _RETRO_TRIVIA_PATH = _BUNDLED_DOORS_DIR / "retro_trivia.py"
 
 
+@pytest.mark.parametrize(
+    "path",
+    (
+        _BUNDLED_DOORS_DIR / "retro_trivia.py",
+        _BUNDLED_DOORS_DIR / "voidrunner.py",
+        _BUNDLED_DOORS_DIR / "war_dialer.py",
+    ),
+)
+def test_bundled_door_wrappers_normalize_tabs_and_keep_indentation_with_content(path):
+    name = f"door_wrap_under_test_{path.stem}"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+        tabbed = module._wrap_output("1234\t56789", 10)
+        indented = module._wrap_output("  0123456789", 5)
+        combining = module._wrap_output("aaa\u0301b", 3)
+        boxed = module._wrap_output(
+            "\x1b[35m│\x1b[37m" + ("word " * 12) + "\x1b[35m│\x1b[0m",
+            20,
+        )
+    finally:
+        sys.modules.pop(name, None)
+
+    assert tabbed == "1234 56789"
+    assert indented.split("\r\n") == ["  012", "34567", "89"]
+    assert combining.split("\r\n") == ["aaa\u0301", "b"]
+    boxed_rows = boxed.split("\r\n")
+    assert len(boxed_rows) > 1
+    assert all(row.startswith("\x1b[35m│\x1b[37m") for row in boxed_rows)
+
+
 def test_the_real_demo_door_plays_a_full_round_through_run_door(db, lane, player):
     door = create_door(db, "Retro Trivia", sys.executable, args=(str(_RETRO_TRIVIA_PATH),), creator=player)
     session = FakeSession()
+    session.terminal_width = 40
 
     async def scenario():
         task = asyncio.create_task(_run(session, lane, door, player))
@@ -268,6 +306,7 @@ def test_the_real_demo_door_plays_a_full_round_through_run_door(db, lane, player
     assert "Question 1/8" in output
     assert "Question 8/8" in output
     assert "Final score:" in output
+    assert all(display_width(strip_ansi(line)) <= 40 for line in output.splitlines())
 
 
 # -- the space-trading door (netbbs.doors.bundled.voidrunner) --------------
@@ -295,6 +334,7 @@ def test_the_real_space_trading_door_plays_a_full_opening_loop_through_run_door(
     monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(door_home))
     door = create_door(db, "Voidrunner", sys.executable, args=(str(_VOIDRUNNER_PATH),), creator=player)
     session = FakeSession()
+    session.terminal_width = 40
     save_dir = door_home / ".netbbs" / "voidrunner_saves"
     save_path = save_dir / f"{player.id}.json"
 
@@ -315,4 +355,10 @@ def test_the_real_space_trading_door_plays_a_full_opening_loop_through_run_door(
     assert "keeper" in output  # the real caller handle, from the drop-file
     assert "Bought 3x Food" in output
     assert "Docking clamps engaged" in output
+    overflows = [
+        strip_ansi(line)
+        for line in output.splitlines()
+        if display_width(strip_ansi(line)) > 40
+    ]
+    assert not overflows
     assert save_path.exists()  # the door manages its own save, unmediated by NetBBS

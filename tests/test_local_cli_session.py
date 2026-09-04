@@ -16,7 +16,7 @@ import pytest
 
 from netbbs.net import local_cli
 from netbbs.net.local_cli import LocalCLISession
-from netbbs.net.session import SessionClosedError
+from netbbs.net.session import SessionClosedError, write_preformatted_line, write_prompt
 
 
 class _FakeBuffer:
@@ -96,6 +96,34 @@ def test_write_line_appends_crlf(monkeypatch):
     session = LocalCLISession()
     asyncio.run(session.write_line("hello"))
     assert fake_stdout.text == "hello\r\n"
+
+
+def test_write_line_word_wraps_to_the_negotiated_terminal_width(monkeypatch):
+    fake_stdout = _patch_stdout(monkeypatch)
+    session = LocalCLISession()
+    session.terminal_width = 12
+    asyncio.run(session.write_line("alpha beta gamma delta"))
+    assert fake_stdout.text == "alpha beta\r\ngamma delta\r\n"
+
+
+def test_write_prompt_wraps_and_reserves_two_columns_for_wide_input(monkeypatch):
+    fake_stdout = _patch_stdout(monkeypatch)
+    session = LocalCLISession()
+    session.terminal_width = 12
+    asyncio.run(write_prompt(session, "alpha beta gamma: "))
+    assert fake_stdout.text == "alpha beta\r\ngamma: "
+
+    fake_stdout.text = ""
+    asyncio.run(write_prompt(session, "12345678901"))
+    assert fake_stdout.text == "1234567890\r\n1"
+
+
+def test_preformatted_line_preserves_fitting_rows_but_bounds_long_ones(monkeypatch):
+    fake_stdout = _patch_stdout(monkeypatch)
+    session = LocalCLISession()
+    session.terminal_width = 12
+    asyncio.run(write_preformatted_line(session, "short\na deliberately long row"))
+    assert fake_stdout.text == "short\r\na\r\ndeliberately\r\nlong row\r\n"
 
 
 def test_write_raw_goes_through_the_binary_buffer(monkeypatch):

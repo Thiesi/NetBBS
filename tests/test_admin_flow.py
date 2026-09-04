@@ -42,6 +42,7 @@ from netbbs.net.session import Session
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls
 from netbbs.rendering import ACCENT_COLOR, MENU_KEY_COLOR, METADATA_COLOR, colored
+from netbbs.rendering.width import display_width
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_shutdown import _hold_registered
@@ -128,6 +129,19 @@ def _visible(text: str) -> str:
     separately (see netbbs.rendering.layout.screen_title), so a literal
     text assertion has to look past the color codes between segments."""
     return _ANSI_RE.sub("", text)
+
+
+def _normalized_visible(text: str) -> str:
+    """Collapse physical wrapping when an assertion concerns prose."""
+    return " ".join(_visible(text).split())
+
+
+def _assert_wrapped_token_visible(text: str, token: str, width: int) -> None:
+    """Every piece of an over-width identifier/path remains visible."""
+    visible = _visible(text)
+    assert all(display_width(line) <= width + 4 for line in visible.splitlines())
+    compact = re.sub(r"[\s|\u2502]", "", visible)
+    assert re.sub(r"\s", "", token) in compact
 
 
 def _openssh_line(verify_key: nacl.signing.VerifyKey) -> str:
@@ -1259,7 +1273,7 @@ def test_key_list_marks_the_primary_key_and_warns_before_removing_it(db, lane, s
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "primary key" in text
-    assert "won't provably continue this identity" in text
+    assert "won't provably continue this identity" in _normalized_visible(text)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.fingerprint == alice.fingerprint  # declined -- nothing changed
@@ -3830,8 +3844,9 @@ def test_enable_with_oversized_file_shows_friendly_error_and_leaves_flag_disable
     banner_path(db).write_bytes(b"x" * (MAX_BANNER_SIZE_BYTES + 1))
     session = FakeSession(["s", "m", "n", "w", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "over the" in _written_text(session)
-    assert "byte limit" in _written_text(session)
+    text = _normalized_visible(_written_text(session))
+    assert "over the" in text
+    assert "byte limit" in text
     assert is_welcome_banner_enabled(db) is False
 
 
@@ -3872,7 +3887,7 @@ def test_preview_screen_renders_resolved_banner_content(db, lane, sysop):
     text = _written_text(session)
     assert "MY DISTINCTIVE BANNER TEXT" in text
     assert "(showing your custom file)" in text
-    assert "generated truecolor/256-color showcase is intentionally bypassed" in text
+    assert "generated truecolor/256-color showcase is intentionally bypassed" in _normalized_visible(text)
 
 
 def test_preview_screen_when_disabled_shows_default_and_says_so(db, lane, sysop):
@@ -4053,7 +4068,7 @@ def test_from_disk_with_no_other_files_shows_an_empty_state_message(db, lane, sy
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No other .ans files found in" in text
-    assert str(tmp_path) in text
+    _assert_wrapped_token_visible(text, str(tmp_path), session.terminal_width)
 
 
 def test_from_disk_excludes_the_current_target_file_and_lists_only_others(db, lane, sysop, tmp_path):
@@ -4135,18 +4150,13 @@ def test_welcome_banner_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     session = FakeSession(["s", "m", "n", "w", "\x08", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert str(banner_path(db)) in text
+    _assert_wrapped_token_visible(text, str(banner_path(db)), session.terminal_width - 4)
     assert "gallery" in text.lower()
 
 
-def test_welcome_banner_ctrl_h_shows_a_long_path_intact_not_cut_in_half(tmp_path):
-    """Dogfood report: the boxed Ctrl-H help screen word-wraps its content
-    to fit inside the frame, and a filesystem path has no spaces to break
-    on -- a deeply-nested node directory (a real, unremarkable case, not
-    an edge case) hard-broke the path across two box lines mid-character,
-    defeating the whole point of showing it (copy-paste it intact).
-    Reproduced with an explicit long path rather than relying on
-    pytest's own tmp_path nesting happening to be long enough."""
+def test_welcome_banner_ctrl_h_keeps_every_piece_of_a_long_path_visible(tmp_path):
+    """An indivisible path wider than the help frame is split only as the
+    unavoidable fallback; every piece remains visible inside the frame."""
     from netbbs.net.welcome_banner import banner_path
 
     deep = tmp_path
@@ -4163,7 +4173,7 @@ def test_welcome_banner_ctrl_h_shows_a_long_path_intact_not_cut_in_half(tmp_path
     lane.close()
     db.close()
 
-    assert str(banner_path(db)) in text
+    _assert_wrapped_token_visible(text, str(banner_path(db)), session.terminal_width - 4)
 
 
 def test_banners_and_mastheads_hub_ctrl_h_shows_generic_help(db, lane, sysop):
@@ -4260,8 +4270,9 @@ def test_masthead_enable_with_oversized_file_shows_friendly_error_and_leaves_fla
     main_menu_banner_path(db).write_bytes(b"x" * (MAX_MASTHEAD_SIZE_BYTES + 1))
     session = FakeSession(["s", "m", "m", "m", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "over the" in _written_text(session)
-    assert "byte limit" in _written_text(session)
+    text = _normalized_visible(_written_text(session))
+    assert "over the" in text
+    assert "byte limit" in text
     assert is_main_menu_banner_enabled(db) is False
 
 
@@ -4432,7 +4443,7 @@ def test_masthead_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     session = FakeSession(["s", "m", "m", "m", "\x08", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert str(main_menu_banner_path(db)) in text
+    _assert_wrapped_token_visible(text, str(main_menu_banner_path(db)), session.terminal_width - 4)
     assert "gallery" in text.lower()
 
 
@@ -4898,7 +4909,7 @@ def test_logoff_banner_enable_with_oversized_file_shows_friendly_error(db, lane,
     logoff_banner_path(db).write_bytes(b"x" * (MAX_LOGOFF_BANNER_SIZE_BYTES + 1))
     session = FakeSession(["s", "m", "n", "l", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
-    text = _written_text(session)
+    text = _normalized_visible(_written_text(session))
     assert "over the" in text and "byte limit" in text
 
 
@@ -5008,7 +5019,7 @@ def test_logoff_banner_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     session = FakeSession(["s", "m", "n", "l", "\x08", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert str(logoff_banner_path(db)) in text
+    _assert_wrapped_token_visible(text, str(logoff_banner_path(db)), session.terminal_width - 4)
     assert "gallery" in text.lower()
 
 
@@ -5214,7 +5225,8 @@ def test_board_list_masthead_enable_with_oversized_file_shows_friendly_error(db,
     session = FakeSession(["s", "m", "m", "o", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "over the" in text and "byte limit" in text
+    normalized = _normalized_visible(text)
+    assert "over the" in normalized and "byte limit" in normalized
 
 
 def test_board_list_masthead_enable_with_valid_file_succeeds_and_is_audit_logged(db, lane, sysop):
@@ -5315,7 +5327,7 @@ def test_board_list_masthead_ctrl_h_shows_where_to_place_the_file(db, lane, syso
     session = FakeSession(["s", "m", "m", "o", "\x08", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert str(board_list_banner_path(db)) in text
+    _assert_wrapped_token_visible(text, str(board_list_banner_path(db)), session.terminal_width - 4)
     assert "gallery" in text.lower()
 
 
@@ -5477,7 +5489,9 @@ def test_chat_channel_picker_masthead_ctrl_h_shows_where_to_place_the_file(db, l
     session = FakeSession(["s", "m", "m", "c", "\x08", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert str(chat_channel_picker_banner_path(db)) in text
+    _assert_wrapped_token_visible(
+        text, str(chat_channel_picker_banner_path(db)), session.terminal_width - 4
+    )
     assert "gallery" in text.lower()
 
 
@@ -6269,7 +6283,7 @@ def test_backup_status_shows_last_backup_summary(db, lane, sysop):
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Last backup:" in text
-    assert str(destination) in text
+    _assert_wrapped_token_visible(text, str(destination), session.terminal_width)
 
 
 def test_backup_status_shows_recent_backup_history(db, lane, sysop):
@@ -7648,7 +7662,7 @@ def test_standalone_rename_says_what_happens_to_callers_inside(db, lane, sysop):
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Updated 'Lobby2'" in text
-    assert "they keep the old name until they leave and rejoin" in text
+    assert "they keep the old name until they leave and rejoin" in _normalized_visible(text)
 
 
 def test_rename_refusal_sanitizes_a_hostile_channel_name(db, lane, sysop):

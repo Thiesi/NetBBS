@@ -31,6 +31,9 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from netbbs.rendering.reflow import print_wrapped  # noqa: E402
 
 NODE_A_TOML = """
 [node]
@@ -343,9 +346,9 @@ def main() -> int:
         finally:
             stop_node(proc_a2)
 
-    print(f"OK -- {len(steps_passed)} steps passed:")
+    print_wrapped(f"OK -- {len(steps_passed)} steps passed:")
     for step in steps_passed:
-        print(f"  - {step}")
+        print_wrapped(f"  - {step}")
     return 0
 
 

@@ -58,7 +58,7 @@ from netbbs.link.reliable_nodes import effective_reliable_nodes
 from netbbs.managed_dns.state import OptIn, get_opt_in
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.managed_dns_flow import offer_managed_dns_opt_in
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import MUTED_COLOR, colored, sanitize_text, wrap_to_width
 from netbbs.storage.execution import DatabaseLane
 
@@ -164,7 +164,7 @@ async def _prompt_for_node_name(session: Session, lane: DatabaseLane) -> bool:
     await session.write_line("")
     await _write_wrapped(session, _NAME_BLURB)
     for attempt in range(2):
-        await session.write(f"Node name (up to {MAX_NODE_DISPLAY_NAME_LENGTH} characters): ")
+        await write_prompt(session, f"Node name (up to {MAX_NODE_DISPLAY_NAME_LENGTH} characters): ")
         raw = (await session.read_line()).strip()
         if not raw:
             if attempt == 0:
@@ -231,5 +231,5 @@ async def _write_wrapped(session: Session, text: str) -> None:
     physical line at a time -- the established fix for colored prose on
     narrow terminals (`netbbs.net.admin_flow._write_wrapped_subtitle`)."""
     await session.write_line("")
-    for wrapped in wrap_to_width(text, session.terminal_width, break_long_words=False):
+    for wrapped in wrap_to_width(text, session.terminal_width):
         await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))

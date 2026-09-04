@@ -37,6 +37,7 @@ from netbbs.attestation import meets_age
 from netbbs.auth.users import User
 from netbbs.communities import get_effective_min_age, get_effective_min_read_level
 from netbbs.permissions import meets_level
+from netbbs.rendering.reflow import print_wrapped
 from netbbs.storage.database import Database
 
 if TYPE_CHECKING:
@@ -570,7 +571,7 @@ def rebuild_indexes(db: Database) -> SearchIndexIntegrityReport:
 
 def _print_report(report: SearchIndexIntegrityReport) -> None:
     if report.is_clean:
-        print("Search indexes are consistent with authoritative data.")
+        print_wrapped("Search indexes are consistent with authoritative data.")
         return
     for name, drift in (
         ("post_search", report.posts),
@@ -579,7 +580,7 @@ def _print_report(report: SearchIndexIntegrityReport) -> None:
     ):
         if drift.is_clean:
             continue
-        print(
+        print_wrapped(
             f"{name}: {len(drift.missing)} missing, {len(drift.stale)} stale, "
             f"{len(drift.extra)} extra"
         )
@@ -623,11 +624,11 @@ def main(argv: list[str] | None = None) -> None:
         else:
             before = rebuild_indexes(db)
             if before.is_clean:
-                print("Search indexes were already consistent; rebuilt anyway.")
+                print_wrapped("Search indexes were already consistent; rebuilt anyway.")
             else:
-                print("Drift found before rebuild:")
+                print_wrapped("Drift found before rebuild:")
                 _print_report(before)
-            print("Rebuild complete.")
+            print_wrapped("Rebuild complete.")
     finally:
         db.close()
 

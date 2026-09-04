@@ -45,7 +45,7 @@ from typing import Awaitable, Callable, Sequence, TypeVar
 
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
 from netbbs.net.help_overlay import show_help
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_preformatted_line
 from netbbs.rendering import (
     ACCENT_COLOR,
     ERROR_COLOR,
@@ -299,9 +299,9 @@ async def pick_item(
 
     if not items and refresh is None:
         prefix = _masthead_prefix()
-        await session.write_line(
-            (f"{prefix}\r\n" if prefix else "") + colored(f"\r\n{empty_message}", fg_color=MUTED_COLOR)
-        )
+        if prefix:
+            await write_preformatted_line(session, prefix)
+        await session.write_line(colored(f"\r\n{empty_message}", fg_color=MUTED_COLOR))
         return None
 
     working_set: Sequence[T] = items
@@ -323,9 +323,9 @@ async def pick_item(
         if not working_set:
             page_index = 0
             prefix = _masthead_prefix()
-            await session.write_line(
-                (f"{prefix}\r\n" if prefix else "") + colored(f"\r\n{empty_message}", fg_color=MUTED_COLOR)
-            )
+            if prefix:
+                await write_preformatted_line(session, prefix)
+            await session.write_line(colored(f"\r\n{empty_message}", fg_color=MUTED_COLOR))
             trailer = f"{menu_key('B', 'ack')} {'—' if unicode_style else '-'} Ctrl-L: redraw"
             if refresh is not None:
                 trailer += ", Ctrl-R: refresh"
@@ -340,7 +340,7 @@ async def pick_item(
         page_items = working_set[start : start + page_size]
 
         if masthead:
-            await session.write_line(_masthead_prefix())
+            await write_preformatted_line(session, _masthead_prefix())
         await session.write_line(
             "\r\n" + screen_title(
                 title,

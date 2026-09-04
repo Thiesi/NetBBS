@@ -46,7 +46,7 @@ from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.help_overlay import show_help
 from netbbs.net.picker import pick_item
-from netbbs.net.session import Session, SessionClosedError
+from netbbs.net.session import Session, SessionClosedError, write_prompt
 from netbbs.rendering import (
     MUTED_COLOR,
     ScreenBuffer,
@@ -431,7 +431,7 @@ async def _confirm_quit(session: Session) -> str:
     other than S/D defaults to "cancel" (dropping the SysOp back into
     the editor with nothing lost), same fallback `read_line`'s
     startswith-based check used before."""
-    await session.write("\r\nUnsaved changes. [S]ave, [D]iscard, or [C]ancel? ")
+    await write_prompt(session, "\r\nUnsaved changes. [S]ave, [D]iscard, or [C]ancel? ")
     answer = (await session.read_key()).lower()
     if answer == "s":
         return "save"

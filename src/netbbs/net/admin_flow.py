@@ -280,7 +280,7 @@ from netbbs.net.resource_editor import (
     edit_resource_draft,
     text_field,
 )
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_preformatted_line, write_prompt
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import (
     NodeControls,
@@ -1807,7 +1807,7 @@ async def _draw_link_participation_screen(
         "Accepting dials these nodes as seeds after your own configured ones and, for a node that "
         "can't be reached from the internet directly, uses them as relays. It hands them no say over "
         "your content and is not a trust decision about anyone (design doc §16, issue #219).",
-        session.terminal_width, break_long_words=False,
+        session.terminal_width,
     )
     for line in _write_wrapped:
         await session.write_line(colored(line, fg_color=MUTED_COLOR))
@@ -1860,7 +1860,7 @@ async def _node_name_screen(session: Session, lane: DatabaseLane, actor: User) -
 
 async def _rename_node_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     current = await lane.run(get_node_display_name)
-    await session.write(f"New name [{current}] (blank to leave unchanged): ")
+    await write_prompt(session, f"New name [{current}] (blank to leave unchanged): ")
     new_name = (await session.read_line()).strip()
     if not new_name:
         await session.write_line("No change.")
@@ -1898,7 +1898,7 @@ async def _set_node_name_gradient_screen(
         preview = gradient_text(name, choice, truecolor=False) if choice is not None else colored(name, fg_color=header_color, bold=True)
         marker = colored(" (current)", fg_color=MUTED_COLOR) if choice == current else ""
         await session.write_line(colored(f"  {i}. {label:<8}", fg_color=LABEL_COLOR) + preview + marker)
-    await session.write(f"Choice (0-{len(choices) - 1}, blank to leave unchanged): ")
+    await write_prompt(session, f"Choice (0-{len(choices) - 1}, blank to leave unchanged): ")
 
     raw = (await session.read_line()).strip()
     if not raw:
@@ -2305,7 +2305,8 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
     for domain in domains:
         await session.write_line(f"{domain.domain_id}: {domain.display_name} (weight {domain.weight:.2f})")
     while True:
-        await session.write(
+        await write_prompt(
+            session,
             f"{action_bar([menu_key('A', 'dd/update'), menu_key('B', 'ack')], width=session.terminal_width)}: "
         )
         choice = (await session.read_key()).lower()
@@ -2408,7 +2409,8 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             f"{sanitize_text(identity.label)}: {sanitize_text(anchor.reason)}"
         )
     while True:
-        await session.write(
+        await write_prompt(
+            session,
             f"{action_bar([menu_key('A', 'dd/update'), menu_key('R', 'emove'), menu_key('B', 'ack')], width=session.terminal_width)}: "
         )
         choice = (await session.read_key()).lower()
@@ -2418,7 +2420,7 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             break
         await session.write(reject_unhandled_key(choice))
     await session.write_line("")
-    await session.write("Node name, DNS name, or technical identity: ")
+    await write_prompt(session, "Node name, DNS name, or technical identity: ")
     fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
     if fingerprint is None:
         return
@@ -2464,7 +2466,8 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             f"vouch(node={reporter.can_vouch_nodes}, user={reporter.can_vouch_users})"
         )
     while True:
-        await session.write(
+        await write_prompt(
+            session,
             f"{action_bar([menu_key('A', 'dd/update'), menu_key('R', 'emove'), menu_key('B', 'ack')], width=session.terminal_width)}: "
         )
         choice = (await session.read_key()).lower()
@@ -2474,7 +2477,7 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             break
         await session.write(reject_unhandled_key(choice))
     await session.write_line("")
-    await session.write("Reporter node name, DNS name, or technical identity: ")
+    await write_prompt(session, "Reporter node name, DNS name, or technical identity: ")
     fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
     if fingerprint is None:
         return
@@ -2484,7 +2487,7 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
         else:
             await session.write("Trust domain ID: ")
             domain_id = (await session.read_line()).strip()
-            await session.write("Scopes (dimension:category, comma separated): ")
+            await write_prompt(session, "Scopes (dimension:category, comma separated): ")
             scopes = _parse_reporter_scopes(await session.read_line())
             node_vouch = await prompt_yes_no(session, "May this reporter vouch for nodes?", default=False)
             user_vouch = await prompt_yes_no(session, "May this reporter vouch for users?", default=False)
@@ -2521,7 +2524,8 @@ async def _attestation_authorities_screen(
             colored("None. Remote attestations fail closed.", fg_color=SUCCESS_COLOR)
         )
     while True:
-        await session.write(
+        await write_prompt(
+            session,
             f"{action_bar([menu_key('A', 'dd/update'), menu_key('R', 'emove'), menu_key('B', 'ack')], width=session.terminal_width)}: "
         )
         choice = (await session.read_key()).lower()
@@ -2531,7 +2535,7 @@ async def _attestation_authorities_screen(
             break
         await session.write(reject_unhandled_key(choice))
     await session.write_line("")
-    await session.write("Authority node name, DNS name, or technical identity: ")
+    await write_prompt(session, "Authority node name, DNS name, or technical identity: ")
     fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
     if fingerprint is None:
         return
@@ -2543,7 +2547,7 @@ async def _attestation_authorities_screen(
                 actor_user_id=actor.id,
             )
         else:
-            await session.write("Attributes (age,name or both, comma separated): ")
+            await write_prompt(session, "Attributes (age,name or both, comma separated): ")
             attributes = [part.strip() for part in (await session.read_line()).split(",")]
             await session.write("Mandatory reason: ")
             reason = (await session.read_line()).strip()
@@ -2668,7 +2672,8 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
     if not exceptions:
         await session.write_line(colored("None. Two independent domains remain required.", fg_color=SUCCESS_COLOR))
     while True:
-        await session.write(
+        await write_prompt(
+            session,
             f"{action_bar([menu_key('A', 'dd/update'), menu_key('R', 'emove'), menu_key('B', 'ack')], width=session.terminal_width)}: "
         )
         choice = (await session.read_key()).lower()
@@ -2678,7 +2683,7 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
             break
         await session.write(reject_unhandled_key(choice))
     await session.write_line("")
-    await session.write("Reporter node name, DNS name, or technical identity: ")
+    await write_prompt(session, "Reporter node name, DNS name, or technical identity: ")
     fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
     if fingerprint is None:
         return
@@ -2889,7 +2894,7 @@ async def _prompt_optional_password(session: Session) -> str | None:
 async def _prompt_optional_pubkey(session: Session) -> nacl.signing.VerifyKey | None:
     if not await prompt_yes_no(session, "Add a public key?", default=False):
         return None
-    await session.write("Paste the public key (base64, or an ssh-ed25519 line): ")
+    await write_prompt(session, "Paste the public key (base64, or an ssh-ed25519 line): ")
     text = (await session.read_line()).strip()
     try:
         return parse_verify_key(text)
@@ -3561,7 +3566,7 @@ async def _user_detail_screen(
             )
         elif choice == "l":
             await session.write_line("")
-            await session.write(f"New level for {target.username!r} [{target.user_level}]: ")
+            await write_prompt(session, f"New level for {target.username!r} [{target.user_level}]: ")
             raw = (await session.read_line()).strip()
             if raw:
                 try:
@@ -3674,7 +3679,9 @@ async def _delete_user_confirm(
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write(f"Type the username {target.username!r} to confirm, or anything else to cancel: ")
+    await write_prompt(
+        session, f"Type the username {target.username!r} to confirm, or anything else to cancel: "
+    )
     confirmation = (await session.read_line()).strip()
     if confirmation != target.username:
         await session.write_line("Cancelled.")
@@ -4226,7 +4233,7 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
     header_color = await lane.run(effective_header_color_256)
 
     async def _format_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await session.write(f"New format [{draft['format']!r}] (blank to leave unchanged): ")
+        await write_prompt(session, f"New format [{draft['format']!r}] (blank to leave unchanged): ")
         new_fmt = (await session.read_line()).strip()
         if not new_fmt:
             return
@@ -5495,7 +5502,7 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
     if not await prompt_yes_no(session, f"Disconnect {_session_name(selected)!r}?", default=False):
         return
 
-    await session.write("Message to show them before disconnecting (optional): ")
+    await write_prompt(session, "Message to show them before disconnecting (optional): ")
     message_raw = (await session.read_line()).strip()
     message = message_raw or None
 
@@ -5537,7 +5544,7 @@ def _delay_seconds_field(key: str = "delay_seconds") -> Callable[[Session, Datab
     mode/message already chosen)."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await session.write(f"Delay in seconds [{draft[key]:g}]: ")
+        await write_prompt(session, f"Delay in seconds [{draft[key]:g}]: ")
         raw = (await session.read_line()).strip()
         if not raw:
             return
@@ -5975,7 +5982,7 @@ async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: Us
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write("Delay in seconds before disconnecting [60]: ")
+    await write_prompt(session, "Delay in seconds before disconnecting [60]: ")
     delay_raw = (await session.read_line()).strip()
     try:
         delay_seconds = float(delay_raw) if delay_raw else 60.0
@@ -5986,7 +5993,7 @@ async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: Us
         await session.write_line("Delay cannot be negative -- cancelled.")
         return
 
-    await session.write("Custom broadcast message (leave blank for the default): ")
+    await write_prompt(session, "Custom broadcast message (leave blank for the default): ")
     message_raw = (await session.read_line()).strip()
     message = message_raw or None
 
@@ -6080,17 +6087,11 @@ async def _write_wrapped_subtitle(
     terminal's own soft-wrap (dogfood report) let it run past the right
     edge unpredictably on anything narrower than the text itself.
 
-    `break_long_words=False`: several callers embed a filesystem path
-    (e.g. "No other .ans files found in {directory}...") -- a long path
-    is exactly the unbreakable-token case that must overflow rather
-    than get cut mid-character (dogfood report, caught by a test path
-    long enough to trigger it).
-
     `bold` (dogfood report: `[S]hutdown`/`[D]rain`'s own alert-colored
     warning lines had this exact same unwrapped-raw-`colored()` bug,
     just with `bold=True` on top) -- passed straight through to
     `colored()` for a caller that needs its wrapped lines bold too."""
-    for wrapped in wrap_to_width(text, session.terminal_width, break_long_words=False) or [text]:
+    for wrapped in wrap_to_width(text, session.terminal_width) or [text]:
         await session.write_line(colored(wrapped, fg_color=color, bold=bold))
 
 
@@ -6245,7 +6246,7 @@ async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, a
             fg_color=METADATA_COLOR,
         )
     )
-    await session.write_line(banner_text)
+    await write_preformatted_line(session, banner_text)
     if status.enabled and status.exists and (status.size_bytes or 0) <= MAX_BANNER_SIZE_BYTES:
         await session.write_line(
             colored(
@@ -6704,7 +6705,7 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
             )
         )
     else:
-        await session.write_line(masthead)
+        await write_preformatted_line(session, masthead)
         await session.write_line(
             colored("(the main menu itself renders live, unchanged, immediately below this)", fg_color=MUTED_COLOR)
         )
@@ -7093,7 +7094,7 @@ async def _preview_logoff_banner_screen(session: Session, lane: DatabaseLane) ->
     status, banner_text = await lane.run(lambda db: (logoff_banner_status(db), load_logoff_banner(db)))
     await session.write_line(colored("\r\nPreviewing logoff banner as shown on Log off:", fg_color=MUTED_COLOR))
     if banner_text:
-        await session.write_line(banner_text)
+        await write_preformatted_line(session, banner_text)
     else:
         await session.write_line(
             colored(
@@ -7398,7 +7399,7 @@ async def _preview_new_account_banner_before_screen(session: Session, lane: Data
         colored("\r\nPreviewing new-account (before) banner as shown at signup:", fg_color=MUTED_COLOR)
     )
     if banner_text:
-        await session.write_line(banner_text)
+        await write_preformatted_line(session, banner_text)
     else:
         await session.write_line(
             colored(
@@ -7705,7 +7706,7 @@ async def _preview_new_account_banner_after_screen(session: Session, lane: Datab
         colored("\r\nPreviewing new-account (after) banner as shown once signup succeeds:", fg_color=MUTED_COLOR)
     )
     if banner_text:
-        await session.write_line(banner_text)
+        await write_preformatted_line(session, banner_text)
     else:
         await session.write_line(
             colored(
@@ -8086,7 +8087,7 @@ async def _preview_board_list_masthead_screen(session: Session, lane: DatabaseLa
     status, masthead_text = await lane.run(lambda db: (board_list_banner_status(db), load_board_list_banner(db)))
     await session.write_line(colored("\r\nPreviewing board list masthead as shown above the board list:", fg_color=MUTED_COLOR))
     if masthead_text:
-        await session.write_line(masthead_text)
+        await write_preformatted_line(session, masthead_text)
     else:
         await session.write_line(
             colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
@@ -8389,7 +8390,7 @@ async def _preview_file_area_masthead_screen(session: Session, lane: DatabaseLan
     status, masthead_text = await lane.run(lambda db: (file_area_banner_status(db), load_file_area_banner(db)))
     await session.write_line(colored("\r\nPreviewing file area masthead as shown above the file-area list:", fg_color=MUTED_COLOR))
     if masthead_text:
-        await session.write_line(masthead_text)
+        await write_preformatted_line(session, masthead_text)
     else:
         await session.write_line(
             colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
@@ -8688,7 +8689,7 @@ async def _preview_chat_channel_picker_masthead_screen(session: Session, lane: D
         colored("\r\nPreviewing chat channel picker masthead as shown above the channel picker:", fg_color=MUTED_COLOR)
     )
     if masthead_text:
-        await session.write_line(masthead_text)
+        await write_preformatted_line(session, masthead_text)
     else:
         await session.write_line(
             colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
@@ -8989,7 +8990,7 @@ async def _set_theme_color_screen(session: Session, lane: DatabaseLane, actor: U
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write(f"{label} [{current_text}]: ")
+    await write_prompt(session, f"{label} [{current_text}]: ")
     raw = (await session.read_line()).strip()
     if not raw:
         await session.write_line("No change.")
@@ -9329,7 +9330,7 @@ async def _prompt_optional_int(session: Session, label: str, *, current: int | N
     accurate word in both cases, not "no gate" (a level isn't a gate
     the way age/name-requirement are)."""
     shown = current if current is not None else "none"
-    await session.write(f"{label} [{shown}] (blank = keep, 'none' = clear): ")
+    await write_prompt(session, f"{label} [{shown}] (blank = keep, 'none' = clear): ")
     raw = (await session.read_line()).strip()
     if not raw:
         return current, True
@@ -9349,7 +9350,7 @@ async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int
     itself already be `None`, meaning no gate), `'none'` clears any
     existing gate, otherwise a plain integer sets it."""
     label = current if current is not None else "none"
-    await session.write(f"Minimum age [{label}] (blank = keep, 'none' = no gate): ")
+    await write_prompt(session, f"Minimum age [{label}] (blank = keep, 'none' = no gate): ")
     raw = (await session.read_line()).strip()
     if not raw:
         return current, True
@@ -9544,7 +9545,7 @@ def _int_field(key: str, label: str) -> Callable[[Session, DatabaseLane, dict], 
     int`, is the right underlying primitive here)."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await session.write(f"{label} [{draft.get(key)}]: ")
+        await write_prompt(session, f"{label} [{draft.get(key)}]: ")
         value = await _read_int(session, default=draft.get(key))
         if value is not None:
             draft[key] = value
@@ -10015,7 +10016,10 @@ async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: 
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write(f"Type the Community name {community.name!r} to confirm, or anything else to cancel: ")
+    await write_prompt(
+        session,
+        f"Type the Community name {community.name!r} to confirm, or anything else to cancel: ",
+    )
     confirmation = (await session.read_line()).strip()
     if confirmation != community.name:
         await session.write_line("Cancelled.")
@@ -10937,7 +10941,10 @@ async def _delete_board_screen(session: Session, lane: DatabaseLane, actor: User
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write(f"Type the message board name {board.name!r} to confirm, or anything else to cancel: ")
+    await write_prompt(
+        session,
+        f"Type the message board name {board.name!r} to confirm, or anything else to cancel: ",
+    )
     confirmation = (await session.read_line()).strip()
     if confirmation != board.name:
         await session.write_line("Cancelled.")
@@ -11627,7 +11634,9 @@ async def _delete_area_screen(session: Session, lane: DatabaseLane, actor: User,
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write(f"Type the file area name {area.name!r} to confirm, or anything else to cancel: ")
+    await write_prompt(
+        session, f"Type the file area name {area.name!r} to confirm, or anything else to cancel: "
+    )
     confirmation = (await session.read_line()).strip()
     if confirmation != area.name:
         await session.write_line("Cancelled.")
@@ -11978,7 +11987,8 @@ async def _resolve_door_name_collision(
     await session.write_line(
         colored(f"\r\n{default_name!r} is already registered as a door.", fg_color=MUTED_COLOR)
     )
-    await session.write(
+    await write_prompt(
+        session,
         f"{menu_key('N', 'ew instance under a different name')}  "
         f"{menu_key('E', 'dit the existing one')}  {menu_key('C', 'ancel')}: "
     )
@@ -11989,7 +11999,7 @@ async def _resolve_door_name_collision(
         return None
     if choice != "n":
         return None
-    await session.write("New name for this instance (blank to cancel): ")
+    await write_prompt(session, "New name for this instance (blank to cancel): ")
     new_name = sanitize_text((await session.read_line()).strip())
     return new_name or None
 
@@ -12272,7 +12282,9 @@ async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User,
     await session.write_line(
         colored("\r\nThis permanently removes the door from the catalogue. This cannot be undone.", fg_color=MUTED_COLOR)
     )
-    await session.write(f"Type the door name {door.name!r} to confirm, or anything else to cancel: ")
+    await write_prompt(
+        session, f"Type the door name {door.name!r} to confirm, or anything else to cancel: "
+    )
     confirmation = (await session.read_line()).strip()
     if confirmation != door.name:
         await session.write_line("Cancelled.")
@@ -12760,7 +12772,7 @@ async def _mrc_room_screen(
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write(f"MRC room [{shown}] (blank = keep, - = unbridge): ")
+    await write_prompt(session, f"MRC room [{shown}] (blank = keep, - = unbridge): ")
     raw = (await session.read_line()).strip()
     if not raw:
         return current
@@ -13029,7 +13041,10 @@ async def _delete_channel_screen(session: Session, lane: DatabaseLane, actor: Us
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write(f"Type the chat channel name {channel.name!r} to confirm, or anything else to cancel: ")
+    await write_prompt(
+        session,
+        f"Type the chat channel name {channel.name!r} to confirm, or anything else to cancel: ",
+    )
     confirmation = (await session.read_line()).strip()
     if confirmation != channel.name:
         await session.write_line("Cancelled.")
@@ -13241,7 +13256,10 @@ async def _list_categories_screen(
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write(f"Type the category name {selected.name!r} to confirm deletion, or anything else to cancel: ")
+    await write_prompt(
+        session,
+        f"Type the category name {selected.name!r} to confirm deletion, or anything else to cancel: ",
+    )
     confirmation = (await session.read_line()).strip()
     if confirmation != selected.name:
         await session.write_line("Cancelled.")
@@ -13283,7 +13301,7 @@ async def _pick_moderator_scope(
         menu_key("z", "", prefix="blanket across all channels "),
     ]
     await session.write_line("Scope:")
-    await session.write(f"{action_bar(scope_options, width=session.terminal_width)}: ")
+    await write_prompt(session, f"{action_bar(scope_options, width=session.terminal_width)}: ")
     scope_key = (await session.read_key()).lower()
     await session.write_line("")
     accent_color = await lane.run(effective_accent_color_256)
@@ -13389,7 +13407,8 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
 
     if object_type == "channel":
         await session.write_line("Preset:")
-        await session.write(
+        await write_prompt(
+            session,
             f"{action_bar([menu_key('F', 'ull moderator (edit+moderate+manage members)'), menu_key('M', 'oderator only')], width=session.terminal_width)}: "
         )
         preset_key = (await session.read_key()).lower()
@@ -13405,7 +13424,8 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             return
     else:
         await session.write_line("Preset:")
-        await session.write(
+        await write_prompt(
+            session,
             f"{action_bar([menu_key('F', 'ull moderator (edit+delete+approve)'), menu_key('A', 'pprover only')], width=session.terminal_width)}: "
         )
         preset_key = (await session.read_key()).lower()

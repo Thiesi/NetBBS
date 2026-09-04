@@ -79,6 +79,7 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 from netbbs import __version__
@@ -91,6 +92,7 @@ from netbbs.managed_dns.credential import (
     transition_credential_path_for as _managed_dns_transition_credential_path_for,
 )
 from netbbs.operational_history import record_operational_run
+from netbbs.rendering.reflow import print_wrapped, terminal_wrapped
 from netbbs.selfupdate import snapshot_database
 from netbbs.storage.database import Database
 from netbbs.storage.migrations import MIGRATIONS
@@ -791,16 +793,16 @@ def main(argv: list[str] | None = None) -> None:
         try:
             destination = create_backup(db_path=args.db, identity_dir=args.identity_dir, destination=args.destination)
         except BackupError as exc:
-            raise SystemExit(f"backup failed: {exc}") from exc
-        print(f"Backup created at {destination}")
+            raise SystemExit(terminal_wrapped(f"backup failed: {exc}", stream=sys.stderr)) from exc
+        print_wrapped(f"Backup created at {destination}")
     else:
         try:
             rollback_dir = restore_backup(source=args.source, db_path=args.db, identity_dir=args.identity_dir)
         except BackupError as exc:
-            raise SystemExit(f"restore failed: {exc}") from exc
-        print(f"Restored {args.source} into {args.db} / {args.identity_dir}")
+            raise SystemExit(terminal_wrapped(f"restore failed: {exc}", stream=sys.stderr)) from exc
+        print_wrapped(f"Restored {args.source} into {args.db} / {args.identity_dir}")
         if rollback_dir is not None:
-            print(
+            print_wrapped(
                 f"Previous generation preserved at {rollback_dir} -- not deleted automatically, "
                 "remove it yourself once you're satisfied the restore is good."
             )

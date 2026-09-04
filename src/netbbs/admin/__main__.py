@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
 import nacl.signing
@@ -51,7 +52,8 @@ from netbbs.net.local_cli import LocalCLISession
 from netbbs.net.local_terminal import raw_terminal
 from netbbs.net.node_theme import effective_accent_color_256
 from netbbs.net.picker import pick_item
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_prompt
+from netbbs.rendering.reflow import terminal_wrapped
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -86,7 +88,12 @@ async def _resolve_actor(session: Session, lane: DatabaseLane, as_username: str 
     if as_username is not None:
         match = next((u for u in sysops if u.username == as_username), None)
         if match is None:
-            raise SystemExit(f"--as {as_username!r} is not an active SysOp-level account")
+            raise SystemExit(
+                terminal_wrapped(
+                    f"--as {as_username!r} is not an active SysOp-level account",
+                    stream=sys.stderr,
+                )
+            )
         return match
 
     if len(sysops) == 1:
@@ -101,7 +108,7 @@ async def _resolve_actor(session: Session, lane: DatabaseLane, as_username: str 
         accent_color=await lane.run(effective_accent_color_256),
     )
     if selected is None:
-        raise SystemExit("no SysOp selected -- exiting")
+        raise SystemExit(terminal_wrapped("no SysOp selected -- exiting", stream=sys.stderr))
     return selected
 
 
@@ -165,7 +172,7 @@ async def _prompt_password(session: Session) -> str | None:
 
 
 async def _prompt_pubkey(session: Session) -> nacl.signing.VerifyKey | None:
-    await session.write("Public key, base64 or ssh-ed25519 line (leave blank to skip): ")
+    await write_prompt(session, "Public key, base64 or ssh-ed25519 line (leave blank to skip): ")
     text = (await session.read_line()).strip()
     if not text:
         return None
@@ -198,10 +205,13 @@ def main(argv: list[str] | None = None) -> None:
         # pointing --db at a database file that doesn't match this
         # build (e.g. one a newer or older version last migrated).
         raise SystemExit(
-            f"could not open the database at {args.db}: {exc} -- this usually means "
-            "the database file doesn't match this build of NetBBS (e.g. it was last migrated "
-            "by a newer or older version). If you're testing multiple NetBBS versions side by "
-            "side, make sure each one is paired with its own separate database file."
+            terminal_wrapped(
+                f"could not open the database at {args.db}: {exc} -- this usually means "
+                "the database file doesn't match this build of NetBBS (e.g. it was last migrated "
+                "by a newer or older version). If you're testing multiple NetBBS versions side by "
+                "side, make sure each one is paired with its own separate database file.",
+                stream=sys.stderr,
+            )
         ) from exc
 
     try:

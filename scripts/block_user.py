@@ -22,12 +22,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from netbbs.auth.users import get_user_by_username  # noqa: E402
 from netbbs.moderation import BlocklistError, block_user  # noqa: E402
+from netbbs.rendering.reflow import print_wrapped  # noqa: E402
 from netbbs.storage.database import Database  # noqa: E402
 
 
 def main() -> None:
     if len(sys.argv) < 3:
-        print(__doc__)
+        print_wrapped(__doc__ or "")
         sys.exit(1)
 
     db_path = Path(sys.argv[1])
@@ -46,11 +47,11 @@ def main() -> None:
     try:
         entry = block_user(db, target, blocked_by=blocker, reason=reason)
     except BlocklistError as exc:
-        print(f"Error: {exc}")
+        print_wrapped(f"Error: {exc}")
         sys.exit(1)
 
     key = entry.fingerprint or f"local user id {entry.local_user_id}"
-    print(f"Blocked {username!r} ({key}) in {db_path}")
+    print_wrapped(f"Blocked {username!r} ({key}) in {db_path}")
 
 
 if __name__ == "__main__":

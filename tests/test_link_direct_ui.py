@@ -32,6 +32,7 @@ from netbbs.net.link_direct import (
     resolve_node_fingerprint,
     send_live_direct_message,
 )
+from netbbs.rendering.ansi import strip_ansi
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import utc_now_iso
@@ -152,7 +153,7 @@ def test_send_refuses_reason_free_when_unreachable(tmp_path):
     rig.direct.unreachable = True
     ok, text = _send(rig, f"bob@{rig.peer_identity.fingerprint[:12]}", "hi")
     assert not ok
-    assert UNREACHABLE_NOTE in text
+    assert " ".join(UNREACHABLE_NOTE.split()) in " ".join(strip_ansi(text).split())
     assert "no_relay" not in text
     assert "Link mail" in text
     rig.close()

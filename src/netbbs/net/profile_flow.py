@@ -69,7 +69,7 @@ from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
 from netbbs.net.redraw_preference import redraw_in_place_enabled, set_redraw_in_place_enabled
 from netbbs.net.resource_editor import Draft, FieldSpec, edit_resource_draft, live_choice_field
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_prompt
 from netbbs.net.sort_ui import SORT_MODE_LABELS
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.unicode_style_preference import set_unicode_style_enabled, unicode_style_enabled
@@ -866,7 +866,9 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
 
     async def _display_name_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         current = draft["display_name"]
-        await session.write(f"\r\nDisplay name [{current or '(not set)'}] -- new value (blank to keep): ")
+        await write_prompt(
+            session, f"\r\nDisplay name [{current or '(not set)'}] -- new value (blank to keep): "
+        )
         new_value = (await session.read_line()).strip()
         if new_value:
             try:
@@ -882,7 +884,9 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
 
     async def _location_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         current = draft["location"]
-        await session.write(f"\r\nLocation [{current or '(not set)'}] -- new value (blank to keep): ")
+        await write_prompt(
+            session, f"\r\nLocation [{current or '(not set)'}] -- new value (blank to keep): "
+        )
         new_value = (await session.read_line()).strip()
         if new_value:
             try:
@@ -898,7 +902,8 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
 
     async def _birthdate_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         current = draft["birthdate"]
-        await session.write(
+        await write_prompt(
+            session,
             f"\r\nBirthdate [{current.isoformat() if current else '(not set)'}] "
             "-- new value as YYYY-MM-DD (blank to keep): "
         )

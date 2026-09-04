@@ -150,8 +150,9 @@ def test_join_announces_caller_and_explains_the_bridge(db, lane, hub, presence, 
         try:
             session, _ = await _run(lane, hub, presence, channel, alice, ["/quit"], mrc_bridge=rig.bridge)
             text = _text(session)
-            assert "bridged to MRC room #lobby on 127.0.0.1" in text
-            assert "your handle 'alice' is visible" in text
+            normalized = " ".join(text.split())
+            assert "bridged to MRC room #lobby on 127.0.0.1" in normalized
+            assert "your handle 'alice' is visible" in normalized
             newroom = await rig.fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
             assert newroom.from_user == "alice"
             await rig.fake.wait_for(lambda p: p.body == "LOGOFF" and p.from_user == "alice")

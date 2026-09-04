@@ -21,12 +21,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from netbbs.auth.users import get_user_by_username  # noqa: E402
 from netbbs.files import create_file_area  # noqa: E402
 from netbbs.files.categories import FileAreaCategoryError, get_category_by_name  # noqa: E402
+from netbbs.rendering.reflow import print_wrapped  # noqa: E402
 from netbbs.storage.database import Database  # noqa: E402
 
 
 def main() -> None:
     if len(sys.argv) < 3:
-        print(__doc__)
+        print_wrapped(__doc__ or "")
         sys.exit(1)
 
     db_path = Path(sys.argv[1])
@@ -39,7 +40,7 @@ def main() -> None:
 
     row = db.connection.execute("SELECT username FROM users LIMIT 1").fetchone()
     if row is None:
-        print("No users exist yet — run scripts/create_test_user.py first.")
+        print_wrapped("No users exist yet — run scripts/create_test_user.py first.")
         sys.exit(1)
     creator = get_user_by_username(db, row["username"])
 
@@ -48,7 +49,7 @@ def main() -> None:
         try:
             category_id = get_category_by_name(db, category_name).id
         except FileAreaCategoryError as exc:
-            print(f"Error: {exc}")
+            print_wrapped(f"Error: {exc}")
             sys.exit(1)
 
     area = create_file_area(
@@ -60,7 +61,10 @@ def main() -> None:
         creator=creator,
     )
     pinned_note = " (pinned)" if area.pinned else ""
-    print(f"Created file area {area.name!r} (area_id {area.area_id[:16]}...){pinned_note} in {db_path}")
+    print_wrapped(
+        f"Created file area {area.name!r} (area_id {area.area_id[:16]}...)"
+        f"{pinned_note} in {db_path}"
+    )
 
 
 if __name__ == "__main__":

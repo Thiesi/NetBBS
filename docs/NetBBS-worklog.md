@@ -842,6 +842,34 @@ after an embedded reset.
 ANSI art is trusted SysOp content and intentionally bypasses ordinary
 untrusted-text sanitization. Keep that trust distinction explicit.
 
+### Terminal prose wrapping
+
+Every ordinary terminal line must pass through `Session.write_line`, whose
+display-column-aware safety net wraps styled ANSI text without splitting escape
+sequences. Interactive prompts use `netbbs.net.session.write_prompt`; it wraps
+without a final newline and reserves one column for the first input character.
+Wrap points consume their whitespace so neither the preceding line ends in a
+blank nor the continuation begins with one. Screen-specific renderers should
+still wrap sanitized plain text before adding color when practical, but must
+never opt into `break_long_words=False` for terminal output because that turns
+an over-width token into invisible overflow. An indivisible token wider than
+the available row is hard-split only as the unavoidable bounded fallback; all
+ordinary prose wraps at word boundaries. `write_preformatted_line` is reserved
+strictly for trusted ANSI banners/mastheads: it retains authored rows that fit
+but still bounds over-width rows, and is never used for product copy. Tabs must
+be normalized before width measurement, while ANSI horizontal cursor controls
+must update a bounded cursor model; treating either as zero-width can still
+produce invisible overflow. Preserve the original cursor controls so absolute
+positioning never blanks cells already drawn on that row. Absolute placement,
+save/restore, and bare carriage returns update column accounting, while numeric
+parameters are clamped without per-column iteration so a tiny ANSI file cannot
+create unbounded CPU work. Prompt output reserves two columns because one input
+character may itself occupy two. CLI tools use `print_wrapped`, and exception
+messages sent to stderr measure stderr rather than stdout. Bundled doors remain
+standalone but apply the same ANSI-aware bound in their local
+`out_line`/`out_prompt` boundary, including combining-mark width and reapplying
+active content styling after colored borders on wrapped box continuations.
+
 Shared semantic roles (`LABEL_COLOR`, `VALUE_COLOR`, `METADATA_COLOR`,
 `SUCCESS_COLOR`, and `ERROR_COLOR`) are the presentation contract for mature
 line-oriented surfaces. Caller and SysOp Who use the same picker palette;

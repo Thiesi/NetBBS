@@ -17,12 +17,335 @@ underlying wrapper swap).
 
 from __future__ import annotations
 
-from typing import Callable, Sequence
+import os
+import sys
+from typing import Callable, Sequence, TextIO
 
-from netbbs.rendering.ansi import colored
-from netbbs.rendering.width import cut_to_width, display_width, truncate_to_width, wrap_to_width
+from netbbs.rendering.ansi import ANSI_ESCAPE_RE, colored
+from netbbs.rendering.width import (
+    char_width,
+    cut_to_width,
+    display_width,
+    truncate_to_width,
+    wrap_to_width,
+)
 
 DEFAULT_WIDTH = 80
+
+
+def terminal_wrapped(
+    text: str,
+    *,
+    width: int | None = None,
+    stream: TextIO | None = None,
+) -> str:
+    """Return CLI prose wrapped for its destination stream using LF rows."""
+    if width is None:
+        width = _terminal_columns(stream or sys.stdout)
+    return wrap_terminal_text(text, width=max(1, width)).replace("\r\n", "\n")
+
+
+def print_wrapped(
+    text: str,
+    *,
+    width: int | None = None,
+    file: TextIO | None = None,
+) -> None:
+    """Print CLI prose within the current terminal's display width."""
+    destination = file or sys.stdout
+    print(terminal_wrapped(text, width=width, stream=destination), file=destination)
+
+
+def _terminal_columns(stream: TextIO) -> int:
+    """Measure the stream which will actually receive the text."""
+    try:
+        configured = int(os.environ.get("COLUMNS", ""))
+    except ValueError:
+        configured = 0
+    if configured > 0:
+        return configured
+    try:
+        return os.get_terminal_size(stream.fileno()).columns
+    except (AttributeError, OSError, ValueError):
+        return DEFAULT_WIDTH
+
+
+def wrap_terminal_text(text: str, width: int) -> str:
+    """Wrap terminal text at display-column-aware word boundaries.
+
+    Unlike :func:`reflow`, this accepts text after trusted ANSI styling has
+    been applied.  Styling and cursor controls remain intact.  Cursor movement
+    is modeled while measuring each row, including save/restore and bare
+    carriage-return resets, so it cannot disguise an overflow.  Existing
+    logical line breaks are preserved (and normalized to terminal CRLF); only
+    an over-width logical line gains additional breaks.
+
+    Whitespace chosen as a wrap point is removed instead of becoming a
+    trailing space on the old line or a leading space on the continuation.
+    A token with no usable whitespace boundary is split only as the unavoidable
+    fallback needed to keep every physical line inside ``width``.  In normal
+    prose that fallback is reserved for identifiers, URLs, and unspaced CJK;
+    authored words must fit the supported 40-column minimum.
+    """
+    if width < 1:
+        raise ValueError(f"width must be >= 1, got {width}")
+
+    logical_lines = text.replace("\r\n", "\n").split("\n")
+    return "\r\n".join(
+        physical
+        for logical in logical_lines
+        for physical in _wrap_terminal_line(logical, width)
+    )
+
+
+def _wrap_terminal_line(text: str, width: int) -> list[str]:
+    """Wrap one logical line while retaining safe ANSI behavior."""
+    # raw bytes, visible character, display width, optional cursor operation
+    atoms: list[tuple[str, str, int, tuple[str, int] | None]] = []
+    pending_escape = ""
+    leading_whitespace = True
+    leading_width = 0
+
+    def append_character(ch: str) -> None:
+        nonlocal pending_escape, leading_whitespace, leading_width
+        # Tabs have terminal-column semantics which depend on the current tab
+        # stops.  Terminal prose treats whitespace as a word boundary, so one
+        # predictable blank preserves that meaning without under-counting it.
+        if ch == "\t":
+            ch = " "
+        width_here = char_width(ch)
+        if leading_whitespace and ch.isspace():
+            # Indentation must leave room for visible content.  Otherwise a
+            # cursor-forward sequence or a very deep indent can manufacture
+            # blank physical rows before the first token.
+            if leading_width + width_here > max(0, width - 1):
+                return
+            leading_width += width_here
+        elif not ch.isspace():
+            leading_whitespace = False
+        atoms.append((pending_escape + ch, ch, width_here, None))
+        pending_escape = ""
+
+    def append_control(raw: str, effect: tuple[str, int]) -> None:
+        nonlocal pending_escape, leading_whitespace, leading_width
+        atoms.append((pending_escape + raw, "", 0, effect))
+        pending_escape = ""
+        if effect[0] in ("absolute", "restore"):
+            leading_whitespace = True
+            leading_width = 0
+
+    def append_text(fragment: str) -> None:
+        for ch in fragment:
+            if ch == "\r":
+                append_control(ch, ("absolute", 0))
+            else:
+                append_character(ch)
+
+    position = 0
+    for match in ANSI_ESCAPE_RE.finditer(text):
+        append_text(text[position : match.start()])
+        control = match.group(0)
+        effect = _cursor_effect(control, width)
+        if effect is not None:
+            append_control(control, effect)
+        else:
+            pending_escape += control
+        position = match.end()
+    append_text(text[position:])
+
+    if not atoms:
+        return [pending_escape]
+
+    lines: list[str] = []
+    start = 0
+    saved_column = 0
+    while start < len(atoms):
+        column = 0
+        candidate_saved = saved_column
+        overflow = len(atoms)
+        segment_start = start
+        for index in range(start, len(atoms)):
+            effect = atoms[index][3]
+            if effect is not None:
+                column, candidate_saved = _apply_cursor_effect(
+                    effect,
+                    column=column,
+                    saved_column=candidate_saved,
+                    width=width,
+                )
+            if effect is not None and effect[0] in ("absolute", "restore"):
+                segment_start = index + 1
+            next_width = column + atoms[index][2]
+            if next_width > width:
+                overflow = index
+                break
+            column = next_width
+
+        if overflow == len(atoms):
+            lines.append("".join(raw for raw, _, _, _ in atoms[start:]) + pending_escape)
+            pending_escape = ""
+            break
+
+        # A space immediately after a full-width word is itself the ideal
+        # boundary even though it did not fit in the measured prefix.
+        whitespace = overflow if atoms[overflow][1].isspace() else None
+        if whitespace is None:
+            for index in range(overflow - 1, segment_start - 1, -1):
+                if atoms[index][1].isspace():
+                    whitespace = index
+                    break
+
+        whitespace_start = whitespace
+        if whitespace is not None:
+            while whitespace_start > segment_start and atoms[whitespace_start - 1][1].isspace():
+                whitespace_start -= 1
+            # Leading indentation is content, not a boundary before content.
+            # Breaking there would emit a spurious empty physical row.
+            if whitespace_start == segment_start:
+                whitespace = None
+
+        if whitespace is None:
+            # One indivisible token is wider than the terminal.  There is no
+            # word boundary to use, so bound the output rather than allowing
+            # the terminal to hide the remainder off its right edge.
+            end = max(start + 1, overflow)
+            lines.append("".join(raw for raw, _, _, _ in atoms[start:end]))
+            saved_column = _saved_column_after(
+                atoms,
+                start=start,
+                end=end,
+                saved_column=saved_column,
+                width=width,
+            )
+            start = end
+            continue
+
+        whitespace_end = whitespace
+        while whitespace_end < len(atoms) and atoms[whitespace_end][1].isspace():
+            whitespace_end += 1
+
+        # Keep styling codes attached to discarded boundary whitespace.  They
+        # take effect at the end of this physical row and carry across CRLF,
+        # preserving the style intended for the continuation without leaving
+        # a visible blank at either edge.
+        boundary_escapes = "".join(
+            raw[: -len(ch)] if ch else raw
+            for raw, ch, _, _ in atoms[whitespace_start:whitespace_end]
+        )
+        lines.append(
+            "".join(raw for raw, _, _, _ in atoms[start:whitespace_start])
+            + boundary_escapes
+        )
+        saved_column = _saved_column_after(
+            atoms,
+            start=start,
+            end=whitespace_end,
+            saved_column=saved_column,
+            width=width,
+        )
+
+        start = whitespace_end
+
+    if pending_escape:
+        lines[-1] += pending_escape
+    return lines
+
+
+def _cursor_effect(sequence: str, width: int) -> tuple[str, int] | None:
+    """Return a bounded horizontal cursor operation for one ANSI control."""
+    if sequence == "\x1b7":
+        return "save", 0
+    if sequence == "\x1b8":
+        return "restore", 0
+    if not sequence.startswith("\x1b["):
+        return None
+    final = sequence[-1]
+    raw_params = sequence[2:-1]
+    if final in ("C", "a"):
+        return "forward", _ansi_parameter(
+            raw_params, 0, default=1, maximum=width
+        )
+    if final == "D":
+        return "back", _ansi_parameter(
+            raw_params, 0, default=1, maximum=width
+        )
+    if final in ("G", "`"):
+        column = _ansi_parameter(raw_params, 0, default=1, maximum=width)
+        return "absolute", column - 1
+    if final in ("H", "f"):
+        column = _ansi_parameter(raw_params, 1, default=1, maximum=width)
+        return "absolute", column - 1
+    if final in ("E", "F"):
+        return "absolute", 0
+    if final == "I":
+        tabs = _ansi_parameter(raw_params, 0, default=1, maximum=width)
+        return "forward", min(width, tabs * 8)
+    if final == "Z":
+        tabs = _ansi_parameter(raw_params, 0, default=1, maximum=width)
+        return "back", min(width, tabs * 8)
+    if final == "s" and not raw_params:
+        return "save", 0
+    if final == "u" and not raw_params:
+        return "restore", 0
+    return None
+
+
+def _ansi_parameter(
+    raw: str,
+    index: int,
+    *,
+    default: int,
+    maximum: int,
+) -> int:
+    parts = raw.split(";") if raw else []
+    if index >= len(parts) or not parts[index]:
+        return default
+    try:
+        return min(maximum, max(1, int(parts[index])))
+    except ValueError:
+        return default
+
+
+def _apply_cursor_effect(
+    effect: tuple[str, int],
+    *,
+    column: int,
+    saved_column: int,
+    width: int,
+) -> tuple[int, int]:
+    operation, value = effect
+    if operation == "forward":
+        column = min(width - 1, column + value)
+    elif operation == "back":
+        column = max(0, column - value)
+    elif operation == "absolute":
+        column = min(width - 1, value)
+    elif operation == "save":
+        saved_column = column
+    elif operation == "restore":
+        column = min(width - 1, saved_column)
+    return column, saved_column
+
+
+def _saved_column_after(
+    atoms: list[tuple[str, str, int, tuple[str, int] | None]],
+    *,
+    start: int,
+    end: int,
+    saved_column: int,
+    width: int,
+) -> int:
+    column = 0
+    for _, _, char_columns, effect in atoms[start:end]:
+        if effect is not None:
+            column, saved_column = _apply_cursor_effect(
+                effect,
+                column=column,
+                saved_column=saved_column,
+                width=width,
+            )
+        column = min(width, column + char_columns)
+    return saved_column
 
 
 def reflow(text: str, width: int = DEFAULT_WIDTH) -> str:

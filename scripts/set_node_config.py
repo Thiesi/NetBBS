@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from netbbs.config import set_config  # noqa: E402
+from netbbs.rendering.reflow import print_wrapped  # noqa: E402
 from netbbs.storage.database import Database  # noqa: E402
 from netbbs.timeutil import (  # noqa: E402
     DISPLAY_FORMAT_CONFIG_KEY,
@@ -35,7 +36,7 @@ from netbbs.timeutil import (  # noqa: E402
 
 def main() -> None:
     if len(sys.argv) != 4:
-        print(__doc__)
+        print_wrapped(__doc__ or "")
         sys.exit(1)
 
     db_path = Path(sys.argv[1])
@@ -56,10 +57,10 @@ def main() -> None:
         else:
             set_config(db, key, value)
     except ValueError as exc:
-        print(f"Error: {exc}")
+        print_wrapped(f"Error: {exc}")
         sys.exit(1)
 
-    print(f"Set {key!r} = {value!r} in {db_path}")
+    print_wrapped(f"Set {key!r} = {value!r} in {db_path}")
 
 
 if __name__ == "__main__":
