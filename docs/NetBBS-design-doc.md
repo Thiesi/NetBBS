@@ -263,9 +263,11 @@ resolves each node-wide RGB override (downgraded to the nearest 256-color
 index for a session without truecolor support) in place of the matching bare
 `theme.py` constant everywhere a screen renders one, including every shared
 rendering primitive (`screen_title`, `double_frame`, `empty_state`) and every
-screen built on top of them. A SysOp sets or clears each color from
-Settings > [C]olors, which previews the candidate RGB against real sample
-text at both truecolor and 256-color depth before asking for confirmation.
+screen built on top of them. A SysOp sets or clears the three colors on one
+draft editor under Settings > [C]olors, which shows every slot's real sample
+text at both truecolor and 256-color depth for the values currently in the
+draft and applies them together on Save (issue #282 replaced the earlier
+per-slot preview-then-confirm screens and their separate preview).
 This is deliberately narrow: every *semantic* color in `netbbs.rendering.
 theme` (errors, warnings, success, privilege badges, operational alerts,
 verified-identity badges) stays fixed everywhere, never SysOp-configurable --

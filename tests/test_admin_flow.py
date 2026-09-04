@@ -4057,6 +4057,25 @@ def test_gallery_declining_a_preset_returns_to_the_same_gallery_to_try_another(d
     assert banner_path(db).read_bytes() == load_welcome_banner_preset(WELCOME_BANNER_PRESETS[2])
 
 
+def test_gallery_apply_choice_drains_a_trailing_enter(db, lane, sysop):
+    """Codex review on #291: "A<Enter>" must not carry the Enter into the
+    success pause (or, on Back, into the picker)."""
+    from netbbs.net.welcome_banner import is_welcome_banner_enabled
+
+    class DrainingSession(FakeSession):
+        def __init__(self, inputs):
+            super().__init__(inputs)
+            self.drains = 0
+
+        async def discard_buffered_enter(self) -> None:
+            self.drains += 1
+
+    session = DrainingSession(["s", "m", "n", "w", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    assert session.drains >= 1
+    assert is_welcome_banner_enabled(db) is True
+
+
 # -- welcome-banner filesystem picker (issue #170) --------------------------
 
 
@@ -5507,6 +5526,8 @@ def test_theme_colors_menu_shows_default_status_for_all_three_slots(db, lane, sy
     _run(session, lane, sysop)
     text = _visible(_written_text(session))  # the editor colors each field label separately
     assert "Accent: " in text and "Header: " in text and "Clock: " in text
+    # Issue #206's condensed status line stays on this nested screen.
+    assert "Backup: " in text and "Update: " in text
     assert text.count("default") >= 3
 
 

@@ -1909,7 +1909,9 @@ async def _set_node_name_gradient_screen(
         if raw == "b":
             await session.write_line("")
             return
-        if raw.isdigit() and int(raw) < len(choices):
+        # ASCII digits only: str.isdigit() is also true for characters like
+        # "²" or "①", for which int() then raises (Codex review on #291).
+        if len(raw) == 1 and raw in "0123456789" and int(raw) < len(choices):
             await session.write_line("")
             chosen = choices[int(raw)]
             break
@@ -6530,6 +6532,13 @@ async def _preview_apply_choice(session: Session, label: str) -> bool:
     while True:
         choice = (await session.read_key()).lower()
         if choice in ("a", "b"):
+            # A caller who habitually types "A<Enter>" must not carry that
+            # Enter into the success pause or back into the picker (where
+            # Enter activates the highlighted entry) -- the same drain the
+            # yes/no primitive this replaces performs (Codex review on #291).
+            discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
+            if discard_buffered_enter is not None:
+                await discard_buffered_enter()
             await session.write_line("")
             return choice == "a"
         await session.write(reject_unhandled_key(choice))
@@ -9209,6 +9218,13 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    # Issue #206's condensed status line on every nested console screen
+    # without a full panel of its own -- kept above the live preview.
+    status_line = await _load_condensed_status_line(
+        lane, unicode_style=unicode_style, terminal_width=session.terminal_width
+    )
+    newline = chr(13) + chr(10)
     await edit_resource_draft(
         session, lane,
         title="Node colors",
@@ -9216,8 +9232,8 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
-        preamble=_theme_preview_preamble,
-        unicode_style=await lane.run(unicode_style_enabled, actor),
+        preamble=lambda d: status_line + newline + _theme_preview_preamble(d),
+        unicode_style=unicode_style,
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
         accent_color=await lane.run(effective_accent_color_256),
         header_color=await lane.run(effective_header_color_256),
