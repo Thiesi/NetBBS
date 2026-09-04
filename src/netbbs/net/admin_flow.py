@@ -3849,7 +3849,6 @@ async def _draw_update_status(
     else:
         await session.write_line(colored("No check has been run on this node yet.", fg_color=MUTED_COLOR))
 
-
     await session.write_line(
         "\r\n"
         + action_bar(
@@ -3862,7 +3861,7 @@ async def _draw_update_status(
             width=session.terminal_width,
         )
     )
-    await session.write("Choice: ")
+    await write_prompt(session, "Choice: ")
     return auto_enabled, masked_token, unicode_style
 
 
@@ -3923,7 +3922,7 @@ async def _github_token_prompt(
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write(colored("Token: ", fg_color=LABEL_COLOR, bold=True))
+    await write_prompt(session, colored("Token: ", fg_color=LABEL_COLOR, bold=True))
     token_input = (await session.read_line(echo=False)).strip()
     if token_input:
         def _apply_token(db: Database) -> None:
@@ -4873,7 +4872,7 @@ async def _draw_link_status(
         actions.append(menu_key("A", "cknowledge identity changes"))
     actions.append(menu_key("B", "ack"))
     await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
-    await session.write("Choice: ")
+    await write_prompt(session, "Choice: ")
     return identity_notices, bool(node.peers)
 
 
@@ -5735,7 +5734,7 @@ async def _scheduled_action_prelude(
         options.append(menu_key("R", replace_label))
     options.append(menu_key("B", "ack"))
     await session.write_line(action_bar(options, width=session.terminal_width))
-    await session.write("Choice: ")
+    await write_prompt(session, "Choice: ")
     while True:
         choice = (await session.read_key()).lower()
         if choice == "b":
@@ -11324,7 +11323,7 @@ async def _gc_screen(session: Session, lane: DatabaseLane) -> None:
     await session.write_line(
         action_bar([menu_key("R", "eclaim now"), menu_key("B", "ack")], width=session.terminal_width)
     )
-    await session.write("Choice: ")
+    await write_prompt(session, "Choice: ")
     while True:
         choice = (await session.read_key()).lower()
         if choice == "b":
