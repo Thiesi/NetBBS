@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from netbbs.net.maintenance import MaintenanceMode
@@ -311,7 +312,9 @@ class NodeControls:
     scheduler` default to a fresh, empty `SequenceScheduler` each --
     every existing test constructing `NodeControls` directly (none of
     which exercise scheduling) needs no changes; `netbbs.__main__.run()`
-    is the only caller that passes its own node-lifetime real ones."""
+    is the only caller that passes its own node-lifetime real ones. The
+    optional configured identity path also gives live SysOp backup creation
+    the same degrade-gracefully shape as the other live-only controls."""
 
     session_registry: ActiveSessionRegistry
     maintenance: MaintenanceMode
@@ -333,6 +336,12 @@ class NodeControls:
     # `netbbs.net` import graph) never imports the chat stack; the real
     # type is annotated at every consumer.
     chat_hub: Any = None
+    # The effective identity directory from NodeConfig.  The live SysOp
+    # Backup screen needs the configured path so a custom identity location
+    # cannot be silently omitted.  None keeps standalone admin and direct
+    # test callers status-only; the database path comes from their existing
+    # DatabaseLane rather than being duplicated here.
+    backup_identity_dir: Path | None = None
 
 
 async def run_shutdown_sequence(

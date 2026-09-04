@@ -2553,6 +2553,24 @@ identically in every environment except one with no direct egress.
 Use SQLite's online backup API; never copy a live WAL database as if it were a
 single inert file.
 
+The live SysOp Backup screen invokes the same synchronous, path-based backup
+primitive via a worker thread, using the database lane's path and the running
+node's effective configured identity directory. Never guess the default
+identity path in this flow: a custom identity directory omitted from a
+nominally successful backup would make it non-recoverable. Standalone admin
+therefore remains status-only; custom destinations and scheduling use the
+CLI, and restore remains offline/CLI-only.
+
+Revalidate that configured identity directory in the backup worker immediately
+before creating the destination. Because cancellation cannot stop an
+`asyncio.to_thread` filesystem operation, the live session must keep ownership
+of that task, await and retrieve its outcome, and only then propagate session
+cancellation. Once the backup primitive returns, report success before writing
+the ancillary SysOp audit row; an audit write failure must not make a completed
+filesystem backup look unsuccessful. Store the last-success timestamp and path
+as one transaction so the dashboard can never pair a new timestamp with an old
+generation, and reload dashboard state when the Backup quick action returns.
+
 Back up in this order:
 
 1. database snapshot;

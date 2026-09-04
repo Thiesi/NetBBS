@@ -2,11 +2,10 @@
 Tests for netbbs.selfupdate (design doc §17, including the DB-snapshot
 addition).
 
-Real GitHub network access and real process replacement (os.execv) are
-never exercised here -- see the module's own docstring for why. Every
-test drives real logic (version comparison, tarball extraction, SQLite
-backup/restore, the pending/confirm/rollback state machine) against
-injected fetchers or real local files instead.
+Real GitHub network access is never exercised here. Process replacement is
+not implemented. Every test drives real logic (version comparison, tarball
+extraction, SQLite backup/restore, and the isolated pending/confirm/rollback
+state machine) against injected fetchers or real local files instead.
 """
 
 from __future__ import annotations
@@ -31,6 +30,7 @@ from netbbs.selfupdate import (
     confirm_update,
     download_and_extract_release,
     get_auto_update_check_enabled,
+    get_display_check_summary,
     get_github_pat,
     get_last_check_summary,
     get_pending_update,
@@ -42,6 +42,7 @@ from netbbs.selfupdate import (
     restore_database,
     roll_back_update,
     run_scheduled_update_check,
+    save_release_cache,
     set_auto_update_check_enabled,
     set_github_pat,
     snapshot_database,
@@ -292,6 +293,60 @@ def test_check_outcome_round_trip(tmp_path):
     checked_at, outcome = get_last_check_summary(db)
     assert checked_at is not None
     assert outcome == "up to date (v2.1.0)"
+    db.close()
+
+
+@pytest.mark.parametrize("installed_version", ["2.2.0", "2.3.0"])
+def test_display_check_summary_contextualizes_an_available_release_already_installed(
+    tmp_path, installed_version
+):
+    db = Database(tmp_path / "node.db")
+    release = ReleaseInfo(
+        tag_name="v2.2.0",
+        tarball_url="https://example.test/v2.2.0.tar.gz",
+        published_at="2026-09-04T12:00:00Z",
+    )
+    save_release_cache(db, '"etag"', release)
+    record_check_outcome(db, "newer release available: v2.2.0")
+
+    checked_at, outcome = get_display_check_summary(db, current_version=installed_version)
+
+    assert checked_at is not None
+    assert outcome == f"last check found v2.2.0; now running {installed_version}"
+    # Display reconciliation does not falsify or overwrite the historical check.
+    assert get_last_check_summary(db)[1] == "newer release available: v2.2.0"
+    db.close()
+
+
+def test_display_check_summary_keeps_an_available_release_newer_than_this_build(tmp_path):
+    db = Database(tmp_path / "node.db")
+    release = ReleaseInfo(
+        tag_name="v2.2.0",
+        tarball_url="https://example.test/v2.2.0.tar.gz",
+        published_at="2026-09-04T12:00:00Z",
+    )
+    save_release_cache(db, '"etag"', release)
+    record_check_outcome(db, "newer release available: v2.2.0")
+
+    assert get_display_check_summary(db, current_version="2.1.0")[1] == (
+        "newer release available: v2.2.0"
+    )
+    db.close()
+
+
+def test_display_check_summary_does_not_reinterpret_other_outcomes(tmp_path):
+    db = Database(tmp_path / "node.db")
+    release = ReleaseInfo(
+        tag_name="v2.2.0",
+        tarball_url="https://example.test/v2.2.0.tar.gz",
+        published_at="2026-09-04T12:00:00Z",
+    )
+    save_release_cache(db, '"etag"', release)
+    record_check_outcome(db, "check failed: connection timed out")
+
+    assert get_display_check_summary(db, current_version="2.2.0")[1] == (
+        "check failed: connection timed out"
+    )
     db.close()
 
 

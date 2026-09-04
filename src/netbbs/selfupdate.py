@@ -410,6 +410,39 @@ def get_last_check_summary(db: Database) -> tuple[str | None, str | None]:
     return get_config(db, _LAST_CHECK_AT_CONFIG_KEY), get_config(db, _LAST_OUTCOME_CONFIG_KEY)
 
 
+def get_display_check_summary(
+    db: Database, *, current_version: str | None = None
+) -> tuple[str | None, str | None]:
+    """Return the last check with an installed-version-aware outcome.
+
+    A supported update is installed outside NetBBS, so the old process may
+    leave ``"newer release available: vX"`` in the database immediately
+    before vX is installed. The new process can then skip its startup check
+    because of the restart cooldown. Preserve the timestamp -- no new network
+    check occurred -- but stop presenting that historical result as a current
+    warning once this build is at least as new as the cached release.
+
+    Only reinterpret the exact outcome written alongside the cached release.
+    Failures and other historical outcomes remain verbatim, and a missing or
+    malformed cache falls back to the stored text rather than guessing by
+    parsing a human-readable message.
+    """
+    checked_at, outcome = get_last_check_summary(db)
+    if outcome is None:
+        return checked_at, None
+
+    _etag, release = load_release_cache(db)
+    if release is None or outcome != f"newer release available: {release.tag_name}":
+        return checked_at, outcome
+
+    if current_version is None:
+        from netbbs import __version__ as current_version
+
+    if is_newer(current_version, release.tag_name):
+        return checked_at, outcome
+    return checked_at, f"last check found {release.tag_name}; now running {current_version}"
+
+
 def _parse_check_timestamp(value: str) -> datetime.datetime:
     """Parse a timestamp written by `utc_now_iso`'s own fixed format.
     `datetime.fromisoformat` is avoided even on Python 3.11+ (where it

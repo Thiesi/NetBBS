@@ -857,6 +857,7 @@ def test_shutdown_event_and_graceful_delay_reach_handle_session(tmp_path, monkey
             assert node_controls is not None
             assert node_controls.shutdown_event is shutdown_event
             assert node_controls.graceful_delay_seconds == 42.0
+            assert node_controls.backup_identity_dir == config.identity_dir
 
             writer.close()
             await writer.wait_closed()

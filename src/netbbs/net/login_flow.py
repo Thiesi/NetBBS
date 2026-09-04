@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum, auto
+from pathlib import Path
 
 from netbbs.auth.users import (
     MIN_REGISTRATION_PASSWORD_LENGTH,
@@ -188,6 +189,7 @@ async def handle_session(
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
     mrc_bridge: MrcBridge | None = None,
+    backup_identity_dir: Path | None = None,
 ) -> None:
     """
     Top-level per-connection entry point.
@@ -218,6 +220,10 @@ async def handle_session(
     read directly below, before `node_controls` even exists yet, to
     tell a rejected connection how much longer a *scheduled* graceful
     shutdown's countdown has left.
+
+    `backup_identity_dir` is the effective configured identity path. It is
+    carried in that same `NodeControls` bundle so the live SysOp Backup
+    screen can never guess the default and omit a custom identity location.
 
     `throttle`/`throttle_config` implement issue #3's cross-connection
     login throttling: `throttle` is node-lifetime shared state (one
@@ -285,6 +291,7 @@ async def handle_session(
         shutdown_scheduler=shutdown_scheduler if shutdown_scheduler is not None else SequenceScheduler(),
         mrc_bridge=mrc_bridge,
         chat_hub=hub,
+        backup_identity_dir=backup_identity_dir,
     )
 
     session_registry.enter(session)
@@ -801,6 +808,7 @@ async def handle_ssh_session(
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
     mrc_bridge: MrcBridge | None = None,
+    backup_identity_dir: Path | None = None,
 ) -> None:
     """
     SSH-specific top-level entry point (GitHub issue #25) — the
@@ -855,6 +863,7 @@ async def handle_ssh_session(
         shutdown_scheduler=shutdown_scheduler if shutdown_scheduler is not None else SequenceScheduler(),
         mrc_bridge=mrc_bridge,
         chat_hub=hub,
+        backup_identity_dir=backup_identity_dir,
     )
 
     session_registry.enter(session)

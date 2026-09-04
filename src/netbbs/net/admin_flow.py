@@ -54,6 +54,7 @@ import json
 import logging
 import math
 import shlex
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Awaitable, Callable, Sequence
@@ -76,7 +77,12 @@ from netbbs.auth.users import (
     set_user_disabled,
     set_user_level,
 )
-from netbbs.backup import get_last_backup_summary
+from netbbs.backup import (
+    BackupError,
+    create_backup,
+    default_backup_destination,
+    get_last_backup_summary,
+)
 from netbbs.managed_dns.state import (
     OptIn as ManagedDnsOptIn,
     RegistrationStatus as ManagedDnsRegistrationStatus,
@@ -319,8 +325,8 @@ from netbbs.selfupdate import (
     check_latest_release,
     clear_github_pat,
     get_auto_update_check_enabled,
+    get_display_check_summary,
     get_github_pat,
-    get_last_check_summary,
     is_newer,
     load_release_cache,
     masked_github_pat,
@@ -586,47 +592,39 @@ async def _write_panel(
 
 
 async def _load_condensed_status_line(lane: DatabaseLane, *, unicode_style: bool, terminal_width: int) -> str:
-    """DB-only status context (GitHub issue #206) for every screen in this
+    """DB-only backup context (GitHub issue #206) for every screen in this
     module that doesn't already show the richer full panel Users/Content/
-    Operations/Settings/Node have -- deliberately just the two facts
-    obtainable from `lane` alone, with no `node_controls`/`link_context`
+    Operations/Settings/Node have. Update status is deliberately absent:
+    unlike backup recency, it is actionable configuration/status which belongs
+    on the SysOp dashboard, Settings overview, and dedicated Update screen, not
+    on unrelated user/content/theme editors. This remains obtainable from
+    `lane` alone, with no `node_controls`/`link_context`
     dependency: threading live node/session/Link state down through every
     nested screen's own call chain (most of which don't currently take
     either) would be a much bigger ripple than this feature is worth. Users/
     Content/Operations/Settings/Node keep their own richer panels instead of
     calling this."""
-    def _load(db: Database) -> tuple[str | None, str | None]:
+    def _load(db: Database) -> str | None:
         backup_at, _backup_path = get_last_backup_summary(db)
-        _update_at, update_outcome = get_last_check_summary(db)
         # Code review follow-up (PR #216): format_for_display resolves the
         # node's configured format/timezone from this same `db` handle --
         # without it, this was the one place in the module still showing
         # the raw stored UTC value (with microseconds) instead of matching
         # the Backup status screen and everywhere else a timestamp appears.
         backup_display = format_for_display(backup_at, db) if backup_at else None
-        return backup_display, update_outcome
+        return backup_display
 
-    backup_display, update_outcome = await lane.run(_load)
-    # Code review follow-up (PR #216): field_row neither wraps nor
-    # truncates, and an update-check outcome can be an arbitrary-length
-    # message (an HTTP client's own exception text, e.g.) -- unconstrained,
-    # this "condensed" row could exceed even the 40-column floor this
-    # module supports, wrapping in the terminal and disrupting the screen
-    # below it. Each field's value is cut to half the width left over
-    # after its own label and the separator, same "cut plain, then
-    # sanitize" order as everywhere else in this module.
-    separator_width = 3 if unicode_style else 5
-    field_budget = max(4, (terminal_width - separator_width) // 2)
-    backup_label, update_label = "Backup: ", "Update: "
+    backup_display = await lane.run(_load)
+    # `field_row` does not wrap or truncate. Cut the stored display value to
+    # the available width before sanitizing, matching the order used elsewhere
+    # in this module.
+    backup_label = "Backup: "
     backup_text = (
-        backup_label + sanitize_text(cut_to_width(backup_display, max(0, field_budget - len(backup_label))))
+        backup_label
+        + sanitize_text(cut_to_width(backup_display, max(0, terminal_width - len(backup_label))))
         if backup_display else "Backup: never"
     )
-    update_text = (
-        update_label + sanitize_text(cut_to_width(update_outcome, max(0, field_budget - len(update_label))))
-        if update_outcome else "Update: not checked"
-    )
-    return field_row([(backup_text, None), (update_text, None)], unicode_style=unicode_style)
+    return field_row([(backup_text, None)], unicode_style=unicode_style)
 
 
 def _degrade_description_level(
@@ -678,9 +676,10 @@ async def admin_menu(
     check of its own, matching `pick_item`'s "presentation and
     selection only" precedent.
 
-    `node_controls` (design doc), if given,
-    unlocks the `[N]ode` quick action and its entry in `[O]perations`
-    (list/disconnect sessions, trigger shutdown) -- present when called
+    `node_controls` (design doc), if given, unlocks the `[N]ode` quick
+    action and its entry in `[O]perations` (list/disconnect sessions,
+    trigger shutdown), and lets `[K] Backup` use the running node's
+    configured identity path -- present when called
     from within a live session (`netbbs.net.login_flow`), absent
     (`None`) when called from the standalone `python -m netbbs.admin`
     CLI, which has no access to a running node's live in-memory state
@@ -758,9 +757,10 @@ async def admin_menu(
             )
         elif choice == "k":
             await session.write_line("")
-            await _backup_status_screen(session, lane, user)
-            await _draw_admin_menu(session, lane, user, node_controls=node_controls,
-                                   link_context=link_context, state=dashboard_state)
+            await _backup_status_screen(session, lane, user, node_controls=node_controls)
+            dashboard_state = await _draw_admin_menu(
+                session, lane, user, node_controls=node_controls, link_context=link_context
+            )
         elif choice == "d":
             await session.write_line("")
             await _managed_dns_status_screen(session, lane, user)
@@ -806,7 +806,7 @@ async def _draw_admin_menu(
             "total_files": sum(count_visible_files(db, area)[0] for area in all_areas),
             **_link_health_snapshot(db, link_context),
             "backup": get_last_backup_summary(db),
-            "update": get_last_check_summary(db),
+            "update": get_display_check_summary(db),
             "description_level": menu_description_level(db, actor),
             "redraw_in_place": redraw_in_place_enabled(db, actor),
             "unicode_style": unicode_style_enabled(db, actor),
@@ -978,7 +978,7 @@ async def _draw_admin_menu(
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"),
     ]
     quick = [
-        MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Last backup status and history"),
+        MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
         MenuEntry(label=menu_key("D", "NS"), brief="Managed netbbs.org subdomain status"),
     ]
     if node_controls is not None:
@@ -1372,7 +1372,7 @@ async def _operations_menu(
             await _write_panel(session, panel, unicode_style=unicode_style, header_color=header_color)
 
         options = [
-            MenuEntry(label=menu_key("K", "up status", prefix="Bac"), brief="Last backup status and history"),
+            MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
             MenuEntry(label=menu_key("P", "rune drafts"), brief="Clean up old unsaved drafts"),
             MenuEntry(label=menu_key("A", "udit log"), brief="Moderation action history"),
         ]
@@ -1443,7 +1443,7 @@ async def _operations_menu(
             await _repair_carried_posts_screen(session, lane)
             state = await lane.run(_load_ops)
         elif choice == "k":
-            await _backup_status_screen(session, lane, actor)
+            await _backup_status_screen(session, lane, actor, node_controls=node_controls)
             state = await lane.run(_load_ops)
         elif choice == "p":
             await _prune_drafts_screen(session, lane)
@@ -1479,7 +1479,7 @@ async def _system_menu(
         return {
             "node_name": get_node_display_name(db),
             "auto_update_enabled": get_auto_update_check_enabled(db),
-            "update": get_last_check_summary(db),
+            "update": get_display_check_summary(db),
             "display_timezone": display_timezone,
             "timestamp_example": format_for_display(
                 utc_now_iso(), override_format=display_format, override_timezone=display_timezone
@@ -1567,7 +1567,7 @@ async def _system_menu(
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "k":
             await session.write_line("")
-            await _backup_status_screen(session, lane, actor)
+            await _backup_status_screen(session, lane, actor, node_controls=node_controls)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         else:
@@ -4335,7 +4335,7 @@ async def _draw_update_status(
 
     def _load(db: Database) -> tuple[bool, str | None, str | None, str | None]:
         auto_enabled = get_auto_update_check_enabled(db)
-        checked_at, outcome = get_last_check_summary(db)
+        checked_at, outcome = get_display_check_summary(db, current_version=current_version)
         return auto_enabled, checked_at, outcome, masked_github_pat(db)
 
     auto_enabled, checked_at, outcome, masked_token = await lane.run(_load)
@@ -4584,85 +4584,223 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
 # -- backup status (design doc §13.4, issue #60's first operational slice) --
 
 
-async def _backup_status_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    """
-    Read-only visibility into when this node was last backed up
-    (`netbbs.backup.get_last_backup_summary`) -- there is deliberately
-    no "back up now"/"restore" action here. Both are `python -m netbbs.
-    backup {create,restore}`, a standalone, cron-schedulable CLI, not a
-    live-session action (see that module's docstring for why: a backup
-    needs to be triggerable by an external scheduler, not only by a
-    SysOp who remembers to log in and press a key). Nothing here
-    mutates anything, so `actor` is accepted only for signature
-    consistency with this submenu's other screens, same as
-    `_link_status_screen`.
-    """
-    checked_at, path = await lane.run(get_last_backup_summary)
-    history = await lane.run(list_operational_run_history, "backup", limit=5)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
-
-    await session.write_line(
-        "\r\n"
-        + screen_title(
-            "Backup status",
-            breadcrumb=(session.node_display_name, "System"),
-            subtitle="Last recorded operator backup for this node.",
-            width=session.terminal_width,
-            clear=redraw_in_place,
-            unicode_style=unicode_style, collapsed=collapsed,
-            header_color=header_color,
-        node_name_gradient=session.node_name_gradient)
+def _create_live_backup(
+    *, db_path: Path, identity_dir: Path, destination: Path
+) -> Path:
+    """Create a live-node backup only while its configured identity exists."""
+    if not identity_dir.is_dir():
+        raise BackupError(
+            f"configured identity directory is unavailable: {identity_dir}"
+        )
+    return create_backup(
+        db_path=db_path,
+        identity_dir=identity_dir,
+        destination=destination,
     )
-    if checked_at is not None:
-        display_format, display_timezone = await lane.run(resolve_display_preferences)
-        when = format_for_display(checked_at, override_format=display_format, override_timezone=display_timezone)
-        await session.write_line(status_badge("BACKED UP", tone="success", unicode_style=unicode_style))
-        await session.write_line(
-            colored("Last backup: ", fg_color=LABEL_COLOR) + colored(when, fg_color=METADATA_COLOR)
+
+
+async def _create_live_backup_owned(
+    *, db_path: Path, identity_dir: Path, destination: Path
+) -> Path:
+    """Keep the uncancellable worker owned until it finishes on cancellation."""
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            _create_live_backup,
+            db_path=db_path,
+            identity_dir=identity_dir,
+            destination=destination,
         )
+    )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        # Cancelling an asyncio.to_thread awaiter cannot stop the underlying
+        # filesystem work.  Keep retrieving cancellation until that worker is
+        # done, then retrieve its outcome before propagating the first cancel.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        try:
+            task.result()
+        except Exception:
+            _logger.exception("live backup failed after its SysOp session was cancelled")
+        raise cancelled
+
+
+async def _backup_status_screen(
+    session: Session,
+    lane: DatabaseLane,
+    actor: User,
+    *,
+    node_controls: NodeControls | None,
+) -> None:
+    """Show backup status and create complete backups from a live node.
+
+    The effective identity directory comes from ``NodeControls``.  Without
+    it (standalone admin), the screen stays status-only instead of guessing a
+    path and risking a backup which silently omits custom identity material.
+    Restore remains an offline CLI action because it replaces live node state.
+    """
+    identity_dir = node_controls.backup_identity_dir if node_controls is not None else None
+    can_create = identity_dir is not None
+    db_path = await lane.run(lambda db: db.path)
+
+    while True:
+        checked_at, path = await lane.run(get_last_backup_summary)
+        history = await lane.run(list_operational_run_history, "backup", limit=5)
+        redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+        unicode_style = await lane.run(unicode_style_enabled, actor)
+        collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+        header_color = await lane.run(effective_header_color_256)
+
         await session.write_line(
-            colored("Location: ", fg_color=LABEL_COLOR)
-            + colored(sanitize_text(path or ""), fg_color=METADATA_COLOR)
-        )
-    else:
-        await session.write_line(
-            empty_state(
-                "No backup recorded",
-                detail="No backup has been taken on this node yet.",
+            "\r\n"
+            + screen_title(
+                "Backup",
+                breadcrumb=(session.node_display_name, "Operations"),
+                subtitle="Create and review complete local node backups.",
                 width=session.terminal_width,
+                clear=redraw_in_place,
+                unicode_style=unicode_style,
+                collapsed=collapsed,
                 header_color=header_color,
+                node_name_gradient=session.node_name_gradient,
             )
         )
-    await session.write_line(
-        colored("Run 'python -m netbbs.backup create --to <path>' to create one.", fg_color=MUTED_COLOR)
-    )
-    # Dogfood follow-up: the single "Last backup" line above couldn't
-    # distinguish "runs on a healthy schedule" from "happened to
-    # succeed once" -- a few of the most recent runs make a gap or an
-    # irregular cadence visible at a glance.
-    if len(history) > 1:
-        display_format, display_timezone = await lane.run(resolve_display_preferences)
-        await session.write_line(colored("\r\nRecent backups:", fg_color=MUTED_COLOR))
-        for run in history:
+        if checked_at is not None:
+            display_format, display_timezone = await lane.run(resolve_display_preferences)
             when = format_for_display(
-                run.created_at, override_format=display_format, override_timezone=display_timezone
+                checked_at,
+                override_format=display_format,
+                override_timezone=display_timezone,
             )
-            await session.write_line(f"  {when}: {sanitize_text(run.outcome)}")
+            await session.write_line(
+                status_badge("BACKED UP", tone="success", unicode_style=unicode_style)
+            )
+            await session.write_line(
+                colored("Last backup: ", fg_color=LABEL_COLOR)
+                + colored(when, fg_color=METADATA_COLOR)
+            )
+            await session.write_line(
+                colored("Location: ", fg_color=LABEL_COLOR)
+                + colored(sanitize_text(path or ""), fg_color=METADATA_COLOR)
+            )
+        else:
+            await session.write_line(
+                empty_state(
+                    "No backup recorded",
+                    detail="No backup has been taken on this node yet.",
+                    width=session.terminal_width,
+                    header_color=header_color,
+                )
+            )
 
-    # Dogfood-reported bug, GitHub issue #205: unlike almost every other
-    # single-shot info screen in this module, this one returned straight
-    # to the SysOp console's own immediate redraw with no pause -- on a
-    # short screen like this (a handful of lines, easily fitting inside
-    # whatever the console dashboard above it already occupied), the
-    # redraw could land before a human had time to actually read it,
-    # reading as "the hotkey did nothing." Matches the "Press any key to
-    # continue..." + read_any_key() convention every other such screen
-    # in this module already uses.
-    await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_any_key()
+        if len(history) > 1:
+            display_format, display_timezone = await lane.run(resolve_display_preferences)
+            await session.write_line(colored("\r\nRecent backups:", fg_color=MUTED_COLOR))
+            for run in history:
+                when = format_for_display(
+                    run.created_at,
+                    override_format=display_format,
+                    override_timezone=display_timezone,
+                )
+                await session.write_line(f"  {when}: {sanitize_text(run.outcome)}")
+
+        if not can_create:
+            await session.write_line(
+                colored(
+                    "Live backup creation is unavailable in standalone admin. "
+                    "Run 'python -m netbbs.backup create --to <path>' instead.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
+            await session.write_line(
+                colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
+            )
+            await session.read_any_key()
+            return
+
+        await session.write_line(
+            "\r\n"
+            + action_bar(
+                [menu_key("C", "reate backup now"), menu_key("B", "ack")],
+                width=session.terminal_width,
+            )
+        )
+        await write_prompt(session, "Choice: ")
+        choice = (await session.read_key()).lower()
+        if choice == "b":
+            await session.write_line("")
+            return
+        if choice != "c":
+            await session.write(reject_unhandled_key(choice))
+            continue
+
+        destination = default_backup_destination(db_path)
+        await session.write_line(
+            "\r\n"
+            + colored("Destination: ", fg_color=LABEL_COLOR)
+            + colored(sanitize_text(str(destination)), fg_color=METADATA_COLOR)
+        )
+        await session.write_line(
+            colored(
+                "This is a local backup. Copy or synchronize it off-node separately "
+                "for disaster recovery.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        if not await prompt_yes_no(session, "Create this complete backup now?", default=False):
+            continue
+
+        await session.write_line(colored("Creating backup...", fg_color=MUTED_COLOR))
+        try:
+            created = await _create_live_backup_owned(
+                db_path=db_path,
+                identity_dir=identity_dir,
+                destination=destination,
+            )
+        except (BackupError, OSError, sqlite3.Error) as exc:
+            await session.write_line(
+                status_badge("BACKUP FAILED", tone="error", unicode_style=unicode_style)
+            )
+            await session.write_line(colored(sanitize_text(str(exc)), fg_color=ERROR_COLOR))
+            if destination.exists():
+                await session.write_line(
+                    colored(
+                        f"A partial directory may remain at {sanitize_text(str(destination))}.",
+                        fg_color=MUTED_COLOR,
+                    )
+                )
+        else:
+            await session.write_line(
+                status_badge("BACKUP COMPLETE", tone="success", unicode_style=unicode_style)
+            )
+            await session.write_line(
+                colored("Created: ", fg_color=LABEL_COLOR)
+                + colored(sanitize_text(str(created)), fg_color=METADATA_COLOR)
+            )
+            try:
+                await lane.run(
+                    lambda db: record_action(
+                        db, actor=actor, action="create_backup", detail=str(created)
+                    )
+                )
+            except sqlite3.Error as exc:
+                _logger.warning("could not audit completed backup %s: %s", created, exc)
+                await session.write_line(
+                    colored(
+                        "The backup completed, but its SysOp audit entry could not be recorded.",
+                        fg_color=MUTED_COLOR,
+                    )
+                )
+        await session.write_line(
+            colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
+        )
+        await session.read_any_key()
 
 
 _MANAGED_DNS_ACTIVE_STATUSES = (ManagedDnsRegistrationStatus.PENDING, ManagedDnsRegistrationStatus.MATURED)
