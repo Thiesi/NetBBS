@@ -2118,6 +2118,7 @@ async def dial_hello(
     hello: HelloMessage,
     lane: DatabaseLane,
     *,
+    refresh_identity_claims: Callable[[DatabaseLane], Awaitable[None]] | None = None,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> PeerRecord:
     """
@@ -2131,6 +2132,10 @@ async def dial_hello(
     body). If the peer's own returned hello fails verification,
     `LinkProtocolError` propagates unwrapped from `node.handle_hello` —
     same exception every other caller of that method already handles.
+
+    A sync caller may supply `refresh_identity_claims`; it runs after the
+    response hello verifies and immediately before `save_peer`, closing the
+    local-rename window created by the HTTP await.
     """
     url = f"{base_url}{LINK_PATH_PREFIX}/hello"
     try:
@@ -2150,6 +2155,8 @@ async def dial_hello(
         raise LinkTransportError(f"malformed hello response from {url}: {exc}") from exc
 
     peer = node.handle_hello(peer_hello)
+    if refresh_identity_claims is not None:
+        await refresh_identity_claims(lane)
     await lane.run(save_peer, peer)
     return peer
 

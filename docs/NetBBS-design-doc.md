@@ -568,7 +568,9 @@ the just-replaced name in the gap before the next outbound descriptor is built.
 Startup primes the current local friendly/DNS pair before opening the Link
 listener. Thereafter the shared own-hello cache is refreshed through the
 background database lane before an inbound peer is persisted and once per
-outbound sync pass. A verified peer-list refresh repeats that local-claim refresh
+outbound sync pass. Each outbound hello repeats that refresh after its network
+wait and immediately before persisting the authenticated peer; candidate
+fallback uses the same path. A verified peer-list refresh likewise repeats it
 after its network wait and immediately before persisting any updated known peer.
 Every endpoint which accepts a signed hello, including
 relay-mailbox pickup, performs that refresh before peer persistence; building
@@ -5792,6 +5794,11 @@ removes any primary, previous, or journal credential artifact absent from the
 backup generation. A replacement abandoned during a rename remains eligible
 for credential-recovery retry only while its own release/abandonment cooldown
 is still open, and reactivation restarts its contact window at the retry time.
+Recovery of a replacement which is still marked pending also records fresh
+contact and restarts its maturation window only if the prior contact gap crossed
+the abandonment threshold. A successful standalone registration or reclaim
+clears any expired previous-name presentation state and obsolete previous
+credential rather than leaving a phantom cancellable transition.
 Rename completion releases or deletes the previous row only when it still belongs
 to the same node fingerprint; a cooldown-expired name reissued to another node is
 never mutated through the stale replacement link. Cancellation performs the

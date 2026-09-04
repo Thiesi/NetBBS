@@ -303,6 +303,33 @@ def test_lost_rename_retry_refreshes_contact_before_the_next_sweep(db):
     assert replacement.contact_started_at == clock.now.isoformat()
 
 
+def test_lost_rename_retry_refreshes_a_stale_pending_replacement(db):
+    clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, abandonment_seconds=60, cooldown_seconds=600,
+        )
+        try:
+            original = await _register(server, name="old-name")
+            await _rename(server, credential=original["credential"], name="new-name")
+            clock.now += timedelta(seconds=120)
+            status, _ = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            await server._sweep_once()
+            return status
+        finally:
+            await server.stop()
+
+    status = asyncio.run(scenario())
+    replacement = get_registration_by_name(db, "new-name")
+    assert status == 201
+    assert replacement.status == "pending"
+    assert replacement.last_contact_at == clock.now.isoformat()
+    assert replacement.contact_started_at == clock.now.isoformat()
+
+
 def test_lost_rename_retry_after_cooldown_creates_a_fresh_replacement(db):
     now = datetime(2026, 9, 4, tzinfo=timezone.utc)
 

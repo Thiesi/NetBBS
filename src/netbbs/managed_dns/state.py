@@ -103,6 +103,9 @@ def set_registration_result_state(
         (PUBLISHED_CONFIG_KEY, "0"),
         (DYNAMIC_CONFIG_KEY, "1" if dynamic else "0"),
         (OPT_IN_CONFIG_KEY, OptIn.ACCEPTED.value),
+        (PREVIOUS_NAME_CONFIG_KEY, ""),
+        (PREVIOUS_STATUS_CONFIG_KEY, ""),
+        (PREVIOUS_PUBLISHED_CONFIG_KEY, "0"),
     ))
 
 

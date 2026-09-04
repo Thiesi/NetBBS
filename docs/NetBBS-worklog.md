@@ -3847,6 +3847,14 @@ precedence. Verified peer-list refreshes must reload local presentation claims
 after the HTTP wait and before persisting an updated known peer, so a local rename
 during that wait still participates in collision detection.
 
+Outbound hello persistence has the same post-network local-claim refresh
+invariant, including candidate fallback. Lost-rename recovery refreshes both the
+current registration and an existing pending replacement before returning a
+rotated credential; otherwise a sweep can immediately abandon the recovered
+replacement. A successful standalone register/reclaim result clears all local
+previous-name metadata atomically and removes the obsolete previous credential,
+so an expired rename cannot remain visible as a phantom transition.
+
 Treat each managed-DNS credential's structured HTTP 401 independently: a
 previous-name 401 remains authoritative when the replacement heartbeat fails
 transiently, and simultaneous inactive results update both cached registrations

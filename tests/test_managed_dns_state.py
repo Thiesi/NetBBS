@@ -25,6 +25,9 @@ from netbbs.managed_dns.state import (
     set_node_fingerprint,
     set_opt_in,
     set_pending_rename_state,
+    set_previous_name,
+    set_previous_published,
+    set_previous_status,
     set_registration_result_state,
     set_heartbeat_reconciliation_state,
     set_published,
@@ -215,6 +218,22 @@ def test_registration_result_state_rolls_back_as_one_transaction(tmp_path):
     assert get_published(db)
     assert not get_dynamic(db)
     assert get_opt_in(db) is OptIn.DECLINED
+    db.close()
+
+
+def test_registration_result_state_clears_expired_rename_metadata(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_previous_name(db, "expired-old")
+    set_previous_status(db, RegistrationStatus.ABANDONED)
+    set_previous_published(db, False)
+
+    set_registration_result_state(
+        db, name="fresh-name", status=RegistrationStatus.PENDING, dynamic=True,
+    )
+
+    assert get_previous_name(db) is None
+    assert get_previous_status(db) is None
+    assert not get_previous_published(db)
     db.close()
 
 

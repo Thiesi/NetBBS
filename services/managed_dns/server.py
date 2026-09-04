@@ -615,6 +615,7 @@ class ManagedDnsServer:
                     )
                     replacement_status = "pending"
                 self._record_authenticated_contact(current, now)
+                self._record_authenticated_contact(existing_replacement, now)
                 replace_registration_credential(
                     self._db, existing_replacement.name, hash_credential(secret)
                 )

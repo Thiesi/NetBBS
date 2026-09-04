@@ -249,6 +249,7 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
             status=RegistrationStatus(result.status),
             dynamic=dynamic,
         )
+        delete_credential(previous_credential_path_for(lane.path))
 
         if was_reclaim:
             if result.status == "matured":

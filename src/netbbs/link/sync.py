@@ -399,7 +399,10 @@ async def _sync_one_seed(
     successful hello back to failure; those are secondary,
     independently-tolerated steps, not the "are we isolated" signal."""
     try:
-        seed_peer = await dial_hello(node, session, seed_url, own_hello_provider(), lane)
+        seed_peer = await dial_hello(
+            node, session, seed_url, own_hello_provider(), lane,
+            refresh_identity_claims=getattr(own_hello_provider, "refresh", None),
+        )
     except (LinkTransportError, LinkProtocolError) as exc:
         _logger.warning("Link sync: could not complete hello with seed %s: %s", seed_url, exc)
         return False

@@ -194,6 +194,41 @@ def test_offer_opt_in_accept_and_register_succeeds_end_to_end(tmp_path):
     db.close()
 
 
+def test_fresh_registration_clears_expired_local_rename_state_and_credential(tmp_path):
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            set_registered_name(db, "expired-replacement")
+            set_registration_status(db, RegistrationStatus.ABANDONED)
+            set_previous_name(db, "expired-old")
+            set_previous_status(db, RegistrationStatus.ABANDONED)
+            set_previous_published(db, False)
+            save_credential(credential_path_for(db.path), "expired-primary-secret")
+            save_credential(previous_credential_path_for(db.path), "expired-old-secret")
+            lane = DatabaseLane(db.path)
+
+            session = FakeSession(["fresh-name", "n", "n", "y"])
+            await register_via_prompt(session, lane)
+
+            lane.close()
+            return db, session
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, session = asyncio.run(scenario())
+    assert get_registered_name(db) == "fresh-name"
+    assert get_previous_name(db) is None
+    assert load_credential(previous_credential_path_for(db.path)) is None
+    assert any("Registered fresh-name.netbbs.org" in line for line in session.written)
+    db.close()
+
+
 def test_register_via_prompt_blank_name_defaults_to_the_previous_registration(tmp_path):
     """A bare Enter reclaims the previously-registered name rather than
     being treated as "skip" -- only true when a previous name actually

@@ -1176,6 +1176,53 @@ def test_dial_hello_completes_a_real_http_handshake(tmp_path):
         bob.close()
 
 
+def test_dial_hello_refreshes_local_claims_before_persisting_peer(tmp_path):
+    from netbbs.config import set_node_display_name
+    from netbbs.link.node_profiles import (
+        latest_identity_observation, remember_own_identity_claims,
+    )
+
+    alice_node = LinkNode(identity=bootstrap_node_identity("dial-claim-alice"))
+    bob_node = LinkNode(identity=bootstrap_node_identity("dial-claim-bob"))
+    alice = _NodeDb(tmp_path, "dial-claim-alice")
+    bob = _NodeDb(tmp_path, "dial-claim-bob")
+
+    def bob_hello():
+        return bob_node.build_hello(
+            addresses=None, outgoing_only=True,
+            created_at="2026-09-04T11:00:00+00:00",
+            friendly_name="Alice's New Dial Name",
+        )
+
+    async def refresh_local_claims(lane):
+        def refresh(db):
+            set_node_display_name(db, "Alice's New Dial Name")
+            remember_own_identity_claims(db, canonical_dns_name=None)
+
+        await lane.run(refresh)
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, bob_hello, bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                return await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}",
+                    _hello_for(alice_node), alice.lane,
+                    refresh_identity_claims=refresh_local_claims,
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        peer = asyncio.run(scenario())
+        observation = latest_identity_observation(alice.db, peer.fingerprint)
+        assert observation is not None
+        assert observation.severity == "security"
+    finally:
+        alice.close()
+        bob.close()
+
+
 def test_hello_server_refreshes_local_claims_before_persisting_the_peer(tmp_path, monkeypatch):
     alice_node = LinkNode(identity=bootstrap_node_identity("ordered-alice"))
     bob_node = LinkNode(identity=bootstrap_node_identity("ordered-bob"))
