@@ -284,6 +284,7 @@ async def handle_session(
         drain_scheduler=drain_scheduler if drain_scheduler is not None else SequenceScheduler(),
         shutdown_scheduler=shutdown_scheduler if shutdown_scheduler is not None else SequenceScheduler(),
         mrc_bridge=mrc_bridge,
+        chat_hub=hub,
     )
 
     session_registry.enter(session)
@@ -851,6 +852,7 @@ async def handle_ssh_session(
         drain_scheduler=drain_scheduler if drain_scheduler is not None else SequenceScheduler(),
         shutdown_scheduler=shutdown_scheduler if shutdown_scheduler is not None else SequenceScheduler(),
         mrc_bridge=mrc_bridge,
+        chat_hub=hub,
     )
 
     session_registry.enter(session)

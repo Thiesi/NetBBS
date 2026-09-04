@@ -7602,3 +7602,50 @@ def test_join_link_decline_persists(db, lane, sysop):
     _run(session, lane, sysop)
     assert get_participation(db) is Participation.DECLINED
     assert "Reliable-node participation declined." in _written_text(session)
+
+
+def test_renaming_an_occupied_channel_is_refused_until_it_empties(db, lane, sysop):
+    """Issue #277: ChatHub keys live membership by channel name, so a
+    rename while callers are inside would cut them off from everyone who
+    joins afterwards. With the running node in reach the rename is
+    refused with the occupant count; once the channel empties it goes
+    through."""
+    from netbbs.chat.channels import create_channel, list_channels
+    from netbbs.chat.hub import ChatHub, ParticipantId
+
+    create_channel(db, "Lobby", creator=sysop)
+    hub = ChatHub()
+    hub.join("Lobby", ParticipantId("alice", 1))
+    controls = NodeControls(
+        session_registry=ActiveSessionRegistry(), maintenance=MaintenanceMode(),
+        shutdown_event=asyncio.Event(), graceful_delay_seconds=60.0, chat_hub=hub,
+    )
+
+    # list -> pick(01) -> e(dit) -> rename -> [S]ave is refused -> put the
+    # name back -> [S]ave succeeds without a rename -> back x3.
+    inputs = ["m", "n", "l", "0", "1", "e", "n", "Lobby2", "s", "n", "Lobby", "s", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
+    text = _written_text(session)
+    assert "'Lobby' cannot be renamed while 1 caller(s) are in it" in text
+    assert "Updated 'Lobby2'" not in text
+    assert [c.name for c in list_channels(db)] == ["Lobby"]
+
+    hub.leave("Lobby", ParticipantId("alice", 1))
+    session = FakeSession(["m", "n", "l", "0", "1", "e", "n", "Lobby2", "s", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
+    assert "Updated 'Lobby2'" in _written_text(session)
+    assert [c.name for c in list_channels(db)] == ["Lobby2"]
+
+
+def test_standalone_rename_says_what_happens_to_callers_inside(db, lane, sysop):
+    """Issue #277: without a running node in reach (the standalone admin
+    CLI) occupancy is unknown, so the rename goes through with a note."""
+    from netbbs.chat.channels import create_channel
+
+    create_channel(db, "Lobby", creator=sysop)
+    session = FakeSession(["m", "n", "l", "0", "1", "e", "n", "Lobby2", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "Updated 'Lobby2'" in text
+    assert "they keep the old name until they leave and rejoin" in text

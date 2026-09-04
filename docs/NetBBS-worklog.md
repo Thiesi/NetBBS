@@ -553,6 +553,14 @@ applied uniformly rather than special-cased per caller.
 
 ### Chat state and rendering
 
+- `ChatHub` keys live membership by channel *name*, and a session inside a
+  channel holds that name for its sends, receives and leave (issue #277). A
+  rename while callers are inside splits them from everyone who joins later,
+  so the SysOp channel screen refuses it with the occupant count until the
+  channel is empty (`NodeControls.chat_hub`, `None` from the standalone
+  CLI, which instead states what a rename does to anyone inside). Re-keying
+  the hub by channel id would remove the restriction; nothing has needed it.
+
 `ChatHub` routes opaque objects and owns bounded per-participant queues. It
 does not render messages or decide moderation semantics.
 

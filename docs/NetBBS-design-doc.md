@@ -940,6 +940,12 @@ snapshot under the origin's identity and never signed for Link
 propagation, and a locally recorded message is always re-read by its own
 row id so a concurrent bridge write cannot be mistaken for it.
 
+Live membership is keyed by channel name, and a session inside a channel keeps
+that name for everything it sends, receives, and leaves with. A channel is
+therefore not renamed while callers are inside it: the SysOp screen refuses
+with the occupant count until it is empty, and the standalone admin CLI, which
+cannot see occupancy, states what a rename does to anyone inside.
+
 ### 6.4 Personal mail
 
 Local asynchronous mail is a persistent domain distinct from chat `/msg`.
