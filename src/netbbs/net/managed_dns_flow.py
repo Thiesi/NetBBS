@@ -36,6 +36,7 @@ from netbbs.managed_dns.state import (
     get_opt_in,
     get_previous_name,
     get_previous_status,
+    get_dynamic,
     get_registered_name,
     get_service_url,
     set_cancelled_rename_state,
@@ -45,9 +46,16 @@ from netbbs.managed_dns.state import (
     set_registration_result_state,
     set_pending_rename_state,
 )
+from netbbs.auth.users import User
+from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.menu_description_preference import menu_description_level
+from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
+from netbbs.net.redraw_preference import redraw_in_place_enabled
+from netbbs.net.resource_editor import FieldSpec, choice_field, choice_step, edit_resource_draft
 from netbbs.net.session import Session, write_prompt
-from netbbs.rendering import MUTED_COLOR, colored, sanitize_text, wrap_to_width
+from netbbs.net.unicode_style_preference import unicode_style_enabled
+from netbbs.rendering import menu_key, MUTED_COLOR, colored, sanitize_text, wrap_to_width
 from netbbs.storage.execution import DatabaseLane
 
 _OPT_IN_BLURB = (
@@ -105,24 +113,38 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
         await register_via_prompt(session, lane)
 
 
-async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
+async def register_via_prompt(
+    session: Session, lane: DatabaseLane, *, actor: User | None = None
+) -> bool:
     """The shared "pick a name and register (or reclaim) now" flow --
     the opt-in prompt's own inline continuation (design doc §16
     Decision 1's own "removing first-run friction" reasoning is
     weakened if accepting it doesn't actually get the SysOp anything
-    without a separate trip through the admin menu) and, unchanged, what
-    the admin screen's own `[R]egister` action calls directly.
+    without a separate trip through the admin menu) and what the admin
+    screen's own `[R]egister` action calls directly.
 
-    Defaults the name prompt to whatever this node last had registered,
-    if any -- a bare Enter reclaims it (design doc §16 Decision 5) rather
-    than requiring the SysOp to retype it. Whatever credential is
-    already on disk is always sent along regardless of which name ends
-    up typed: the server only actually treats it as a reclaim attempt
-    when it matches an existing row for *that* name still within its
-    cooldown (`services.managed_dns.server._handle_register`'s own
-    docstring) -- passing it for an unrelated fresh name is harmless,
-    simply ignored server-side, so this function never needs to know in
-    advance which case it's in.
+    Issue #282: a draft editor rather than a fixed chain -- `[N]ame`
+    (prefilled with the previous registration, so reclaiming is just
+    `[R]egister`; design doc §16 Decision 5), `[D]ynamic IP` (seeded
+    from the previous registration's own setting, `True` for a fresh
+    one), `[W]eb behind HTTPS proxy` (informational: sets expectations,
+    not the request), then `[R]egister`; `[B]ack` sends nothing. The
+    request itself runs inside the register step so a service rejection
+    (reserved, taken, rate-limited, unreachable) keeps the draft on
+    screen for another try; the credential-replacement confirmation
+    also lives there because it forfeits a reclaim window.
+
+    Whatever credential is already on disk is always sent along
+    regardless of which name ends up typed: the server only treats it
+    as a reclaim attempt when it matches an existing row for *that*
+    name still within its cooldown (`services.managed_dns.server.
+    _handle_register`'s own docstring) -- passing it for an unrelated
+    fresh name is harmless, simply ignored server-side.
+
+    `actor` (the SysOp menu's caller; `None` on the first-run path)
+    selects the editor's presentation preferences. Returns whether an
+    outcome was written that the caller should hold on screen -- `False`
+    for `[B]ack`, so the admin screen returns straight to its status.
     """
     base_url = await lane.run(get_service_url)
     if not base_url:
@@ -134,7 +156,7 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
                 fg_color=MUTED_COLOR,
             )
         )
-        return
+        return True
 
     node_fingerprint = await lane.run(get_node_fingerprint)
     if not node_fingerprint:
@@ -145,128 +167,161 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
         await session.write_line(
             colored("(This node's identity isn't ready yet -- try again after a restart.)", fg_color=MUTED_COLOR)
         )
-        return
+        return True
 
     previous_name = await lane.run(get_registered_name)
-    if previous_name is not None:
+    previous_dynamic = await lane.run(get_dynamic) if previous_name is not None else True
+    draft: dict = {"name": previous_name or "", "dynamic": previous_dynamic, "web_behind_proxy": False}
+
+    async def _name_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        shown = sanitize_text(draft["name"]) if draft["name"] else "(none)"
         await write_prompt(
-            session,
-            f"Desired subdomain name (letters, digits, hyphens; Enter for {previous_name!r}): "
+            session, f"Desired subdomain name (letters, digits, hyphens) [{shown}] (blank = keep): ",
         )
-    else:
-        await write_prompt(
-            session,
-            "Desired subdomain name (letters, digits, hyphens; leave blank to skip for now): ",
-        )
-    raw_name = (await session.read_line()).strip()
-    if not raw_name:
-        if previous_name is None:
-            return
-        raw_name = previous_name
+        raw = (await session.read_line()).strip()
+        if raw:
+            draft["name"] = raw
 
-    # Design doc §16 Decision 6: Telnet/SSH are always assumed to sit on
-    # their standard ports as part of the caller-facing promise; web is
-    # the one exception, since a bare A/AAAA record can't itself say
-    # which port/transport a caller should use, and this node's own web
-    # listener has no TLS of its own (nodeconfig's own docstring) -- it
-    # only means something as part of that promise behind a real
-    # HTTPS-terminating reverse proxy on 443. This is purely informational:
-    # neither this node nor the managed service can verify a reverse
-    # proxy's existence, so a "no" here changes nothing about what gets
-    # sent, only sets the SysOp's own expectations up front.
-    web_behind_proxy = await prompt_yes_no(
-        session,
-        f"If callers should reach this board's web interface at {sanitize_text(raw_name)}.netbbs.org, "
-        "is it served through an HTTPS-terminating reverse proxy on port 443? "
-        "(Telnet/SSH are always assumed to be on their standard ports.)",
-        default=False,
-    )
-    if not web_behind_proxy:
-        for wrapped in wrap_to_width(
-            "(Noting that -- the managed record still tracks this node's address, "
-            "but a bare web address won't be part of the promise; telling callers "
-            "how to actually reach any web interface stays your own responsibility.)",
-            session.terminal_width,
-        ):
-            await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
+    fields = [
+        FieldSpec(
+            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Subdomain name",
+            render=lambda d: f"{sanitize_text(d['name'])}.netbbs.org" if d["name"] else "(required)",
+            prompt=_name_prompt,
+            brief="The <name>.netbbs.org to register",
+            help=(
+                "Letters, digits, and hyphens. A name this node registered before is prefilled, so "
+                "reclaiming it is just [R]egister."
+            ),
+        ),
+        FieldSpec(
+            key="dynamic", hotkey="d", menu_text=menu_key("D", "ynamic IP"), label="Follow address changes",
+            render=lambda d: "yes" if d["dynamic"] else "no",
+            prompt=choice_field("dynamic", [True, False]), step=choice_step("dynamic", [True, False]),
+            brief="Keep the record pointed at this node",
+            help="Keep the managed record pointed at this node's current address if it changes (dynamic IP).",
+        ),
+        FieldSpec(
+            key="web_behind_proxy", hotkey="w", menu_text=menu_key("W", "eb behind HTTPS proxy"),
+            label="Web served via an HTTPS proxy on 443",
+            render=lambda d: "yes" if d["web_behind_proxy"] else "no (web address is not part of the promise)",
+            prompt=choice_field("web_behind_proxy", [False, True]), step=choice_step("web_behind_proxy", [False, True]),
+            brief="Sets expectations only",
+            help=(
+                "Telnet/SSH are always assumed to be on their standard ports. A bare A/AAAA record can't "
+                "say which port a web caller should use, and this node's own web listener has no TLS, so "
+                "the web address only counts as part of the promise behind an HTTPS-terminating reverse "
+                "proxy on 443. Neither this node nor the service can verify one; this only sets your own "
+                "expectations."
+            ),
+        ),
+    ]
 
-    dynamic = await prompt_yes_no(
-        session, "Keep this pointed at your node's current address if it changes (dynamic IP)?", default=True
-    )
-
-    stored_credential = load_credential(credential_path_for(lane.path))
-    if stored_credential is not None and previous_name is not None and raw_name.lower() != previous_name.lower():
-        replace = await prompt_yes_no(
-            session,
-            f"Registering a different name will replace this node's saved credential for "
-            f"{sanitize_text(previous_name)}.netbbs.org and forfeit its reclaim window. Continue?",
-            default=False,
-        )
-        if not replace:
-            return
-
-    # Lazy: netbbs.managed_dns.client requires aiohttp, which this
-    # module must not require merely to import itself -- see this
-    # module's own docstring.
-    try:
-        from aiohttp import ClientSession
-        from netbbs.managed_dns.client import ManagedDnsError, register
-    except ModuleNotFoundError:
-        await session.write_line(
-            colored("Registration requires NetBBS's optional HTTP support.", fg_color=MUTED_COLOR)
-        )
-        return
-
-    async with managed_dns_transition_lock(lane.path):
-        # The prompt may have been open while another transition completed.
-        # Reload the credential generation that this request will replace.
+    async def save(draft: dict) -> str:
+        """Runs the registration; returns the outcome line. Raises
+        `ValueError` (the editor's retry path) to keep the draft on a
+        rejection, a declined confirmation, or an unreachable service."""
+        raw_name = draft["name"]
+        dynamic = draft["dynamic"]
+        if not raw_name:
+            raise ValueError("a subdomain name is required")
         stored_credential = load_credential(credential_path_for(lane.path))
-        try:
-            async with ClientSession(trust_env=True) as http_session:
-                result = await register(
-                    http_session, base_url, name=raw_name, node_fingerprint=node_fingerprint,
-                    dynamic=dynamic, credential=stored_credential,
-                )
-        except ManagedDnsError as exc:
-            await session.write_line(
-                colored(f"Registration failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR)
+        if (
+            stored_credential is not None and previous_name is not None
+            and raw_name.lower() != previous_name.lower()
+        ):
+            replace = await prompt_yes_no(
+                session,
+                f"Registering a different name will replace this node's saved credential for "
+                f"{sanitize_text(previous_name)}.netbbs.org and forfeit its reclaim window. Continue?",
+                default=False,
             )
-            return
+            if not replace:
+                raise ValueError("No change made. The draft is kept; [B]ack discards it.")
 
-        # A reclaim always returns the exact same credential the caller
-        # already had (services.managed_dns.server._reclaim never mints a
-        # new one); a fresh registration always mints a brand new one. This
-        # is a reliable signal for which one just happened -- unlike the
-        # resulting `status`, which reclaiming a registration that was
-        # released *before* it ever matured correctly still reports as
-        # "pending," identical to a genuinely fresh registration's own
-        # status.
-        was_reclaim = stored_credential is not None and result.credential == stored_credential
+        # Lazy: netbbs.managed_dns.client requires aiohttp, which this
+        # module must not require merely to import itself -- see this
+        # module's own docstring.
+        try:
+            from aiohttp import ClientSession
+            from netbbs.managed_dns.client import ManagedDnsError, register
+        except ModuleNotFoundError:
+            return "Registration requires NetBBS's optional HTTP support."
 
-        save_credential(credential_path_for(lane.path), result.credential)
-        # Publication is only ever confirmed by a heartbeat's reported
-        # address -- a reclaim that comes back `matured` may still have had
-        # its republish fail, so the next heartbeat decides.
-        await lane.run(
-            set_registration_result_state,
-            name=result.name,
-            status=RegistrationStatus(result.status),
-            dynamic=dynamic,
-        )
-        delete_credential(previous_credential_path_for(lane.path))
+        async with managed_dns_transition_lock(lane.path):
+            # The editor may have been open while another transition completed.
+            # Reload the credential generation that this request will replace.
+            stored_credential = load_credential(credential_path_for(lane.path))
+            try:
+                async with ClientSession(trust_env=True) as http_session:
+                    result = await register(
+                        http_session, base_url, name=raw_name, node_fingerprint=node_fingerprint,
+                        dynamic=dynamic, credential=stored_credential,
+                    )
+            except ManagedDnsError as exc:
+                raise ValueError(f"Registration failed: {sanitize_text(str(exc))}") from exc
 
+            # A reclaim always returns the exact same credential the caller
+            # already had (services.managed_dns.server._reclaim never mints a
+            # new one); a fresh registration always mints a brand new one. This
+            # is a reliable signal for which one just happened -- unlike the
+            # resulting `status`, which reclaiming a registration that was
+            # released *before* it ever matured correctly still reports as
+            # "pending," identical to a genuinely fresh registration's own
+            # status.
+            was_reclaim = stored_credential is not None and result.credential == stored_credential
+
+            save_credential(credential_path_for(lane.path), result.credential)
+            # Publication is only ever confirmed by a heartbeat's reported
+            # address -- a reclaim that comes back `matured` may still have had
+            # its republish fail, so the next heartbeat decides.
+            await lane.run(
+                set_registration_result_state,
+                name=result.name,
+                status=RegistrationStatus(result.status),
+                dynamic=dynamic,
+            )
+            delete_credential(previous_credential_path_for(lane.path))
+
+        if not draft["web_behind_proxy"]:
+            for wrapped in wrap_to_width(
+                "(Noting that -- the managed record still tracks this node's address, "
+                "but a bare web address won't be part of the promise; telling callers "
+                "how to actually reach any web interface stays your own responsibility.)",
+                session.terminal_width,
+            ):
+                await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
         if was_reclaim:
             if result.status == "matured":
-                message = f"Reclaimed {result.name}.netbbs.org -- it's live again."
-            else:
-                message = f"Reclaimed {result.name}.netbbs.org -- it will resume maturing from where it left off."
-        else:
-            message = (
-                f"Registered {result.name}.netbbs.org -- it will go live once this "
-                "node has stayed in contact for a little while (this prevents abuse, "
-                "not a fault on your end)."
-            )
+                return f"Reclaimed {result.name}.netbbs.org -- it's live again."
+            return f"Reclaimed {result.name}.netbbs.org -- it will resume maturing from where it left off."
+        return (
+            f"Registered {result.name}.netbbs.org -- it will go live once this "
+            "node has stayed in contact for a little while (this prevents abuse, "
+            "not a fault on your end)."
+        )
+
+    presentation: dict = {}
+    if actor is not None:
+        presentation = {
+            "description_level": await lane.run(menu_description_level, actor),
+            "redraw_in_place": await lane.run(redraw_in_place_enabled, actor),
+            "unicode_style": await lane.run(unicode_style_enabled, actor),
+            "collapsed": await lane.run(breadcrumb_collapsed_enabled, actor),
+            "accent_color": await lane.run(effective_accent_color_256),
+            "header_color": await lane.run(effective_header_color_256),
+        }
+    message = await edit_resource_draft(
+        session, lane,
+        title="Managed DNS registration",
+        subtitle="Register (or reclaim) this node's netbbs.org subdomain.",
+        fields=fields, draft=draft, save=save, error_type=ValueError,
+        save_menu_text=menu_key("R", "egister"), save_hotkey="r", back_menu_text=menu_key("B", "ack"),
+        **presentation,
+    )
+    if message is None:
+        return False
     await session.write_line(colored(message, fg_color=MUTED_COLOR))
+    return True
 
 
 async def release_registration(session: Session, lane: DatabaseLane) -> None:
