@@ -1213,3 +1213,26 @@ def test_scrollback_snapshot_excludes_external_network_lines(tmp_path):
             await subscriber.teardown()
 
     asyncio.run(scenario())
+
+
+def test_scrollback_snapshot_cap_applies_after_external_rows_are_filtered(tmp_path):
+    """Review of #275: a chatty MRC room must not consume the whole
+    snapshot budget and leave a new subscriber with nothing."""
+    async def scenario():
+        origin = _Node(tmp_path, "origin-external-cap")
+        subscriber = _Node(tmp_path, "subscriber-external-cap")
+        try:
+            origin_channel, _subscriber_channel = _setup_linked_channel(origin, subscriber, name="external-cap")
+            record_message(origin.db, origin_channel, kind="message", author_label="alice", body="ours")
+            for index in range(25):
+                record_message(
+                    origin.db, origin_channel, kind="message", author_label="bob@Other (MRC)",
+                    body=f"theirs {index}", external_source="mrc",
+                )
+            entries = _snapshot_entries(origin.db, origin_channel)
+            assert [entry["body"] for entry in entries] == ["ours"]
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())

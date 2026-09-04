@@ -213,6 +213,11 @@ class MrcBridge:
         self._last_error: str | None = None
         self._connected_since: str | None = None
         self._connected_at_monotonic: float | None = None
+        # Set when a SysOp (re)enables MRC: the first connection after
+        # that must give occupants of already-mapped channels the same
+        # disclosure a live mapping change gives (they never saw the
+        # join-time notice, since the channel was not bridged then).
+        self._notify_on_connect = False
         self._attempts = 0
         self._dropped_outbound = 0
         self._dropped_inbound = 0
@@ -241,6 +246,7 @@ class MrcBridge:
             self._fatal_error = None
             self._attempts = 0
             await self._reload_from_db()
+            self._notify_on_connect = True
             if not self._stopping:
                 self._start_connector_if_enabled()
 
@@ -253,6 +259,7 @@ class MrcBridge:
             if self._state is MrcState.CONNECTED:
                 await self._reconcile_announced(notify=True)
             if self._settings is not None and self._settings.enabled and self._connector_task is None:
+                self._notify_on_connect = True
                 self._start_connector_if_enabled()
 
     async def _reload_from_db(self) -> None:
@@ -416,7 +423,8 @@ class MrcBridge:
         _logger.info("Connected to MRC hub %s:%d as %r", settings.host, settings.port, settings.site_name)
         self._drain_outbound_queue()
         self._send_site_info(settings)
-        await self._reconcile_announced()
+        notify, self._notify_on_connect = self._notify_on_connect, False
+        await self._reconcile_announced(notify=notify)
 
         connection.tasks = [
             asyncio.create_task(self._reader_loop(reader), name="mrc-reader"),
@@ -502,8 +510,14 @@ class MrcBridge:
         return True
 
     async def _handle_raw_line(self, raw: bytes) -> None:
+        # Every non-empty line pays, well-formed or not: a hub streaming
+        # garbage is bounded by the same bucket as one streaming packets.
+        if not raw.strip():
+            return
+        if not self._admit_packet():
+            return
         packet = self._parse_raw_line(raw)
-        if packet is not None and self._admit_packet():
+        if packet is not None:
             await self._handle_packet(packet)
 
     async def _writer_loop(self, writer: asyncio.StreamWriter) -> None:
@@ -522,6 +536,11 @@ class MrcBridge:
             settings = self._settings
             if settings is None:
                 continue
+            # The standalone admin CLI edits mappings in SQLite without a
+            # way to tell the running node; re-reading them once per tick
+            # bounds how long a pause, unmap, delete or rename made there
+            # keeps relaying (and tells any newly-bridged occupants).
+            await self.refresh_channel_mappings()
             refresh_rosters = self._clock() - last_userlist >= self._userlist_refresh
             for channel_id, nicks in list(self._announced.items()):
                 mapping = self._by_channel.get(channel_id)

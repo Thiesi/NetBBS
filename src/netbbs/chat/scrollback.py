@@ -161,6 +161,16 @@ def record_message(
             (channel.id, kind, author_label, author_fingerprint, body, created_at, external_source),
         )
     message_id = cursor.lastrowid
+    # Capture *this* row now, inside the transaction and before the trim:
+    # never "the channel's newest row" (a background writer -- issue
+    # #275's MRC bridge on the background lane -- can land another row
+    # around this one, and the caller would sign and propagate someone
+    # else's line as its own), and never after the commit either (with a
+    # scrollback limit of 1 that other writer's own trim can delete this
+    # row before it is read back).
+    row = db.connection.execute(
+        "SELECT * FROM channel_messages WHERE id = ?", (message_id,)
+    ).fetchone()
     limit = get_scrollback_limit(db)
     db.connection.execute(
         """
@@ -183,15 +193,6 @@ def record_message(
     index_channel_message(db, channel.id, message_id, kind, body)
     prune_channel_message_search(db, channel.id)
     db.connection.commit()
-
-    # Re-read *this* row by its id, never "the channel's newest row":
-    # a background writer (issue #275's MRC bridge records inbound lines
-    # on the background lane) can insert between the commit above and
-    # this read, and the caller would otherwise sign and propagate
-    # someone else's line as its own.
-    row = db.connection.execute(
-        "SELECT * FROM channel_messages WHERE id = ?", (message_id,)
-    ).fetchone()
     return _row_to_message(row)
 
 

@@ -4318,6 +4318,14 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
 
 # -- Inter-BBS chat: MRC bridge (issue #275) ---------------------------------
 
+# Shown by the standalone admin CLI, which edits the database but cannot
+# reach the running node's bridge: the bridge re-reads its mappings once
+# per keepalive tick, so the change is not instant and must not be
+# reported as if it were.
+_MRC_STANDALONE_NOTE = (
+    "Saved. A running node applies this within a minute; until then the bridge keeps its current mapping."
+)
+
 
 _MRC_STATE_BADGES: dict[MrcState, tuple[str, str]] = {
     MrcState.CONNECTED: ("CONNECTED", "success"),
@@ -12733,6 +12741,8 @@ async def _mrc_room_screen(
         if mrc_bridge is not None:
             await mrc_bridge.refresh_channel_mappings()
         await session.write_line(f"Channel {channel.name!r} is no longer bridged to MRC.")
+        if mrc_bridge is None:
+            await session.write_line(colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
         return None
 
     def _set(db: Database) -> MrcChannelMapping:
@@ -12751,6 +12761,8 @@ async def _mrc_room_screen(
     if mrc_bridge is not None:
         await mrc_bridge.refresh_channel_mappings()
     await session.write_line(f"Channel {channel.name!r} is now bridged to MRC room #{mapping.room}.")
+    if mrc_bridge is None:
+        await session.write_line(colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
     settings = await lane.run(load_mrc_settings)
     if not settings.enabled:
         await session.write_line(
@@ -12788,6 +12800,8 @@ async def _toggle_mrc_pause(
         await mrc_bridge.refresh_channel_mappings()
     verb = "paused" if paused else "resumed"
     await session.write_line(f"MRC bridge for {channel.name!r} {verb}.")
+    if mrc_bridge is None:
+        await session.write_line(colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
     return mapping
 
 

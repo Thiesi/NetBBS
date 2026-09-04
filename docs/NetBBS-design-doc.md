@@ -5085,8 +5085,11 @@ everything through the same `netbbs.chat.hub.ChatHub.broadcast()` a
 purely local participant's own message already goes through. Its own
 `_handle_channel_message` already renders a remote-authored message with
 `author_fingerprint=None` and a descriptive `author_label` (`f"{user_id}
-@{fingerprint}"`) — the exact shape an MRC-authored message needs, no new
-`channel_messages` column or storage rule required. The outbound hook
+@{fingerprint}"`) — the shape an MRC-authored message reuses, with one
+storage rule added on review: `channel_messages.external_source` marks
+such a row so it is never attested as this node's own content (§6.3;
+trusted-scrollback snapshots skip it and Link queueing refuses to sign
+it). The outbound hook
 point already exists too: `netbbs.net.chat_flow`'s per-message send path
 calls `link_context.realtime_bridge.broadcast_local_message_live(channel,
 recorded_message)` immediately after `record_message`/`hub.broadcast` —

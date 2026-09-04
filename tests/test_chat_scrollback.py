@@ -176,3 +176,14 @@ def test_external_source_round_trips(db, lobby):
     assert get_scrollback(db, lobby)[-1].external_source == "mrc"
     local = record_message(db, lobby, kind="message", author_label="alice", body="hello")
     assert local.external_source is None
+
+
+def test_record_message_returns_the_row_even_when_the_limit_is_one(db, lobby):
+    """Review of #275: the row is captured inside the transaction, before
+    the trim, so a limit of 1 plus another writer's trim cannot delete it
+    before it is read back."""
+    set_scrollback_limit(db, 1)
+    first = record_message(db, lobby, kind="message", author_label="alice", body="first")
+    second = record_message(db, lobby, kind="message", author_label="alice", body="second")
+    assert (first.body, second.body) == ("first", "second")
+    assert [m.body for m in get_scrollback(db, lobby)] == ["second"]

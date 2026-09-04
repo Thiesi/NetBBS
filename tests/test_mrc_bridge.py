@@ -825,3 +825,80 @@ def test_userlist_for_an_unmapped_room_is_not_retained(db, lane, lobby, alice):
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_enabling_mrc_tells_occupants_of_already_mapped_channels(db, lane, lobby, alice):
+    """Review of #275: mapping first and switching MRC on afterwards is the
+    natural SysOp order, and the callers already inside never saw a
+    join-time notice because the channel was not bridged then."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = _bridge(hub, lane)
+        await bridge.start()
+        try:
+            assert bridge.state is MrcState.DISABLED
+            _enable(db, fake.port)
+            await bridge.reload_settings()
+            await _wait_until(lambda: bridge.state is MrcState.CONNECTED)
+            notice = await asyncio.wait_for(queue.get(), timeout=2)
+            assert isinstance(notice, str)
+            assert "now bridged to MRC room #lobby" in notice and "'alice'" in notice
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_standalone_pause_reaches_the_running_bridge_within_a_tick(db, lane, lobby, alice):
+    """Review of #275: the standalone admin CLI edits mappings in SQLite
+    with no way to tell the running node; the bridge re-reads them once
+    per keepalive tick."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            set_mrc_paused(db, lobby, True)  # no refresh call: the standalone CLI cannot make one
+            await fake.wait_for(lambda p: p.body == "LOGOFF")
+            assert not bridge.is_bridged(lobby)
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_malformed_lines_are_charged_to_the_inbound_bucket(db, lane, lobby, alice):
+    """Review of #275: garbage lines were counted but never charged, so a
+    hub streaming them was unbounded by the inbound bucket."""
+    from netbbs.mrc.bridge import INBOUND_BURST
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        now = [1000.0]  # frozen: no refill during the burst
+        bridge = await _connected_bridge(db, lane, hub, fake, clock=lambda: now[0])
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            garbage = "x\n" * (INBOUND_BURST + 5)
+            await fake.send_line(garbage + "bob~Other~lobby~~~lobby~did this get through?~")
+            await _wait_until(lambda: bridge.status().dropped_inbound >= INBOUND_BURST + 5)
+            await asyncio.sleep(0.1)
+            assert not [m for m in get_scrollback(db, lobby) if m.kind == "message"]
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())

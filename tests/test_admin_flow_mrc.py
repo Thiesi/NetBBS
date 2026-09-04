@@ -313,3 +313,13 @@ def test_renaming_a_mapped_channel_refreshes_the_running_bridge(db, lane, sysop,
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_standalone_mapping_changes_say_they_are_not_instant(db, lane, sysop, lobby):
+    """Review of #275: without a bridge in reach (the standalone admin
+    CLI), a pause or unmap only changes the database; the screen must
+    not claim the live bridge stopped relaying."""
+    session = FakeSession(["m", "#General", "p", "m", "-", "b"])
+    asyncio.run(_open_channel_detail(session, lane, sysop, lobby))
+    text = _visible(_written_text(session))
+    assert text.count("A running node applies this within a minute") == 3

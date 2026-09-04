@@ -612,13 +612,55 @@ session needs the same treatment.
   spaces underscored, bodies 140 chars / ASCII 32-125, lines 512 bytes, no
   escaping for the `~` delimiter. `netbbs.mrc.protocol.parse_line` strips
   ANSI and control bytes from every field at the parse boundary; nothing
-  downstream may assume otherwise, and pipe codes (`|NN`) are stripped before
-  recording rather than translated.
+  downstream may assume otherwise, and pipe codes (`|NN`) are stripped from
+  every field at parse time, identity fields included, rather than translated.
 - Inbound room lines are recorded through the ordinary `record_message`
-  (author label `user@site (MRC)`, `author_fingerprint=NULL`) and so are
-  bounded by the scrollback limit and search-indexed; server notices, topics
-  and NOTME join/part chatter are broadcast as plain strings and never
-  stored. Private (`to_user`) lines are never delivered.
+  (author label `user@site (MRC)`, `author_fingerprint=NULL`,
+  `external_source='mrc'`) and so are bounded by the scrollback limit and
+  search-indexed; server notices, topics and join/part chatter are broadcast
+  as plain strings and never stored. Private (`to_user`) lines are never
+  delivered. Join/part chatter is recognised only by the hub's anchored
+  templates (`*** ...`, `- nick has joined|left|timed out`, `- nick was
+  renamed`), never by bare keywords: a caller's "I'm leaving after dinner" is
+  a chat line with an author.
+- Provenance boundary: `channel_messages.external_source` (migration 61) is
+  the one marker that a row is not this node's own content. Trusted-scrollback
+  snapshots filter such rows *before* applying their entry cap, Link queueing
+  refuses to sign them, and `record_message` captures the inserted row by id
+  inside its own transaction -- never "the channel's newest row" (a bridge
+  write on the background lane can land beside it) and never after the commit
+  (with a scrollback limit of 1 the other writer's trim can delete it first).
+- Disclosure invariant: a caller is told that their handle and words leave the
+  node before their first relayed line, whichever way the channel became
+  bridged -- on joining a bridged channel, when a SysOp maps or remaps an
+  occupied channel, and on the first connection after MRC is enabled
+  node-wide. Reconnects re-announce silently.
+- Announced callers are tracked together with the room they were announced
+  in, so a remap moves them (`NEWROOM old:new`) instead of leaving the hub
+  roster in the old room. The bridge re-reads its mappings once per keepalive
+  tick because the standalone admin CLI edits them in SQLite with no way to
+  signal the running node; pause, unmap, delete and rename therefore converge
+  within a tick, and the standalone screens say so. A storage error while
+  recording an inbound line drops that mapping, never the connection.
+- Inbound bound: every non-empty line is charged to the inbound bucket before
+  it is parsed, before and after HELLO alike; only HELLO itself is recognised
+  ahead of the bucket, or a flood during the handshake could block it forever.
+  USERLIST state is retained only for mapped rooms. The remote roster hides an
+  entry only when nick *and* site match this node. A multi-chunk local line is
+  relayed all-or-nothing under the per-caller bucket, and local delivery
+  precedes the relay notice so a sender's dropped socket cannot take the
+  already-recorded message from other readers.
+- Reconnect "stability" is judged from the connected-at timestamp:
+  `_connect_and_serve` never returns normally, so a flag set on return could
+  never fire. USERLIST request timestamps are cleared with the rosters, or a
+  reconnect inside the request guard shows an empty room until the next
+  refresh. The diagnostic log handler is attached on every run because MRC can
+  be enabled without Link.
+- Known limitations: one account with simultaneous sessions in two different
+  bridged channels appears in only one hub room (a node-wide per-account
+  identity would be a design change); renaming an occupied channel splits
+  `ChatHub` membership for all delivery, MRC included, which is a chat
+  subsystem question rather than a bridge one.
 - `OLDVERSION` from the hub stops the connector until `reload_settings()`;
   retrying would open a fresh rejected session each time. The advertised
   protocol version (`netbbs.mrc.protocol.PROTOCOL_VERSION`) tracks the MRC
@@ -3997,37 +4039,3 @@ crash-between-two-writes finding in the interrupted-cancellation path was
 declined: the managed-DNS service is a single-operator service where manual
 repair of one row is the realistic recovery, and the branch already carries
 twice the feature's own size in such safeguards.
-
-MRC bridge review (PR #276, 15 findings, 13 addressed in one pass). Provenance:
-`channel_messages.external_source` (migration 61) marks an MRC line, the
-trusted-scrollback snapshot skips such rows, Link queueing refuses to sign
-them, and `record_message` re-reads the inserted row by id instead of the
-channel's newest row, which under a concurrent bridge write handed a local
-caller someone else's line to sign. Disclosure: mapping or remapping an
-occupied channel tells every occupant before their next line is relayed, and
-a remap moves announced callers with `NEWROOM old:new` instead of leaving the
-hub roster in the old room. Presence chatter is matched against the hub's
-anchored templates, never bare keywords, so "I'm leaving after dinner" stays a
-chat line with its author. The remote roster hides a name only when nick and
-site both match this node. Pipe codes are stripped from every inbound field at
-parse time. A multi-chunk line is relayed all-or-nothing under the per-caller
-bucket. Pre-HELLO packets pass the same size cap and token bucket as later
-traffic, with HELLO itself recognised ahead of the bucket. A live `OLDVERSION`
-closes the connection at once. Deleting a mapped channel refreshes the running
-bridge, and an inbound line for a channel that vanished underneath a cached
-mapping drops the mapping rather than the connection. The diagnostic log
-handler is attached on every run and the Operations menu offers the log on any
-running node, since MRC can be enabled without Link. The case-insensitive
-one-room-one-channel rule is now the index itself (`lower(mrc_room)`). Local
-delivery precedes the MRC relay notice, as `/me` already did. Declined: two
-32-character usernames sharing their first 30 characters colliding on the wire.
-
-Second MRC review pass (5 findings, 4 addressed). The reconnect backoff is
-reset from how long a session was actually up, since `_connect_and_serve`
-never returns normally and the old "stable" flag could never be set; USERLIST
-request timestamps are cleared with the rosters so a quick reconnect asks
-again; roster state is retained only for mapped rooms; renaming a mapped
-channel refreshes the running bridge like deleting one. Deferred: one account
-with simultaneous sessions parked in two different bridged channels appears
-in only one hub room, which needs a node-wide per-account identity rather
-than a patch, and has not been seen in use.
