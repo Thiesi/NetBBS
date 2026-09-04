@@ -2,23 +2,18 @@
 Self-update mechanism (design doc §17), including a DB-snapshot-before-
 migration safety net.
 
-Scoped as protocol-agnostic plumbing only: this module
-knows how to check GitHub Releases, fetch and extract a newer release,
-snapshot the database before handing off to it, and record enough state
-to confirm a successful start or roll back a failed one. It knows
-nothing about NetBBS Link protocol/schema compatibility -- that's
-explicitly deferred to whenever Phase 3 needs it.
+Scoped as protocol-agnostic plumbing only: this module checks GitHub
+Releases, can fetch and safely extract a release, snapshots/restores the
+database, and persists pending state for a future apply orchestrator.
+NetBBS Link protocol compatibility remains a separate concern in
+`netbbs.link.protocol`.
 
-**Untestable-from-this-sandbox pieces, by design, matching this
-project's existing precedent for SSH/Zmodem/browser-rendering
-verification:** actually reaching GitHub's real API, and actually
-replacing the running process (`os.execv`), are both behind injectable
-seams (`fetch`/`restart` parameters) so the surrounding logic --
-version comparison, release-info parsing, download/extract, DB
-snapshot/restore, and the pending/confirm/rollback state machine -- is
-fully unit-tested without either. The real network call and the real
-process replacement have not been exercised end-to-end outside this
-sandbox.
+The release fetchers are injectable so version comparison, release-info
+parsing, download/extraction, database snapshot/restore, and the pending
+state primitives can be tested without reaching GitHub. No command,
+menu, or node-lifecycle path currently calls `prepare_update`,
+`confirm_update`, or `roll_back_update`; process replacement and
+automated rollback are not implemented here or elsewhere.
 """
 
 from __future__ import annotations
@@ -87,8 +82,8 @@ class UpdateError(Exception):
 
 
 def get_auto_update_check_enabled(db: Database) -> bool:
-    # Default on, matching §17: "auto-apply is the default, consistent
-    # with 'as seamless as possible' being the stated goal."
+    # Scheduled release checks default on. This setting never enables an
+    # automatic download, apply, or restart; those paths are not implemented.
     value = get_config(db, AUTO_UPDATE_CHECK_ENABLED_CONFIG_KEY)
     return value != "0"
 
@@ -640,12 +635,12 @@ def prepare_update(
 ) -> Path:
     """
     Download and extract `release`, snapshot the database, and record
-    enough state that a subsequent process (the re-exec'd new version)
-    can confirm success or a rollback can undo it. Returns the new
-    release's directory -- the caller (`__main__`/the admin flow) is
-    responsible for actually re-exec'ing into it; this function never
-    replaces the running process itself, so it's fully testable without
-    an injectable restart seam of its own.
+    enough state for a future orchestrator to confirm success or restore
+    the snapshot after failure. Returns the new release's directory.
+
+    This is an isolated primitive with no production caller. In particular,
+    neither `netbbs.__main__` nor the admin flow invokes it, and it does not
+    install files into the active environment or replace the running process.
     """
     new_release_dir = download_and_extract_release(release, releases_root, fetch=fetch)
 
@@ -712,12 +707,13 @@ def _clear_pending_update(db: Database) -> None:
 
 def confirm_update(db: Database, pending: PendingUpdate) -> None:
     """
-    Called by the newly re-exec'd process once it's reached a genuinely
-    successful start (past `_start_servers`, per `__main__.run`) --
-    clears the pending marker (no rollback needed) and rotates the
-    previous release directory out rather than deleting it, per §17
-    ("kept on disk, rotated out"). The database snapshot is removed:
-    once confirmed, it exists only to consume disk space.
+    Resolve an isolated pending update as successful: clear its persisted
+    markers, record the outcome, and remove the database snapshot. The
+    previous release directory is left untouched.
+
+    No startup path currently calls this function. A future apply
+    orchestrator would call it only after deciding that the new release
+    reached its defined successful-start boundary.
     """
     _clear_pending_update(db)
     record_check_outcome(db, f"applied {pending.version} successfully")
@@ -727,19 +723,14 @@ def confirm_update(db: Database, pending: PendingUpdate) -> None:
 
 def roll_back_update(db: Database, pending: PendingUpdate, *, db_path: Path) -> None:
     """
-    Called when the newly re-exec'd process fails to start cleanly:
-    restores the database from the pre-migration snapshot -- the
-    previous version's code may not be able to read a schema the
-    failed update migrated forward -- and clears the pending marker. Does
-    **not** itself re-exec back into the previous version -- like
-    `prepare_update`, that's left to the caller, which already has to
-    own the actual restart mechanism.
+    Resolve an isolated pending update as failed: restore the database
+    snapshot, clear the pending markers, record the outcome, and remove the
+    staged new-release directory. This function does not reinstall or
+    re-exec the previous release, and no production failure path calls it.
 
-    `db_path` is supplied explicitly rather than derived from
-    `pending` -- the caller (`netbbs.__main__`) already has the real
-    database path in hand, and deriving it from the snapshot's own
-    filename would just be re-parsing something the caller already
-    knows correctly.
+    `db_path` is explicit because an eventual orchestrator will already know
+    the configured live database path; deriving it from the snapshot filename
+    would duplicate less reliable path knowledge.
     """
     restore_database(pending.db_snapshot_path, db_path)
     _clear_pending_update(db)
