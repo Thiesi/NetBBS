@@ -6753,6 +6753,25 @@ def test_live_backup_screen_creates_a_complete_backup_with_configured_identity(
     assert "This is a local backup" in _written_text(session)
 
 
+def test_dashboard_refreshes_its_backup_summary_after_quick_action(
+    db, lane, sysop,
+):
+    identity_dir = db.path.parent / "identity"
+    identity_dir.mkdir()
+    controls = _node_controls(backup_identity_dir=identity_dir)
+    session = FakeSession(["k", "c", "y", " ", "b", "b"])
+
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
+
+    backup_lines = [
+        line
+        for line in _visible(_written_text(session)).split("\r\n")
+        if "Backup:" in line
+    ]
+    assert "Backup: never" in backup_lines[0]
+    assert "Backup: never" not in backup_lines[-1]
+
+
 def test_live_backup_screen_surfaces_a_backup_failure(db, lane, sysop, monkeypatch):
     from netbbs.net import admin_flow
 

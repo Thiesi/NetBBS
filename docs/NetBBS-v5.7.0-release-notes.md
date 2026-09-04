@@ -51,7 +51,9 @@ file copies run off the event loop while remaining owned through session
 cancellation. The live flow refuses to create a nominally complete backup if
 the configured identity directory is unavailable. Completion is reported even
 if its ancillary audit write fails, and the screen refreshes its status and
-recent-run history afterward.
+recent-run history afterward. Returning through the dashboard quick action
+also reloads its backup summary, whose timestamp and destination are persisted
+as one transaction.
 
 These are local backups; off-node transfer and retention remain operator
 responsibilities. `python -m netbbs.backup create` remains available for custom
@@ -126,5 +128,6 @@ where it is used.
   skipped.
 - `python -m netbbs --version` reports v5.7.0 and schema version 61.
 - Backup creation is tested against a live database lane with a non-default
-  identity directory; Link relay and MRC coverage use real loopback transports
-  where the protocol boundary matters.
+  identity directory; final focused coverage also exercises dashboard refresh
+  and atomic summary persistence. Link relay and MRC coverage use real loopback
+  transports where the protocol boundary matters.

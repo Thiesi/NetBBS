@@ -167,10 +167,10 @@ def test_create_backup_still_succeeds_if_status_bookkeeping_fails(
 ):
     destination = tmp_path / "backup1"
 
-    def fail_status_write(*args, **kwargs):
+    def fail_status_open(*args, **kwargs):
         raise sqlite3.OperationalError("database busy")
 
-    monkeypatch.setattr(backup_module, "set_config", fail_status_write)
+    monkeypatch.setattr(backup_module, "Database", fail_status_open)
 
     assert create_backup(
         db_path=db_path, identity_dir=identity_dir, destination=destination
@@ -370,6 +370,36 @@ def test_create_backup_records_last_backup_state(tmp_path, db_path, identity_dir
     checked_at, path = get_last_backup_summary(Database(db_path))
     assert checked_at is not None
     assert path == str(destination)
+
+
+def test_create_backup_rolls_back_both_summary_fields_if_either_write_fails(
+    tmp_path, db_path, identity_dir,
+):
+    db = Database(db_path)
+    db.connection.execute(
+        """
+        CREATE TRIGGER fail_last_backup_path
+        BEFORE INSERT ON node_config
+        WHEN NEW.key = 'last_backup_path'
+        BEGIN
+            SELECT RAISE(ABORT, 'simulated summary write failure');
+        END
+        """
+    )
+    db.connection.commit()
+    db.close()
+
+    create_backup(
+        db_path=db_path,
+        identity_dir=identity_dir,
+        destination=tmp_path / "backup1",
+    )
+
+    db = Database(db_path)
+    try:
+        assert get_last_backup_summary(db) == (None, None)
+    finally:
+        db.close()
 
 
 def test_create_backup_appends_to_operational_run_history(tmp_path, db_path, identity_dir):

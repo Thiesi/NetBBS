@@ -2567,7 +2567,9 @@ before creating the destination. Because cancellation cannot stop an
 of that task, await and retrieve its outcome, and only then propagate session
 cancellation. Once the backup primitive returns, report success before writing
 the ancillary SysOp audit row; an audit write failure must not make a completed
-filesystem backup look unsuccessful.
+filesystem backup look unsuccessful. Store the last-success timestamp and path
+as one transaction so the dashboard can never pair a new timestamp with an old
+generation, and reload dashboard state when the Backup quick action returns.
 
 Back up in this order:
 

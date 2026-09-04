@@ -758,8 +758,9 @@ async def admin_menu(
         elif choice == "k":
             await session.write_line("")
             await _backup_status_screen(session, lane, user, node_controls=node_controls)
-            await _draw_admin_menu(session, lane, user, node_controls=node_controls,
-                                   link_context=link_context, state=dashboard_state)
+            dashboard_state = await _draw_admin_menu(
+                session, lane, user, node_controls=node_controls, link_context=link_context
+            )
         elif choice == "d":
             await session.write_line("")
             await _managed_dns_status_screen(session, lane, user)

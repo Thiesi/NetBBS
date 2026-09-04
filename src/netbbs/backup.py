@@ -85,7 +85,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from netbbs import __version__
-from netbbs.config import get_config, set_config
+from netbbs.config import get_config
 from netbbs.link.node_identity import NodeIdentity, NodeIdentityError
 from netbbs.managed_dns.credential import (
     credential_path_for as _managed_dns_credential_path_for,
@@ -429,8 +429,18 @@ def _record_backup_state(db_path: Path, destination: Path) -> None:
     try:
         db = Database(db_path)
         try:
-            set_config(db, _LAST_BACKUP_AT_CONFIG_KEY, utc_now_iso())
-            set_config(db, _LAST_BACKUP_PATH_CONFIG_KEY, str(destination))
+            created_at = utc_now_iso()
+            with db.connection:
+                db.connection.executemany(
+                    """
+                    INSERT INTO node_config (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (
+                        (_LAST_BACKUP_AT_CONFIG_KEY, created_at),
+                        (_LAST_BACKUP_PATH_CONFIG_KEY, str(destination)),
+                    ),
+                )
             record_operational_run(db, "backup", "succeeded", detail=str(destination))
         finally:
             db.close()
