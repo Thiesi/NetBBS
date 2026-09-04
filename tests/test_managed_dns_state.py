@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
 from netbbs.managed_dns.state import (
     OptIn,
     RegistrationStatus,
@@ -9,6 +13,10 @@ from netbbs.managed_dns.state import (
     get_last_contact_at,
     get_node_fingerprint,
     get_opt_in,
+    get_previous_name,
+    get_previous_published,
+    get_previous_status,
+    get_published,
     get_registered_name,
     get_registration_status,
     get_service_url,
@@ -16,6 +24,8 @@ from netbbs.managed_dns.state import (
     set_last_contact_at,
     set_node_fingerprint,
     set_opt_in,
+    set_pending_rename_state,
+    set_published,
     set_registered_name,
     set_registration_status,
     set_service_url,
@@ -136,4 +146,39 @@ def test_service_url_can_be_cleared_back_to_none(tmp_path):
     set_service_url(db, "https://managed.netbbs.org")
     set_service_url(db, None)
     assert get_service_url(db) is None
+    db.close()
+
+
+def test_pending_rename_state_rolls_back_as_one_transaction(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_registered_name(db, "old-name")
+    set_registration_status(db, RegistrationStatus.MATURED)
+    set_published(db, True)
+    db.connection.execute(
+        """
+        CREATE TRIGGER reject_pending_status
+        BEFORE UPDATE OF value ON node_config
+        WHEN OLD.key = 'managed_dns_status' AND NEW.value = 'pending'
+        BEGIN
+            SELECT RAISE(ABORT, 'simulated write failure');
+        END
+        """
+    )
+    db.connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="simulated write failure"):
+        set_pending_rename_state(
+            db,
+            name="new-name",
+            previous_name="old-name",
+            previous_status=RegistrationStatus.MATURED,
+            previous_published=True,
+        )
+
+    assert get_registered_name(db) == "old-name"
+    assert get_registration_status(db) is RegistrationStatus.MATURED
+    assert get_published(db)
+    assert get_previous_name(db) is None
+    assert get_previous_status(db) is None
+    assert not get_previous_published(db)
     db.close()

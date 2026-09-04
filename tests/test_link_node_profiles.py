@@ -54,6 +54,24 @@ def test_signed_profile_is_presented_as_friendly_name_and_dns(tmp_path):
     assert peer.descriptor.payload["friendly_name"] == "The Rusty Anchor"
 
 
+def test_transport_endpoint_host_is_not_a_presentation_identity_claim(db):
+    peers = []
+    for label, port in (("first-endpoint", 7862), ("second-endpoint", 7863)):
+        identity = bootstrap_node_identity(label)
+        node = LinkNode(identity=identity)
+        peer = node.handle_hello(node.build_hello(
+            addresses=[{"protocol": "http", "address": "shared.example.org", "port": port}],
+            outgoing_only=False,
+            created_at="2026-09-04T00:00:00+00:00",
+        ))
+        save_peer(db, peer)
+        peers.append(peer)
+
+    assert all(identity_for_peer(peer).dns_name is None for peer in peers)
+    assert resolve_peer_reference(peers, "shared.example.org") == []
+    assert not any(item.severity == "security" for item in list_identity_observations(db))
+
+
 def test_resolver_prefers_dns_and_refuses_ambiguous_friendly_names(tmp_path):
     alice = _peer(tmp_path, "alice", "The Anchor", "one.example.org")
     bob = _peer(tmp_path, "bob", "The Anchor", "two.example.org")

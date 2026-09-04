@@ -64,6 +64,47 @@ PUBLISHED_CONFIG_KEY = "managed_dns_published"
 PREVIOUS_PUBLISHED_CONFIG_KEY = "managed_dns_previous_published"
 
 
+def _set_config_values(db: Database, values: tuple[tuple[str, str], ...]) -> None:
+    """Commit a related set of node-config values as one transaction."""
+    with db.connection:
+        db.connection.executemany(
+            """
+            INSERT INTO node_config (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            values,
+        )
+
+
+def set_pending_rename_state(
+    db: Database, *, name: str, previous_name: str,
+    previous_status: RegistrationStatus, previous_published: bool,
+) -> None:
+    """Atomically switch the local presentation to a pending replacement."""
+    _set_config_values(db, (
+        (PREVIOUS_NAME_CONFIG_KEY, previous_name),
+        (PREVIOUS_STATUS_CONFIG_KEY, previous_status.value),
+        (PREVIOUS_PUBLISHED_CONFIG_KEY, "1" if previous_published else "0"),
+        (NAME_CONFIG_KEY, name),
+        (STATUS_CONFIG_KEY, RegistrationStatus.PENDING.value),
+        (PUBLISHED_CONFIG_KEY, "0"),
+    ))
+
+
+def set_cancelled_rename_state(
+    db: Database, *, name: str, status: RegistrationStatus, published: bool,
+) -> None:
+    """Atomically restore the previous registration after cancellation."""
+    _set_config_values(db, (
+        (NAME_CONFIG_KEY, name),
+        (STATUS_CONFIG_KEY, status.value),
+        (PUBLISHED_CONFIG_KEY, "1" if published else "0"),
+        (PREVIOUS_NAME_CONFIG_KEY, ""),
+        (PREVIOUS_STATUS_CONFIG_KEY, ""),
+        (PREVIOUS_PUBLISHED_CONFIG_KEY, "0"),
+    ))
+
+
 def get_opt_in(db: Database) -> OptIn:
     value = get_config(db, OPT_IN_CONFIG_KEY)
     return OptIn(value) if value is not None else OptIn.UNDECIDED

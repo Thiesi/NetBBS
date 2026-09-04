@@ -136,11 +136,6 @@ def identity_for_peer(peer) -> NodeDisplayIdentity:
     payload = peer.descriptor.payload
     friendly = normalize_friendly_name(payload.get("friendly_name"))
     dns_name = normalize_dns_name(payload.get("canonical_dns_name"))
-    if dns_name is None:
-        for address in payload.get("addresses") or ():
-            dns_name = normalize_dns_name(address.get("address")) if isinstance(address, dict) else None
-            if dns_name:
-                break
     return NodeDisplayIdentity(peer.fingerprint, friendly or UNNAMED_NODE_NAME, dns_name)
 
 

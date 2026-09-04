@@ -303,18 +303,28 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     assert marker == ("present-before-backup",)
 
 
-def test_restore_removes_a_newer_credential_transition_absent_from_backup(
+def test_restore_removes_newer_managed_dns_credentials_absent_from_backup(
     tmp_path, db_path, identity_dir,
 ):
     _seed_full_node(db_path, identity_dir)
+    primary = _managed_dns_credential_path(db_path)
+    previous = _managed_dns_previous_credential_path(db_path)
+    primary.unlink()
+    previous.unlink()
     source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup1")
     transition = _managed_dns_transition_credential_path(db_path)
+    primary.write_text("post-backup primary secret")
+    previous.write_text("post-backup previous secret")
     transition.write_text("post-backup staged secrets")
 
     rollback = restore_backup(source=source, db_path=db_path, identity_dir=identity_dir)
 
+    assert not primary.exists()
+    assert not previous.exists()
     assert not transition.exists()
     assert rollback is not None
+    assert (rollback / primary.name).read_text() == "post-backup primary secret"
+    assert (rollback / previous.name).read_text() == "post-backup previous secret"
     assert (rollback / transition.name).read_text() == "post-backup staged secrets"
 
 

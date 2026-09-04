@@ -3777,3 +3777,17 @@ Bounded identity-observation pruning gives undismissed security warnings first
 claim on both per-peer and global retention budgets. Retain a bounded history of
 the local node's replaced friendly and DNS claims too, and resolve friendly and
 DNS matches as one ambiguity set rather than giving either claim kind precedence.
+
+Managed-DNS rename configuration is a single `node_config` transaction; never
+publish a new name while retaining the old registration's matured/published
+flags. Cancellation commits the revived old-name state before removing its
+retained credential, then journals the reverse file swap. Backup restore treats
+absence as state for the primary credential, previous credential, and transition
+journal alike.
+
+Endpoint hosts in signed `addresses` entries remain transport metadata and do
+not enter the friendly/DNS identity-claim namespace. High-impact selectors such
+as board-origin transfer expose the full fingerprint when presentation labels
+collide, with the fingerprint placed first so terminal truncation cannot hide it.
+Status screens which describe current authenticated presentation load the live
+node name from configuration rather than a session's login-time breadcrumb cache.

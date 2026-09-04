@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from netbbs.managed_dns.credential import credential_path_for, load_credential, previous_credential_path_for
 from netbbs.managed_dns.state import (
     OptIn,
@@ -421,4 +423,66 @@ def test_managed_name_change_and_cancel_preserve_the_old_registration(tmp_path, 
     assert get_previous_name(db) is None
     assert load_credential(credential_path_for(db.path)) == old_credential
     assert load_credential(previous_credential_path_for(db.path)) is None
+    db.close()
+
+
+def test_cancelled_rename_is_recoverable_if_reverse_credential_journaling_crashes(
+    tmp_path, monkeypatch,
+):
+    from netbbs.managed_dns.updater import run_scheduled_managed_dns_updater
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            lane = DatabaseLane(db.path)
+            await register_via_prompt(FakeSession(["old-name", "n", "n"]), lane)
+            old_credential = load_credential(credential_path_for(db.path))
+            await rename_registration(FakeSession(["new-name", "y"]), lane)
+            replacement_credential = load_credential(credential_path_for(db.path))
+
+            def simulated_crash(*_args, **_kwargs):
+                raise RuntimeError("simulated crash before reverse journal")
+
+            monkeypatch.setattr(
+                "netbbs.net.managed_dns_flow.stage_credential_cancellation",
+                simulated_crash,
+            )
+            with pytest.raises(RuntimeError, match="simulated crash"):
+                await cancel_registration_rename(FakeSession(["y"]), lane)
+
+            assert get_registered_name(db) == "old-name"
+            assert get_previous_name(db) is None
+            assert load_credential(credential_path_for(db.path)) == replacement_credential
+            assert load_credential(previous_credential_path_for(db.path)) == old_credential
+
+            pass_finished = asyncio.Event()
+            parked = asyncio.Event()
+
+            async def stop_after_one_pass(_seconds):
+                pass_finished.set()
+                await parked.wait()
+
+            task = asyncio.create_task(
+                run_scheduled_managed_dns_updater(db, sleep=stop_after_one_pass)
+            )
+            await asyncio.wait_for(pass_finished.wait(), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            lane.close()
+            return db, old_credential
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, old_credential = asyncio.run(scenario())
+    assert load_credential(credential_path_for(db.path)) == old_credential
+    assert load_credential(previous_credential_path_for(db.path)) is None
+    assert get_registered_name(db) == "old-name"
     db.close()

@@ -24,7 +24,8 @@ from pathlib import Path
 
 from netbbs.managed_dns.credential import (
     credential_path_for, delete_credential, load_credential, previous_credential_path_for,
-    recover_credential_transition, save_credential, stage_credential_transition,
+    recover_credential_transition, save_credential, stage_credential_cancellation,
+    stage_credential_transition,
     transition_credential_path_for,
 )
 from netbbs.managed_dns.state import (
@@ -36,16 +37,15 @@ from netbbs.managed_dns.state import (
     get_previous_status,
     get_registered_name,
     get_service_url,
+    set_cancelled_rename_state,
     set_dynamic,
     set_opt_in,
     get_previous_published,
     get_published,
-    set_previous_name,
-    set_previous_published,
-    set_previous_status,
     set_published,
     set_registered_name,
     set_registration_status,
+    set_pending_rename_state,
 )
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.session import Session
@@ -344,12 +344,14 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
     stage_credential_transition(lane.path, old_credential, result.credential)
     save_credential(previous_credential_path_for(lane.path), old_credential)
     save_credential(primary_path, result.credential)
-    await lane.run(set_previous_name, result.previous_name)
-    await lane.run(set_previous_status, RegistrationStatus(result.previous_status))
-    await lane.run(set_previous_published, await lane.run(get_published))
-    await lane.run(set_registered_name, result.name)
-    await lane.run(set_registration_status, RegistrationStatus.PENDING)
-    await lane.run(set_published, False)
+    previous_published = await lane.run(get_published)
+    await lane.run(
+        set_pending_rename_state,
+        name=result.name,
+        previous_name=result.previous_name,
+        previous_status=RegistrationStatus(result.previous_status),
+        previous_published=previous_published,
+    )
     delete_credential(transition_credential_path_for(lane.path))
     await session.write_line(
         colored(
@@ -391,12 +393,17 @@ async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> No
     except ManagedDnsError as exc:
         await session.write_line(colored(f"Cancellation failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
         return
-    save_credential(primary_path, old_credential)
-    delete_credential(previous_credential_path_for(lane.path))
-    await lane.run(set_registered_name, result.previous_name)
-    await lane.run(set_registration_status, RegistrationStatus(result.previous_status) if result.previous_status else old_status)
-    await lane.run(set_published, await lane.run(get_previous_published))
-    await lane.run(set_previous_name, None)
-    await lane.run(set_previous_status, None)
-    await lane.run(set_previous_published, False)
+    restored_status = RegistrationStatus(result.previous_status) if result.previous_status else old_status
+    restored_published = await lane.run(get_previous_published)
+    await lane.run(
+        set_cancelled_rename_state,
+        name=result.previous_name,
+        status=restored_status,
+        published=restored_published,
+    )
+    # The database now describes the remotely revived old name. Until
+    # this reverse file swap completes, the still-retained previous
+    # secret lets the updater recover by heartbeating both credentials.
+    stage_credential_cancellation(lane.path, old_credential)
+    recover_credential_transition(lane.path)
     await session.write_line(colored(f"Kept {result.previous_name}.netbbs.org; the name change was cancelled.", fg_color=MUTED_COLOR))

@@ -17,7 +17,7 @@ mutating calls against project-operated infrastructure.
 The three path helpers follow the exact derived-path convention used by
 the backup subsystem. The primary credential, rename-time previous
 credential, and crash-recovery transition journal are all recoverable
-artifacts; restore must preserve both the journal's presence and absence.
+artifacts; restore must preserve each artifact's presence and absence.
 """
 
 from __future__ import annotations
@@ -46,14 +46,23 @@ def transition_credential_path_for(db_path: Path) -> Path:
 
 
 def stage_credential_transition(db_path: Path, old_secret: str, new_secret: str) -> None:
+    """Journal the forward credential swap which begins a rename."""
     save_credential(
         transition_credential_path_for(db_path),
-        json.dumps({"old": old_secret, "new": new_secret}),
+        json.dumps({"primary": new_secret, "previous": old_secret}),
+    )
+
+
+def stage_credential_cancellation(db_path: Path, restored_secret: str) -> None:
+    """Journal the reverse swap which completes a cancelled rename."""
+    save_credential(
+        transition_credential_path_for(db_path),
+        json.dumps({"primary": restored_secret, "previous": None}),
     )
 
 
 def recover_credential_transition(db_path: Path) -> bool:
-    """Finish an interrupted managed-name credential swap, if one was staged."""
+    """Finish an interrupted forward or reverse credential swap."""
     path = transition_credential_path_for(db_path)
     raw = load_credential(path)
     if raw is None:
@@ -62,11 +71,28 @@ def recover_credential_transition(db_path: Path) -> bool:
         payload = json.loads(raw)
     except (TypeError, ValueError):
         return False
-    old_secret, new_secret = payload.get("old"), payload.get("new")
-    if not isinstance(old_secret, str) or not old_secret or not isinstance(new_secret, str) or not new_secret:
+    if not isinstance(payload, dict):
         return False
-    save_credential(previous_credential_path_for(db_path), old_secret)
-    save_credential(credential_path_for(db_path), new_secret)
+    if "primary" in payload:
+        primary_secret = payload.get("primary")
+        previous_secret = payload.get("previous")
+    else:
+        # Backups can restore forward-only journals created by an older
+        # version, so retain read compatibility with {old, new}.
+        primary_secret = payload.get("new")
+        previous_secret = payload.get("old")
+    if (
+        not isinstance(primary_secret, str) or not primary_secret
+        or (previous_secret is not None and (
+            not isinstance(previous_secret, str) or not previous_secret
+        ))
+    ):
+        return False
+    save_credential(credential_path_for(db_path), primary_secret)
+    if previous_secret is None:
+        delete_credential(previous_credential_path_for(db_path))
+    else:
+        save_credential(previous_credential_path_for(db_path), previous_secret)
     delete_credential(path)
     return True
 

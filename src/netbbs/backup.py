@@ -548,11 +548,15 @@ def _restore_switch_plan(
                 live_path = _managed_dns_transition_credential_path_for(db_path)
             plan.append((entry.name, entry, live_path))
 
-    transition_path = _managed_dns_transition_credential_path_for(db_path)
-    if not any(live_path == transition_path for _, _, live_path in plan):
-        # Point-in-time restore must also restore absence: a newer staged
-        # transition must not overwrite the restored credential generation.
-        plan.append((transition_path.name, None, transition_path))
+    for credential_path in (
+        _managed_dns_credential_path_for(db_path),
+        _managed_dns_previous_credential_path_for(db_path),
+        _managed_dns_transition_credential_path_for(db_path),
+    ):
+        if not any(live_path == credential_path for _, _, live_path in plan):
+            # Point-in-time restore must also restore absence: no newer
+            # credential-generation artifact may survive over the snapshot.
+            plan.append((credential_path.name, None, credential_path))
 
     return plan
 

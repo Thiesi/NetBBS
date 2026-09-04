@@ -502,7 +502,9 @@ Link endpoint descriptors carry both claims inside the node-signed hello
 bundle. User-facing screens show the friendly name, qualified by the canonical
 DNS name where useful, and do not expose fingerprints by default. DNS names are
 unique routing names, but neither a friendly name nor DNS is cryptographic
-identity authority.
+identity authority. Transport endpoints in the descriptor's `addresses` list
+are connectivity data, not presentation claims; an older peer which omits
+`canonical_dns_name` does not implicitly claim its endpoint host as a DNS name.
 
 The underlying address and every protocol/persistence relationship remain
 `user@node-fingerprint`. Durable linked content -- channel scrollback, mail,
@@ -2195,6 +2197,10 @@ Voluntary board-origin transfer requires mutual consent:
 2. the proposed origin signs acceptance;
 3. peers project the new origin only after both valid events.
 
+Because this transfers authority, a SysOp picker must disambiguate peers whose
+friendly/DNS presentation labels collide by showing their full fingerprints
+before selection and confirmation.
+
 Only one outstanding transfer offer is meaningful at a time.
 
 If the current origin loses all valid signing authority and cannot publish a
@@ -3164,7 +3170,7 @@ with no single existing tool that treats them as one recoverable set:
 | Node identity | `identity_dir` (`root.identity`, `signing.identity`, `transport.identity`, `transitions.json`) | `netbbs.link.node_identity` |
 | SSH host key | `db_path.parent / f"{db_path.stem}_ssh_host_key"` | `netbbs.net.ssh.ensure_host_key`, once, at first startup |
 | Managed-DNS credential | `db_path.parent / f"{db_path.stem}_managed_dns_credential"` | `netbbs.managed_dns.credential`, once, at registration (§16 Decision 7, issue #201) |
-| Managed-DNS rename credentials | Previous credential plus the temporary credential-transition journal beside `db_path`; restore preserves both the journal's presence and absence | `netbbs.managed_dns.credential`, during a managed-name transition |
+| Managed-DNS rename credentials | Previous credential plus the temporary credential-transition journal beside `db_path`; restore preserves the presence and absence of the primary, previous, and journal artifacts | `netbbs.managed_dns.credential`, during a managed-name transition |
 | Welcome banner | `db_path.parent / f"{db_path.stem}_welcome_banner.ans"` | SysOp, via the welcome-banner menu screen |
 | Main-menu masthead | `db_path.parent / f"{db_path.stem}_main_menu_banner.ans"` | SysOp, via the masthead menu screen (issue #161) |
 | Logoff banner | `db_path.parent / f"{db_path.stem}_logoff_banner.ans"` | SysOp, via the logoff-banner menu screen (issue #177) |
@@ -5696,6 +5702,16 @@ retryable rejection before entering the worker queue. Publication and
 deletion failures remain retryable state (release is not finalized until
 deletion succeeds, and a failed static publication is retried), and the
 service-wide token-bucket state survives backend restarts.
+
+Node-side rename state is one local database transaction: the replacement name,
+pending/unpublished state, and previous-name presentation state never become
+visible in a partial combination. Cancellation first commits the remotely
+revived previous name as a coherent local state, then uses the credential
+transition journal in reverse to restore the previous bearer secret and remove
+the replacement-era extra secret. A crash on either side remains recoverable by
+the retained two credentials and the updater. Point-in-time restore likewise
+removes any primary, previous, or journal credential artifact absent from the
+backup generation.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 

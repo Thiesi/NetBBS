@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import stat
 import sys
 import os
@@ -15,6 +16,7 @@ from netbbs.managed_dns.credential import (
     previous_credential_path_for,
     recover_credential_transition,
     save_credential,
+    stage_credential_cancellation,
     stage_credential_transition,
     transition_credential_path_for,
 )
@@ -104,3 +106,27 @@ def test_staged_rename_credential_swap_is_recoverable_after_a_crash(tmp_path):
     assert load_credential(credential_path_for(db_path)) == "new-secret"
     assert load_credential(previous_credential_path_for(db_path)) == "old-secret"
     assert load_credential(transition_credential_path_for(db_path)) is None
+
+
+def test_staged_cancellation_removes_the_previous_credential_on_recovery(tmp_path):
+    db_path = tmp_path / "node.db"
+    save_credential(credential_path_for(db_path), "replacement-secret")
+    save_credential(previous_credential_path_for(db_path), "old-secret")
+    stage_credential_cancellation(db_path, "old-secret")
+
+    assert recover_credential_transition(db_path) is True
+    assert load_credential(credential_path_for(db_path)) == "old-secret"
+    assert load_credential(previous_credential_path_for(db_path)) is None
+    assert load_credential(transition_credential_path_for(db_path)) is None
+
+
+def test_recovery_accepts_the_legacy_forward_journal_shape(tmp_path):
+    db_path = tmp_path / "node.db"
+    save_credential(
+        transition_credential_path_for(db_path),
+        json.dumps({"old": "old-secret", "new": "new-secret"}),
+    )
+
+    assert recover_credential_transition(db_path) is True
+    assert load_credential(credential_path_for(db_path)) == "new-secret"
+    assert load_credential(previous_credential_path_for(db_path)) == "old-secret"

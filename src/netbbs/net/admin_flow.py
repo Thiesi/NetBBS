@@ -186,7 +186,7 @@ from netbbs.link.files import LinkFilesError, is_area_linked, link_file_area
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.node_profiles import (
     dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
-    is_node_fingerprint, list_identity_observations, own_canonical_dns_name,
+    is_node_fingerprint, list_identity_observations, name_key, own_canonical_dns_name,
     resolve_stored_peer_reference,
 )
 from netbbs.link.relay_mailbox import mailbox_sizes
@@ -4257,10 +4257,11 @@ async def _link_status_screen(
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     own_dns = await lane.run(own_canonical_dns_name, config.advertised_host if config else None)
+    own_name = await lane.run(get_node_display_name)
     await session.write_line(
         colored("Node: ", fg_color=LABEL_COLOR)
         + colored(
-            sanitize_text(session.node_display_name + (f" · {own_dns}" if own_dns else "")),
+            sanitize_text(own_name + (f" · {own_dns}" if own_dns else "")),
             fg_color=METADATA_COLOR,
         )
     )
@@ -10188,6 +10189,20 @@ async def _transfer_board_origin_screen(
     peers = sorted(
         link_context.link_node.peers.values(), key=lambda peer: identity_for_peer(peer).label.lower()
     )
+    identities = {peer.fingerprint: identity_for_peer(peer) for peer in peers}
+    label_counts: dict[str, int] = {}
+    for identity in identities.values():
+        key = name_key(identity.label)
+        label_counts[key] = label_counts.get(key, 0) + 1
+
+    def _candidate_label(peer) -> str:
+        identity = identities[peer.fingerprint]
+        if label_counts[name_key(identity.label)] > 1:
+            # Put the full technical identity first so a narrow picker
+            # cannot truncate away the only distinguishing value.
+            return f"{peer.fingerprint} ({identity.label})"
+        return identity.label
+
     await session.write_line(
         colored("\r\nTransfer message board origin", fg_color=await lane.run(effective_header_color_256), bold=True)
     )
@@ -10196,7 +10211,7 @@ async def _transfer_board_origin_screen(
         return
     selected = await pick_item(
         session, peers,
-        name_of=lambda peer: identity_for_peer(peer).label,
+        name_of=_candidate_label,
         stable_id_of=lambda peer: id(peer),
         title="New message-board origin",
         empty_message="No known peers.",
@@ -10209,7 +10224,7 @@ async def _transfer_board_origin_screen(
     if selected is None:
         return
     target = selected.fingerprint
-    target_label = sanitize_text(identity_for_peer(selected).label)
+    target_label = sanitize_text(_candidate_label(selected))
     if not await prompt_yes_no(session, f"Offer to hand {board.name!r} off to {target_label}?", default=False):
         await session.write_line("Cancelled.")
         return

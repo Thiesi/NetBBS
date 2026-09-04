@@ -2748,6 +2748,43 @@ def test_transfer_board_origin_flow(db, lane, sysop):
     offer = link_context.link_node.pending_origin_transfers[board.board_id]
     assert offer.payload["new_origin_fingerprint"] == peer.fingerprint
     assert offer.payload["old_origin_fingerprint"] == link_context.node_identity.fingerprint
+    assert peer.fingerprint not in text
+
+
+def test_transfer_board_origin_disambiguates_duplicate_peer_labels(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+    peers = []
+    for label in ("duplicate-a", "duplicate-b"):
+        identity = bootstrap_node_identity(label)
+        remote = LinkNode(identity=identity)
+        peer = link_context.link_node.handle_hello(remote.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at="2026-09-04T00:00:00+00:00",
+            friendly_name="Shared Node",
+            canonical_dns_name="shared.example.org",
+        ))
+        link_context.link_node.peers[peer.fingerprint] = peer
+        peers.append(peer)
+
+    inputs = [
+        "m", "m", "l", "0", "1",
+        "t", "0", "1", "n",
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _visible(_written_text(session))
+    assert all(peer.fingerprint in text for peer in peers)
+    assert "Offer sent" not in text
 
 
 def test_close_board_flow(db, lane, sysop):
@@ -6291,6 +6328,18 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
     assert "Linked boards: 1" in text
     assert "Known events: 1" in text
     assert "No verified peers." in text
+
+
+def test_link_status_screen_reads_the_current_node_name(db, lane, sysop):
+    from netbbs.config import set_node_display_name
+
+    session = FakeSession(["s", "l", "b", "b"])
+    assert session.node_display_name == "NetBBS"
+    set_node_display_name(db, "Renamed While Connected")
+
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    assert "Node: Renamed While Connected" in _visible(_written_text(session))
 
 
 def test_link_status_screen_can_acknowledge_identity_change_notices(db, lane, sysop):
