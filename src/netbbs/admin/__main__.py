@@ -147,6 +147,15 @@ async def _bootstrap_first_sysop(session: Session, lane: DatabaseLane) -> User:
             password = await _prompt_password(session)
         if choice in ("k", "b"):
             verify_key = await _prompt_pubkey(session)
+        if choice == "b" and (password is None or verify_key is None):
+            # [B]oth was an explicit choice: one accepted credential is
+            # not enough to create the account with (Codex review on
+            # #292) -- start the choice over rather than silently
+            # settling for half.
+            await session.write_line("Both were selected, but only one was accepted. Try again.")
+            password = None
+            verify_key = None
+            continue
         if password is None and verify_key is None:
             await session.write_line("An account needs a password, a public key, or both. Try again.\r\n")
 

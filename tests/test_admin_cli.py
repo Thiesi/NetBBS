@@ -85,6 +85,16 @@ def test_bootstrap_rejects_an_unknown_credential_choice_and_retries(db, lane):
     assert "Public key" not in _written_text(session)  # never asked for a key on the password path
 
 
+def test_bootstrap_both_requires_both_credentials(db, lane):
+    """Codex review on #292: [B]oth with only a password accepted (blank
+    key) starts the choice over instead of creating a password-only
+    account."""
+    session = FakeSession(["sysop", "b", "hunter2", "hunter2", "", "p", "hunter2", "hunter2", "n", "n"])
+    user = asyncio.run(_bootstrap_first_sysop(session, lane))
+    assert user.username == "sysop"
+    assert "Both were selected, but only one was accepted." in _written_text(session)
+
+
 # -- resolution: exactly one active SysOp --------------------------------
 
 
