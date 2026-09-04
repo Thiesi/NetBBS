@@ -135,6 +135,12 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
         # its only working secret already deleted.
         stage_credential_cancellation(db.path, previous_credential)
         recover_credential_transition(db.path)
+    elif previous_result is not None and previous_credential is not None:
+        # The previous name can mature or be republished even when the
+        # replacement heartbeat times out. Preserve the unknown primary state,
+        # but do not discard authoritative progress from the successful old
+        # credential.
+        _apply_previous_heartbeat_result(db, name=name, result=previous_result)
     elif primary_inactive or previous_inactive:
         # Each 401 is authoritative independently of the other
         # request's outcome. Reconcile both cached identities in
@@ -148,6 +154,25 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
                 previous_inactive and previous_credential is not None
             ),
         )
+
+
+def _apply_previous_heartbeat_result(
+    db: Database, *, name: str, result: HeartbeatResult,
+) -> None:
+    """Apply a successful old-name heartbeat without guessing primary state."""
+    previous_name = get_previous_name(db)
+    if previous_name is None or result.name != previous_name:
+        return
+    set_heartbeat_reconciliation_state(
+        db,
+        name=name,
+        status=get_registration_status(db),
+        published=get_published(db),
+        last_contact_at=utc_now_iso(),
+        previous_name=previous_name,
+        previous_status=RegistrationStatus(result.status),
+        previous_published=result.last_known_address is not None,
+    )
 
 
 async def _send_heartbeat(

@@ -538,6 +538,16 @@ class ManagedDnsServer:
             if name == current.name:
                 return web.json_response({"error": "the replacement name is unchanged"}, status=400)
             existing_replacement = get_replacement_for_name(self._db, current.name)
+            if (
+                existing_replacement is not None
+                and existing_replacement.node_fingerprint != current.node_fingerprint
+            ):
+                # The old name may have passed cooldown and been reissued while
+                # its former replacement remained pending or abandoned. That
+                # stale relationship gives the new owner no authority over the
+                # other node's credential; handle the requested target through
+                # the ordinary availability/admission path below.
+                existing_replacement = None
             if existing_replacement is not None:
                 if existing_replacement.name != name:
                     return web.json_response({"error": "a rename is already pending"}, status=409)

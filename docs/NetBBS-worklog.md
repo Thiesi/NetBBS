@@ -3860,3 +3860,11 @@ and signed-profile admission. Bounded local identity-claim history is ordered by
 most recent retirement or reuse: remove an existing normalized claim before
 appending it again, so pruning does not discard a recently reused name merely
 because it first appeared early.
+
+A managed-DNS replacement selected through `replaces_name` remains recoverable
+only when its node fingerprint matches the currently authenticated registration.
+An old name can be reissued after cooldown while its former replacement row still
+exists; the new owner must never receive a rotated credential for that stale row.
+Treat both rename sides' heartbeat outcomes independently: when the previous-name
+heartbeat succeeds but the primary times out, preserve the primary cache while
+atomically applying the old name's authoritative status and publication result.

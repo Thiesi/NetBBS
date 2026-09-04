@@ -5759,10 +5759,17 @@ Rename completion releases or deletes the previous row only when it still belong
 to the same node fingerprint; a cooldown-expired name reissued to another node is
 never mutated through the stale replacement link. Cancellation performs the
 same ownership check before any provider deletion, including when the reissued
-previous row is already active. If its heartbeat becomes
+previous row is already active. Rename retry likewise treats an existing
+`replaces_name` relationship as recoverable only when the replacement and
+currently authenticated registration have the same node fingerprint; reissue
+never transfers control of an old replacement credential. If its heartbeat becomes
 authoritatively inactive while the old
 name's heartbeat fails transiently, the node continues heartbeating the retained
 old credential on later passes rather than letting the still-live name expire.
+A successful old-name heartbeat is also reconciled when the replacement
+heartbeat fails transiently: the replacement's cached state remains unchanged,
+while the old name's authoritative status and publication result are committed
+atomically.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 
