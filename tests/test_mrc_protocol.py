@@ -176,7 +176,88 @@ def test_presence_chatter_matches_the_hub_templates_not_loose_keywords():
 
 
 def test_parse_line_strips_pipe_codes_from_identity_fields_and_server_bodies():
-    packet = parse_line("|04bob~|12Other~lobby~~~lobby~|07hi~")
-    assert (packet.from_user, packet.from_site, packet.body) == ("bob", "Other", "hi")
+    packet = parse_line("|04bob~|12Other~lobby~~~lobby~|07hi |UNthere |99x~")
+    # Identity fields lose every pipe code; a body keeps its colour codes
+    # (issue #298) and loses the MCI variables and out-of-range numbers.
+    assert (packet.from_user, packet.from_site, packet.body) == ("bob", "Other", "|07hi there x")
     server = parse_line("SERVER~~~alice~~lobby~USERLIST:|12Carol@third,bob@|04other~")
     assert parse_userlist(parse_server_command(server.body)[1]) == ["Carol@third", "bob@other"]
+
+
+# --- body conventions and CTCP (issue #298) ---------------------------------
+
+from netbbs.mrc.protocol import (  # noqa: E402
+    CTCP_ROOM,
+    MAX_CHUNKS,
+    chat_message,
+    ctcp_reply,
+    ctcp_request,
+    format_action_body,
+    format_room_body,
+    is_ctcp_packet,
+    parse_ctcp_reply,
+    parse_ctcp_request,
+    room_body_reserve,
+    split_sender_prefix,
+)
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ("|03<|11Alice|03>|16|07 hello there", ("message", "hello there")),        # Mystic
+        ("|00|10<|02Alice|10>|00 |03hello there", ("message", "|03hello there")),  # ENiGMA½
+        ("Alice |07hello there", ("message", "|07hello there")),                   # Synchronet
+        ("|07Alice|07 hello there", ("message", "hello there")),                   # ANetBBS
+        ("|15* |13Alice waves at everyone", ("action", "waves at everyone")),      # every client's /me
+        ("<alice> case does not matter", ("message", "case does not matter")),
+    ],
+)
+def test_split_sender_prefix_peels_every_reference_client_template(body, expected):
+    assert split_sender_prefix(body, "Alice") == expected
+
+
+def test_split_sender_prefix_accepts_the_spaced_spelling_of_an_underscored_name():
+    assert split_sender_prefix("|03<|11John Doe|03> hi", "John_Doe") == ("message", "hi")
+
+
+def test_split_sender_prefix_records_a_body_whole_unless_it_names_the_sender():
+    assert split_sender_prefix("<Bob> hi", "Alice") == ("message", "<Bob> hi")
+    assert split_sender_prefix("* Bob waves", "Alice") == ("message", "* Bob waves")
+    assert split_sender_prefix("Alice", "Alice") == ("message", "Alice")
+    assert split_sender_prefix("Alicehello", "Alice") == ("message", "Alicehello")
+    assert split_sender_prefix("hello", "") == ("message", "hello")
+
+
+def test_house_style_bodies_and_their_budget():
+    assert format_room_body("alice", "hi") == "|08<|14alice|08>|16|07 hi"
+    assert format_action_body("alice", "waves") == "|15* |13alice waves"
+    reserve = room_body_reserve("alice")
+    chunks, truncated = split_body(" ".join(["word"] * 100), reserve=reserve)
+    assert truncated is True and len(chunks) == MAX_CHUNKS
+    assert all(len(format_room_body("alice", chunk)) <= MAX_BODY for chunk in chunks)
+    # An outbound body is what the wire sees: no splitting after the fact.
+    assert len(build_line(chat_message("alice", "My_Board", "lobby", format_room_body("alice", chunks[0])))) <= MAX_LINE
+
+
+def test_ctcp_packets_parse_and_build_both_ways():
+    request = parse_line("bob~Other~ctcp_echo_channel~alice~~ctcp_echo_channel~[CTCP] bob alice PING 12345~")
+    assert is_ctcp_packet(request)
+    parsed = parse_ctcp_request(request.body)
+    assert (parsed.requester, parsed.target, parsed.command, parsed.params) == ("bob", "alice", "PING", "12345")
+    assert parse_ctcp_request("[CTCP] bob alice") is None
+    assert parse_ctcp_request("hello [CTCP] bob alice VERSION") is None
+    assert parse_ctcp_reply("[CTCP-REPLY] VERSION Something 1.0") == ("VERSION", "Something 1.0")
+    assert parse_ctcp_reply("[CTCP] bob alice VERSION") is None
+    reply = ctcp_reply("alice", "My_Board", "bob", "version", "NetBBS 5.7.1")
+    assert (reply.to_user, reply.to_room, reply.from_room, reply.body) == (
+        "bob", CTCP_ROOM, CTCP_ROOM, "[CTCP-REPLY] VERSION NetBBS 5.7.1",
+    )
+    outbound = ctcp_request("alice", "My_Board", "bob", "clientinfo")
+    assert outbound.body == "[CTCP] alice bob CLIENTINFO" and outbound.to_user == "bob"
+    assert not is_ctcp_packet(parse_line("bob~Other~lobby~~~lobby~hi~"))
+
+
+def test_parse_userlist_and_server_commands_ignore_colour_decoration():
+    assert parse_userlist("|12Carol@third,bob@|04other") == ["Carol@third", "bob@other"]
+    assert parse_server_command("|07USERLIST:a,b") == ("USERLIST", "a,b")

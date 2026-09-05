@@ -18,7 +18,7 @@ from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.scrollback import ChannelMessage, get_scrollback, record_message
-from netbbs.mrc.bridge import MrcBridge, MrcState
+from netbbs.mrc.bridge import MrcBridge, MrcNotice, MrcState
 from netbbs.mrc.protocol import MrcPacket
 from netbbs.mrc.settings import (
     MrcSettings,
@@ -141,9 +141,11 @@ def test_local_join_message_and_leave_reach_the_room(db, lane, lobby, alice):
 
             recorded = record_message(db, lobby, kind="message", author_label="alice", author_fingerprint=None, body="hello ~ world")
             assert await bridge.local_message(lobby, recorded) == (True, False)
-            chat = await fake.wait_for(lambda p: p.to_user == "" and p.body.startswith("hello"))
+            # Issue #298: the body wears the caller's handle in the network's
+            # own convention, so other boards show a name, not bare text.
+            chat = await fake.wait_for(lambda p: p.to_user == "" and "hello" in p.body)
             assert (chat.from_user, chat.from_site, chat.from_room, chat.to_room, chat.body) == (
-                "alice", "My_Board", "lobby", "lobby", "hello world",
+                "alice", "My_Board", "lobby", "lobby", "|08<|14alice|08>|16|07 hello world",
             )
             # The hub echoed that line back; it must not be recorded twice.
             await asyncio.sleep(0.05)
@@ -151,7 +153,7 @@ def test_local_join_message_and_leave_reach_the_room(db, lane, lobby, alice):
 
             action = record_message(db, lobby, kind="action", author_label="alice", author_fingerprint=None, body="waves")
             assert await bridge.local_message(lobby, action) == (True, False)
-            await fake.wait_for(lambda p: p.body == "* alice waves")
+            await fake.wait_for(lambda p: p.body == "|15* |13alice waves")
 
             long_line = record_message(db, lobby, kind="message", author_label="alice", author_fingerprint=None, body=" ".join(["word"] * 200))
             # alice's per-user bucket has one token left of a burst of 3
@@ -193,21 +195,22 @@ def test_inbound_room_message_is_recorded_as_external_author(db, lane, lobby, al
             assert delivered.kind == "message"
             assert delivered.author_label == "bob@Other (MRC)"
             assert delivered.author_fingerprint is None
-            assert delivered.body == "hi from MRC"
-            assert [m.body for m in get_scrollback(db, lobby) if m.kind == "message"] == ["hi from MRC"]
+            # Colour codes survive (issue #298); the escape sequence does not.
+            assert delivered.body == "|07hi from |12MRC"
+            assert [m.body for m in get_scrollback(db, lobby) if m.kind == "message"] == ["|07hi from |12MRC"]
 
             # Unmapped room: ignored entirely.
             await fake.send_line("bob~Other~elsewhere~~~elsewhere~secret~")
             # Presence chatter and NOTME lines: ephemeral notice, not recorded.
             await fake.send_line("bob~Other~lobby~NOTME~~lobby~|07- |12bob |04has joined|08.~")
             notice = await asyncio.wait_for(queue.get(), timeout=2)
-            assert isinstance(notice, str) and "[MRC] - bob has joined." in notice
+            assert isinstance(notice, MrcNotice) and notice.text == "|07- |12bob |04has joined|08."
             await fake.send_line("SERVER~~~~~lobby~*** Joining lobby: carol@Third~")
             notice = await asyncio.wait_for(queue.get(), timeout=2)
-            assert "[MRC] *** Joining lobby: carol@Third" in notice
+            assert notice.text == "*** Joining lobby: carol@Third" and notice.kind == "notice"
             await fake.send_line("SERVER~~~CLIENT~~~ROOMTOPIC:lobby:|15Be excellent~")
             notice = await asyncio.wait_for(queue.get(), timeout=2)
-            assert "[MRC] room topic: Be excellent" in notice
+            assert notice.text == "room topic: |15Be excellent"
             assert queue.empty()
             assert len([m for m in get_scrollback(db, lobby) if m.kind == "message"]) == 1
         finally:
@@ -654,9 +657,9 @@ def test_multi_chunk_message_is_all_or_nothing_under_the_per_caller_bucket(db, l
             assert await bridge.local_message(lobby, _msg("two")) == (True, False)
             long_body = " ".join(["word"] * 60)  # three wire chunks, one token left
             assert await bridge.local_message(lobby, _msg(long_body)) == (False, False)
-            await fake.wait_for(lambda p: p.body == "two")
+            await fake.wait_for(lambda p: p.body.endswith(" two"))
             await asyncio.sleep(0.1)
-            assert not [p for p in fake.received if p.body.startswith("word word")]
+            assert not [p for p in fake.received if "word word" in p.body]
             assert bridge.status().dropped_outbound == 1
         finally:
             await bridge.close()

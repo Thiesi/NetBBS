@@ -145,10 +145,10 @@ from netbbs.link.node_profiles import (
     identity_for_peer,
     latest_identity_observation,
 )
-from netbbs.mrc.bridge import MrcBridge
-from netbbs.mrc.protocol import MAX_BODY as MRC_MAX_BODY
-from netbbs.mrc.protocol import MAX_CHUNKS as MRC_MAX_CHUNKS
+from netbbs.mrc.bridge import MrcBridge, MrcNotice
 from netbbs.mrc.settings import get_mrc_mapping
+from netbbs.net.mrc_color_preference import mrc_colors_enabled
+from netbbs.rendering.pipe_codes import render_pipe_codes, strip_pipe_codes
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer, reject_unhandled_key
@@ -905,13 +905,22 @@ def _render_channel_message(
         line = _colored_around("*** ", author_label, " has left the channel.", fg_color=MUTED_COLOR)
     elif message.kind == "action":
         bullet = "• " if unicode_style_enabled(db, viewer) else "* "
-        line = _colored_around(
-            bullet, author_label, f" {sanitize_text(message.body)}", fg_color=MUTED_COLOR
-        )
+        if message.external_source == "mrc":
+            # The body is its own reset-terminated span beside the muted
+            # label: SGR reset restores no outer colour, so the two are
+            # composed independently rather than nested (issue #298).
+            line = _colored_around(bullet, author_label, " ", fg_color=MUTED_COLOR) + _mrc_body(db, viewer, message.body)
+        else:
+            line = _colored_around(
+                bullet, author_label, f" {sanitize_text(message.body)}", fg_color=MUTED_COLOR
+            )
     else:  # "message"
         color = SELF_COLOR if self_message else effective_accent_color_256(db)
         label = _colored_around("<", author_label, ">", fg_color=color, bold=self_message)
-        line = f"{label} {sanitize_text(message.body)}"
+        if message.external_source == "mrc":
+            line = f"{label} {_mrc_body(db, viewer, message.body)}"
+        else:
+            line = f"{label} {sanitize_text(message.body)}"
     durable_author = _durable_link_author(db, message)
     author_fingerprint = (
         message.author_fingerprint
@@ -2195,17 +2204,95 @@ async def _relay_to_mrc(session: Session, mrc_bridge: MrcBridge, channel: Channe
         await session.write_line(colored(f"(not relayed to MRC: {reason})", fg_color=MUTED_COLOR))
     elif truncated:
         await session.write_line(
-            colored(f"(only the first {MRC_MAX_CHUNKS * MRC_MAX_BODY} characters reached MRC)", fg_color=MUTED_COLOR)
+            colored("(that line was too long for MRC -- only its first part reached the room)", fg_color=MUTED_COLOR)
         )
+
+
+def _mrc_body(db: Database, viewer: User, body: str | None) -> str:
+    """An MRC-sourced body for `viewer`'s screen (issue #298): sanitized
+    first, then either its `|NN` colour codes rendered or every code
+    stripped, per the viewer's own preference. Always a self-contained
+    span -- `render_pipe_codes` resets after itself -- so it can sit
+    beside a coloured label without either bleeding into the other."""
+    text = sanitize_text(body or "")
+    if mrc_colors_enabled(db, viewer):
+        return render_pipe_codes(text)
+    return strip_pipe_codes(text)
+
+
+def _render_mrc_notice(db: Database, viewer: User, notice: MrcNotice) -> str:
+    """One ephemeral MRC line (hub chatter, a network broadcast, or the
+    hub's reply to something `viewer` asked) -- badge, then the text
+    through `_mrc_body`, then the viewer's timestamp preference."""
+    badge_text = {"broadcast": "[MRC broadcast]", "reply": "[MRC]"}.get(notice.kind, "[MRC]")
+    line = colored(badge_text, fg_color=MUTED_COLOR) + " " + _mrc_body(db, viewer, notice.text)
+    return format_with_preference(db, viewer, line, notice.created_at)
+
+
+# `/mrc <subcommand>` (issue #298): what each one asks the hub, as the
+# caller's own nick. The reply comes back as plain text addressed to
+# that nick and is shown to them alone.
+_MRC_HUB_COMMANDS: dict[str, tuple[str, bool]] = {
+    # subcommand -> (hub command, takes an argument)
+    "rooms": ("LIST", False),
+    "who": ("CHATTERS", False),
+    "chatters": ("CHATTERS", False),
+    "bbses": ("CONNECTED", True),
+    "info": ("INFO", True),
+    "motd": ("MOTD", False),
+    "stats": ("STATS", False),
+    "help": ("HELP", False),
+    "lastseen": ("LASTSEEN", True),
+    "topics": ("TOPICS", False),
+}
 
 
 async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
     """`/mrc` (issue #275): this channel's bridge at a glance -- room,
     hub, whether the link is up right now (the status line's `[MRC]`
-    only says *bridged*), and the hub's own roster for the room."""
+    only says *bridged*), and the hub's own roster for the room.
+
+    `/mrc <subcommand>` (issue #298) asks the hub something on the
+    caller's behalf -- `rooms`, `who`, `bbses [search]`, `info <bbs>`,
+    `motd`, `stats`, `help`, `lastseen <nick>`, `topics`; `send
+    <command>` passes any other server command through verbatim, and
+    `ctcp <nick> VERSION|TIME|PING|CLIENTINFO` asks another user's
+    client. Every reply arrives as `[MRC]` lines for this caller only."""
     mapping = ctx.mrc_bridge.mapping_for(ctx.channel) if ctx.mrc_bridge is not None else None
     if ctx.mrc_bridge is None or mapping is None:
         await ctx.session.write_line(colored("This channel isn't bridged to MRC.", fg_color=MUTED_COLOR))
+        return
+    subcommand, _, rest = args.strip().partition(" ")
+    subcommand = subcommand.lower()
+    rest = rest.strip()
+    if subcommand:
+        if subcommand == "send":
+            if not rest:
+                await _show_usage(ctx.session, "mrc")
+                return
+            failure = ctx.mrc_bridge.send_hub_command(ctx.channel, ctx.user.username, rest)
+        elif subcommand == "ctcp":
+            target, _, command = rest.partition(" ")
+            if not target or not command.strip():
+                await _show_usage(ctx.session, "mrc")
+                return
+            failure = ctx.mrc_bridge.send_ctcp(ctx.channel, ctx.user.username, target, command.strip())
+        elif subcommand in _MRC_HUB_COMMANDS:
+            hub_command, takes_argument = _MRC_HUB_COMMANDS[subcommand]
+            if rest and not takes_argument:
+                await _show_usage(ctx.session, "mrc")
+                return
+            failure = ctx.mrc_bridge.send_hub_command(
+                ctx.channel, ctx.user.username, f"{hub_command} {rest}".strip(),
+            )
+        else:
+            await ctx.session.write_line(
+                colored(f"Unknown /mrc subcommand: {sanitize_text(subcommand)}", fg_color=MUTED_COLOR)
+            )
+            await _show_usage(ctx.session, "mrc")
+            return
+        if failure is not None:
+            await ctx.session.write_line(colored(f"(not sent to MRC: {sanitize_text(failure)})", fg_color=MUTED_COLOR))
         return
     status = ctx.mrc_bridge.status()
     transport = "TLS" if status.tls else "plain"
@@ -2571,7 +2658,10 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "grantaccess": ("/grantaccess <user>", "Directly grant a user access to this chat channel."),
     "revokeaccess": ("/revokeaccess <user>", "Revoke a user's access to this chat channel."),
     "members": ("/members", "List users with direct access to this chat channel."),
-    "mrc": ("/mrc", "Show this channel's MRC bridge: room, hub link state, and who's there from other BBSes."),
+    "mrc": (
+        "/mrc [rooms|who|bbses [search]|info <bbs>|motd|stats|help|lastseen <nick>|topics|send <command>|ctcp <nick> <VERSION|TIME|PING|CLIENTINFO>]",
+        "Show this channel's MRC bridge, or ask the MRC hub something; its reply is shown to you alone.",
+    ),
 }
 
 _COMMANDS: dict[str, CommandHandler] = {
@@ -3637,6 +3727,14 @@ async def _chat_loop(
                     # something now-stale (e.g. an away reminder).
                     rendered = await lane.run(format_with_preference, user, message.text, message.created_at)
                     await deliver(rendered, repaint_status=True)
+                    continue
+                if isinstance(message, MrcNotice):
+                    # Issue #298: hub chatter, broadcasts and command replies
+                    # arrive with their colour codes intact and are styled
+                    # here, per viewer, after sanitization -- never as a
+                    # shared pre-coloured string.
+                    rendered = await lane.run(_render_mrc_notice, user, message)
+                    await deliver(rendered, repaint_status=message.kind != "reply")
                     continue
                 if isinstance(message, QueueOverflowNotice):
                     # GitHub issue #31: this session's own queue overflowed
