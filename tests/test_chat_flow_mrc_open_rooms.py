@@ -197,3 +197,88 @@ def test_a_second_session_cannot_take_the_identity_into_another_room(db, lane, h
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_listing_the_section_accepts_no_invitation(db, lane, hub, presence, alice, bob):
+    """Review of #300: building the section's list must be free of side
+    effects -- a pending invitation to a members-only open room is not
+    accepted by merely looking at the list."""
+    from netbbs.chat.channels import update_channel
+    from netbbs.chat.membership import create_invitation, has_pending_invitation, is_member
+    from netbbs.moderation import ChannelPermission, grant_permissions
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        try:
+            room = (await bridge.open_room("club", "bob")).channel
+            update_channel(
+                db, room, name=room.name, description=room.description, min_level=0, category_id=None,
+                pinned=False, hidden=False, members_only=True, allow_member_invites=False, min_age=None,
+                name_requirement=None, community_id=None, changed_by=bob,
+            )
+            grant_permissions(
+                db, bob, object_type="channel", object_id=room.id,
+                permissions=ChannelPermission.MANAGE_MEMBERS, granted_by=bob,
+            )
+            create_invitation(db, room, alice, invited_by=bob)
+            assert has_pending_invitation(db, room, alice)
+            session = await _browse(lane, hub, presence, alice, ["0", "1", "b", "b"], mrc_bridge=bridge)
+            assert "club" not in _visible_text(session).split("Multi Relay Chat", 1)[-1].split("Available chat channels")[0]
+            assert has_pending_invitation(db, room, alice) and not is_member(db, room, alice)
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_gates_are_checked_before_a_room_is_materialized(db, lane, hub, presence, alice):
+    """Review of #300: an account the open-room gates turn away must not
+    be able to fill the cap with rooms it can never enter."""
+    from netbbs.mrc.settings import count_open_rooms
+
+    create_channel(db, "general", creator=alice)
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub, min_level=50)
+        try:
+            session = await _browse(
+                lane, hub, presence, alice,
+                ["0", "1", "0", "1", "viaPicker", "b", "0", "2", "/join mrc:viaJoin", "/quit"], mrc_bridge=bridge,
+            )
+            text = _visible_text(session)
+            assert text.count("You are not authorized to open MRC rooms on this node.") == 2
+            assert count_open_rooms(db) == 0
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_a_room_blocked_after_opening_admits_nobody(db, lane, hub, presence, alice):
+    """Review of #300: the blocklist applies to every way into an
+    existing open room, not only to opening a new one."""
+    from netbbs.mrc.settings import get_mrc_mapping
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        try:
+            temp = (await bridge.open_room("temp", "alice")).channel
+            other = (await bridge.open_room("other", "alice")).channel
+            save_open_room_settings(db, OpenRoomSettings(enabled=True, blocklist=("temp",)))
+            await bridge.refresh_channel_mappings()
+            assert get_mrc_mapping(db, temp) is not None  # still there until the sweeper retires it
+            # Section: temp is not listed; from #other, both /join forms refuse.
+            session = await _browse(
+                lane, hub, presence, alice,
+                ["0", "1", "0", "2", "/join temp", "/join mrc:temp", "/quit"], mrc_bridge=bridge,
+            )
+            text = _visible_text(session)
+            section = text.split("Multi Relay Chat", 1)[-1]
+            assert "other" in section and " temp" not in section.split("Joined")[0]
+            assert "Joined" in text and other.name in text
+            assert text.count("The SysOp has blocked MRC room #temp on this node.") == 2
+            assert hub.participant_count(temp.name) == 0
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())

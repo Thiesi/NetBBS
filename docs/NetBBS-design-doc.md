@@ -5374,14 +5374,17 @@ without teaching native chat anything about MRC. Decisions:
 - **Lifecycle is bounded and SysOp-tuned:** a cap on open rooms (default
   32; opening refuses past it, nothing is evicted), a retention period
   (default 7 days) after which a room with no local participant, no
-  activity and no follower is retired by the bridge's keepalive-tick
-  sweeper together with its scrollback, a blocklist of rooms callers
-  may not open, and `[A]dopt`/`Re[t]ire` on the channel screen. The
-  sweeper is a node action with no `User` behind it and the moderation
-  log requires an actor, so a retirement is reported to the MRC
-  diagnostic log and counted on the status screen instead of audited;
-  a SysOp's own retire is audited as usual. Rooms opened while the
-  switch was on keep ageing out after it is switched off.
+  activity and no follower is retired by the bridge's sweeper together
+  with its scrollback, a blocklist of rooms callers may not open — or
+  enter, once blocked — and `[A]dopt`/`Re[t]ire` on the channel
+  screen. The sweeper runs on its own task, independent of the hub
+  connection and of the switch, so a long outage or switching MRC off
+  never strands the cap. It is a node action with no `User` behind it
+  and the moderation log requires an actor, so a retirement is reported
+  to the MRC diagnostic log and counted on the status screen instead of
+  audited; a SysOp's own retire is audited as usual. The gates are
+  checked before a room is materialized, so an account they turn away
+  cannot spend the cap on rooms it can never enter.
 - **Never Link.** `link_channel` refuses a caller-origin row and the
   channel screen offers no `[L]ink` for it: MRC content is that
   network's, not this node's, and must never be re-broadcast under this
@@ -5390,10 +5393,13 @@ without teaching native chat anything about MRC. Decisions:
 - **One MRC identity per account, in one room.** The hub knows one
   `nick@site` in one room; a second session of the same account
   entering a different bridged channel is refused naming the room the
-  identity already holds. The session that is leaving a room on `/join`
-  does not count against itself unless another session of the same
-  account stays behind. A nick suffix was rejected: it would present a
-  second person to the network.
+  identity already holds. The rule is decided from local occupancy of
+  the bridged channels, not from what has been announced to the hub
+  (announcements lapse during backoff), and enforced once, atomically,
+  at the chat loop's own hub join. The session that is leaving a room
+  on `/join` does not count against itself unless another session of
+  the same account stays behind. A nick suffix was rejected: it would
+  present a second person to the network.
 - **Finding rooms.** The top-level channel picker gains a "[Multi Relay
   Chat]" entry (only with MRC on and open rooms allowed) that opens its
   own picker: rooms open here with local and hub occupancy, rooms the

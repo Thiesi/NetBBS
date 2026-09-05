@@ -24,6 +24,7 @@ explicit would leak channel content the moment MRC is switched on).
 from __future__ import annotations
 
 import datetime
+import json
 import sqlite3
 from dataclasses import dataclass
 
@@ -295,7 +296,6 @@ def load_open_room_settings(db: Database) -> OpenRoomSettings:
     name_requirement = get_config(db, OPEN_ROOMS_NAME_REQUIREMENT_KEY) or None
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         name_requirement = None
-    blocklist = tuple(entry for entry in (get_config(db, OPEN_ROOMS_BLOCKLIST_KEY) or "").split(",") if entry)
     return OpenRoomSettings(
         enabled=get_config(db, OPEN_ROOMS_ENABLED_KEY) == "1",
         min_level=_int_config(db, OPEN_ROOMS_MIN_LEVEL_KEY, 0),
@@ -303,8 +303,24 @@ def load_open_room_settings(db: Database) -> OpenRoomSettings:
         name_requirement=name_requirement,
         cap=_int_config(db, OPEN_ROOMS_CAP_KEY, DEFAULT_OPEN_ROOM_CAP),
         retention_days=_int_config(db, OPEN_ROOMS_RETENTION_DAYS_KEY, DEFAULT_OPEN_ROOM_RETENTION_DAYS),
-        blocklist=blocklist,
+        blocklist=_load_blocklist(db),
     )
+
+
+def _load_blocklist(db: Database) -> tuple[str, ...]:
+    """The blocklist is stored as a JSON list: a room name may contain
+    a comma (MRC allows ASCII 33-125), so a comma-joined string could
+    not tell `foo,bar` from `foo` and `bar`."""
+    raw = get_config(db, OPEN_ROOMS_BLOCKLIST_KEY) or ""
+    if not raw:
+        return ()
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        return ()
+    if not isinstance(entries, list):
+        return ()
+    return tuple(entry for entry in entries if isinstance(entry, str) and entry)
 
 
 def validate_open_room_settings(settings: OpenRoomSettings) -> OpenRoomSettings:
@@ -340,7 +356,7 @@ def save_open_room_settings(db: Database, settings: OpenRoomSettings) -> OpenRoo
     set_config(db, OPEN_ROOMS_NAME_REQUIREMENT_KEY, validated.name_requirement or "")
     set_config(db, OPEN_ROOMS_CAP_KEY, str(validated.cap))
     set_config(db, OPEN_ROOMS_RETENTION_DAYS_KEY, str(validated.retention_days))
-    set_config(db, OPEN_ROOMS_BLOCKLIST_KEY, ",".join(validated.blocklist))
+    set_config(db, OPEN_ROOMS_BLOCKLIST_KEY, json.dumps(list(validated.blocklist)))
     return validated
 
 

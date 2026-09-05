@@ -297,6 +297,10 @@ class MrcBridge:
 
         self._state = MrcState.DISABLED
         self._connector_task: asyncio.Task | None = None
+        # Issue #300: the open-room sweeper runs on its own task, on the
+        # keepalive cadence but independent of the hub connection -- a
+        # room must age out while the hub is unreachable or MRC is off.
+        self._sweeper_task: asyncio.Task | None = None
         self._connection: _Connection | None = None
         self._stopping = False
         self._fatal_error: str | None = None
@@ -321,10 +325,44 @@ class MrcBridge:
         async with self._reload_lock:
             await self._reload_from_db()
             self._start_connector_if_enabled()
+            self._start_sweeper()
 
     async def close(self) -> None:
         self._stopping = True
+        await self._stop_sweeper()
         await self._stop_connector(graceful=True)
+
+    def _start_sweeper(self) -> None:
+        if self._stopping or (self._sweeper_task is not None and not self._sweeper_task.done()):
+            return
+        self._sweeper_task = asyncio.create_task(self._sweeper_loop(), name="mrc-open-room-sweeper")
+
+    async def _stop_sweeper(self) -> None:
+        task, self._sweeper_task = self._sweeper_task, None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _sweeper_loop(self) -> None:
+        """Retire idle open rooms (`_sweep_open_rooms`) once per keepalive
+        interval, whatever the hub link is doing. Re-reads the mappings
+        and open-room settings first so a retention or blocklist edit
+        made from the standalone admin CLI is honoured within a tick."""
+        while not self._stopping:
+            await asyncio.sleep(self._keepalive_interval)
+            if self._stopping:
+                return
+            try:
+                await self.refresh_channel_mappings()
+                await self._sweep_open_rooms()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _logger.warning("MRC open-room sweeper: %s", exc)
 
     async def reload_settings(self) -> None:
         """Re-read the hub settings and channel mappings from the
@@ -643,7 +681,6 @@ class MrcBridge:
             # keeps relaying (and tells any newly-bridged occupants).
             await self.refresh_channel_mappings()
             self._rehomed.clear()
-            await self._sweep_open_rooms()
             refresh_rosters = self._clock() - last_userlist >= self._userlist_refresh
             for channel_id, nicks in list(self._announced.items()):
                 mapping = self._by_channel.get(channel_id)
@@ -965,10 +1002,17 @@ class MrcBridge:
         await self._touch(mapping)
 
     def _forget_mapping(self, mapping: MrcChannelMapping) -> None:
+        """Drop every trace of a mapping: the lookups, the announced
+        callers, and the per-room caches (roster, USERLIST timestamp,
+        activity stamp) -- open rooms come and go at callers' pace, so a
+        retired room must not leave a roster behind (issue #300)."""
         self._by_room.pop(mapping.room.lower(), None)
         self._by_channel.pop(mapping.channel.id, None)
         self._announced.pop(mapping.channel.id, None)
         self._announced_rooms.pop(mapping.channel.id, None)
+        self._rosters.pop(mapping.room.lower(), None)
+        self._last_userlist_request.pop(mapping.room.lower(), None)
+        self._last_touch.pop(mapping.channel.id, None)
 
     async def _handle_server_packet(self, packet: MrcPacket) -> None:
         settings = self._settings
@@ -1243,18 +1287,31 @@ class MrcBridge:
         `leaving` is the channel the asking session is about to leave
         (`/join` from inside a room): it does not count unless another
         session of the same account is still in it, since that session
-        keeps the identity there after this one has gone."""
-        for channel_id, nicks in self._announced.items():
-            if channel_id == channel.id or username not in nicks:
+        keeps the identity there after this one has gone.
+
+        Decided from the `ChatHub`'s occupancy of every active bridged
+        channel, not from what has been announced to the hub: the
+        announced set is empty while the link is down and only catches
+        up on reconnect, and a reservation that lapsed during backoff
+        would let two sessions settle in two rooms and then fight over
+        one nick when the link returns."""
+        for mapping in self._by_channel.values():
+            if mapping.channel.id == channel.id or not mapping.active:
                 continue
-            mapping = self._by_channel.get(channel_id)
-            if mapping is None:
+            sessions = self._hub.participants_for_username(mapping.channel.name, username)
+            if not sessions:
                 continue
-            if leaving is not None and channel_id == leaving.id:
-                if len(self._hub.participants_for_username(mapping.channel.name, username)) <= 1:
-                    continue
+            if leaving is not None and mapping.channel.id == leaving.id and len(sessions) <= 1:
+                continue
             return mapping.room
         return None
+
+    def room_blocked(self, room: str) -> bool:
+        """Whether the SysOp's current blocklist names `room` -- checked
+        on every way into an open room, not only when it is first
+        opened, so a room blocked after callers opened it stops
+        admitting them until the sweeper retires it."""
+        return self._open_settings is not None and self._open_settings.blocks(room)
 
     def observed_rooms(self) -> list[str]:
         """Rooms this node has heard of, most recently seen first: rooms
@@ -1297,8 +1354,9 @@ class MrcBridge:
     async def _sweep_open_rooms(self) -> None:
         """Retire idle open rooms (see `sweep_open_rooms`): nobody in
         them per the `ChatHub`, idle past the retention, followed by no
-        one. Runs every keepalive tick whether or not the switch is
-        currently on -- rooms opened earlier still age out."""
+        one. Runs from `_sweeper_loop` whether or not the switch is on
+        and whether or not the hub is reachable -- rooms opened earlier
+        still age out, and a stranded cap never needs a hand."""
         open_settings = self._open_settings
         if open_settings is None:
             return

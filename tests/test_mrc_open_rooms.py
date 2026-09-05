@@ -67,6 +67,11 @@ def test_open_room_settings_default_off_and_round_trip(db):
     )
     assert saved.blocklist == ("Bad_Room", "evil")
     assert load_open_room_settings(db) == saved
+    # A room name may contain a comma (MRC allows it): the list must not
+    # split on it, so `foo,bar` blocks `foo,bar` and nothing else.
+    saved = save_open_room_settings(db, OpenRoomSettings(blocklist=("foo,bar",)))
+    assert load_open_room_settings(db).blocklist == ("foo,bar",)
+    assert saved.blocks("FOO,BAR") and not saved.blocks("foo") and not saved.blocks("bar")
 
 
 @pytest.mark.parametrize(

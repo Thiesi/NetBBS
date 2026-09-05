@@ -97,6 +97,17 @@ def test_open_room_detail_offers_adopt_and_retire_but_never_link_or_unbridge(db,
     assert "adopt_mrc_room" in {a.action for a in list_recent_actions(db, limit=5)}
 
 
+def test_the_unlisted_pause_key_is_rejected_for_an_open_room(db, lane, sysop):
+    settings = save_open_room_settings(db, OpenRoomSettings(enabled=True))
+    channel = materialize_open_room(db, "lobby", open_settings=settings).channel
+    session = FakeSession(["p", "b"])
+    asyncio.run(admin_flow._channel_detail_screen(session, lane, sysop, channel, mrc_bridge=None))
+    text = _visible(_written_text(session))
+    assert "paused" not in text
+    mapping = get_mrc_mapping(db, channel)
+    assert mapping is not None and not mapping.paused
+
+
 def test_retire_asks_first_and_then_removes_the_room(db, lane, sysop):
     settings = save_open_room_settings(db, OpenRoomSettings(enabled=True))
     channel = materialize_open_room(db, "lobby", open_settings=settings).channel

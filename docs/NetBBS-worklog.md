@@ -722,21 +722,40 @@ session needs the same treatment.
   room), and `create_channel`/`update_channel` refuse the prefix for everyone
   else -- a database from before this release cannot contain a `mrc:` channel
   because the prefix was not reachable through any screen.
-- The sweeper runs on the bridge's keepalive tick (`_sweep_open_rooms`) whether
-  or not the open-room switch is currently on, using `mrc_last_active_at`
-  (or `created_at` for a never-touched row), the `ChatHub`'s participant
-  counts as the occupancy source and `user_follows` as the keep-alive; it
-  goes through `purge_channel_rows` (the row half of `delete_channel`, which
-  also prunes the search index) and reports to the MRC diagnostic log because
-  `moderation_log.actor_user_id` is NOT NULL and the node has no user. Activity
-  stamps are written at most once a minute per channel (`_touch`), never per
-  line.
-- One identity per account: `identity_room_elsewhere` looks at `_announced`,
-  and a session switching rooms with `/join` passes its current channel as
-  `leaving` so its own announcement does not block it -- unless another
-  session of the same account is still there. The browse loop re-checks after
-  `_authorize_channel_entry` because a picked channel can be entered without
-  `/join`, the same reason that check exists at all (issue #28).
+- The sweeper is its own bridge task (`_sweeper_loop`, keepalive cadence),
+  started by `start()` and independent of the hub connection and of the
+  open-room switch: rooms must age out during a long outage or after MRC is
+  switched off, or the cap strands. It re-reads mappings and settings first
+  (the standalone CLI edits them without telling the node), uses
+  `mrc_last_active_at` (or `created_at` for a never-touched row), the
+  `ChatHub`'s participant counts as the occupancy source and `user_follows`
+  as the keep-alive, goes through `purge_channel_rows` (the row half of
+  `delete_channel`, which also prunes the search index) and reports to the
+  MRC diagnostic log because `moderation_log.actor_user_id` is NOT NULL and
+  the node has no user. `_forget_mapping` drops the room's roster, USERLIST
+  timestamp and activity stamp too -- open rooms churn at callers' pace, so a
+  retired room must leave nothing behind. Activity stamps are written at most
+  once a minute per channel (`_touch`), never per line.
+- One identity per account is decided from the `ChatHub`'s occupancy of every
+  active bridged channel (`identity_room_elsewhere`), never from `_announced`:
+  the announced set is empty during backoff and only catches up on reconnect.
+  The one authoritative check sits in `_chat_loop` immediately before
+  `hub.join` with no await in between, so two sessions of one account cannot
+  both pass for two rooms; the picker and `/join` run the same check earlier
+  only for a friendlier refusal. A session switching rooms with `/join` passes
+  its current channel as `leaving` so its own presence does not block it --
+  unless another session of the same account is still there.
+- Gates before rows: `_open_room_gate_denial` checks the caller against the
+  node-wide open-room defaults *before* `open_room` materializes anything, or
+  an account the gates turn away could fill the cap with rooms it can never
+  enter. The section's list is built with `_may_enter_quietly`, never
+  `_authorize_channel_entry`, because the latter accepts a pending invitation
+  as a side effect and a listing must write nothing.
+- The blocklist is consulted on every way into an existing open room (the
+  section's list and selection, bare and explicit `/join`, and the `_chat_loop`
+  pre-join check), not only when a room is first opened; a room blocked after
+  it was opened admits nobody until the sweeper retires it. It is stored as a
+  JSON list because a room name may contain a comma.
 - `remote_roster` hides every entry at this node's own site, not only nicks
   currently announced: a USERLIST fetched moments before a caller left still
   names them, and "0 here, 1 on MRC" for one's own ghost is wrong.

@@ -16,6 +16,7 @@ from netbbs.activity import follow
 from netbbs.chat.channels import get_channel_by_name
 from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.scrollback import record_message
+from netbbs.mrc.bridge import MrcState
 from netbbs.mrc.settings import (
     MrcSettingsError,
     OpenRoomSettings,
@@ -181,4 +182,61 @@ def test_activity_is_stamped_and_the_sweeper_retires_idle_rooms_on_the_tick(db, 
         finally:
             await bridge.close()
             await fake.close()
+    asyncio.run(scenario())
+
+
+def test_identity_is_decided_from_local_occupancy_not_from_announcements(db, lane, lobby, alice, sysop):
+    """Review of #300: the announced set is empty while the link is
+    down, so the rule must read the ChatHub, or two sessions could
+    settle in two rooms during backoff and fight over one nick later."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        save_open_room_settings(db, OpenRoomSettings(enabled=True))
+        set_mrc_room(db, lobby, "general")
+        hub = ChatHub()
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            other = (await bridge.open_room("other", "alice")).channel
+            await fake.drop_clients()
+            await _wait_until(lambda: bridge.state is not MrcState.CONNECTED)
+            # In #general per the hub's own roster, announced to nobody.
+            hub.join(lobby.name, ParticipantId("alice", 1))
+            assert bridge.identity_room_elsewhere(other, "alice") == "general"
+            assert bridge.identity_room_elsewhere(other, "alice", leaving=lobby) is None
+            hub.join(lobby.name, ParticipantId("alice", 2))
+            assert bridge.identity_room_elsewhere(other, "alice", leaving=lobby) == "general"
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_retirement_drops_the_rooms_caches_and_runs_without_a_hub(db, lane, lobby, alice):
+    """Review of #300: a retired room must leave no roster behind, and
+    the sweeper must run while the hub is unreachable -- otherwise a
+    long outage strands the whole cap."""
+    async def scenario():
+        settings = save_open_room_settings(db, OpenRoomSettings(enabled=True, retention_days=7))
+        # Port 1 is never listening: every connection attempt fails.
+        _enable(db, 1)
+        hub = ChatHub()
+        from tests.test_mrc_bridge import _bridge
+        bridge = _bridge(hub, lane, keepalive_interval_seconds=0.2)
+        await bridge.start()
+        try:
+            from netbbs.mrc.settings import materialize_open_room
+            stale = materialize_open_room(db, "stale", open_settings=settings).channel
+            touch_open_room(db, stale, now="2020-01-01T00:00:00.000000Z")
+            await bridge.refresh_channel_mappings()
+            bridge._rosters["stale"] = ("ghost@Other",)
+            bridge._last_userlist_request["stale"] = 0.0
+            assert bridge.state is not MrcState.CONNECTED
+            await _wait_until(lambda: bridge.status().retired_rooms == 1, timeout=3.0)
+            assert get_mrc_mapping(db, stale) is None
+            assert "stale" not in bridge._rosters and "stale" not in bridge._last_userlist_request
+            assert bridge.state is not MrcState.CONNECTED
+        finally:
+            await bridge.close()
     asyncio.run(scenario())

@@ -13716,7 +13716,9 @@ async def _channel_detail_screen(
             await session.write_line("")
             mrc_mapping = await _unbridge_mrc_room(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
             await _redraw()
-        elif choice == "p" and mrc_mapping is not None:
+        elif choice == "p" and mrc_mapping is not None and not mrc_mapping.is_open_room:
+            # An open room has no pause (it is retired, not paused); the
+            # key is rejected rather than acting on an unlisted action.
             await session.write_line("")
             mrc_mapping = await _toggle_mrc_pause(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
             await _redraw()
