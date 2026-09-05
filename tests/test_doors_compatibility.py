@@ -64,6 +64,100 @@ def test_native_socket_requires_descriptor_drop_file():
     assert DoorProfile(endpoint="socketpair", drop_files=("DOOR32.SYS",)).validate()
 
 
+@pytest.mark.parametrize("argument", ["{unknown}", "{", "{node.foo}", "{node:bad}", "{node!r}"])
+def test_preflight_rejects_invalid_native_substitutions(argument, db, player):
+    from netbbs.doors.profiles import preflight
+    door = create_door(db, "Bad arguments", sys.executable, args=(argument,),
+                       creator=player, profile=DoorProfile())
+    assert any("argument" in problem.lower() for problem in preflight(door))
+
+
+def test_preflight_accepts_documented_and_escaped_substitutions(db, player):
+    from netbbs.doors.profiles import preflight
+    door = create_door(db, "Arguments", sys.executable,
+                       args=("{node_dir}", "{install_dir}", "{node}", "{door32}", "{door_sys}", "{{literal}}"),
+                       creator=player, profile=DoorProfile())
+    assert preflight(door) == []
+
+
+@pytest.mark.parametrize("web", [False, True])
+def test_preflight_fixed_geometry_allows_browser_resize(web, db, player):
+    from netbbs.doors.profiles import preflight
+    door = create_door(db, "Fixed screen", sys.executable, creator=player,
+                       profile=DoorProfile(width=80, height=25))
+    session = FakeSession()
+    session.terminal_width, session.terminal_height = 60, 24
+    if web:
+        session._door_stream = False  # Same capability marker as WebSession.
+    problems = preflight(door, session)
+    assert bool(problems) is not web
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_probe_persists_verified_output_result(valid, db, lane, player, tmp_path, monkeypatch):
+    from netbbs.doors import probe
+    from netbbs.moderation.log import list_actions_for_object
+    text = "DOS READY █ éQ" if valid else "DOS READY: damaged echo"
+    script = _write_script(tmp_path, "probe_output.py", f"import sys; sys.stdout.buffer.write({text.encode()!r})")
+    door = create_door(db, "Probe result", sys.executable, creator=player,
+                       profile=DoorProfile(adapter="dosbox", endpoint="socketpair", encoding="cp437",
+                                           install_dir=str(tmp_path), options={"command": "NEVER.EXE"}))
+
+    async def real_process(session, lane, candidate, actor, **kwargs):
+        return await run_door(session, lane, replace(candidate, profile=None, args=(str(script),)), actor, **kwargs)
+
+    monkeypatch.setattr(probe, "run_door", real_process)
+    result = asyncio.run(probe.probe_dosbox(lane, door, player))
+    assert result.reason == ("exited" if valid else "relay_failed")
+    assert db.connection.execute("SELECT last_diagnostic FROM doors WHERE id = ?", (door.id,)).fetchone()[0] == result.diagnostic
+    entries = [entry for entry in list_actions_for_object(db, "door", door.id) if entry.action == "play_door"]
+    assert len(entries) == 1
+    assert f"reason={result.reason}" in entries[0].detail
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX half-closed socket")
+@pytest.mark.parametrize("end", ["drain", "cancel"])
+def test_remote_input_closure_drains_pending_output(end):
+    from netbbs.doors.endpoints import socket_endpoint
+    from netbbs.doors.runtime import _relay
+
+    async def scenario():
+        endpoint, peer = socket_endpoint()
+        blocked, release = asyncio.Event(), asyncio.Event()
+
+        class SlowSession(FakeSession):
+            async def write_raw(self, data):
+                blocked.set()
+                await release.wait()
+                await super().write_raw(data)
+
+        session = SlowSession()
+        peer.sendall(b"Final score: 42")
+        peer.shutdown(socket.SHUT_RD)
+        task = asyncio.create_task(_relay(session, endpoint))
+        try:
+            await asyncio.wait_for(blocked.wait(), 2)
+            session.type_in("Q")  # EPIPE on a real endpoint while output is held.
+            await asyncio.sleep(0.05)
+            assert not task.done(), "input closure discarded buffered output"
+            if end == "cancel":
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                peer.shutdown(socket.SHUT_WR)
+                release.set()
+                assert await asyncio.wait_for(task, 2) == "door_exited"
+                assert session.written == b"Final score: 42"
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await endpoint.close()
+            peer.close()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("field", ["local_user", "remote_user"])
 @pytest.mark.parametrize("value", [42, "", "{unknown}", "secret\n", "x" * 129])
 def test_preflight_rejects_invalid_credential_values(field, value, db, player, tmp_path):

@@ -128,7 +128,7 @@ async def _relay(session, endpoint, proc=None):
             results = [task.result() for task in done]
             if "caller_disconnected" in results:
                 return "caller_disconnected"
-            if output_task in done or (proc is None and input_task in done):
+            if output_task in done:
                 return "door_exited"
             if exit_task in done:
                 # Kill lingering pipe/socket holders independently of draining.
@@ -199,7 +199,9 @@ def _record_door_session(db, *, actor, door, duration_seconds, reason, exit_code
                   detail=f"door={door.name!r} duration={duration_seconds:.1f}s reason={reason} exit_code={exit_code}")
 
 
-async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_TIME_LIMIT_SECONDS):
+async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_TIME_LIMIT_SECONDS,
+                   output_check=None):
+    """Supervise and record one run; an optional synchronous probe check returns an error string."""
     profile = door.profile
     start = time.monotonic()
     proc = endpoint = lease = child_socket = None
@@ -304,6 +306,13 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
                         exit_code = 1
                         tail.extend(b"DOS command failed or did not return through the configured launcher.\n")
                 reason = "exited" if exit_code == 0 else "crashed"
+                # A capability probe's success includes its wire assertions,
+                # not merely the emulator's exit code. Persist one final verdict.
+                if reason == "exited" and output_check is not None:
+                    problem = output_check()
+                    if problem:
+                        reason = "relay_failed"
+                        tail.extend(problem.encode("utf-8", errors="replace")[:2048])
         except asyncio.TimeoutError:
             reason = "timed_out"
         except Exception as exc:

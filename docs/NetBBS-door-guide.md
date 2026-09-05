@@ -108,6 +108,9 @@ the emulator, game and NetBBS itself must not run as root.
    list, never a shell command. Supported substitutions are `{node_dir}`,
    `{install_dir}`, `{node}`, `{door_sys}`, `{door32}`. Quote argv entries
    with spaces; use forward slashes in Windows development paths.
+   Check setup rejects malformed or unsupported native substitutions; use
+   `{{` and `}}` for literal braces. Format specifications and conversions
+   are not supported.
    Remote presets use the placeholder executable `remote`; no executable is
    launched. Configure their destination and credentials in adapter options.
 4. Set the drop formats, casing, endpoint, encoding and geometry required by
@@ -126,6 +129,8 @@ the emulator, game and NetBBS itself must not run as root.
 6. Read its test result/exit code and diagnostic excerpt. Save explicitly.
    Back discards configuration edits. The door detail's **Last diagnostic**
    retains at most 8 KiB from the latest run; callers do not receive stderr.
+   Capability-probe diagnostics and the audit entry include the verified
+   COM1/CP437 outcome, not just the emulator's exit code.
 7. Test each enabled caller transport, including return to the door picker,
    and only then lower the minimum play level.
 
@@ -163,7 +168,9 @@ keyboard input. Configure native Telnet/SSH clients accordingly. `raw` means
 no codec conversion and is not a browser profile. Web door mode preserves
 escape sequences and uses an incremental UTF-8 decoder; classic fixed-size
 screens return to browser-fit geometry after play. Telnet/SSH terminals must
-already be at least the configured size; NetBBS does not resize their windows.
+already be at least the configured size; a smaller browser viewport is allowed
+because web door mode sets the requested terminal geometry. NetBBS does not
+resize Telnet/SSH windows.
 PTY geometry is set at launch; dynamic terminal resizing inside local games
 is not currently forwarded.
 

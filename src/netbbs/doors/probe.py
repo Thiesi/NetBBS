@@ -78,7 +78,10 @@ async def probe_dosbox(lane, door, actor):
                               options={"command": "PROBE.COM", "fossil": fossil})
         candidate = replace(door, name=f"{door.name} (capability probe)", profile=profile, args=())
         session = _ProbeSession()
-        result = await run_door(session, lane, candidate, actor, wall_time_limit_seconds=12)
-        if result.reason == "exited" and not all(x.encode() in session.output for x in ("DOS READY", "█", "éQ")):
-            result = replace(result, reason="relay_failed", diagnostic="COM1 probe output/CP437 echo did not match.")
-        return result
+        def check_output():
+            if not all(x.encode() in session.output for x in ("DOS READY", "█", "éQ")):
+                return "COM1 probe output/CP437 echo did not match."
+            return ""
+
+        return await run_door(session, lane, candidate, actor, wall_time_limit_seconds=12,
+                              output_check=check_output)

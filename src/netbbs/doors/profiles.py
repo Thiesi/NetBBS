@@ -179,7 +179,8 @@ def preflight(door, session=None) -> list[str]:
                         problems.append(f"Missing FOSSIL driver {driver}; obtain it legally and install it outside NetBBS.")
         if os.name != "posix" and (profile.endpoint != "stdio" or profile.adapter == "dosbox"):
             problems.append("This profile requires POSIX (NetBSD/Linux); Windows is development-only.")
-        if session is not None and profile.width and (session.terminal_width < profile.width or session.terminal_height < profile.height):
+        if (session is not None and getattr(session, "_door_stream", None) is None and profile.width
+                and (session.terminal_width < profile.width or session.terminal_height < profile.height)):
             problems.append(f"Terminal must be at least {profile.width}x{profile.height}.")
         if session is not None and profile.encoding == "raw" and getattr(session, "_door_stream", None) is not None:
             problems.append("Web doors require a utf-8 or cp437 profile; explicitly raw bytes are native-terminal only.")
@@ -190,6 +191,15 @@ def preflight(door, session=None) -> list[str]:
             except (ValueError, OSError) as exc:
                 problems.append(str(exc))
             return problems
+        if profile.adapter == "native":
+            for argument in door.args:
+                try:
+                    for _, name, spec, conversion in string.Formatter().parse(argument):
+                        if name is not None and (name not in ("node_dir", "install_dir", "node", "door32", "door_sys")
+                                                 or spec or conversion):
+                            raise ValueError("use only {node_dir}, {install_dir}, {node}, {door32}, {door_sys}")
+                except ValueError as exc:
+                    problems.append(f"Invalid native argument substitution: {exc}.")
     for executable in (door.executable_path, *(profile.runner[:1] if profile else ())):
         if not Path(executable).is_absolute() or not Path(executable).is_file() or not os.access(executable, os.X_OK):
             problems.append(f"Executable is missing or not executable: {executable}. Install it outside NetBBS.")
