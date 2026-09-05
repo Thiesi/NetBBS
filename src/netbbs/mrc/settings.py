@@ -535,3 +535,18 @@ def sweep_open_rooms(
         purge_channel_rows(db, mapping.channel)
         retired.append(mapping)
     return retired
+
+
+def set_open_room_topic(db: Database, channel: Channel, topic: str | None) -> bool:
+    """The hub's `ROOMTOPIC` for an open room (issue #304): stored on
+    the row so the chat status line shows it, the way it shows a local
+    channel's topic -- a direct update, since the node is not a `User`
+    and `netbbs.chat.channels.set_topic` audits an actor. A no-op for
+    any channel that is not an open room (a mapped channel's topic is
+    the SysOp's). Returns whether a row changed."""
+    cursor = db.connection.execute(
+        "UPDATE channels SET topic = ? WHERE id = ? AND mrc_origin = ?",
+        (topic or None, channel.id, OPEN_ROOM_ORIGIN),
+    )
+    db.connection.commit()
+    return cursor.rowcount > 0

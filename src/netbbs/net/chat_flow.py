@@ -158,6 +158,7 @@ from netbbs.mrc.settings import (
 )
 from netbbs.net.mrc_color_preference import mrc_colors_enabled
 from netbbs.rendering.pipe_codes import render_pipe_codes, strip_pipe_codes
+from netbbs.timeutil import utc_now_iso
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer, reject_unhandled_key
@@ -313,6 +314,9 @@ async def browse_channels(
     degrade-gracefully shape `netbbs.net.board_flow._show_board`'s own
     `link_context` parameter already has for board posts.
     """
+    # Issue #304: what this session has already been told about MRC
+    # (the hub's welcome), across every channel it visits.
+    mrc_session_state: dict = {}
     channel = initial_channel or await _pick_channel(
         session, lane, hub, user, category_id=None,
         community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix, mrc_bridge=mrc_bridge,
@@ -332,7 +336,7 @@ async def browse_channels(
         action = await _chat_loop(
             session, lane, hub, presence, mailbox, history, channel, user,
             session_registry=session_registry, link_context=link_context, direct_invites=direct_invites,
-            mrc_bridge=mrc_bridge,
+            mrc_bridge=mrc_bridge, mrc_session_state=mrc_session_state,
         )
         if isinstance(action, _SwitchTo):
             channel = action.channel
@@ -716,8 +720,12 @@ _JOIN_BY_NAME_STABLE_ID = -1
 def _mrc_section_description(status: MrcStatus) -> str:
     if not status.connected:
         return f"rooms on the MRC network -- hub link {status.state.value}"
-    count = status.open_rooms
-    return f"rooms on the MRC network -- {count} open here" if count else "rooms on the MRC network"
+    bits = []
+    if status.open_rooms:
+        bits.append(f"{status.open_rooms} open here")
+    if status.network_summary:
+        bits.append(status.network_summary)
+    return "rooms on the MRC network" + (" -- " + ", ".join(bits) if bits else "")
 
 
 def _mrc_identity_check(
@@ -1620,6 +1628,27 @@ async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
     in-channel notice plus the audit log entry `set_topic` already
     writes is enough.
     """
+    mapping = ctx.mrc_bridge.mapping_for(ctx.channel) if ctx.mrc_bridge is not None else None
+    if mapping is not None and mapping.is_open_room:
+        # Issue #304: an open room's topic belongs to the hub. A bare
+        # /topic shows it (clearing would be a local fiction); text is
+        # sent as NEWTOPIC and the hub decides -- its reply reaches the
+        # caller through the ordinary per-caller path.
+        if not args:
+            current = (await ctx.lane.run(get_channel_by_name, ctx.channel.name)).topic
+            if current:
+                await ctx.session.write_line(f"Topic of #{sanitize_text(mapping.room)}: {sanitize_text(current)}")
+            else:
+                await ctx.session.write_line(colored(f"#{sanitize_text(mapping.room)} has no topic set.", fg_color=MUTED_COLOR))
+            return
+        failure = ctx.mrc_bridge.send_topic(ctx.channel, ctx.user.username, args)
+        if failure is not None:
+            await ctx.session.write_line(colored(f"(not sent to MRC: {sanitize_text(failure)})", fg_color=MUTED_COLOR))
+            return
+        await ctx.session.write_line(
+            colored("(topic change sent to the MRC hub; it decides, and its answer follows)", fg_color=MUTED_COLOR)
+        )
+        return
     try:
         await ctx.lane.run(set_topic, ctx.channel, args or None, set_by=ctx.user)
     except TopicError:
@@ -2442,6 +2471,8 @@ async def _handle_away(ctx: ChatCommandContext, args: str) -> None:
         if ctx.presence.is_away(ctx.user.username):
             ctx.presence.clear_away(ctx.user.username)
             await ctx.session.write_line(colored("You are no longer marked away.", fg_color=MUTED_COLOR))
+            if ctx.mrc_bridge is not None:
+                await ctx.mrc_bridge.local_away(ctx.user.username, None)
         else:
             await ctx.session.write_line(colored("You are not currently marked away.", fg_color=MUTED_COLOR))
         return
@@ -2450,6 +2481,13 @@ async def _handle_away(ctx: ChatCommandContext, args: str) -> None:
     await ctx.session.write_line(
         colored(f"You are now marked away: {sanitize_text(args)}", fg_color=MUTED_COLOR)
     )
+    if ctx.mrc_bridge is not None:
+        # Issue #304: the away state a caller already has here is the
+        # one the network sees (AFK), for every room they are announced in.
+        if await ctx.mrc_bridge.local_away(ctx.user.username, args):
+            await ctx.session.write_line(
+                colored("(MRC sees a shortened version of that message; its limit is 136 characters)", fg_color=MUTED_COLOR)
+            )
 
 
 async def _handle_timestamps(ctx: ChatCommandContext, args: str) -> None:
@@ -2615,6 +2653,15 @@ _MRC_HUB_COMMANDS: dict[str, tuple[str, str]] = {
 }
 
 
+# `/mrc <subcommand>` forms whose argument is a secret (issue #304):
+# asked for separately with echo off, never on the command line.
+_MRC_SECRET_COMMANDS: dict[str, str] = {
+    "register": "REGISTER",
+    "identify": "IDENTIFY",
+    "roompass": "ROOMPASS",
+}
+
+
 async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
     """`/mrc` (issue #275): this channel's bridge at a glance -- room,
     hub, whether the link is up right now (the status line's `[MRC]`
@@ -2634,6 +2681,28 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
     subcommand = subcommand.lower()
     rest = rest.strip()
     if subcommand:
+        if subcommand in _MRC_SECRET_COMMANDS or (subcommand == "update" and rest.lower().startswith("password")):
+            # Issue #304: the secret is asked for with echo off and sent
+            # once as the caller's own nick; it is stored nowhere and never
+            # enters the input history (no `history` on that read).
+            hub_command = _MRC_SECRET_COMMANDS.get(subcommand, "UPDATE password")
+            if rest and subcommand != "update":
+                await ctx.session.write_line(
+                    colored("Type the command alone; the password is asked for separately and never shown.", fg_color=MUTED_COLOR)
+                )
+                return
+            await write_prompt(ctx.session, "Password (not shown; blank = cancel): ")
+            secret = (await ctx.session.read_line(echo=False)).strip()
+            await ctx.session.write_line("")
+            if not secret:
+                await ctx.session.write_line(colored("(cancelled)", fg_color=MUTED_COLOR))
+                return
+            failure = ctx.mrc_bridge.send_secret_command(ctx.channel, ctx.user.username, hub_command, secret)
+            if failure is not None:
+                await ctx.session.write_line(colored(f"(not sent to MRC: {sanitize_text(failure)})", fg_color=MUTED_COLOR))
+            else:
+                await ctx.session.write_line(colored("(sent to the hub; its answer follows)", fg_color=MUTED_COLOR))
+            return
         if subcommand == "send":
             if not rest:
                 await _show_usage(ctx.session, "mrc")
@@ -3028,7 +3097,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "revokeaccess": ("/revokeaccess <user>", "Revoke a user's access to this chat channel."),
     "members": ("/members", "List users with direct access to this chat channel."),
     "mrc": (
-        "/mrc [rooms|who|bbses [search]|info <bbs>|motd|stats|help|lastseen <nick>|topics|send <command>|ctcp <nick> <VERSION|TIME|PING|CLIENTINFO>]",
+        "/mrc [rooms|who|bbses [search]|info <bbs>|motd|stats|help|lastseen <nick>|topics|register|identify|roompass|update password|send <command>|ctcp <nick> <VERSION|TIME|PING|CLIENTINFO>]",
         "Show this channel's MRC bridge, or ask the MRC hub something; its reply is shown to you alone.",
     ),
 }
@@ -3827,6 +3896,7 @@ async def _chat_loop(
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
     mrc_bridge: MrcBridge | None = None,
+    mrc_session_state: dict | None = None,
 ) -> ChatAction:
     """
     Real-time chat within `channel`, until the user types /quit, /leave,
@@ -4055,6 +4125,17 @@ async def _chat_loop(
         if mrc_bridge is not None and mrc_bridge.is_bridged(channel):
             await _announce_mrc_bridge(session, mrc_bridge, channel, user)
             await mrc_bridge.local_join(channel, user.username)
+            if mrc_session_state is not None and not mrc_session_state.get("welcomed"):
+                # Issue #304: the hub's welcome, once per session -- its
+                # banner as remembered by the bridge, then MOTD asked for
+                # as this caller, answered through the per-caller path.
+                # Consumed only once the ask is actually queued: a first
+                # room entered during a hub outage leaves the welcome for
+                # the next room after the link returns.
+                if mrc_bridge.send_hub_command(channel, user.username, "MOTD") is None:
+                    mrc_session_state["welcomed"] = True
+                    for line in mrc_bridge.banner_lines():
+                        await session.write_line(await lane.run(_render_mrc_notice, user, MrcNotice(line, utc_now_iso())))
         if pinned_ui_enabled:
             await _repaint_status_line(
                 session, lane, hub, presence, channel, user,

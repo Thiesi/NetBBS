@@ -439,6 +439,22 @@ MRC knows one identity per caller in one room, so a second session of the
 same account trying to enter a different MRC room is refused with the
 room it already holds.
 
+**Presence and welcome.** A caller's `/away` is mirrored to the network
+(and repeated on every reconnect), so MRC users see the same away state
+callers here see. The first MRC room a caller enters in a session shows
+the hub's banner and its message of the day; `/mrc motd` asks again. The
+network's size -- "MRC: 41 users on 12 boards" -- appears above Who's
+online, in the picker's Multi Relay Chat section and on Node > Chat
+bridge (MRC), refreshed every few minutes while anyone here is on the
+network. In a room a caller opened, the topic is the hub's: it shows on
+the status line as the hub sets it, and `/topic <text>` there asks the hub
+(which may require MRC Trust) rather than changing anything locally; in a
+channel you mapped, `/topic` keeps its usual local meaning. `/mrc
+register`, `/mrc identify`, `/mrc update password` and `/mrc roompass`
+ask for the password separately with echo off and send it once; NetBBS
+stores no MRC credentials. Each caller picks the colour their handle
+wears on MRC under `[P]rofile` → `[Y]our MRC nick colour`.
+
 MRC users colour their lines with Mystic-style `|NN` codes. Those colours
 are shown by default; a caller who prefers plain text switches them off
 under `[P]rofile` → `[I]nter-BBS chat colours`. Either way an inbound

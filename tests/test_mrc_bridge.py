@@ -316,9 +316,12 @@ def test_ping_gets_imalive_and_keepalive_sends_iamhere(db, lane, lobby, alice):
         hub.join(lobby.name, ParticipantId("alice", 1))
         bridge = await _connected_bridge(db, lane, hub, fake, keepalive_interval_seconds=0.1)
         try:
+            # The connect-time IMALIVE (site info) may still be in flight
+            # behind the other connect packets: let it land before counting.
+            await fake.wait_for(lambda p: p.body.startswith("IMALIVE:"))
             before = len(fake.packets(body_prefix="IMALIVE:"))
             await fake.ping()
-            await _wait_until(lambda: len(fake.packets(body_prefix="IMALIVE:")) == before + 1)
+            await _wait_until(lambda: len(fake.packets(body_prefix="IMALIVE:")) >= before + 1)
             here = await fake.wait_for(lambda p: p.body == "IAMHERE")
             assert (here.from_user, here.from_room, here.to_room) == ("alice", "lobby", "lobby")
         finally:

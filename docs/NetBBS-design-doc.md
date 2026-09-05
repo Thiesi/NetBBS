@@ -5427,6 +5427,45 @@ without teaching native chat anything about MRC. Decisions:
   the `LIST` reply into the observed-room list, and `ROOM_OPEN`/
   `ROOM_CLOSE`. Nothing above depends on them.
 
+**Issue #304 (presence and welcome)** carries the presence a caller
+already has here onto the network and lets the network's own life show
+through, without teaching native chat anything about MRC:
+
+- **Away state is mirrored, never separate.** NetBBS's `/away` is the
+  one away state; the bridge sends the hub `AFK <message>` for every
+  room the caller is announced in, repeats it on every announcement
+  (reconnects included) so the hub is never behind, and sends a bare
+  `AFK` on return -- the best reading of "back" any reference client
+  offers, to be corrected when the hub's documentation says otherwise.
+- **The hub's welcome, once per session.** On a caller's first MRC room
+  in a session the bridge shows the hub's `BANNER:` lines as remembered
+  from connect and asks for `MOTD` as that caller; the reply reaches
+  them alone through the per-caller path of #298. Once per session, not
+  per room.
+- **The network's size where callers look for company.** The bridge asks
+  `STATS` once per roster refresh, parses `bbses rooms users` (the
+  Mystic layout; an unparseable reply keeps the raw line for the status
+  screen and shows "unknown" elsewhere), and Who's online, the picker's
+  MRC section and the bridge status screen show "N users on M boards"
+  with the reading's age. The bridge's own ask is parsed, not shown; a
+  caller's `/mrc stats` is shown.
+- **An open room's topic is the hub's.** Inbound `ROOMTOPIC` for an
+  open room is stored on the row (a direct update; the node is not a
+  `User`) so the status line shows it; `/topic <text>` inside an open
+  room sends `NEWTOPIC` and the hub decides (MRC Trust applies there),
+  a bare `/topic` shows the topic rather than clearing it. Inside a
+  mapped channel `/topic` keeps its local meaning and audit.
+- **Identity commands with masked input, nothing stored.** `/mrc
+  register`, `/mrc identify`, `/mrc update password` and `/mrc
+  roompass` ask for the secret separately with echo off and send it
+  once as the caller's nick; the secret reaches no scrollback, log or
+  input history (decision 5 stands: the node stores no credentials that
+  are not its own).
+- **A personal nick colour.** The house-style body's handle colour is a
+  per-caller choice among the sixteen CGA colours (Profile, default
+  yellow), read when the caller is announced; brackets and text colour
+  stay the house's, and typed pipe codes stay stripped (#298).
+
 ### Issue #194 — trusted scrollback-on-join — closed
 
 **Goal:** decide whether/how a node gets recent scrollback the instant it
