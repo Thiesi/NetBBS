@@ -871,6 +871,27 @@ session needs the same treatment.
   categories negated), the section's own picker uses -1 for "open by name"
   and -2-n for observed rooms; `pick_item` shows the id beside every entry,
   so these must stay small.
+- Private messages (issue #305): the opt-in is read on the lane with the
+  nick colour (`load_private_optin`, injectable; `_ensure_nick_color` reads
+  both or neither) and cached only while the caller is announced somewhere,
+  so `private_messages_enabled` answers `None` for a caller the bridge has
+  not announced and the Profile switch applies at the next entry. An
+  inbound private line for an opted-in caller goes through `_deliver_private`
+  -> `_deliver_reply(kind="private")`: a per-remote-sender bucket
+  (`PRIVATE_BURST`, `MAX_TRACKED_PRIVATE_BUCKETS`) first, then the caller's
+  reply allowance, never `record_message` -- private lines exist only in
+  participant queues. A caller who did not opt in keeps the one-notice path
+  unchanged. `send_private` requires the opt-in and the announcement, builds
+  the body with `format_room_body` (the recipient's client shows the
+  handle), and sets `msg_ext` from `_known_sites` (nick -> site, learned
+  from every non-own inbound packet, `MAX_KNOWN_SITES`, least recently
+  seen evicted); a nick never seen sends an empty `msg_ext` and the hub
+  routes on the nick alone. `/mrc r` answers `_last_private_sender`, which
+  is bridge memory for this connection only. The once-per-session
+  "not private" note is `mrc_session_state["private_noted"]`, set by
+  whichever of send (`_handle_mrc_private`, through the command context's
+  `mrc_session_state`) or receive (the chat loop's notice branch) comes
+  first.
 
 ### Read cursors and follows (issue #56)
 

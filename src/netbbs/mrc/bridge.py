@@ -98,6 +98,7 @@ from netbbs.mrc.settings import (
     touch_open_room,
 )
 from netbbs.net.mrc_nick_color_preference import mrc_nick_color_for_username
+from netbbs.net.mrc_private_preference import mrc_private_messages_for_username
 from netbbs.net.throttle import _TokenBucket
 from netbbs.rendering import colored
 from netbbs.rendering.pipe_codes import strip_pipe_codes
@@ -141,6 +142,13 @@ MAX_TRACKED_CTCP_SENDERS = 200
 # target, join/leave chatter) -- remotely named, so bounded; and how
 # often an open room's activity stamp is written per channel.
 MAX_OBSERVED_ROOMS = 200
+# Issue #305: private lines from one remote sender are bounded on their
+# own (a flood from one nick must not evict chat), and the nick -> site
+# map learned from inbound traffic is remotely named, so bounded too.
+PRIVATE_BURST = 5
+PRIVATE_RATE_PER_SECOND = 1.0
+MAX_TRACKED_PRIVATE_BUCKETS = 200
+MAX_KNOWN_SITES = 500
 OPEN_ROOM_TOUCH_INTERVAL_SECONDS = 60.0
 # `*** Joining lobby: nick@site` / `*** Leaving lobby: nick@site`
 _ROOM_CHATTER_RE = re.compile(r"^\*\*\*\s+(?:Joining|Leaving)\s+(?P<room>\S+):\s+\S", re.IGNORECASE)
@@ -249,6 +257,7 @@ class MrcBridge:
         load_mappings: Callable[[Database], list[MrcChannelMapping]] = list_mrc_mappings,
         load_open_settings: Callable[[Database], OpenRoomSettings] = load_open_room_settings,
         load_nick_color: Callable[[Database, str], int] = mrc_nick_color_for_username,
+        load_private_optin: Callable[[Database, str], bool] = mrc_private_messages_for_username,
         open_connection: OpenConnection = asyncio.open_connection,
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -272,6 +281,7 @@ class MrcBridge:
         self._load_mappings = load_mappings
         self._load_open_settings = load_open_settings
         self._load_nick_color = load_nick_color
+        self._load_private_optin = load_private_optin
         self._open_connection = open_connection
         self._rng = rng if rng is not None else random.Random()
         self._clock = clock
@@ -331,6 +341,15 @@ class MrcBridge:
         # periodic ask is only parsed).
         self._nick_colors: dict[str, int] = {}
         self._banner: list[str] = []
+        # Issue #305: the private-message opt-in per announced caller
+        # (read with the nick colour), the site each remote nick was last
+        # seen at (so an outbound private line carries `to_site`), the
+        # last private sender per caller (for `/mrc r`), and the
+        # per-remote-sender allowance.
+        self._private_optin: dict[str, bool] = {}
+        self._known_sites: dict[str, tuple[str, str, float]] = {}
+        self._last_private_sender: dict[str, tuple[str, str]] = {}
+        self._private_buckets: dict[tuple[str, str], _TokenBucket] = {}
         self._network_stats: tuple[int, int, int] | None = None
         self._network_stats_at: float | None = None
         self._network_stats_raw: str | None = None
@@ -610,6 +629,7 @@ class MrcBridge:
         self._connected_since = utc_now_iso()
         self._banner.clear()
         self._nick_colors.clear()
+        self._private_optin.clear()
         self._connected_at_monotonic = self._clock()
         self._last_error = None
         _logger.info("Connected to MRC hub %s:%d as %r", settings.host, settings.port, settings.site_name)
@@ -879,6 +899,7 @@ class MrcBridge:
             # Their next announcement re-reads the Profile: "applies the
             # next time you enter an MRC room" means exactly that.
             self._nick_colors.pop(username, None)
+            self._private_optin.pop(username, None)
         mapping = self._by_channel.get(channel.id)
         settings = self._settings
         if mapping is None or settings is None or self._state is not MrcState.CONNECTED:
@@ -999,15 +1020,21 @@ class MrcBridge:
         return text, False
 
     async def _ensure_nick_color(self, username: str) -> None:
-        if username in self._nick_colors:
+        if username in self._nick_colors and username in self._private_optin:
             return
         try:
             color = await self._lane.run(self._load_nick_color, username)
         except Exception:
             color = protocol.DEFAULT_NICK_COLOR
+        try:
+            optin = await self._lane.run(self._load_private_optin, username)
+        except Exception:
+            optin = False
         self._nick_colors[username] = color
+        self._private_optin[username] = bool(optin)
         if len(self._nick_colors) > 500:
             self._nick_colors.clear()
+            self._private_optin.clear()
 
     # --- presence, welcome, size, topics (issue #304) ------------------------
 
@@ -1182,6 +1209,7 @@ class MrcBridge:
             return
         if packet.from_site.lower() == settings.site_wire_name.lower():
             return  # the hub echoing this node's own traffic
+        self._observe_site(packet.from_user, packet.from_site)
         if protocol.is_ctcp_packet(packet):
             await self._handle_ctcp(packet)
             return
@@ -1473,10 +1501,11 @@ class MrcBridge:
             for participant in self._hub.participants_for_username(mapping.channel.name, username):
                 await self._hub.send_to(mapping.channel.name, participant, notice, priority=priority)
 
-    async def _deliver_reply(self, username: str, text: str) -> None:
-        """One line of the hub's reply to `username`, under that caller's
-        own reply allowance; the first line dropped in a burst is
-        replaced by a single "cut short" notice."""
+    async def _deliver_reply(self, username: str, text: str, *, kind: str = "reply") -> None:
+        """One line of the hub's reply to `username` (or, `kind="private"`,
+        a private line for them), under that caller's own reply
+        allowance; the first line dropped in a burst is replaced by a
+        single "cut short" notice."""
         bucket = self._reply_buckets.get(username)
         if bucket is None:
             if len(self._reply_buckets) >= 500:
@@ -1500,7 +1529,7 @@ class MrcBridge:
         if bucket.has_tokens(self._reply_burst / 2):
             self._reply_truncated.discard(username)
         bucket.consume()
-        await self._deliver_to_caller(username, MrcNotice(text, utc_now_iso(), kind="reply"))
+        await self._deliver_to_caller(username, MrcNotice(text, utc_now_iso(), kind=kind))
 
     # --- open rooms (issue #300) ---------------------------------------------
 
@@ -1779,6 +1808,10 @@ class MrcBridge:
         await self._hub.broadcast(mapping.channel.name, MrcNotice(text, utc_now_iso()))
 
     async def _notify_private_message(self, packet: MrcPacket) -> None:
+        addressed = self._caller_for_nick(packet.to_user)
+        if addressed is not None and self._private_optin.get(addressed[1], False):
+            await self._deliver_private(addressed[1], packet)
+            return
         target = packet.to_user.lower()
         for channel_id, nicks in self._announced.items():
             for username, nick in nicks.items():
@@ -1803,6 +1836,106 @@ class MrcBridge:
                 for participant in self._hub.participants_for_username(mapping.channel.name, username):
                     await self._hub.send_to(mapping.channel.name, participant, notice)
                 return
+
+    async def _deliver_private(self, username: str, packet: MrcPacket) -> None:
+        """A private line for a caller who opted in (issue #305): shown to
+        their sessions as an `MrcNotice` of kind `private`, never
+        recorded; the sender's embedded handle is peeled like a room
+        line's and the colour codes kept. Bounded per remote sender
+        (`PRIVATE_BURST`) ahead of the per-caller allowance
+        `_deliver_reply` already applies."""
+        sender_key = (packet.from_site.lower(), packet.from_user.lower())
+        bucket = self._private_buckets.get(sender_key)
+        if bucket is None:
+            if len(self._private_buckets) >= MAX_TRACKED_PRIVATE_BUCKETS:
+                self._private_buckets.clear()
+            bucket = _TokenBucket(PRIVATE_BURST, PRIVATE_RATE_PER_SECOND, self._clock)
+            self._private_buckets[sender_key] = bucket
+        if not bucket.has_token():
+            self._dropped_inbound += 1
+            return
+        bucket.consume()
+        _kind, text = protocol.split_sender_prefix(packet.body.strip(), packet.from_user)
+        text = text.strip()
+        if not strip_pipe_codes(text).strip():
+            return
+        self._last_private_sender[username] = (packet.from_user, packet.from_site)
+        if len(self._last_private_sender) > 500:
+            self._last_private_sender = {username: self._last_private_sender[username]}
+        sender = f"{packet.from_user or 'unknown'}@{packet.from_site or 'unknown'}"
+        await self._deliver_reply(username, f"{sender}: {text}", kind="private")
+
+    def _observe_site(self, nick: str, site: str) -> None:
+        nick = protocol.sanitize_name(nick)
+        site = protocol.sanitize_name(site)
+        if not nick or not site:
+            return
+        key = nick.lower()
+        if key not in self._known_sites and len(self._known_sites) >= MAX_KNOWN_SITES:
+            oldest = min(self._known_sites.items(), key=lambda item: item[1][2])[0]
+            del self._known_sites[oldest]
+        self._known_sites[key] = (nick, site, self._clock())
+
+    def site_for_nick(self, nick: str) -> str:
+        """The site `nick` was last seen at, or "" when unknown (the hub
+        routes on the nick alone then)."""
+        entry = self._known_sites.get(protocol.sanitize_name(nick).lower())
+        return entry[1] if entry is not None else ""
+
+    def private_messages_enabled(self, username: str) -> bool | None:
+        """The caller's opt-in as the bridge knows it: `True`/`False`
+        once they have been announced, `None` before (not read yet)."""
+        return self._private_optin.get(username)
+
+    def reply_target(self, username: str) -> tuple[str, str] | None:
+        """`(nick, site)` of the last MRC user who messaged `username`
+        privately this connection, for `/mrc r`."""
+        return self._last_private_sender.get(username)
+
+    async def send_private(self, channel: Channel, username: str, target: str, text: str) -> tuple[str | None, bool]:
+        """Send `text` privately to MRC user `target` as the caller's
+        nick (issue #305). Requires the caller's own opt-in -- refusing
+        replies while starting conversations is not offered -- and their
+        announcement; the body wears the house style so the recipient's
+        client shows who wrote it, `to_site` is the site the target was
+        last seen at, and the caller's per-user bucket and the room
+        line's chunking apply. Returns `(reason, truncated)`: `reason` is
+        `None` when queued."""
+        mapping = self._by_channel.get(channel.id)
+        settings = self._settings
+        if mapping is None or not mapping.active or settings is None or not settings.enabled:
+            return "this channel isn't bridged to MRC", False
+        if self._state is not MrcState.CONNECTED:
+            return "the MRC link is offline", False
+        nick = self._announced.get(channel.id, {}).get(username)
+        if nick is None:
+            return "you aren't announced to the hub yet", False
+        await self._ensure_nick_color(username)
+        if not self._private_optin.get(username, False):
+            return "you have not opted in to private MRC messages (Profile)", False
+        target_nick = protocol.sanitize_name(target)
+        if not target_nick or target_nick.upper() in protocol.RESERVED_NAMES:
+            return "that is not an MRC user name", False
+        body = protocol.sanitize_body(text)
+        if not body:
+            return "nothing to send", False
+        color = self._nick_colors.get(username, protocol.DEFAULT_NICK_COLOR)
+
+        def template(nick_: str, text_: str) -> str:
+            return protocol.format_room_body(nick_, text_, nick_color=color)
+
+        chunks, truncated = protocol.split_body(body, reserve=len(template(nick, "")))
+        bucket = self._user_bucket(username)
+        if not bucket.has_tokens(len(chunks)):
+            self._dropped_outbound += 1
+            return "you're sending faster than MRC allows", truncated
+        target_site = self.site_for_nick(target_nick)
+        for chunk in chunks:
+            bucket.consume()
+            self._enqueue(MrcPacket(
+                nick, settings.site_wire_name, mapping.room, target_nick, target_site, "", template(nick, chunk),
+            ))
+        return None, truncated
 
     # --- status --------------------------------------------------------------
 
