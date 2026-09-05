@@ -271,9 +271,15 @@ def test_link_refuses_a_genesis_that_squats_or_aliases_an_open_room(db):
         get_channel_by_name(db, "mrc:elsewhere")
     # ... and the room of that name can still be opened here.
     assert materialize_open_room(db, "elsewhere", open_settings=_on()).channel.name == "mrc:elsewhere"
-    # A second genesis colliding on the renamed name gets a suffix.
+    # A second genesis colliding on the renamed name gets a suffix; a
+    # third, with both names taken, is a tolerated refusal rather than an
+    # IntegrityError the transport would not expect.
     second = materialize_carried_channel(db, _genesis("e" * 64, "MRC:elsewhere"))
     assert second.name == "local-MRC:elsewhere-eeeeeeee"
+    sysop = create_user(db, "sysop3", password="hunter2", user_level=255)
+    create_channel(db, "local-mrc:elsewhere-dddddddd", creator=sysop)
+    with pytest.raises(ChannelCarryRefusedError, match="already local channel names"):
+        materialize_carried_channel(db, _genesis("d" * 64, "mrc:elsewhere"))
     with pytest.raises(ChannelCarryRefusedError, match="belongs to an MRC room"):
         materialize_carried_channel(db, _genesis(opened.channel_id, "innocent"))
     assert get_mrc_mapping(db, opened).is_open_room

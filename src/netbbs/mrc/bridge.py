@@ -294,6 +294,9 @@ class MrcBridge:
         # minute, so the lane hop between its occupancy snapshot and its
         # delete cannot race a caller who is one await away from joining.
         self._entering: dict[int, float] = {}
+        # (channel id, username) already told that their identity is held
+        # elsewhere -- said once per conflict, not once per keepalive tick.
+        self._identity_notified: set[tuple[int, str]] = set()
 
         self._outbound: asyncio.Queue[str] = asyncio.Queue(maxsize=outbound_queue_size)
         self._node_bucket = _TokenBucket(OUTBOUND_BURST, OUTBOUND_RATE_PER_SECOND, clock)
@@ -819,6 +822,23 @@ class MrcBridge:
         if mapping is None or settings is None or self._state is not MrcState.CONNECTED:
             return
         self._enqueue(protocol.logoff(nick, settings.site_wire_name, mapping.room))
+        await self._promote_waiting(username)
+
+    async def _promote_waiting(self, username: str) -> None:
+        """The identity just left its room: announce `username` in the
+        first other active bridged channel they still occupy (the one
+        held back by `_announce`'s one-room rule), now rather than on the
+        next keepalive tick, and let its notice be sent again if the
+        conflict ever recurs."""
+        for mapping in self._by_channel.values():
+            if not mapping.active or username in self._announced.get(mapping.channel.id, {}):
+                continue
+            if not self._hub.participants_for_username(mapping.channel.name, username):
+                continue
+            if self._announce(mapping, username):
+                self._identity_notified.discard((mapping.channel.id, username))
+                await self._notify_bridged(mapping, [username])
+                return
 
     async def local_message(self, channel: Channel, message: ChannelMessage) -> tuple[bool, bool]:
         """Relay a locally-recorded `message`/`action` to the room.
@@ -890,6 +910,10 @@ class MrcBridge:
         held = self.identity_room_elsewhere(mapping.channel, username)
         if held is None:
             return
+        key = (mapping.channel.id, username)
+        if key in self._identity_notified:
+            return
+        self._identity_notified.add(key)
         notice = colored(
             f"Your MRC identity is already in #{sanitize_text(held)} from another session; MRC allows one "
             f"room per user, so what you say here is not relayed to #{sanitize_text(mapping.room)} until you leave it there.",
@@ -942,6 +966,7 @@ class MrcBridge:
             for username in sorted(usernames):
                 if self._announce(mapping, username):
                     announced.append(username)
+                    self._identity_notified.discard((mapping.channel.id, username))
                 else:
                     await self._notify_identity_held(mapping, username)
             if notify and newcomers:

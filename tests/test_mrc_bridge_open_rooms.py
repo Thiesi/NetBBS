@@ -298,6 +298,20 @@ def test_one_identity_holds_when_the_sysop_maps_two_occupied_channels(db, lane, 
             recorded = record_message(db, second, kind="message", author_label="alice", author_fingerprint=None, body="hi")
             assert await bridge.local_message(second, recorded) == (False, False)
             assert bridge.status().participants == 1
+            # The notice is said once per conflict, not once per refresh.
+            await bridge.refresh_channel_mappings()
+            await bridge.refresh_channel_mappings()
+            await asyncio.sleep(0.05)
+            assert second_queue.empty()
+            # When the holder leaves its room, the waiting channel is
+            # announced at once -- not on the next keepalive tick.
+            hub.leave(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_leave(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "LOGOFF")
+            await fake.wait_for(lambda p: p.body == "NEWROOM::elsewhere")
+            notice = await asyncio.wait_for(second_queue.get(), timeout=2)
+            assert "now bridged to MRC room #elsewhere" in notice
+            assert await bridge.local_message(second, recorded) == (True, False)
         finally:
             await bridge.close()
             await fake.close()

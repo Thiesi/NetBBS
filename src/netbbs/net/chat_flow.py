@@ -666,7 +666,9 @@ async def _pick_channel(
             return picked
         # Backed out of the MRC section: show this level again with fresh
         # occupancy -- a loop, not a recursive call, so a caller wandering
-        # in and out of the section never deepens the stack.
+        # in and out of the section never deepens the stack -- and with the
+        # section itself re-decided from the bridge's current settings.
+        leading = [mrc_section] if mrc_bridge.open_rooms_enabled else []
         new_channels, _, _, _ = await _load_sorted(mode_box["mode"])
         mixed = [*leading, *categories_here, *new_channels]
 
@@ -902,6 +904,11 @@ async def _pick_mrc_room(
         if selected is None:
             return None
         if isinstance(selected, MrcChannelMapping):
+            if not mrc_bridge.open_rooms_enabled:
+                await session.write_line(
+                    colored("Opening MRC rooms is switched off on this node.", fg_color=MUTED_COLOR)
+                )
+                return None
             if mrc_bridge.room_blocked(selected.room):
                 await session.write_line(
                     colored(f"The SysOp has blocked MRC room #{sanitize_text(selected.room)} on this node.", fg_color=MUTED_COLOR)

@@ -237,6 +237,15 @@ def materialize_carried_channel(
             "SELECT 1 FROM channels WHERE lower(name) = lower(?)", (local_name,)
         ).fetchone() is not None:
             local_name = f"{local_name}-{genesis.payload['channel_id'][:8]}"
+            if db.connection.execute(
+                "SELECT 1 FROM channels WHERE lower(name) = lower(?)", (local_name,)
+            ).fetchone() is not None:
+                # Both candidates taken locally: a tolerated refusal, not an
+                # IntegrityError the transport would not expect.
+                raise ChannelCarryRefusedError(
+                    f"refusing to carry channel {payload_name!r}: both {local_name!r} and its "
+                    "unsuffixed form are already local channel names here"
+                )
     existing = db.connection.execute(
         "SELECT * FROM channels WHERE channel_id = ?", (genesis.payload["channel_id"],)
     ).fetchone()
