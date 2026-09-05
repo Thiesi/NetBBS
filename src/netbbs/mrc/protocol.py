@@ -40,6 +40,7 @@ import re
 from dataclasses import dataclass
 
 from netbbs.rendering.ansi import strip_ansi
+from netbbs.rendering.pipe_codes import strip_non_color_pipe_codes, strip_pipe_codes
 from netbbs.rendering.sanitize import sanitize_text
 
 SEPARATOR = "~"
@@ -73,10 +74,58 @@ RESERVED_NAMES = frozenset({SERVER, CLIENT, NOTME, ALL})
 # room" rather than one specific user.
 BROADCAST_TARGETS = frozenset({"", NOTME, ALL, CLIENT})
 
-# Mystic pipe codes: `|00`-`|23` colours plus two-character MCI codes
-# such as `|UN`. Synchronet strips `\|\w\w`, ENiGMA `\|[0-9A-Z]{2}`.
-_PIPE_CODE_RE = re.compile(r"\|[0-9A-Za-z]{2}")
+# Mystic pipe codes (`|00`-`|23` colours plus two-character MCI codes
+# such as `|UN`) are `netbbs.rendering.pipe_codes`' grammar; the
+# identity fields strip all of them, a body keeps the colour subset.
 _WHITESPACE_RE = re.compile(r"\s+")
+
+# The room in which CTCP requests and replies travel (issue #298) --
+# the same literal every reference client uses.
+CTCP_ROOM = "ctcp_echo_channel"
+CTCP_REQUEST = "[CTCP]"
+CTCP_REPLY = "[CTCP-REPLY]"
+CTCP_COMMANDS = ("VERSION", "TIME", "PING", "CLIENTINFO")
+
+# The house style a NetBBS caller's line wears on the wire (issue
+# #298): every reference client embeds the sender's own coloured handle
+# in the body and shows an inbound body verbatim, so a bare body would
+# reach other boards with no name attached. Grey brackets, a yellow
+# name (the nearest CGA reading of NetBBS's gold accent), then the
+# Mystic idiom `|16|07` -- default background, light-grey text -- before
+# the words. Actions use the template every client shares.
+ROOM_BODY_TEMPLATE = "|08<|14{nick}|08>|16|07 {text}"
+ACTION_BODY_TEMPLATE = "|15* |13{nick} {text}"
+
+# A body's leading sender prefix as the reference clients write it,
+# anchored, with colour codes allowed between the tokens:
+#   `|03<|11Alice|03>|16|07 text`   Mystic / ENiGMA (bracketed)
+#   `Alice |07text`                 Synchronet / ANetBBS (bare)
+#   `|15* |13Alice waves`           every client's /me
+# The templates are matched with the packet's own `from_user` spliced
+# in literally (`_sender_prefix_patterns`), never with a wildcard name,
+# so nothing is ever guessed: a body that does not start with *this*
+# sender's name in one of these shapes is recorded whole.
+_PIPE = r"(?:\|[0-9A-Za-z]{2})*"
+_SENDER_PREFIX_TEMPLATES = (
+    ("action", r"^{pipe}\*\s+{pipe}{nick}{pipe}\s+(?P<text>.*)$"),
+    ("message", r"^{pipe}<{pipe}{nick}{pipe}>{pipe}\s*(?P<text>.*)$"),
+    ("message", r"^{pipe}{nick}{pipe}\s+(?P<text>.*)$"),
+)
+
+
+def _sender_prefix_patterns(from_user: str) -> list[tuple[str, re.Pattern[str]]]:
+    """The three anchored templates for one sender. A Mystic display
+    name keeps its spaces inside the body (`<John Doe>`) while the
+    `from_user` field carries underscores, so both spellings are
+    accepted."""
+    spellings = {from_user, from_user.replace("_", " ")}
+    nick = "(?:" + "|".join(re.escape(spelling) for spelling in sorted(spellings)) + ")"
+    return [
+        (kind, re.compile(template.format(pipe=_PIPE, nick=nick), re.IGNORECASE | re.DOTALL))
+        for kind, template in _SENDER_PREFIX_TEMPLATES
+    ]
+
+
 # The hub's and reference clients' join/part/rename templates, anchored:
 # `*** Joining lobby: nick@site`, `*** Leaving ...`, `- nick has joined`,
 # `- nick@site has left chat.`, `- nick has timed out`, `- nick was
@@ -116,10 +165,6 @@ class MrcPacket:
 
 class MrcProtocolError(ValueError):
     pass
-
-
-def strip_pipe_codes(text: str) -> str:
-    return _PIPE_CODE_RE.sub("", text)
 
 
 def _printable(text: str, *, low: int, high: int = 125) -> str:
@@ -182,23 +227,27 @@ def nick_for_username(username: str) -> str:
     return nick
 
 
-def split_body(body: str, *, max_chunks: int = MAX_CHUNKS) -> tuple[list[str], bool]:
+def split_body(body: str, *, max_chunks: int = MAX_CHUNKS, reserve: int = 0) -> tuple[list[str], bool]:
     """Split an already-sanitized body into at most `max_chunks` wire
-    chunks of `MAX_BODY` characters, breaking on spaces where possible.
-    Returns `(chunks, truncated)`; `truncated` is `True` when text past
-    the last chunk was dropped, so the caller can tell the sender."""
+    chunks of `MAX_BODY - reserve` characters, breaking on spaces where
+    possible. `reserve` is what the caller prepends to every chunk (the
+    sender prefix of `format_room_body`, issue #298) and counts against
+    the hub's limit like any other character. Returns `(chunks,
+    truncated)`; `truncated` is `True` when text past the last chunk was
+    dropped, so the caller can tell the sender."""
+    limit = max(1, MAX_BODY - reserve)
     words = [word for word in body.split(" ") if word]
     chunks: list[str] = []
     current = ""
     for word in words:
-        while len(word) > MAX_BODY:
+        while len(word) > limit:
             if current:
                 chunks.append(current)
                 current = ""
-            chunks.append(word[:MAX_BODY])
-            word = word[MAX_BODY:]
+            chunks.append(word[:limit])
+            word = word[limit:]
         candidate = word if not current else f"{current} {word}"
-        if len(candidate) <= MAX_BODY:
+        if len(candidate) <= limit:
             current = candidate
         else:
             chunks.append(current)
@@ -250,15 +299,18 @@ def parse_line(line: str) -> MrcPacket | None:
         return None
     if len(fields) > 7:
         fields = fields[:6] + [" ".join(fields[6:])]
-    # Pipe codes are stripped from *every* field here, identity fields
-    # included: a remote `|04bob` is `bob` wherever it is later shown or
-    # compared, the same normalization outbound names already get.
-    cleaned = [strip_pipe_codes(sanitize_text(strip_ansi(field))).strip() for field in fields]
-    names = [value[:MAX_NAME] for value in cleaned[:6]]
+    # Pipe codes are stripped from every *identity* field here: a remote
+    # `|04bob` is `bob` wherever it is later shown or compared, the same
+    # normalization outbound names already get. The body keeps its
+    # colour codes (`|00`-`|23`, issue #298) -- printable ASCII, safe to
+    # store, rendered or stripped per viewer -- and loses every other
+    # pipe token (Mystic MCI variables) right here.
+    cleaned = [sanitize_text(strip_ansi(field)).strip() for field in fields]
+    names = [strip_pipe_codes(value)[:MAX_NAME] for value in cleaned[:6]]
     return MrcPacket(
         from_user=names[0], from_site=names[1], from_room=names[2],
         to_user=names[3], msg_ext=names[4], to_room=names[5],
-        body=cleaned[6][:MAX_LINE],
+        body=strip_non_color_pipe_codes(cleaned[6])[:MAX_LINE],
     )
 
 
@@ -268,13 +320,15 @@ def parse_server_command(body: str) -> tuple[str, str]:
     no colon is `(BODY, "")`. The command is upper-cased for matching;
     params keep any further colons intact."""
     command, _, params = body.partition(":")
-    return command.strip().upper(), params.strip()
+    return strip_pipe_codes(command).strip().upper(), params.strip()
 
 
 def parse_userlist(params: str) -> list[str]:
     """`USERLIST:alice,bob@othersite,carol` → the names as sent (each
-    already sanitized by `parse_line`), empty entries dropped."""
-    return [entry.strip() for entry in params.split(",") if entry.strip()]
+    already sanitized by `parse_line`; a colour code around a name is
+    decoration, not identity, and is dropped), empty entries dropped."""
+    entries = (strip_pipe_codes(entry).strip() for entry in params.split(","))
+    return [entry for entry in entries if entry]
 
 
 def looks_like_presence_chatter(body: str) -> bool:
@@ -347,3 +401,79 @@ def capabilities(site: str, caps: list[str]) -> MrcPacket:
 
 def shutdown(site: str) -> MrcPacket:
     return site_command(site, "SHUTDOWN")
+
+
+# --- body conventions (issue #298) ------------------------------------------
+
+
+def split_sender_prefix(body: str, from_user: str) -> tuple[str, str]:
+    """Peel the sender's own embedded handle off an inbound room body.
+    Returns `(kind, text)`: `kind` is `"action"` for the shared `/me`
+    template, else `"message"`; `text` keeps its colour codes. A body
+    that does not start with `from_user` in one of the reference
+    clients' shapes comes back whole -- the equality with `from_user`
+    is what makes this safe, nothing is guessed."""
+    if from_user:
+        for kind, pattern in _sender_prefix_patterns(from_user):
+            match = pattern.match(body)
+            if match is not None:
+                return kind, match.group("text")
+    return "message", body
+
+
+def format_room_body(nick: str, text: str) -> str:
+    """One wire chunk of an ordinary line, in the house style."""
+    return ROOM_BODY_TEMPLATE.format(nick=nick, text=text)
+
+
+def format_action_body(nick: str, text: str) -> str:
+    return ACTION_BODY_TEMPLATE.format(nick=nick, text=text)
+
+
+def room_body_reserve(nick: str) -> int:
+    """How many characters of `MAX_BODY` the house-style prefix costs
+    for `nick` -- what `split_body` must hold back per chunk."""
+    return len(format_room_body(nick, ""))
+
+
+# --- CTCP (issue #298) -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CtcpRequest:
+    requester: str
+    target: str
+    command: str
+    params: str
+
+
+def is_ctcp_packet(packet: MrcPacket) -> bool:
+    return packet.to_room.lower() == CTCP_ROOM or packet.from_room.lower() == CTCP_ROOM
+
+
+def parse_ctcp_request(body: str) -> CtcpRequest | None:
+    """`[CTCP] requester target COMMAND [params]` -- the shape ENiGMA½
+    and ANetBBS both build. Anything else (including a reply) is
+    `None`."""
+    parts = strip_pipe_codes(body).strip().split(None, 4)
+    if len(parts) < 4 or parts[0].upper() != CTCP_REQUEST:
+        return None
+    params = parts[4] if len(parts) > 4 else ""
+    return CtcpRequest(requester=parts[1], target=parts[2], command=parts[3].upper(), params=params)
+
+
+def parse_ctcp_reply(body: str) -> tuple[str, str] | None:
+    """`[CTCP-REPLY] COMMAND text` -> `(COMMAND, text)`, else `None`."""
+    parts = strip_pipe_codes(body).strip().split(None, 2)
+    if len(parts) < 2 or parts[0].upper() != CTCP_REPLY:
+        return None
+    return parts[1].upper(), (parts[2] if len(parts) > 2 else "")
+
+
+def ctcp_request(nick: str, site: str, target: str, command: str, params: str = "") -> MrcPacket:
+    body = f"{CTCP_REQUEST} {nick} {target} {command.upper()}" + (f" {params}" if params else "")
+    return MrcPacket(nick, site, CTCP_ROOM, target, "", CTCP_ROOM, body)
+
+
+def ctcp_reply(nick: str, site: str, requester: str, command: str, text: str) -> MrcPacket:
+    return MrcPacket(nick, site, CTCP_ROOM, requester, "", CTCP_ROOM, f"{CTCP_REPLY} {command.upper()} {text}".rstrip())

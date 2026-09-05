@@ -620,8 +620,9 @@ session needs the same treatment.
   spaces underscored, bodies 140 chars / ASCII 32-125, lines 512 bytes, no
   escaping for the `~` delimiter. `netbbs.mrc.protocol.parse_line` strips
   ANSI and control bytes from every field at the parse boundary; nothing
-  downstream may assume otherwise, and pipe codes (`|NN`) are stripped from
-  every field at parse time, identity fields included, rather than translated.
+  downstream may assume otherwise. Pipe codes (`|NN`) are stripped from the
+  identity fields at parse time and never translated there; what a body
+  keeps is the colour rule below (issue #298).
 - Inbound room lines are recorded through the ordinary `record_message`
   (author label `user@site (MRC)`, `author_fingerprint=NULL`,
   `external_source='mrc'`) and so are bounded by the scrollback limit and
@@ -675,8 +676,42 @@ session needs the same treatment.
   protocol revision the reference clients send, not NetBBS's release number.
 - `tests/mrc_fake_hub.py` is the only MRC test double: a real loopback TCP
   server speaking the tilde protocol (HELLO, PING, echo, USERLIST,
-  OLDVERSION). Bridge, chat-flow, admin-screen and `run()` lifecycle tests all
-  drive it over real sockets; there is no in-memory transport stub.
+  OLDVERSION, and plain-text replies to the informational commands). Bridge,
+  chat-flow, admin-screen and `run()` lifecycle tests all drive it over real
+  sockets; there is no in-memory transport stub.
+- Body convention (issue #298): an MRC body carries the *sender's own*
+  handle, in colour, and every client displays a body verbatim -- the hub
+  adds no name. Outbound, every chunk is `protocol.format_room_body` /
+  `format_action_body` and `split_body(reserve=...)` pays for the prefix out
+  of the 140-character budget. Inbound, `split_sender_prefix` peels a prefix
+  only when the embedded name equals `from_user` (the underscored and the
+  spaced spelling both count); a body naming anyone else is recorded whole.
+  The fake hub's bare bodies hid this for a release: any new body test must
+  use one of the four reference templates.
+- Pipe codes have two fates at the parse boundary: identity fields lose every
+  `|XX`; a body keeps `|00`-`|23` and loses the rest. Nothing after
+  `parse_line` may strip colour from a body it will store; nothing may render
+  a body without `sanitize_text` first. `netbbs.rendering.pipe_codes.
+  render_pipe_codes` is the only producer of pipe-derived SGR and always
+  resets after itself; `_render_channel_message` composes it beside the label
+  as an independent span. `record_message(index_body=...)` carries the plain
+  words to the search index. Hub roster entries and server-command words are
+  stripped before comparison (`parse_userlist`, `parse_server_command`).
+- Per-caller delivery: a `SERVER` packet addressed to an announced nick is
+  looked up through `_announced` (`_caller_for_nick`), never through the
+  account name -- the hub knows nicks only, and `USERNICK` can change one
+  mid-session. `MrcNotice` (text with codes, kind, created_at) is the one
+  object the bridge hands `ChatHub` for ephemeral lines; the receive loop
+  renders it per viewer. A shared pre-coloured string would defeat the
+  per-viewer colour preference.
+- Bounds added: reply lines per caller (`REPLY_BURST`/`REPLY_RATE_PER_SECOND`,
+  one "cut short" notice per burst), CTCP replies per remote sender
+  (`CTCP_BURST`), `USERROOM` re-announce at most once per keepalive tick
+  (`_rehomed`, cleared on the tick). A CTCP request for a nick this node never
+  announced is ignored without a reply.
+- An empty `to_room` is treated as a network broadcast (shown in every active
+  bridged channel), following ENiGMA½; if the live hub ever sends ordinary
+  room traffic with an empty `to_room`, this is the switch to revisit.
 
 ### Read cursors and follows (issue #56)
 

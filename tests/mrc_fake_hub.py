@@ -86,6 +86,12 @@ class FakeMrcHub:
                 raise AssertionError(f"expected {count} connections, saw {self.connections}")
             await asyncio.sleep(0.01)
 
+    def reply_lines(self, command: str, params: str) -> list[str]:
+        """What the hub says back to a user-level informational command
+        (overridable per test). Two lines by default, coloured the way
+        the real hub decorates its replies."""
+        return [f"|10{command} reply line 1", f"|07{command} reply line 2 {params}".rstrip()]
+
     def packets(self, *, body_prefix: str | None = None, from_user: str | None = None) -> list[MrcPacket]:
         return [
             packet for packet in self.received
@@ -139,6 +145,15 @@ class FakeMrcHub:
                 self.users[key] = new_room or "lobby"
             elif command == "LOGOFF":
                 self.users.pop(key, None)
+            elif command.split(" ", 1)[0] in ("LIST", "MOTD", "CHATTERS", "CONNECTED", "INFO", "STATS", "HELP", "TOPICS"):
+                # Issue #298: an informational command (`LIST`, or
+                # `CONNECTED phenom` with a space-separated argument) is
+                # answered with plain text lines addressed to the asking
+                # nick -- the shape every such hub reply has.
+                word, _, argument = command.partition(" ")
+                for line in self.reply_lines(word, argument.lower()):
+                    writer.write(build_line(MrcPacket("SERVER", "", "", packet.from_user, "", "", line)).encode("ascii"))
+                await writer.drain()
             elif command == "USERLIST":
                 room = (packet.to_room or self.users.get(key, "")).lower()
                 names = ",".join(

@@ -46,6 +46,18 @@ Bounds (§16 Decision 5, "bound remotely influenced resources"):
   changes settings -- every retry would start a brand-new rejected
   session.
 
+Body convention and per-caller traffic (issue #298): every MRC client
+embeds the sender's own coloured handle in the body and shows an inbound
+body verbatim, so outbound chunks wear `protocol.format_room_body`'s
+house style and an inbound prefix naming `from_user` is peeled off
+before recording; colour codes stay in the stored body for the renderer.
+A `SERVER` packet addressed to an announced nick is that caller's reply
+(`LIST`, `MOTD`, `INFO`, ...), delivered to their sessions alone as an
+`MrcNotice` under a per-caller allowance; `USERROOM`/`USERNICK` keep the
+announced state honest and `TERMINATE` is fatal like `OLDVERSION`. CTCP
+requests for an announced nick are answered here, bounded per remote
+sender. Broadcasts (empty `to_room`) reach every active bridged channel.
+
 Every task this bridge creates is cancelled and gathered by `close()`
 on every exit path.
 """
@@ -73,6 +85,7 @@ from netbbs.mrc.protocol import MrcPacket, parse_line
 from netbbs.mrc.settings import MrcChannelMapping, MrcSettings, list_mrc_mappings, load_mrc_settings
 from netbbs.net.throttle import _TokenBucket
 from netbbs.rendering import colored
+from netbbs.rendering.pipe_codes import strip_pipe_codes
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.theme import MUTED_COLOR
 from netbbs.storage.database import Database
@@ -81,6 +94,34 @@ from netbbs.timeutil import utc_now_iso
 
 MRC_LOGGER_NAME = "netbbs.mrc"
 _logger = logging.getLogger(MRC_LOGGER_NAME)
+
+
+@dataclass(frozen=True)
+class MrcNotice:
+    """An ephemeral MRC line for a caller's screen (issue #298): a hub
+    notice or room chatter (`kind="notice"`), a network-wide broadcast
+    (`"broadcast"`), or the hub's reply to something the caller asked
+    (`"reply"`). `text` is sanitized and keeps its `|NN` colour codes;
+    `netbbs.net.chat_flow` renders it per viewer (colours on or off,
+    timestamp preference), the same way `_TimestampedNotice` defers
+    rendering there. Never recorded."""
+
+    text: str
+    created_at: str
+    kind: str = "notice"
+
+
+# How many reply lines the hub may push at one caller in a burst (a
+# `LIST` or `HELP` reply is dozens of lines) and how fast the allowance
+# refills; past it, lines are counted and dropped and the caller told
+# once per burst.
+REPLY_BURST = 60
+REPLY_RATE_PER_SECOND = 10.0
+# CTCP: every request costs one reply, so a remote sender is bounded on
+# its own -- three quick ones, then one every two seconds.
+CTCP_BURST = 3
+CTCP_RATE_PER_SECOND = 0.5
+MAX_TRACKED_CTCP_SENDERS = 200
 
 RECONNECT_MIN_BACKOFF_SECONDS = 1.0
 RECONNECT_MAX_BACKOFF_SECONDS = 60.0
@@ -168,6 +209,7 @@ class MrcBridge:
         keepalive_interval_seconds: float = KEEPALIVE_INTERVAL_SECONDS,
         userlist_refresh_seconds: float = USERLIST_REFRESH_INTERVAL_SECONDS,
         outbound_queue_size: int = OUTBOUND_QUEUE_SIZE,
+        reply_burst: int = REPLY_BURST,
     ) -> None:
         self._hub = hub
         self._lane = lane
@@ -183,6 +225,7 @@ class MrcBridge:
         self._connect_timeout = connect_timeout_seconds
         self._keepalive_interval = keepalive_interval_seconds
         self._userlist_refresh = userlist_refresh_seconds
+        self._reply_burst = reply_burst
 
         self._settings: MrcSettings | None = None
         # room (lower-cased) -> mapping; channel id -> mapping
@@ -199,6 +242,17 @@ class MrcBridge:
         # (sender lower, channel id, username) -> already notified about
         # an undeliverable private message
         self._private_notified: set[tuple[str, int, str]] = set()
+        # Issue #298: per-caller allowance for hub reply lines, whether
+        # that caller has already been told a burst was cut short, the
+        # per-remote-sender CTCP allowance, and how often the hub moved
+        # each caller out of their mapped room this keepalive tick
+        # (re-announced on the first move and told on the first two, so a
+        # room that keeps bouncing them is neither a NEWROOM loop nor a
+        # stream of priority notices).
+        self._reply_buckets: dict[str, _TokenBucket] = {}
+        self._reply_truncated: set[str] = set()
+        self._ctcp_buckets: dict[tuple[str, str], _TokenBucket] = {}
+        self._rehomed: dict[tuple[int, str], int] = {}
 
         self._outbound: asyncio.Queue[str] = asyncio.Queue(maxsize=outbound_queue_size)
         self._node_bucket = _TokenBucket(OUTBOUND_BURST, OUTBOUND_RATE_PER_SECOND, clock)
@@ -309,6 +363,8 @@ class MrcBridge:
         self._announced_rooms.clear()
         self._rosters.clear()
         self._last_userlist_request.clear()
+        self._rehomed.clear()
+        self._reply_truncated.clear()
         if self._state is not MrcState.ERROR:
             self._state = MrcState.DISABLED
 
@@ -374,6 +430,8 @@ class MrcBridge:
                 self._announced_rooms.clear()
                 self._rosters.clear()
                 self._last_userlist_request.clear()
+                self._rehomed.clear()
+                self._reply_truncated.clear()
             # `_connect_and_serve` never returns normally -- a finished
             # session always raises -- so "stable" is judged from how long
             # the session was actually up, not from a normal return.
@@ -541,6 +599,7 @@ class MrcBridge:
             # bounds how long a pause, unmap, delete or rename made there
             # keeps relaying (and tells any newly-bridged occupants).
             await self.refresh_channel_mappings()
+            self._rehomed.clear()
             refresh_rosters = self._clock() - last_userlist >= self._userlist_refresh
             for channel_id, nicks in list(self._announced.items()):
                 mapping = self._by_channel.get(channel_id)
@@ -685,11 +744,14 @@ class MrcBridge:
             self._announce(mapping, username)
             nick = nicks[username]
         body = protocol.sanitize_body(message.body)
-        if message.kind == "action":
-            body = f"* {nick} {body}"
         if not body:
             return False, False
-        chunks, truncated = protocol.split_body(body)
+        # Issue #298: every chunk carries the caller's handle in the
+        # network's own body convention, so the words reach other boards
+        # with a name attached; the prefix is paid for out of the same
+        # 140-character budget as the words.
+        template = protocol.format_action_body if message.kind == "action" else protocol.format_room_body
+        chunks, truncated = protocol.split_body(body, reserve=len(template(nick, "")))
         bucket = self._user_bucket(username)
         # All chunks or none: a prefix of a long line reaching MRC while
         # the caller is told it was *not* relayed is worse than either.
@@ -698,7 +760,7 @@ class MrcBridge:
             return False, truncated
         for chunk in chunks:
             bucket.consume()
-            self._enqueue(protocol.chat_message(nick, settings.site_wire_name, mapping.room, chunk))
+            self._enqueue(protocol.chat_message(nick, settings.site_wire_name, mapping.room, template(nick, chunk)))
         return True, truncated
 
     def _announce(self, mapping: MrcChannelMapping, username: str) -> None:
@@ -797,24 +859,41 @@ class MrcBridge:
             return
         if packet.from_site.lower() == settings.site_wire_name.lower():
             return  # the hub echoing this node's own traffic
+        if protocol.is_ctcp_packet(packet):
+            await self._handle_ctcp(packet)
+            return
         if not packet.is_broadcast:
             await self._notify_private_message(packet)
+            return
+        if not packet.to_room:
+            # No room at all: a network-wide broadcast (ENiGMA½'s own
+            # reading of an empty `to_room`), shown wherever this node
+            # listens rather than filed under the sender's room.
+            await self._handle_broadcast(packet)
             return
         mapping = self._by_room.get(packet.room.lower())
         if mapping is None or not mapping.active:
             return
-        body = protocol.strip_pipe_codes(packet.body).strip()
-        if not body:
+        plain = strip_pipe_codes(packet.body).strip()
+        if not plain:
             return
-        if packet.to_user.upper() == protocol.NOTME or protocol.looks_like_presence_chatter(body):
-            await self._broadcast_notice(mapping, body)
+        if packet.to_user.upper() == protocol.NOTME or protocol.looks_like_presence_chatter(plain):
+            await self._broadcast_notice(mapping, packet.body.strip())
             self._request_userlist(mapping, self._any_nick(mapping) or "NetBBS")
+            return
+        # Issue #298: the body carries the sender's own coloured handle
+        # in every reference client's convention; peel it so the caller
+        # sees one name, and keep the colour codes for the renderer.
+        kind, text = protocol.split_sender_prefix(packet.body, packet.from_user)
+        text = text.strip()
+        plain_text = strip_pipe_codes(text).strip()
+        if not plain_text:
             return
         author_label = f"{packet.from_user or 'unknown'}@{packet.from_site or 'unknown'} (MRC)"
         try:
             recorded = await self._lane.run(
-                record_message, mapping.channel, kind="message", author_label=author_label,
-                author_fingerprint=None, body=body, external_source="mrc",
+                record_message, mapping.channel, kind=kind, author_label=author_label,
+                author_fingerprint=None, body=text, external_source="mrc", index_body=plain_text,
             )
         except sqlite3.DatabaseError as exc:
             # The channel was deleted (or its row otherwise vanished)
@@ -860,6 +939,12 @@ class MrcBridge:
             return
         if command == "GOODBYE":
             raise ConnectionError("hub is closing the connection")
+        if command == "TERMINATE":
+            # The hub ended this site's session on purpose (Mystic's
+            # client treats it as final); retrying would only repeat it.
+            self._fatal_error = f"hub terminated the session: {strip_pipe_codes(params) or 'no reason given'}"
+            self._last_error = self._fatal_error
+            raise ConnectionError(self._fatal_error)
         if command == "USERLIST":
             room_key = self._room_key_for_server_packet(packet)
             # Only rooms this node has mapped: the hub names the room, and
@@ -870,22 +955,253 @@ class MrcBridge:
             return
         if command == "ROOMTOPIC":
             room, _, topic = params.partition(":")
-            mapping = self._by_room.get(room.strip().lower())
+            mapping = self._by_room.get(strip_pipe_codes(room).strip().lower())
             if mapping is not None and mapping.active:
-                await self._broadcast_notice(mapping, f"room topic: {protocol.strip_pipe_codes(topic).strip()}")
+                await self._broadcast_notice(mapping, f"room topic: {topic.strip()}")
             return
-        if command in ("STATS", "LATENCY", "BANNER", "MOTD", "PROTOCOLVERSION", "PONG"):
+        if command in ("PROTOCOLVERSION", "PONG"):
+            return
+        addressed = self._caller_for_nick(packet.to_user)
+        if addressed is not None:
+            channel_id, username = addressed
+            if command == "USERROOM":
+                await self._handle_userroom(channel_id, username, strip_pipe_codes(params).strip())
+                return
+            if command == "USERNICK":
+                await self._handle_usernick(channel_id, username, strip_pipe_codes(params).strip())
+                return
+            # Issue #298: everything else the hub says *to one caller* is
+            # the reply to something they asked (LIST, CHATTERS, INFO,
+            # MOTD, STATS, HELP ...) -- plain text lines, shown to them
+            # alone and bounded per caller.
+            await self._deliver_reply(username, packet.body.strip())
             return
         if packet.to_user.upper() not in ("", protocol.CLIENT, protocol.ALL):
-            return  # per-user server chatter (MOTD text, banners) -- not for the room
+            return  # addressed to a nick this node never announced
+        if command in ("STATS", "LATENCY", "BANNER", "MOTD"):
+            return  # site-wide chatter with no room to show it in
         mapping = self._by_room.get(packet.room.lower())
         if mapping is None or not mapping.active:
             return
-        body = protocol.strip_pipe_codes(packet.body).strip()
-        if body:
+        body = packet.body.strip()
+        if strip_pipe_codes(body).strip():
             await self._broadcast_notice(mapping, body)
-            if protocol.looks_like_presence_chatter(body):
+            if protocol.looks_like_presence_chatter(strip_pipe_codes(body)):
                 self._request_userlist(mapping, self._any_nick(mapping) or "NetBBS")
+
+    async def _handle_userroom(self, channel_id: int, username: str, room: str) -> None:
+        """`USERROOM:<room>` to one of this node's nicks: the hub moved
+        the caller (bounced from a password room, or a hub-side merge).
+        The channel stays bridged to its mapped room, so the caller is
+        told and re-announced there. Per keepalive tick: one re-announce,
+        two notices, then silence -- a room that keeps bouncing them is
+        neither a NEWROOM loop nor a stream of priority notices."""
+        mapping = self._by_channel.get(channel_id)
+        settings = self._settings
+        if mapping is None or settings is None or not room or room.lower() == mapping.room.lower():
+            return
+        nick = self._announced.get(channel_id, {}).get(username)
+        if nick is None:
+            return
+        key = (channel_id, username)
+        moves = self._rehomed.get(key, 0)
+        self._rehomed[key] = moves + 1
+        if moves == 0:
+            self._enqueue(protocol.newroom(nick, settings.site_wire_name, room, mapping.room))
+            text = (
+                f"The MRC hub moved you to #{room}; this channel is bridged to #{mapping.room}, "
+                "so you have been announced there again."
+            )
+        elif moves == 1:
+            text = (
+                f"The MRC hub keeps moving you to #{room}. Until it lets you stay in #{mapping.room}, "
+                "what you say here will not reach MRC."
+            )
+        else:
+            # Two priority notices per keepalive tick is the whole story;
+            # a hub repeating itself past that must not keep evicting chat.
+            return
+        await self._deliver_to_caller(username, MrcNotice(text, utc_now_iso()), priority=True)
+
+    async def _handle_usernick(self, channel_id: int, username: str, new_nick: str) -> None:
+        """`USERNICK:<nick>` to one of this node's nicks: the hub renamed
+        the caller (a registered handle, a collision). Track the new
+        name so replies and CTCP still find them, and say so."""
+        new_nick = protocol.sanitize_name(new_nick)
+        nicks = self._announced.get(channel_id)
+        if not new_nick or nicks is None or username not in nicks or nicks[username].lower() == new_nick.lower():
+            return
+        nicks[username] = new_nick
+        await self._deliver_to_caller(
+            username, MrcNotice(f"The MRC hub now knows you as {new_nick!r}.", utc_now_iso()), priority=True,
+        )
+
+    async def _handle_broadcast(self, packet: MrcPacket) -> None:
+        plain = strip_pipe_codes(packet.body).strip()
+        if not plain:
+            return
+        kind, text = protocol.split_sender_prefix(packet.body.strip(), packet.from_user)
+        if not strip_pipe_codes(text).strip():
+            return
+        sender = f"{packet.from_user or 'unknown'}@{packet.from_site or 'unknown'}"
+        notice = MrcNotice(f"{sender}: {text.strip()}", utc_now_iso(), kind="broadcast")
+        for mapping in self._by_channel.values():
+            if mapping.active:
+                await self._hub.broadcast(mapping.channel.name, notice)
+
+    async def _handle_ctcp(self, packet: MrcPacket) -> None:
+        """Issue #298: answer a `[CTCP] requester target COMMAND` aimed at
+        one of this node's nicks, and show a `[CTCP-REPLY]` to the caller
+        who asked for it. Bounded per remote sender: every request costs
+        this node a reply."""
+        settings = self._settings
+        if settings is None:
+            return
+        request = protocol.parse_ctcp_request(packet.body)
+        if request is not None:
+            addressed = self._caller_for_nick(request.target) or self._caller_for_nick(packet.to_user)
+            if addressed is None or request.command not in protocol.CTCP_COMMANDS:
+                return
+            key = (packet.from_site.lower(), packet.from_user.lower())
+            bucket = self._ctcp_buckets.get(key)
+            if bucket is None:
+                if len(self._ctcp_buckets) >= MAX_TRACKED_CTCP_SENDERS:
+                    self._ctcp_buckets.clear()
+                bucket = _TokenBucket(CTCP_BURST, CTCP_RATE_PER_SECOND, self._clock)
+                self._ctcp_buckets[key] = bucket
+            if not bucket.has_token():
+                self._dropped_inbound += 1
+                return
+            bucket.consume()
+            channel_id, username = addressed
+            nick = self._announced.get(channel_id, {}).get(username) or request.target
+            if request.command == "VERSION":
+                text = f"NetBBS {self._version}"
+            elif request.command == "TIME":
+                text = utc_now_iso()
+            elif request.command == "PING":
+                text = request.params
+            else:  # CLIENTINFO
+                text = " ".join(protocol.CTCP_COMMANDS)
+            self._enqueue(protocol.ctcp_reply(nick, settings.site_wire_name, packet.from_user, request.command, text))
+            return
+        reply = protocol.parse_ctcp_reply(packet.body)
+        if reply is None:
+            return
+        addressed = self._caller_for_nick(packet.to_user)
+        if addressed is None:
+            return
+        command, text = reply
+        await self._deliver_reply(
+            addressed[1], f"CTCP {command} reply from {packet.from_user}@{packet.from_site}: {text}".rstrip(": "),
+        )
+
+    def _caller_for_nick(self, nick: str) -> tuple[int, str] | None:
+        """The announced caller behind `nick` as `(channel id, username)`,
+        or `None` -- the hub addresses replies, moves, renames and CTCP
+        to the nick, never to the account."""
+        target = nick.lower()
+        if not target or target in {name.lower() for name in protocol.RESERVED_NAMES}:
+            return None
+        for channel_id, nicks in self._announced.items():
+            for username, announced_nick in nicks.items():
+                if announced_nick.lower() == target:
+                    return channel_id, username
+        return None
+
+    async def _deliver_to_caller(self, username: str, notice: MrcNotice, *, priority: bool = False) -> None:
+        for channel_id in list(self._announced):
+            if username not in self._announced.get(channel_id, {}):
+                continue
+            mapping = self._by_channel.get(channel_id)
+            if mapping is None:
+                continue
+            for participant in self._hub.participants_for_username(mapping.channel.name, username):
+                await self._hub.send_to(mapping.channel.name, participant, notice, priority=priority)
+
+    async def _deliver_reply(self, username: str, text: str) -> None:
+        """One line of the hub's reply to `username`, under that caller's
+        own reply allowance; the first line dropped in a burst is
+        replaced by a single "cut short" notice."""
+        bucket = self._reply_buckets.get(username)
+        if bucket is None:
+            if len(self._reply_buckets) >= 500:
+                self._reply_buckets.clear()
+            bucket = _TokenBucket(self._reply_burst, REPLY_RATE_PER_SECOND, self._clock)
+            self._reply_buckets[username] = bucket
+        if not bucket.has_token():
+            self._dropped_inbound += 1
+            if username not in self._reply_truncated:
+                self._reply_truncated.add(username)
+                await self._deliver_to_caller(
+                    username,
+                    MrcNotice("(the hub's reply was cut short -- it sent more lines than are shown at once)", utc_now_iso(), kind="reply"),
+                    priority=True,
+                )
+            return
+        # The latch lifts only once the allowance has genuinely recovered
+        # (half the burst back), not on the first trickle-admitted line:
+        # a hub streaming just above the refill rate would otherwise earn
+        # a fresh priority notice at every refill.
+        if bucket.has_tokens(self._reply_burst / 2):
+            self._reply_truncated.discard(username)
+        bucket.consume()
+        await self._deliver_to_caller(username, MrcNotice(text, utc_now_iso(), kind="reply"))
+
+    # --- caller-initiated hub commands (issue #298) ------------------------
+
+    def send_hub_command(self, channel: Channel, username: str, command: str) -> str | None:
+        """Send `command` (`LIST`, `CHATTERS`, `MOTD`, ...) to the hub as
+        the caller's own announced nick; the reply comes back through
+        `_deliver_reply`. Returns `None` when queued, else the reason it
+        was not (offline, not bridged, or the caller's own allowance
+        spent), for the caller's screen."""
+        mapping = self._by_channel.get(channel.id)
+        settings = self._settings
+        if mapping is None or not mapping.active or settings is None or not settings.enabled:
+            return "this channel isn't bridged to MRC"
+        if self._state is not MrcState.CONNECTED:
+            return "the MRC link is offline"
+        nick = self._announced.get(channel.id, {}).get(username)
+        if nick is None:
+            return "you aren't announced to the hub yet"
+        body = protocol.sanitize_body(command)
+        if not body:
+            return "nothing to send"
+        if len(body) > protocol.MAX_BODY:
+            return f"that command is longer than MRC allows ({protocol.MAX_BODY} characters)"
+        bucket = self._user_bucket(username)
+        if not bucket.has_token():
+            self._dropped_outbound += 1
+            return "you're sending faster than MRC allows"
+        bucket.consume()
+        self._enqueue(protocol.user_command(nick, settings.site_wire_name, mapping.room, body))
+        return None
+
+    def send_ctcp(self, channel: Channel, username: str, target: str, command: str) -> str | None:
+        """Ask another MRC user's client something (`VERSION`, `TIME`,
+        `PING`, `CLIENTINFO`); the reply is shown to the caller."""
+        mapping = self._by_channel.get(channel.id)
+        settings = self._settings
+        if mapping is None or not mapping.active or settings is None or not settings.enabled:
+            return "this channel isn't bridged to MRC"
+        if self._state is not MrcState.CONNECTED:
+            return "the MRC link is offline"
+        nick = self._announced.get(channel.id, {}).get(username)
+        if nick is None:
+            return "you aren't announced to the hub yet"
+        target = protocol.sanitize_name(target)
+        command = command.strip().upper()
+        if not target or command not in protocol.CTCP_COMMANDS:
+            return "usage: /mrc ctcp <nick> " + "|".join(protocol.CTCP_COMMANDS)
+        bucket = self._user_bucket(username)
+        if not bucket.has_token():
+            self._dropped_outbound += 1
+            return "you're sending faster than MRC allows"
+        bucket.consume()
+        params = utc_now_iso() if command == "PING" else ""
+        self._enqueue(protocol.ctcp_request(nick, settings.site_wire_name, target, command, params))
+        return None
 
     def _room_key_for_server_packet(self, packet: MrcPacket) -> str | None:
         if packet.room:
@@ -905,12 +1221,10 @@ class MrcBridge:
         return next(iter(nicks.values()))
 
     async def _broadcast_notice(self, mapping: MrcChannelMapping, text: str) -> None:
-        """Ephemeral, never recorded: the same plain-string path
-        `netbbs.net.chat_flow`'s receive loop already renders for
-        `/topic`-style notices. Sanitized before styling."""
-        await self._hub.broadcast(
-            mapping.channel.name, colored(f"[MRC] {sanitize_text(text)}", fg_color=MUTED_COLOR)
-        )
+        """Ephemeral, never recorded: an `MrcNotice` the receive loop in
+        `netbbs.net.chat_flow` renders per viewer. `text` is already
+        sanitized by `parse_line` and keeps its colour codes."""
+        await self._hub.broadcast(mapping.channel.name, MrcNotice(text, utc_now_iso()))
 
     async def _notify_private_message(self, packet: MrcPacket) -> None:
         target = packet.to_user.lower()

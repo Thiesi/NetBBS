@@ -74,7 +74,9 @@ single-node BBS:
   local moderation set (mute/ban/kick, moderated-board/area approval
   queues, permission grants).
 - An opt-in bridge from individual channels to the inter-BBS MRC
-  (Multi Relay Chat) network, configured live from the SysOp console.
+  (Multi Relay Chat) network, configured live from the SysOp console,
+  with the network's colours, hub commands (`/mrc rooms`, `/mrc bbses`,
+  ...) and CTCP.
 - A user directory (vCard/finger-style lookup) and per-user
   preferences.
 - A fullscreen WYSIWYG ANSI art editor (for welcome banners) and a

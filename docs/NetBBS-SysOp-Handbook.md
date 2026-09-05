@@ -407,7 +407,30 @@ username, spaces underscored) is now visible to everyone on that network;
 appearing as `user@site (MRC)` — an external, unverifiable author,
 never a local account. Private MRC messages are not delivered (the
 addressed caller is told once per sender); only room traffic crosses the
-bridge, in both directions.
+bridge, in both directions. On the wire a caller's line carries their
+handle the way every MRC client writes it (`<handle> text`, in the
+network's colour codes), so other boards see who said it.
+
+MRC users colour their lines with Mystic-style `|NN` codes. Those colours
+are shown by default; a caller who prefers plain text switches them off
+under `[P]rofile` → `[I]nter-BBS chat colours`. Either way an inbound
+line is sanitized before any code becomes a colour. A caller's own typed
+codes are not relayed — NetBBS callers speak in one house style.
+
+`/mrc` also asks the hub things on the caller's behalf: `/mrc rooms`,
+`/mrc who`, `/mrc bbses [search]`, `/mrc info <bbs>`, `/mrc motd`,
+`/mrc stats`, `/mrc help`, `/mrc lastseen <nick>`, `/mrc topics`, plus
+`/mrc send <command>` for any other server command and `/mrc ctcp <nick>
+VERSION|TIME|PING|CLIENTINFO`. The hub's reply is shown to that caller
+alone as `[MRC]` lines, bounded per caller. Network-wide broadcasts from
+trusted MRC users appear in every bridged channel as `[MRC broadcast]`.
+The bridge answers other clients' CTCP requests (VERSION, TIME in UTC,
+PING, CLIENTINFO) for any announced caller on its own, bounded per
+remote sender. If the hub moves a caller out of the mapped room (a
+password room, for instance) they are told and announced there again,
+at most once per minute; if the hub renames them they are told the new
+name; if the hub terminates the site's session the link stops until you
+change and save the MRC settings, like an `OLDVERSION` rejection.
 
 `[N]ode` → `[C]hat bridge (MRC)` shows the link state (connected,
 reconnecting, error, off), hub, last error, drop counters and every

@@ -5243,9 +5243,11 @@ bridge going quiet, never blocking local chat delivery or the caller who
 just sent a message; malformed or oversized inbound lines are dropped
 and logged, never allowed to crash the local channel. Every outbound
 field is sanitized to MRC's own documented charset/length limits before
-it's sent; inbound Mystic `|NN` pipe-color codes are stripped, never
-rendered as NetBBS's own ANSI — matches "sanitize before styling," and
-treats them as untrusted input either way.
+it's sent. Inbound Mystic `|NN` pipe codes are untrusted text, never
+raw ANSI: identity fields lose all of them, a body keeps only the
+colour subset (`|00`-`|23`), and those become NetBBS's own SGR solely
+through `netbbs.rendering.pipe_codes`, after sanitization and per
+viewer (issue #298, below) — "sanitize before styling" holds exactly.
 
 **Implemented as issue #275** (`netbbs.mrc`), with every decision above
 as specified and the three questions this scoping pass left open
@@ -5298,6 +5300,47 @@ page is not publicly reachable:
   SysOp changes settings, since every retry would start a fresh
   rejected session. Bridge warnings land in the same bounded
   diagnostic log Link already uses.
+
+**Issue #298 (body convention, colours, CTCP, per-caller hub replies)**
+corrected one shipped assumption and added what falls out of it. Every
+reference client embeds the sender's own coloured handle *inside* the
+message body (Mystic `|03<|11Alice|03>|16|07 text`, ENiGMA½
+`|00|10<|02Alice|10>|00 |03text`, Synchronet `Alice |07text`, ANetBBS
+`|07Alice|07 text`; actions `|15* |13Alice text`) and displays an
+inbound body verbatim; the hub adds nothing. The bridge therefore
+sends every chunk in a house style (`|08<|14nick|08>|16|07 text`, the
+prefix paid for out of the same 140-character budget) and peels an
+inbound prefix only when the embedded name equals `from_user` -- an
+unmatched body is recorded whole, nothing is guessed. Decisions taken
+with it:
+
+- **Colour codes are content, not markup.** `|00`-`|23` survive in a
+  stored MRC body (printable ASCII, safe to store) and are turned into
+  SGR by `netbbs.rendering.pipe_codes` only after sanitization, per
+  viewer, under a Profile toggle that defaults to on; every other pipe
+  token is stripped at the parse boundary, identity fields lose all of
+  them, and the search index receives the plain words. A caller's own
+  typed codes are still stripped: letting them through would put codes
+  into local scrollback and Link-signed exports of mapped channels.
+- **The hub's reply to one caller goes to that caller.** A `SERVER`
+  packet addressed to an announced nick is that caller's reply
+  (`LIST`, `CHATTERS`, `INFO`, `MOTD`, `HELP`, ...), delivered to their
+  sessions alone under a per-caller line allowance, never recorded;
+  `/mrc <subcommand>` sends the asks. `USERROOM` re-announces the
+  caller in the mapped room at most once per keepalive tick,
+  `USERNICK` retargets the announced nick, `TERMINATE` is fatal like
+  `OLDVERSION`. An empty `to_room` is a network broadcast, shown in
+  every active bridged channel (ENiGMA½'s reading).
+- **CTCP lives in the bridge.** `VERSION`, `TIME` (UTC only), `PING`
+  and `CLIENTINFO` are answered for any announced nick, bounded per
+  remote sender because every request costs a reply; no SysOp or caller
+  wiring exists for it.
+
+Decisions 2 (per-channel, explicit, off by default) and 3 (channels
+only) are unchanged by this issue; the planning pass that produced it
+also decided to amend both in later slices (caller-opened rooms behind
+a node-wide switch; opt-in private messages), each recorded here when
+it ships.
 
 ### Issue #194 — trusted scrollback-on-join — closed
 
