@@ -73,8 +73,9 @@ single-node BBS:
   display aliases, `/away`, invite-only/hidden channels, and a full
   local moderation set (mute/ban/kick, moderated-board/area approval
   queues, permission grants).
-- An opt-in bridge from individual channels to the inter-BBS MRC
-  (Multi Relay Chat) network, configured live from the SysOp console,
+- An opt-in bridge to the inter-BBS MRC (Multi Relay Chat) network,
+  configured live from the SysOp console: map individual channels to
+  rooms, or let callers open any room by name from the chat picker,
   with the network's colours, hub commands (`/mrc rooms`, `/mrc bbses`,
   ...) and CTCP.
 - A user directory (vCard/finger-style lookup) and per-user

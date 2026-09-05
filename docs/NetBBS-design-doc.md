@@ -972,7 +972,11 @@ background delivery, and Link-wide presence wait for Phase 5.
 
 A channel may additionally be bridged, per channel and only by explicit
 SysOp choice, to one room on the external MRC (Multi Relay Chat) network
-(§16, issue #165 / #275). Bridging changes nothing about the channel's
+(§16, issue #165 / #275); and, where the SysOp allows it, a caller may
+open any MRC room by name, which materializes a channel `mrc:<room>` of
+its own — a real row with the node-wide open-room gates, listed in the
+picker's own "Multi Relay Chat" section, never Link-able, and retired
+once idle (§16, issue #300). Bridging changes nothing about the channel's
 own model: local traffic is recorded and delivered exactly as before and
 then relayed; inbound MRC lines are recorded as external, unverifiable
 authors (`user@site (MRC)`) that never enter trust evaluation; private
@@ -5210,13 +5214,21 @@ architecture here to multiplex in the first place. One `MrcBridge`
 instance, analogous to `LiveChannelBridge`, owns the one outbound hub
 socket for the whole node.
 
-**Decision 2 (locked in) — bridging is per-channel, explicit, and off by
-default; never automatic for every channel.** MRC rooms are flat,
-global, and unauthenticated with no ACL concept at all — "every local
-channel bridges by default" would silently leak channel contents onto a
-public, unauthenticated network the moment a SysOp enables MRC at all.
-A SysOp must name which local channel maps to which MRC room, the same
-opt-in shape every other Link-adjacent per-channel setting already uses.
+**Decision 2 (locked in, amended by issue #300) — a local channel is
+bridged only per channel, explicitly, and off by default; an MRC room a
+caller opens is a channel of its own, behind a second node-wide switch
+that is also off by default.** MRC rooms are flat, global, and
+unauthenticated with no ACL concept at all — "every local channel
+bridges by default" would silently leak channel contents onto a public,
+unauthenticated network the moment a SysOp enables MRC at all. A SysOp
+must name which local channel maps to which MRC room, the same opt-in
+shape every other Link-adjacent per-channel setting already uses. The
+amendment (issue #300) keeps that rationale intact: an *open room* has
+no local content to leak because it is born on the network — a caller
+asks for a room by name and it materializes as a real channel named
+`mrc:<room>` (design doc §6.3), so enabling MRC alone still bridges
+nothing, and the SysOp decides separately whether callers may open
+rooms at all.
 
 **Decision 3 (locked in) — channels only, never direct/private chat.**
 Matches the issue's own framing, and is reinforced by the protocol
@@ -5336,11 +5348,80 @@ with it:
   remote sender because every request costs a reply; no SysOp or caller
   wiring exists for it.
 
-Decisions 2 (per-channel, explicit, off by default) and 3 (channels
-only) are unchanged by this issue; the planning pass that produced it
-also decided to amend both in later slices (caller-opened rooms behind
-a node-wide switch; opt-in private messages), each recorded here when
-it ships.
+Decision 3 (channels only) is unchanged by this issue; the planning
+pass that produced it decided to amend it in a later slice (opt-in
+private messages), recorded here when it ships. Decision 2's amendment
+shipped as issue #300, next.
+
+**Issue #300 (open rooms)** lets a caller reach any room on the network
+without a SysOp mapping it first, without a door-style client, and
+without teaching native chat anything about MRC. Decisions:
+
+- **An open room is a real channel row, materialized on demand** — the
+  same precedent as a carried Link channel (§9.6): the first caller to
+  open `lobby` gets a `channels` row named `mrc:lobby` with
+  `mrc_room='lobby'` and `mrc_origin='caller'`, gates copied from the
+  node-wide open-room defaults (level, age, name requirement), content-
+  addressed on the room name so a room reopened after retirement keeps
+  its id. A room the SysOp already mapped *is* that channel (one room,
+  one channel), so opening it lands the caller in the SysOp's channel
+  under its own gates. Every existing chat feature works unchanged
+  because nothing but the origin marker differs.
+- **The `mrc:` prefix is reserved.** No local user or SysOp screen may
+  create or rename a channel into it (`netbbs.chat.channels` refuses),
+  so a hub `lobby` never collides with a local `lobby` and no local
+  channel can impersonate a room.
+- **Lifecycle is bounded and SysOp-tuned:** a cap on open rooms (default
+  32; opening refuses past it, nothing is evicted), a retention period
+  (default 7 days) after which a room with no local participant, no
+  activity and no follower is retired by the bridge's sweeper together
+  with its scrollback, a blocklist of rooms callers may not open — or
+  enter, once blocked — and `[A]dopt`/`Re[t]ire` on the channel
+  screen. The sweeper runs on its own task, independent of the hub
+  connection and of the switch, so a long outage or switching MRC off
+  never strands the cap. It is a node action with no `User` behind it
+  and the moderation log requires an actor, so a retirement is reported
+  to the MRC diagnostic log and counted on the status screen instead of
+  audited; a SysOp's own retire is audited as usual. The gates are
+  checked before a room is materialized, so an account they turn away
+  cannot spend the cap on rooms it can never enter.
+- **Never Link, in either direction.** `link_channel` refuses a
+  caller-origin row and the channel screen offers no `[L]ink` for it:
+  MRC content is that network's, not this node's, and must never be
+  re-broadcast under this node's signature. Inbound, a peer's genesis
+  named into the `mrc:` prefix or claiming an open room's id is refused
+  outright, and a carried message is projected only into a channel
+  with a genesis on file. An open room's id is content-addressed on the
+  room *and* a per-node secret, so two nodes opening the same room
+  never share an id and no peer can compute one. Adopting a room
+  clears the origin and makes it an ordinary mapped channel again,
+  which may be Linked like any other. The migration renames any local
+  channel that already wore the prefix (it was typeable before this
+  release) to `local-mrc:...`.
+- **One MRC identity per account, in one room.** The hub knows one
+  `nick@site` in one room; a second session of the same account
+  entering a different bridged channel is refused naming the room the
+  identity already holds. The rule is decided from local occupancy of
+  the bridged channels, not from what has been announced to the hub
+  (announcements lapse during backoff), and enforced once, atomically,
+  at the chat loop's own hub join. The session that is leaving a room
+  on `/join` does not count against itself unless another session of
+  the same account stays behind. A nick suffix was rejected: it would
+  present a second person to the network.
+- **Finding rooms.** The top-level channel picker gains a "[Multi Relay
+  Chat]" entry (only with MRC on and open rooms allowed) that opens its
+  own picker: rooms open here with local and hub occupancy, rooms the
+  bridge has heard of (opened here, `USERROOM` targets, join/leave
+  chatter naming a room; bounded, in memory, rebuilt on connect), and
+  "[Open a room by name]" — one prompt, since a room that does not
+  exist yet is created by entering it. Inside an MRC room, `/join
+  <name>` resolves to an already-open `mrc:<name>`, then a local
+  channel, then opens `<name>` as a room; `/join mrc:<name>` opens the
+  room from anywhere; `/rooms` asks the hub. Open rooms are excluded
+  from the ordinary channel list, since the section is their place.
+- **Deferred until the hub's protocol documentation arrives:** parsing
+  the `LIST` reply into the observed-room list, and `ROOM_OPEN`/
+  `ROOM_CLOSE`. Nothing above depends on them.
 
 ### Issue #194 — trusted scrollback-on-join — closed
 

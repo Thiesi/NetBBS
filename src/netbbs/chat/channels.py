@@ -36,6 +36,21 @@ class TopicError(Exception):
     just for this."""
 
 
+# Issue #300: the local name of an MRC room a caller opened (`mrc:lobby`).
+# Reserved so a hub `lobby` never collides with a local `lobby`, and so
+# no local user can create a channel that impersonates a room. Only
+# `netbbs.mrc.settings.materialize_open_room` may mint such a row.
+OPEN_ROOM_NAME_PREFIX = "mrc:"
+
+
+def _refuse_reserved_name(name: str) -> None:
+    if name.lower().startswith(OPEN_ROOM_NAME_PREFIX):
+        raise ChannelError(
+            f"channel names starting with {OPEN_ROOM_NAME_PREFIX!r} are reserved for MRC rooms "
+            "callers open; a caller opens one from the chat channel picker."
+        )
+
+
 @dataclass(frozen=True)
 class Channel:
     id: int
@@ -109,6 +124,7 @@ def create_channel(
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise ChannelError(f"invalid name_requirement: {name_requirement!r}")
+    _refuse_reserved_name(name)
     created_at = utc_now_iso()
     channel_id = compute_content_id(
         {
@@ -226,6 +242,8 @@ def update_channel(
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise ChannelError(f"invalid name_requirement: {name_requirement!r}")
+    if name != channel.name:
+        _refuse_reserved_name(name)
     try:
         db.connection.execute(
             """
@@ -269,7 +287,22 @@ def delete_channel(db: Database, channel: Channel, *, deleted_by: User) -> None:
         db, actor=deleted_by, action="delete_channel", object_type="channel", object_id=channel.id,
         detail=f"deleted channel {channel.name!r} (id {channel.id})",
     )
+    purge_channel_rows(db, channel)
+
+
+def purge_channel_rows(db: Database, channel: Channel) -> None:
+    """The row-removal half of `delete_channel`, without the audit entry
+    -- for a removal the node itself performs (issue #300: an idle MRC
+    room a caller opened is retired by the bridge's sweeper, which has
+    no `User` to sign the moderation log with; it reports to the MRC
+    diagnostic log instead). Every SysOp-driven deletion still goes
+    through `delete_channel`. The search index is pruned alongside the
+    scrollback it mirrors, so a retired room's lines cannot surface in a
+    search after the room is gone."""
+    from netbbs.search import prune_channel_message_search  # deferred: netbbs.search's own cycle note
+
     db.connection.execute("DELETE FROM channel_messages WHERE channel_id = ?", (channel.id,))
+    prune_channel_message_search(db, channel.id)
     db.connection.execute("DELETE FROM channel_restrictions WHERE channel_id = ?", (channel.id,))
     db.connection.execute("DELETE FROM channel_members WHERE channel_id = ?", (channel.id,))
     db.connection.execute("DELETE FROM channel_invitations WHERE channel_id = ?", (channel.id,))

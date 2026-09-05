@@ -411,6 +411,34 @@ bridge, in both directions. On the wire a caller's line carries their
 handle the way every MRC client writes it (`<handle> text`, in the
 network's colour codes), so other boards see who said it.
 
+**Open rooms.** Mapping channels one by one suits a few curated rooms, but
+MRC rooms come and go. If you want callers to reach any room on the
+network, switch on `[O]pen rooms` in the same Settings screen. The chat
+channel picker then gains a `[Multi Relay Chat]` entry at the top level
+that opens its own list: rooms already open on this node (with how many
+callers are here and how many MRC users are there), rooms the node has
+heard of, and `[Open a room by name]`. A room a caller opens becomes a
+real channel named `mrc:<room>` — visible on your channel list and
+screens like any other, with the gates you set for open rooms (`Le[v]el`,
+`A[g]e`, `Re[q]uired name`), never Link-able, and excluded from the plain
+channel picker since the section is its place. Inside one, `/join <room>`
+opens another MRC room (an existing local channel of that name still
+wins), `/join mrc:<room>` works from anywhere, and `/rooms` asks the hub.
+A room the SysOp has mapped is that channel: opening it by name lands the
+caller in yours.
+
+Open rooms are bounded: a `[C]ap` (default 32; opening refuses past it,
+nothing is evicted), a `[R]etention` period (default 7 days) after which
+a room with nobody in it, no activity and no follower is retired together
+with its scrollback by the bridge itself (reported in the Diagnostics log
+and counted on the status screen), and a `Bloc[k]list` of rooms callers
+may not open. On an open room's channel screen, `[A]dopt` keeps it for
+good as an ordinary bridged channel and `Re[t]ire` removes it now. Rooms
+opened while the switch was on keep ageing out after you switch it off.
+MRC knows one identity per caller in one room, so a second session of the
+same account trying to enter a different MRC room is refused with the
+room it already holds.
+
 MRC users colour their lines with Mystic-style `|NN` codes. Those colours
 are shown by default; a caller who prefers plain text switches them off
 under `[P]rofile` → `[I]nter-BBS chat colours`. Either way an inbound

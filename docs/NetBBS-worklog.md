@@ -712,6 +712,89 @@ session needs the same treatment.
 - An empty `to_room` is treated as a network broadcast (shown in every active
   bridged channel), following ENiGMA½; if the live hub ever sends ordinary
   room traffic with an empty `to_room`, this is the switch to revisit.
+- Open rooms (issue #300): `channels.mrc_origin = 'caller'` is the one marker
+  that a row was materialized for a caller rather than mapped by a SysOp;
+  everything that treats an open room differently (the picker section, the
+  sweeper, `Re[t]ire`/`[A]dopt`, the Link refusal, exclusion from the plain
+  channel list) reads that column, never the `mrc:` name prefix, which is
+  only the collision guard. Only `netbbs.mrc.settings.materialize_open_room`
+  may insert such a row (direct INSERT, content-addressed on the lower-cased
+  room), and `create_channel`/`update_channel` refuse the prefix for everyone
+  else -- a database from before this release cannot contain a `mrc:` channel
+  because the prefix was not reachable through any screen.
+- The sweeper is its own bridge task (`_sweeper_loop`, keepalive cadence),
+  started by `start()` and independent of the hub connection and of the
+  open-room switch: rooms must age out during a long outage or after MRC is
+  switched off, or the cap strands. It re-reads mappings and settings first
+  (the standalone CLI edits them without telling the node), uses
+  `mrc_last_active_at` (or `created_at` for a never-touched row), the
+  `ChatHub`'s participant counts as the occupancy source and `user_follows`
+  as the keep-alive, goes through `purge_channel_rows` (the row half of
+  `delete_channel`, which also prunes the search index) and reports to the
+  MRC diagnostic log because `moderation_log.actor_user_id` is NOT NULL and
+  the node has no user. `_forget_mapping` drops the room's roster, USERLIST
+  timestamp and activity stamp too -- open rooms churn at callers' pace, so a
+  retired room must leave nothing behind. Activity stamps are written at most
+  once a minute per channel (`_touch`), never per line.
+- One identity per account is decided from the `ChatHub`'s occupancy of every
+  active bridged channel (`identity_room_elsewhere`), never from `_announced`:
+  the announced set is empty during backoff and only catches up on reconnect.
+  The one authoritative check sits in `_chat_loop` immediately before
+  `hub.join` with no await in between, so two sessions of one account cannot
+  both pass for two rooms; the picker and `/join` run the same check earlier
+  only for a friendlier refusal. A session switching rooms with `/join` passes
+  its current channel as `leaving` so its own presence does not block it --
+  unless another session of the same account is still there.
+- Gates before rows: `_open_room_gate_denial` checks the caller against the
+  node-wide open-room defaults *before* `open_room` materializes anything, or
+  an account the gates turn away could fill the cap with rooms it can never
+  enter. The section's list is built with `_may_enter_quietly`, never
+  `_authorize_channel_entry`, because the latter accepts a pending invitation
+  as a side effect and a listing must write nothing.
+- The blocklist is consulted on every way into an existing open room (the
+  section's list and selection, bare and explicit `/join`, and the `_chat_loop`
+  pre-join check), not only when a room is first opened; a room blocked after
+  it was opened admits nobody until the sweeper retires it. It is stored as a
+  JSON list because a room name may contain a comma.
+- `_open_or_find_room` is the one resolution step for the picker and `/join`:
+  an existing channel for the room (SysOp-mapped or open) is returned as is
+  and entered under its own gates; only a *new* row is subject to the
+  node-wide defaults, the blocklist and the one-identity rule
+  (`identity_room_held`, the target-agnostic form), all before the write.
+  Otherwise stricter defaults would lock callers out of the SysOp's own
+  mapped channel, and a second session could spend the cap on rooms it is
+  refused.
+- An open room's `channel_id` is content-addressed on the room *and* a
+  per-node secret (`mrc_open_room_namespace` in `node_config`, minted once):
+  two nodes opening the same room must not share an id, or an adopted-and-
+  Linked room on one would alias the open room on the other in
+  `materialize_carried_channel`, and a peer must not be able to compute a
+  room's id. `materialize_carried_channel` refuses a genesis named into the
+  `mrc:` prefix or claiming an open room's id (`ChannelCarryRefusedError`, a
+  `ChannelCarryLimitError` so the transport's tolerance applies), and
+  `materialize_carried_channel_message` projects only into rows with a
+  genesis on file. The migration renames any pre-existing `mrc:` channel to
+  `local-mrc:...` -- the prefix was typeable before this release.
+- Activity is stamped before the connectivity check in `local_join` and
+  `local_message`: a room in use during a hub outage is not idle. A session
+  that passed the pre-join checks holds its room against the sweeper for a
+  minute (`note_entry`, `_entering`), which covers the lane hop between the
+  sweeper's occupancy snapshot and its delete; a caller arriving inside that
+  hop is the residual, accepted window.
+- Join/leave chatter is matched up to the last `: ` (`(?P<room>\S+):\s+\S`)
+  because a colon is legal inside a room name.
+- `remote_roster` hides every entry at this node's own site, not only nicks
+  currently announced: a USERLIST fetched moments before a caller left still
+  names them, and "0 here, 1 on MRC" for one's own ghost is wrong.
+- Observed rooms are bridge memory (200 entries, least recently seen
+  evicted), fed by openings, `USERROOM` targets and the anchored `*** Joining
+  <room>:` / `*** Leaving <room>:` templates; the hub only sends join chatter
+  for rooms this node is in, so the list mostly reflects this node's own
+  history until the `LIST` reply format is known and parsed.
+- The picker's section entry uses stable id 0 (channels are positive,
+  categories negated), the section's own picker uses -1 for "open by name"
+  and -2-n for observed rooms; `pick_item` shows the id beside every entry,
+  so these must stay small.
 
 ### Read cursors and follows (issue #56)
 

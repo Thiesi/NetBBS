@@ -145,8 +145,17 @@ from netbbs.link.node_profiles import (
     identity_for_peer,
     latest_identity_observation,
 )
-from netbbs.mrc.bridge import MrcBridge, MrcNotice
-from netbbs.mrc.settings import get_mrc_mapping
+from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX
+from netbbs.mrc.bridge import MrcBridge, MrcNotice, MrcStatus
+from netbbs.mrc.settings import (
+    MrcChannelMapping,
+    MrcSettingsError,
+    OpenRoomSettings,
+    get_mrc_mapping,
+    is_open_room_name,
+    list_open_rooms,
+    open_room_channel_ids,
+)
 from netbbs.net.mrc_color_preference import mrc_colors_enabled
 from netbbs.rendering.pipe_codes import render_pipe_codes, strip_pipe_codes
 from netbbs.messaging_preferences import accepts_direct_messages
@@ -160,7 +169,7 @@ from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.unicode_style_preference import unicode_style_enabled
-from netbbs.net.session import Session, SessionClosedError
+from netbbs.net.session import Session, SessionClosedError, write_prompt
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.permissions import meets_level
@@ -306,15 +315,17 @@ async def browse_channels(
     """
     channel = initial_channel or await _pick_channel(
         session, lane, hub, user, category_id=None,
-        community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+        community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix, mrc_bridge=mrc_bridge,
     )
     while channel is not None:
         allowed, denial_message = await lane.run(_authorize_channel_entry, channel, user)
+        if allowed:
+            allowed, denial_message = _mrc_identity_check(mrc_bridge, channel, user)
         if not allowed:
             await session.write_line(colored(denial_message, fg_color=MUTED_COLOR))
             channel = await _pick_channel(
                 session, lane, hub, user, category_id=None,
-                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix, mrc_bridge=mrc_bridge,
             )
             continue
 
@@ -329,7 +340,7 @@ async def browse_channels(
         if isinstance(action, _ToPicker):
             channel = await _pick_channel(
                 session, lane, hub, user, category_id=None,
-                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix, mrc_bridge=mrc_bridge,
             )
             continue
         if isinstance(action, _EnterDirectChat):
@@ -445,6 +456,7 @@ async def _pick_channel(
     community_id: int | None = None,
     community_scoped: bool = False,
     title_prefix: str | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> Channel | None:
     """
     Browse channels within a category (or the top level) and return
@@ -485,6 +497,10 @@ async def _pick_channel(
     def _load(db: Database, order_by: str) -> tuple[list[Channel], list[Category], str | None, str | None]:
         base_order = order_by if order_by in ("alphabetical", "recent") else "alphabetical"
         all_channels = _visible_channels_for(db, user, order_by=base_order)
+        # Issue #300: rooms callers opened on MRC live in the picker's
+        # own "Multi Relay Chat" section, not among the local channels.
+        open_room_ids = open_room_channel_ids(db)
+        all_channels = [c for c in all_channels if c.id not in open_room_ids]
         if community_scoped:
             all_channels = [c for c in all_channels if c.community_id == community_id]
         channels_here = [c for c in all_channels if c.category_id == category_id]
@@ -556,8 +572,16 @@ async def _pick_channel(
     channel_masthead = await lane.run(load_chat_channel_picker_banner)
     title = "Chat channels" if title_prefix is not None else "Available chat channels"
     picker_breadcrumb = (title_prefix,) if title_prefix is not None else ()
+    # Issue #300: at the top level, with MRC on and open rooms allowed,
+    # the network is one more place to browse -- an entry that opens its
+    # own picker, the way a category does.
+    mrc_section = (
+        _MrcRoomsEntry()
+        if category_id is None and not community_scoped and mrc_bridge is not None and mrc_bridge.open_rooms_enabled
+        else None
+    )
 
-    if not categories_here:
+    if not categories_here and mrc_section is None:
         async def on_sort_flat() -> list[Channel] | None:
             new_mode = await _run_sort_prompt()
             if new_mode is None:
@@ -584,26 +608,34 @@ async def _pick_channel(
             masthead=channel_masthead,
         )
 
-    mixed: list[Category | Channel] = [*categories_here, *channels_here]
+    leading: list[_MrcRoomsEntry] = [mrc_section] if mrc_section is not None else []
+    mixed: list[Category | Channel | _MrcRoomsEntry] = [*leading, *categories_here, *channels_here]
 
-    def render_name(item: Category | Channel) -> str:
+    def render_name(item: Category | Channel | _MrcRoomsEntry) -> str:
+        if isinstance(item, _MrcRoomsEntry):
+            return "[Multi Relay Chat]"
         return f"[{item.name}]" if isinstance(item, Category) else item.name
 
-    def render_description(item: Category | Channel) -> str | None:
+    def render_description(item: Category | Channel | _MrcRoomsEntry) -> str | None:
+        if isinstance(item, _MrcRoomsEntry):
+            assert mrc_bridge is not None
+            return _mrc_section_description(mrc_bridge.status())
         if isinstance(item, Category):
             return item.description or "(category)"
         return _channel_description(hub, item)
 
-    def stable_id(item: Category | Channel) -> int:
+    def stable_id(item: Category | Channel | _MrcRoomsEntry) -> int:
+        if isinstance(item, _MrcRoomsEntry):
+            return _MRC_SECTION_STABLE_ID
         return item.id if isinstance(item, Channel) else -item.id
 
-    async def on_sort_mixed() -> list[Category | Channel] | None:
+    async def on_sort_mixed() -> list[Category | Channel | _MrcRoomsEntry] | None:
         new_mode = await _run_sort_prompt()
         if new_mode is None:
             return None
         mode_box["mode"] = new_mode
         new_channels, _, _, _ = await _load_sorted(new_mode)
-        return [*categories_here, *new_channels]
+        return [*leading, *categories_here, *new_channels]
 
     selected = await pick_item(
         session,
@@ -625,12 +657,323 @@ async def _pick_channel(
     if selected is None:
         return None
 
+    if isinstance(selected, _MrcRoomsEntry):
+        assert mrc_bridge is not None
+        picked = await _pick_mrc_room(session, lane, hub, user, mrc_bridge, masthead=channel_masthead)
+        if picked is not None:
+            return picked
+        # Backed out of the MRC section: back to the top level, the
+        # same "back always lands somewhere consistent" a category has.
+        return await _pick_channel(
+            session, lane, hub, user, category_id=None,
+            community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+            mrc_bridge=mrc_bridge,
+        )
     if isinstance(selected, Category):
         return await _pick_channel(
             session, lane, hub, user, category_id=selected.id,
             community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+            mrc_bridge=mrc_bridge,
         )
     return selected
+
+
+# --- MRC open rooms (issue #300) -------------------------------------------
+
+
+@dataclass(frozen=True)
+class _MrcRoomsEntry:
+    """The top-level picker's "[Multi Relay Chat]" entry -- opens the
+    MRC section (`_pick_mrc_room`) the way a `Category` opens its own
+    level. Carries nothing: the bridge is the state."""
+
+
+# Stable picker id for the section entry: channels use their positive
+# ids and categories their negated ids, so 0 is the one value neither
+# can take. It is shown as "(#0)" beside the entry, like any other.
+_MRC_SECTION_STABLE_ID = 0
+
+
+@dataclass(frozen=True)
+class _ObservedRoomEntry:
+    """A room the bridge has heard of that nobody here has open."""
+
+    room: str
+    index: int
+
+
+@dataclass(frozen=True)
+class _JoinByNameEntry:
+    """The section's one action: open a room by typing its name."""
+
+
+_JOIN_BY_NAME_STABLE_ID = -1
+
+
+def _mrc_section_description(status: MrcStatus) -> str:
+    if not status.connected:
+        return f"rooms on the MRC network -- hub link {status.state.value}"
+    count = status.open_rooms
+    return f"rooms on the MRC network -- {count} open here" if count else "rooms on the MRC network"
+
+
+def _mrc_identity_check(
+    mrc_bridge: MrcBridge | None, channel: Channel, user: User, *, leaving: Channel | None = None,
+) -> tuple[bool, str | None]:
+    """Decision 6 (issue #300): one MRC identity per account, in one
+    room. A second session of the same account entering a *different*
+    bridged channel is refused, naming the room the identity already
+    holds; the same channel (a second window on the same room) is fine.
+    Purely in-memory, so it stays synchronous beside `_authorize_channel_
+    entry`'s own lane call."""
+    if mrc_bridge is None or not mrc_bridge.is_bridged(channel):
+        return True, None
+    elsewhere = mrc_bridge.identity_room_elsewhere(channel, user.username, leaving=leaving)
+    if elsewhere is None:
+        return True, None
+    return False, (
+        f"Your MRC identity is already in #{sanitize_text(elsewhere)} from another session; "
+        "MRC allows one room per user. Leave it there first."
+    )
+
+
+def _may_enter_quietly(db: Database, channel: Channel, user: User) -> bool:
+    """`_authorize_channel_entry`'s visibility half without its side
+    effect: level, age and name gates, and membership *as it stands*
+    (a pending invitation is not accepted here). Used to list rooms in
+    the MRC section; the real check runs when a room is entered."""
+    if not meets_level(user, channel.min_level) or not meets_age(db, user, get_effective_min_age(db, channel)):
+        return False
+    if not meets_name_requirement(db, user, get_effective_name_requirement(db, channel)):
+        return False
+    return not channel.members_only or is_member(db, channel, user) or has_pending_invitation(db, channel, user)
+
+
+def _open_room_gate_denial(db: Database, user: User, open_settings: OpenRoomSettings | None) -> str | None:
+    """Why `user` may not open a *new* room under the node-wide open-room
+    gates, or `None`. Checked before a row is materialized, so an account
+    the gates would turn away at the door cannot fill the cap with rooms
+    it can never enter (review of issue #300)."""
+    if open_settings is None:
+        return "Opening MRC rooms is switched off on this node."
+    if not meets_level(user, open_settings.min_level) or not meets_age(db, user, open_settings.min_age):
+        return "You are not authorized to open MRC rooms on this node."
+    if not meets_name_requirement(db, user, open_settings.name_requirement):
+        return "Opening MRC rooms here requires a verified real name."
+    return None
+
+
+async def _open_or_find_room(
+    session: Session,
+    lane: DatabaseLane,
+    mrc_bridge: MrcBridge,
+    user: User,
+    room: str,
+    *,
+    leaving: Channel | None = None,
+) -> MrcChannelMapping | None:
+    """Resolve MRC `room` to a channel for `user`, opening it if no
+    channel carries it yet. An existing channel -- the SysOp's mapped
+    channel or an open room -- is returned as is (its own gates apply
+    on entry); only a *new* row is subject to the node-wide open-room
+    gates, the blocklist and the one-identity rule, all checked before
+    anything is written so a refused caller never spends the cap.
+    Every refusal is spoken; `None` means nothing to enter."""
+    existing = mrc_bridge.mapping_for_room(room)
+    if existing is not None:
+        if existing.is_open_room and mrc_bridge.room_blocked(existing.room):
+            await session.write_line(
+                colored(f"The SysOp has blocked MRC room #{sanitize_text(existing.room)} on this node.", fg_color=MUTED_COLOR)
+            )
+            return None
+        return existing
+    if mrc_bridge.room_blocked(room):
+        await session.write_line(
+            colored(f"The SysOp has blocked MRC room #{sanitize_text(room)} on this node.", fg_color=MUTED_COLOR)
+        )
+        return None
+    held = mrc_bridge.identity_room_held(user.username, leaving=leaving)
+    if held is not None:
+        await session.write_line(
+            colored(
+                f"Your MRC identity is already in #{sanitize_text(held)} from another session; "
+                "MRC allows one room per user. Leave it there first.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return None
+    denial = await lane.run(_open_room_gate_denial, user, mrc_bridge.open_room_settings)
+    if denial is not None:
+        await session.write_line(colored(denial, fg_color=MUTED_COLOR))
+        return None
+    try:
+        return await mrc_bridge.open_room(room, user.username)
+    except MrcSettingsError as exc:
+        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        return None
+
+
+async def _pick_mrc_room(
+    session: Session,
+    lane: DatabaseLane,
+    hub: ChatHub,
+    user: User,
+    mrc_bridge: MrcBridge,
+    *,
+    masthead: str = "",
+) -> Channel | None:
+    """The "Multi Relay Chat" section (issue #300): rooms open on this
+    node (with local and hub occupancy), rooms the bridge has heard of,
+    and one action -- open a room by name. Picking an observed room or
+    typing a name opens it through the bridge, which materializes the
+    `mrc:<room>` channel (or finds the SysOp's channel for that room)
+    and announces the caller on entry. Refusals -- switched off, on the
+    SysOp's blocklist, at the cap -- are shown and the section stays
+    open. Returns the channel to enter, or `None` on `[B]ack`."""
+    unicode_style = await lane.run(unicode_style_enabled, user)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, user)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, user)
+    accent = await lane.run(effective_accent_color_256)
+
+    async def _items() -> list[MrcChannelMapping | _ObservedRoomEntry | _JoinByNameEntry]:
+        def _load(db: Database) -> list[MrcChannelMapping]:
+            # Listing must not accept invitations or write anything:
+            # `_may_enter_quietly`, never `_authorize_channel_entry`.
+            return [
+                mapping for mapping in list_open_rooms(db)
+                if _may_enter_quietly(db, mapping.channel, user) and not mrc_bridge.room_blocked(mapping.room)
+            ]
+
+        visible_open = await lane.run(_load)
+        known = {mapping.room.lower() for mapping in await lane.run(list_open_rooms)}
+        observed = [
+            _ObservedRoomEntry(room, index)
+            for index, room in enumerate(mrc_bridge.observed_rooms())
+            if room.lower() not in known and not mrc_bridge.room_blocked(room)
+        ]
+        return [_JoinByNameEntry(), *visible_open, *observed]
+
+    def _name(item: MrcChannelMapping | _ObservedRoomEntry | _JoinByNameEntry) -> str:
+        if isinstance(item, _JoinByNameEntry):
+            return "[Open a room by name]"
+        if isinstance(item, _ObservedRoomEntry):
+            return item.room
+        return item.room
+
+    def _description(item: MrcChannelMapping | _ObservedRoomEntry | _JoinByNameEntry) -> str | None:
+        if isinstance(item, _JoinByNameEntry):
+            return "type the MRC room to open; a room that does not exist yet is created by entering it"
+        if isinstance(item, _ObservedRoomEntry):
+            return "seen on the network -- nobody here is in it"
+        here = hub.participant_count(item.channel.name)
+        there = len(mrc_bridge.remote_roster(item.channel))
+        bits = [f"{here} here", f"{there} on MRC"]
+        if item.paused:
+            bits.append("paused by the SysOp")
+        return ", ".join(bits)
+
+    def _stable_id(item: MrcChannelMapping | _ObservedRoomEntry | _JoinByNameEntry) -> int:
+        if isinstance(item, _JoinByNameEntry):
+            return _JOIN_BY_NAME_STABLE_ID
+        if isinstance(item, _ObservedRoomEntry):
+            return _JOIN_BY_NAME_STABLE_ID - 1 - item.index
+        return item.channel.id
+
+    while True:
+        status = mrc_bridge.status()
+        subtitle_state = "" if status.connected else f" (hub link {status.state.value})"
+        selected = await pick_item(
+            session,
+            await _items(),
+            name_of=_name,
+            stable_id_of=_stable_id,
+            description_of=_description,
+            title=f"Multi Relay Chat{subtitle_state}",
+            breadcrumb=("Chat",),
+            empty_message="No MRC rooms are open here yet.",
+            refresh=_items,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            accent_color=accent,
+            masthead=masthead,
+        )
+        if selected is None:
+            return None
+        if isinstance(selected, MrcChannelMapping):
+            if mrc_bridge.room_blocked(selected.room):
+                await session.write_line(
+                    colored(f"The SysOp has blocked MRC room #{sanitize_text(selected.room)} on this node.", fg_color=MUTED_COLOR)
+                )
+                continue
+            return selected.channel
+        if isinstance(selected, _ObservedRoomEntry):
+            room = selected.room
+        else:
+            await write_prompt(session, "MRC room to open (blank = back): ")
+            room = (await session.read_line()).strip()
+            if not room:
+                continue
+        mapping = await _open_or_find_room(session, lane, mrc_bridge, user, room)
+        if mapping is None:
+            continue
+        allowed, denial = await lane.run(_authorize_channel_entry, mapping.channel, user)
+        if not allowed:
+            await session.write_line(colored(denial, fg_color=MUTED_COLOR))
+            continue
+        if not status.connected:
+            await session.write_line(
+                colored("The MRC link is offline right now; you will be announced there when it reconnects.", fg_color=MUTED_COLOR)
+            )
+        return mapping.channel
+
+
+async def _resolve_join_target(ctx: ChatCommandContext, name: str) -> Channel | None:
+    """`/join` resolution with open rooms (issue #300). `mrc:<room>`
+    always means the MRC room and opens it if allowed. Inside an MRC
+    room a bare name means, in order: that MRC room if it is already
+    open here, a local channel of that name, else open it as an MRC
+    room. Outside MRC rooms a bare name is a local channel, as before.
+    Every refusal is spoken; `None` means nothing to switch to."""
+    bridge = ctx.mrc_bridge
+    explicit = is_open_room_name(name)
+    room = name[len(OPEN_ROOM_NAME_PREFIX):].strip() if explicit else name
+    async def _open(room_name: str) -> Channel | None:
+        assert bridge is not None
+        mapping = await _open_or_find_room(ctx.session, ctx.lane, bridge, ctx.user, room_name, leaving=ctx.channel)
+        return mapping.channel if mapping is not None else None
+
+    if explicit:
+        if bridge is None or not bridge.open_rooms_enabled:
+            await ctx.session.write_line(
+                colored("Opening MRC rooms is switched off on this node.", fg_color=MUTED_COLOR)
+            )
+            return None
+        return await _open(room)
+    in_mrc_room = bridge is not None and bridge.mapping_for(ctx.channel) is not None
+    if in_mrc_room:
+        try:
+            existing = await ctx.lane.run(get_channel_by_name, f"{OPEN_ROOM_NAME_PREFIX}{name}")
+        except ChannelError:
+            existing = None
+        if existing is not None:
+            assert bridge is not None
+            if bridge.room_blocked(name):
+                await ctx.session.write_line(
+                    colored(f"The SysOp has blocked MRC room #{sanitize_text(name)} on this node.", fg_color=MUTED_COLOR)
+                )
+                return None
+            return existing
+    try:
+        return await ctx.lane.run(get_channel_by_name, name)
+    except ChannelError:
+        pass
+    if in_mrc_room and bridge is not None and bridge.open_rooms_enabled:
+        return await _open(name)
+    await ctx.session.write_line(
+        colored(f"No such channel: {sanitize_text(name)!r}", fg_color=MUTED_COLOR)
+    )
+    return None
 
 
 def _authorize_channel_entry(db: Database, channel: Channel, user: User) -> tuple[bool, str | None]:
@@ -1221,12 +1564,8 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
         await _show_usage(ctx.session, "join")
         return None
 
-    try:
-        channel = await ctx.lane.run(get_channel_by_name, channel_name)
-    except ChannelError:
-        await ctx.session.write_line(
-            colored(f"No such channel: {sanitize_text(channel_name)!r}", fg_color=MUTED_COLOR)
-        )
+    channel = await _resolve_join_target(ctx, channel_name)
+    if channel is None:
         return None
 
     if channel.id == ctx.channel.id:
@@ -1236,11 +1575,20 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
         return None
 
     allowed, denial_message = await ctx.lane.run(_authorize_channel_entry, channel, ctx.user)
+    if allowed:
+        # This session leaves `ctx.channel` on the switch, so its own
+        # announcement there does not hold the identity against it.
+        allowed, denial_message = _mrc_identity_check(ctx.mrc_bridge, channel, ctx.user, leaving=ctx.channel)
     if not allowed:
         await ctx.session.write_line(colored(denial_message, fg_color=MUTED_COLOR))
         return None
 
     return _SwitchTo(channel)
+
+
+async def _handle_rooms(ctx: ChatCommandContext, args: str) -> None:
+    """`/rooms` (issue #300): the hub's room list, as `/mrc rooms`."""
+    await _handle_mrc(ctx, "rooms")
 
 
 async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
@@ -2631,7 +2979,8 @@ async def _handle_members(ctx: ChatCommandContext, args: str) -> None:
 _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "quit": ("/quit", "Leave chat and return to the main menu."),
     "leave": ("/leave", "Leave this chat channel and return to the chat channel picker."),
-    "join": ("/join <channel>", "Switch to another chat channel."),
+    "join": ("/join <channel>", "Switch to another chat channel; inside an MRC room, /join <room> opens that MRC room (mrc:<room> from anywhere)."),
+    "rooms": ("/rooms", "List the rooms on the MRC network (the hub's reply is shown to you alone)."),
     "topic": ("/topic [text]", "Set the chat channel topic; a bare /topic clears it (requires edit permission)."),
     "msg": ("/msg <user> <text>", "Send a one-off private message; quote a user@node name containing spaces."),
     "private": ("/private <user>", "Enter a private conversation with an online user (user@node-name-or-dns for a linked node)."),
@@ -2667,6 +3016,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
 _COMMANDS: dict[str, CommandHandler] = {
     "quit": _handle_quit,
     "mrc": _handle_mrc,
+    "rooms": _handle_rooms,
     "leave": _handle_leave,
     "join": _handle_join,
     "topic": _handle_topic,
@@ -2757,6 +3107,7 @@ def _channel_is_mrc_bridged(db: Database, channel: Channel, user: User) -> bool:
 
 _COMMAND_VISIBILITY: dict[str, Callable[[Database, Channel, User], bool]] = {
     "mrc": _channel_is_mrc_bridged,
+    "rooms": _channel_is_mrc_bridged,
     "mute": _requires_moderate,
     "unmute": _requires_moderate,
     "ban": _requires_moderate,
@@ -3564,6 +3915,25 @@ async def _chat_loop(
             colored(f"\r\nYou are banned from this channel ({until}).", fg_color=MUTED_COLOR)
         )
         return _Quit()
+
+    if mrc_bridge is not None:
+        # Issue #300, decided here and nowhere else atomically: no await
+        # between this check and `hub.join`, so two sessions of one
+        # account cannot both pass for two rooms, and a room the SysOp
+        # blocked after it was opened admits nobody. The picker and
+        # `/join` run the same checks earlier for a friendlier refusal.
+        mapping = mrc_bridge.mapping_for(channel)
+        if mapping is not None and mapping.is_open_room and mrc_bridge.room_blocked(mapping.room):
+            await session.write_line(
+                colored(f"\r\nThe SysOp has blocked MRC room #{sanitize_text(mapping.room)} on this node.", fg_color=MUTED_COLOR)
+            )
+            return _ToPicker()
+        allowed, denial_message = _mrc_identity_check(mrc_bridge, channel, user)
+        if not allowed:
+            await session.write_line(colored(f"\r\n{denial_message}", fg_color=MUTED_COLOR))
+            return _ToPicker()
+        if mapping is not None:
+            mrc_bridge.note_entry(channel)
 
     participant_id = ParticipantId(username=user.username, session_key=id(session))
     queue = hub.join(channel.name, participant_id)
