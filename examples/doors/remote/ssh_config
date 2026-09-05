@@ -1,0 +1,17 @@
+# MANUAL SYSOP TASK: replace provider, account, and key paths. Verify its host key.
+# Start with: ssh -F /absolute/path/to/ssh_config -N netbbs-door-tunnel
+Host netbbs-door-tunnel
+    HostName REPLACE_WITH_PROVIDER_SSH_HOST
+    User REPLACE_WITH_PROVIDER_ACCOUNT
+    Port 22
+    IdentityFile /REPLACE/WITH/PRIVATE/TUNNEL_KEY
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking yes
+    ExitOnForwardFailure yes
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+    LocalForward 127.0.0.1:1513 127.0.0.1:513
+    ForwardAgent no
+    ForwardX11 no
+    RequestTTY no

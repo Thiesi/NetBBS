@@ -1,0 +1,16 @@
+{
+  "name": "Remote RLogin over a managed tunnel",
+  "executable_path": "remote",
+  "args": [],
+  "profile": {
+    "version": 1, "adapter": "rlogin", "encoding": "cp437", "width": 80, "height": 25,
+    "max_sessions": 1,
+    "options": {
+      "service_name": "Your provider's service name",
+      "host": "127.0.0.1", "port": 1513,
+      "allowed_destinations": ["127.0.0.1:1513"],
+      "local_user": "{user_id}", "remote_user": "{handle}",
+      "insecure_acknowledged": false
+    }
+  }
+}

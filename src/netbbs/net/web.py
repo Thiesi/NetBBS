@@ -23,15 +23,14 @@ two transports.
 interop (`netbbs.net.zmodem`) depends on the *terminal client*
 auto-detecting and driving the protocol — a property of native terminal
 emulators (SyncTERM, lrzsz) that a JS widget running in a browser tab
-doesn't have. `WebSession.read_byte`/`write_raw` exist only to satisfy
-the `Session` ABC and raise `NotImplementedError` if ever called;
-`netbbs.net.file_flow` already handles that gracefully (same as any
-other failed transfer) rather than crashing the session.
+doesn't have. Raw I/O is available only within explicit, stream-scoped
+door mode; it does not enable Zmodem in the ordinary browser interface.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -179,6 +178,11 @@ class WebSession(Session):
             maxsize=_MAX_QUEUED_CHARS
         )
         self._pushed_back_item: str | _SpecialKey | None = None
+        self._door_queue: asyncio.Queue[int | None] = asyncio.Queue(maxsize=_MAX_QUEUED_CHARS)
+        self._door_active = False
+        self._door_stream = 0
+        self._door_encoding = "utf-8"
+        self._input_closed = False
         self._input_error = "client disconnected"
         self.peer_address = peer_address
         # NetBBS controls the client end-to-end (netbbs-terminal.js
@@ -190,6 +194,10 @@ class WebSession(Session):
 
     def _signal_input_closed(self, message: str) -> None:
         self._input_error = message
+        self._input_closed = True
+        if self._door_queue.full():
+            self._door_queue.get_nowait()
+        self._door_queue.put_nowait(None)
         try:
             self._char_queue.put_nowait(None)
         except asyncio.QueueFull:
@@ -234,7 +242,20 @@ class WebSession(Session):
 
     async def _handle_event(self, event: dict) -> None:
         event_type = event.get("type")
-        if event_type == "key":
+        if event_type == "door_key":
+            if not self._door_active or event.get("stream") != self._door_stream:
+                return
+            data = event.get("data")
+            if isinstance(data, str):
+                if len(data) > _MAX_KEY_EVENT_LENGTH:
+                    await self._reject_input("web terminal key event is too large")
+                encoded = data.encode("utf-8", errors="replace")
+                for value in encoded:
+                    try:
+                        self._door_queue.put_nowait(value)
+                    except asyncio.QueueFull:
+                        await self._reject_input("web terminal input queue is full")
+        elif event_type == "key" and not self._door_active:
             data = event.get("data")
             if isinstance(data, str):
                 if len(data) > _MAX_KEY_EVENT_LENGTH:
@@ -269,6 +290,8 @@ class WebSession(Session):
         key alike — used by `read_line`'s cursor-aware path, which
         needs to tell them apart. `_read_char` (below) is the
         char-only view `read_key` and masked reads still want."""
+        if self._input_closed:
+            raise SessionClosedError(self._input_error)
         if self._pushed_back_item is not None:
             item = self._pushed_back_item
             self._pushed_back_item = None
@@ -301,16 +324,58 @@ class WebSession(Session):
             raise SessionClosedError("client disconnected during write") from exc
 
     async def write_raw(self, data: bytes) -> None:
-        raise NotImplementedError(
-            "file transfer is not available over the web transport — real Zmodem "
-            "interop depends on a native terminal client auto-detecting the "
-            "protocol, which a browser tab can't do; use Telnet or SSH instead"
-        )
+        if not self._door_active:
+            raise NotImplementedError("raw web I/O requires door mode; Zmodem is unavailable")
+        try:
+            for offset in range(0, len(data), 4096):
+                await self._ws.send_json({"type": "door_output", "stream": self._door_stream,
+                                          "data": base64.b64encode(data[offset:offset + 4096]).decode("ascii")})
+        except (ConnectionResetError, RuntimeError) as exc:
+            raise SessionClosedError("client disconnected during door output") from exc
 
     async def read_byte(self) -> int | None:
-        raise NotImplementedError(
-            "raw byte I/O is not available over the web transport — see write_raw"
-        )
+        if not self._door_active:
+            raise NotImplementedError("raw web I/O requires door mode")
+        if self._input_closed:
+            raise SessionClosedError(self._input_error)
+        value = await self._door_queue.get()
+        if value is None:
+            raise SessionClosedError(self._input_error)
+        return value
+
+    def _clear_door_input(self) -> None:
+        self._pushed_back_item = None
+        for queue in (self._char_queue, self._door_queue):
+            while not queue.empty():
+                queue.get_nowait()
+
+    async def enter_door_mode(self, *, encoding: str = "utf-8", width: int | None = None,
+                              height: int | None = None) -> None:
+        if self._door_active:
+            raise RuntimeError("a door already owns this session")
+        if encoding not in ("utf-8", "cp437"):
+            raise ValueError("web doors require utf-8 or cp437")
+        self._clear_door_input()
+        self._door_stream += 1
+        self._door_encoding = encoding
+        self._door_active = True
+        try:
+            await self._ws.send_json({"type": "door_mode", "active": True,
+                                     "stream": self._door_stream, "encoding": encoding,
+                                     "cols": width, "rows": height})
+        except (ConnectionResetError, RuntimeError) as exc:
+            raise SessionClosedError("client disconnected entering door mode") from exc
+
+    async def leave_door_mode(self) -> None:
+        was_active = self._door_active
+        self._door_active = False
+        self._clear_door_input()
+        if was_active and not self._ws.closed:
+            try:
+                await self._ws.send_json({"type": "door_mode", "active": False,
+                                         "stream": self._door_stream})
+            except (ConnectionResetError, RuntimeError):
+                pass
 
     async def read_line(
         self,
@@ -707,9 +772,11 @@ class WebServer:
 
     @property
     def port(self) -> int:
-        if self._site is None:
+        if self._runner is None or not self._runner.addresses:
             raise RuntimeError("server has not been started yet")
-        return self._site.port
+        # TCPSite.port is absent in older supported aiohttp releases. The
+        # runner exposes the actual bound address (including ephemeral ports).
+        return self._runner.addresses[0][1]
 
     async def start(self) -> None:
         app = web.Application()

@@ -190,6 +190,13 @@ class Session(ABC):
     async def write(self, text: str) -> None:
         """Send raw text to the client, no trailing newline added."""
 
+    async def enter_door_mode(self, *, encoding: str = "utf-8", width: int | None = None,
+                              height: int | None = None) -> None:
+        """Temporarily give a door ownership of terminal input and output."""
+
+    async def leave_door_mode(self) -> None:
+        """Restore ordinary input after the owning door has stopped."""
+
     async def write_line(self, text: str = "") -> None:
         """
         Send text followed by a line terminator.

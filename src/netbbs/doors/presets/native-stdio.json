@@ -1,0 +1,10 @@
+{
+  "name": "Native stdio setup template",
+  "executable_path": "/usr/local/libexec/doors/game",
+  "args": ["{door_sys}"],
+  "profile": {
+    "version": 1, "adapter": "native", "endpoint": "stdio",
+    "install_dir": "/var/games/netbbs/native", "drop_files": ["DOOR.SYS"],
+    "encoding": "utf-8", "max_sessions": 1
+  }
+}

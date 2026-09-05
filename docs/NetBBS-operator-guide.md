@@ -15,6 +15,10 @@ itself always comes from the project's official GitHub releases or
 tagged source. On NetBSD, pkgsrc supplies its external dependencies, not
 NetBBS itself.
 
+For bundled and external door games, see the [door setup guide](NetBBS-door-guide.md).
+It distinguishes NetBBS configuration from manual game/emulator/driver/tunnel
+installation and links the configurations shipped in this repository.
+
 ## 1. Installing NetBBS
 
 Use an official GitHub release for an operator installation. An

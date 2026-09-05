@@ -1,0 +1,11 @@
+{
+  "name": "POSIX DOOR32 socket setup template",
+  "executable_path": "/usr/local/libexec/doors/game",
+  "args": ["{door32}"],
+  "profile": {
+    "version": 1, "adapter": "native", "endpoint": "socketpair",
+    "install_dir": "/var/games/netbbs/native", "drop_files": ["DOOR32.SYS"],
+    "filename_case": "lower", "encoding": "cp437",
+    "width": 80, "height": 25, "max_sessions": 1
+  }
+}

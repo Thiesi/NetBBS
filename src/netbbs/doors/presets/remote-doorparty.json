@@ -1,0 +1,15 @@
+{
+  "name": "DoorParty (operator-provisioned SSH tunnel)",
+  "executable_path": "remote",
+  "args": [],
+  "profile": {
+    "version": 1, "adapter": "rlogin", "encoding": "cp437",
+    "width": 80, "height": 25, "max_sessions": 1,
+    "options": {
+      "host": "127.0.0.1", "port": 1513,
+      "allowed_destinations": ["127.0.0.1:1513"],
+      "service_name": "DoorParty",
+      "credential_file": "/var/lib/netbbs/doorparty.credentials.json"
+    }
+  }
+}

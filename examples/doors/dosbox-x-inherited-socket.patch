@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# External DOSBox-X source patch; not part of the NetBBS Python runtime.
+--- a/src/hardware/serialport/misc_util.cpp
++++ b/src/hardware/serialport/misc_util.cpp
+@@ -580,7 +580,10 @@
+ 	if (!NetWrapper_InitializeSDLNet())
+ 		return;
+ 
+-	nativetcpstruct = new _TCPsocketX;
++	// SDLNet_TCP_Close owns and SDL_free's the socket structure.
++	nativetcpstruct = static_cast<_TCPsocketX *>(SDL_calloc(1, sizeof(_TCPsocketX)));
++	if (!nativetcpstruct)
++		return;
+ 	mysock = (TCPsocket)nativetcpstruct;
+ 
+ 	// fill the SDL socket manually
+@@ -594,3 +597,3 @@
+-	sockaddr_in		sa;
++	sockaddr_in		sa = {};
+ 	socklen_t		sz;
+ 	sz=sizeof(sa);
+@@ -601,7 +604,6 @@
+ 		nativetcpstruct->remoteAddress.port = /*ntohs(*/sa.sin_port;//);
+ 	}
+ 	else {
+-		mysock = nullptr;
+ 		return;
+ 	}
+ 	sz=sizeof(sa);
+@@ -610,7 +612,6 @@
+ 		(nativetcpstruct)->localAddress.port = /*ntohs(*/ sa.sin_port; //);
+ 	}
+ 	else {
+-		mysock = nullptr;
+ 		return;
+ 	}
+ 	if(mysock) {
+@@ -659,9 +660,6 @@
+ 
+ TCPClientSocket::~TCPClientSocket()
+ {
+-#ifdef NATIVESOCKETS
+-	delete nativetcpstruct;
+-#endif
+ 	if(mysock) {
+ 		if(listensocketset)
+ 			SDLNet_TCP_DelSocket(listensocketset, mysock);

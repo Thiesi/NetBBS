@@ -1,5 +1,8 @@
 # NetBBS
 
+Door games: see the [operator setup and compatibility guide](docs/NetBBS-door-guide.md)
+for native, DOSBox-X and remote doors, manual prerequisites, and tested limits.
+
 **[www.netbbs.org](https://www.netbbs.org)** — the project site, with a
 fuller pitch and real screenshots from a running node.
 

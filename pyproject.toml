@@ -52,6 +52,7 @@ web = [
 where = ["src"]
 
 [tool.setuptools.package-data]
+"netbbs.doors" = ["presets/*.json"]
 "netbbs.web" = ["static/*"]
 "netbbs.net" = [
     "banner_presets/welcome/*.ans",

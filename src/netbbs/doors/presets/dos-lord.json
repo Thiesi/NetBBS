@@ -1,0 +1,12 @@
+{
+  "name": "LORD 4.07 DOS",
+  "executable_path": "/usr/pkg/bin/dosbox-x",
+  "args": [],
+  "profile": {
+    "version": 1, "adapter": "dosbox", "endpoint": "socketpair",
+    "install_dir": "/var/games/netbbs/lord", "drop_files": ["DOOR.SYS"],
+    "encoding": "cp437", "width": 80, "height": 25, "memory_mb": 1024,
+    "max_sessions": 1,
+    "options": {"fossil": "BNU.COM /L0=38400", "command": "CALL START.BAT {node}", "success_exit_codes": [0, 255]}
+  }
+}

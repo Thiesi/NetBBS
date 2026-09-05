@@ -1,0 +1,18 @@
+# MANUAL: confirm current host/ports with DoorParty, fill in your assigned user,
+# independently verify the host key, and start from a private operator terminal:
+# ssh -F /absolute/path/to/doorparty_ssh_config -N netbbs-doorparty
+# Password is entered at OpenSSH's prompt, never stored in this file or NetBBS.
+Host netbbs-doorparty
+    HostName dp.throwbackbbs.com
+    Port 2022
+    User REPLACE_WITH_ASSIGNED_SSH_ACCOUNT
+    BatchMode no
+    PreferredAuthentications publickey,password
+    StrictHostKeyChecking yes
+    ExitOnForwardFailure yes
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+    LocalForward 127.0.0.1:1513 dp.throwbackbbs.com:513
+    ForwardAgent no
+    ForwardX11 no
+    RequestTTY no
