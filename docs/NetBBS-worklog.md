@@ -813,6 +813,37 @@ session needs the same treatment.
   section entry is re-decided from `open_rooms_enabled` on every return to
   the top level, and selecting an existing open room refuses while the switch
   is off.
+- Presence (issue #304): `local_away(username, message | None)` mirrors the
+  registry's away state as `AFK <message>` / bare `AFK` to every room the
+  caller is announced in, and `_announce` repeats the current state after
+  every NEWROOM (reconnects included). The bare-`AFK`-means-back reading is
+  a guess from the reference clients, not documentation; correct it when the
+  hub's protocol page is available.
+- The hub's welcome is session state, not bridge state: `browse_channels`
+  owns one `mrc_session_state` dict for the whole visit and `_chat_loop`
+  marks `welcomed` on the first MRC join; the bridge only remembers the
+  connect-time `BANNER:` lines (`banner_lines`, last ten). MOTD is asked for
+  through `send_hub_command`, so it costs the caller a token like any ask.
+- STATS: the bridge asks once per roster refresh (and once at connect) as any
+  announced nick, so with nobody announced the figures simply age; the reply
+  is recorded (`_record_stats`, Mystic `bbses rooms users` layout, raw line
+  kept when it does not parse) and delivered only to a caller who asked
+  themselves (`_stats_requested`). Screens read `MrcStatus.network_summary`
+  and `network_stats_age_seconds`; never the raw tuple.
+- An open room's topic is written by `set_open_room_topic` (direct UPDATE,
+  `mrc_origin = 'caller'` only) from the hub's `ROOMTOPIC`, pipe codes
+  stripped; `/topic` in an open room goes to the hub (`send_topic`, bounded
+  by the body limit including the room name) and changes nothing locally.
+  A mapped channel's topic remains the SysOp's and audited.
+- Secrets typed for `/mrc identify` and friends are read with
+  `session.read_line(echo=False)` and *no* `history` argument -- the input
+  history records only what `read_line` is handed a history for -- and are
+  sent once through `send_hub_command`; nothing stores them and the
+  diagnostic log never carries packet bodies.
+- The nick colour is read per username on the lane (`load_nick_color`,
+  injectable) the first time a caller is announced and cached for the
+  connection; `format_room_body(nick_color=...)` is the only place it is
+  applied, so an out-of-range value always falls back to the house yellow.
 - `remote_roster` hides every entry at this node's own site, not only nicks
   currently announced: a USERLIST fetched moments before a caller left still
   names them, and "0 here, 1 on MRC" for one's own ghost is wrong.

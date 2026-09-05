@@ -37,6 +37,12 @@ BACKGROUND_CODES = range(16, 24)
 # black, blue, green, cyan, red, magenta, brown, light grey. The bright
 # half (CGA 8-15) is the same permutation plus eight.
 CGA_TO_XTERM = (0, 4, 2, 6, 1, 5, 3, 7)
+# The sixteen CGA colours by name, in CGA order (issue #304: a caller
+# picks their MRC nick colour from these on the Profile screen).
+CGA_COLOR_NAMES = (
+    "black", "blue", "green", "cyan", "red", "magenta", "brown", "light grey",
+    "dark grey", "light blue", "light green", "light cyan", "light red", "light magenta", "yellow", "white",
+)
 # ``|16`` is "black background", which on a CP437 terminal is the
 # default ground; emitting the terminal's own default (SGR 49) rather
 # than a painted black keeps a message readable on a light background

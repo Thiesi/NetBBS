@@ -92,9 +92,11 @@ from netbbs.mrc.settings import (
     load_mrc_settings,
     load_open_room_settings,
     materialize_open_room,
+    set_open_room_topic,
     sweep_open_rooms,
     touch_open_room,
 )
+from netbbs.net.mrc_nick_color_preference import mrc_nick_color_for_username
 from netbbs.net.throttle import _TokenBucket
 from netbbs.rendering import colored
 from netbbs.rendering.pipe_codes import strip_pipe_codes
@@ -196,6 +198,23 @@ class MrcStatus:
     open_room_cap: int = 0
     observed_rooms: int = 0
     retired_rooms: int = 0
+    # Issue #304: the network's size from the hub's last `STATS` reply
+    # (BBSes, rooms, users), how old that reading is, and the raw line
+    # when it did not parse.
+    network_bbses: int | None = None
+    network_rooms: int | None = None
+    network_users: int | None = None
+    network_stats_age_seconds: float | None = None
+    network_stats_raw: str | None = None
+
+    @property
+    def network_summary(self) -> str | None:
+        """"41 users on 12 boards", or `None` while nothing is known."""
+        if self.network_users is None or self.network_bbses is None:
+            return None
+        users = f"{self.network_users} user{'s' if self.network_users != 1 else ''}"
+        boards = f"{self.network_bbses} board{'s' if self.network_bbses != 1 else ''}"
+        return f"{users} on {boards}"
 
     @property
     def connected(self) -> bool:
@@ -227,6 +246,7 @@ class MrcBridge:
         load_settings: Callable[[Database], MrcSettings] = load_mrc_settings,
         load_mappings: Callable[[Database], list[MrcChannelMapping]] = list_mrc_mappings,
         load_open_settings: Callable[[Database], OpenRoomSettings] = load_open_room_settings,
+        load_nick_color: Callable[[Database, str], int] = mrc_nick_color_for_username,
         open_connection: OpenConnection = asyncio.open_connection,
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -245,6 +265,7 @@ class MrcBridge:
         self._load_settings = load_settings
         self._load_mappings = load_mappings
         self._load_open_settings = load_open_settings
+        self._load_nick_color = load_nick_color
         self._open_connection = open_connection
         self._rng = rng if rng is not None else random.Random()
         self._clock = clock
@@ -297,6 +318,18 @@ class MrcBridge:
         # (channel id, username) already told that their identity is held
         # elsewhere -- said once per conflict, not once per keepalive tick.
         self._identity_notified: set[tuple[int, str]] = set()
+        # Issue #304: per-caller nick colour (read once per announcement),
+        # away state to mirror (username -> message, present = away),
+        # the hub's banner lines, the last STATS reading, and who asked
+        # for STATS themselves (their reply is shown, the bridge's own
+        # periodic ask is only parsed).
+        self._nick_colors: dict[str, int] = {}
+        self._away: dict[str, str | None] = {}
+        self._banner: list[str] = []
+        self._network_stats: tuple[int, int, int] | None = None
+        self._network_stats_at: float | None = None
+        self._network_stats_raw: str | None = None
+        self._stats_requested: set[str] = set()
 
         self._outbound: asyncio.Queue[str] = asyncio.Queue(maxsize=outbound_queue_size)
         self._node_bucket = _TokenBucket(OUTBOUND_BURST, OUTBOUND_RATE_PER_SECOND, clock)
@@ -572,6 +605,11 @@ class MrcBridge:
         self._send_site_info(settings)
         notify, self._notify_on_connect = self._notify_on_connect, False
         await self._reconcile_announced(notify=notify)
+        for channel_id, nicks in self._announced.items():
+            mapping = self._by_channel.get(channel_id)
+            if mapping is not None and nicks:
+                self._request_stats(next(iter(nicks.values())), mapping.room)
+                break
 
         connection.tasks = [
             asyncio.create_task(self._reader_loop(reader), name="mrc-reader"),
@@ -700,6 +738,13 @@ class MrcBridge:
                     self._request_userlist(mapping, next(iter(nicks.values())), force=True)
             if refresh_rosters:
                 last_userlist = self._clock()
+                # One STATS ask per refresh, as any announced nick: the
+                # network's size for Who's online and the picker.
+                for channel_id, nicks in self._announced.items():
+                    mapping = self._by_channel.get(channel_id)
+                    if mapping is not None and nicks:
+                        self._request_stats(next(iter(nicks.values())), mapping.room)
+                        break
 
     # --- outbound ----------------------------------------------------------
 
@@ -801,6 +846,7 @@ class MrcBridge:
         await self._touch(mapping)
         if self._state is not MrcState.CONNECTED:
             return
+        await self._ensure_nick_color(username)
         if not self._announce(mapping, username):
             await self._notify_identity_held(mapping, username)
 
@@ -861,6 +907,7 @@ class MrcBridge:
         nicks = self._announced.setdefault(channel.id, {})
         nick = nicks.get(username)
         if nick is None:
+            await self._ensure_nick_color(username)
             if not self._announce(mapping, username):
                 return False, False
             nick = nicks[username]
@@ -871,7 +918,12 @@ class MrcBridge:
         # network's own body convention, so the words reach other boards
         # with a name attached; the prefix is paid for out of the same
         # 140-character budget as the words.
-        template = protocol.format_action_body if message.kind == "action" else protocol.format_room_body
+        color = self._nick_colors.get(username, protocol.DEFAULT_NICK_COLOR)
+        if message.kind == "action":
+            template = protocol.format_action_body
+        else:
+            def template(nick_: str, text_: str, _color: int = color) -> str:
+                return protocol.format_room_body(nick_, text_, nick_color=_color)
         chunks, truncated = protocol.split_body(body, reserve=len(template(nick, "")))
         bucket = self._user_bucket(username)
         # All chunks or none: a prefix of a long line reaching MRC while
@@ -904,7 +956,91 @@ class MrcBridge:
         self._announced_rooms[mapping.channel.id] = mapping.room
         self._enqueue(protocol.newroom(nick, settings.site_wire_name, "", mapping.room))
         self._request_userlist(mapping, nick)
+        if username in self._away:
+            # The hub is never behind on a caller's away state: told on
+            # every announcement, reconnects included.
+            self._enqueue(protocol.afk(nick, settings.site_wire_name, mapping.room, self._away[username]))
         return True
+
+    async def _ensure_nick_color(self, username: str) -> None:
+        if username in self._nick_colors:
+            return
+        try:
+            color = await self._lane.run(self._load_nick_color, username)
+        except Exception:
+            color = protocol.DEFAULT_NICK_COLOR
+        self._nick_colors[username] = color
+        if len(self._nick_colors) > 500:
+            self._nick_colors.clear()
+
+    # --- presence, welcome, size, topics (issue #304) ------------------------
+
+    async def local_away(self, username: str, message: str | None) -> None:
+        """Mirror the caller's away state to the hub: `message` marks
+        them away (`AFK <message>`), `None` brings them back. Sent from
+        every room they are announced in; remembered so a reconnect or a
+        later announcement repeats it."""
+        settings = self._settings
+        if message is None:
+            self._away.pop(username, None)
+        else:
+            self._away[username] = message
+        if settings is None or self._state is not MrcState.CONNECTED:
+            return
+        for channel_id, nicks in self._announced.items():
+            mapping = self._by_channel.get(channel_id)
+            nick = nicks.get(username)
+            if mapping is None or nick is None:
+                continue
+            self._enqueue(protocol.afk(nick, settings.site_wire_name, mapping.room, message))
+
+    def banner_lines(self) -> list[str]:
+        """What the hub said in its `BANNER:` lines on connect, sanitized
+        with colour codes kept -- the welcome a caller sees once per
+        session on their first MRC room (issue #304)."""
+        return list(self._banner)
+
+    def send_topic(self, channel: Channel, username: str, text: str) -> str | None:
+        """Ask the hub to set an open room's topic (`NEWTOPIC`); the hub
+        decides (MRC Trust is required there) and its reply reaches the
+        caller. Returns `None` when queued, else the reason it was not."""
+        mapping = self._by_channel.get(channel.id)
+        settings = self._settings
+        if mapping is None or not mapping.active or settings is None or not settings.enabled:
+            return "this channel isn't bridged to MRC"
+        if self._state is not MrcState.CONNECTED:
+            return "the MRC link is offline"
+        nick = self._announced.get(channel.id, {}).get(username)
+        if nick is None:
+            return "you aren't announced to the hub yet"
+        body = protocol.sanitize_body(text)
+        if not body:
+            return "nothing to send"
+        if len(f"NEWTOPIC:{mapping.room}:{body}") > protocol.MAX_BODY:
+            return f"that topic is longer than MRC allows ({protocol.MAX_BODY} characters with the room name)"
+        bucket = self._user_bucket(username)
+        if not bucket.has_token():
+            self._dropped_outbound += 1
+            return "you're sending faster than MRC allows"
+        bucket.consume()
+        self._enqueue(protocol.newtopic(nick, settings.site_wire_name, mapping.room, body))
+        return None
+
+    def _request_stats(self, nick: str, room: str) -> None:
+        settings = self._settings
+        if settings is None:
+            return
+        self._enqueue(protocol.stats(nick, settings.site_wire_name, room))
+
+    def _record_stats(self, params: str) -> None:
+        parsed = protocol.parse_stats(params)
+        self._network_stats_at = self._clock()
+        if parsed is None:
+            self._network_stats = None
+            self._network_stats_raw = strip_pipe_codes(params).strip()[:protocol.MAX_LINE]
+        else:
+            self._network_stats = parsed
+            self._network_stats_raw = None
 
     async def _notify_identity_held(self, mapping: MrcChannelMapping, username: str) -> None:
         held = self.identity_room_elsewhere(mapping.channel, username)
@@ -964,6 +1100,7 @@ class MrcBridge:
             newcomers = sorted(username for username in usernames if username not in already)
             announced: list[str] = []
             for username in sorted(usernames):
+                await self._ensure_nick_color(username)
                 if self._announce(mapping, username):
                     announced.append(username)
                     self._identity_notified.discard((mapping.channel.id, username))
@@ -1117,7 +1254,21 @@ class MrcBridge:
             room, _, topic = params.partition(":")
             mapping = self._by_room.get(strip_pipe_codes(room).strip().lower())
             if mapping is not None and mapping.active:
+                if mapping.is_open_room:
+                    # Issue #304: an open room's topic is the hub's; keep it
+                    # on the row so the status line shows it.
+                    plain = strip_pipe_codes(topic).strip() or None
+                    try:
+                        await self._lane.run(set_open_room_topic, mapping.channel, plain)
+                    except sqlite3.DatabaseError as exc:
+                        _logger.warning("MRC room %r: could not store its topic: %s", mapping.room, exc)
                 await self._broadcast_notice(mapping, f"room topic: {topic.strip()}")
+            return
+        if command == "BANNER" and packet.to_user.upper() in ("", protocol.CLIENT, protocol.ALL):
+            text = params.strip()
+            if text:
+                self._banner.append(text)
+                del self._banner[:-10]
             return
         if command in ("PROTOCOLVERSION", "PONG"):
             return
@@ -1130,6 +1281,12 @@ class MrcBridge:
             if command == "USERNICK":
                 await self._handle_usernick(channel_id, username, strip_pipe_codes(params).strip())
                 return
+            if command == "STATS":
+                # Parsed for everyone; shown only to a caller who asked.
+                self._record_stats(params)
+                if username not in self._stats_requested:
+                    return
+                self._stats_requested.discard(username)
             # Issue #298: everything else the hub says *to one caller* is
             # the reply to something they asked (LIST, CHATTERS, INFO,
             # MOTD, STATS, HELP ...) -- plain text lines, shown to them
@@ -1505,6 +1662,8 @@ class MrcBridge:
             self._dropped_outbound += 1
             return "you're sending faster than MRC allows"
         bucket.consume()
+        if body.split(" ", 1)[0].upper() == "STATS":
+            self._stats_requested.add(username)
         self._enqueue(protocol.user_command(nick, settings.site_wire_name, mapping.room, body))
         return None
 
@@ -1609,6 +1768,13 @@ class MrcBridge:
             open_room_cap=self._open_settings.cap if self._open_settings is not None else 0,
             observed_rooms=len(self._observed_rooms),
             retired_rooms=self._retired_rooms,
+            network_bbses=self._network_stats[0] if self._network_stats else None,
+            network_rooms=self._network_stats[1] if self._network_stats else None,
+            network_users=self._network_stats[2] if self._network_stats else None,
+            network_stats_age_seconds=(
+                self._clock() - self._network_stats_at if self._network_stats_at is not None else None
+            ),
+            network_stats_raw=self._network_stats_raw,
         )
 
     @property

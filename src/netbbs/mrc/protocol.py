@@ -93,8 +93,12 @@ CTCP_COMMANDS = ("VERSION", "TIME", "PING", "CLIENTINFO")
 # name (the nearest CGA reading of NetBBS's gold accent), then the
 # Mystic idiom `|16|07` -- default background, light-grey text -- before
 # the words. Actions use the template every client shares.
-ROOM_BODY_TEMPLATE = "|08<|14{nick}|08>|16|07 {text}"
+ROOM_BODY_TEMPLATE = "|08<|{color}{nick}|08>|16|07 {text}"
 ACTION_BODY_TEMPLATE = "|15* |13{nick} {text}"
+# The house nick colour: CGA 14, yellow -- the nearest reading of
+# NetBBS's gold accent. A caller may pick another CGA colour (issue
+# #304); the brackets and the text colour stay the house's.
+DEFAULT_NICK_COLOR = 14
 
 # A body's leading sender prefix as the reference clients write it,
 # anchored, with colour codes allowed between the tokens:
@@ -421,19 +425,58 @@ def split_sender_prefix(body: str, from_user: str) -> tuple[str, str]:
     return "message", body
 
 
-def format_room_body(nick: str, text: str) -> str:
-    """One wire chunk of an ordinary line, in the house style."""
-    return ROOM_BODY_TEMPLATE.format(nick=nick, text=text)
+def format_room_body(nick: str, text: str, *, nick_color: int = DEFAULT_NICK_COLOR) -> str:
+    """One wire chunk of an ordinary line, in the house style; the nick
+    in `nick_color` (CGA 0-15, the caller's own choice on their Profile,
+    issue #304)."""
+    color = nick_color if 0 <= nick_color <= 15 else DEFAULT_NICK_COLOR
+    return ROOM_BODY_TEMPLATE.format(color=f"{color:02d}", nick=nick, text=text)
 
 
 def format_action_body(nick: str, text: str) -> str:
     return ACTION_BODY_TEMPLATE.format(nick=nick, text=text)
 
 
-def room_body_reserve(nick: str) -> int:
+def room_body_reserve(nick: str, *, nick_color: int = DEFAULT_NICK_COLOR) -> int:
     """How many characters of `MAX_BODY` the house-style prefix costs
     for `nick` -- what `split_body` must hold back per chunk."""
-    return len(format_room_body(nick, ""))
+    return len(format_room_body(nick, "", nick_color=nick_color))
+
+
+# --- presence, topics and the network's size (issue #304) --------------------
+
+
+def afk(nick: str, site: str, room: str, message: str | None) -> MrcPacket:
+    """`AFK <message>` marks the nick away (ENiGMA½ and Mystic send
+    exactly this); a bare `AFK` is the best reading of "back" any
+    reference client offers -- corrected when the hub's own
+    documentation says otherwise."""
+    body = "AFK" if not message else f"AFK {message}"
+    return user_command(nick, site, room, body)
+
+
+def newtopic(nick: str, site: str, room: str, text: str) -> MrcPacket:
+    return user_command(nick, site, room, f"NEWTOPIC:{room}:{text}")
+
+
+def stats(nick: str, site: str, room: str) -> MrcPacket:
+    return user_command(nick, site, room, "STATS")
+
+
+def parse_stats(params: str) -> tuple[int, int, int] | None:
+    """`STATS:<bbses> <rooms> <users>` (the Mystic layout) -> the three
+    counts, or `None` for anything else -- the raw line is kept for the
+    status screen in that case."""
+    parts = strip_pipe_codes(params).split()
+    if len(parts) < 3:
+        return None
+    try:
+        bbses, rooms, users = (int(part) for part in parts[:3])
+    except ValueError:
+        return None
+    if min(bbses, rooms, users) < 0:
+        return None
+    return bbses, rooms, users
 
 
 # --- CTCP (issue #298) -------------------------------------------------------

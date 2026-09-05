@@ -5495,6 +5495,16 @@ async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, no
             colored("Dropped lines: ", fg_color=LABEL_COLOR)
             + colored(f"{status.dropped_outbound} outbound, {status.dropped_inbound} inbound", fg_color=METADATA_COLOR)
         )
+        if status.network_summary is not None:
+            age = status.network_stats_age_seconds or 0.0
+            network_line = f"{status.network_summary}, {status.network_rooms} rooms (as of {int(age // 60)} min ago)"
+        elif status.network_stats_raw:
+            network_line = f"unknown -- the hub answered STATS with: {sanitize_text(status.network_stats_raw)}"
+        else:
+            network_line = "unknown yet (asked once a caller is announced)"
+        await session.write_line(
+            colored("Network size: ", fg_color=LABEL_COLOR) + colored(network_line, fg_color=METADATA_COLOR)
+        )
     if status.enabled or status.open_rooms or status.retired_rooms:
         # Shown whenever there is open-room state to report -- with MRC
         # switched off node-wide too, since the sweeper keeps retiring
