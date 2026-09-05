@@ -2607,9 +2607,12 @@ MIGRATIONS = [
         sql="""
         ALTER TABLE channels ADD COLUMN mrc_origin TEXT;
         ALTER TABLE channels ADD COLUMN mrc_last_active_at TEXT;
-        UPDATE channels SET name = 'local-' || name
-        WHERE lower(name) LIKE 'mrc:%'
-          AND NOT EXISTS (SELECT 1 FROM channels other WHERE lower(other.name) = lower('local-' || channels.name));
+        UPDATE channels SET name = CASE
+            WHEN EXISTS (SELECT 1 FROM channels other WHERE lower(other.name) = lower('local-' || channels.name))
+            THEN 'local-' || name || '-' || id
+            ELSE 'local-' || name
+        END
+        WHERE lower(name) LIKE 'mrc:%';
         """,
     ),
 ]

@@ -111,6 +111,15 @@ def link_channel(
     """
     if is_channel_linked(db, channel):
         raise LinkChannelsError(f"channel {channel.name!r} is already Linked")
+    if channel.name.lower().startswith(OPEN_ROOM_NAME_PREFIX):
+        # An adopted room keeps its name until the SysOp renames it; a
+        # genesis wearing the reserved prefix would be renamed by every
+        # receiving node (see materialize_carried_channel), so ask for
+        # the rename first rather than sign a name nobody will carry.
+        raise LinkChannelsError(
+            f"channel {channel.name!r} cannot be Linked under a name starting with "
+            f"{OPEN_ROOM_NAME_PREFIX!r}; rename it first (Edit), then Link it"
+        )
     if is_open_mrc_room(db, channel):
         # Issue #300: a room a caller opened on MRC is that network's
         # content, never this node's -- signing a genesis for it would
@@ -215,14 +224,19 @@ def materialize_carried_channel(
     what `Channel` actually has settable at creation time).
     """
     payload_name = str(genesis.payload.get("name", ""))
+    local_name = payload_name
     if payload_name.lower().startswith(OPEN_ROOM_NAME_PREFIX):
         # Issue #300: the prefix is reserved for MRC rooms callers open
-        # here; a genesis wearing it could squat the name (so the room
-        # can never be opened) or impersonate a room on every screen.
-        raise ChannelCarryRefusedError(
-            f"refusing to carry channel {payload_name!r}: names starting with "
-            f"{OPEN_ROOM_NAME_PREFIX!r} are reserved for MRC rooms callers open on this node"
-        )
+        # here. A genesis wearing it -- a channel Linked before the
+        # prefix was reserved, or a peer trying to squat a room's name --
+        # is carried under `local-mrc:...`, the same rename the migration
+        # applies to this node's own pre-release rows, so it can neither
+        # block a room from opening nor impersonate one.
+        local_name = f"local-{payload_name}"
+        if db.connection.execute(
+            "SELECT 1 FROM channels WHERE lower(name) = lower(?)", (local_name,)
+        ).fetchone() is not None:
+            local_name = f"{local_name}-{genesis.payload['channel_id'][:8]}"
     existing = db.connection.execute(
         "SELECT * FROM channels WHERE channel_id = ?", (genesis.payload["channel_id"],)
     ).fetchone()
@@ -255,7 +269,7 @@ def materialize_carried_channel(
         """,
         (
             payload["channel_id"],
-            payload["name"],
+            local_name,
             payload.get("description"),
             payload.get("default_min_level", 0),
             payload["created_at"],

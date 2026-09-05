@@ -637,38 +637,39 @@ async def _pick_channel(
         new_channels, _, _, _ = await _load_sorted(new_mode)
         return [*leading, *categories_here, *new_channels]
 
-    selected = await pick_item(
-        session,
-        mixed,
-        name_of=render_name,
-        stable_id_of=stable_id,
-        on_sort=on_sort_mixed,
-        sort_label=_sort_label,
-        description_of=render_description,
-        title=title,
-        breadcrumb=picker_breadcrumb,
-        empty_message="No chat channels are available to you yet.",
-        redraw_in_place=redraw_in_place,
-        unicode_style=unicode_style,
-        collapsed=collapsed,
-        accent_color=await lane.run(effective_accent_color_256),
-        masthead=channel_masthead,
-    )
-    if selected is None:
-        return None
-
-    if isinstance(selected, _MrcRoomsEntry):
+    accent_color = await lane.run(effective_accent_color_256)
+    while True:
+        selected = await pick_item(
+            session,
+            mixed,
+            name_of=render_name,
+            stable_id_of=stable_id,
+            on_sort=on_sort_mixed,
+            sort_label=_sort_label,
+            description_of=render_description,
+            title=title,
+            breadcrumb=picker_breadcrumb,
+            empty_message="No chat channels are available to you yet.",
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            accent_color=accent_color,
+            masthead=channel_masthead,
+        )
+        if selected is None:
+            return None
+        if not isinstance(selected, _MrcRoomsEntry):
+            break
         assert mrc_bridge is not None
         picked = await _pick_mrc_room(session, lane, hub, user, mrc_bridge, masthead=channel_masthead)
         if picked is not None:
             return picked
-        # Backed out of the MRC section: back to the top level, the
-        # same "back always lands somewhere consistent" a category has.
-        return await _pick_channel(
-            session, lane, hub, user, category_id=None,
-            community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-            mrc_bridge=mrc_bridge,
-        )
+        # Backed out of the MRC section: show this level again with fresh
+        # occupancy -- a loop, not a recursive call, so a caller wandering
+        # in and out of the section never deepens the stack.
+        new_channels, _, _, _ = await _load_sorted(mode_box["mode"])
+        mixed = [*leading, *categories_here, *new_channels]
+
     if isinstance(selected, Category):
         return await _pick_channel(
             session, lane, hub, user, category_id=selected.id,
@@ -906,7 +907,14 @@ async def _pick_mrc_room(
                     colored(f"The SysOp has blocked MRC room #{sanitize_text(selected.room)} on this node.", fg_color=MUTED_COLOR)
                 )
                 continue
-            return selected.channel
+            # The list on screen may be older than the sweeper's last pass.
+            current = await lane.run(get_mrc_mapping, selected.channel)
+            if current is None:
+                await session.write_line(
+                    colored(f"MRC room #{sanitize_text(selected.room)} was retired while you were looking; pick again.", fg_color=MUTED_COLOR)
+                )
+                continue
+            return current.channel
         if isinstance(selected, _ObservedRoomEntry):
             room = selected.room
         else:
@@ -952,18 +960,17 @@ async def _resolve_join_target(ctx: ChatCommandContext, name: str) -> Channel | 
         return await _open(room)
     in_mrc_room = bridge is not None and bridge.mapping_for(ctx.channel) is not None
     if in_mrc_room:
-        try:
-            existing = await ctx.lane.run(get_channel_by_name, f"{OPEN_ROOM_NAME_PREFIX}{name}")
-        except ChannelError:
-            existing = None
+        assert bridge is not None
+        # MRC room names are case-insensitive: the bridge's own lookup,
+        # not a case-sensitive channel-name match.
+        existing = bridge.mapping_for_room(name)
         if existing is not None:
-            assert bridge is not None
-            if bridge.room_blocked(name):
+            if existing.is_open_room and bridge.room_blocked(existing.room):
                 await ctx.session.write_line(
-                    colored(f"The SysOp has blocked MRC room #{sanitize_text(name)} on this node.", fg_color=MUTED_COLOR)
+                    colored(f"The SysOp has blocked MRC room #{sanitize_text(existing.room)} on this node.", fg_color=MUTED_COLOR)
                 )
                 return None
-            return existing
+            return existing.channel
     try:
         return await ctx.lane.run(get_channel_by_name, name)
     except ChannelError:
@@ -2548,7 +2555,13 @@ async def _relay_to_mrc(session: Session, mrc_bridge: MrcBridge, channel: Channe
         return
     relayed, truncated = await mrc_bridge.local_message(channel, recorded)
     if not relayed:
-        reason = "you're sending faster than MRC allows" if mrc_bridge.status().connected else "the MRC link is offline"
+        held = mrc_bridge.identity_room_elsewhere(channel, recorded.author_label)
+        if not mrc_bridge.status().connected:
+            reason = "the MRC link is offline"
+        elif held is not None:
+            reason = f"your MRC identity is in #{sanitize_text(held)} from another session"
+        else:
+            reason = "you're sending faster than MRC allows"
         await session.write_line(colored(f"(not relayed to MRC: {reason})", fg_color=MUTED_COLOR))
     elif truncated:
         await session.write_line(
@@ -3923,6 +3936,12 @@ async def _chat_loop(
         # blocked after it was opened admits nobody. The picker and
         # `/join` run the same checks earlier for a friendlier refusal.
         mapping = mrc_bridge.mapping_for(channel)
+        if mapping is None and is_open_room_name(channel.name):
+            # Retired between being picked and being entered.
+            await session.write_line(
+                colored(f"\r\n{sanitize_text(channel.name)} was retired just now; pick another room.", fg_color=MUTED_COLOR)
+            )
+            return _ToPicker()
         if mapping is not None and mapping.is_open_room and mrc_bridge.room_blocked(mapping.room):
             await session.write_line(
                 colored(f"\r\nThe SysOp has blocked MRC room #{sanitize_text(mapping.room)} on this node.", fg_color=MUTED_COLOR)

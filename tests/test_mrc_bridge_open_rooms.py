@@ -13,7 +13,7 @@ import asyncio
 import pytest
 
 from netbbs.activity import follow
-from netbbs.chat.channels import get_channel_by_name
+from netbbs.chat.channels import create_channel, get_channel_by_name
 from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.scrollback import record_message
 from netbbs.mrc.bridge import MrcState
@@ -269,6 +269,38 @@ def test_activity_is_stamped_while_the_hub_is_unreachable(db, lane, lobby, alice
             assert get_mrc_mapping(db, room).last_active_at != long_ago
         finally:
             await bridge.close()
+    asyncio.run(scenario())
+
+
+def test_one_identity_holds_when_the_sysop_maps_two_occupied_channels(db, lane, lobby, alice, sysop):
+    """Third review of #300: no hub.join happens when the SysOp maps or
+    unpauses a channel a caller already sits in, so the wire announce
+    itself must keep one nick in one room."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        second = create_channel(db, "second", creator=sysop)
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        second_queue = hub.join(second.name, ParticipantId("alice", 2))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            set_mrc_room(db, lobby, "lobby")
+            set_mrc_room(db, second, "elsewhere")
+            await bridge.refresh_channel_mappings()
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await asyncio.sleep(0.1)
+            assert not [p for p in fake.received if p.body == "NEWROOM::elsewhere"]
+            notice = await asyncio.wait_for(second_queue.get(), timeout=2)
+            assert "Your MRC identity is already in #lobby" in notice
+            # What she says in the second channel is not relayed under her nick.
+            recorded = record_message(db, second, kind="message", author_label="alice", author_fingerprint=None, body="hi")
+            assert await bridge.local_message(second, recorded) == (False, False)
+            assert bridge.status().participants == 1
+        finally:
+            await bridge.close()
+            await fake.close()
     asyncio.run(scenario())
 
 

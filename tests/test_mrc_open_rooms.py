@@ -216,7 +216,17 @@ def test_link_refuses_an_open_room_but_not_an_adopted_one(db, tmp_path):
     with pytest.raises(LinkChannelsError, match="cannot be Linked"):
         link_channel(db, opened, node_identity=identity)
     adopt_open_room(db, opened)
-    assert link_channel(db, opened, node_identity=identity) is not None
+    # Adopted but still named into the prefix: Link asks for a rename
+    # first, since every receiving node would rename the genesis anyway.
+    with pytest.raises(LinkChannelsError, match="rename it first"):
+        link_channel(db, opened, node_identity=identity)
+    sysop = create_user(db, "sysop2", password="hunter2", user_level=255)
+    renamed = update_channel(
+        db, opened, name="lobby-talk", description=None, min_level=0, category_id=None, pinned=False,
+        hidden=False, members_only=False, allow_member_invites=False, min_age=None, name_requirement=None,
+        community_id=None, changed_by=sysop,
+    )
+    assert link_channel(db, renamed, node_identity=identity) is not None
 
 
 def test_open_room_ids_are_namespaced_per_node(db, tmp_path):
@@ -253,12 +263,19 @@ def test_link_refuses_a_genesis_that_squats_or_aliases_an_open_room(db):
             default_min_age=None, default_name_requirement=None,
         )
 
-    with pytest.raises(ChannelCarryRefusedError, match="reserved"):
-        materialize_carried_channel(db, _genesis("f" * 64, "mrc:elsewhere"))
-    with pytest.raises(ChannelCarryRefusedError, match="belongs to an MRC room"):
-        materialize_carried_channel(db, _genesis(opened.channel_id, "innocent"))
+    # A genesis wearing the prefix (Linked before the prefix was reserved,
+    # or a squat) is carried under local-mrc:..., never as mrc:...
+    carried = materialize_carried_channel(db, _genesis("f" * 64, "mrc:elsewhere"))
+    assert carried.name == "local-mrc:elsewhere"
     with pytest.raises(ChannelError):
         get_channel_by_name(db, "mrc:elsewhere")
+    # ... and the room of that name can still be opened here.
+    assert materialize_open_room(db, "elsewhere", open_settings=_on()).channel.name == "mrc:elsewhere"
+    # A second genesis colliding on the renamed name gets a suffix.
+    second = materialize_carried_channel(db, _genesis("e" * 64, "MRC:elsewhere"))
+    assert second.name == "local-MRC:elsewhere-eeeeeeee"
+    with pytest.raises(ChannelCarryRefusedError, match="belongs to an MRC room"):
+        materialize_carried_channel(db, _genesis(opened.channel_id, "innocent"))
     assert get_mrc_mapping(db, opened).is_open_room
 
 

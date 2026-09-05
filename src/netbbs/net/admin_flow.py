@@ -5255,7 +5255,7 @@ async def _mrc_settings_screen(
         FieldSpec(
             key="open_rooms", hotkey="o", menu_text=menu_key("O", "pen rooms"), label="Callers may open any room",
             render=lambda d: "yes" if d["open_rooms"] else "no",
-            prompt=bool_field("open_rooms", "Let callers open any MRC room from the chat picker?"),
+            prompt=_toggle_draft_field("open_rooms"),
             brief="Rooms callers open appear as mrc:<room> channels", section="Open rooms",
             help=(
                 "Off by default. On: the chat channel picker gains a Multi Relay Chat section where a "
@@ -5364,6 +5364,16 @@ async def _mrc_settings_screen(
     await session.write_line("Saved and applied. Link now: " + _mrc_state_line(status, unicode_style=unicode_style))
     if status.last_error:
         await session.write_line(colored(f"Last error: {sanitize_text(status.last_error)}", fg_color=MUTED_COLOR))
+
+
+def _toggle_draft_field(key: str) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
+    """A toggle toggles (design doc §3.5): flip the draft value in place,
+    no yes/no prompt -- `[S]ave & apply` is the one boundary that matters."""
+
+    async def _toggle(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        draft[key] = not bool(draft.get(key))
+
+    return _toggle
 
 
 async def _blocklist_field(session: Session, lane: DatabaseLane, draft: dict) -> None:

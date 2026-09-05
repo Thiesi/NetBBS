@@ -245,9 +245,10 @@ def test_network_broadcasts_reach_every_active_bridged_channel(db, lane, lobby, 
         set_mrc_room(db, paused, "quiet")
         set_mrc_paused(db, paused, True)
         hub = ChatHub()
+        # Three different accounts: one MRC identity sits in one room.
         lobby_queue = hub.join(lobby.name, ParticipantId("alice", 1))
-        other_queue = hub.join(other.name, ParticipantId("alice", 2))
-        paused_queue = hub.join(paused.name, ParticipantId("alice", 3))
+        other_queue = hub.join(other.name, ParticipantId("bob", 2))
+        paused_queue = hub.join(paused.name, ParticipantId("carol", 3))
         bridge = await _connected_bridge(db, lane, hub, fake)
         try:
             await fake.wait_for(lambda p: p.body.startswith("NEWROOM:"))

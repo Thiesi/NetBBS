@@ -5389,9 +5389,13 @@ without teaching native chat anything about MRC. Decisions:
   caller-origin row and the channel screen offers no `[L]ink` for it:
   MRC content is that network's, not this node's, and must never be
   re-broadcast under this node's signature. Inbound, a peer's genesis
-  named into the `mrc:` prefix or claiming an open room's id is refused
-  outright, and a carried message is projected only into a channel
-  with a genesis on file. An open room's id is content-addressed on the
+  named into the `mrc:` prefix is carried as `local-mrc:...` (a channel
+  Linked before the prefix was reserved keeps propagating; a squat
+  lands nowhere), one claiming an open room's id is refused outright,
+  and a carried message is projected only into a channel with a genesis
+  on file. An adopted room keeps its `mrc:` name until the SysOp
+  renames it, and Link asks for that rename before signing. An open
+  room's id is content-addressed on the
   room *and* a per-node secret, so two nodes opening the same room
   never share an id and no peer can compute one. Adopting a room
   clears the origin and makes it an ordinary mapped channel again,

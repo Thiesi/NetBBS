@@ -783,6 +783,27 @@ session needs the same treatment.
   hop is the residual, accepted window.
 - Join/leave chatter is matched up to the last `: ` (`(?P<room>\S+):\s+\S`)
   because a colon is legal inside a room name.
+- The wire announce itself keeps one nick in one room: `_announce` returns
+  `False` when the account is already announced through another channel
+  (the SysOp mapping or unpausing two channels one caller occupies performs
+  no `hub.join`, so the entry-time check never ran), the caller is told
+  through `_notify_identity_held`, and `local_message` returns "not relayed"
+  with `_relay_to_mrc` naming the room that holds the identity.
+- A carried genesis wearing the `mrc:` prefix is materialized under
+  `local-mrc:<rest>` (suffix `-<8 id chars>` on a name collision), not
+  refused -- a channel Linked before the prefix was reserved keeps
+  propagating -- while a genesis claiming an open room's id is still
+  refused. `link_channel` refuses a channel still named into the prefix and
+  asks for a rename, since an adopted room keeps its name; the migration's
+  rename appends `-<id>` when `local-mrc:...` is already taken.
+- The top-level picker is a loop around `pick_item`: backing out of the MRC
+  section re-renders the same level with fresh occupancy instead of calling
+  `_pick_channel` again, or a caller wandering in and out would deepen the
+  stack each time. A picked open room is re-read from the database before
+  it is returned, and the pre-join check refuses an open-room name with no
+  mapping, because the list on screen can be older than the sweeper's last
+  pass. Bare `/join <name>` inside an MRC room resolves through the bridge's
+  case-insensitive `mapping_for_room`, never a channel-name match.
 - `remote_roster` hides every entry at this node's own site, not only nicks
   currently announced: a USERLIST fetched moments before a caller left still
   names them, and "0 here, 1 on MRC" for one's own ghost is wrong.
