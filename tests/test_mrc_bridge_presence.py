@@ -12,6 +12,7 @@ import asyncio
 
 from netbbs.chat.channels import get_channel_by_name
 from netbbs.chat.hub import ChatHub, ParticipantId
+from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import record_message
 from netbbs.mrc.bridge import MrcNotice, MrcState, MrcStatus
 from netbbs.mrc.settings import OpenRoomSettings, save_open_room_settings, set_mrc_room
@@ -38,25 +39,51 @@ def test_away_state_is_mirrored_and_repeated_on_reconnect(db, lane, lobby, alice
         set_mrc_room(db, lobby, "lobby")
         hub = ChatHub()
         hub.join(lobby.name, ParticipantId("alice", 1))
-        bridge = await _connected_bridge(db, lane, hub, fake)
+        presence = PresenceRegistry()
+        presence.enter("alice")
+        bridge = await _connected_bridge(db, lane, hub, fake, presence=presence)
         try:
             await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
             # Not announced: nothing goes out for bob.
-            await bridge.local_away("bob", "away")
-            await bridge.local_away("alice", "gone fishing")
+            assert await bridge.local_away("bob", "away") is False
+            presence.set_away("alice", "gone fishing")
+            assert await bridge.local_away("alice", "gone fishing") is False
             afk = await fake.wait_for(lambda p: p.body == "AFK gone fishing")
             assert (afk.from_user, afk.to_user, afk.to_room) == ("alice", "SERVER", "lobby")
             await _wait_until(lambda: fake.afk.get(("my_board", "alice")) == "gone fishing")
             assert ("my_board", "bob") not in fake.afk
-            # A reconnect re-announces and repeats the away state.
+            # A reconnect re-announces and repeats the away state -- read
+            # from the presence registry, the one place it lives.
             await fake.drop_clients()
             await _wait_until(lambda: bridge.state is not MrcState.CONNECTED)
             await _wait_until(lambda: bridge.state is MrcState.CONNECTED, timeout=3.0)
             await _wait_until(lambda: len(fake.packets(body_prefix="AFK gone fishing")) >= 2, timeout=3.0)
             # Back: the bare form.
+            presence.clear_away("alice")
             await bridge.local_away("alice", None)
             await fake.wait_for(lambda p: p.body == "AFK")
             await _wait_until(lambda: fake.afk.get(("my_board", "alice")) is None)
+            # Too long or decorated: bounded and sanitized, and the caller
+            # is told it was cut.
+            long_message = "|12busy " + "x" * 200
+            presence.set_away("alice", long_message)
+            assert await bridge.local_away("alice", long_message) is True
+            sent = await fake.wait_for(lambda p: p.body.startswith("AFK busy"))
+            assert len(sent.body) <= 140 and "|12" not in sent.body
+            # The account's final session leaving clears the registry's
+            # away state; a later announcement sends no stale AFK.
+            presence.leave("alice")
+            assert not presence.is_away("alice")
+            hub.leave(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_leave(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "LOGOFF")
+            count_before = len(fake.packets(body_prefix="AFK"))
+            presence.enter("alice")
+            hub.join(lobby.name, ParticipantId("alice", 2))
+            await bridge.local_join(lobby, "alice")
+            await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM::lobby")) >= 3, timeout=3.0)
+            await asyncio.sleep(0.2)
+            assert len(fake.packets(body_prefix="AFK")) == count_before
         finally:
             await bridge.close()
             await fake.close()
@@ -159,6 +186,75 @@ def test_the_callers_nick_colour_is_read_once_and_worn_on_the_wire(db, lane, lob
             chat = await fake.wait_for(lambda p: p.to_user == "" and p.body.endswith(" hi"))
             assert chat.body == "|08<|12alice|08>|16|07 hi"
             assert asked == ["alice"]
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_nick_colour_is_reread_after_the_caller_leaves(db, lane, lobby, alice):
+    """Review of #306: "applies the next time you enter" means the next
+    announcement after the account's last MRC room, not a bridge restart."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        colours = {"alice": 12}
+
+        def _colour(db_, username):
+            return colours.get(username, 14)
+
+        bridge = await _connected_bridge(db, lane, hub, fake, load_nick_color=_colour)
+        try:
+            hub.join(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            colours["alice"] = 9  # changed on the Profile while inside
+            recorded = record_message(db, lobby, kind="message", author_label="alice", author_fingerprint=None, body="one")
+            await bridge.local_message(lobby, recorded)
+            first = await fake.wait_for(lambda p: p.body.endswith(" one"))
+            assert first.body.startswith("|08<|12alice")  # still the colour read at entry
+            hub.leave(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_leave(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "LOGOFF")
+            hub.join(lobby.name, ParticipantId("alice", 2))
+            await bridge.local_join(lobby, "alice")
+            recorded = record_message(db, lobby, kind="message", author_label="alice", author_fingerprint=None, body="two")
+            await bridge.local_message(lobby, recorded)
+            second = await fake.wait_for(lambda p: p.body.endswith(" two"))
+            assert second.body.startswith("|08<|09alice")
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_banner_belongs_to_a_connection_and_stats_to_a_hub(db, lane, lobby, alice):
+    """Review of #306: a reconnect must not stack banner lines, and a
+    settings reload must not carry the previous hub's population."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await _wait_until(lambda: bridge.banner_lines() == ["|14Welcome to the fake hub"])
+            await _wait_until(lambda: bridge.status().network_users is not None)
+            await fake.drop_clients()
+            await _wait_until(lambda: bridge.state is not MrcState.CONNECTED)
+            await _wait_until(lambda: bridge.state is MrcState.CONNECTED, timeout=3.0)
+            await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM::lobby")) >= 2, timeout=3.0)
+            await asyncio.sleep(0.1)
+            assert bridge.banner_lines() == ["|14Welcome to the fake hub"]
+            assert bridge.status().network_users is not None  # same hub: kept across the reconnect
+            await bridge.reload_settings()
+            assert bridge.status().network_users is None and bridge.status().network_summary is None
+            await _wait_until(lambda: bridge.state is MrcState.CONNECTED, timeout=3.0)
         finally:
             await bridge.close()
             await fake.close()

@@ -813,11 +813,14 @@ session needs the same treatment.
   section entry is re-decided from `open_rooms_enabled` on every return to
   the top level, and selecting an existing open room refuses while the switch
   is off.
-- Presence (issue #304): `local_away(username, message | None)` mirrors the
-  registry's away state as `AFK <message>` / bare `AFK` to every room the
-  caller is announced in, and `_announce` repeats the current state after
-  every NEWROOM (reconnects included). The bare-`AFK`-means-back reading is
-  a guess from the reference clients, not documentation; correct it when the
+- Presence (issue #304): the away state lives in `PresenceRegistry` only.
+  `local_away(username, message | None)` sends `AFK <message>` / bare `AFK`
+  to every room the caller is announced in *now*, and `_announce` re-reads
+  the registry after every NEWROOM (reconnects included), so a final logout
+  -- which clears the registry -- can never leave a stale AFK behind in the
+  bridge. The message is sanitized like a body and cut to fit after `AFK `
+  in one packet (the caller is told). The bare-`AFK`-means-back reading is a
+  guess from the reference clients, not documentation; correct it when the
   hub's protocol page is available.
 - The hub's welcome is session state, not bridge state: `browse_channels`
   owns one `mrc_session_state` dict for the whole visit and `_chat_loop`
@@ -838,12 +841,24 @@ session needs the same treatment.
 - Secrets typed for `/mrc identify` and friends are read with
   `session.read_line(echo=False)` and *no* `history` argument -- the input
   history records only what `read_line` is handed a history for -- and are
-  sent once through `send_hub_command`; nothing stores them and the
-  diagnostic log never carries packet bodies.
+  sent once through `send_secret_command`, which validates the wire's own
+  alphabet (printable ASCII 33-125, no space, no tilde, one packet) and sends
+  the credential verbatim; never through `sanitize_body`, which would
+  silently rewrite a pipe-code-shaped substring and change the credential.
+  Nothing stores them and the diagnostic log never carries packet bodies.
 - The nick colour is read per username on the lane (`load_nick_color`,
-  injectable) the first time a caller is announced and cached for the
-  connection; `format_room_body(nick_color=...)` is the only place it is
-  applied, so an out-of-range value always falls back to the house yellow.
+  injectable) when a caller is announced and cached only while they are
+  announced somewhere: `local_leave` drops it with their last announcement
+  and a new connection starts empty, so "applies the next time you enter an
+  MRC room" is literally true. `format_room_body(nick_color=...)` is the
+  only place it is applied, so an out-of-range value always falls back to the
+  house yellow.
+- Banner lines belong to a connection (cleared when a connection reaches
+  CONNECTED, before the hub's BANNER arrives) and the STATS reading belongs
+  to a hub (cleared by `reload_settings`, kept across a reconnect to the same
+  endpoint). The welcome's `welcomed` flag is set only when the MOTD ask was
+  actually queued, so a first room entered during an outage leaves the
+  welcome for the next room after the link returns.
 - `remote_roster` hides every entry at this node's own site, not only nicks
   currently announced: a USERLIST fetched moments before a caller left still
   names them, and "0 here, 1 on MRC" for one's own ghost is wrong.

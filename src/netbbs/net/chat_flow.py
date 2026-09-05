@@ -2484,7 +2484,10 @@ async def _handle_away(ctx: ChatCommandContext, args: str) -> None:
     if ctx.mrc_bridge is not None:
         # Issue #304: the away state a caller already has here is the
         # one the network sees (AFK), for every room they are announced in.
-        await ctx.mrc_bridge.local_away(ctx.user.username, args)
+        if await ctx.mrc_bridge.local_away(ctx.user.username, args):
+            await ctx.session.write_line(
+                colored("(MRC sees a shortened version of that message; its limit is 136 characters)", fg_color=MUTED_COLOR)
+            )
 
 
 async def _handle_timestamps(ctx: ChatCommandContext, args: str) -> None:
@@ -2694,7 +2697,7 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
             if not secret:
                 await ctx.session.write_line(colored("(cancelled)", fg_color=MUTED_COLOR))
                 return
-            failure = ctx.mrc_bridge.send_hub_command(ctx.channel, ctx.user.username, f"{hub_command} {secret}")
+            failure = ctx.mrc_bridge.send_secret_command(ctx.channel, ctx.user.username, hub_command, secret)
             if failure is not None:
                 await ctx.session.write_line(colored(f"(not sent to MRC: {sanitize_text(failure)})", fg_color=MUTED_COLOR))
             else:
@@ -4126,10 +4129,13 @@ async def _chat_loop(
                 # Issue #304: the hub's welcome, once per session -- its
                 # banner as remembered by the bridge, then MOTD asked for
                 # as this caller, answered through the per-caller path.
-                mrc_session_state["welcomed"] = True
-                for line in mrc_bridge.banner_lines():
-                    await session.write_line(await lane.run(_render_mrc_notice, user, MrcNotice(line, utc_now_iso())))
-                mrc_bridge.send_hub_command(channel, user.username, "MOTD")
+                # Consumed only once the ask is actually queued: a first
+                # room entered during a hub outage leaves the welcome for
+                # the next room after the link returns.
+                if mrc_bridge.send_hub_command(channel, user.username, "MOTD") is None:
+                    mrc_session_state["welcomed"] = True
+                    for line in mrc_bridge.banner_lines():
+                        await session.write_line(await lane.run(_render_mrc_notice, user, MrcNotice(line, utc_now_iso())))
         if pinned_ui_enabled:
             await _repaint_status_line(
                 session, lane, hub, presence, channel, user,

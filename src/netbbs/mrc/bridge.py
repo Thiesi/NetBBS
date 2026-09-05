@@ -80,6 +80,7 @@ from typing import Any
 
 from netbbs.chat.channels import Channel
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import ChannelMessage, record_message
 from netbbs.mrc import protocol
 from netbbs.mrc.protocol import MrcPacket, parse_line
@@ -243,6 +244,7 @@ class MrcBridge:
         hub: ChatHub,
         lane: DatabaseLane,
         version: str,
+        presence: PresenceRegistry | None = None,
         load_settings: Callable[[Database], MrcSettings] = load_mrc_settings,
         load_mappings: Callable[[Database], list[MrcChannelMapping]] = list_mrc_mappings,
         load_open_settings: Callable[[Database], OpenRoomSettings] = load_open_room_settings,
@@ -262,6 +264,10 @@ class MrcBridge:
         self._hub = hub
         self._lane = lane
         self._version = version
+        # Issue #304: the one away state is the presence registry's; the
+        # bridge reads it when it announces a caller rather than keeping
+        # a copy that could outlive the account's last session.
+        self._presence = presence
         self._load_settings = load_settings
         self._load_mappings = load_mappings
         self._load_open_settings = load_open_settings
@@ -324,7 +330,6 @@ class MrcBridge:
         # for STATS themselves (their reply is shown, the bridge's own
         # periodic ask is only parsed).
         self._nick_colors: dict[str, int] = {}
-        self._away: dict[str, str | None] = {}
         self._banner: list[str] = []
         self._network_stats: tuple[int, int, int] | None = None
         self._network_stats_at: float | None = None
@@ -414,6 +419,11 @@ class MrcBridge:
             await self._stop_connector(graceful=True)
             self._fatal_error = None
             self._attempts = 0
+            # A reading from the previous hub must not describe the new one.
+            self._network_stats = None
+            self._network_stats_at = None
+            self._network_stats_raw = None
+            self._banner.clear()
             await self._reload_from_db()
             self._notify_on_connect = True
             if not self._stopping:
@@ -598,6 +608,8 @@ class MrcBridge:
 
         self._state = MrcState.CONNECTED
         self._connected_since = utc_now_iso()
+        self._banner.clear()
+        self._nick_colors.clear()
         self._connected_at_monotonic = self._clock()
         self._last_error = None
         _logger.info("Connected to MRC hub %s:%d as %r", settings.host, settings.port, settings.site_name)
@@ -863,6 +875,10 @@ class MrcBridge:
         if not nicks:
             self._announced.pop(channel.id, None)
             self._announced_rooms.pop(channel.id, None)
+        if not any(username in others for others in self._announced.values()):
+            # Their next announcement re-reads the Profile: "applies the
+            # next time you enter an MRC room" means exactly that.
+            self._nick_colors.pop(username, None)
         mapping = self._by_channel.get(channel.id)
         settings = self._settings
         if mapping is None or settings is None or self._state is not MrcState.CONNECTED:
@@ -956,11 +972,31 @@ class MrcBridge:
         self._announced_rooms[mapping.channel.id] = mapping.room
         self._enqueue(protocol.newroom(nick, settings.site_wire_name, "", mapping.room))
         self._request_userlist(mapping, nick)
-        if username in self._away:
+        away = self._away_message(username)
+        if away is not None:
             # The hub is never behind on a caller's away state: told on
             # every announcement, reconnects included.
-            self._enqueue(protocol.afk(nick, settings.site_wire_name, mapping.room, self._away[username]))
+            self._enqueue(protocol.afk(nick, settings.site_wire_name, mapping.room, away))
         return True
+
+    def _away_message(self, username: str) -> str | None:
+        """The caller's current away message per the presence registry
+        (bounded and sanitized for the wire), or `None` when not away or
+        when no registry was given."""
+        if self._presence is None or not self._presence.is_away(username):
+            return None
+        return self._wire_away_text(self._presence.get_away_message(username) or "")[0]
+
+    @staticmethod
+    def _wire_away_text(message: str) -> tuple[str, bool]:
+        """An away message as it may travel: sanitized like any body and
+        cut to what fits after `AFK ` in one packet. Returns the text and
+        whether it was cut."""
+        text = protocol.sanitize_body(message)
+        limit = protocol.MAX_BODY - len("AFK ")
+        if len(text) > limit:
+            return text[:limit].rstrip(), True
+        return text, False
 
     async def _ensure_nick_color(self, username: str) -> None:
         if username in self._nick_colors:
@@ -975,24 +1011,23 @@ class MrcBridge:
 
     # --- presence, welcome, size, topics (issue #304) ------------------------
 
-    async def local_away(self, username: str, message: str | None) -> None:
-        """Mirror the caller's away state to the hub: `message` marks
+    async def local_away(self, username: str, message: str | None) -> bool:
+        """Mirror the caller's away state to the hub now: `message` marks
         them away (`AFK <message>`), `None` brings them back. Sent from
-        every room they are announced in; remembered so a reconnect or a
-        later announcement repeats it."""
+        every room they are announced in; the presence registry keeps
+        the state, so a reconnect or a later announcement repeats it
+        (`_announce`). Returns whether the message was cut to fit."""
         settings = self._settings
-        if message is None:
-            self._away.pop(username, None)
-        else:
-            self._away[username] = message
+        text, truncated = ("", False) if message is None else self._wire_away_text(message)
         if settings is None or self._state is not MrcState.CONNECTED:
-            return
+            return truncated
         for channel_id, nicks in self._announced.items():
             mapping = self._by_channel.get(channel_id)
             nick = nicks.get(username)
             if mapping is None or nick is None:
                 continue
-            self._enqueue(protocol.afk(nick, settings.site_wire_name, mapping.room, message))
+            self._enqueue(protocol.afk(nick, settings.site_wire_name, mapping.room, None if message is None else text))
+        return truncated
 
     def banner_lines(self) -> list[str]:
         """What the hub said in its `BANNER:` lines on connect, sanitized
@@ -1664,6 +1699,34 @@ class MrcBridge:
         bucket.consume()
         if body.split(" ", 1)[0].upper() == "STATS":
             self._stats_requested.add(username)
+        self._enqueue(protocol.user_command(nick, settings.site_wire_name, mapping.room, body))
+        return None
+
+    def send_secret_command(self, channel: Channel, username: str, command: str, secret: str) -> str | None:
+        """`IDENTIFY <secret>` and friends (issue #304): the secret is
+        validated against what the wire can carry -- printable ASCII
+        33-125, no tilde, no space, one packet -- and sent verbatim; it is
+        never passed through the chat sanitizer, which would silently
+        rewrite a pipe-code-shaped substring and change the credential."""
+        mapping = self._by_channel.get(channel.id)
+        settings = self._settings
+        if mapping is None or not mapping.active or settings is None or not settings.enabled:
+            return "this channel isn't bridged to MRC"
+        if self._state is not MrcState.CONNECTED:
+            return "the MRC link is offline"
+        nick = self._announced.get(channel.id, {}).get(username)
+        if nick is None:
+            return "you aren't announced to the hub yet"
+        if not secret or any(ch in "~ " or not 33 <= ord(ch) <= 125 for ch in secret):
+            return "MRC passwords are printable ASCII without spaces or tildes; that one cannot be sent as typed"
+        body = f"{command} {secret}"
+        if len(body) > protocol.MAX_BODY:
+            return f"that password is longer than MRC allows ({protocol.MAX_BODY - len(command) - 1} characters)"
+        bucket = self._user_bucket(username)
+        if not bucket.has_token():
+            self._dropped_outbound += 1
+            return "you're sending faster than MRC allows"
+        bucket.consume()
         self._enqueue(protocol.user_command(nick, settings.site_wire_name, mapping.room, body))
         return None
 

@@ -118,7 +118,10 @@ def test_identity_commands_take_the_secret_masked_and_never_show_it(db, lane, hu
         try:
             session, _ = await _run(
                 lane, hub, presence, channel, alice,
-                ["/mrc identify", "s3cret-word", "/mrc register", "", "/mrc identify extra", "/quit"],
+                [
+                    "/mrc identify", "s3cret|12word", "/mrc register", "", "/mrc identify extra",
+                    "/mrc roompass", "has a space", "/quit",
+                ],
                 mrc_bridge=rig.bridge,
             )
             text = _text(session)
@@ -126,10 +129,13 @@ def test_identity_commands_take_the_secret_masked_and_never_show_it(db, lane, hu
             assert "(sent to the hub; its answer follows)" in text
             assert "(cancelled)" in text
             assert "Type the command alone" in text
-            assert "s3cret-word" not in "\n".join(session.written)
+            assert "printable ASCII without spaces or tildes" in text
+            assert "s3cret" not in "\n".join(session.written)
+            # Sent verbatim: a pipe-code-shaped substring is part of the
+            # credential, never sanitized away as if it were chat.
             sent = await rig.fake.wait_for(lambda p: p.body.startswith("IDENTIFY "))
-            assert (sent.from_user, sent.body) == ("alice", "IDENTIFY s3cret-word")
-            assert not [p for p in rig.fake.received if p.body.startswith("REGISTER")]
+            assert (sent.from_user, sent.body) == ("alice", "IDENTIFY s3cret|12word")
+            assert not [p for p in rig.fake.received if p.body.startswith(("REGISTER", "ROOMPASS"))]
         finally:
             await rig.close()
     asyncio.run(scenario())

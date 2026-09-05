@@ -627,7 +627,7 @@ async def run(
     # independent of `link_context` by design. Whether it actually dials
     # the hub is a DB-backed SysOp decision (`netbbs.mrc.settings`),
     # read by `start()` below once the node is otherwise up.
-    mrc_bridge = MrcBridge(hub=hub, lane=background_lane, version=__version__)
+    mrc_bridge = MrcBridge(hub=hub, lane=background_lane, version=__version__, presence=presence)
     throttle = _build_throttle(config)
     throttle_config = config.throttle
     if session_registry is None:
