@@ -885,20 +885,28 @@ session needs the same treatment.
   (`PRIVATE_BURST`; at `MAX_TRACKED_PRIVATE_BUCKETS` a *full* bucket is
   evicted, which is lossless, and with none idle the new identity is dropped
   -- the table never resets anyone's allowance, since identities are free to
-  invent), then the caller's reply allowance, whose overflow notice is
-  latched per `(username, kind)` and worded for what was dropped; never
-  `record_message` -- private lines exist only in participant queues. A
-  caller who did not opt in keeps the one-notice path unchanged.
-  `send_private` requires the opt-in and the announcement, builds the body
-  with `format_room_body` (the recipient's client shows the handle), and
+  invent; a drop is told to the caller once per burst, latched per sender),
+  then the caller's reply allowance, whose overflow notice is latched per
+  `(username, kind)` and worded for what was dropped; never `record_message`
+  -- private lines exist only in participant queues. A caller who did not
+  opt in keeps the one-notice path unchanged. A private line *from this
+  node's own site* is delivered, not dropped as a room echo: the hub sends
+  it here because the target is here (two callers of one node). The reply
+  target is recorded only for a line that passed the caller's allowance.
+  `send_private` requires the opt-in and the announcement, refuses a target
+  the wire would spell differently (never silently address somebody else),
+  builds the body with `format_room_body` (the recipient's client shows the
+  handle), and
   sets `msg_ext` from the `site` the caller is answering (`/mrc r` passes
   the recorded sender's site, never a fresh lookup: the same nick can exist
   on two boards) or else from `_known_sites` (nick -> site, learned from
   every non-own inbound packet, `MAX_KNOWN_SITES`, least recently seen
   evicted); a nick never seen sends an empty `msg_ext` and the hub routes
-  on the nick alone. `/mrc r` answers `_last_private_sender`, which is
-  bridge memory for one hub connection (cleared with the sender buckets
-  when a connection reaches CONNECTED). The once-per-session
+  on the nick alone; `_known_sites` is cleared by `reload_settings` (a
+  different hub knows different boards). `/mrc r` answers
+  `_last_private_sender`, pruned with the other per-caller caches to the
+  announced set and cleared with the sender buckets when a connection
+  reaches CONNECTED. The once-per-session
   "not private" note is `mrc_session_state["private_noted"]`, set by
   whichever of send (`_handle_mrc_private`, through the command context's
   `mrc_session_state`) or receive (the chat loop's notice branch) comes

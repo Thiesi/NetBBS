@@ -350,6 +350,7 @@ class MrcBridge:
         self._known_sites: dict[str, tuple[str, str, float]] = {}
         self._last_private_sender: dict[str, tuple[str, str]] = {}
         self._private_buckets: dict[tuple[str, str], _TokenBucket] = {}
+        self._private_drop_noted: set[tuple[str, tuple[str, str]]] = set()
         self._network_stats: tuple[int, int, int] | None = None
         self._network_stats_at: float | None = None
         self._network_stats_raw: str | None = None
@@ -443,6 +444,7 @@ class MrcBridge:
             self._network_stats_at = None
             self._network_stats_raw = None
             self._banner.clear()
+            self._known_sites.clear()
             await self._reload_from_db()
             self._notify_on_connect = True
             if not self._stopping:
@@ -632,6 +634,7 @@ class MrcBridge:
         self._private_optin.clear()
         self._last_private_sender.clear()
         self._private_buckets.clear()
+        self._private_drop_noted.clear()
         self._connected_at_monotonic = self._clock()
         self._last_error = None
         _logger.info("Connected to MRC hub %s:%d as %r", settings.host, settings.port, settings.site_name)
@@ -1058,7 +1061,7 @@ class MrcBridge:
         announced = set()
         for nicks in self._announced.values():
             announced.update(nicks)
-        for cache in (self._nick_colors, self._private_optin):
+        for cache in (self._nick_colors, self._private_optin, self._last_private_sender):
             for username in [name for name in cache if name not in announced]:
                 del cache[username]
 
@@ -1235,7 +1238,14 @@ class MrcBridge:
             await self._handle_server_packet(packet)
             return
         if packet.from_site.lower() == settings.site_wire_name.lower():
-            return  # the hub echoing this node's own traffic
+            # The hub echoing this node's own room traffic -- except a
+            # private line addressed to a nick, which reaches this site
+            # because the target is here (two callers of this node
+            # messaging each other through the network).
+            if packet.is_broadcast or protocol.is_ctcp_packet(packet):
+                return
+            await self._notify_private_message(packet)
+            return
         self._observe_site(packet.from_user, packet.from_site)
         if protocol.is_ctcp_packet(packet):
             await self._handle_ctcp(packet)
@@ -1892,7 +1902,21 @@ class MrcBridge:
             self._private_buckets[sender_key] = bucket
         if not bucket.has_token():
             self._dropped_inbound += 1
+            if (username, sender_key) not in self._private_drop_noted:
+                if len(self._private_drop_noted) >= MAX_TRACKED_PRIVATE_BUCKETS:
+                    self._private_drop_noted.clear()
+                self._private_drop_noted.add((username, sender_key))
+                await self._deliver_to_caller(
+                    username,
+                    MrcNotice(
+                        f"(private lines from {packet.from_user}@{packet.from_site} arrived faster than can be shown -- some were dropped)",
+                        utc_now_iso(), kind="private",
+                    ),
+                    priority=True,
+                )
             return
+        if bucket.has_tokens(PRIVATE_BURST / 2):
+            self._private_drop_noted.discard((username, sender_key))
         bucket.consume()
         _kind, text = protocol.split_sender_prefix(packet.body.strip(), packet.from_user)
         text = text.strip()
@@ -1902,8 +1926,6 @@ class MrcBridge:
         if not await self._deliver_reply(username, f"{sender}: {text}", kind="private"):
             return  # `/mrc r` answers the last line they saw, never one they did not
         self._last_private_sender[username] = (packet.from_user, packet.from_site)
-        if len(self._last_private_sender) > 500:
-            self._last_private_sender = {username: self._last_private_sender[username]}
 
     def _observe_site(self, nick: str, site: str) -> None:
         nick = protocol.sanitize_name(nick)
@@ -1959,6 +1981,9 @@ class MrcBridge:
         target_nick = protocol.sanitize_name(target)
         if not target_nick or target_nick.upper() in protocol.RESERVED_NAMES:
             return "that is not an MRC user name", False
+        if target_nick != target.strip():
+            # Never silently address somebody else: "b\u00f3b" is not "bb".
+            return "MRC user names are printable ASCII without spaces; that one cannot be sent as typed", False
         body = protocol.sanitize_body(text)
         if not body:
             return "nothing to send", False

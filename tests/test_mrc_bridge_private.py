@@ -172,9 +172,13 @@ def test_private_lines_are_bounded_per_remote_sender(db, lane, lobby, alice):
                 item = queue.get_nowait()
                 if isinstance(item, MrcNotice) and item.kind == "private":
                     texts.append(item.text)
-            # bob's flood is cut at his own allowance; carol's line is
-            # untouched by it.
-            assert texts == [f"bob@Other: line {i}" for i in range(PRIVATE_BURST)] + ["carol@Third: hello from carol"]
+            # bob's flood is cut at his own allowance -- and the caller is
+            # told once -- while carol's line is untouched by it.
+            assert texts == (
+                [f"bob@Other: line {i}" for i in range(PRIVATE_BURST)]
+                + ["(private lines from bob@Other arrived faster than can be shown -- some were dropped)"]
+                + ["carol@Third: hello from carol"]
+            )
             assert bridge.status().dropped_inbound == 3
         finally:
             await bridge.close()
@@ -274,6 +278,9 @@ def test_the_sender_table_never_resets_an_allowance(db, lane, lobby, alice, monk
             await fake.send_line("dave~Other~garden~alice~My_Board~~dave 0~")
             await fake.send_line("bob~Other~garden~alice~My_Board~~bob late~")
             await asyncio.sleep(0.2)
+            # bob's own drop is told to the caller; dave's identity simply
+            # never existed for the bridge.
+            assert (await _next_notice(queue)).text.startswith("(private lines from bob@Other arrived faster")
             assert queue.empty()
             assert bridge.status().dropped_inbound == 2
             # Once a tracked bucket is full again it is evicted for the newcomer.
@@ -430,6 +437,71 @@ def test_the_reply_target_is_the_last_line_actually_shown(db, lane, lobby, alice
                     texts.append(item.text)
             assert "carol@Third: unseen" not in texts and "bob@Other: two" in texts
             assert bridge.reply_target("alice") == ("bob", "Other")
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_two_callers_here_can_message_each_other_through_the_network(db, lane, lobby, alice, sysop):
+    """Review of #307 (round 3): a private line between two callers of
+    this node arrives from this node's own site -- delivered, not
+    dropped as a room echo."""
+    from netbbs.auth.users import create_user
+    create_user(db, "carol", password="hunter2", user_level=10)
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        carol_queue = hub.join(lobby.name, ParticipantId("carol", 2))
+        bridge = await _connected_bridge(db, lane, hub, fake, load_private_optin=_optin_for("alice", "carol"))
+        try:
+            await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM::lobby")) == 2)
+            assert await bridge.send_private(lobby, "alice", "carol", "psst, carol") == (None, False)
+            notice = await _next_notice(carol_queue)
+            assert notice.text == "alice@My_Board: psst, carol"
+            assert bridge.reply_target("carol") == ("alice", "My_Board")
+            # Room traffic from this site is still an echo, never chat twice.
+            await asyncio.sleep(0.2)
+            assert carol_queue.empty()
+            assert [m for m in get_scrollback(db, lobby) if "psst" in m.body] == []
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_targets_and_sites_are_never_silently_rewritten(db, lane, lobby, alice):
+    """Review of #307 (round 3): a target the wire would spell
+    differently is refused, learned sites belong to one hub, and the
+    reply target follows the announced set."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake, load_private_optin=_optin_for("alice"))
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            for target in ("b\u00f3b", "bo b", "bob|12"):
+                reason, _ = await bridge.send_private(lobby, "alice", target, "hi")
+                assert reason == "MRC user names are printable ASCII without spaces; that one cannot be sent as typed", target
+            assert not [p for p in fake.received if p.to_user.lower().startswith("b")]
+            await fake.send_line("bob~Other~garden~alice~My_Board~~hello~")
+            await _next_notice(queue)
+            assert bridge.site_for_nick("bob") == "Other" and bridge.reply_target("alice") == ("bob", "Other")
+            hub.leave(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_leave(lobby, "alice")
+            assert bridge.reply_target("alice") is None
+            await bridge.reload_settings()
+            assert bridge.site_for_nick("bob") == ""
+            await _wait_until(lambda: bridge.state is MrcState.CONNECTED, timeout=3.0)
         finally:
             await bridge.close()
             await fake.close()
