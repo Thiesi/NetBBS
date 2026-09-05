@@ -648,7 +648,8 @@ callers and a game demonstrably safe for shared-file access.
 | ANSI art but no response | Match UART vs FOSSIL, baud, drop-file path and game input conventions; some prompts require Enter |
 | DOS exits but NetBBS reports crash | Read last diagnostic; game exit status and emulator status are separate; check command spelling and START.BAT |
 | Door is busy | Default one-session policy; wait rather than deleting lease files |
-| Web rejects raw mode / screen too small | Use utf-8 or cp437 and enlarge the terminal to the configured dimensions |
+| Web rejects raw mode | Use utf-8 or cp437; browser door mode sets the configured dimensions |
+| Telnet/SSH screen too small | Enlarge the terminal to at least the configured dimensions |
 | Remote connection refused/handshake rejected | Check tunnel, exact provider field convention, credentials permissions and allowlist; never disable verification to hide a TLS/SSH error |
 | Native wrapper leaves children behind | Keep descendants in the owned group; daemonization, setsid, detached containers and untrusted code are outside the supervision guarantee |
 
