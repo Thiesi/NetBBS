@@ -77,7 +77,7 @@ single-node BBS:
   configured live from the SysOp console: map individual channels to
   rooms, or let callers open any room by name from the chat picker,
   with the network's colours, hub commands (`/mrc rooms`, `/mrc bbses`,
-  ...) and CTCP.
+  ...), CTCP, and opt-in private messages.
 - A user directory (vCard/finger-style lookup) and per-user
   preferences.
 - A fullscreen WYSIWYG ANSI art editor (for welcome banners) and a

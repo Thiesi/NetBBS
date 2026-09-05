@@ -5230,12 +5230,20 @@ asks for a room by name and it materializes as a real channel named
 nothing, and the SysOp decides separately whether callers may open
 rooms at all.
 
-**Decision 3 (locked in) — channels only, never direct/private chat.**
-Matches the issue's own framing, and is reinforced by the protocol
-itself: MRC's `to_user` targeting carries no real confidentiality (the
-hub, or any client willing to lie about its own identity, can see or
-spoof it), so gatewaying anything shaped like private chat would be a
-false promise of privacy NetBBS itself doesn't need to make.
+**Decision 3 (locked in, amended by issue #305) — channels by default;
+private messages only for a caller who asked for them.** The protocol
+argument stands: MRC's `to_user` targeting carries no real
+confidentiality (the hub, or any client willing to lie about its own
+identity, can see or spoof it), so NetBBS must never present an MRC
+private line as private. What the original decision got wrong is the
+remedy: refusing them outright leaves a caller who reads "bob@Other
+tried to message you privately" with no way to answer, while every
+other client on the network delivers such lines. So the bridge delivers
+and sends private lines for a caller who switched them on in their
+Profile (off by default, one switch for both directions), tells them
+once per session what "private" means on that network, and never
+records a private line anywhere. A caller who left the switch off gets
+exactly what they got before: one notice per sender, nothing shown.
 
 **Decision 4 (locked in) — inbound content is always rendered as
 external/untrusted, and never enters Phase 4 at all.** An inbound MRC
@@ -5348,10 +5356,9 @@ with it:
   remote sender because every request costs a reply; no SysOp or caller
   wiring exists for it.
 
-Decision 3 (channels only) is unchanged by this issue; the planning
-pass that produced it decided to amend it in a later slice (opt-in
-private messages), recorded here when it ships. Decision 2's amendment
-shipped as issue #300, next.
+Decision 3 (channels only) is unchanged by this issue; its amendment
+(opt-in private messages) shipped as issue #305, below. Decision 2's
+amendment shipped as issue #300, next.
 
 **Issue #300 (open rooms)** lets a caller reach any room on the network
 without a SysOp mapping it first, without a door-style client, and
@@ -5465,6 +5472,41 @@ through, without teaching native chat anything about MRC:
   per-caller choice among the sixteen CGA colours (Profile, default
   yellow), read when the caller is announced; brackets and text colour
   stay the house's, and typed pipe codes stay stripped (#298).
+
+**Issue #305 (private messages, opt-in)** amends Decision 3 as the
+planning pass intended:
+
+- **One switch, off by default, both directions.** `[P]rofile` →
+  `[P]rivate MRC messages` (Communication section). The bridge reads it
+  when it announces the caller, alongside the nick colour, and forgets
+  it with their last announcement; switching it on applies the next
+  time they enter an MRC room. Sending requires the same switch:
+  starting conversations while refusing replies is not offered.
+- **Delivered as a notice, never as chat.** An inbound private line for
+  a caller who opted in is an `MrcNotice` of kind `private`, shown as
+  `[MRC private] bob@Other: text` with the bell, to that caller's
+  sessions only, through the per-caller path of #298 and bounded per
+  remote sender ahead of it (a flood from one nick must not evict
+  chat). The sender's embedded handle is peeled exactly like a room
+  line's and the colour codes kept. It is never recorded: no scrollback,
+  no search index, no log body.
+- **Sent as the caller's nick, in the house style.** `/mrc msg <nick>
+  <text>` and `/mrc r <text>` (to whoever last messaged them this
+  connection) send a packet with `to_user` set, `to_room` empty and
+  `msg_ext` the site the target was last seen at -- learned from every
+  inbound packet, bounded, so the hub can route to the right board when
+  the same nick exists on two; unknown stays empty and the hub routes
+  on the nick. The body wears the house style so the recipient's client
+  shows who wrote it; chunking and the caller's own send allowance
+  apply as for a room line. The sender sees a local echo, never a
+  channel line.
+- **What "private" means, said once.** The first private line a
+  session sends or receives comes with one note: private MRC messages
+  are not private on that network; the hub and any client can read or
+  spoof them. Once per session, whichever direction comes first.
+- **Nothing for the SysOp to configure.** The switch is the caller's;
+  the node-wide MRC switch and the channel mappings already decide
+  whether they are on the network at all.
 
 ### Issue #194 — trusted scrollback-on-join — closed
 

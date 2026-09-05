@@ -76,6 +76,7 @@ from netbbs.net.sort_ui import SORT_MODE_LABELS
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.mrc_color_preference import mrc_colors_enabled, set_mrc_colors_enabled
 from netbbs.net.mrc_nick_color_preference import mrc_nick_color, set_mrc_nick_color
+from netbbs.net.mrc_private_preference import mrc_private_messages_enabled, set_mrc_private_messages_enabled
 from netbbs.rendering.pipe_codes import CGA_COLOR_NAMES
 from netbbs.net.unicode_style_preference import set_unicode_style_enabled, unicode_style_enabled
 from netbbs.permissions import meets_level
@@ -366,6 +367,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "signature": await lane.run(get_signature, user) or "",
         "fullscreen_editor": await lane.run(fullscreen_editor_enabled, user),
         "accepts_dm": await lane.run(accepts_direct_messages, user),
+        "mrc_private": await lane.run(mrc_private_messages_enabled, user),
         "history_name_visible": await lane.run(session_history_name_visible, user),
         "color_depth": await lane.run(color_depth_override, user) or "auto",
         "description_level": description_level,
@@ -571,6 +573,23 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "Whether other callers can send you a direct/private chat message from the "
                 "Who's online screen. Doesn't affect linked-channel chat -- only direct, "
                 "one-to-one messages."
+            ),
+            section="Communication",
+        ),
+        FieldSpec(
+            key="mrc_private", hotkey="p", menu_text=menu_key("P", "rivate MRC messages"),
+            label="Private messages from MRC users",
+            render=lambda d: "accepted" if d["mrc_private"] else "not accepted",
+            prompt=live_choice_field(
+                "mrc_private", [False, True],
+                persist=lambda lane, v: lane.run(set_mrc_private_messages_enabled, user, v),
+            ),
+            brief="Off by default; also needed to send",
+            help=(
+                "Whether users on the Multi Relay Chat network can message you privately "
+                "(/mrc msg), and whether you can message them. Off by default: a private MRC "
+                "message is not private on that network -- the hub and any client can read or "
+                "spoof it. Applies the next time you enter an MRC room."
             ),
             section="Communication",
         ),

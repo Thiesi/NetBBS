@@ -871,6 +871,46 @@ session needs the same treatment.
   categories negated), the section's own picker uses -1 for "open by name"
   and -2-n for observed rooms; `pick_item` shows the id beside every entry,
   so these must stay small.
+- Private messages (issue #305): the opt-in is read on the lane with the
+  nick colour (`load_private_optin`, injectable) by `_ensure_nick_color`,
+  which caches each value it could read; a failed opt-in read is logged and
+  left unread (the caller shows "not read yet", inbound takes the opt-out
+  path, the next announcement or send retries). Both caches hold only
+  announced callers: `_prune_caller_caches` runs wherever an announcement
+  is removed (leave, reconciliation, a forgotten mapping) and after every
+  read, so they are bounded by live sessions and never wiped wholesale, and
+  the Profile switch applies at the next entry. An inbound private line for
+  an opted-in caller goes through `_deliver_private` ->
+  `_deliver_reply(kind="private")`: a per-remote-sender bucket first
+  (`PRIVATE_BURST`; at `MAX_TRACKED_PRIVATE_BUCKETS` a *full* bucket is
+  evicted, which is lossless, and with none idle the new identity is dropped
+  -- the table never resets anyone's allowance, since identities are free to
+  invent; a drop is told to the caller once per burst, latched per sender),
+  then the caller's reply allowance, whose overflow notice is latched per
+  `(username, kind)` and worded for what was dropped; never `record_message`
+  -- private lines exist only in participant queues. A caller who did not
+  opt in keeps the one-notice path unchanged. A private line *from this
+  node's own site* is delivered, not dropped as a room echo: the hub sends
+  it here because the target is here (two callers of one node). The reply
+  target is recorded only for a line that passed the caller's allowance.
+  `send_private` requires the opt-in and the announcement, refuses a target
+  the wire would spell differently (never silently address somebody else),
+  builds the body with `format_room_body` (the recipient's client shows the
+  handle), and
+  sets `msg_ext` from the `site` the caller is answering (`/mrc r` passes
+  the recorded sender's site, never a fresh lookup: the same nick can exist
+  on two boards) or else from `_known_sites` (nick -> site, learned from
+  every non-own inbound packet, `MAX_KNOWN_SITES`, least recently seen
+  evicted); a nick never seen sends an empty `msg_ext` and the hub routes
+  on the nick alone; `_known_sites` is cleared by `reload_settings` (a
+  different hub knows different boards). `/mrc r` answers
+  `_last_private_sender`, pruned with the other per-caller caches to the
+  announced set and cleared with the sender buckets when a connection
+  reaches CONNECTED. The once-per-session
+  "not private" note is `mrc_session_state["private_noted"]`, set by
+  whichever of send (`_handle_mrc_private`, through the command context's
+  `mrc_session_state`) or receive (the chat loop's notice branch) comes
+  first.
 
 ### Read cursors and follows (issue #56)
 
