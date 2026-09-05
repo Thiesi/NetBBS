@@ -405,9 +405,9 @@ status line; a one-line notice on joining that their handle (their
 username, spaces underscored) is now visible to everyone on that network;
 `/who`, `/names` and `/mrc` listing the room's MRC users; and MRC lines
 appearing as `user@site (MRC)` — an external, unverifiable author,
-never a local account. Private MRC messages are not delivered (the
-addressed caller is told once per sender); only room traffic crosses the
-bridge, in both directions. On the wire a caller's line carries their
+never a local account. Private MRC messages reach only a caller who
+switched them on (see below); everyone else is told once per sender that
+somebody tried. On the wire a caller's line carries their
 handle the way every MRC client writes it (`<handle> text`, in the
 network's colour codes), so other boards see who said it.
 
@@ -455,6 +455,19 @@ ask for the password separately with echo off and send it once; NetBBS
 stores no MRC credentials. Each caller picks the colour their handle
 wears on MRC under `[P]rofile` → `[Y]our MRC nick colour`.
 
+**Private messages.** Off by default. A caller who wants them switches
+them on under `[P]rofile` → `[P]rivate MRC messages`; the switch applies
+the next time they enter an MRC room and covers both directions. From
+then on a private line from an MRC user rings the bell and shows as
+`[MRC private] bob@Other: text` to that caller alone; `/mrc msg <nick>
+<text>` answers anyone on the network and `/mrc r <text>` answers
+whoever wrote last. The first private line in a session, either way,
+comes with a note that these messages are not private on that network:
+the hub and any client can read or spoof them. Private lines are never
+stored -- not in scrollback, not in search, not in any log. There is
+nothing for you to configure; a caller who leaves the switch off is told
+once per sender that somebody tried, as before.
+
 MRC users colour their lines with Mystic-style `|NN` codes. Those colours
 are shown by default; a caller who prefers plain text switches them off
 under `[P]rofile` → `[I]nter-BBS chat colours`. Either way an inbound
@@ -464,8 +477,10 @@ codes are not relayed — NetBBS callers speak in one house style.
 `/mrc` also asks the hub things on the caller's behalf: `/mrc rooms`,
 `/mrc who`, `/mrc bbses [search]`, `/mrc info <bbs>`, `/mrc motd`,
 `/mrc stats`, `/mrc help`, `/mrc lastseen <nick>`, `/mrc topics`, plus
-`/mrc send <command>` for any other server command and `/mrc ctcp <nick>
-VERSION|TIME|PING|CLIENTINFO`. The hub's reply is shown to that caller
+`/mrc send <command>` for any other server command, `/mrc ctcp <nick>
+VERSION|TIME|PING|CLIENTINFO`, and `/mrc msg <nick> <text>` / `/mrc r
+<text>` for a caller who opted in to private messages. The hub's reply
+is shown to that caller
 alone as `[MRC]` lines, bounded per caller. Network-wide broadcasts from
 trusted MRC users appear in every bridged channel as `[MRC broadcast]`.
 The bridge answers other clients' CTCP requests (VERSION, TIME in UTC,

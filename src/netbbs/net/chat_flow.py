@@ -1463,6 +1463,9 @@ class ChatCommandContext:
     # no running node behind it (standalone tests, admin CLI); the
     # bridge itself answers "is *this* channel bridged".
     mrc_bridge: MrcBridge | None = None
+    # Issue #304/#305: what this session has already been told about MRC
+    # (the welcome, the "not private" note) -- owned by `browse_channels`.
+    mrc_session_state: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -2630,7 +2633,7 @@ def _render_mrc_notice(db: Database, viewer: User, notice: MrcNotice) -> str:
     """One ephemeral MRC line (hub chatter, a network broadcast, or the
     hub's reply to something `viewer` asked) -- badge, then the text
     through `_mrc_body`, then the viewer's timestamp preference."""
-    badge_text = {"broadcast": "[MRC broadcast]", "reply": "[MRC]"}.get(notice.kind, "[MRC]")
+    badge_text = {"broadcast": "[MRC broadcast]", "reply": "[MRC]", "private": "[MRC private]"}.get(notice.kind, "[MRC]")
     line = colored(badge_text, fg_color=MUTED_COLOR) + " " + _mrc_body(db, viewer, notice.text)
     return format_with_preference(db, viewer, line, notice.created_at)
 
@@ -2651,6 +2654,43 @@ _MRC_HUB_COMMANDS: dict[str, tuple[str, str]] = {
     "lastseen": ("LASTSEEN", "required"),
     "topics": ("TOPICS", "none"),
 }
+
+
+# Issue #305: said once per session, on the first private line sent or
+# received, whichever comes first.
+_MRC_PRIVATE_NOTE = (
+    "Private MRC messages are not private on that network: the hub and any client can read or spoof them."
+)
+
+
+async def _handle_mrc_private(ctx: ChatCommandContext, target: str | None, text: str) -> None:
+    """`/mrc msg <nick> <text>` and `/mrc r <text>` (issue #305)."""
+    assert ctx.mrc_bridge is not None
+    if target is None:
+        last = ctx.mrc_bridge.reply_target(ctx.user.username)
+        if last is None:
+            await ctx.session.write_line(colored("Nobody on MRC has messaged you privately yet.", fg_color=MUTED_COLOR))
+            return
+        target = last[0]
+    if not text.strip():
+        await _show_usage(ctx.session, "mrc")
+        return
+    reason, truncated = await ctx.mrc_bridge.send_private(ctx.channel, ctx.user.username, target, text)
+    if reason is not None:
+        await ctx.session.write_line(colored(f"(not sent to MRC: {sanitize_text(reason)})", fg_color=MUTED_COLOR))
+        return
+    if ctx.mrc_session_state is not None and not ctx.mrc_session_state.get("private_noted"):
+        ctx.mrc_session_state["private_noted"] = True
+        await ctx.session.write_line(colored(_MRC_PRIVATE_NOTE, fg_color=MUTED_COLOR))
+    site = ctx.mrc_bridge.site_for_nick(target)
+    shown = f"{sanitize_text(target)}@{sanitize_text(site)}" if site else sanitize_text(target)
+    await ctx.session.write_line(
+        colored("[MRC private] ", fg_color=MUTED_COLOR) + f"-> {shown}: {sanitize_text(text.strip())}"
+    )
+    if truncated:
+        await ctx.session.write_line(
+            colored("(that line was too long for MRC -- only its first part was sent)", fg_color=MUTED_COLOR)
+        )
 
 
 # `/mrc <subcommand>` forms whose argument is a secret (issue #304):
@@ -2681,6 +2721,16 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
     subcommand = subcommand.lower()
     rest = rest.strip()
     if subcommand:
+        if subcommand == "msg":
+            target, _, text = rest.partition(" ")
+            if not target:
+                await _show_usage(ctx.session, "mrc")
+                return
+            await _handle_mrc_private(ctx, target, text)
+            return
+        if subcommand == "r":
+            await _handle_mrc_private(ctx, None, rest)
+            return
         if subcommand in _MRC_SECRET_COMMANDS or (subcommand == "update" and rest.lower().startswith("password")):
             # Issue #304: the secret is asked for with echo off and sent
             # once as the caller's own nick; it is stored nowhere and never
@@ -2746,6 +2796,11 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
     else:
         detail = f" -- {sanitize_text(status.last_error)}" if status.last_error else ""
         await ctx.session.write_line(f"Link: {status_badge(status.state.value.upper(), tone='neutral')}{detail}")
+    optin = ctx.mrc_bridge.private_messages_enabled(ctx.user.username)
+    optin_text = "on" if optin else ("off" if optin is False else "not read yet")
+    await ctx.session.write_line(
+        colored(f"Private MRC messages: {optin_text} (Profile > Communication)", fg_color=MUTED_COLOR)
+    )
     roster = _mrc_roster_entries(ctx)
     if roster:
         await ctx.session.write_line(f"{len(roster)} MRC user{'s' if len(roster) != 1 else ''} here: " + ", ".join(roster))
@@ -3097,8 +3152,8 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "revokeaccess": ("/revokeaccess <user>", "Revoke a user's access to this chat channel."),
     "members": ("/members", "List users with direct access to this chat channel."),
     "mrc": (
-        "/mrc [rooms|who|bbses [search]|info <bbs>|motd|stats|help|lastseen <nick>|topics|register|identify|roompass|update password|send <command>|ctcp <nick> <VERSION|TIME|PING|CLIENTINFO>]",
-        "Show this channel's MRC bridge, or ask the MRC hub something; its reply is shown to you alone.",
+        "/mrc [rooms|who|bbses [search]|info <bbs>|motd|stats|help|lastseen <nick>|topics|msg <nick> <text>|r <text>|register|identify|roompass|update password|send <command>|ctcp <nick> <VERSION|TIME|PING|CLIENTINFO>]",
+        "Show this channel's MRC bridge, ask the MRC hub something (its reply is shown to you alone), or message an MRC user privately if you opted in.",
     ),
 }
 
@@ -4211,6 +4266,14 @@ async def _chat_loop(
                     # here, per viewer, after sanitization -- never as a
                     # shared pre-coloured string.
                     rendered = await lane.run(_render_mrc_notice, user, message)
+                    if message.kind == "private":
+                        # Issue #305: a private line rings the bell, like every
+                        # reference client, and the first one in a session
+                        # comes with what "private" means on that network.
+                        rendered = "\x07" + rendered
+                        if mrc_session_state is not None and not mrc_session_state.get("private_noted"):
+                            mrc_session_state["private_noted"] = True
+                            await deliver(colored(_MRC_PRIVATE_NOTE, fg_color=MUTED_COLOR))
                     await deliver(rendered, repaint_status=message.kind != "reply")
                     continue
                 if isinstance(message, QueueOverflowNotice):
@@ -4318,6 +4381,7 @@ async def _chat_loop(
                                 realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
                                 link_context=link_context,
                                 mrc_bridge=mrc_bridge,
+                                mrc_session_state=mrc_session_state,
                             )
                             action = await _dispatch_command(ctx, line)
                             if isinstance(action, _EnterPrivate):
@@ -4363,6 +4427,7 @@ async def _chat_loop(
                                 realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
                                 link_context=link_context,
                                 mrc_bridge=mrc_bridge,
+                                mrc_session_state=mrc_session_state,
                             )
                             if isinstance(private_target, RemotePrivateTarget):
                                 # Issue #270: each line is one live direct
