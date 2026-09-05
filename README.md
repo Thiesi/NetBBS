@@ -325,11 +325,15 @@ netbbs/
 │                         user-facing display formatting, kept separate
 ├── scripts/               Dev utilities for exercising features without
 │                         a self-registration UI or full admin session —
-│                         create/block/unblock test users, boards,
-│                         channels, categories, file areas/files, set
-│                         node config values directly, and an automated
-│                         two-node Link quickstart smoke test
-│                         (`link_quickstart_smoke_test.py`)
+│                         create/block/unblock test users, message
+│                         boards, chat channels, categories, file
+│                         areas/files, set node config values directly,
+│                         and an automated two-node NetBBS Link
+│                         quickstart smoke test
+│                         (`link_quickstart_smoke_test.py`). The
+│                         `website_*.py` group captures real screens
+│                         for www.netbbs.org and audits the published
+│                         pages after a deploy
 ├── tests/                Test suite (pytest; conftest.py speeds up
 │                         Argon2id-heavy tests automatically)
 ├── pyproject.toml
