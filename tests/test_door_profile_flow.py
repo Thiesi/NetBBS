@@ -1,7 +1,9 @@
 """Real draft editor: Back does not save, invalid fields retain the draft."""
 import asyncio
 import json
+import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +11,51 @@ from netbbs.doors.registry import create_door, get_door_by_name
 from netbbs.doors.profiles import DoorProfile
 from netbbs.net.door_profile_flow import edit_door_profile
 from tests.test_door_flow import FakeSession, db, lane, player
+
+
+@pytest.mark.parametrize("failure", ["denied", "listing_error", "real_permissions"])
+def test_check_setup_directory_error_preserves_draft(failure, db, lane, player, tmp_path, monkeypatch):
+    if failure == "real_permissions" and (os.name != "posix" or os.geteuid() == 0):
+        pytest.skip("requires an unprivileged POSIX service account")
+    installation = tmp_path / "game"
+    installation.mkdir()
+    profile = DoorProfile(adapter="dosbox", endpoint="socketpair", encoding="cp437",
+                          install_dir=str(installation), options={"command": "GAME.EXE", "fossil": "BNU.COM"})
+    door = create_door(db, "Unreadable game", sys.executable, creator=player, profile=profile)
+    real_access, real_iterdir = os.access, Path.iterdir
+    listed = []
+
+    def access(path, mode):
+        return False if failure == "denied" and Path(path) == installation else real_access(path, mode)
+
+    def iterdir(path):
+        if path == installation:
+            listed.append(path)
+            if failure != "real_permissions":
+                raise PermissionError("game directory cannot be listed")
+        return real_iterdir(path)
+
+    monkeypatch.setattr(os, "access", access)
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    if failure == "real_permissions":
+        installation.chmod(0)
+    session = FakeSession(["g", "--keep-this-draft", "k", " ", "s"])
+    try:
+        saved = asyncio.run(edit_door_profile(session, lane, player, door))
+    finally:
+        installation.chmod(0o700)
+    assert saved.args == ("--keep-this-draft",)
+    assert get_door_by_name(db, door.name) == saved
+    assert not session._inputs
+    output = "".join(session.written)
+    assert "Static checks passed" not in output
+    assert "Press any key to return to the draft" in output
+    if failure == "listing_error":
+        assert "Cannot inspect installation directory" in output
+        assert listed
+    else:
+        assert "Service account cannot read/write/search" in output
+        assert not listed
 
 
 def test_compatibility_back_does_not_add_profile(db, lane, player):

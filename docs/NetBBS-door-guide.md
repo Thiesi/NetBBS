@@ -120,6 +120,9 @@ the emulator, game and NetBBS itself must not run as root.
    confirmation and uses a temporary installation. **Test as SysOp** asks for one
    explicit confirmation, then starts the actual game/service. A test can
    modify game data even if you later leave the draft without saving.
+   An unreadable game directory is reported without discarding your draft.
+   **MANUAL — outside NetBBS:** correct its service-account permissions using
+   the filesystem guidance above, then run **Check setup** again.
 6. Read its test result/exit code and diagnostic excerpt. Save explicitly.
    Back discards configuration edits. The door detail's **Last diagnostic**
    retains at most 8 KiB from the latest run; callers do not receive stderr.

@@ -158,16 +158,25 @@ def preflight(door, session=None) -> list[str]:
             profile.validate()
         except ProfileError as exc:
             return [str(exc)]
+        installation_accessible = False
         if profile.install_dir and not Path(profile.install_dir).is_dir():
             problems.append("Installation directory is missing; create it and install the game outside NetBBS.")
         elif profile.install_dir and not os.access(profile.install_dir, os.R_OK | os.W_OK | os.X_OK):
             problems.append("Service account cannot read/write/search the installation directory.")
+        elif profile.install_dir:
+            installation_accessible = True
         if profile.adapter == "dosbox" and profile.options.get("fossil") and profile.install_dir:
             driver = profile.options["fossil"].split()[0]
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,8}\.(?:[cC][oO][mM]|[eE][xX][eE])", driver):
                 problems.append("FOSSIL command must start with a COM/EXE filename in the installation directory.")
-            elif Path(profile.install_dir).is_dir() and driver.upper() not in {p.name.upper() for p in Path(profile.install_dir).iterdir()}:
-                problems.append(f"Missing FOSSIL driver {driver}; obtain it legally and install it outside NetBBS.")
+            elif installation_accessible:
+                try:
+                    names = {p.name.upper() for p in Path(profile.install_dir).iterdir()}
+                except OSError as exc:
+                    problems.append(f"Cannot inspect installation directory: {exc}")
+                else:
+                    if driver.upper() not in names:
+                        problems.append(f"Missing FOSSIL driver {driver}; obtain it legally and install it outside NetBBS.")
         if os.name != "posix" and (profile.endpoint != "stdio" or profile.adapter == "dosbox"):
             problems.append("This profile requires POSIX (NetBSD/Linux); Windows is development-only.")
         if session is not None and profile.width and (session.terminal_width < profile.width or session.terminal_height < profile.height):
