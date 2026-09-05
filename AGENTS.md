@@ -221,14 +221,16 @@ process-count ceilings, an async wall-time watchdog, and unconditional
 reap on every exit path) behind a deliberately minimal, drop-file-shaped
 v1 API, plus two real bundled doors proving the pipeline end to end —
 Retro Trivia and Voidrunner, the latter a full persistent space-trading
-game after several post-launch expansion and hardening rounds. DOSBox/
-legacy-DOS-door compatibility and multiplayer/persistent-state doors are
-explicitly deferred, not part of this vertical.
+game after several post-launch expansion and hardening rounds. Issue #296
+extends this with native legacy profiles, DOSBox-X and remote RLogin adapters;
+#297 adds explicit browser door mode. External installations remain manual.
+Consult `docs/NetBBS-door-guide.md` for the bounded verification matrix,
+setup templates and outstanding platform/game certification limits.
 
 It does **not** yet imply public federation, Phase 4's public-readiness gate
 being closed, Phase 5 complete beyond its first vertical, Phase 6 (advanced
-governance/Link Communities) work, or DOS-door/legacy compatibility within
-Phase 7. Check the design document and open issues for the current roadmap
+governance/Link Communities) work, or universal legacy-door compatibility.
+Check the design document and open issues for the current roadmap
 rather than extending this summary.
 
 <!-- moradin-forge:start -->

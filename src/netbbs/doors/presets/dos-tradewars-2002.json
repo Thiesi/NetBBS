@@ -1,0 +1,12 @@
+{
+  "name": "TradeWars 2002 3.09 DOS setup template",
+  "executable_path": "/usr/pkg/bin/dosbox-x",
+  "args": [],
+  "profile": {
+    "version": 1, "adapter": "dosbox", "endpoint": "socketpair",
+    "install_dir": "/var/games/netbbs/tw2002", "drop_files": ["CHAIN.TXT"],
+    "encoding": "cp437", "width": 80, "height": 25, "memory_mb": 1024,
+    "max_sessions": 1,
+    "options": {"fossil": "BNU.COM /L0=38400", "command": "TW2002.EXE TWNODE={node}"}
+  }
+}

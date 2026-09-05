@@ -3684,7 +3684,7 @@ after restoring trust (without a fresh hello first) fails with the
 completed-hello error, not a trust-policy one, which is easy to
 misdiagnose as a bug in the recovery path itself.
 
-`netbbs.doors.runtime`'s sandbox model (issue #63/#167/#172) is
+`netbbs.doors.runtime`'s execution model (issue #63/#167/#172/#296) is
 deliberately same-OS-user subprocess isolation, not containers or a
 privilege-separated user -- see that module's own docstring for the
 full reasoning. Two non-obvious constraints that follow from that
@@ -3695,8 +3695,8 @@ itself share one OS user by design, `DOOR_MAX_PROCESSES` bounds one
 door's own runaway forking but also stacks across every concurrent door
 session and NetBBS's own process count; it's a coarse fork-bomb backstop,
 not a precise per-door quota. And `resource` itself is POSIX-only --
-guarded with a plain `try/except ImportError` (this project's dev
-sandbox routinely runs on Windows), so a door still runs during local
+imported only by the POSIX launcher (this project's dev
+environment routinely runs on Windows), so a stdio door still runs during local
 development, just without the CPU/memory/process-count ceilings a real
 NetBSD/Linux node enforces; only the async wall-time watchdog (pure
 `asyncio`, cross-platform) applies unconditionally. Real verification of
@@ -3710,14 +3710,41 @@ merging with NetBBS's own. A door gets `NETBBS_DOOR_INFO` plus the
 platform's home-directory locator (`HOME` or `USERPROFILE`), resolved by
 the parent so persistent doors do not mistake their disposable scratch
 working directory for durable storage. No other parent variables are
-inherited, and there is no way for a SysOp to hand a door custom
-configuration through the door registry (`Door` has no env/config field
-at all, only `executable_path`/`args`). Any door wanting an
-operator-tunable setting either needs a config file at a fixed path
-relative to its own script, a
-CLI flag folded into `args`, or a wrapper launcher script that sets env
-vars before exec'ing the real interpreter -- not a registry-level env
-override, because that mechanism doesn't exist in v1.
+inherited. Compatibility profiles add only a narrow operator-defined map
+(`TERM`, locale/timezone/path, and `DOOR_*`) plus the disposable node path
+and number. DOSBox receives scratch HOME/XDG paths so it cannot discover the
+operator's ambient configuration. These omissions prevent accidental secret
+handoff; they cannot prevent same-user native code reading files itself.
+
+POSIX process exit and `asyncio.Process.wait()` completion are not equivalent:
+descendants can retain the leader's PIPE descriptors after it exits. Observe
+`returncode` independently to detect leader exit, then terminate the whole
+group and reap. Tests must include a leader which exits while a descendant
+ignores SIGTERM and retains its pipes. Shield spawn and cleanup ownership
+against repeated cancellation, not merely the main relay task.
+
+DOSBox-X's NetBSD package name/version and executable version differ; record
+both in the door guide and test capabilities instead of assuming a nominal
+version is sufficient. Upstream 0.84.3 and 2025.02.01 delete the inherited
+SDL_net socket structure twice; NetBSD's allocator can let launch/quit tests
+pass while Debian's aborts. A passing probe is not proof of memory safety.
+Keep the external source fix and tested build instructions in the door guide;
+never classify an emulator signal/crash as success because a DOS return marker
+was written first. Large shared-library mappings require a higher address
+space ceiling than the native 256 MiB default even with only 16 MiB emulated
+RAM. Nullmodem transmission has scheduled events: zero transmit delay and a
+short BIOS delay after the DOS game returns prevent losing its final bytes.
+DOSBox can create lowercase host files from uppercase DOS paths. DOS `IF`
+redirection can create an empty file before evaluating the condition; use
+batch labels for distinct status markers and inspect names case-insensitively.
+
+Legacy configuration parsers need byte-level validation against the actual
+program. LORD 4.07 silently ignores LF-only node files; install its NODE1.DAT
+with CRLF. Global War's distributed 2.7 executable stalls with bare values
+where its WAR.CFG uses space-delimited value/comment lines. Preserve those
+suffixes and bulletin key/description fields, not just the apparent values.
+The manual configuration copier refuses overwrites and has byte-exact tests
+for both CRLF text and the DOS 3.09 TradeWars node configuration.
 
 `netbbs.doors.bundled.voidrunner` (a second, larger real door alongside
 Retro Trivia; both ship as real installed package data under
