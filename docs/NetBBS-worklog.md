@@ -769,12 +769,15 @@ session needs the same treatment.
   two nodes opening the same room must not share an id, or an adopted-and-
   Linked room on one would alias the open room on the other in
   `materialize_carried_channel`, and a peer must not be able to compute a
-  room's id. `materialize_carried_channel` refuses a genesis named into the
-  `mrc:` prefix or claiming an open room's id (`ChannelCarryRefusedError`, a
+  room's id. `materialize_carried_channel` carries a genesis named into the
+  `mrc:` prefix as `local-mrc:<rest>` (see the carry bullet below), refuses
+  one claiming an open room's id (`ChannelCarryRefusedError`, a
   `ChannelCarryLimitError` so the transport's tolerance applies), and
   `materialize_carried_channel_message` projects only into rows with a
   genesis on file. The migration renames any pre-existing `mrc:` channel to
-  `local-mrc:...` -- the prefix was typeable before this release.
+  `local-mrc:...` -- the prefix was typeable before this release -- falling
+  back to `-<id>` and then `-<16 chars of channel_id>` when those names are
+  taken, so the rename can never abort an upgrade.
 - Activity is stamped before the connectivity check in `local_join` and
   `local_message`: a room in use during a hub outage is not idle. A session
   that passed the pre-join checks holds its room against the sweeper for a
@@ -783,6 +786,33 @@ session needs the same treatment.
   hop is the residual, accepted window.
 - Join/leave chatter is matched up to the last `: ` (`(?P<room>\S+):\s+\S`)
   because a colon is legal inside a room name.
+- The wire announce itself keeps one nick in one room: `_announce` returns
+  `False` when the account is already announced through another channel
+  (the SysOp mapping or unpausing two channels one caller occupies performs
+  no `hub.join`, so the entry-time check never ran), the caller is told
+  through `_notify_identity_held` (once per conflict, `_identity_notified`,
+  not once per keepalive tick), `local_message` returns "not relayed" with
+  `_relay_to_mrc` naming the room that holds the identity, and
+  `local_leave` promotes a waiting occupied channel (`_promote_waiting`) the
+  moment the holder's last session leaves its room.
+- A carried genesis wearing the `mrc:` prefix is materialized under
+  `local-mrc:<rest>` (suffix `-<8 id chars>` on a name collision; both taken
+  is a tolerated `ChannelCarryRefusedError`, never an `IntegrityError` after
+  `save_event`), not refused -- a channel Linked before the prefix was
+  reserved keeps propagating -- while a genesis claiming an open room's id
+  is still refused. `link_channel` refuses a channel still named into the
+  prefix and asks for a rename, since an adopted room keeps its name.
+- The top-level picker is a loop around `pick_item`: backing out of the MRC
+  section re-renders the same level with fresh occupancy instead of calling
+  `_pick_channel` again, or a caller wandering in and out would deepen the
+  stack each time. A picked open room is re-read from the database before
+  it is returned, and the pre-join check refuses an open-room name with no
+  mapping, because the list on screen can be older than the sweeper's last
+  pass. Bare `/join <name>` inside an MRC room resolves through the bridge's
+  case-insensitive `mapping_for_room`, never a channel-name match. The
+  section entry is re-decided from `open_rooms_enabled` on every return to
+  the top level, and selecting an existing open room refuses while the switch
+  is off.
 - `remote_roster` hides every entry at this node's own site, not only nicks
   currently announced: a USERLIST fetched moments before a caller left still
   names them, and "0 here, 1 on MRC" for one's own ghost is wrong.

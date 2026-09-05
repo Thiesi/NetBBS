@@ -38,11 +38,12 @@ from tests.test_admin_flow_mrc import (  # noqa: F401 -- fixtures and helpers
 
 
 def test_settings_screen_edits_the_open_room_half_and_its_blocklist(db, lane, sysop):
-    # s: Settings, i: MRC; o/y: open rooms on; c: cap 5; r: retention 3;
-    # k: blocklist -> a: add "Secret Room", a: add "|04evil", r: remove ->
-    # pick 0,1 (the first entry), b: back; s: save; b/b/b out.
+    # s: Settings, i: MRC; o: open rooms on (a toggle toggles -- no
+    # prompt); c: cap 5; r: retention 3; k: blocklist -> a: add "Secret
+    # Room", a: add "|04evil", r: remove -> pick 0,1 (the first entry),
+    # b: back; s: save; b/b/b out.
     session = FakeSession([
-        "s", "i", "o", "y", "c", "5", "r", "3",
+        "s", "i", "o", "c", "5", "r", "3",
         "k", "a", "Secret Room", "a", "|04evil", "r", "0", "1", "b",
         "s", "b", "b", "b",
     ])

@@ -318,6 +318,77 @@ def test_identity_is_checked_before_a_room_is_materialized(db, lane, hub, presen
     asyncio.run(scenario())
 
 
+def test_bare_join_inside_a_room_matches_mrc_rooms_case_insensitively(db, lane, hub, presence, alice):
+    """Third review of #300: MRC room names are case-insensitive, so
+    `/join lobby` inside a room finds `mrc:Lobby` before a local `lobby`."""
+    create_channel(db, "lobby", creator=alice)
+    create_channel(db, "general", creator=alice)
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        try:
+            session = await _browse(
+                lane, hub, presence, alice,
+                ["0", "1", "0", "1", "Lobby", "/join lobby", "/quit"], mrc_bridge=bridge,
+            )
+            text = _visible_text(session)
+            assert "mrc:Lobby" in text
+            assert "You are already in #mrc:Lobby." in text
+            assert "Joined #lobby" not in text
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_backing_out_of_the_section_repeatedly_stays_on_the_top_level(db, lane, hub, presence, alice):
+    """Third review of #300: leaving the section and re-entering it is a
+    loop, not a recursion; forty cycles must end with one clean Back."""
+    create_channel(db, "general", creator=alice)
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        try:
+            keys = ["0", "1", "b"] * 40 + ["b"]
+            session = await _browse(lane, hub, presence, alice, keys, mrc_bridge=bridge)
+            assert session._inputs == []
+            assert _visible_text(session).count("Multi Relay Chat\r\n") >= 40
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_a_room_retired_between_picking_and_entering_is_refused(db, lane, hub, presence, alice):
+    """Third review of #300: the picker's list can be older than the
+    sweeper's last pass; a stale pick is refused, never entered."""
+    from netbbs.mrc.settings import retire_open_room
+
+    create_channel(db, "general", creator=alice)
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        try:
+            stale = (await bridge.open_room("stale", "alice")).channel
+            retire_open_room(db, stale)
+            await bridge.refresh_channel_mappings()
+            session = FakeSession(["b"])
+            await asyncio.wait_for(
+                chat_flow.browse_channels(
+                    session, lane, hub, presence, MessageMailbox(), InputHistory(), alice,
+                    initial_channel=stale, mrc_bridge=bridge,
+                ),
+                timeout=4,
+            )
+            text = _visible_text(session)
+            assert "mrc:stale was retired just now; pick another room." in text
+            assert "Joined" not in text and hub.participant_count(stale.name) == 0
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
 def test_a_room_blocked_after_opening_admits_nobody(db, lane, hub, presence, alice):
     """Review of #300: the blocklist applies to every way into an
     existing open room, not only to opening a new one."""
