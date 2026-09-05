@@ -2,11 +2,13 @@
 Mystic-style pipe colour codes (issue #298): the two-digit ``|NN``
 tokens every MRC client embeds in chat bodies. ``|00``-``|15`` are the
 sixteen CGA foreground colours and ``|16``-``|23`` the eight CGA
-backgrounds -- exactly the first entries of the xterm 256-colour
-palette, so no colour table is needed: ``|NN`` becomes ``fg(NN)`` and
-``|1N`` becomes ``bg(N)``. Anything else after a pipe (Mystic's
-two-letter MCI template variables such as ``|UN``, or a number past 23)
-is not colour and is dropped.
+backgrounds. CGA numbers its colours in the IBM order (blue is 1, red
+is 4, brown/yellow 6/14) while the xterm palette uses the ANSI order
+(red is 1, blue is 4, yellow 3/11), so a code is *permuted* through
+`CGA_TO_XTERM` before it becomes ``fg()``/``bg()``; passing the number
+through unchanged would paint ``|14`` yellow as bright cyan. Anything
+else after a pipe (Mystic's two-letter MCI template variables such as
+``|UN``, or a number past 23) is not colour and is dropped.
 
 Ordering matters for "sanitize before styling": a pipe code is plain
 printable ASCII, never an escape, so the caller sanitizes the untrusted
@@ -28,16 +30,23 @@ from netbbs.rendering.ansi import CSI, RESET, bg, fg
 
 # Every pipe token a client might emit: two alphanumerics after `|`.
 _PIPE_TOKEN_RE = re.compile(r"\|[0-9A-Za-z]{2}")
-# The colour subset: exactly two digits.
-_PIPE_COLOR_RE = re.compile(r"\|(\d{2})")
 
 FOREGROUND_CODES = range(0, 16)
 BACKGROUND_CODES = range(16, 24)
+# CGA order -> xterm/ANSI palette index, for the eight base colours:
+# black, blue, green, cyan, red, magenta, brown, light grey. The bright
+# half (CGA 8-15) is the same permutation plus eight.
+CGA_TO_XTERM = (0, 4, 2, 6, 1, 5, 3, 7)
 # ``|16`` is "black background", which on a CP437 terminal is the
 # default ground; emitting the terminal's own default (SGR 49) rather
 # than a painted black keeps a message readable on a light background
 # and identical on a dark one.
 _DEFAULT_BACKGROUND = f"{CSI}49m"
+
+
+def cga_to_xterm(code: int) -> int:
+    """The xterm palette index for CGA colour `code` (0-15)."""
+    return CGA_TO_XTERM[code % 8] + (8 if code >= 8 else 0)
 
 
 def strip_pipe_codes(text: str) -> str:
@@ -79,10 +88,10 @@ def render_pipe_codes(text: str) -> str:
         code = int(digits)
         if code in FOREGROUND_CODES:
             emitted = True
-            return fg(code)
+            return fg(cga_to_xterm(code))
         if code in BACKGROUND_CODES:
             emitted = True
-            return _DEFAULT_BACKGROUND if code == 16 else bg(code - 16)
+            return _DEFAULT_BACKGROUND if code == 16 else bg(cga_to_xterm(code - 16))
         return ""
 
     rendered = _PIPE_TOKEN_RE.sub(_replace, text)

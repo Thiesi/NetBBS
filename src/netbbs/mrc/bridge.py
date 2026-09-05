@@ -244,14 +244,15 @@ class MrcBridge:
         self._private_notified: set[tuple[str, int, str]] = set()
         # Issue #298: per-caller allowance for hub reply lines, whether
         # that caller has already been told a burst was cut short, the
-        # per-remote-sender CTCP allowance, and the callers the hub moved
-        # out of their mapped room this keepalive tick (re-announced at
-        # most once per tick, so a room that keeps bouncing them cannot
-        # turn into a NEWROOM loop).
+        # per-remote-sender CTCP allowance, and how often the hub moved
+        # each caller out of their mapped room this keepalive tick
+        # (re-announced on the first move and told on the first two, so a
+        # room that keeps bouncing them is neither a NEWROOM loop nor a
+        # stream of priority notices).
         self._reply_buckets: dict[str, _TokenBucket] = {}
         self._reply_truncated: set[str] = set()
         self._ctcp_buckets: dict[tuple[str, str], _TokenBucket] = {}
-        self._rehomed: set[tuple[int, str]] = set()
+        self._rehomed: dict[tuple[int, str], int] = {}
 
         self._outbound: asyncio.Queue[str] = asyncio.Queue(maxsize=outbound_queue_size)
         self._node_bucket = _TokenBucket(OUTBOUND_BURST, OUTBOUND_RATE_PER_SECOND, clock)
@@ -992,8 +993,9 @@ class MrcBridge:
         """`USERROOM:<room>` to one of this node's nicks: the hub moved
         the caller (bounced from a password room, or a hub-side merge).
         The channel stays bridged to its mapped room, so the caller is
-        told and re-announced there -- once per keepalive tick, so a
-        room that keeps bouncing them never becomes a NEWROOM loop."""
+        told and re-announced there. Per keepalive tick: one re-announce,
+        two notices, then silence -- a room that keeps bouncing them is
+        neither a NEWROOM loop nor a stream of priority notices."""
         mapping = self._by_channel.get(channel_id)
         settings = self._settings
         if mapping is None or settings is None or not room or room.lower() == mapping.room.lower():
@@ -1002,18 +1004,23 @@ class MrcBridge:
         if nick is None:
             return
         key = (channel_id, username)
-        if key not in self._rehomed:
-            self._rehomed.add(key)
+        moves = self._rehomed.get(key, 0)
+        self._rehomed[key] = moves + 1
+        if moves == 0:
             self._enqueue(protocol.newroom(nick, settings.site_wire_name, room, mapping.room))
             text = (
                 f"The MRC hub moved you to #{room}; this channel is bridged to #{mapping.room}, "
                 "so you have been announced there again."
             )
-        else:
+        elif moves == 1:
             text = (
                 f"The MRC hub keeps moving you to #{room}. Until it lets you stay in #{mapping.room}, "
                 "what you say here will not reach MRC."
             )
+        else:
+            # Two priority notices per keepalive tick is the whole story;
+            # a hub repeating itself past that must not keep evicting chat.
+            return
         await self._deliver_to_caller(username, MrcNotice(text, utc_now_iso()), priority=True)
 
     async def _handle_usernick(self, channel_id: int, username: str, new_nick: str) -> None:
@@ -1132,8 +1139,13 @@ class MrcBridge:
                     priority=True,
                 )
             return
+        # The latch lifts only once the allowance has genuinely recovered
+        # (half the burst back), not on the first trickle-admitted line:
+        # a hub streaming just above the refill rate would otherwise earn
+        # a fresh priority notice at every refill.
+        if bucket.has_tokens(self._reply_burst / 2):
+            self._reply_truncated.discard(username)
         bucket.consume()
-        self._reply_truncated.discard(username)
         await self._deliver_to_caller(username, MrcNotice(text, utc_now_iso(), kind="reply"))
 
     # --- caller-initiated hub commands (issue #298) ------------------------
@@ -1156,6 +1168,8 @@ class MrcBridge:
         body = protocol.sanitize_body(command)
         if not body:
             return "nothing to send"
+        if len(body) > protocol.MAX_BODY:
+            return f"that command is longer than MRC allows ({protocol.MAX_BODY} characters)"
         bucket = self._user_bucket(username)
         if not bucket.has_token():
             self._dropped_outbound += 1

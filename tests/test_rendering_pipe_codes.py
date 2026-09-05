@@ -8,18 +8,33 @@ import pytest
 
 from netbbs.rendering.ansi import RESET, bg, fg, strip_ansi
 from netbbs.rendering.layout import visible_width
-from netbbs.rendering.pipe_codes import render_pipe_codes, strip_non_color_pipe_codes, strip_pipe_codes
+from netbbs.rendering.pipe_codes import (
+    cga_to_xterm,
+    render_pipe_codes,
+    strip_non_color_pipe_codes,
+    strip_pipe_codes,
+)
 from netbbs.rendering.sanitize import sanitize_text
 
 
+def test_cga_order_is_permuted_into_xterm_order():
+    # CGA: blue 1, red 4, brown 6, yellow 14, light red 12, white 15.
+    # xterm: red 1, blue 4, yellow 3/11, bright red 9, bright white 15.
+    assert [cga_to_xterm(code) for code in range(16)] == [0, 4, 2, 6, 1, 5, 3, 7, 8, 12, 10, 14, 9, 13, 11, 15]
+    assert render_pipe_codes("|14yellow") == f"{fg(11)}yellow{RESET}"
+    assert render_pipe_codes("|12red") == f"{fg(9)}red{RESET}"
+    assert render_pipe_codes("|04red") == f"{fg(1)}red{RESET}"
+    assert render_pipe_codes("|17blue bg") == f"{bg(4)}blue bg{RESET}"
+
+
 @pytest.mark.parametrize("code", range(0, 16))
-def test_every_foreground_code_maps_to_the_matching_palette_entry(code):
-    assert render_pipe_codes(f"|{code:02d}x") == f"{fg(code)}x{RESET}"
+def test_every_foreground_code_maps_to_its_palette_entry(code):
+    assert render_pipe_codes(f"|{code:02d}x") == f"{fg(cga_to_xterm(code))}x{RESET}"
 
 
 @pytest.mark.parametrize("code", range(17, 24))
-def test_every_background_code_maps_to_the_matching_palette_entry(code):
-    assert render_pipe_codes(f"|{code:02d}x") == f"{bg(code - 16)}x{RESET}"
+def test_every_background_code_maps_to_its_palette_entry(code):
+    assert render_pipe_codes(f"|{code:02d}x") == f"{bg(cga_to_xterm(code - 16))}x{RESET}"
 
 
 def test_black_background_is_the_terminal_default_not_painted_black():
@@ -62,5 +77,5 @@ def test_sanitize_then_render_leaves_no_foreign_escape():
     hostile = "|12hi \x1b[31mthere\x07 |04!"
     rendered = render_pipe_codes(sanitize_text(strip_ansi(hostile)))
     assert "\x1b[31m" not in rendered and "\x07" not in rendered
-    assert fg(12) in rendered and fg(4) in rendered
+    assert fg(cga_to_xterm(12)) in rendered and fg(cga_to_xterm(4)) in rendered
     assert strip_ansi(rendered) == "hi there !"

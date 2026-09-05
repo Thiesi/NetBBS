@@ -620,8 +620,9 @@ session needs the same treatment.
   spaces underscored, bodies 140 chars / ASCII 32-125, lines 512 bytes, no
   escaping for the `~` delimiter. `netbbs.mrc.protocol.parse_line` strips
   ANSI and control bytes from every field at the parse boundary; nothing
-  downstream may assume otherwise, and pipe codes (`|NN`) are stripped from
-  every field at parse time, identity fields included, rather than translated.
+  downstream may assume otherwise. Pipe codes (`|NN`) are stripped from the
+  identity fields at parse time and never translated there; what a body
+  keeps is the colour rule below (issue #298).
 - Inbound room lines are recorded through the ordinary `record_message`
   (author label `user@site (MRC)`, `author_fingerprint=NULL`,
   `external_source='mrc'`) and so are bounded by the scrollback limit and

@@ -17,6 +17,7 @@ from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.net.mrc_color_preference import set_mrc_colors_enabled
 from netbbs.rendering.ansi import fg
+from netbbs.rendering.pipe_codes import cga_to_xterm
 from tests.test_chat_flow_mrc import (  # noqa: F401 -- fixtures
     _QueueSession,
     _rig,
@@ -53,9 +54,10 @@ def test_mrc_colours_are_rendered_or_stripped_per_viewer(db, lane, hub, presence
             assert "bob@Other (MRC) waves" in text
             assert "[MRC] room topic: be excellent" in text
             assert "<bob>" not in text and "|12" not in text and "|14" not in text
-            assert (fg(12) in raw) is expect_colour
-            assert (fg(9) in raw) is expect_colour
-            assert (fg(14) in raw) is expect_colour
+            # CGA |12 light red, |09 light blue, |14 yellow -> xterm 9, 12, 11.
+            assert (fg(cga_to_xterm(12)) in raw) is expect_colour
+            assert (fg(cga_to_xterm(9)) in raw) is expect_colour
+            assert (fg(cga_to_xterm(14)) in raw) is expect_colour
         finally:
             await rig.close()
 
@@ -74,7 +76,7 @@ def test_scrollback_replay_renders_mrc_colours_the_same_way(db, lane, hub, prese
         session, _ = await _run(lane, hub, presence, channel, alice, ["/quit"])
         raw = "\n".join(session.written)
         assert "<bob@Other (MRC)> earlier words" in _text(session)
-        assert fg(12) in raw
+        assert fg(cga_to_xterm(12)) in raw
     asyncio.run(scenario())
 
 
@@ -134,6 +136,26 @@ def test_mrc_subcommand_failures_are_explained(db, lane, hub, presence, channel,
                 lane, hub, presence, channel, alice, ["/mrc motd", "/quit"], mrc_bridge=rig.bridge,
             )
             assert "(not sent to MRC: the MRC link is offline)" in _text(session)
+        finally:
+            await rig.close()
+    asyncio.run(scenario())
+
+
+def test_required_arguments_and_the_wire_limit_are_checked_before_sending(db, lane, hub, presence, channel, alice):
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            session, _ = await _run(
+                lane, hub, presence, channel, alice,
+                ["/mrc info", "/mrc lastseen", "/mrc send HELP " + "x" * 200, "/mrc bbses", "/quit"],
+                mrc_bridge=rig.bridge,
+            )
+            text = _text(session)
+            assert text.count("Usage: /mrc") == 2
+            assert "(not sent to MRC: that command is longer than MRC allows (140 characters))" in text
+            # `bbses` takes an optional argument, so the bare form is sent.
+            await rig.fake.wait_for(lambda p: p.body == "CONNECTED")
+            assert not [p for p in rig.fake.received if p.body in ("INFO", "LASTSEEN") or p.body.startswith("HELP")]
         finally:
             await rig.close()
     asyncio.run(scenario())

@@ -2232,18 +2232,18 @@ def _render_mrc_notice(db: Database, viewer: User, notice: MrcNotice) -> str:
 # `/mrc <subcommand>` (issue #298): what each one asks the hub, as the
 # caller's own nick. The reply comes back as plain text addressed to
 # that nick and is shown to them alone.
-_MRC_HUB_COMMANDS: dict[str, tuple[str, bool]] = {
-    # subcommand -> (hub command, takes an argument)
-    "rooms": ("LIST", False),
-    "who": ("CHATTERS", False),
-    "chatters": ("CHATTERS", False),
-    "bbses": ("CONNECTED", True),
-    "info": ("INFO", True),
-    "motd": ("MOTD", False),
-    "stats": ("STATS", False),
-    "help": ("HELP", False),
-    "lastseen": ("LASTSEEN", True),
-    "topics": ("TOPICS", False),
+_MRC_HUB_COMMANDS: dict[str, tuple[str, str]] = {
+    # subcommand -> (hub command, argument: "none" | "optional" | "required")
+    "rooms": ("LIST", "none"),
+    "who": ("CHATTERS", "none"),
+    "chatters": ("CHATTERS", "none"),
+    "bbses": ("CONNECTED", "optional"),
+    "info": ("INFO", "required"),
+    "motd": ("MOTD", "none"),
+    "stats": ("STATS", "none"),
+    "help": ("HELP", "none"),
+    "lastseen": ("LASTSEEN", "required"),
+    "topics": ("TOPICS", "none"),
 }
 
 
@@ -2278,8 +2278,8 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
                 return
             failure = ctx.mrc_bridge.send_ctcp(ctx.channel, ctx.user.username, target, command.strip())
         elif subcommand in _MRC_HUB_COMMANDS:
-            hub_command, takes_argument = _MRC_HUB_COMMANDS[subcommand]
-            if rest and not takes_argument:
+            hub_command, argument = _MRC_HUB_COMMANDS[subcommand]
+            if (rest and argument == "none") or (not rest and argument == "required"):
                 await _show_usage(ctx.session, "mrc")
                 return
             failure = ctx.mrc_bridge.send_hub_command(

@@ -5243,9 +5243,11 @@ bridge going quiet, never blocking local chat delivery or the caller who
 just sent a message; malformed or oversized inbound lines are dropped
 and logged, never allowed to crash the local channel. Every outbound
 field is sanitized to MRC's own documented charset/length limits before
-it's sent; inbound Mystic `|NN` pipe-color codes are stripped, never
-rendered as NetBBS's own ANSI — matches "sanitize before styling," and
-treats them as untrusted input either way.
+it's sent. Inbound Mystic `|NN` pipe codes are untrusted text, never
+raw ANSI: identity fields lose all of them, a body keeps only the
+colour subset (`|00`-`|23`), and those become NetBBS's own SGR solely
+through `netbbs.rendering.pipe_codes`, after sanitization and per
+viewer (issue #298, below) — "sanitize before styling" holds exactly.
 
 **Implemented as issue #275** (`netbbs.mrc`), with every decision above
 as specified and the three questions this scoping pass left open

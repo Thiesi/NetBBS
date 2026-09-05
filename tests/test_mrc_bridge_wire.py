@@ -263,3 +263,100 @@ def test_network_broadcasts_reach_every_active_bridged_channel(db, lane, lobby, 
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_repeated_hub_moves_stop_producing_notices_within_a_tick(db, lane, lobby, alice):
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake, keepalive_interval_seconds=30.0)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            for _ in range(6):
+                await fake.send_line("SERVER~~~alice~~~USERROOM:secret~")
+            await fake.wait_for(lambda p: p.body == "NEWROOM:secret:lobby")
+            await asyncio.sleep(0.2)
+            notices = []
+            while not queue.empty():
+                notices.append(queue.get_nowait())
+            # One re-announce, two notices, then silence for the rest of the tick.
+            assert len(fake.packets(body_prefix="NEWROOM:secret")) == 1
+            assert [("moved you" in n.text, "keeps moving" in n.text) for n in notices] == [(True, False), (False, True)]
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_hub_command_longer_than_the_wire_limit_is_refused_with_a_reason(db, lane, lobby, alice):
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            reason = bridge.send_hub_command(lobby, "alice", "HELP " + "x" * 200)
+            assert reason == "that command is longer than MRC allows (140 characters)"
+            assert bridge.status().dropped_outbound == 0
+            assert bridge.send_hub_command(lobby, "alice", "HELP " + "x" * 100) is None
+            await fake.wait_for(lambda p: p.body.startswith("HELP xxx"))
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_reply_truncation_notice_is_once_per_burst_even_when_the_hub_trickles(db, lane, lobby, alice):
+    """A hub streaming just above the refill rate must not earn a fresh
+    priority notice at every refilled token: the latch lifts only once
+    the allowance has recovered to half the burst."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        now = [1000.0]
+        bridge = await _connected_bridge(
+            db, lane, hub, fake, reply_burst=4, clock=lambda: now[0], keepalive_interval_seconds=30.0,
+        )
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+
+            async def drain(count: int) -> list[str]:
+                got = []
+                for _ in range(count):
+                    got.append((await asyncio.wait_for(queue.get(), timeout=2)).text)
+                await asyncio.sleep(0.1)
+                assert queue.empty(), queue.get_nowait()
+                return got
+
+            for i in range(6):
+                await fake.send_line(f"SERVER~~~alice~~~line {i}~")
+            first = await drain(5)
+            assert first[:4] == ["line 0", "line 1", "line 2", "line 3"] and "cut short" in first[4]
+            # One token refilled (10/s): one line admitted, the next dropped
+            # -- and no second notice, the allowance is nowhere near back.
+            now[0] += 0.1
+            await fake.send_line("SERVER~~~alice~~~trickle a~")
+            await fake.send_line("SERVER~~~alice~~~trickle b~")
+            assert await drain(1) == ["trickle a"]
+            # Fully recovered: the latch lifts, and a new burst earns one new notice.
+            now[0] += 10.0
+            for i in range(6):
+                await fake.send_line(f"SERVER~~~alice~~~again {i}~")
+            second = await drain(5)
+            assert second[:4] == ["again 0", "again 1", "again 2", "again 3"] and "cut short" in second[4]
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
