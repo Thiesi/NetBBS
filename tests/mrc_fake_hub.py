@@ -29,6 +29,11 @@ class FakeMrcHub:
         self.connections = 0
         # (site lower, nick lower) -> room
         self.users: dict[tuple[str, str], str] = {}
+        # Issue #304: away messages by (site, nick) (None = back), room
+        # topics, and the banner line pushed after HELLO.
+        self.afk: dict[tuple[str, str], str | None] = {}
+        self.topics: dict[str, str] = {}
+        self.banner: str | None = "|14Welcome to the fake hub"
         self._event = asyncio.Event()
 
     async def start(self) -> None:
@@ -86,6 +91,12 @@ class FakeMrcHub:
                 raise AssertionError(f"expected {count} connections, saw {self.connections}")
             await asyncio.sleep(0.01)
 
+    def reply_lines(self, command: str, params: str) -> list[str]:
+        """What the hub says back to a user-level informational command
+        (overridable per test). Two lines by default, coloured the way
+        the real hub decorates its replies."""
+        return [f"|10{command} reply line 1", f"|07{command} reply line 2 {params}".rstrip()]
+
     def packets(self, *, body_prefix: str | None = None, from_user: str | None = None) -> list[MrcPacket]:
         return [
             packet for packet in self.received
@@ -109,6 +120,8 @@ class FakeMrcHub:
                 return
             if self._hello:
                 writer.write(build_line(MrcPacket("SERVER", "", "", "CLIENT", "", "", "HELLO")).encode("ascii"))
+                if self.banner:
+                    writer.write(build_line(MrcPacket("SERVER", "", "", "CLIENT", "", "", f"BANNER:{self.banner}")).encode("ascii"))
                 await writer.drain()
             while True:
                 raw = await reader.readline()
@@ -139,6 +152,31 @@ class FakeMrcHub:
                 self.users[key] = new_room or "lobby"
             elif command == "LOGOFF":
                 self.users.pop(key, None)
+            elif command.split(" ", 1)[0] == "AFK":
+                # `command` is upper-cased for matching; the message keeps
+                # its case from the body.
+                message = packet.body[len("AFK"):].strip()
+                self.afk[key] = message or None
+            elif command == "NEWTOPIC":
+                room, _, text = params.partition(":")
+                self.topics[room.lower()] = text
+                await self.send_packet(MrcPacket("SERVER", "", "", "CLIENT", "", "", f"ROOMTOPIC:{room}:{text}"))
+            elif command == "STATS":
+                # Issue #304: the Mystic layout, from this hub's own view.
+                sites = {site for site, _nick in self.users}
+                rooms = {room.lower() for room in self.users.values()}
+                reply = MrcPacket("SERVER", "", "", packet.from_user, "", "", f"STATS:{len(sites)} {len(rooms)} {len(self.users)}")
+                writer.write(build_line(reply).encode("ascii"))
+                await writer.drain()
+            elif command.split(" ", 1)[0] in ("LIST", "MOTD", "CHATTERS", "CONNECTED", "INFO", "HELP", "TOPICS"):
+                # Issue #298: an informational command (`LIST`, or
+                # `CONNECTED phenom` with a space-separated argument) is
+                # answered with plain text lines addressed to the asking
+                # nick -- the shape every such hub reply has.
+                word, _, argument = command.partition(" ")
+                for line in self.reply_lines(word, argument.lower()):
+                    writer.write(build_line(MrcPacket("SERVER", "", "", packet.from_user, "", "", line)).encode("ascii"))
+                await writer.drain()
             elif command == "USERLIST":
                 room = (packet.to_room or self.users.get(key, "")).lower()
                 names = ",".join(

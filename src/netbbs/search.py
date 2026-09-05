@@ -29,6 +29,7 @@ existence or content.
 from __future__ import annotations
 
 import argparse
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -37,6 +38,7 @@ from netbbs.attestation import meets_age
 from netbbs.auth.users import User
 from netbbs.communities import get_effective_min_age, get_effective_min_read_level
 from netbbs.permissions import meets_level
+from netbbs.rendering.pipe_codes import strip_pipe_codes
 from netbbs.rendering.reflow import print_wrapped
 from netbbs.storage.database import Database
 
@@ -451,12 +453,32 @@ def _expected_channel_message_index(db: Database) -> dict[int, tuple[int, str]]:
     messages have no edit/approval concept -- retained in
     `channel_messages` at all is the only criterion."""
     placeholders = ",".join("?" * len(_CHANNEL_CONTENT_KINDS))
-    rows = db.connection.execute(
-        f"SELECT id, channel_id, body FROM channel_messages "
-        f"WHERE kind IN ({placeholders}) AND body IS NOT NULL",
-        _CHANNEL_CONTENT_KINDS,
-    ).fetchall()
-    return {row["id"]: (row["channel_id"], row["body"]) for row in rows}
+    try:
+        rows = db.connection.execute(
+            f"SELECT id, channel_id, body, external_source FROM channel_messages "
+            f"WHERE kind IN ({placeholders}) AND body IS NOT NULL",
+            _CHANNEL_CONTENT_KINDS,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Migration tests exercise schemas from before `external_source`
+        # existed -- the same tolerance `record_message` has.
+        rows = db.connection.execute(
+            f"SELECT id, channel_id, body, NULL AS external_source FROM channel_messages "
+            f"WHERE kind IN ({placeholders}) AND body IS NOT NULL",
+            _CHANNEL_CONTENT_KINDS,
+        ).fetchall()
+    return {row["id"]: (row["channel_id"], _indexed_channel_body(row["body"], row["external_source"])) for row in rows}
+
+
+def _indexed_channel_body(body: str, external_source: str | None) -> str:
+    """What the index holds for a channel message: the stored body, or
+    for an MRC row (issue #298) the body with its `|NN` colour codes
+    stripped -- the same normalization `record_message(index_body=...)`
+    applies on insert, so an integrity check never reports a coloured
+    line as drift and a rebuild never puts the codes back."""
+    if external_source == "mrc":
+        return strip_pipe_codes(body).strip()
+    return body
 
 
 @dataclass(frozen=True)

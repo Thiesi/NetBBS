@@ -620,8 +620,9 @@ session needs the same treatment.
   spaces underscored, bodies 140 chars / ASCII 32-125, lines 512 bytes, no
   escaping for the `~` delimiter. `netbbs.mrc.protocol.parse_line` strips
   ANSI and control bytes from every field at the parse boundary; nothing
-  downstream may assume otherwise, and pipe codes (`|NN`) are stripped from
-  every field at parse time, identity fields included, rather than translated.
+  downstream may assume otherwise. Pipe codes (`|NN`) are stripped from the
+  identity fields at parse time and never translated there; what a body
+  keeps is the colour rule below (issue #298).
 - Inbound room lines are recorded through the ordinary `record_message`
   (author label `user@site (MRC)`, `author_fingerprint=NULL`,
   `external_source='mrc'`) and so are bounded by the scrollback limit and
@@ -675,8 +676,241 @@ session needs the same treatment.
   protocol revision the reference clients send, not NetBBS's release number.
 - `tests/mrc_fake_hub.py` is the only MRC test double: a real loopback TCP
   server speaking the tilde protocol (HELLO, PING, echo, USERLIST,
-  OLDVERSION). Bridge, chat-flow, admin-screen and `run()` lifecycle tests all
-  drive it over real sockets; there is no in-memory transport stub.
+  OLDVERSION, and plain-text replies to the informational commands). Bridge,
+  chat-flow, admin-screen and `run()` lifecycle tests all drive it over real
+  sockets; there is no in-memory transport stub.
+- Body convention (issue #298): an MRC body carries the *sender's own*
+  handle, in colour, and every client displays a body verbatim -- the hub
+  adds no name. Outbound, every chunk is `protocol.format_room_body` /
+  `format_action_body` and `split_body(reserve=...)` pays for the prefix out
+  of the 140-character budget. Inbound, `split_sender_prefix` peels a prefix
+  only when the embedded name equals `from_user` (the underscored and the
+  spaced spelling both count); a body naming anyone else is recorded whole.
+  The fake hub's bare bodies hid this for a release: any new body test must
+  use one of the four reference templates.
+- Pipe codes have two fates at the parse boundary: identity fields lose every
+  `|XX`; a body keeps `|00`-`|23` and loses the rest. Nothing after
+  `parse_line` may strip colour from a body it will store; nothing may render
+  a body without `sanitize_text` first. `netbbs.rendering.pipe_codes.
+  render_pipe_codes` is the only producer of pipe-derived SGR and always
+  resets after itself; `_render_channel_message` composes it beside the label
+  as an independent span. `record_message(index_body=...)` carries the plain
+  words to the search index. Hub roster entries and server-command words are
+  stripped before comparison (`parse_userlist`, `parse_server_command`).
+- Per-caller delivery: a `SERVER` packet addressed to an announced nick is
+  looked up through `_announced` (`_caller_for_nick`), never through the
+  account name -- the hub knows nicks only, and `USERNICK` can change one
+  mid-session. `MrcNotice` (text with codes, kind, created_at) is the one
+  object the bridge hands `ChatHub` for ephemeral lines; the receive loop
+  renders it per viewer. A shared pre-coloured string would defeat the
+  per-viewer colour preference.
+- Bounds added: reply lines per caller (`REPLY_BURST`/`REPLY_RATE_PER_SECOND`,
+  one "cut short" notice per burst), CTCP replies per remote sender
+  (`CTCP_BURST`), `USERROOM` re-announce at most once per keepalive tick
+  (`_rehomed`, cleared on the tick). A CTCP request for a nick this node never
+  announced is ignored without a reply.
+- An empty `to_room` is treated as a network broadcast (shown in every active
+  bridged channel), following ENiGMA½; if the live hub ever sends ordinary
+  room traffic with an empty `to_room`, this is the switch to revisit.
+- Open rooms (issue #300): `channels.mrc_origin = 'caller'` is the one marker
+  that a row was materialized for a caller rather than mapped by a SysOp;
+  everything that treats an open room differently (the picker section, the
+  sweeper, `Re[t]ire`/`[A]dopt`, the Link refusal, exclusion from the plain
+  channel list) reads that column, never the `mrc:` name prefix, which is
+  only the collision guard. Only `netbbs.mrc.settings.materialize_open_room`
+  may insert such a row (direct INSERT, content-addressed on the lower-cased
+  room), and `create_channel`/`update_channel` refuse the prefix for everyone
+  else -- a database from before this release cannot contain a `mrc:` channel
+  because the prefix was not reachable through any screen.
+- The sweeper is its own bridge task (`_sweeper_loop`, keepalive cadence),
+  started by `start()` and independent of the hub connection and of the
+  open-room switch: rooms must age out during a long outage or after MRC is
+  switched off, or the cap strands. It re-reads mappings and settings first
+  (the standalone CLI edits them without telling the node), uses
+  `mrc_last_active_at` (or `created_at` for a never-touched row), the
+  `ChatHub`'s participant counts as the occupancy source and `user_follows`
+  as the keep-alive, goes through `purge_channel_rows` (the row half of
+  `delete_channel`, which also prunes the search index) and reports to the
+  MRC diagnostic log because `moderation_log.actor_user_id` is NOT NULL and
+  the node has no user. `_forget_mapping` drops the room's roster, USERLIST
+  timestamp and activity stamp too -- open rooms churn at callers' pace, so a
+  retired room must leave nothing behind. Activity stamps are written at most
+  once a minute per channel (`_touch`), never per line.
+- One identity per account is decided from the `ChatHub`'s occupancy of every
+  active bridged channel (`identity_room_elsewhere`), never from `_announced`:
+  the announced set is empty during backoff and only catches up on reconnect.
+  The one authoritative check sits in `_chat_loop` immediately before
+  `hub.join` with no await in between, so two sessions of one account cannot
+  both pass for two rooms; the picker and `/join` run the same check earlier
+  only for a friendlier refusal. A session switching rooms with `/join` passes
+  its current channel as `leaving` so its own presence does not block it --
+  unless another session of the same account is still there.
+- Gates before rows: `_open_room_gate_denial` checks the caller against the
+  node-wide open-room defaults *before* `open_room` materializes anything, or
+  an account the gates turn away could fill the cap with rooms it can never
+  enter. The section's list is built with `_may_enter_quietly`, never
+  `_authorize_channel_entry`, because the latter accepts a pending invitation
+  as a side effect and a listing must write nothing.
+- The blocklist is consulted on every way into an existing open room (the
+  section's list and selection, bare and explicit `/join`, and the `_chat_loop`
+  pre-join check), not only when a room is first opened; a room blocked after
+  it was opened admits nobody until the sweeper retires it. It is stored as a
+  JSON list because a room name may contain a comma.
+- `_open_or_find_room` is the one resolution step for the picker and `/join`:
+  an existing channel for the room (SysOp-mapped or open) is returned as is
+  and entered under its own gates; only a *new* row is subject to the
+  node-wide defaults, the blocklist and the one-identity rule
+  (`identity_room_held`, the target-agnostic form), all before the write.
+  Otherwise stricter defaults would lock callers out of the SysOp's own
+  mapped channel, and a second session could spend the cap on rooms it is
+  refused.
+- An open room's `channel_id` is content-addressed on the room *and* a
+  per-node secret (`mrc_open_room_namespace` in `node_config`, minted once):
+  two nodes opening the same room must not share an id, or an adopted-and-
+  Linked room on one would alias the open room on the other in
+  `materialize_carried_channel`, and a peer must not be able to compute a
+  room's id. `materialize_carried_channel` carries a genesis named into the
+  `mrc:` prefix as `local-mrc:<rest>` (see the carry bullet below), refuses
+  one claiming an open room's id (`ChannelCarryRefusedError`, a
+  `ChannelCarryLimitError` so the transport's tolerance applies), and
+  `materialize_carried_channel_message` projects only into rows with a
+  genesis on file. The migration renames any pre-existing `mrc:` channel to
+  `local-mrc:...` -- the prefix was typeable before this release -- falling
+  back to `-<id>` and then `-<16 chars of channel_id>` when those names are
+  taken, so the rename can never abort an upgrade.
+- Activity is stamped before the connectivity check in `local_join` and
+  `local_message`: a room in use during a hub outage is not idle. A session
+  that passed the pre-join checks holds its room against the sweeper for a
+  minute (`note_entry`, `_entering`), which covers the lane hop between the
+  sweeper's occupancy snapshot and its delete; a caller arriving inside that
+  hop is the residual, accepted window.
+- Join/leave chatter is matched up to the last `: ` (`(?P<room>\S+):\s+\S`)
+  because a colon is legal inside a room name.
+- The wire announce itself keeps one nick in one room: `_announce` returns
+  `False` when the account is already announced through another channel
+  (the SysOp mapping or unpausing two channels one caller occupies performs
+  no `hub.join`, so the entry-time check never ran), the caller is told
+  through `_notify_identity_held` (once per conflict, `_identity_notified`,
+  not once per keepalive tick), `local_message` returns "not relayed" with
+  `_relay_to_mrc` naming the room that holds the identity, and
+  `local_leave` promotes a waiting occupied channel (`_promote_waiting`) the
+  moment the holder's last session leaves its room.
+- A carried genesis wearing the `mrc:` prefix is materialized under
+  `local-mrc:<rest>` (suffix `-<8 id chars>` on a name collision; both taken
+  is a tolerated `ChannelCarryRefusedError`, never an `IntegrityError` after
+  `save_event`), not refused -- a channel Linked before the prefix was
+  reserved keeps propagating -- while a genesis claiming an open room's id
+  is still refused. `link_channel` refuses a channel still named into the
+  prefix and asks for a rename, since an adopted room keeps its name.
+- The top-level picker is a loop around `pick_item`: backing out of the MRC
+  section re-renders the same level with fresh occupancy instead of calling
+  `_pick_channel` again, or a caller wandering in and out would deepen the
+  stack each time. A picked open room is re-read from the database before
+  it is returned, and the pre-join check refuses an open-room name with no
+  mapping, because the list on screen can be older than the sweeper's last
+  pass. Bare `/join <name>` inside an MRC room resolves through the bridge's
+  case-insensitive `mapping_for_room`, never a channel-name match. The
+  section entry is re-decided from `open_rooms_enabled` on every return to
+  the top level, and selecting an existing open room refuses while the switch
+  is off.
+- Presence (issue #304): the away state lives in `PresenceRegistry` only.
+  `local_away(username, message | None)` sends `AFK <message>` / bare `AFK`
+  to every room the caller is announced in *now*, and `_announce` re-reads
+  the registry after every NEWROOM (reconnects included), so a final logout
+  -- which clears the registry -- can never leave a stale AFK behind in the
+  bridge. The message is sanitized like a body and cut to fit after `AFK `
+  in one packet (the caller is told). The bare-`AFK`-means-back reading is a
+  guess from the reference clients, not documentation; correct it when the
+  hub's protocol page is available.
+- The hub's welcome is session state, not bridge state: `browse_channels`
+  owns one `mrc_session_state` dict for the whole visit and `_chat_loop`
+  marks `welcomed` on the first MRC join; the bridge only remembers the
+  connect-time `BANNER:` lines (`banner_lines`, last ten). MOTD is asked for
+  through `send_hub_command`, so it costs the caller a token like any ask.
+- STATS: the bridge asks once per roster refresh (and once at connect) as any
+  announced nick, so with nobody announced the figures simply age; the reply
+  is recorded (`_record_stats`, Mystic `bbses rooms users` layout, raw line
+  kept when it does not parse) and delivered only to a caller who asked
+  themselves (`_stats_requested`). Screens read `MrcStatus.network_summary`
+  and `network_stats_age_seconds`; never the raw tuple.
+- An open room's topic is written by `set_open_room_topic` (direct UPDATE,
+  `mrc_origin = 'caller'` only) from the hub's `ROOMTOPIC`, pipe codes
+  stripped; `/topic` in an open room goes to the hub (`send_topic`, bounded
+  by the body limit including the room name) and changes nothing locally.
+  A mapped channel's topic remains the SysOp's and audited.
+- Secrets typed for `/mrc identify` and friends are read with
+  `session.read_line(echo=False)` and *no* `history` argument -- the input
+  history records only what `read_line` is handed a history for -- and are
+  sent once through `send_secret_command`, which validates the wire's own
+  alphabet (printable ASCII 33-125, no space, no tilde, one packet) and sends
+  the credential verbatim; never through `sanitize_body`, which would
+  silently rewrite a pipe-code-shaped substring and change the credential.
+  Nothing stores them and the diagnostic log never carries packet bodies.
+- The nick colour is read per username on the lane (`load_nick_color`,
+  injectable) when a caller is announced and cached only while they are
+  announced somewhere: `local_leave` drops it with their last announcement
+  and a new connection starts empty, so "applies the next time you enter an
+  MRC room" is literally true. `format_room_body(nick_color=...)` is the
+  only place it is applied, so an out-of-range value always falls back to the
+  house yellow.
+- Banner lines belong to a connection (cleared when a connection reaches
+  CONNECTED, before the hub's BANNER arrives) and the STATS reading belongs
+  to a hub (cleared by `reload_settings`, kept across a reconnect to the same
+  endpoint). The welcome's `welcomed` flag is set only when the MOTD ask was
+  actually queued, so a first room entered during an outage leaves the
+  welcome for the next room after the link returns.
+- `remote_roster` hides every entry at this node's own site, not only nicks
+  currently announced: a USERLIST fetched moments before a caller left still
+  names them, and "0 here, 1 on MRC" for one's own ghost is wrong.
+- Observed rooms are bridge memory (200 entries, least recently seen
+  evicted), fed by openings, `USERROOM` targets and the anchored `*** Joining
+  <room>:` / `*** Leaving <room>:` templates; the hub only sends join chatter
+  for rooms this node is in, so the list mostly reflects this node's own
+  history until the `LIST` reply format is known and parsed.
+- The picker's section entry uses stable id 0 (channels are positive,
+  categories negated), the section's own picker uses -1 for "open by name"
+  and -2-n for observed rooms; `pick_item` shows the id beside every entry,
+  so these must stay small.
+- Private messages (issue #305): the opt-in is read on the lane with the
+  nick colour (`load_private_optin`, injectable) by `_ensure_nick_color`,
+  which caches each value it could read; a failed opt-in read is logged and
+  left unread (the caller shows "not read yet", inbound takes the opt-out
+  path, the next announcement or send retries). Both caches hold only
+  announced callers: `_prune_caller_caches` runs wherever an announcement
+  is removed (leave, reconciliation, a forgotten mapping) and after every
+  read, so they are bounded by live sessions and never wiped wholesale, and
+  the Profile switch applies at the next entry. An inbound private line for
+  an opted-in caller goes through `_deliver_private` ->
+  `_deliver_reply(kind="private")`: a per-remote-sender bucket first
+  (`PRIVATE_BURST`; at `MAX_TRACKED_PRIVATE_BUCKETS` a *full* bucket is
+  evicted, which is lossless, and with none idle the new identity is dropped
+  -- the table never resets anyone's allowance, since identities are free to
+  invent; a drop is told to the caller once per burst, latched per sender),
+  then the caller's reply allowance, whose overflow notice is latched per
+  `(username, kind)` and worded for what was dropped; never `record_message`
+  -- private lines exist only in participant queues. A caller who did not
+  opt in keeps the one-notice path unchanged. A private line *from this
+  node's own site* is delivered, not dropped as a room echo: the hub sends
+  it here because the target is here (two callers of one node). The reply
+  target is recorded only for a line that passed the caller's allowance.
+  `send_private` requires the opt-in and the announcement, refuses a target
+  the wire would spell differently (never silently address somebody else),
+  builds the body with `format_room_body` (the recipient's client shows the
+  handle), and
+  sets `msg_ext` from the `site` the caller is answering (`/mrc r` passes
+  the recorded sender's site, never a fresh lookup: the same nick can exist
+  on two boards) or else from `_known_sites` (nick -> site, learned from
+  every non-own inbound packet, `MAX_KNOWN_SITES`, least recently seen
+  evicted); a nick never seen sends an empty `msg_ext` and the hub routes
+  on the nick alone; `_known_sites` is cleared by `reload_settings` (a
+  different hub knows different boards). `/mrc r` answers
+  `_last_private_sender`, pruned with the other per-caller caches to the
+  announced set and cleared with the sender buckets when a connection
+  reaches CONNECTED. The once-per-session
+  "not private" note is `mrc_session_state["private_noted"]`, set by
+  whichever of send (`_handle_mrc_private`, through the command context's
+  `mrc_session_state`) or receive (the chat loop's notice branch) comes
+  first.
 
 ### Read cursors and follows (issue #56)
 

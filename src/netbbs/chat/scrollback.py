@@ -118,6 +118,7 @@ def record_message(
     author_fingerprint: str | None = None,
     body: str | None = None,
     external_source: str | None = None,
+    index_body: str | None = None,
 ) -> ChannelMessage:
     """
     Append an event to `channel`'s scrollback and trim it back down to the
@@ -125,6 +126,9 @@ def record_message(
 
     `external_source` marks a line that arrived from an outside network
     (issue #275's MRC bridge records `"mrc"`); see `ChannelMessage`.
+    `index_body`, when given, is what the search index receives instead
+    of `body` -- an MRC body keeps its `|NN` colour codes (issue #298),
+    and a search hit should show and match the words, not the codes.
 
     `body` is required for `kind="message"` and `kind="daybreak"`
     -- the announcement text itself, since a
@@ -190,7 +194,7 @@ def record_message(
     # indexed before it's ever pruned back out (harmless either order
     # here, but indexing first keeps this reading top-to-bottom with the
     # inserts/deletes immediately above).
-    index_channel_message(db, channel.id, message_id, kind, body)
+    index_channel_message(db, channel.id, message_id, kind, body if index_body is None else index_body)
     prune_channel_message_search(db, channel.id)
     db.connection.commit()
     return _row_to_message(row)

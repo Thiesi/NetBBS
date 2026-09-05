@@ -215,6 +215,20 @@ def _remote_who_entries(db: Database, link_context: LinkContext | None) -> list[
     ]
 
 
+def _mrc_network_masthead(node_controls: NodeControls) -> str:
+    """One line above Who's online: "MRC: 41 users on 12 boards (as of 3
+    min ago)", or nothing when MRC is off or nothing is known yet."""
+    bridge = getattr(node_controls, "mrc_bridge", None)
+    if bridge is None:
+        return ""
+    status = bridge.status()
+    if not status.enabled or status.network_summary is None:
+        return ""
+    age = status.network_stats_age_seconds or 0.0
+    when = "just now" if age < 90 else f"as of {int(age // 60)} min ago"
+    return colored(f"MRC: {status.network_summary} ({when})", fg_color=MUTED_COLOR)
+
+
 async def _caller_who_screen(
     session: Session,
     db: Database,
@@ -429,6 +443,9 @@ async def _caller_who_screen(
             description_of=lambda e: _who_entry_description(db, e),
             title="Who's online",
             empty_message="No one else is online right now.",
+            # Issue #304: the network beyond this node, when the MRC
+            # bridge knows its size -- company a caller can go and find.
+            masthead=_mrc_network_masthead(node_controls),
             # Issue #102: this is exactly the "list that goes stale while
             # you're looking at it" case Ctrl-R exists for -- who's
             # connected changes independently of anything this screen does.

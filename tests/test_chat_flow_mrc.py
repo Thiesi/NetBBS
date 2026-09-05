@@ -168,9 +168,11 @@ def test_message_and_action_are_relayed_under_the_callers_handle(db, lane, hub, 
             session, _ = await _run(
                 lane, hub, presence, channel, alice, ["hello mrc", "/me waves", "/quit"], mrc_bridge=rig.bridge,
             )
-            chat = await rig.fake.wait_for(lambda p: p.body == "hello mrc")
+            # Issue #298: the wire body carries the handle in the network's
+            # own convention, so other boards show who said it.
+            chat = await rig.fake.wait_for(lambda p: p.body == "|08<|14alice|08>|16|07 hello mrc")
             assert (chat.from_user, chat.from_site, chat.to_room) == ("alice", "My_Board", "lobby")
-            await rig.fake.wait_for(lambda p: p.body == "* alice waves")
+            await rig.fake.wait_for(lambda p: p.body == "|15* |13alice waves")
             assert "not relayed" not in _text(session)
             assert [m.body for m in get_scrollback(db, channel) if m.kind == "message"] == ["hello mrc"]
         finally:
@@ -196,7 +198,7 @@ def test_inbound_mrc_line_is_rendered_as_an_external_author(db, lane, hub, prese
             assert "\x1b[31m" not in "\n".join(session.written)
             recorded = [m for m in get_scrollback(db, channel) if m.kind == "message"]
             assert [(m.author_label, m.author_fingerprint, m.body) for m in recorded] == [
-                ("bob@Other (MRC)", None, "greetings from afar"),
+                ("bob@Other (MRC)", None, "|12greetings from afar"),
             ]
         finally:
             await rig.close()

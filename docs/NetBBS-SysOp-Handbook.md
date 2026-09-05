@@ -405,9 +405,91 @@ status line; a one-line notice on joining that their handle (their
 username, spaces underscored) is now visible to everyone on that network;
 `/who`, `/names` and `/mrc` listing the room's MRC users; and MRC lines
 appearing as `user@site (MRC)` — an external, unverifiable author,
-never a local account. Private MRC messages are not delivered (the
-addressed caller is told once per sender); only room traffic crosses the
-bridge, in both directions.
+never a local account. Private MRC messages reach only a caller who
+switched them on (see below); everyone else is told once per sender that
+somebody tried. On the wire a caller's line carries their
+handle the way every MRC client writes it (`<handle> text`, in the
+network's colour codes), so other boards see who said it.
+
+**Open rooms.** Mapping channels one by one suits a few curated rooms, but
+MRC rooms come and go. If you want callers to reach any room on the
+network, switch on `[O]pen rooms` in the same Settings screen. The chat
+channel picker then gains a `[Multi Relay Chat]` entry at the top level
+that opens its own list: rooms already open on this node (with how many
+callers are here and how many MRC users are there), rooms the node has
+heard of, and `[Open a room by name]`. A room a caller opens becomes a
+real channel named `mrc:<room>` — visible on your channel list and
+screens like any other, with the gates you set for open rooms (`Le[v]el`,
+`A[g]e`, `Re[q]uired name`), never Link-able, and excluded from the plain
+channel picker since the section is its place. Inside one, `/join <room>`
+opens another MRC room (an existing local channel of that name still
+wins), `/join mrc:<room>` works from anywhere, and `/rooms` asks the hub.
+A room the SysOp has mapped is that channel: opening it by name lands the
+caller in yours.
+
+Open rooms are bounded: a `[C]ap` (default 32; opening refuses past it,
+nothing is evicted), a `[R]etention` period (default 7 days) after which
+a room with nobody in it, no activity and no follower is retired together
+with its scrollback by the bridge itself (reported in the Diagnostics log
+and counted on the status screen), and a `Bloc[k]list` of rooms callers
+may not open. On an open room's channel screen, `[A]dopt` keeps it for
+good as an ordinary bridged channel and `Re[t]ire` removes it now. Rooms
+opened while the switch was on keep ageing out after you switch it off.
+MRC knows one identity per caller in one room, so a second session of the
+same account trying to enter a different MRC room is refused with the
+room it already holds.
+
+**Presence and welcome.** A caller's `/away` is mirrored to the network
+(and repeated on every reconnect), so MRC users see the same away state
+callers here see. The first MRC room a caller enters in a session shows
+the hub's banner and its message of the day; `/mrc motd` asks again. The
+network's size -- "MRC: 41 users on 12 boards" -- appears above Who's
+online, in the picker's Multi Relay Chat section and on Node > Chat
+bridge (MRC), refreshed every few minutes while anyone here is on the
+network. In a room a caller opened, the topic is the hub's: it shows on
+the status line as the hub sets it, and `/topic <text>` there asks the hub
+(which may require MRC Trust) rather than changing anything locally; in a
+channel you mapped, `/topic` keeps its usual local meaning. `/mrc
+register`, `/mrc identify`, `/mrc update password` and `/mrc roompass`
+ask for the password separately with echo off and send it once; NetBBS
+stores no MRC credentials. Each caller picks the colour their handle
+wears on MRC under `[P]rofile` → `[Y]our MRC nick colour`.
+
+**Private messages.** Off by default. A caller who wants them switches
+them on under `[P]rofile` → `[P]rivate MRC messages`; the switch applies
+the next time they enter an MRC room and covers both directions. From
+then on a private line from an MRC user rings the bell and shows as
+`[MRC private] bob@Other: text` to that caller alone; `/mrc msg <nick>
+<text>` answers anyone on the network and `/mrc r <text>` answers
+whoever wrote last. The first private line in a session, either way,
+comes with a note that these messages are not private on that network:
+the hub and any client can read or spoof them. Private lines are never
+stored -- not in scrollback, not in search, not in any log. There is
+nothing for you to configure; a caller who leaves the switch off is told
+once per sender that somebody tried, as before.
+
+MRC users colour their lines with Mystic-style `|NN` codes. Those colours
+are shown by default; a caller who prefers plain text switches them off
+under `[P]rofile` → `[I]nter-BBS chat colours`. Either way an inbound
+line is sanitized before any code becomes a colour. A caller's own typed
+codes are not relayed — NetBBS callers speak in one house style.
+
+`/mrc` also asks the hub things on the caller's behalf: `/mrc rooms`,
+`/mrc who`, `/mrc bbses [search]`, `/mrc info <bbs>`, `/mrc motd`,
+`/mrc stats`, `/mrc help`, `/mrc lastseen <nick>`, `/mrc topics`, plus
+`/mrc send <command>` for any other server command, `/mrc ctcp <nick>
+VERSION|TIME|PING|CLIENTINFO`, and `/mrc msg <nick> <text>` / `/mrc r
+<text>` for a caller who opted in to private messages. The hub's reply
+is shown to that caller
+alone as `[MRC]` lines, bounded per caller. Network-wide broadcasts from
+trusted MRC users appear in every bridged channel as `[MRC broadcast]`.
+The bridge answers other clients' CTCP requests (VERSION, TIME in UTC,
+PING, CLIENTINFO) for any announced caller on its own, bounded per
+remote sender. If the hub moves a caller out of the mapped room (a
+password room, for instance) they are told and announced there again,
+at most once per minute; if the hub renames them they are told the new
+name; if the hub terminates the site's session the link stops until you
+change and save the MRC settings, like an `OLDVERSION` rejection.
 
 `[N]ode` → `[C]hat bridge (MRC)` shows the link state (connected,
 reconnecting, error, off), hub, last error, drop counters and every

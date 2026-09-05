@@ -972,7 +972,11 @@ background delivery, and Link-wide presence wait for Phase 5.
 
 A channel may additionally be bridged, per channel and only by explicit
 SysOp choice, to one room on the external MRC (Multi Relay Chat) network
-(§16, issue #165 / #275). Bridging changes nothing about the channel's
+(§16, issue #165 / #275); and, where the SysOp allows it, a caller may
+open any MRC room by name, which materializes a channel `mrc:<room>` of
+its own — a real row with the node-wide open-room gates, listed in the
+picker's own "Multi Relay Chat" section, never Link-able, and retired
+once idle (§16, issue #300). Bridging changes nothing about the channel's
 own model: local traffic is recorded and delivered exactly as before and
 then relayed; inbound MRC lines are recorded as external, unverifiable
 authors (`user@site (MRC)`) that never enter trust evaluation; private
@@ -5259,20 +5263,36 @@ architecture here to multiplex in the first place. One `MrcBridge`
 instance, analogous to `LiveChannelBridge`, owns the one outbound hub
 socket for the whole node.
 
-**Decision 2 (locked in) — bridging is per-channel, explicit, and off by
-default; never automatic for every channel.** MRC rooms are flat,
-global, and unauthenticated with no ACL concept at all — "every local
-channel bridges by default" would silently leak channel contents onto a
-public, unauthenticated network the moment a SysOp enables MRC at all.
-A SysOp must name which local channel maps to which MRC room, the same
-opt-in shape every other Link-adjacent per-channel setting already uses.
+**Decision 2 (locked in, amended by issue #300) — a local channel is
+bridged only per channel, explicitly, and off by default; an MRC room a
+caller opens is a channel of its own, behind a second node-wide switch
+that is also off by default.** MRC rooms are flat, global, and
+unauthenticated with no ACL concept at all — "every local channel
+bridges by default" would silently leak channel contents onto a public,
+unauthenticated network the moment a SysOp enables MRC at all. A SysOp
+must name which local channel maps to which MRC room, the same opt-in
+shape every other Link-adjacent per-channel setting already uses. The
+amendment (issue #300) keeps that rationale intact: an *open room* has
+no local content to leak because it is born on the network — a caller
+asks for a room by name and it materializes as a real channel named
+`mrc:<room>` (design doc §6.3), so enabling MRC alone still bridges
+nothing, and the SysOp decides separately whether callers may open
+rooms at all.
 
-**Decision 3 (locked in) — channels only, never direct/private chat.**
-Matches the issue's own framing, and is reinforced by the protocol
-itself: MRC's `to_user` targeting carries no real confidentiality (the
-hub, or any client willing to lie about its own identity, can see or
-spoof it), so gatewaying anything shaped like private chat would be a
-false promise of privacy NetBBS itself doesn't need to make.
+**Decision 3 (locked in, amended by issue #305) — channels by default;
+private messages only for a caller who asked for them.** The protocol
+argument stands: MRC's `to_user` targeting carries no real
+confidentiality (the hub, or any client willing to lie about its own
+identity, can see or spoof it), so NetBBS must never present an MRC
+private line as private. What the original decision got wrong is the
+remedy: refusing them outright leaves a caller who reads "bob@Other
+tried to message you privately" with no way to answer, while every
+other client on the network delivers such lines. So the bridge delivers
+and sends private lines for a caller who switched them on in their
+Profile (off by default, one switch for both directions), tells them
+once per session what "private" means on that network, and never
+records a private line anywhere. A caller who left the switch off gets
+exactly what they got before: one notice per sender, nothing shown.
 
 **Decision 4 (locked in) — inbound content is always rendered as
 external/untrusted, and never enters Phase 4 at all.** An inbound MRC
@@ -5292,9 +5312,11 @@ bridge going quiet, never blocking local chat delivery or the caller who
 just sent a message; malformed or oversized inbound lines are dropped
 and logged, never allowed to crash the local channel. Every outbound
 field is sanitized to MRC's own documented charset/length limits before
-it's sent; inbound Mystic `|NN` pipe-color codes are stripped, never
-rendered as NetBBS's own ANSI — matches "sanitize before styling," and
-treats them as untrusted input either way.
+it's sent. Inbound Mystic `|NN` pipe codes are untrusted text, never
+raw ANSI: identity fields lose all of them, a body keeps only the
+colour subset (`|00`-`|23`), and those become NetBBS's own SGR solely
+through `netbbs.rendering.pipe_codes`, after sanitization and per
+viewer (issue #298, below) — "sanitize before styling" holds exactly.
 
 **Implemented as issue #275** (`netbbs.mrc`), with every decision above
 as specified and the three questions this scoping pass left open
@@ -5347,6 +5369,193 @@ page is not publicly reachable:
   SysOp changes settings, since every retry would start a fresh
   rejected session. Bridge warnings land in the same bounded
   diagnostic log Link already uses.
+
+**Issue #298 (body convention, colours, CTCP, per-caller hub replies)**
+corrected one shipped assumption and added what falls out of it. Every
+reference client embeds the sender's own coloured handle *inside* the
+message body (Mystic `|03<|11Alice|03>|16|07 text`, ENiGMA½
+`|00|10<|02Alice|10>|00 |03text`, Synchronet `Alice |07text`, ANetBBS
+`|07Alice|07 text`; actions `|15* |13Alice text`) and displays an
+inbound body verbatim; the hub adds nothing. The bridge therefore
+sends every chunk in a house style (`|08<|14nick|08>|16|07 text`, the
+prefix paid for out of the same 140-character budget) and peels an
+inbound prefix only when the embedded name equals `from_user` -- an
+unmatched body is recorded whole, nothing is guessed. Decisions taken
+with it:
+
+- **Colour codes are content, not markup.** `|00`-`|23` survive in a
+  stored MRC body (printable ASCII, safe to store) and are turned into
+  SGR by `netbbs.rendering.pipe_codes` only after sanitization, per
+  viewer, under a Profile toggle that defaults to on; every other pipe
+  token is stripped at the parse boundary, identity fields lose all of
+  them, and the search index receives the plain words. A caller's own
+  typed codes are still stripped: letting them through would put codes
+  into local scrollback and Link-signed exports of mapped channels.
+- **The hub's reply to one caller goes to that caller.** A `SERVER`
+  packet addressed to an announced nick is that caller's reply
+  (`LIST`, `CHATTERS`, `INFO`, `MOTD`, `HELP`, ...), delivered to their
+  sessions alone under a per-caller line allowance, never recorded;
+  `/mrc <subcommand>` sends the asks. `USERROOM` re-announces the
+  caller in the mapped room at most once per keepalive tick,
+  `USERNICK` retargets the announced nick, `TERMINATE` is fatal like
+  `OLDVERSION`. An empty `to_room` is a network broadcast, shown in
+  every active bridged channel (ENiGMA½'s reading).
+- **CTCP lives in the bridge.** `VERSION`, `TIME` (UTC only), `PING`
+  and `CLIENTINFO` are answered for any announced nick, bounded per
+  remote sender because every request costs a reply; no SysOp or caller
+  wiring exists for it.
+
+Decision 3 (channels only) is unchanged by this issue; its amendment
+(opt-in private messages) shipped as issue #305, below. Decision 2's
+amendment shipped as issue #300, next.
+
+**Issue #300 (open rooms)** lets a caller reach any room on the network
+without a SysOp mapping it first, without a door-style client, and
+without teaching native chat anything about MRC. Decisions:
+
+- **An open room is a real channel row, materialized on demand** — the
+  same precedent as a carried Link channel (§9.6): the first caller to
+  open `lobby` gets a `channels` row named `mrc:lobby` with
+  `mrc_room='lobby'` and `mrc_origin='caller'`, gates copied from the
+  node-wide open-room defaults (level, age, name requirement), content-
+  addressed on the room name so a room reopened after retirement keeps
+  its id. A room the SysOp already mapped *is* that channel (one room,
+  one channel), so opening it lands the caller in the SysOp's channel
+  under its own gates. Every existing chat feature works unchanged
+  because nothing but the origin marker differs.
+- **The `mrc:` prefix is reserved.** No local user or SysOp screen may
+  create or rename a channel into it (`netbbs.chat.channels` refuses),
+  so a hub `lobby` never collides with a local `lobby` and no local
+  channel can impersonate a room.
+- **Lifecycle is bounded and SysOp-tuned:** a cap on open rooms (default
+  32; opening refuses past it, nothing is evicted), a retention period
+  (default 7 days) after which a room with no local participant, no
+  activity and no follower is retired by the bridge's sweeper together
+  with its scrollback, a blocklist of rooms callers may not open — or
+  enter, once blocked — and `[A]dopt`/`Re[t]ire` on the channel
+  screen. The sweeper runs on its own task, independent of the hub
+  connection and of the switch, so a long outage or switching MRC off
+  never strands the cap. It is a node action with no `User` behind it
+  and the moderation log requires an actor, so a retirement is reported
+  to the MRC diagnostic log and counted on the status screen instead of
+  audited; a SysOp's own retire is audited as usual. The gates are
+  checked before a room is materialized, so an account they turn away
+  cannot spend the cap on rooms it can never enter.
+- **Never Link, in either direction.** `link_channel` refuses a
+  caller-origin row and the channel screen offers no `[L]ink` for it:
+  MRC content is that network's, not this node's, and must never be
+  re-broadcast under this node's signature. Inbound, a peer's genesis
+  named into the `mrc:` prefix is carried as `local-mrc:...` (a channel
+  Linked before the prefix was reserved keeps propagating; a squat
+  lands nowhere), one claiming an open room's id is refused outright,
+  and a carried message is projected only into a channel with a genesis
+  on file. An adopted room keeps its `mrc:` name until the SysOp
+  renames it, and Link asks for that rename before signing. An open
+  room's id is content-addressed on the
+  room *and* a per-node secret, so two nodes opening the same room
+  never share an id and no peer can compute one. Adopting a room
+  clears the origin and makes it an ordinary mapped channel again,
+  which may be Linked like any other. The migration renames any local
+  channel that already wore the prefix (it was typeable before this
+  release) to `local-mrc:...`.
+- **One MRC identity per account, in one room.** The hub knows one
+  `nick@site` in one room; a second session of the same account
+  entering a different bridged channel is refused naming the room the
+  identity already holds. The rule is decided from local occupancy of
+  the bridged channels, not from what has been announced to the hub
+  (announcements lapse during backoff), and enforced once, atomically,
+  at the chat loop's own hub join. The session that is leaving a room
+  on `/join` does not count against itself unless another session of
+  the same account stays behind. A nick suffix was rejected: it would
+  present a second person to the network.
+- **Finding rooms.** The top-level channel picker gains a "[Multi Relay
+  Chat]" entry (only with MRC on and open rooms allowed) that opens its
+  own picker: rooms open here with local and hub occupancy, rooms the
+  bridge has heard of (opened here, `USERROOM` targets, join/leave
+  chatter naming a room; bounded, in memory, rebuilt on connect), and
+  "[Open a room by name]" — one prompt, since a room that does not
+  exist yet is created by entering it. Inside an MRC room, `/join
+  <name>` resolves to an already-open `mrc:<name>`, then a local
+  channel, then opens `<name>` as a room; `/join mrc:<name>` opens the
+  room from anywhere; `/rooms` asks the hub. Open rooms are excluded
+  from the ordinary channel list, since the section is their place.
+- **Deferred until the hub's protocol documentation arrives:** parsing
+  the `LIST` reply into the observed-room list, and `ROOM_OPEN`/
+  `ROOM_CLOSE`. Nothing above depends on them.
+
+**Issue #304 (presence and welcome)** carries the presence a caller
+already has here onto the network and lets the network's own life show
+through, without teaching native chat anything about MRC:
+
+- **Away state is mirrored, never separate.** NetBBS's `/away` is the
+  one away state; the bridge sends the hub `AFK <message>` for every
+  room the caller is announced in, repeats it on every announcement
+  (reconnects included) so the hub is never behind, and sends a bare
+  `AFK` on return -- the best reading of "back" any reference client
+  offers, to be corrected when the hub's documentation says otherwise.
+- **The hub's welcome, once per session.** On a caller's first MRC room
+  in a session the bridge shows the hub's `BANNER:` lines as remembered
+  from connect and asks for `MOTD` as that caller; the reply reaches
+  them alone through the per-caller path of #298. Once per session, not
+  per room.
+- **The network's size where callers look for company.** The bridge asks
+  `STATS` once per roster refresh, parses `bbses rooms users` (the
+  Mystic layout; an unparseable reply keeps the raw line for the status
+  screen and shows "unknown" elsewhere), and Who's online, the picker's
+  MRC section and the bridge status screen show "N users on M boards"
+  with the reading's age. The bridge's own ask is parsed, not shown; a
+  caller's `/mrc stats` is shown.
+- **An open room's topic is the hub's.** Inbound `ROOMTOPIC` for an
+  open room is stored on the row (a direct update; the node is not a
+  `User`) so the status line shows it; `/topic <text>` inside an open
+  room sends `NEWTOPIC` and the hub decides (MRC Trust applies there),
+  a bare `/topic` shows the topic rather than clearing it. Inside a
+  mapped channel `/topic` keeps its local meaning and audit.
+- **Identity commands with masked input, nothing stored.** `/mrc
+  register`, `/mrc identify`, `/mrc update password` and `/mrc
+  roompass` ask for the secret separately with echo off and send it
+  once as the caller's nick; the secret reaches no scrollback, log or
+  input history (decision 5 stands: the node stores no credentials that
+  are not its own).
+- **A personal nick colour.** The house-style body's handle colour is a
+  per-caller choice among the sixteen CGA colours (Profile, default
+  yellow), read when the caller is announced; brackets and text colour
+  stay the house's, and typed pipe codes stay stripped (#298).
+
+**Issue #305 (private messages, opt-in)** amends Decision 3 as the
+planning pass intended:
+
+- **One switch, off by default, both directions.** `[P]rofile` →
+  `[P]rivate MRC messages` (Communication section). The bridge reads it
+  when it announces the caller, alongside the nick colour, and forgets
+  it with their last announcement; switching it on applies the next
+  time they enter an MRC room. Sending requires the same switch:
+  starting conversations while refusing replies is not offered.
+- **Delivered as a notice, never as chat.** An inbound private line for
+  a caller who opted in is an `MrcNotice` of kind `private`, shown as
+  `[MRC private] bob@Other: text` with the bell, to that caller's
+  sessions only, through the per-caller path of #298 and bounded per
+  remote sender ahead of it (a flood from one nick must not evict
+  chat). The sender's embedded handle is peeled exactly like a room
+  line's and the colour codes kept. It is never recorded: no scrollback,
+  no search index, no log body.
+- **Sent as the caller's nick, in the house style.** `/mrc msg <nick>
+  <text>` and `/mrc r <text>` (to whoever last messaged them this
+  connection) send a packet with `to_user` set, `to_room` empty and
+  `msg_ext` the site the target was last seen at -- learned from every
+  inbound packet, bounded, so the hub can route to the right board when
+  the same nick exists on two; unknown stays empty and the hub routes
+  on the nick. The body wears the house style so the recipient's client
+  shows who wrote it; chunking and the caller's own send allowance
+  apply as for a room line. The sender sees a local echo, never a
+  channel line.
+- **What "private" means, said once.** The first private line a
+  session sends or receives comes with one note: private MRC messages
+  are not private on that network; the hub and any client can read or
+  spoof them. Once per session, whichever direction comes first.
+- **Nothing for the SysOp to configure.** The switch is the caller's;
+  the node-wide MRC switch and the channel mappings already decide
+  whether they are on the network at all.
 
 ### Issue #194 — trusted scrollback-on-join — closed
 

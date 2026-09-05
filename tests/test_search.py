@@ -537,6 +537,35 @@ def test_find_goto_jumps_directly_to_a_result_by_its_shown_number(db, lane, alic
 # -- check_index_integrity / rebuild_indexes (issue #74) -------------------
 
 
+def test_mrc_bodies_are_indexed_and_rebuilt_without_their_colour_codes(db, alice):
+    """Issue #298: an MRC row keeps its `|NN` codes in `channel_messages`
+    but the index holds the words; the integrity check must agree with
+    that, and a rebuild must not put the codes back."""
+    from netbbs.chat.channels import create_channel
+    from netbbs.chat.scrollback import record_message
+    from netbbs.search import check_index_integrity, rebuild_indexes
+
+    channel = create_channel(db, "lobby", creator=alice)
+    recorded = record_message(
+        db, channel, kind="message", author_label="bob@Other (MRC)", author_fingerprint=None,
+        body="|12blue|07 words", external_source="mrc", index_body="blue words",
+    )
+    local = record_message(db, channel, kind="message", author_label="alice", author_fingerprint=None, body="keep |12 here")
+
+    def _indexed() -> dict[int, str]:
+        rows = db.connection.execute(
+            "SELECT message_id, body FROM channel_message_search WHERE channel_id = ?", (channel.id,)
+        ).fetchall()
+        return {row["message_id"]: row["body"] for row in rows}
+
+    expected = {recorded.id: "blue words", local.id: "keep |12 here"}
+    assert _indexed() == expected
+    drift = check_index_integrity(db).channel_messages
+    assert (drift.missing, drift.stale, drift.extra) == ((), (), ())
+    rebuild_indexes(db)
+    assert _indexed() == expected
+
+
 def test_check_index_integrity_is_clean_on_freshly_indexed_content(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "hello world", "body")

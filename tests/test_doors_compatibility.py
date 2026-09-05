@@ -403,6 +403,48 @@ def test_profile_migration_preserves_unprofiled_door_and_missing_remote_credenti
     assert preflight(door)
 
 
+def test_upgrade_from_released_mrc_schema_preserves_rooms_and_doors(tmp_path, monkeypatch):
+    from netbbs.storage import database as storage
+    from netbbs.storage.migrations import MIGRATIONS
+    from netbbs.mrc.settings import OpenRoomSettings, materialize_open_room, save_open_room_settings
+    from netbbs.chat.scrollback import record_message
+    from netbbs.doors.registry import get_door_by_name
+
+    # v5.10.0 has schema 62. Its released MRC migration must precede the
+    # previously unpublished door migration, not share its version number.
+    assert "MRC open rooms" in MIGRATIONS[61].description
+    assert "door compatibility" in MIGRATIONS[62].description
+    path = tmp_path / "upgrade.db"
+    with monkeypatch.context() as previous:
+        previous.setattr(storage, "MIGRATIONS", MIGRATIONS[:62])
+        old = storage.Database(path)
+        try:
+            settings = save_open_room_settings(old, OpenRoomSettings(enabled=True, cap=7))
+            mapping = materialize_open_room(old, "Lobby", open_settings=settings)
+            record_message(old, mapping.channel, kind="message", author_label="remote-user",
+                           author_fingerprint=None, body="Keep MRC history")
+            old.connection.execute("""INSERT INTO doors (name, executable_path, args, min_play_level, created_at)
+                                      VALUES (?, ?, ?, ?, ?)""",
+                                   ("Existing native", sys.executable, '["game.py"]', 10, "2026-09-05T00:00:00Z"))
+            old.connection.commit()
+            snapshots = {table: [dict(row) for row in old.connection.execute(f"SELECT * FROM {table}")]
+                         for table in ("channels", "channel_messages", "node_config")}
+            assert old.connection.execute("PRAGMA user_version").fetchone()[0] == 62
+        finally:
+            old.close()
+    upgraded = storage.Database(path)
+    try:
+        assert upgraded.connection.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+        for table, rows in snapshots.items():
+            assert [dict(row) for row in upgraded.connection.execute(f"SELECT * FROM {table}")] == rows
+        door = get_door_by_name(upgraded, "Existing native")
+        assert door.profile is None and door.args == ("game.py",) and door.min_play_level == 10
+        assert upgraded.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert upgraded.connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        upgraded.close()
+
+
 def test_cancellation_during_spawn_and_broken_terminal_restore_still_reaps(db, lane, player, tmp_path, monkeypatch):
     script = _write_script(tmp_path, "spawn.py", "import time; time.sleep(60)")
     door = create_door(db, "Spawn cancellation", sys.executable, args=(str(script),), creator=player,

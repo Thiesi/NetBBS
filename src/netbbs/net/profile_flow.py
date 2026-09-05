@@ -74,6 +74,10 @@ from netbbs.net.resource_editor import Draft, FieldSpec, edit_resource_draft, li
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.sort_ui import SORT_MODE_LABELS
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
+from netbbs.net.mrc_color_preference import mrc_colors_enabled, set_mrc_colors_enabled
+from netbbs.net.mrc_nick_color_preference import mrc_nick_color, set_mrc_nick_color
+from netbbs.net.mrc_private_preference import mrc_private_messages_enabled, set_mrc_private_messages_enabled
+from netbbs.rendering.pipe_codes import CGA_COLOR_NAMES
 from netbbs.net.unicode_style_preference import set_unicode_style_enabled, unicode_style_enabled
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
@@ -363,11 +367,14 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "signature": await lane.run(get_signature, user) or "",
         "fullscreen_editor": await lane.run(fullscreen_editor_enabled, user),
         "accepts_dm": await lane.run(accepts_direct_messages, user),
+        "mrc_private": await lane.run(mrc_private_messages_enabled, user),
         "history_name_visible": await lane.run(session_history_name_visible, user),
         "color_depth": await lane.run(color_depth_override, user) or "auto",
         "description_level": description_level,
         "redraw_in_place": redraw_in_place,
         "unicode_style": unicode_style,
+        "mrc_colors": await lane.run(mrc_colors_enabled, user),
+        "mrc_nick_color": await lane.run(mrc_nick_color, user),
         "breadcrumb_collapsed": collapsed,
         "sort_preference_count": len(await lane.run(list_sort_preferences, user)),
         "ssh_key_count": len(await lane.run(list_ssh_keys, user)),
@@ -570,6 +577,23 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Communication",
         ),
         FieldSpec(
+            key="mrc_private", hotkey="p", menu_text=menu_key("P", "rivate MRC messages"),
+            label="Private messages from MRC users",
+            render=lambda d: "accepted" if d["mrc_private"] else "not accepted",
+            prompt=live_choice_field(
+                "mrc_private", [False, True],
+                persist=lambda lane, v: lane.run(set_mrc_private_messages_enabled, user, v),
+            ),
+            brief="Off by default; also needed to send",
+            help=(
+                "Whether users on the Multi Relay Chat network can message you privately "
+                "(/mrc msg), and whether you can message them. Off by default: a private MRC "
+                "message is not private on that network -- the hub and any client can read or "
+                "spoof it. Applies the next time you enter an MRC room."
+            ),
+            section="Communication",
+        ),
+        FieldSpec(
             key="history_name_visible", hotkey="h", menu_text=menu_key("H", "istory visibility"),
             label="Name shown in Last sessions",
             render=lambda d: "yes" if d["history_name_visible"] else "no (hidden)",
@@ -645,6 +669,38 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "Whether menus/breadcrumbs use Unicode characters (›, ●, etc.) for a "
                 "cleaner look, or fall back to plain ASCII ('/', '[X]', etc.) for a terminal "
                 "that renders Unicode incorrectly."
+            ),
+            section="Display",
+        ),
+        FieldSpec(
+            key="mrc_colors", hotkey="i", menu_text=menu_key("I", "nter-BBS chat colours"),
+            label="Inter-BBS chat (MRC) colours",
+            render=lambda d: "on" if d["mrc_colors"] else "off",
+            prompt=live_choice_field(
+                "mrc_colors", [False, True],
+                persist=lambda lane, v: lane.run(set_mrc_colors_enabled, user, v),
+            ),
+            brief="Show the colours MRC users put in their lines",
+            help=(
+                "Users on the Multi Relay Chat network colour their lines with Mystic-style "
+                "codes. On: those colours are shown in a channel bridged to MRC. Off: the same "
+                "lines appear as plain text. Either way the text is sanitized first."
+            ),
+            section="Display",
+        ),
+        FieldSpec(
+            key="mrc_nick_color", hotkey="y", menu_text=menu_key("Y", "our MRC nick colour"),
+            label="MRC nick colour",
+            render=lambda d: f"{CGA_COLOR_NAMES[d['mrc_nick_color']]} (|{d['mrc_nick_color']:02d})",
+            prompt=live_choice_field(
+                "mrc_nick_color", list(range(16)),
+                persist=lambda lane, v: lane.run(set_mrc_nick_color, user, v),
+            ),
+            brief="The colour your handle wears on MRC",
+            help=(
+                "Every line you send to the Multi Relay Chat network carries your handle in front "
+                "of it, in this colour -- one of the sixteen CGA colours MRC clients understand. "
+                "Each press moves to the next colour. Applies the next time you enter an MRC room."
             ),
             section="Display",
         ),
