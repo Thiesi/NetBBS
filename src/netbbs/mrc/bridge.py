@@ -918,6 +918,9 @@ class MrcBridge:
                 continue
             if not self._hub.participants_for_username(mapping.channel.name, username):
                 continue
+            # The leave that got us here pruned their Profile caches with
+            # their last announcement; this announcement reads them again.
+            await self._ensure_nick_color(username)
             if self._announce(mapping, username):
                 self._identity_notified.discard((mapping.channel.id, username))
                 await self._notify_bridged(mapping, [username])
@@ -1526,11 +1529,11 @@ class MrcBridge:
             for participant in self._hub.participants_for_username(mapping.channel.name, username):
                 await self._hub.send_to(mapping.channel.name, participant, notice, priority=priority)
 
-    async def _deliver_reply(self, username: str, text: str, *, kind: str = "reply") -> None:
+    async def _deliver_reply(self, username: str, text: str, *, kind: str = "reply") -> bool:
         """One line of the hub's reply to `username` (or, `kind="private"`,
         a private line for them), under that caller's own reply
         allowance; the first line dropped in a burst is replaced by a
-        single "cut short" notice."""
+        single "cut short" notice. Returns whether the line was shown."""
         bucket = self._reply_buckets.get(username)
         if bucket is None:
             if len(self._reply_buckets) >= 500:
@@ -1546,7 +1549,7 @@ class MrcBridge:
                 else:
                     cut = "(the hub's reply was cut short -- it sent more lines than are shown at once)"
                 await self._deliver_to_caller(username, MrcNotice(cut, utc_now_iso(), kind=kind), priority=True)
-            return
+            return False
         # The latch lifts only once the allowance has genuinely recovered
         # (half the burst back), not on the first trickle-admitted line:
         # a hub streaming just above the refill rate would otherwise earn
@@ -1555,6 +1558,7 @@ class MrcBridge:
             self._reply_truncated.discard((username, kind))
         bucket.consume()
         await self._deliver_to_caller(username, MrcNotice(text, utc_now_iso(), kind=kind))
+        return True
 
     # --- open rooms (issue #300) ---------------------------------------------
 
@@ -1894,11 +1898,12 @@ class MrcBridge:
         text = text.strip()
         if not strip_pipe_codes(text).strip():
             return
+        sender = f"{packet.from_user or 'unknown'}@{packet.from_site or 'unknown'}"
+        if not await self._deliver_reply(username, f"{sender}: {text}", kind="private"):
+            return  # `/mrc r` answers the last line they saw, never one they did not
         self._last_private_sender[username] = (packet.from_user, packet.from_site)
         if len(self._last_private_sender) > 500:
             self._last_private_sender = {username: self._last_private_sender[username]}
-        sender = f"{packet.from_user or 'unknown'}@{packet.from_site or 'unknown'}"
-        await self._deliver_reply(username, f"{sender}: {text}", kind="private")
 
     def _observe_site(self, nick: str, site: str) -> None:
         nick = protocol.sanitize_name(nick)

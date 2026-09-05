@@ -369,3 +369,68 @@ def test_caches_follow_the_announced_set_and_a_failed_read_is_not_cached(db, lan
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_a_promoted_caller_keeps_their_optin(db, lane, lobby, alice, sysop):
+    """Review of #307 (round 2): the leave that promotes a waiting room
+    pruned the caller's caches; the promotion reads them again."""
+    from netbbs.chat.channels import create_channel
+
+    garden = create_channel(db, "garden", creator=sysop)
+    set_mrc_room(db, garden, "garden")
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        bridge = await _connected_bridge(db, lane, hub, fake, load_private_optin=_optin_for("alice"))
+        try:
+            hub.join(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            garden_queue = hub.join(garden.name, ParticipantId("alice", 2))
+            await bridge.local_join(garden, "alice")  # held back: one room per identity
+            await asyncio.sleep(0.3)
+            assert not fake.packets(body_prefix="NEWROOM::garden")  # one room per identity
+            hub.leave(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_leave(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "NEWROOM::garden")
+            assert bridge.private_messages_enabled("alice") is True
+            await fake.send_line("bob~Other~garden~alice~My_Board~~still here?~")
+            assert (await _next_notice(garden_queue)).text == "bob@Other: still here?"
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_the_reply_target_is_the_last_line_actually_shown(db, lane, lobby, alice):
+    """Review of #307 (round 2): a private line dropped by the caller's
+    reply allowance must not become what `/mrc r` answers."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake, load_private_optin=_optin_for("alice"), reply_burst=2)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await fake.send_line("bob~Other~garden~alice~My_Board~~one~")
+            await fake.send_line("bob~Other~garden~alice~My_Board~~two~")
+            await fake.send_line("carol~Third~garden~alice~My_Board~~unseen~")
+            await asyncio.sleep(0.3)
+            texts = []
+            while not queue.empty():
+                item = queue.get_nowait()
+                if isinstance(item, MrcNotice):
+                    texts.append(item.text)
+            assert "carol@Third: unseen" not in texts and "bob@Other: two" in texts
+            assert bridge.reply_target("alice") == ("bob", "Other")
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
