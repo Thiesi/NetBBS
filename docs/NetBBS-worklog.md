@@ -756,6 +756,33 @@ session needs the same treatment.
   pre-join check), not only when a room is first opened; a room blocked after
   it was opened admits nobody until the sweeper retires it. It is stored as a
   JSON list because a room name may contain a comma.
+- `_open_or_find_room` is the one resolution step for the picker and `/join`:
+  an existing channel for the room (SysOp-mapped or open) is returned as is
+  and entered under its own gates; only a *new* row is subject to the
+  node-wide defaults, the blocklist and the one-identity rule
+  (`identity_room_held`, the target-agnostic form), all before the write.
+  Otherwise stricter defaults would lock callers out of the SysOp's own
+  mapped channel, and a second session could spend the cap on rooms it is
+  refused.
+- An open room's `channel_id` is content-addressed on the room *and* a
+  per-node secret (`mrc_open_room_namespace` in `node_config`, minted once):
+  two nodes opening the same room must not share an id, or an adopted-and-
+  Linked room on one would alias the open room on the other in
+  `materialize_carried_channel`, and a peer must not be able to compute a
+  room's id. `materialize_carried_channel` refuses a genesis named into the
+  `mrc:` prefix or claiming an open room's id (`ChannelCarryRefusedError`, a
+  `ChannelCarryLimitError` so the transport's tolerance applies), and
+  `materialize_carried_channel_message` projects only into rows with a
+  genesis on file. The migration renames any pre-existing `mrc:` channel to
+  `local-mrc:...` -- the prefix was typeable before this release.
+- Activity is stamped before the connectivity check in `local_join` and
+  `local_message`: a room in use during a hub outage is not idle. A session
+  that passed the pre-join checks holds its room against the sweeper for a
+  minute (`note_entry`, `_entering`), which covers the lane hop between the
+  sweeper's occupancy snapshot and its delete; a caller arriving inside that
+  hop is the residual, accepted window.
+- Join/leave chatter is matched up to the last `: ` (`(?P<room>\S+):\s+\S`)
+  because a colon is legal inside a room name.
 - `remote_roster` hides every entry at this node's own site, not only nicks
   currently announced: a USERLIST fetched moments before a caller left still
   names them, and "0 here, 1 on MRC" for one's own ghost is wrong.

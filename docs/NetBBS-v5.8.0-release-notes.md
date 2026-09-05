@@ -22,9 +22,11 @@ evicting anyone. A retention period (default 7 days) retires a room nobody
 is in, nobody follows and nobody has used, together with its scrollback.
 A blocklist names rooms callers may not open. On an open room's channel
 screen the SysOp can `[A]dopt` it as an ordinary bridged channel or
-`Re[t]ire` it at once. Open rooms are never shared over NetBBS Link, and
-the `mrc:` name prefix is reserved for them. The node status screen shows
-open rooms against the cap and what the sweeper has retired.
+`Re[t]ire` it at once. Open rooms are never shared over NetBBS Link in
+either direction, and the `mrc:` name prefix is reserved for them: a local
+channel that already carried such a name is renamed `local-mrc:...` by the
+migration. The node status screen shows open rooms against the cap and what
+the sweeper has retired, also after MRC is switched off.
 
 MRC allows one identity per caller in one room, so a second session of the
 same account entering a different MRC room is refused naming the room it

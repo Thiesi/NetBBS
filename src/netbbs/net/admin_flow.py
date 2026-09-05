@@ -5402,10 +5402,17 @@ async def _blocklist_field(session: Session, lane: DatabaseLane, draft: dict) ->
             continue
         if choice == "r" and entries:
             await session.write_line("")
-            await write_prompt(session, "Number to remove (blank = cancel): ")
-            raw = (await session.read_line()).strip()
-            if raw.isdigit() and 1 <= int(raw) <= len(entries):
-                del entries[int(raw) - 1]
+            # The entries themselves are the choices (design doc §3.5):
+            # a picker, not a second prompt asking for a number.
+            picked = await pick_item(
+                session, list(enumerate(entries, start=1)),
+                name_of=lambda item: f"#{item[1]}",
+                stable_id_of=lambda item: item[0],
+                title="Unblock an MRC room",
+                empty_message="No MRC rooms are blocked.",
+            )
+            if picked is not None:
+                entries.remove(picked[1])
                 draft["open_blocklist"] = entries
             continue
         await session.write(reject_unhandled_key(choice))
@@ -5478,18 +5485,25 @@ async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, no
             colored("Dropped lines: ", fg_color=LABEL_COLOR)
             + colored(f"{status.dropped_outbound} outbound, {status.dropped_inbound} inbound", fg_color=METADATA_COLOR)
         )
-    if status.enabled:
+    if status.enabled or status.open_rooms or status.retired_rooms:
+        # Shown whenever there is open-room state to report -- with MRC
+        # switched off node-wide too, since the sweeper keeps retiring
+        # rooms opened earlier and a SysOp should see that happening.
         open_settings = await lane.run(load_open_room_settings)
+        ageing = (
+            f"{status.open_rooms} opened earlier still age out after {open_settings.retention_days} idle "
+            f"day{'s' if open_settings.retention_days != 1 else ''}; {status.retired_rooms} retired since start"
+        )
         if status.open_rooms_enabled:
             open_line = (
                 f"{status.open_rooms} of {open_settings.cap} open, retired after {open_settings.retention_days} idle "
                 f"day{'s' if open_settings.retention_days != 1 else ''}; {status.observed_rooms} room"
                 f"{'s' if status.observed_rooms != 1 else ''} heard of; {status.retired_rooms} retired since start"
             )
+        elif not status.enabled:
+            open_line = f"MRC is off node-wide; {ageing}"
         else:
-            open_line = "off (callers cannot open rooms)" + (
-                f"; {status.open_rooms} opened earlier still age out" if status.open_rooms else ""
-            )
+            open_line = f"off (callers cannot open rooms); {ageing}"
         await session.write_line(
             colored("Open rooms: ", fg_color=LABEL_COLOR) + colored(open_line, fg_color=METADATA_COLOR)
         )

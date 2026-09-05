@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 
-from netbbs.chat.channels import Channel
+from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX, Channel
 from netbbs.chat.scrollback import ChannelMessage as LocalChannelMessage, get_scrollback_limit
 from netbbs.link.events import (
     CHANNEL_MESSAGE_OBJECT_TYPE,
@@ -54,6 +54,15 @@ class ChannelCarryLimitError(Exception):
     rejection: the underlying `channel_genesis` is already verified,
     accepted, and persisted, and keeps gossiping normally regardless --
     only this node's own local materialization is refused."""
+
+
+class ChannelCarryRefusedError(ChannelCarryLimitError):
+    """Raised by `materialize_carried_channel` for a genesis this node
+    will not carry at all (issue #300): one named into the reserved
+    `mrc:` prefix, or one whose id already belongs to an MRC room a
+    caller opened here. A subclass of `ChannelCarryLimitError` so every
+    caller's existing tolerance (log and carry on; the event itself is
+    already verified and keeps gossiping) applies unchanged."""
 
 
 def is_channel_linked(db: Database, channel: Channel) -> bool:
@@ -205,10 +214,28 @@ def materialize_carried_channel(
     `description`/`min_level`/`min_age`/`name_requirement` only, matching
     what `Channel` actually has settable at creation time).
     """
+    payload_name = str(genesis.payload.get("name", ""))
+    if payload_name.lower().startswith(OPEN_ROOM_NAME_PREFIX):
+        # Issue #300: the prefix is reserved for MRC rooms callers open
+        # here; a genesis wearing it could squat the name (so the room
+        # can never be opened) or impersonate a room on every screen.
+        raise ChannelCarryRefusedError(
+            f"refusing to carry channel {payload_name!r}: names starting with "
+            f"{OPEN_ROOM_NAME_PREFIX!r} are reserved for MRC rooms callers open on this node"
+        )
     existing = db.connection.execute(
         "SELECT * FROM channels WHERE channel_id = ?", (genesis.payload["channel_id"],)
     ).fetchone()
     if existing is not None:
+        if "mrc_origin" in existing.keys() and existing["mrc_origin"] == "caller":
+            # An id that happens to match an open room here is not that
+            # room: an open room is never Link content, whatever a peer
+            # claims (its id is namespaced per node so an honest peer
+            # cannot produce this; a dishonest one must not either).
+            raise ChannelCarryRefusedError(
+                f"refusing to carry channel {payload_name!r}: its id belongs to an MRC room "
+                "a caller opened on this node"
+            )
         return _channel_from_row(existing)
 
     if max_carried_channels is not None and carried_channel_count(db, own_fingerprint) >= max_carried_channels:
@@ -291,9 +318,12 @@ def materialize_carried_channel_message(
         return _channel_message_from_row(existing)
 
     channel_row = db.connection.execute(
-        "SELECT id FROM channels WHERE channel_id = ?", (message.payload["channel_id"],)
+        "SELECT * FROM channels WHERE channel_id = ?", (message.payload["channel_id"],)
     ).fetchone()
-    if channel_row is None:
+    if channel_row is None or channel_row["link_genesis_json"] is None:
+        # Not carried: no genesis on file. That also excludes an MRC room
+        # a caller opened (issue #300), which never has one -- a message
+        # naming its id is projected nowhere, whatever a peer claims.
         return None
     channel_local_id = channel_row["id"]
 

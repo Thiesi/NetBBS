@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import secrets
 import sqlite3
 from dataclasses import dataclass
 
@@ -360,6 +361,20 @@ def save_open_room_settings(db: Database, settings: OpenRoomSettings) -> OpenRoo
     return validated
 
 
+OPEN_ROOM_NAMESPACE_KEY = "mrc_open_room_namespace"
+
+
+def _open_room_namespace(db: Database) -> str:
+    """A random secret minted once per node and kept in `node_config`,
+    mixed into every open room's channel id. Never shown, never sent:
+    a room's id must be unpredictable to peers and distinct per node."""
+    value = get_config(db, OPEN_ROOM_NAMESPACE_KEY)
+    if not value:
+        value = secrets.token_hex(16)
+        set_config(db, OPEN_ROOM_NAMESPACE_KEY, value)
+    return value
+
+
 def open_room_channel_name(room: str) -> str:
     return f"{OPEN_ROOM_NAME_PREFIX}{room}"
 
@@ -418,7 +433,14 @@ def materialize_open_room(db: Database, room: str, *, open_settings: OpenRoomSet
             "try again once one has gone quiet."
         )
     now = utc_now_iso()
-    channel_id = compute_content_id({"type": "mrc_room", "room": normalized.lower()})
+    # Content-addressed on the room *and* a per-node secret namespace:
+    # the same room opened on two nodes must not share a channel id, or
+    # one node's adopted-and-Linked room would alias the other's open
+    # room in `materialize_carried_channel`, and a peer could compute the
+    # id of a room here (review of issue #300).
+    channel_id = compute_content_id({
+        "type": "mrc_room", "room": normalized.lower(), "node": _open_room_namespace(db),
+    })
     try:
         db.connection.execute(
             """

@@ -240,3 +240,69 @@ def test_retirement_drops_the_rooms_caches_and_runs_without_a_hub(db, lane, lobb
         finally:
             await bridge.close()
     asyncio.run(scenario())
+
+
+def test_activity_is_stamped_while_the_hub_is_unreachable(db, lane, lobby, alice):
+    """Second review of #300: a room in use during an outage is not idle;
+    the stamp must not sit behind the connectivity check."""
+    async def scenario():
+        settings = save_open_room_settings(db, OpenRoomSettings(enabled=True))
+        _enable(db, 1)  # never listening
+        hub = ChatHub()
+        from tests.test_mrc_bridge import _bridge
+        bridge = _bridge(hub, lane, keepalive_interval_seconds=30.0)
+        await bridge.start()
+        try:
+            from netbbs.mrc.settings import materialize_open_room
+            room = materialize_open_room(db, "outage", open_settings=settings).channel
+            long_ago = "2020-01-01T00:00:00.000000Z"
+            touch_open_room(db, room, now=long_ago)
+            await bridge.refresh_channel_mappings()
+            assert bridge.state is not MrcState.CONNECTED
+            hub.join(room.name, ParticipantId("alice", 1))
+            await bridge.local_join(room, "alice")
+            assert get_mrc_mapping(db, room).last_active_at != long_ago
+            touch_open_room(db, room, now=long_ago)
+            bridge._last_touch.clear()
+            recorded = record_message(db, room, kind="message", author_label="alice", author_fingerprint=None, body="hi")
+            assert await bridge.local_message(room, recorded) == (False, False)  # not relayed, but noted
+            assert get_mrc_mapping(db, room).last_active_at != long_ago
+        finally:
+            await bridge.close()
+    asyncio.run(scenario())
+
+
+def test_room_names_with_colons_and_entry_reservations(db, lane, lobby, alice):
+    """Second review of #300: a colon is legal inside a room name (the
+    separator is the last ': '), and a room a session is about to join
+    counts as occupied for the sweeper."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        settings = save_open_room_settings(db, OpenRoomSettings(enabled=True, retention_days=7))
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake, keepalive_interval_seconds=30.0)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await fake.send_line("SERVER~~~~~lobby~*** Joining foo:bar: carol@Third~")
+            await _wait_until(lambda: "foo:bar" in bridge.observed_rooms())
+            assert "foo" not in bridge.observed_rooms()
+
+            entering = (await bridge.open_room("entering", "alice")).channel
+            touch_open_room(db, entering, now="2020-01-01T00:00:00.000000Z")
+            bridge.note_entry(entering)
+            await bridge._sweep_open_rooms()
+            assert get_mrc_mapping(db, entering) is not None
+            # The identity rule has a target-agnostic form for the moment
+            # before a room exists.
+            assert bridge.identity_room_held("alice") == "lobby"
+            assert bridge.identity_room_held("alice", leaving=lobby) is None
+            assert bridge.identity_room_held("bob") is None
+            del settings
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())

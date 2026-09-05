@@ -746,7 +746,7 @@ def _may_enter_quietly(db: Database, channel: Channel, user: User) -> bool:
         return False
     if not meets_name_requirement(db, user, get_effective_name_requirement(db, channel)):
         return False
-    return not channel.members_only or is_member(db, channel, user)
+    return not channel.members_only or is_member(db, channel, user) or has_pending_invitation(db, channel, user)
 
 
 def _open_room_gate_denial(db: Database, user: User, open_settings: OpenRoomSettings | None) -> str | None:
@@ -761,6 +761,56 @@ def _open_room_gate_denial(db: Database, user: User, open_settings: OpenRoomSett
     if not meets_name_requirement(db, user, open_settings.name_requirement):
         return "Opening MRC rooms here requires a verified real name."
     return None
+
+
+async def _open_or_find_room(
+    session: Session,
+    lane: DatabaseLane,
+    mrc_bridge: MrcBridge,
+    user: User,
+    room: str,
+    *,
+    leaving: Channel | None = None,
+) -> MrcChannelMapping | None:
+    """Resolve MRC `room` to a channel for `user`, opening it if no
+    channel carries it yet. An existing channel -- the SysOp's mapped
+    channel or an open room -- is returned as is (its own gates apply
+    on entry); only a *new* row is subject to the node-wide open-room
+    gates, the blocklist and the one-identity rule, all checked before
+    anything is written so a refused caller never spends the cap.
+    Every refusal is spoken; `None` means nothing to enter."""
+    existing = mrc_bridge.mapping_for_room(room)
+    if existing is not None:
+        if existing.is_open_room and mrc_bridge.room_blocked(existing.room):
+            await session.write_line(
+                colored(f"The SysOp has blocked MRC room #{sanitize_text(existing.room)} on this node.", fg_color=MUTED_COLOR)
+            )
+            return None
+        return existing
+    if mrc_bridge.room_blocked(room):
+        await session.write_line(
+            colored(f"The SysOp has blocked MRC room #{sanitize_text(room)} on this node.", fg_color=MUTED_COLOR)
+        )
+        return None
+    held = mrc_bridge.identity_room_held(user.username, leaving=leaving)
+    if held is not None:
+        await session.write_line(
+            colored(
+                f"Your MRC identity is already in #{sanitize_text(held)} from another session; "
+                "MRC allows one room per user. Leave it there first.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return None
+    denial = await lane.run(_open_room_gate_denial, user, mrc_bridge.open_room_settings)
+    if denial is not None:
+        await session.write_line(colored(denial, fg_color=MUTED_COLOR))
+        return None
+    try:
+        return await mrc_bridge.open_room(room, user.username)
+    except MrcSettingsError as exc:
+        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        return None
 
 
 async def _pick_mrc_room(
@@ -864,16 +914,8 @@ async def _pick_mrc_room(
             room = (await session.read_line()).strip()
             if not room:
                 continue
-        # The gates first, then the row: a caller the defaults turn away
-        # must not spend the cap on a room they cannot enter.
-        denial = await lane.run(_open_room_gate_denial, user, mrc_bridge.open_room_settings)
-        if denial is not None:
-            await session.write_line(colored(denial, fg_color=MUTED_COLOR))
-            continue
-        try:
-            mapping = await mrc_bridge.open_room(room, user.username)
-        except MrcSettingsError as exc:
-            await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        mapping = await _open_or_find_room(session, lane, mrc_bridge, user, room)
+        if mapping is None:
             continue
         allowed, denial = await lane.run(_authorize_channel_entry, mapping.channel, user)
         if not allowed:
@@ -898,20 +940,8 @@ async def _resolve_join_target(ctx: ChatCommandContext, name: str) -> Channel | 
     room = name[len(OPEN_ROOM_NAME_PREFIX):].strip() if explicit else name
     async def _open(room_name: str) -> Channel | None:
         assert bridge is not None
-        if bridge.room_blocked(room_name):
-            await ctx.session.write_line(
-                colored(f"The SysOp has blocked MRC room #{sanitize_text(room_name)} on this node.", fg_color=MUTED_COLOR)
-            )
-            return None
-        denial = await ctx.lane.run(_open_room_gate_denial, ctx.user, bridge.open_room_settings)
-        if denial is not None:
-            await ctx.session.write_line(colored(denial, fg_color=MUTED_COLOR))
-            return None
-        try:
-            return (await bridge.open_room(room_name, ctx.user.username)).channel
-        except MrcSettingsError as exc:
-            await ctx.session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
-            return None
+        mapping = await _open_or_find_room(ctx.session, ctx.lane, bridge, ctx.user, room_name, leaving=ctx.channel)
+        return mapping.channel if mapping is not None else None
 
     if explicit:
         if bridge is None or not bridge.open_rooms_enabled:
@@ -3902,6 +3932,8 @@ async def _chat_loop(
         if not allowed:
             await session.write_line(colored(f"\r\n{denial_message}", fg_color=MUTED_COLOR))
             return _ToPicker()
+        if mapping is not None:
+            mrc_bridge.note_entry(channel)
 
     participant_id = ParticipantId(username=user.username, session_key=id(session))
     queue = hub.join(channel.name, participant_id)

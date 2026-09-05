@@ -140,7 +140,7 @@ MAX_TRACKED_CTCP_SENDERS = 200
 MAX_OBSERVED_ROOMS = 200
 OPEN_ROOM_TOUCH_INTERVAL_SECONDS = 60.0
 # `*** Joining lobby: nick@site` / `*** Leaving lobby: nick@site`
-_ROOM_CHATTER_RE = re.compile(r"^\*\*\*\s+(?:Joining|Leaving)\s+(?P<room>[^\s:]+):", re.IGNORECASE)
+_ROOM_CHATTER_RE = re.compile(r"^\*\*\*\s+(?:Joining|Leaving)\s+(?P<room>\S+):\s+\S", re.IGNORECASE)
 
 RECONNECT_MIN_BACKOFF_SECONDS = 1.0
 RECONNECT_MAX_BACKOFF_SECONDS = 60.0
@@ -289,6 +289,11 @@ class MrcBridge:
         self._observed_rooms: dict[str, tuple[str, float]] = {}
         self._last_touch: dict[int, float] = {}
         self._retired_rooms = 0
+        # channel id -> when a session last passed the pre-join check for
+        # it: the sweeper treats a room being entered as occupied for a
+        # minute, so the lane hop between its occupancy snapshot and its
+        # delete cannot race a caller who is one await away from joining.
+        self._entering: dict[int, float] = {}
 
         self._outbound: asyncio.Queue[str] = asyncio.Queue(maxsize=outbound_queue_size)
         self._node_bucket = _TokenBucket(OUTBOUND_BURST, OUTBOUND_RATE_PER_SECOND, clock)
@@ -786,10 +791,14 @@ class MrcBridge:
         channel is bridged and they aren't already announced (a second
         session of the same account is still one MRC user)."""
         mapping = self._by_channel.get(channel.id)
-        if mapping is None or not mapping.active or self._state is not MrcState.CONNECTED:
+        if mapping is None or not mapping.active:
+            return
+        # Stamped before the connectivity check: a room in use during a
+        # hub outage is not idle, whatever the link is doing.
+        await self._touch(mapping)
+        if self._state is not MrcState.CONNECTED:
             return
         self._announce(mapping, username)
-        await self._touch(mapping)
 
     async def local_leave(self, channel: Channel, username: str) -> None:
         """A caller left `channel`. Sends LOGOFF only once the account
@@ -821,6 +830,8 @@ class MrcBridge:
         settings = self._settings
         if mapping is None or not mapping.active or settings is None:
             return False, False
+        if message.kind in ("message", "action"):
+            await self._touch(mapping)  # in use, relayed or not
         if self._state is not MrcState.CONNECTED:
             return False, False
         if message.kind not in ("message", "action") or not message.body:
@@ -849,7 +860,6 @@ class MrcBridge:
         for chunk in chunks:
             bucket.consume()
             self._enqueue(protocol.chat_message(nick, settings.site_wire_name, mapping.room, template(nick, chunk)))
-        await self._touch(mapping)
         return True, truncated
 
     def _announce(self, mapping: MrcChannelMapping, username: str) -> None:
@@ -1277,7 +1287,36 @@ class MrcBridge:
         await self.refresh_channel_mappings()
         return mapping
 
-    def identity_room_elsewhere(self, channel: Channel, username: str, *, leaving: Channel | None = None) -> str | None:
+    def mapping_for_room(self, room: str) -> MrcChannelMapping | None:
+        """The channel already carrying MRC room `room` here -- a SysOp-
+        mapped channel or an open room -- or `None`. Resolved before any
+        open-room gate is applied: entering an existing channel is that
+        channel's own decision, the node-wide defaults only govern
+        materializing a new row."""
+        return self._by_room.get(protocol.sanitize_room(room).lower())
+
+    def note_entry(self, channel: Channel) -> None:
+        """A session has passed the pre-join checks for `channel` and is
+        about to join it: hold the room against the sweeper (see
+        `_entering`)."""
+        now = self._clock()
+        self._entering = {
+            channel_id: stamp for channel_id, stamp in self._entering.items()
+            if now - stamp < OPEN_ROOM_TOUCH_INTERVAL_SECONDS
+        }
+        self._entering[channel.id] = now
+
+    def identity_room_held(self, username: str, *, leaving: Channel | None = None) -> str | None:
+        """The MRC room `username` currently occupies through any active
+        bridged channel, or `None` -- the target-agnostic form of
+        `identity_room_elsewhere`, for the moment *before* a room exists
+        (opening a new one must not spend the cap on a caller whose
+        identity is already elsewhere)."""
+        return self.identity_room_elsewhere(None, username, leaving=leaving)
+
+    def identity_room_elsewhere(
+        self, channel: Channel | None, username: str, *, leaving: Channel | None = None,
+    ) -> str | None:
         """The MRC room `username` is already announced in through a
         channel other than `channel`, or `None`. An MRC identity is one
         nick at one site in one room: a second session of the same
@@ -1296,7 +1335,7 @@ class MrcBridge:
         would let two sessions settle in two rooms and then fight over
         one nick when the link returns."""
         for mapping in self._by_channel.values():
-            if mapping.channel.id == channel.id or not mapping.active:
+            if (channel is not None and mapping.channel.id == channel.id) or not mapping.active:
                 continue
             sessions = self._hub.participants_for_username(mapping.channel.name, username)
             if not sessions:
@@ -1360,9 +1399,13 @@ class MrcBridge:
         open_settings = self._open_settings
         if open_settings is None:
             return
+        now = self._clock()
         occupied = {
             mapping.channel.id for mapping in self._by_channel.values()
             if self._hub.participant_count(mapping.channel.name) > 0
+        } | {
+            channel_id for channel_id, stamp in self._entering.items()
+            if now - stamp < OPEN_ROOM_TOUCH_INTERVAL_SECONDS
         }
         try:
             retired = await self._lane.run(

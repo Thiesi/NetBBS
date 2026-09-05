@@ -39,11 +39,11 @@ from tests.test_admin_flow_mrc import (  # noqa: F401 -- fixtures and helpers
 
 def test_settings_screen_edits_the_open_room_half_and_its_blocklist(db, lane, sysop):
     # s: Settings, i: MRC; o/y: open rooms on; c: cap 5; r: retention 3;
-    # k: blocklist -> a: add "Secret Room", a: add "|04evil", r: remove 1,
-    # b: back; s: save; b/b/b out.
+    # k: blocklist -> a: add "Secret Room", a: add "|04evil", r: remove ->
+    # pick 0,1 (the first entry), b: back; s: save; b/b/b out.
     session = FakeSession([
         "s", "i", "o", "y", "c", "5", "r", "3",
-        "k", "a", "Secret Room", "a", "|04evil", "r", "1", "b",
+        "k", "a", "Secret Room", "a", "|04evil", "r", "0", "1", "b",
         "s", "b", "b", "b",
     ])
     asyncio.run(admin_menu(session, lane, sysop))
@@ -125,6 +125,28 @@ def test_retire_asks_first_and_then_removes_the_room(db, lane, sysop):
     else:
         raise AssertionError("retired room still exists")
     assert "retire_mrc_room" in {a.action for a in list_recent_actions(db, limit=5)}
+
+
+def test_status_screen_reports_retained_open_rooms_with_mrc_switched_off(db, lane, sysop, lobby):
+    """Second review of #300: rooms opened earlier keep ageing out after
+    MRC is switched off node-wide, and the SysOp must see that."""
+    async def scenario():
+        settings = save_open_room_settings(db, OpenRoomSettings(enabled=True, retention_days=3))
+        materialize_open_room(db, "leftover", open_settings=settings)
+        save_open_room_settings(db, OpenRoomSettings(enabled=False, retention_days=3))
+        bridge = _bridge(lane)
+        await bridge.start()  # MRC disabled: no connection, sweeper still runs
+        try:
+            session = FakeSession(["n", "c", "b", "b", "b"])
+            await admin_menu(session, lane, sysop, node_controls=_controls(bridge))
+            # The line wraps at the terminal width; compare with the
+            # wrap-inserted breaks folded back into single spaces.
+            text = " ".join(_visible(_written_text(session)).split())
+            assert "MRC is off node-wide; 1 opened earlier still age out after 3 idle days; 0 retired since start" in text
+            assert "mrc:leftover -> #leftover (open room)" in text
+        finally:
+            await bridge.close()
+    asyncio.run(scenario())
 
 
 def test_status_screen_reports_open_rooms(db, lane, sysop, lobby):

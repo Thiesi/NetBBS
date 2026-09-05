@@ -223,8 +223,14 @@ def test_listing_the_section_accepts_no_invitation(db, lane, hub, presence, alic
             create_invitation(db, room, alice, invited_by=bob)
             assert has_pending_invitation(db, room, alice)
             session = await _browse(lane, hub, presence, alice, ["0", "1", "b", "b"], mrc_bridge=bridge)
-            assert "club" not in _visible_text(session).split("Multi Relay Chat", 1)[-1].split("Available chat channels")[0]
+            # The invitee sees the room (or could never find it to accept),
+            # but looking accepts nothing.
+            assert "club" in _visible_text(session).split("Multi Relay Chat", 1)[-1]
             assert has_pending_invitation(db, room, alice) and not is_member(db, room, alice)
+            # Entering it is what accepts the invitation.
+            session = await _browse(lane, hub, presence, alice, ["0", "1", "0", "2", "/quit"], mrc_bridge=bridge)
+            assert "Joined" in _visible_text(session)
+            assert is_member(db, room, alice) and not has_pending_invitation(db, room, alice)
         finally:
             await bridge.close()
             await fake.close()
@@ -247,6 +253,64 @@ def test_gates_are_checked_before_a_room_is_materialized(db, lane, hub, presence
             )
             text = _visible_text(session)
             assert text.count("You are not authorized to open MRC rooms on this node.") == 2
+            assert count_open_rooms(db) == 0
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_existing_rooms_are_governed_by_their_own_gates_not_the_creation_defaults(db, lane, hub, presence, alice):
+    """Second review of #300: the node-wide defaults govern materializing
+    a *new* row only; a SysOp-mapped channel for that room, or a room
+    opened under older defaults, is entered under its own gates."""
+    from netbbs.mrc.settings import count_open_rooms
+
+    general = create_channel(db, "general", creator=alice)
+    set_mrc_room(db, general, "lobby")
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        try:
+            earlier = (await bridge.open_room("earlier", "alice")).channel
+            # Defaults tightened afterwards: level 50, alice is level 10.
+            save_open_room_settings(db, OpenRoomSettings(enabled=True, min_level=50))
+            await bridge.refresh_channel_mappings()
+            session = await _browse(
+                lane, hub, presence, alice,
+                ["0", "1", "0", "1", "lobby", "/join mrc:earlier", "/join mrc:brandnew", "/quit"], mrc_bridge=bridge,
+            )
+            text = _visible_text(session)
+            assert "Joined" in text and general.name in text and earlier.name in text
+            assert "You are not authorized to open MRC rooms on this node." in text
+            assert count_open_rooms(db) == 1
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_identity_is_checked_before_a_room_is_materialized(db, lane, hub, presence, alice):
+    """Second review of #300: a second session whose identity is already
+    in another room must not spend the cap on rooms it will be refused."""
+    from netbbs.mrc.settings import count_open_rooms
+
+    general = create_channel(db, "general", creator=alice)
+    set_mrc_room(db, general, "general")
+    create_channel(db, "plain", creator=alice)
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        try:
+            hub.join(general.name, ParticipantId("alice", 1))
+            await bridge.local_join(general, "alice")
+            await fake.wait_for(lambda p: p.body == "NEWROOM::general")
+            session = await _browse(
+                lane, hub, presence, alice,
+                ["0", "1", "0", "1", "first", "b", "0", "3", "/join mrc:second", "/quit"], mrc_bridge=bridge,
+            )
+            text = _visible_text(session)
+            assert text.count("Your MRC identity is already in #general") == 2
             assert count_open_rooms(db) == 0
         finally:
             await bridge.close()

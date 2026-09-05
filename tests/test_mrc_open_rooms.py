@@ -219,6 +219,49 @@ def test_link_refuses_an_open_room_but_not_an_adopted_one(db, tmp_path):
     assert link_channel(db, opened, node_identity=identity) is not None
 
 
+def test_open_room_ids_are_namespaced_per_node(db, tmp_path):
+    """Second review of #300: the same room opened on two nodes must not
+    share a channel id, or one node's adopted-and-Linked room would alias
+    the other's open room in `materialize_carried_channel`."""
+    other = Database(tmp_path / "other.db")
+    try:
+        here = materialize_open_room(db, "lobby", open_settings=_on()).channel
+        there = materialize_open_room(other, "lobby", open_settings=_on()).channel
+        assert here.channel_id != there.channel_id
+        # Stable on one node: reopening after retirement keeps the id.
+        retire_open_room(db, here)
+        assert materialize_open_room(db, "lobby", open_settings=_on()).channel.channel_id == here.channel_id
+    finally:
+        other.close()
+
+
+def test_link_refuses_a_genesis_that_squats_or_aliases_an_open_room(db):
+    """Second review of #300: a peer's genesis may neither wear the
+    reserved prefix nor claim an open room's id, and a message naming an
+    open room's id is projected nowhere."""
+    from netbbs.link.channels import ChannelCarryRefusedError, materialize_carried_channel
+    from netbbs.link.events import build_channel_genesis
+    from netbbs.timeutil import utc_now_iso
+
+    peer = bootstrap_node_identity("peer")
+    opened = materialize_open_room(db, "lobby", open_settings=_on()).channel
+
+    def _genesis(channel_id: str, name: str):
+        return build_channel_genesis(
+            signing_identity=peer.signing_key, origin_fingerprint=peer.fingerprint, channel_id=channel_id,
+            name=name, created_at=utc_now_iso(), description=None, default_min_level=0,
+            default_min_age=None, default_name_requirement=None,
+        )
+
+    with pytest.raises(ChannelCarryRefusedError, match="reserved"):
+        materialize_carried_channel(db, _genesis("f" * 64, "mrc:elsewhere"))
+    with pytest.raises(ChannelCarryRefusedError, match="belongs to an MRC room"):
+        materialize_carried_channel(db, _genesis(opened.channel_id, "innocent"))
+    with pytest.raises(ChannelError):
+        get_channel_by_name(db, "mrc:elsewhere")
+    assert get_mrc_mapping(db, opened).is_open_room
+
+
 def test_existing_rows_survive_the_migration_with_no_origin(db, sysop):
     """The additive columns land NULL on every existing channel: a
     SysOp-mapped bridge made before this release is not an open room."""

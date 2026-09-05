@@ -5385,11 +5385,19 @@ without teaching native chat anything about MRC. Decisions:
   audited; a SysOp's own retire is audited as usual. The gates are
   checked before a room is materialized, so an account they turn away
   cannot spend the cap on rooms it can never enter.
-- **Never Link.** `link_channel` refuses a caller-origin row and the
-  channel screen offers no `[L]ink` for it: MRC content is that
-  network's, not this node's, and must never be re-broadcast under this
-  node's signature. Adopting a room clears the origin and makes it an
-  ordinary mapped channel again, which may be Linked like any other.
+- **Never Link, in either direction.** `link_channel` refuses a
+  caller-origin row and the channel screen offers no `[L]ink` for it:
+  MRC content is that network's, not this node's, and must never be
+  re-broadcast under this node's signature. Inbound, a peer's genesis
+  named into the `mrc:` prefix or claiming an open room's id is refused
+  outright, and a carried message is projected only into a channel
+  with a genesis on file. An open room's id is content-addressed on the
+  room *and* a per-node secret, so two nodes opening the same room
+  never share an id and no peer can compute one. Adopting a room
+  clears the origin and makes it an ordinary mapped channel again,
+  which may be Linked like any other. The migration renames any local
+  channel that already wore the prefix (it was typeable before this
+  release) to `local-mrc:...`.
 - **One MRC identity per account, in one room.** The hub knows one
   `nick@site` in one room; a second session of the same account
   entering a different bridged channel is refused naming the room the
