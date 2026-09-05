@@ -4628,7 +4628,10 @@ here since #172 is self-contained):
 Compatibility extension (issues #296/#297):
 
 - A nullable, versioned profile preserves the original JSON/stdio API for
-  existing registrations. Profiles add persistent installation directories,
+  existing registrations. SysOps can explicitly remove a profile in the draft
+  editor without recreating the registration; executable/argv and game data
+  are retained. Native socket profiles require DOOR32 descriptor metadata.
+  Profiles add persistent installation directories,
   disposable node directories, exact CRLF classic drop files, native stdio,
   controlling PTYs, private inherited DOOR32 sockets, DOSBox-X COM1 sockets,
   and allowlisted outbound RLogin services. Never pass the caller's socket.
@@ -4641,7 +4644,9 @@ Compatibility extension (issues #296/#297):
   helper applies limits and the optional controlling terminal, then execs the
   operator-selected argv; no threaded-process `preexec_fn`. Cancellation
   during spawn or cleanup retains ownership. Descendants are terminated on
-  every exit path, even when their leader has already exited.
+  every exit path, even when their leader has already exited. Leader exit
+  does not discard buffered terminal output: it drains to EOF while still
+  respecting the session watchdog, caller disconnect and shutdown.
 - Legacy installations default to one active session. Cross-process advisory
   node leases are keyed by resolved installation directory; higher limits
   require explicit SysOp certification of the game's locking. Persistent

@@ -121,17 +121,23 @@ async def _relay(session, endpoint, proc=None):
     output_task = asyncio.create_task(_pump_output(session, endpoint))
     exit_task = asyncio.create_task(_wait_leader(proc)) if proc else None
     tasks = [input_task, output_task] + ([exit_task] if exit_task else [])
+    pending = set(tasks)
     try:
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        results = [task.result() for task in done]
-        if "caller_disconnected" in results:
-            return "caller_disconnected"
-        if exit_task in done and not output_task.done():
-            try:
-                await asyncio.wait_for(asyncio.shield(output_task), timeout=0.25)
-            except asyncio.TimeoutError:
-                pass
-        return "door_exited"
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            results = [task.result() for task in done]
+            if "caller_disconnected" in results:
+                return "caller_disconnected"
+            if output_task in done or (proc is None and input_task in done):
+                return "door_exited"
+            if exit_task in done:
+                # Kill lingering pipe/socket holders independently of draining.
+                # A slow caller still gets every final byte, bounded by the
+                # launch watchdog and caller disconnect, not a 250 ms cutoff.
+                stop_task = asyncio.create_task(_stop_process(proc))
+                tasks.append(stop_task)
+                pending.add(stop_task)
+            # Broken stdin does not imply stdout has finished delivering.
     finally:
         for task in tasks:
             if not task.done():
@@ -143,6 +149,12 @@ async def _diagnostics(reader, tail):
     while chunk := await reader.read(4096):
         tail.extend(chunk)
         del tail[:-_DIAGNOSTIC_BYTES]
+
+
+async def _discard_output(reader):
+    """Release pipe backpressure after terminal delivery has been cancelled."""
+    while await reader.read(4096):
+        pass
 
 
 async def _finish_owned(task):
@@ -315,7 +327,17 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
         async def cleanup():
             nonlocal exit_code
             errors = []
+            # A full StreamReader can pause the underlying pipe. After timeout
+            # or disconnect the terminal pump is gone; drain without forwarding
+            # so process reaping/pipe closure cannot depend on that slow caller.
+            drains = []
+            if proc is not None:
+                if proc.stdout is not None and (endpoint is None or isinstance(endpoint, StreamEndpoint)):
+                    drains.append(asyncio.create_task(_discard_output(proc.stdout)))
+                if proc.stderr is not None and not diagnostic_tasks:
+                    drains.append(asyncio.create_task(_discard_output(proc.stderr)))
             for operation in (lambda: _stop_process(proc) if proc is not None else None,
+                              lambda: asyncio.gather(*drains),
                               lambda: endpoint.close() if endpoint is not None else None):
                 try:
                     pending = operation()

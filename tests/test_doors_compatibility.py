@@ -58,6 +58,100 @@ def test_profile_rejects_invalid_or_dangerous_config(data):
         DoorProfile.from_json(json.dumps(data))
 
 
+def test_native_socket_requires_descriptor_drop_file():
+    with pytest.raises(ProfileError, match="DOOR32.SYS"):
+        DoorProfile(endpoint="socketpair").validate()
+    assert DoorProfile(endpoint="socketpair", drop_files=("DOOR32.SYS",)).validate()
+
+
+@pytest.mark.parametrize("field", ["local_user", "remote_user"])
+@pytest.mark.parametrize("value", [42, "", "{unknown}", "secret\n", "x" * 129])
+def test_preflight_rejects_invalid_credential_values(field, value, db, player, tmp_path):
+    from netbbs.doors.profiles import preflight
+    path = tmp_path / "credentials.json"
+    path.write_text(json.dumps({field: value}), encoding="utf-8")
+    path.chmod(0o600)
+    profile = DoorProfile(adapter="rlogin", options={"host": "127.0.0.1", "port": 513,
+        "allowed_destinations": ["127.0.0.1:513"], "service_name": "Test",
+        "credential_file": str(path)})
+    door = create_door(db, "Credentials", "remote", creator=player, profile=profile)
+    problems = preflight(door)
+    assert problems, "invalid provider identity passed static checks"
+    if value:
+        assert str(value) not in " ".join(problems)
+
+
+@pytest.mark.parametrize("failure", ["refused", "timeout", "cancel", "all_refused", "rejected"])
+def test_remote_falls_back_to_reachable_address(failure, monkeypatch):
+    from netbbs.doors import remote
+
+    async def scenario():
+        received, sockets = [], []
+        finished = asyncio.Event()
+
+        async def handler(reader, writer):
+            try:
+                for _ in range(4):
+                    received.append(await reader.readuntil(b"\0"))
+                writer.write(b"\1" if failure == "rejected" else b"\0")
+                await writer.drain()
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                finished.set()
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        loop = asyncio.get_running_loop()
+        real_connect = loop.sock_connect
+
+        async def addresses(*args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port))] * 2
+
+        async def connect(sock, address):
+            sockets.append(sock)
+            if failure == "all_refused":
+                raise ConnectionRefusedError("all addresses unavailable")
+            if len(sockets) == 1 and failure != "rejected":
+                if failure == "refused":
+                    raise ConnectionRefusedError("first address unavailable")
+                if failure == "cancel":
+                    raise asyncio.CancelledError
+                await asyncio.sleep(60)
+            await real_connect(sock, address)
+
+        monkeypatch.setattr(loop, "getaddrinfo", addresses)
+        monkeypatch.setattr(loop, "sock_connect", connect)
+        monkeypatch.setattr(remote, "_CONNECT_ATTEMPT_SECONDS", 0.05, raising=False)
+        profile = DoorProfile(adapter="rlogin", options={"host": "127.0.0.1", "port": port,
+            "allowed_destinations": [f"127.0.0.1:{port}"], "service_name": "Test"})
+        try:
+            if failure in ("all_refused", "rejected"):
+                with pytest.raises(ConnectionRefusedError if failure == "all_refused" else ValueError):
+                    await remote.connect_remote(profile, {"handle": "Player", "user_id": 1}, 80, 25)
+                assert len(sockets) == (2 if failure == "all_refused" else 1)
+                if failure == "rejected":
+                    await asyncio.wait_for(finished.wait(), 2)
+            elif failure == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await remote.connect_remote(profile, {"handle": "Player", "user_id": 1}, 80, 25)
+                assert len(sockets) == 1
+            else:
+                endpoint = await asyncio.wait_for(remote.connect_remote(
+                    profile, {"handle": "Player", "user_id": 1}, 80, 25), 2)
+                await endpoint.close()
+                await asyncio.wait_for(finished.wait(), 2)
+                assert len(sockets) == 2
+                assert received == [b"\0", b"1\0", b"Player\0", b"ansi/38400\0"]
+            assert all(sock.fileno() == -1 for sock in sockets)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("endpoint", ["stdio", "pty", "socketpair"])
 def test_native_endpoints_metadata_and_persistent_scores(endpoint, db, lane, player, tmp_path, monkeypatch):
     if endpoint != "stdio" and os.name != "posix":

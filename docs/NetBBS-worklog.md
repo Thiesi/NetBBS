@@ -3684,7 +3684,12 @@ handoff; they cannot prevent same-user native code reading files itself.
 POSIX process exit and `asyncio.Process.wait()` completion are not equivalent:
 descendants can retain the leader's PIPE descriptors after it exits. Observe
 `returncode` independently to detect leader exit, then terminate the whole
-group and reap. Tests must include a leader which exits while a descendant
+group and reap independently of output delivery. Keep draining the endpoint
+to EOF under the existing watchdog/disconnect bounds; a short fixed drain
+timeout can silently truncate final screens on a backpressured web session.
+After abnormal termination cancels delivery, discard remaining pipe output
+concurrently with teardown so a paused StreamReader cannot prevent reaping.
+Tests must include delayed terminal writes and a leader which exits while a descendant
 ignores SIGTERM and retains its pipes. Shield spawn and cleanup ownership
 against repeated cancellation, not merely the main relay task.
 

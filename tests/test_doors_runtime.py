@@ -28,6 +28,47 @@ from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 
+@pytest.mark.parametrize("end", ["drain", "disconnect", "timeout"])
+@pytest.mark.parametrize("rows", [600, 18000])
+def test_final_output_waits_for_slow_caller(end, rows, db, lane, player, tmp_path):
+    script = _write_script(tmp_path, "final_output.py",
+                           f"import sys; sys.stdout.buffer.write(b'Final score: 42\\n' * {rows}); sys.stdout.buffer.flush()")
+    door = create_door(db, "Final output", sys.executable, args=(str(script),), creator=player)
+
+    async def scenario():
+        blocked, release = asyncio.Event(), asyncio.Event()
+
+        class SlowSession(FakeSession):
+            async def write_raw(self, data):
+                blocked.set()
+                await release.wait()
+                await super().write_raw(data)
+
+        session = SlowSession()
+        task = asyncio.create_task(run_door(session, lane, door, player,
+                                           wall_time_limit_seconds=1 if end == "timeout" else 10))
+        try:
+            await asyncio.wait_for(blocked.wait(), 5)
+            # The old leader-exit drain deadline silently cancels this write.
+            await asyncio.sleep(0.6)
+            assert not task.done(), "normal exit discarded blocked terminal output"
+            if end == "drain":
+                release.set()
+            elif end == "disconnect":
+                session.disconnect()
+            result = await asyncio.wait_for(task, 5)
+            assert result.reason == {"drain": "exited", "disconnect": "caller_disconnected",
+                                     "timeout": "timed_out"}[end]
+            if end == "drain":
+                assert session.written == b"Final score: 42\n" * rows
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 @pytest.fixture
 def db(tmp_path):
     database = Database(tmp_path / "node.db")

@@ -126,6 +126,23 @@ the emulator, game and NetBBS itself must not run as root.
 7. Test each enabled caller transport, including return to the door picker,
    and only then lower the minimum play level.
 
+To remove a saved compatibility profile, open **Compatibility**, toggle
+**[1] Restore original API on Save** to True, then **[S]ave**. This restores
+the original JSON metadata/UTF-8 stdio API without deleting the registration,
+changing its access level, or deleting game files. Executable and arguments
+are retained: correct them in the same draft if they currently name an
+emulator or remote service instead of a native NetBBS door. Profile-only
+fields are ignored while reset is selected; toggle it off to resume editing
+them. Back leaves the stored profile unchanged.
+
+Native `socketpair` profiles must include `DOOR32.SYS`: that file tells the
+game which inherited descriptor carries its terminal. **Check setup** also
+validates effective provider identity values from private credential files,
+using sample caller data; actual caller values are checked again at launch.
+Remote connections try alternate resolved addresses after connection failure
+(up to two seconds per address, within the ten-second overall startup limit).
+A provider's handshake rejection is not retried at another address.
+
 Also check existing caller handles against the particular game's own name
 length and character rules. NetBBS supplies the caller ID and handle but does
 not migrate, rename or reconcile an existing third-party player database.

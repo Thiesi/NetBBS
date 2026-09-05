@@ -20,6 +20,12 @@ _PRESETS = Path(__file__).resolve().parent.parent / "doors" / "presets"
 
 
 def _candidate(door, draft):
+    try:
+        args = tuple(shlex.split(draft["args_line"]))
+    except ValueError as exc:
+        raise ProfileError(f"Arguments: {exc}") from exc
+    if draft.get("original_api"):
+        return replace(door, executable_path=draft["executable_path"], args=args, profile=None)
     value = {k: draft[k] for k in asdict(DoorProfile())}
     for key in ("width", "height", "baud", "security_level", "time_limit", "max_sessions", "memory_mb"):
         try:
@@ -32,10 +38,6 @@ def _candidate(door, draft):
         except ValueError as exc:
             raise ProfileError(f"{key} needs valid JSON") from exc
     profile = DoorProfile.from_json(json.dumps(value))
-    try:
-        args = tuple(shlex.split(draft["args_line"]))
-    except ValueError as exc:
-        raise ProfileError(f"Arguments: {exc}") from exc
     return replace(door, executable_path=draft["executable_path"], args=args, profile=profile)
 
 
@@ -43,12 +45,15 @@ def _draft(door):
     value = asdict(door.profile or DoorProfile())
     for key in ("drop_files", "runner", "environment", "options"):
         value[key] = json.dumps(value[key])
-    value.update(executable_path=door.executable_path, args_line=shlex.join(door.args))
+    value.update(executable_path=door.executable_path, args_line=shlex.join(door.args), original_api=False)
     return value
 
 
 async def edit_door_profile(session, lane, actor, door):
     draft = _draft(door)
+
+    async def original_api_prompt(session, lane, draft):
+        draft["original_api"] = not draft["original_api"]
 
     async def preset_prompt(session, lane, draft):
         paths = sorted(_PRESETS.glob("*.json"))
@@ -113,7 +118,7 @@ async def edit_door_profile(session, lane, actor, door):
     async def probe_prompt(session, lane, draft):
         try:
             candidate = _candidate(door, draft)
-            if candidate.profile.adapter != "dosbox":
+            if candidate.profile is None or candidate.profile.adapter != "dosbox":
                 raise ProfileError("Emulator capability probe is only for DOSBox profiles.")
             problems = await asyncio.to_thread(preflight, candidate, session)
             if problems:
@@ -136,6 +141,9 @@ async def edit_door_profile(session, lane, actor, door):
                                  prompt=prompt or text_field(key), help=help))
     add("preset", "p", "Setup template", "Runtime", preset_prompt)
     add("import", "j", "Import JSON", "Runtime", import_prompt)
+    add("original_api", "1", "Restore original API on Save", "Runtime",
+        original_api_prompt,
+        help="Remove compatibility settings on Save. Keeps executable/arguments and game data; correct paths first if needed. Toggle off to keep the profile draft.")
     add("adapter", "a", "Adapter", "Runtime", choice_field("adapter", ["native", "dosbox", "rlogin"]))
     add("endpoint", "i", "I/O endpoint", "Runtime", choice_field("endpoint", ["stdio", "pty", "socketpair"]))
     add("executable_path", "e", "Executable/runtime path", "Runtime")

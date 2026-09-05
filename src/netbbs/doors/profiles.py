@@ -82,6 +82,8 @@ class DoorProfile:
         if not isinstance(self.drop_files, (list, tuple)) or any(x not in
                 ("DOOR.SYS", "DORINFO1.DEF", "DORINFOx.DEF", "CHAIN.TXT", "DOOR32.SYS") for x in self.drop_files):
             raise ProfileError("unsupported drop-file format")
+        if self.adapter == "native" and self.endpoint == "socketpair" and "DOOR32.SYS" not in self.drop_files:
+            raise ProfileError("Native socketpair requires DOOR32.SYS to publish the terminal descriptor")
         if not isinstance(self.environment, dict) or len(self.environment) > 32:
             raise ProfileError("environment must be a map of at most 32 entries")
         for key, value in self.environment.items():
@@ -173,11 +175,9 @@ def preflight(door, session=None) -> list[str]:
         if session is not None and profile.encoding == "raw" and getattr(session, "_door_stream", None) is not None:
             problems.append("Web doors require a utf-8 or cp437 profile; explicitly raw bytes are native-terminal only.")
         if profile.adapter == "rlogin":
-            from netbbs.doors.remote import validate_remote, _credentials
+            from netbbs.doors.remote import identity_fields
             try:
-                validate_remote(profile)
-                if profile.options.get("credential_file"):
-                    _credentials(profile.options["credential_file"])
+                identity_fields(profile, {"handle": "probe", "user_id": 1})
             except (ValueError, OSError) as exc:
                 problems.append(str(exc))
             return problems

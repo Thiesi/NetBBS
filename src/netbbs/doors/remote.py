@@ -12,6 +12,8 @@ import struct
 import string
 from pathlib import Path
 
+_CONNECT_ATTEMPT_SECONDS = 2
+
 
 def validate_remote(profile):
     options = profile.options
@@ -81,6 +83,14 @@ def _field(value, info):
     return data + b"\x00"
 
 
+def identity_fields(profile, info):
+    """Resolve and validate the same effective identities in preflight and play."""
+    options = profile.options
+    credentials = _credentials(options["credential_file"]) if options.get("credential_file") else {}
+    return tuple(_field(credentials.get(key, options.get(key, default)), info)
+                 for key, default in (("local_user", "{user_id}"), ("remote_user", "{handle}")))
+
+
 class RemoteEndpoint:
     def __init__(self, sock, width, height):
         self.sock = sock
@@ -125,19 +135,33 @@ class RemoteEndpoint:
 
 async def connect_remote(profile, info, width, height):
     host, port = validate_remote(profile)
-    options = profile.options
-    credentials = _credentials(options["credential_file"]) if options.get("credential_file") else {}
-    local = credentials.get("local_user", options.get("local_user", "{user_id}"))
-    remote = credentials.get("remote_user", options.get("remote_user", "{handle}"))
-    handshake = b"\x00" + _field(local, info) + _field(remote, info) + f"ansi/{profile.baud}".encode() + b"\x00"
+    local, remote = identity_fields(profile, info)
+    handshake = b"\x00" + local + remote + f"ansi/{profile.baud}".encode() + b"\x00"
     loop = asyncio.get_running_loop()
     async with asyncio.timeout(10):
         addresses = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        family, kind, proto, _, address = addresses[0]
-        sock = socket.socket(family, kind, proto)
-        sock.setblocking(False)
+        last_error = OSError("Remote service hostname resolved to no usable addresses")
+        for family, kind, proto, _, address in addresses:
+            sock = None
+            try:
+                sock = socket.socket(family, kind, proto)
+                sock.setblocking(False)
+                await asyncio.wait_for(loop.sock_connect(sock, address), _CONNECT_ATTEMPT_SECONDS)
+            except OSError as exc:
+                if sock is not None:
+                    sock.close()
+                last_error = exc
+            except BaseException:
+                if sock is not None:
+                    sock.close()
+                raise
+            else:
+                break
+        else:
+            raise last_error
         try:
-            await loop.sock_connect(sock, address)
+            # Once connected, a provider's rejection is authoritative; do not
+            # replay credentials to another address after handshake failure.
             await loop.sock_sendall(sock, handshake)
             ack = await loop.sock_recv(sock, 1)
             if ack != b"\x00":

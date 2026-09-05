@@ -34,6 +34,13 @@ class DoorError(Exception):
     """Raised for door registration/lookup failures."""
 
 
+class _KeepProfile:
+    """Omission preserves the profile; explicit None restores the original API."""
+
+
+_KEEP_PROFILE = _KeepProfile()
+
+
 def custom_doors_dir(db: Database) -> Path:
     """The conventional location for a SysOp's *own* door scripts --
     `netbbs.net.admin_flow`'s door `[F]rom disk` picker browses exactly
@@ -156,10 +163,12 @@ def update_door(
     pinned: bool,
     community_id: int | None,
     changed_by: User,
-    profile: DoorProfile | None = None,
+    profile: DoorProfile | None | _KeepProfile = _KEEP_PROFILE,
 ) -> Door:
     """Replace `door`'s editable settings with the given full state --
-    mirrors `update_file_area`'s own full-replace shape."""
+    mirrors `update_file_area`'s own full-replace shape. Omit profile to keep
+    compatibility settings; pass None to restore the original JSON/stdio API."""
+    effective_profile = door.profile if profile is _KEEP_PROFILE else profile
     try:
         db.connection.execute(
             """
@@ -172,7 +181,7 @@ def update_door(
                 name, description, executable_path,
                 json.dumps(list(args)) if args else None,
                 min_play_level, int(pinned), community_id,
-                (profile or door.profile).to_json() if (profile or door.profile) else None, door.id,
+                effective_profile.to_json() if effective_profile else None, door.id,
             ),
         )
         db.connection.commit()
