@@ -2590,4 +2590,11 @@ MIGRATIONS = [
         CREATE UNIQUE INDEX idx_channels_mrc_room ON channels(lower(mrc_room)) WHERE mrc_room IS NOT NULL;
         """,
     ),
+    Migration(
+        description="Versioned door compatibility profiles and bounded last-run diagnostics (issue #296)",
+        sql="""
+        ALTER TABLE doors ADD COLUMN profile_json TEXT;
+        ALTER TABLE doors ADD COLUMN last_diagnostic TEXT;
+        """,
+    ),
 ]

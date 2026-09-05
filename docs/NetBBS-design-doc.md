@@ -4580,7 +4580,7 @@ No public/untrusted federation claim precedes this phase.
 - Link Communities and signed Community membership/carry changes;
 - curated governance audit board and live activity feed.
 
-### Phase 7 — Doors and legacy compatibility — first vertical complete
+### Phase 7 — Doors and legacy compatibility
 
 Implemented (issue #172, closed — supersedes #63 and #167, both closed;
 full design record on those two issues' own comment threads, summarized
@@ -4625,13 +4625,57 @@ here since #172 is self-contained):
   every screen in its tactical HUD — v5.4.0 release notes carry the full
   list, not repeated here).
 
-Explicitly out of scope for this vertical, not implemented:
+Compatibility extension (issues #296/#297):
 
-- DOSBox/dosemu compatibility — a later adapter on top of this same
-  capability set, deferred by #172's own scope boundary, not merely
-  unscheduled;
-- multiplayer or persistent cross-session door state — single-player,
-  session-scoped only, matching issue #63's own recommendation;
+- A nullable, versioned profile preserves the original JSON/stdio API for
+  existing registrations. Profiles add persistent installation directories,
+  disposable node directories, exact CRLF classic drop files, native stdio,
+  controlling PTYs, private inherited DOOR32 sockets, DOSBox-X COM1 sockets,
+  and allowlisted outbound RLogin services. Never pass the caller's socket.
+- CP437 doors are transcoded to/from NetBBS's UTF-8 terminals. Browser door
+  mode uses bounded base64 output frames and stream-scoped raw key events;
+  stale door input cannot become menu actions. Resize stays out of band;
+  fixed geometry is restored to browser-fit geometry on exit. This does not
+  add browser Zmodem support. Explicit raw profiles are native-terminal only.
+- Each POSIX launch owns a process group. An internal, freshly exec'd Python
+  helper applies limits and the optional controlling terminal, then execs the
+  operator-selected argv; no threaded-process `preexec_fn`. Cancellation
+  during spawn or cleanup retains ownership. Descendants are terminated on
+  every exit path, even when their leader has already exited.
+- Legacy installations default to one active session. Cross-process advisory
+  node leases are keyed by resolved installation directory; higher limits
+  require explicit SysOp certification of the game's locking. Persistent
+  scores are owned by the door, not a new NetBBS database capability.
+- DOSBox-X is external software. NetBBS generates narrow C: installation and
+  D: node mounts, headless configuration, transparent inherited COM1 and
+  secure mode after mounting. Optional FOSSIL software is operator supplied.
+  Runtime diagnostics are bounded and SysOp-only; emulator stderr is never
+  relayed to callers. DOS program status is checked separately from emulator
+  status, including LORD's normal return code 255.
+- RLogin requires a fixed allowlist and caller-visible service identity.
+  Loopback SSH/TLS tunnels are the default; direct plaintext requires an
+  explicit insecure-operation acknowledgement. Provider identity templates
+  may read a private operator-created credential file. No caller chooses a
+  destination and no privileged source port is requested.
+- A SysOp draft editor provides packaged setup templates, JSON import,
+  preflight and an explicit test launch. Back saves nothing; Test may modify
+  the game's persistent data. No game, driver, emulator, tunnel or host
+  package is automatically downloaded or installed.
+
+The bounded verification matrix and exact manual setup instructions live in
+[the door guide](NetBBS-door-guide.md). A template is not a certification of
+arbitrary game versions, platforms, or multiplayer operation. Same-user
+native code can read the service account's files, including keys and database;
+resource limits are not filesystem/network isolation. DOS mounts improve the
+practical boundary but cannot protect against emulator vulnerabilities.
+Optional external runner argv is operator-managed and does not imply a
+privileged or automatically provisioned containment environment.
+
+Still outside the supported scope:
+
+- Wine/Win32, Linux ELF emulation on NetBSD, DOSEMU, other BBSes' private
+  scripting APIs, graphical/VGA scraping, RIP, sound or IPX forwarding;
+- universal legacy compatibility, untrusted native binaries or caller uploads;
 - any door capability beyond the raw-terminal-I/O metadata handshake
   above — deliberately minimal by design, add only what a real door
   actually needs;
@@ -4639,8 +4683,8 @@ Explicitly out of scope for this vertical, not implemented:
   this phase's original planning stub, never folded into #172's own
   scope and not otherwise picked up; still open, unscoped.
 
-`RLIMIT_CPU`/`RLIMIT_AS`/`RLIMIT_NPROC` are all set in the forked child
-before exec (`src/netbbs/doors/runtime.py`), matching the locked design's
+`RLIMIT_CPU`/`RLIMIT_AS`/`RLIMIT_NPROC` are set by the internal launcher
+before the real program's exec (`src/netbbs/doors/launcher.py`), matching the locked design's
 CPU/memory/process-count ceilings; the wall-time watchdog, crash
 reporting, and cleanup-on-disconnect each have a real regression test
 (`tests/test_doors_runtime.py`). Not yet independently verified: a

@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# External DOSBox-X build patch; not part of the NetBBS Python runtime.
+--- a/configure.ac
++++ b/configure.ac
+@@ -713,1 +713,5 @@
+-AC_CHECK_LIB(png, png_get_io_ptr, have_png_lib=yes, ,-lz)
++AC_CHECK_LIB(png, png_get_io_ptr, [have_png_lib=yes; png_link=-lpng], ,-lz)
++if test x$have_png_lib != xyes; then
++    AC_CHECK_LIB(png16, png_get_io_ptr,
++        [have_png_lib=yes; png_link=-lpng16], ,-lz)
++fi
+@@ -1106,1 +1110,1 @@
+-    LIBS="$LIBS -lpng -lz"
++    LIBS="$LIBS $png_link -lz"

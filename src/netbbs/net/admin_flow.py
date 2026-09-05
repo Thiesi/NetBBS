@@ -13098,6 +13098,7 @@ async def _list_doors_screen(session: Session, lane: DatabaseLane, actor: User) 
 
 
 async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User, door: Door) -> None:
+    from netbbs.net.door_profile_flow import edit_door_profile, show_door_diagnostic
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
@@ -13109,6 +13110,14 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
         if choice == "b":
             await session.write_line("")
             return
+        elif choice == "c":
+            updated = await edit_door_profile(session, lane, actor, door)
+            if updated is not None:
+                door = updated
+            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+        elif choice == "l":
+            await show_door_diagnostic(session, lane, door)
+            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
         elif choice == "e":
             await session.write_line("")
             updated = await _door_screen(session, lane, actor, existing=door)
@@ -13142,7 +13151,10 @@ async def _draw_door_detail(
     await session.write_line(f"Arguments: {' '.join(door.args) if door.args else '(none)'}")
     await session.write_line(f"Community: {await lane.run(_community_label, door.community_id)}")
     await session.write_line(f"Play level: {door.min_play_level}  Pinned: {'yes' if door.pinned else 'no'}")
+    await session.write_line(f"Compatibility: {door.profile.adapter if door.profile else 'NetBBS native API'}")
     options = [
+        MenuEntry(label=menu_key("C", "ompatibility"), brief="Profile, preflight and test launch"),
+        MenuEntry(label=menu_key("L", "ast diagnostic"), brief="View runtime errors"),
         MenuEntry(label=menu_key("E", "dit"), brief="Change this door's settings"),
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this door"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),

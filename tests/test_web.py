@@ -24,6 +24,29 @@ async def _run_server(session_handler):
     return server
 
 
+def test_bound_port_does_not_require_new_tcpsite_property(monkeypatch):
+    # aiohttp 3.9-3.11 have no TCPSite.port; exercise that older public surface
+    # even when the development environment has a newer aiohttp installed.
+    monkeypatch.delattr(aiohttp.web.TCPSite, "port", raising=False)
+
+    async def scenario():
+        async def handler(session):
+            pass
+
+        server = await _run_server(handler)
+        try:
+            assert server.port > 0
+            async with aiohttp.ClientSession() as client:
+                async with client.get(f"http://127.0.0.1:{server.port}/") as response:
+                    assert response.status == 200
+        finally:
+            await server.stop()
+        with pytest.raises(RuntimeError, match="not been started"):
+            _ = server.port
+
+    asyncio.run(scenario())
+
+
 def test_session_handler_is_called_on_connect():
     calls = []
 

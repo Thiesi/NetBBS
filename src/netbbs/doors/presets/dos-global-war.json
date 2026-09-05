@@ -1,0 +1,11 @@
+{
+  "name": "Global War 2.7 DOS",
+  "executable_path": "/usr/pkg/bin/dosbox-x",
+  "args": [],
+  "profile": {
+    "version": 1, "adapter": "dosbox", "endpoint": "socketpair",
+    "install_dir": "/var/games/netbbs/globalwar", "drop_files": ["DOOR.SYS"],
+    "encoding": "cp437", "width": 80, "height": 25, "memory_mb": 1024,
+    "max_sessions": 1, "options": {"command": "WAR.EXE /D D:\\DOOR.SYS"}
+  }
+}

@@ -28,7 +28,7 @@ from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
-from netbbs.rendering import MUTED_COLOR, colored
+from netbbs.rendering import MUTED_COLOR, colored, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -79,7 +79,8 @@ async def browse_doors(
         door = await pick_item(
             session,
             doors,
-            name_of=lambda d: d.name,
+            name_of=lambda d: (f"{d.name} [remote: {d.profile.options['service_name']}]"
+                               if d.profile and d.profile.adapter == "rlogin" else d.name),
             stable_id_of=lambda d: d.id,
             description_of=lambda d: d.description,
             title=title,
@@ -106,6 +107,9 @@ async def browse_doors(
             )
             continue
 
+        if door.profile and door.profile.adapter == "rlogin":
+            await session.write_line("Remote service: " + sanitize_text(door.profile.options["service_name"]) +
+                                     ". Its operator receives your game identity and controls game data and availability.")
         await session.write_line(colored(f"\r\nLaunching {door.name}...", fg_color=MUTED_COLOR))
         result = await run_door(session, lane, door, user)
         if not await _report_door_result(session, door, result):
@@ -126,6 +130,10 @@ async def _report_door_result(session: Session, door: Door, result: DoorRunResul
         message = f"{door.name} exited unexpectedly (code {result.exit_code})."
     elif result.reason == "timed_out":
         message = f"{door.name} was ended -- it ran too long."
+    elif result.reason == "relay_failed":
+        message = f"{door.name} stopped because its terminal stream failed -- ask a SysOp to check the log."
+    elif result.reason == "busy":
+        message = f"{door.name} is in use. Please try again when another caller has finished."
     else:
         message = f"Left {door.name}."
     await session.write_line(colored(f"\r\n{message}", fg_color=MUTED_COLOR))

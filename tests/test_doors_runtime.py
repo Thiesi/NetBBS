@@ -7,6 +7,7 @@ module actually uses."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import collections
 import importlib.util
 import json
@@ -217,6 +218,55 @@ def test_bad_executable_path_is_reported_as_failed_to_start(db, lane, player):
 
     assert result.reason == "failed_to_start"
     assert result.exit_code is None
+
+
+@pytest.mark.parametrize("game,keys,expected", [
+    ("retro_trivia.py", "A" * 9, b"Final score:"),
+    ("voidrunner.py", "\rYQ", b"Docking clamps engaged"),
+    ("war_dialer.py", " Q", b"W A R"),
+])
+def test_web_bundled_trivia_round_restores_menu_on_same_websocket(db, lane, player, tmp_path, monkeypatch, game, keys, expected):
+    import aiohttp
+    from netbbs.net.web import WebServer
+
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path / "door-home"))
+    door = create_door(db, "Web bundled", sys.executable, args=(str(_BUNDLED_DOORS_DIR / game),), creator=player)
+    results = []
+
+    async def handler(session):
+        # Includes interpreter startup on real, potentially emulated POSIX
+        # hosts; watchdog behavior has its own short, dedicated tests.
+        results.append(await run_door(session, lane, door, player, wall_time_limit_seconds=60))
+        await session.write("MENU")
+        assert await session.read_key(echo=False) == "B"
+        await session.write("BACK")
+
+    async def scenario():
+        server = WebServer(host="127.0.0.1", port=0, session_handler=handler)
+        await server.start()
+        output = bytearray()
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws:
+                    mode = await ws.receive_json(timeout=3)
+                    assert mode["type"] == "door_mode" and mode["active"]
+                    await ws.send_json({"type": "door_key", "stream": mode["stream"], "data": keys})
+                    while True:
+                        msg = await ws.receive_json(timeout=75)
+                        if msg["type"] == "door_output":
+                            output.extend(base64.b64decode(msg["data"]))
+                        elif msg["type"] == "door_mode":
+                            assert not msg["active"]
+                        elif msg.get("data") == "MENU":
+                            await ws.send_json({"type": "key", "data": "B"})
+                        elif msg.get("data") == "BACK":
+                            break
+        finally:
+            await server.stop()
+        assert expected in output
+
+    asyncio.run(scenario())
+    assert results[0].reason == "exited"
 
 
 def test_play_door_is_audit_logged(db, lane, player, tmp_path):

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.auth.users import User
+from netbbs.doors.profiles import DoorProfile
 from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -63,6 +64,7 @@ class Door:
     pinned: bool
     created_at: str
     community_id: int | None
+    profile: DoorProfile | None = None
 
 
 def create_door(
@@ -76,18 +78,20 @@ def create_door(
     pinned: bool = False,
     community_id: int | None = None,
     creator: User,
+    profile: DoorProfile | None = None,
 ) -> Door:
     """Register a new door. No permission check here -- same reasoning
     as `create_file_area`/`create_board`: an admin-level action, gated by
     the calling screen (SysOp console), not this function."""
+    profile_json = profile.to_json() if profile else None
     created_at = utc_now_iso()
     try:
         db.connection.execute(
             """
             INSERT INTO doors
                 (name, description, executable_path, args, min_play_level,
-                 pinned, created_at, community_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 pinned, created_at, community_id, profile_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -98,6 +102,7 @@ def create_door(
                 int(pinned),
                 created_at,
                 community_id,
+                profile_json,
             ),
         )
         db.connection.commit()
@@ -151,6 +156,7 @@ def update_door(
     pinned: bool,
     community_id: int | None,
     changed_by: User,
+    profile: DoorProfile | None = None,
 ) -> Door:
     """Replace `door`'s editable settings with the given full state --
     mirrors `update_file_area`'s own full-replace shape."""
@@ -159,13 +165,14 @@ def update_door(
             """
             UPDATE doors
             SET name = ?, description = ?, executable_path = ?, args = ?,
-                min_play_level = ?, pinned = ?, community_id = ?
+                min_play_level = ?, pinned = ?, community_id = ?, profile_json = ?
             WHERE id = ?
             """,
             (
                 name, description, executable_path,
                 json.dumps(list(args)) if args else None,
-                min_play_level, int(pinned), community_id, door.id,
+                min_play_level, int(pinned), community_id,
+                (profile or door.profile).to_json() if (profile or door.profile) else None, door.id,
             ),
         )
         db.connection.commit()
@@ -201,4 +208,5 @@ def _row_to_door(row: sqlite3.Row) -> Door:
         pinned=bool(row["pinned"]),
         created_at=row["created_at"],
         community_id=row["community_id"],
+        profile=DoorProfile.from_json(row["profile_json"]) if row["profile_json"] else None,
     )

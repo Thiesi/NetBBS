@@ -4,8 +4,11 @@
 //   browser -> server: {"type": "key", "data": "<raw onData string>"}
 //                       {"type": "resize", "cols": N, "rows": N}
 //   server -> browser: {"type": "output", "data": "<text to display>"}
+// Door mode adds stream-tagged door_key/door_output frames; output carries
+// base64 UTF-8 bytes (legacy CP437 is converted by the server). A streaming
+// decoder preserves code points split across frames.
 //
-// Deliberately not raw byte passthrough (xterm.js's addon-attach) --
+// Menus deliberately do not use raw byte passthrough (addon-attach) --
 // see design doc round 22 point 7 for why: a browser has already
 // resolved the raw-terminal-byte ambiguity a byte-oriented protocol
 // exists to handle, and structured messages give resize a first-class
@@ -35,6 +38,9 @@
 
   var scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
   var ws = new WebSocket(scheme + "//" + window.location.host + "/ws");
+  var doorStream = null;
+  var doorDecoder = null;
+  var fixedDoorSize = false;
 
   function sendResize() {
     if (ws.readyState === WebSocket.OPEN) {
@@ -53,7 +59,18 @@
     } catch (e) {
       return;
     }
-    if (msg.type === "output" && typeof msg.data === "string") {
+    if (msg.type === "door_mode") {
+      if (doorDecoder) term.write(doorDecoder.decode());
+      doorStream = msg.active ? msg.stream : null;
+      doorDecoder = msg.active ? new TextDecoder("utf-8") : null;
+      fixedDoorSize = !!(msg.active && msg.cols && msg.rows);
+      if (fixedDoorSize) term.resize(msg.cols, msg.rows);
+      else fitAddon.fit();
+      if (!msg.active) sendResize();
+    } else if (msg.type === "door_output" && msg.stream === doorStream && doorDecoder) {
+      var bytes = Uint8Array.from(atob(msg.data), function (c) { return c.charCodeAt(0); });
+      term.write(doorDecoder.decode(bytes, { stream: true }));
+    } else if (msg.type === "output" && typeof msg.data === "string") {
       term.write(msg.data);
     }
   };
@@ -68,12 +85,18 @@
 
   term.onData(function (data) {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "key", data: data }));
+      // Bound pasted chunks and browser-side queued writes as well as server queues.
+      var chars = Array.from(data);
+      for (var i = 0; i < chars.length; i += 1024) {
+        if (ws.bufferedAmount > 65536) { ws.close(); return; }
+        ws.send(JSON.stringify({ type: doorStream === null ? "key" : "door_key",
+                                stream: doorStream, data: chars.slice(i, i + 1024).join("") }));
+      }
     }
   });
 
   window.addEventListener("resize", function () {
-    fitAddon.fit();
+    if (!fixedDoorSize) fitAddon.fit();
     sendResize();
   });
 })();
