@@ -2590,4 +2590,19 @@ MIGRATIONS = [
         CREATE UNIQUE INDEX idx_channels_mrc_room ON channels(lower(mrc_room)) WHERE mrc_room IS NOT NULL;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #300 (MRC open rooms): channels.mrc_origin tells a SysOp-mapped bridge "
+            "(NULL) from an MRC room a caller opened on demand ('caller' -- a real channel "
+            "row named mrc:<room>, materialized the way a carried Link channel is, never "
+            "Link-able, retired by the bridge's sweeper when idle); channels.mrc_last_active_at "
+            "is what that sweeper reads. Additive nullable columns, same shape as mrc_room. "
+            "The open-room switch, defaults, cap, retention and blocklist live in node_config "
+            "(mrc_open_rooms*), no new table."
+        ),
+        sql="""
+        ALTER TABLE channels ADD COLUMN mrc_origin TEXT;
+        ALTER TABLE channels ADD COLUMN mrc_last_active_at TEXT;
+        """,
+    ),
 ]

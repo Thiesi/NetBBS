@@ -66,6 +66,15 @@ def is_channel_linked(db: Database, channel: Channel) -> bool:
     return row is not None and row["link_genesis_json"] is not None
 
 
+def is_open_mrc_room(db: Database, channel: Channel) -> bool:
+    """Whether `channel` is an MRC room a caller opened (issue #300,
+    `channels.mrc_origin = 'caller'`) -- read here with one query rather
+    than importing `netbbs.mrc.settings`, so Link's own module graph
+    stays free of the bridge package."""
+    row = db.connection.execute("SELECT mrc_origin FROM channels WHERE id = ?", (channel.id,)).fetchone()
+    return row is not None and "mrc_origin" in row.keys() and row["mrc_origin"] == "caller"
+
+
 def link_channel(
     db: Database,
     channel: Channel,
@@ -93,6 +102,14 @@ def link_channel(
     """
     if is_channel_linked(db, channel):
         raise LinkChannelsError(f"channel {channel.name!r} is already Linked")
+    if is_open_mrc_room(db, channel):
+        # Issue #300: a room a caller opened on MRC is that network's
+        # content, never this node's -- signing a genesis for it would
+        # re-broadcast an unauthenticated network under this node's key.
+        raise LinkChannelsError(
+            f"channel {channel.name!r} is an MRC room a caller opened and cannot be Linked; "
+            "adopt it and bridge a local channel instead if you want that room on Link"
+        )
 
     genesis = build_channel_genesis(
         signing_identity=node_identity.signing_key,

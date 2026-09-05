@@ -68,6 +68,7 @@ import asyncio
 import logging
 import platform
 import random
+import re
 import sqlite3
 import ssl
 import sys
@@ -82,7 +83,18 @@ from netbbs.chat.hub import ChatHub
 from netbbs.chat.scrollback import ChannelMessage, record_message
 from netbbs.mrc import protocol
 from netbbs.mrc.protocol import MrcPacket, parse_line
-from netbbs.mrc.settings import MrcChannelMapping, MrcSettings, list_mrc_mappings, load_mrc_settings
+from netbbs.mrc.settings import (
+    MrcChannelMapping,
+    MrcSettings,
+    MrcSettingsError,
+    OpenRoomSettings,
+    list_mrc_mappings,
+    load_mrc_settings,
+    load_open_room_settings,
+    materialize_open_room,
+    sweep_open_rooms,
+    touch_open_room,
+)
 from netbbs.net.throttle import _TokenBucket
 from netbbs.rendering import colored
 from netbbs.rendering.pipe_codes import strip_pipe_codes
@@ -122,6 +134,13 @@ REPLY_RATE_PER_SECOND = 10.0
 CTCP_BURST = 3
 CTCP_RATE_PER_SECOND = 0.5
 MAX_TRACKED_CTCP_SENDERS = 200
+# Issue #300: rooms this node has seen named (opened here, a USERROOM
+# target, join/leave chatter) -- remotely named, so bounded; and how
+# often an open room's activity stamp is written per channel.
+MAX_OBSERVED_ROOMS = 200
+OPEN_ROOM_TOUCH_INTERVAL_SECONDS = 60.0
+# `*** Joining lobby: nick@site` / `*** Leaving lobby: nick@site`
+_ROOM_CHATTER_RE = re.compile(r"^\*\*\*\s+(?:Joining|Leaving)\s+(?P<room>[^\s:]+):", re.IGNORECASE)
 
 RECONNECT_MIN_BACKOFF_SECONDS = 1.0
 RECONNECT_MAX_BACKOFF_SECONDS = 60.0
@@ -169,6 +188,14 @@ class MrcStatus:
     dropped_outbound: int
     dropped_inbound: int
     rooms: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Issue #300: open rooms (rooms callers opened) against the SysOp's
+    # cap, rooms this node has heard of but nobody here is in, and how
+    # many idle open rooms the sweeper has retired since start.
+    open_rooms_enabled: bool = False
+    open_rooms: int = 0
+    open_room_cap: int = 0
+    observed_rooms: int = 0
+    retired_rooms: int = 0
 
     @property
     def connected(self) -> bool:
@@ -199,6 +226,7 @@ class MrcBridge:
         version: str,
         load_settings: Callable[[Database], MrcSettings] = load_mrc_settings,
         load_mappings: Callable[[Database], list[MrcChannelMapping]] = list_mrc_mappings,
+        load_open_settings: Callable[[Database], OpenRoomSettings] = load_open_room_settings,
         open_connection: OpenConnection = asyncio.open_connection,
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -216,6 +244,7 @@ class MrcBridge:
         self._version = version
         self._load_settings = load_settings
         self._load_mappings = load_mappings
+        self._load_open_settings = load_open_settings
         self._open_connection = open_connection
         self._rng = rng if rng is not None else random.Random()
         self._clock = clock
@@ -253,6 +282,13 @@ class MrcBridge:
         self._reply_truncated: set[str] = set()
         self._ctcp_buckets: dict[tuple[str, str], _TokenBucket] = {}
         self._rehomed: dict[tuple[int, str], int] = {}
+        # Issue #300: the open-room settings, rooms heard of (lower-cased
+        # name -> (display name, last seen)), the last activity stamp
+        # written per open room, and the sweeper's tally.
+        self._open_settings: OpenRoomSettings | None = None
+        self._observed_rooms: dict[str, tuple[str, float]] = {}
+        self._last_touch: dict[int, float] = {}
+        self._retired_rooms = 0
 
         self._outbound: asyncio.Queue[str] = asyncio.Queue(maxsize=outbound_queue_size)
         self._node_bucket = _TokenBucket(OUTBOUND_BURST, OUTBOUND_RATE_PER_SECOND, clock)
@@ -309,7 +345,11 @@ class MrcBridge:
         unmaps or pauses a channel) and reconcile announced callers
         without dropping the hub connection."""
         async with self._reload_lock:
-            self._apply_mappings(await self._lane.run(self._load_mappings))
+            def _load(db: Database) -> tuple[list[MrcChannelMapping], OpenRoomSettings]:
+                return self._load_mappings(db), self._load_open_settings(db)
+
+            mappings, self._open_settings = await self._lane.run(_load)
+            self._apply_mappings(mappings)
             if self._state is MrcState.CONNECTED:
                 await self._reconcile_announced(notify=True)
             if self._settings is not None and self._settings.enabled and self._connector_task is None:
@@ -317,16 +357,19 @@ class MrcBridge:
                 self._start_connector_if_enabled()
 
     async def _reload_from_db(self) -> None:
-        def _load(db: Database) -> tuple[MrcSettings, list[MrcChannelMapping]]:
-            return self._load_settings(db), self._load_mappings(db)
+        def _load(db: Database) -> tuple[MrcSettings, list[MrcChannelMapping], OpenRoomSettings]:
+            return self._load_settings(db), self._load_mappings(db), self._load_open_settings(db)
 
-        settings, mappings = await self._lane.run(_load)
+        settings, mappings, open_settings = await self._lane.run(_load)
         self._settings = settings
+        self._open_settings = open_settings
         self._apply_mappings(mappings)
 
     def _apply_mappings(self, mappings: list[MrcChannelMapping]) -> None:
         self._by_room = {mapping.room.lower(): mapping for mapping in mappings}
         self._by_channel = {mapping.channel.id: mapping for mapping in mappings}
+        for mapping in mappings:
+            self._observe_room(mapping.room)
 
     def _start_connector_if_enabled(self) -> None:
         if self._stopping or self._settings is None or not self._settings.enabled:
@@ -600,6 +643,7 @@ class MrcBridge:
             # keeps relaying (and tells any newly-bridged occupants).
             await self.refresh_channel_mappings()
             self._rehomed.clear()
+            await self._sweep_open_rooms()
             refresh_rosters = self._clock() - last_userlist >= self._userlist_refresh
             for channel_id, nicks in list(self._announced.items()):
                 mapping = self._by_channel.get(channel_id)
@@ -690,7 +734,13 @@ class MrcBridge:
 
         def _is_own(entry: str) -> bool:
             nick, _, site = entry.partition("@")
-            return nick.lower() in own and (not site or site.lower() == own_site)
+            if site:
+                # Anyone the hub lists at this node's own site is this
+                # node's caller, announced now or a moment ago (issue
+                # #300: a roster fetched before a caller left still
+                # names them) -- never "on MRC" from here.
+                return site.lower() == own_site
+            return nick.lower() in own
 
         return sorted((name for name in roster if not _is_own(name)), key=str.lower)
 
@@ -702,6 +752,7 @@ class MrcBridge:
         if mapping is None or not mapping.active or self._state is not MrcState.CONNECTED:
             return
         self._announce(mapping, username)
+        await self._touch(mapping)
 
     async def local_leave(self, channel: Channel, username: str) -> None:
         """A caller left `channel`. Sends LOGOFF only once the account
@@ -761,6 +812,7 @@ class MrcBridge:
         for chunk in chunks:
             bucket.consume()
             self._enqueue(protocol.chat_message(nick, settings.site_wire_name, mapping.room, template(nick, chunk)))
+        await self._touch(mapping)
         return True, truncated
 
     def _announce(self, mapping: MrcChannelMapping, username: str) -> None:
@@ -871,10 +923,11 @@ class MrcBridge:
             # listens rather than filed under the sender's room.
             await self._handle_broadcast(packet)
             return
+        plain = strip_pipe_codes(packet.body).strip()
+        self._observe_chatter(plain)
         mapping = self._by_room.get(packet.room.lower())
         if mapping is None or not mapping.active:
             return
-        plain = strip_pipe_codes(packet.body).strip()
         if not plain:
             return
         if packet.to_user.upper() == protocol.NOTME or protocol.looks_like_presence_chatter(plain):
@@ -909,6 +962,7 @@ class MrcBridge:
             )
             return
         await self._hub.broadcast(mapping.channel.name, recorded)
+        await self._touch(mapping)
 
     def _forget_mapping(self, mapping: MrcChannelMapping) -> None:
         self._by_room.pop(mapping.room.lower(), None)
@@ -980,6 +1034,7 @@ class MrcBridge:
             return  # addressed to a nick this node never announced
         if command in ("STATS", "LATENCY", "BANNER", "MOTD"):
             return  # site-wide chatter with no room to show it in
+        self._observe_chatter(strip_pipe_codes(packet.body))
         mapping = self._by_room.get(packet.room.lower())
         if mapping is None or not mapping.active:
             return
@@ -1000,6 +1055,7 @@ class MrcBridge:
         settings = self._settings
         if mapping is None or settings is None or not room or room.lower() == mapping.room.lower():
             return
+        self._observe_room(room)
         nick = self._announced.get(channel_id, {}).get(username)
         if nick is None:
             return
@@ -1148,6 +1204,127 @@ class MrcBridge:
         bucket.consume()
         await self._deliver_to_caller(username, MrcNotice(text, utc_now_iso(), kind="reply"))
 
+    # --- open rooms (issue #300) ---------------------------------------------
+
+    @property
+    def open_rooms_enabled(self) -> bool:
+        """Whether callers may open MRC rooms here: MRC on node-wide
+        *and* the open-room switch on."""
+        return (
+            self._settings is not None and self._settings.enabled
+            and self._open_settings is not None and self._open_settings.enabled
+        )
+
+    @property
+    def open_room_settings(self) -> OpenRoomSettings | None:
+        return self._open_settings
+
+    async def open_room(self, room: str, username: str) -> MrcChannelMapping:
+        """Open MRC `room` for `username`: materialize (or find) its
+        channel and make the bridge treat it as an active mapping now,
+        so the caller's `NEWROOM` goes out through the ordinary announce
+        path the moment they enter. Raises `MrcSettingsError` with the
+        reason the caller sees (switched off, blocked, at the cap)."""
+        if not self.open_rooms_enabled or self._open_settings is None:
+            raise MrcSettingsError("Opening MRC rooms is switched off on this node.")
+        open_settings = self._open_settings
+        mapping = await self._lane.run(materialize_open_room, room, open_settings=open_settings)
+        self._observe_room(mapping.room)
+        await self.refresh_channel_mappings()
+        return mapping
+
+    def identity_room_elsewhere(self, channel: Channel, username: str, *, leaving: Channel | None = None) -> str | None:
+        """The MRC room `username` is already announced in through a
+        channel other than `channel`, or `None`. An MRC identity is one
+        nick at one site in one room: a second session of the same
+        account cannot be in two rooms at once (decision 6, issue #300),
+        so the caller is refused with this room's name.
+
+        `leaving` is the channel the asking session is about to leave
+        (`/join` from inside a room): it does not count unless another
+        session of the same account is still in it, since that session
+        keeps the identity there after this one has gone."""
+        for channel_id, nicks in self._announced.items():
+            if channel_id == channel.id or username not in nicks:
+                continue
+            mapping = self._by_channel.get(channel_id)
+            if mapping is None:
+                continue
+            if leaving is not None and channel_id == leaving.id:
+                if len(self._hub.participants_for_username(mapping.channel.name, username)) <= 1:
+                    continue
+            return mapping.room
+        return None
+
+    def observed_rooms(self) -> list[str]:
+        """Rooms this node has heard of, most recently seen first: rooms
+        callers opened, `USERROOM` targets, join/leave chatter naming a
+        room. Advisory -- joining by name is the mechanism; this is the
+        list beside it."""
+        ordered = sorted(self._observed_rooms.values(), key=lambda entry: entry[1], reverse=True)
+        return [display for display, _seen in ordered]
+
+    def _observe_room(self, room: str) -> None:
+        room = protocol.sanitize_room(room)
+        if not room:
+            return
+        key = room.lower()
+        if key not in self._observed_rooms and len(self._observed_rooms) >= MAX_OBSERVED_ROOMS:
+            oldest = min(self._observed_rooms.items(), key=lambda item: item[1][1])[0]
+            del self._observed_rooms[oldest]
+        self._observed_rooms[key] = (room, self._clock())
+
+    def _observe_chatter(self, plain: str) -> None:
+        match = _ROOM_CHATTER_RE.match(plain.strip())
+        if match is not None:
+            self._observe_room(match.group("room"))
+
+    async def _touch(self, mapping: MrcChannelMapping) -> None:
+        """Stamp activity on an open room for the sweeper, at most once
+        per `OPEN_ROOM_TOUCH_INTERVAL_SECONDS` per channel -- one lane
+        write per minute, never one per line."""
+        if not mapping.is_open_room:
+            return
+        now = self._clock()
+        if now - self._last_touch.get(mapping.channel.id, -1e9) < OPEN_ROOM_TOUCH_INTERVAL_SECONDS:
+            return
+        self._last_touch[mapping.channel.id] = now
+        try:
+            await self._lane.run(touch_open_room, mapping.channel)
+        except sqlite3.DatabaseError as exc:
+            _logger.warning("MRC open room %r: could not stamp activity: %s", mapping.room, exc)
+
+    async def _sweep_open_rooms(self) -> None:
+        """Retire idle open rooms (see `sweep_open_rooms`): nobody in
+        them per the `ChatHub`, idle past the retention, followed by no
+        one. Runs every keepalive tick whether or not the switch is
+        currently on -- rooms opened earlier still age out."""
+        open_settings = self._open_settings
+        if open_settings is None:
+            return
+        occupied = {
+            mapping.channel.id for mapping in self._by_channel.values()
+            if self._hub.participant_count(mapping.channel.name) > 0
+        }
+        try:
+            retired = await self._lane.run(
+                sweep_open_rooms, retention_days=open_settings.retention_days, occupied_channel_ids=occupied,
+            )
+        except sqlite3.DatabaseError as exc:
+            _logger.warning("MRC open-room sweep failed: %s", exc)
+            return
+        if not retired:
+            return
+        self._retired_rooms += len(retired)
+        for mapping in retired:
+            self._forget_mapping(mapping)
+            self._last_touch.pop(mapping.channel.id, None)
+            _logger.info(
+                "MRC open room #%s retired after %d idle day(s) (channel %r and its scrollback removed)",
+                mapping.room, open_settings.retention_days, mapping.channel.name,
+            )
+        await self.refresh_channel_mappings()
+
     # --- caller-initiated hub commands (issue #298) ------------------------
 
     def send_hub_command(self, channel: Channel, username: str, command: str) -> str | None:
@@ -1274,6 +1451,11 @@ class MrcBridge:
             dropped_outbound=self._dropped_outbound,
             dropped_inbound=self._dropped_inbound,
             rooms=rooms,
+            open_rooms_enabled=self.open_rooms_enabled,
+            open_rooms=sum(1 for mapping in self._by_channel.values() if mapping.is_open_room),
+            open_room_cap=self._open_settings.cap if self._open_settings is not None else 0,
+            observed_rooms=len(self._observed_rooms),
+            retired_rooms=self._retired_rooms,
         )
 
     @property

@@ -250,7 +250,12 @@ from netbbs.mrc.settings import (
     MrcChannelMapping,
     MrcSettings,
     MrcSettingsError,
+    OpenRoomSettings,
+    adopt_open_room,
     clear_mrc_room,
+    load_open_room_settings,
+    retire_open_room,
+    save_open_room_settings,
     default_port_for,
     get_mrc_mapping,
     list_mrc_mappings,
@@ -258,7 +263,9 @@ from netbbs.mrc.settings import (
     save_mrc_settings,
     set_mrc_paused,
     set_mrc_room,
+    validate_mrc_settings,
 )
+from netbbs.mrc.protocol import sanitize_room
 from netbbs.moderation.roles import (
     BoardPermission,
     ChannelPermission,
@@ -5150,11 +5157,19 @@ async def _mrc_settings_screen(
     enabling MRC can never, by itself, put any channel on the network.
     """
     current = await lane.run(load_mrc_settings)
+    open_current = await lane.run(load_open_room_settings)
     draft: dict = {
         "enabled": current.enabled, "host": current.host, "port": current.port, "tls": current.tls,
         "site_name": current.site_name, "info_sysop": current.info_sysop,
         "info_description": current.info_description, "info_telnet": current.info_telnet,
         "info_ssh": current.info_ssh, "info_web": current.info_web,
+        # Issue #300: the open-room half -- whether callers may open any
+        # room, the gates a room opened that way starts with, and the
+        # lifecycle bounds.
+        "open_rooms": open_current.enabled, "open_min_level": open_current.min_level,
+        "open_min_age": open_current.min_age, "open_name_requirement": open_current.name_requirement,
+        "open_cap": open_current.cap, "open_retention_days": open_current.retention_days,
+        "open_blocklist": list(open_current.blocklist),
     }
     mrc_bridge = node_controls.mrc_bridge if node_controls is not None else None
     unicode_style = await lane.run(unicode_style_enabled, actor)
@@ -5237,6 +5252,58 @@ async def _mrc_settings_screen(
             render=lambda d: d["info_web"] or "(none)", prompt=_optional_text_field("info_web"),
             brief="URL of the web/xterm.js front door", section="Advertised addresses",
         ),
+        FieldSpec(
+            key="open_rooms", hotkey="o", menu_text=menu_key("O", "pen rooms"), label="Callers may open any room",
+            render=lambda d: "yes" if d["open_rooms"] else "no",
+            prompt=bool_field("open_rooms", "Let callers open any MRC room from the chat picker?"),
+            brief="Rooms callers open appear as mrc:<room> channels", section="Open rooms",
+            help=(
+                "Off by default. On: the chat channel picker gains a Multi Relay Chat section where a "
+                "caller can open any room on the network by name; it becomes a channel named mrc:<room> "
+                "here, with the gates below, and is retired once idle. Channels you bridge yourself are "
+                "unaffected either way."
+            ),
+        ),
+        FieldSpec(
+            key="open_min_level", hotkey="v", menu_text=menu_key("v", "el for open rooms", prefix="Le"),
+            label="Minimum level (open rooms)",
+            render=lambda d: str(d["open_min_level"]), prompt=_int_field("open_min_level", "Minimum level"),
+            brief="Level a caller needs to open or enter one", section="Open rooms",
+        ),
+        FieldSpec(
+            key="open_min_age", hotkey="g", menu_text=menu_key("g", "e for open rooms", prefix="A"),
+            label="Minimum age (open rooms)",
+            render=lambda d: "none" if d["open_min_age"] is None else str(d["open_min_age"]),
+            prompt=_optional_int_field("open_min_age", "Minimum age (blank = none)"),
+            brief="Age gate on every room callers open", section="Open rooms",
+        ),
+        FieldSpec(
+            key="open_name_requirement", hotkey="q", menu_text=menu_key("q", "uired name (open rooms)", prefix="Re"),
+            label="Name requirement (open rooms)",
+            render=lambda d: d["open_name_requirement"] or "none",
+            prompt=choice_field("open_name_requirement", [None, "verified", "verified_and_displayed"]),
+            brief="none / verified / verified_and_displayed", section="Open rooms",
+        ),
+        FieldSpec(
+            key="open_cap", hotkey="c", menu_text=menu_key("C", "ap on open rooms"), label="Cap on open rooms",
+            render=lambda d: str(d["open_cap"]), prompt=_int_field("open_cap", "Most rooms open at once"),
+            brief="Opening refuses past this; nothing is evicted", section="Open rooms",
+        ),
+        FieldSpec(
+            key="open_retention_days", hotkey="r", menu_text=menu_key("R", "etention (days)"), label="Retention (days)",
+            render=lambda d: str(d["open_retention_days"]),
+            prompt=_int_field("open_retention_days", "Days an open room may sit idle"),
+            brief="An idle, unfollowed open room is retired after this", section="Open rooms",
+            help=(
+                "A room callers opened is deleted, with its scrollback, once nobody has been in it for "
+                "this many days -- unless someone follows it or you adopt it from its channel screen."
+            ),
+        ),
+        FieldSpec(
+            key="open_blocklist", hotkey="k", menu_text=menu_key("k", "list", prefix="Bloc"), label="Blocked rooms",
+            render=lambda d: ", ".join(d["open_blocklist"]) if d["open_blocklist"] else "(none)",
+            prompt=_blocklist_field, brief="Rooms callers may not open here", section="Open rooms",
+        ),
     ]
 
     async def save(draft: dict) -> MrcSettings:
@@ -5247,11 +5314,25 @@ async def _mrc_settings_screen(
             info_ssh=str(draft["info_ssh"]), info_web=str(draft["info_web"]),
         )
 
+        open_candidate = OpenRoomSettings(
+            enabled=bool(draft["open_rooms"]), min_level=int(draft["open_min_level"]),
+            min_age=draft["open_min_age"], name_requirement=draft["open_name_requirement"],
+            cap=int(draft["open_cap"]), retention_days=int(draft["open_retention_days"]),
+            blocklist=tuple(draft["open_blocklist"]),
+        )
+
         def _persist(db: Database) -> MrcSettings:
+            # Validate both halves before writing either, so a bad open-room
+            # value cannot leave the hub half saved and the rest not.
+            validate_mrc_settings(candidate)
+            open_saved = save_open_room_settings(db, open_candidate)
             saved = save_mrc_settings(db, candidate)
             record_action(
                 db, actor=actor, action="set_mrc_settings",
-                detail=f"enabled={saved.enabled} hub={saved.host}:{saved.port} tls={saved.tls} site={saved.site_name!r}",
+                detail=(
+                    f"enabled={saved.enabled} hub={saved.host}:{saved.port} tls={saved.tls} site={saved.site_name!r} "
+                    f"open_rooms={open_saved.enabled} cap={open_saved.cap} retention={open_saved.retention_days}d"
+                ),
             )
             return saved
 
@@ -5283,6 +5364,51 @@ async def _mrc_settings_screen(
     await session.write_line("Saved and applied. Link now: " + _mrc_state_line(status, unicode_style=unicode_style))
     if status.last_error:
         await session.write_line(colored(f"Last error: {sanitize_text(status.last_error)}", fg_color=MUTED_COLOR))
+
+
+async def _blocklist_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
+    """The open-room blocklist as its own small list screen (issue
+    #300): the current entries, `[A]dd` (one prompt), `[R]emove` (pick
+    by number), `[B]ack`. Edits the draft only; the settings screen's
+    own `[S]ave & apply` persists it."""
+    while True:
+        entries: list[str] = list(draft["open_blocklist"])
+        await session.write_line("")
+        if entries:
+            await session.write_line("Blocked MRC rooms (callers cannot open these here):")
+            for index, room in enumerate(entries, start=1):
+                await session.write_line(f"  {index}. #{sanitize_text(room)}")
+        else:
+            await session.write_line(colored("No MRC rooms are blocked.", fg_color=MUTED_COLOR))
+        actions = [menu_key("A", "dd")]
+        if entries:
+            actions.append(menu_key("R", "emove"))
+        actions.append(menu_key("B", "ack"))
+        await session.write_line("    ".join(actions))
+        choice = (await session.read_key()).lower()
+        if choice == "b":
+            await session.write_line("")
+            return
+        if choice == "a":
+            await session.write_line("")
+            await write_prompt(session, "Room to block (blank = cancel): ")
+            raw = (await session.read_line()).strip()
+            room = sanitize_room(raw)
+            if not room:
+                continue
+            if room.lower() not in {entry.lower() for entry in entries}:
+                entries.append(room)
+            draft["open_blocklist"] = entries
+            continue
+        if choice == "r" and entries:
+            await session.write_line("")
+            await write_prompt(session, "Number to remove (blank = cancel): ")
+            raw = (await session.read_line()).strip()
+            if raw.isdigit() and 1 <= int(raw) <= len(entries):
+                del entries[int(raw) - 1]
+                draft["open_blocklist"] = entries
+            continue
+        await session.write(reject_unhandled_key(choice))
 
 
 async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
@@ -5352,12 +5478,27 @@ async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, no
             colored("Dropped lines: ", fg_color=LABEL_COLOR)
             + colored(f"{status.dropped_outbound} outbound, {status.dropped_inbound} inbound", fg_color=METADATA_COLOR)
         )
+    if status.enabled:
+        open_settings = await lane.run(load_open_room_settings)
+        if status.open_rooms_enabled:
+            open_line = (
+                f"{status.open_rooms} of {open_settings.cap} open, retired after {open_settings.retention_days} idle "
+                f"day{'s' if open_settings.retention_days != 1 else ''}; {status.observed_rooms} room"
+                f"{'s' if status.observed_rooms != 1 else ''} heard of; {status.retired_rooms} retired since start"
+            )
+        else:
+            open_line = "off (callers cannot open rooms)" + (
+                f"; {status.open_rooms} opened earlier still age out" if status.open_rooms else ""
+            )
+        await session.write_line(
+            colored("Open rooms: ", fg_color=LABEL_COLOR) + colored(open_line, fg_color=METADATA_COLOR)
+        )
     if not mappings:
         await session.write_line(colored("\r\nNo channel is bridged to an MRC room yet.", fg_color=MUTED_COLOR))
     else:
         await session.write_line("\r\nBridged channels:")
         for mapping in mappings:
-            state = "paused" if mapping.paused else "bridged"
+            state = "paused" if mapping.paused else ("open room" if mapping.is_open_room else "bridged")
             roster = mrc_bridge.remote_roster(mapping.channel)
             who = f"{len(roster)} MRC user{'s' if len(roster) != 1 else ''}"
             if roster:
@@ -13551,16 +13692,27 @@ async def _channel_detail_screen(
             await session.write_line("")
             await _channel_restrictions_screen(session, lane, actor, channel)
             await _redraw()
-        elif choice == "l" and link_context is not None and not linked:
+        elif choice == "l" and link_context is not None and not linked and not (
+            mrc_mapping is not None and mrc_mapping.is_open_room
+        ):
             await session.write_line("")
             await _link_channel_screen(session, lane, actor, channel, link_context)
             linked = await lane.run(is_channel_linked, channel)
             await _redraw()
-        elif choice == "m":
+        elif choice == "m" and not (mrc_mapping is not None and mrc_mapping.is_open_room):
             await session.write_line("")
             mrc_mapping = await _mrc_room_screen(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
             await _redraw()
-        elif choice == "u" and mrc_mapping is not None:
+        elif choice == "a" and mrc_mapping is not None and mrc_mapping.is_open_room:
+            await session.write_line("")
+            mrc_mapping = await _adopt_open_room_screen(session, lane, actor, channel, mrc_bridge=mrc_bridge)
+            await _redraw()
+        elif choice == "t" and mrc_mapping is not None and mrc_mapping.is_open_room:
+            await session.write_line("")
+            if await _retire_open_room_screen(session, lane, actor, channel, mrc_bridge=mrc_bridge):
+                return
+            await _redraw()
+        elif choice == "u" and mrc_mapping is not None and not mrc_mapping.is_open_room:
             await session.write_line("")
             mrc_mapping = await _unbridge_mrc_room(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
             await _redraw()
@@ -13609,8 +13761,25 @@ async def _draw_channel_detail(
     )
     if link_context is not None:
         await session.write_line(f"Linked: {'yes' if linked else 'no'}")
+    open_room = mrc_mapping is not None and mrc_mapping.is_open_room
     if mrc_mapping is None:
         await session.write_line("MRC room: none (not bridged)")
+    elif open_room:
+        last_active = mrc_mapping.last_active_at
+        if last_active:
+            display_format, display_timezone = await lane.run(resolve_display_preferences)
+            last_active = format_for_display(last_active, override_format=display_format, override_timezone=display_timezone)
+        await session.write_line(
+            f"MRC room: #{sanitize_text(mrc_mapping.room)} (open room -- opened by a caller"
+            f"{', paused' if mrc_mapping.paused else ''}; last active {last_active or 'unknown'})"
+        )
+        await session.write_line(
+            colored(
+                "Retired automatically once idle and unfollowed; adopt it to keep it as an ordinary bridged "
+                "channel. Never shared over NetBBS Link.",
+                fg_color=MUTED_COLOR,
+            )
+        )
     else:
         state = "paused" if mrc_mapping.paused else "bridged"
         await session.write_line(f"MRC room: #{sanitize_text(mrc_mapping.room)} ({state})")
@@ -13627,10 +13796,14 @@ async def _draw_channel_detail(
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this channel"),
         MenuEntry(label=menu_key("R", "estrictions"), brief="Active mutes and bans"),
     ]
-    if link_context is not None and not linked:
+    if link_context is not None and not linked and not open_room:
         options.append(MenuEntry(label=menu_key("L", "ink this chat channel"), brief="Share it via NetBBS Link"))
-    options.append(MenuEntry(label=menu_key("M", "RC room"), brief="Bridge to a Multi Relay Chat room"))
-    if mrc_mapping is not None:
+    if open_room:
+        options.append(MenuEntry(label=menu_key("A", "dopt"), brief="Keep it as an ordinary bridged channel"))
+        options.append(MenuEntry(label=menu_key("t", "ire", prefix="Re"), brief="Remove it and its scrollback now"))
+    else:
+        options.append(MenuEntry(label=menu_key("M", "RC room"), brief="Bridge to a Multi Relay Chat room"))
+    if mrc_mapping is not None and not open_room:
         options.append(MenuEntry(label=menu_key("U", "nbridge"), brief="Stop relaying and forget the room"))
         if mrc_mapping.paused:
             options.append(MenuEntry(label=menu_key("P", "ause MRC bridge", prefix="Un"), brief="Resume relaying to MRC"))
@@ -13642,6 +13815,66 @@ async def _draw_channel_detail(
         + _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
     )
     await session.write("Choice: ")
+
+
+async def _adopt_open_room_screen(
+    session: Session, lane: DatabaseLane, actor: User, channel: Channel, *, mrc_bridge: MrcBridge | None,
+) -> MrcChannelMapping | None:
+    """`[A]dopt` (issue #300): the SysOp keeps a room a caller opened --
+    it becomes an ordinary bridged channel the sweeper ignores. Not
+    destructive, so no confirmation: a toggle toggles."""
+
+    def _adopt(db: Database) -> MrcChannelMapping:
+        mapping = adopt_open_room(db, channel)
+        record_action(
+            db, actor=actor, action="adopt_mrc_room", object_type="channel", object_id=channel.id,
+            detail=f"#{mapping.room}",
+        )
+        return mapping
+
+    try:
+        mapping = await lane.run(_adopt)
+    except MrcSettingsError as exc:
+        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        return await lane.run(get_mrc_mapping, channel)
+    if mrc_bridge is not None:
+        await mrc_bridge.refresh_channel_mappings()
+    await session.write_line(
+        f"Adopted: {channel.name!r} stays bridged to MRC room #{mapping.room} until you unbridge it."
+    )
+    return mapping
+
+
+async def _retire_open_room_screen(
+    session: Session, lane: DatabaseLane, actor: User, channel: Channel, *, mrc_bridge: MrcBridge | None,
+) -> bool:
+    """`Re[t]ire` (issue #300): remove a room a caller opened, with its
+    scrollback, now. Destructive, so the yes/no is the last keystroke
+    behind the hotkey. Callers inside are told and returned to the
+    picker by the same path a deleted channel already uses."""
+    if not await prompt_yes_no(
+        session, f"Retire {sanitize_text(channel.name)} and delete its scrollback now?", default=False,
+    ):
+        return False
+
+    def _retire(db: Database) -> None:
+        retire_open_room(db, channel)
+        record_action(
+            db, actor=actor, action="retire_mrc_room", object_type="channel", object_id=channel.id,
+            detail=f"retired open MRC room channel {channel.name!r} (id {channel.id})",
+        )
+
+    try:
+        await lane.run(_retire)
+    except MrcSettingsError as exc:
+        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        return False
+    if mrc_bridge is not None:
+        await mrc_bridge.refresh_channel_mappings()
+    await session.write_line(f"Retired {channel.name!r}.")
+    if mrc_bridge is None:
+        await session.write_line(colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
+    return True
 
 
 async def _mrc_room_screen(

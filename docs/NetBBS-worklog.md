@@ -712,6 +712,43 @@ session needs the same treatment.
 - An empty `to_room` is treated as a network broadcast (shown in every active
   bridged channel), following ENiGMA½; if the live hub ever sends ordinary
   room traffic with an empty `to_room`, this is the switch to revisit.
+- Open rooms (issue #300): `channels.mrc_origin = 'caller'` is the one marker
+  that a row was materialized for a caller rather than mapped by a SysOp;
+  everything that treats an open room differently (the picker section, the
+  sweeper, `Re[t]ire`/`[A]dopt`, the Link refusal, exclusion from the plain
+  channel list) reads that column, never the `mrc:` name prefix, which is
+  only the collision guard. Only `netbbs.mrc.settings.materialize_open_room`
+  may insert such a row (direct INSERT, content-addressed on the lower-cased
+  room), and `create_channel`/`update_channel` refuse the prefix for everyone
+  else -- a database from before this release cannot contain a `mrc:` channel
+  because the prefix was not reachable through any screen.
+- The sweeper runs on the bridge's keepalive tick (`_sweep_open_rooms`) whether
+  or not the open-room switch is currently on, using `mrc_last_active_at`
+  (or `created_at` for a never-touched row), the `ChatHub`'s participant
+  counts as the occupancy source and `user_follows` as the keep-alive; it
+  goes through `purge_channel_rows` (the row half of `delete_channel`, which
+  also prunes the search index) and reports to the MRC diagnostic log because
+  `moderation_log.actor_user_id` is NOT NULL and the node has no user. Activity
+  stamps are written at most once a minute per channel (`_touch`), never per
+  line.
+- One identity per account: `identity_room_elsewhere` looks at `_announced`,
+  and a session switching rooms with `/join` passes its current channel as
+  `leaving` so its own announcement does not block it -- unless another
+  session of the same account is still there. The browse loop re-checks after
+  `_authorize_channel_entry` because a picked channel can be entered without
+  `/join`, the same reason that check exists at all (issue #28).
+- `remote_roster` hides every entry at this node's own site, not only nicks
+  currently announced: a USERLIST fetched moments before a caller left still
+  names them, and "0 here, 1 on MRC" for one's own ghost is wrong.
+- Observed rooms are bridge memory (200 entries, least recently seen
+  evicted), fed by openings, `USERROOM` targets and the anchored `*** Joining
+  <room>:` / `*** Leaving <room>:` templates; the hub only sends join chatter
+  for rooms this node is in, so the list mostly reflects this node's own
+  history until the `LIST` reply format is known and parsed.
+- The picker's section entry uses stable id 0 (channels are positive,
+  categories negated), the section's own picker uses -1 for "open by name"
+  and -2-n for observed rooms; `pick_item` shows the id beside every entry,
+  so these must stay small.
 
 ### Read cursors and follows (issue #56)
 
