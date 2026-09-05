@@ -12,7 +12,7 @@ import asyncio
 
 from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.scrollback import get_scrollback
-from netbbs.mrc.bridge import PRIVATE_BURST, MrcNotice
+from netbbs.mrc.bridge import PRIVATE_BURST, MrcNotice, MrcState
 from netbbs.mrc.settings import set_mrc_room
 from tests.mrc_fake_hub import FakeMrcHub
 from tests.test_mrc_bridge import (  # noqa: F401 -- fixtures
@@ -204,6 +204,167 @@ def test_the_optin_is_reread_after_the_caller_leaves(db, lane, lobby, alice):
             hub.join(lobby.name, ParticipantId("alice", 2))
             await bridge.local_join(lobby, "alice")
             await _wait_until(lambda: bridge.private_messages_enabled("alice") is True)
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_a_reply_keeps_the_site_it_came_from(db, lane, lobby, alice):
+    """Review of #307: the same nick can exist on two boards; `/mrc r`
+    answers the identity that wrote, not wherever that nick was last
+    seen."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake, load_private_optin=_optin_for("alice"))
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await fake.send_line("bob~SiteA~garden~alice~My_Board~~hello~")
+            await _next_notice(queue)
+            await fake.send_line("bob~SiteB~garden~~~garden~room chatter~")
+            await _wait_until(lambda: bridge.site_for_nick("bob") == "SiteB")
+            assert bridge.reply_target("alice") == ("bob", "SiteA")
+            assert await bridge.send_private(lobby, "alice", "bob", "back", site="SiteA") == (None, False)
+            sent = await fake.wait_for(lambda p: p.to_user == "bob" and p.body.endswith(" back"))
+            assert sent.msg_ext == "SiteA"
+            # And a fresh `/mrc msg bob` goes by the last sighting.
+            assert await bridge.send_private(lobby, "alice", "bob", "new") == (None, False)
+            sent = await fake.wait_for(lambda p: p.to_user == "bob" and p.body.endswith(" new"))
+            assert sent.msg_ext == "SiteB"
+            # A reconnect starts a new conversation state.
+            await fake.drop_clients()
+            await _wait_until(lambda: bridge.state is not MrcState.CONNECTED)
+            await _wait_until(lambda: bridge.state is MrcState.CONNECTED, timeout=3.0)
+            assert bridge.reply_target("alice") is None
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_the_sender_table_never_resets_an_allowance(db, lane, lobby, alice, monkeypatch):
+    """Review of #307: identities are free to invent, so reaching the
+    table's cap evicts an idle (full) bucket or admits nobody new --
+    never clears everyone's allowance."""
+    from netbbs.mrc import bridge as bridge_module
+    monkeypatch.setattr(bridge_module, "MAX_TRACKED_PRIVATE_BUCKETS", 2)
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake, load_private_optin=_optin_for("alice"))
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            for i in range(PRIVATE_BURST):
+                await fake.send_line(f"bob~Other~garden~alice~My_Board~~bob {i}~")
+            await fake.send_line("carol~Other~garden~alice~My_Board~~carol 0~")
+            for _ in range(PRIVATE_BURST + 1):
+                await _next_notice(queue)
+            # Both tracked senders are mid-burst: a third identity gets nothing,
+            # and bob's allowance is still spent.
+            await fake.send_line("dave~Other~garden~alice~My_Board~~dave 0~")
+            await fake.send_line("bob~Other~garden~alice~My_Board~~bob late~")
+            await asyncio.sleep(0.2)
+            assert queue.empty()
+            assert bridge.status().dropped_inbound == 2
+            # Once a tracked bucket is full again it is evicted for the newcomer.
+            await asyncio.sleep(1.1)
+            await fake.send_line("dave~Other~garden~alice~My_Board~~third try~")
+            assert (await _next_notice(queue)).text == "dave@Other: third try"
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_private_overflow_is_reported_as_private_loss(db, lane, lobby, alice):
+    """Review of #307: the per-caller allowance's overflow notice names
+    what was dropped and is latched per kind."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake, load_private_optin=_optin_for("alice"), reply_burst=2)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            for i in range(4):
+                await fake.send_line(f"bob~Other~garden~alice~My_Board~~line {i}~")
+            await asyncio.sleep(0.3)
+            notices = []
+            while not queue.empty():
+                item = queue.get_nowait()
+                if isinstance(item, MrcNotice):
+                    notices.append((item.kind, item.text))
+            assert notices == [
+                ("private", "bob@Other: line 0"),
+                ("private", "bob@Other: line 1"),
+                ("private", "(private MRC messages for you arrived faster than can be shown -- some were dropped)"),
+            ]
+            assert "hub's reply" not in str(notices)
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_caches_follow_the_announced_set_and_a_failed_read_is_not_cached(db, lane, lobby, alice):
+    """Review of #307: pausing a mapping unannounces its callers and must
+    drop their cached Profile choices; a read that fails is logged, not
+    remembered as "off"."""
+    from netbbs.mrc.settings import set_mrc_paused
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        optin = {"alice": False}
+        failing = {"on": False}
+
+        def _load(db_, username):
+            if failing["on"]:
+                raise RuntimeError("database is away")
+            return optin.get(username, False)
+
+        bridge = await _connected_bridge(db, lane, hub, fake, load_private_optin=_load)
+        try:
+            hub.join(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            assert bridge.private_messages_enabled("alice") is False
+            set_mrc_paused(db, lobby, True)
+            await bridge.refresh_channel_mappings()
+            await fake.wait_for(lambda p: p.body == "LOGOFF")
+            assert bridge.private_messages_enabled("alice") is None
+            optin["alice"] = True  # switched on while the mapping was paused
+            set_mrc_paused(db, lobby, False)
+            await bridge.refresh_channel_mappings()
+            await _wait_until(lambda: bridge.private_messages_enabled("alice") is True)
+            # A failed read: not cached, so the next read tries again.
+            hub.leave(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_leave(lobby, "alice")
+            assert bridge.private_messages_enabled("alice") is None
+            failing["on"] = True
+            hub.join(lobby.name, ParticipantId("alice", 2))
+            await bridge.local_join(lobby, "alice")
+            assert bridge.private_messages_enabled("alice") is None
+            assert (await bridge.send_private(lobby, "alice", "bob", "hi"))[0] == "you have not opted in to private MRC messages (Profile)"
+            failing["on"] = False
+            assert await bridge.send_private(lobby, "alice", "bob", "hi") == (None, False)
+            assert bridge.private_messages_enabled("alice") is True
         finally:
             await bridge.close()
             await fake.close()

@@ -2664,25 +2664,29 @@ _MRC_PRIVATE_NOTE = (
 
 
 async def _handle_mrc_private(ctx: ChatCommandContext, target: str | None, text: str) -> None:
-    """`/mrc msg <nick> <text>` and `/mrc r <text>` (issue #305)."""
+    """`/mrc msg <nick> <text>` and `/mrc r <text>` (issue #305). A reply
+    goes to the identity (nick *and* site) that wrote, not to wherever
+    that nick was seen last: the same nick can exist on two boards."""
     assert ctx.mrc_bridge is not None
+    site: str | None = None
     if target is None:
         last = ctx.mrc_bridge.reply_target(ctx.user.username)
         if last is None:
             await ctx.session.write_line(colored("Nobody on MRC has messaged you privately yet.", fg_color=MUTED_COLOR))
             return
-        target = last[0]
+        target, site = last
     if not text.strip():
         await _show_usage(ctx.session, "mrc")
         return
-    reason, truncated = await ctx.mrc_bridge.send_private(ctx.channel, ctx.user.username, target, text)
+    reason, truncated = await ctx.mrc_bridge.send_private(ctx.channel, ctx.user.username, target, text, site=site)
     if reason is not None:
         await ctx.session.write_line(colored(f"(not sent to MRC: {sanitize_text(reason)})", fg_color=MUTED_COLOR))
         return
     if ctx.mrc_session_state is not None and not ctx.mrc_session_state.get("private_noted"):
         ctx.mrc_session_state["private_noted"] = True
         await ctx.session.write_line(colored(_MRC_PRIVATE_NOTE, fg_color=MUTED_COLOR))
-    site = ctx.mrc_bridge.site_for_nick(target)
+    if site is None:
+        site = ctx.mrc_bridge.site_for_nick(target)
     shown = f"{sanitize_text(target)}@{sanitize_text(site)}" if site else sanitize_text(target)
     await ctx.session.write_line(
         colored("[MRC private] ", fg_color=MUTED_COLOR) + f"-> {shown}: {sanitize_text(text.strip())}"

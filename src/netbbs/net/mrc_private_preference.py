@@ -11,7 +11,7 @@ lane when it announces someone (`mrc_private_messages_for_username`).
 
 from __future__ import annotations
 
-from netbbs.auth.users import User, get_user_by_username
+from netbbs.auth.users import AuthError, User, get_user_by_username
 from netbbs.storage.database import Database
 from netbbs.user_preferences import get_user_preference, set_user_preference
 
@@ -27,10 +27,12 @@ def set_mrc_private_messages_enabled(db: Database, user: User, enabled: bool) ->
 
 
 def mrc_private_messages_for_username(db: Database, username: str) -> bool:
+    """The opt-in by username, for the bridge. An unknown account is
+    off; a database failure raises, so the bridge can tell "off" from
+    "could not read" and never hides an opted-in caller's messages
+    behind a broken read."""
     try:
         user = get_user_by_username(db, username)
-    except Exception:
-        return False
-    if user is None:
-        return False
+    except AuthError:
+        return False  # no such account
     return mrc_private_messages_enabled(db, user)

@@ -118,6 +118,9 @@ def test_inbound_private_line_rings_the_bell_and_r_answers_it(db, lane, hub, pre
             async def push_private():
                 await rig.fake.wait_for(lambda p: p.body == "NEWROOM::lobby" and p.from_user == "alice")
                 await rig.fake.send_line("bob~Other~garden~alice~My_Board~~|03<|11bob|03>|16|07 psst~")
+                # Review of #307: the same nick seen elsewhere since does
+                # not redirect the reply.
+                await rig.fake.send_line("bob~Elsewhere~garden~~~garden~|03<|11bob|03>|16|07 room chatter~")
                 await asyncio.sleep(0.2)
 
             session = await _run_session(

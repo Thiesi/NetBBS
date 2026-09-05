@@ -316,7 +316,7 @@ class MrcBridge:
         # room that keeps bouncing them is neither a NEWROOM loop nor a
         # stream of priority notices).
         self._reply_buckets: dict[str, _TokenBucket] = {}
-        self._reply_truncated: set[str] = set()
+        self._reply_truncated: set[tuple[str, str]] = set()
         self._ctcp_buckets: dict[tuple[str, str], _TokenBucket] = {}
         self._rehomed: dict[tuple[int, str], int] = {}
         # Issue #300: the open-room settings, rooms heard of (lower-cased
@@ -630,6 +630,8 @@ class MrcBridge:
         self._banner.clear()
         self._nick_colors.clear()
         self._private_optin.clear()
+        self._last_private_sender.clear()
+        self._private_buckets.clear()
         self._connected_at_monotonic = self._clock()
         self._last_error = None
         _logger.info("Connected to MRC hub %s:%d as %r", settings.host, settings.port, settings.site_name)
@@ -895,11 +897,9 @@ class MrcBridge:
         if not nicks:
             self._announced.pop(channel.id, None)
             self._announced_rooms.pop(channel.id, None)
-        if not any(username in others for others in self._announced.values()):
-            # Their next announcement re-reads the Profile: "applies the
-            # next time you enter an MRC room" means exactly that.
-            self._nick_colors.pop(username, None)
-            self._private_optin.pop(username, None)
+        # Their next announcement re-reads the Profile: "applies the
+        # next time you enter an MRC room" means exactly that.
+        self._prune_caller_caches()
         mapping = self._by_channel.get(channel.id)
         settings = self._settings
         if mapping is None or settings is None or self._state is not MrcState.CONNECTED:
@@ -1020,21 +1020,44 @@ class MrcBridge:
         return text, False
 
     async def _ensure_nick_color(self, username: str) -> None:
+        """Read the caller's Profile choices the bridge needs (nick
+        colour, private-message opt-in) once per announcement. Both
+        caches hold only announced callers (`_prune_caller_caches` runs
+        wherever an announcement is removed), so they are bounded by
+        live sessions, never wiped wholesale. A
+        failed opt-in read is logged and left unread: the caller shows
+        as "not read yet", inbound private lines take the opt-out path,
+        and the next announcement or `send_private` tries again."""
         if username in self._nick_colors and username in self._private_optin:
             return
-        try:
-            color = await self._lane.run(self._load_nick_color, username)
-        except Exception:
-            color = protocol.DEFAULT_NICK_COLOR
-        try:
-            optin = await self._lane.run(self._load_private_optin, username)
-        except Exception:
-            optin = False
-        self._nick_colors[username] = color
-        self._private_optin[username] = bool(optin)
-        if len(self._nick_colors) > 500:
-            self._nick_colors.clear()
-            self._private_optin.clear()
+        if username not in self._nick_colors:
+            try:
+                color = await self._lane.run(self._load_nick_color, username)
+            except Exception:
+                color = protocol.DEFAULT_NICK_COLOR
+            self._nick_colors[username] = color
+        if username not in self._private_optin:
+            try:
+                optin = await self._lane.run(self._load_private_optin, username)
+            except Exception as exc:
+                _logger.warning(
+                    "Could not read the private-message opt-in for %r; private MRC messages "
+                    "stay off for them until it can be read: %s", username, exc,
+                )
+            else:
+                self._private_optin[username] = bool(optin)
+
+    def _prune_caller_caches(self) -> None:
+        """Drop the per-caller Profile caches of everyone announced
+        nowhere -- called wherever an announcement is removed (a leave,
+        reconciliation, a forgotten mapping) so a Profile change made
+        while unannounced is read at the next entry."""
+        announced = set()
+        for nicks in self._announced.values():
+            announced.update(nicks)
+        for cache in (self._nick_colors, self._private_optin):
+            for username in [name for name in cache if name not in announced]:
+                del cache[username]
 
     # --- presence, welcome, size, topics (issue #304) ------------------------
 
@@ -1154,6 +1177,7 @@ class MrcBridge:
                 self._enqueue(protocol.logoff(nick, settings.site_wire_name, room))
             self._announced.pop(channel_id, None)
             self._announced_rooms.pop(channel_id, None)
+        self._prune_caller_caches()
         for mapping in self._by_channel.values():
             if not mapping.active:
                 continue
@@ -1275,6 +1299,7 @@ class MrcBridge:
         self._rosters.pop(mapping.room.lower(), None)
         self._last_userlist_request.pop(mapping.room.lower(), None)
         self._last_touch.pop(mapping.channel.id, None)
+        self._prune_caller_caches()
 
     async def _handle_server_packet(self, packet: MrcPacket) -> None:
         settings = self._settings
@@ -1514,20 +1539,20 @@ class MrcBridge:
             self._reply_buckets[username] = bucket
         if not bucket.has_token():
             self._dropped_inbound += 1
-            if username not in self._reply_truncated:
-                self._reply_truncated.add(username)
-                await self._deliver_to_caller(
-                    username,
-                    MrcNotice("(the hub's reply was cut short -- it sent more lines than are shown at once)", utc_now_iso(), kind="reply"),
-                    priority=True,
-                )
+            if (username, kind) not in self._reply_truncated:
+                self._reply_truncated.add((username, kind))
+                if kind == "private":
+                    cut = "(private MRC messages for you arrived faster than can be shown -- some were dropped)"
+                else:
+                    cut = "(the hub's reply was cut short -- it sent more lines than are shown at once)"
+                await self._deliver_to_caller(username, MrcNotice(cut, utc_now_iso(), kind=kind), priority=True)
             return
         # The latch lifts only once the allowance has genuinely recovered
         # (half the burst back), not on the first trickle-admitted line:
         # a hub streaming just above the refill rate would otherwise earn
         # a fresh priority notice at every refill.
         if bucket.has_tokens(self._reply_burst / 2):
-            self._reply_truncated.discard(username)
+            self._reply_truncated.discard((username, kind))
         bucket.consume()
         await self._deliver_to_caller(username, MrcNotice(text, utc_now_iso(), kind=kind))
 
@@ -1848,7 +1873,17 @@ class MrcBridge:
         bucket = self._private_buckets.get(sender_key)
         if bucket is None:
             if len(self._private_buckets) >= MAX_TRACKED_PRIVATE_BUCKETS:
-                self._private_buckets.clear()
+                # A full bucket is indistinguishable from a new one, so
+                # evicting it costs nothing; with every tracked sender
+                # mid-burst, a new identity gets no allowance at all --
+                # identities are free to invent, allowances are not.
+                idle = next(
+                    (key for key, known in self._private_buckets.items() if known.has_tokens(PRIVATE_BURST)), None,
+                )
+                if idle is None:
+                    self._dropped_inbound += 1
+                    return
+                del self._private_buckets[idle]
             bucket = _TokenBucket(PRIVATE_BURST, PRIVATE_RATE_PER_SECOND, self._clock)
             self._private_buckets[sender_key] = bucket
         if not bucket.has_token():
@@ -1892,15 +1927,18 @@ class MrcBridge:
         privately this connection, for `/mrc r`."""
         return self._last_private_sender.get(username)
 
-    async def send_private(self, channel: Channel, username: str, target: str, text: str) -> tuple[str | None, bool]:
+    async def send_private(
+        self, channel: Channel, username: str, target: str, text: str, *, site: str | None = None,
+    ) -> tuple[str | None, bool]:
         """Send `text` privately to MRC user `target` as the caller's
         nick (issue #305). Requires the caller's own opt-in -- refusing
         replies while starting conversations is not offered -- and their
         announcement; the body wears the house style so the recipient's
-        client shows who wrote it, `to_site` is the site the target was
-        last seen at, and the caller's per-user bucket and the room
-        line's chunking apply. Returns `(reason, truncated)`: `reason` is
-        `None` when queued."""
+        client shows who wrote it, `to_site` is `site` when the caller
+        is answering a particular identity (`/mrc r`), else the site the
+        target was last seen at, and the caller's per-user bucket and
+        the room line's chunking apply. Returns `(reason, truncated)`:
+        `reason` is `None` when queued."""
         mapping = self._by_channel.get(channel.id)
         settings = self._settings
         if mapping is None or not mapping.active or settings is None or not settings.enabled:
@@ -1929,7 +1967,7 @@ class MrcBridge:
         if not bucket.has_tokens(len(chunks)):
             self._dropped_outbound += 1
             return "you're sending faster than MRC allows", truncated
-        target_site = self.site_for_nick(target_nick)
+        target_site = protocol.sanitize_name(site) if site is not None else self.site_for_nick(target_nick)
         for chunk in chunks:
             bucket.consume()
             self._enqueue(MrcPacket(

@@ -67,3 +67,16 @@ def test_profile_screen_toggles_it(db, alice):
         assert mrc_private_messages_enabled(db, alice) is False
     finally:
         lane.close()
+
+
+def test_a_failed_lookup_raises_rather_than_reading_as_off(db, alice, monkeypatch):
+    """Review of #307: the bridge must be able to tell "off" from
+    "could not read"."""
+    from netbbs.net import mrc_private_preference as module
+
+    def _broken(db_, username):
+        raise RuntimeError("database is away")
+
+    monkeypatch.setattr(module, "get_user_by_username", _broken)
+    with pytest.raises(RuntimeError):
+        mrc_private_messages_for_username(db, "alice")
