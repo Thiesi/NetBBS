@@ -34,13 +34,32 @@ PAGES = {
 }
 PROTECTED = re.compile(r"<pre\b.*?</pre>|<style>.*?</style>|<script>.*?</script>", re.S)
 TAG = re.compile(r"<[^>]+>")
-TERMS = re.compile(r"\b(Link|boards?|channels?|areas?)\b")
+# "Link" is a proper noun, so only a capitalised occurrence is the product --
+# a hyperlink, a serial link and the MRC hub link are ordinary English. The
+# other three are common nouns whose case follows their position in a
+# sentence, so `Boards`/`Channels`/`Areas` at the head of a heading or clause
+# are matched too; those are exactly the ones a case-sensitive scan misses.
+TERMS = re.compile(r"\bLink\b|(?i:\b(?:boards?|channels?|areas?)\b)")
 # Already-qualified phrasings, and the two exempt senses.
+#
+# Each entry must span the noun it qualifies *including its plural*, because
+# an occurrence counts as qualified only when the term match sits inside one
+# of them. Words are joined so that a hyphen, a run of spaces, or a line
+# break between them all match: the page source wraps prose freely, so a
+# phrase split across a line and its indent is still the qualified phrase.
+_PHRASES = [
+    # the house forms
+    "NetBBS Link", "message boards?", "chat channels?", "file areas?",
+    "bulletin boards?",
+    # board = a whole BBS, not a message board
+    "other boards?", "your board", "the sending board",
+    "the board day to day", "full featured board", "boards already",
+    "owned boards", "A board has always",
+    # channel = a network connection, not a chat channel
+    "encrypted channel", "hub link",
+]
 QUALIFIED = re.compile(
-    r"NetBBS Link|message[- ]board|chat[- ]channel|file area|bulletin board"
-    r"|other boards|your board|the sending board|the board day to day"
-    r"|full-featured board|every other board|encrypted channel|hub link"
-    r"|A board has always", re.I)
+    "|".join(r"[\s-]+".join(phrase.split()) for phrase in _PHRASES), re.I)
 
 
 def prose(text: str):
@@ -68,12 +87,18 @@ def check(label: str, text: str) -> int:
     print("=" * 78)
     flagged = 0
     for chunk in prose(text):
+        # Spans of every already-qualified or exempt phrase in this run of
+        # prose. An occurrence counts as qualified only when it sits *inside*
+        # one of them: a nearby "message boards" must not silence a bare
+        # "channels" a few words later.
+        safe = [m.span() for m in QUALIFIED.finditer(chunk)]
         for m in TERMS.finditer(chunk):
-            lo, hi = max(0, m.start() - 70), min(len(chunk), m.end() + 70)
-            context = " ".join(chunk[lo:hi].split())
-            if QUALIFIED.search(context):
+            start, end = m.span()
+            if any(a <= start and end <= b for a, b in safe):
                 continue
-            print(f"  [{m.group(1):<9}] ...{context}...")
+            lo, hi = max(0, start - 70), min(len(chunk), end + 70)
+            context = " ".join(chunk[lo:hi].split())
+            print(f"  [{m.group(0):<9}] ...{context}...")
             flagged += 1
     print(f"  -> {flagged} unqualified use(s)")
     print()

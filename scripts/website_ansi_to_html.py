@@ -21,6 +21,12 @@ Two things this has to get right, both learned the hard way:
   a flat character stream repeats the status line after every message.
   Painting it into an 80x24 cell buffer -- what the caller's terminal
   actually does -- yields the screen they actually see.
+
+Known limitation: one cell is advanced per code point, so a double-width
+glyph (CJK) would occupy one column instead of two and a combining mark
+would take a cell of its own, shifting the rest of the row. No capture the
+site uses contains either. If one ever does, place characters by display
+width and fold zero-width marks into the preceding cell.
 """
 
 from __future__ import annotations
@@ -57,6 +63,7 @@ class Style:
     fg: tuple[int, int, int] | None = None
     bg: tuple[int, int, int] | None = None
     bold: bool = False
+    underline: bool = False
 
     def css(self) -> str:
         parts = []
@@ -66,6 +73,8 @@ class Style:
             parts.append("background:rgb(%d,%d,%d)" % self.bg)
         if self.bold:
             parts.append("font-weight:600")
+        if self.underline:
+            parts.append("text-decoration:underline")
         parts.append("display:inline-block")
         parts.append("width:1ch")
         return ";".join(parts)
@@ -141,6 +150,11 @@ class Screen:
                 self.style = replace(self.style, bold=True)
             elif p in (21, 22):
                 self.style = replace(self.style, bold=False)
+            elif p == 4:
+                # `_compose_status_line` underlines the row for an away caller.
+                self.style = replace(self.style, underline=True)
+            elif p == 24:
+                self.style = replace(self.style, underline=False)
             elif 30 <= p <= 37:
                 self.style = replace(self.style, fg=xterm256(p - 30))
             elif 90 <= p <= 97:
