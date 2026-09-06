@@ -100,7 +100,8 @@ async def capture() -> str:
 
         session = CaptureSession()
         await browse_doors(session, lane, caller)
-        assert session.snapshot is not None, "picker never drew"
+        if session.snapshot is None:                 # assert would vanish under -O
+            raise RuntimeError("the picker never drew a screen")
         return session.snapshot
     finally:
         lane.close()

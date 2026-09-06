@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import random
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -49,6 +50,11 @@ from tests.mrc_fake_hub import FakeMrcHub                       # noqa: E402
 from tests.test_chat_flow_moderation import FakeSession         # noqa: E402
 
 NODE_NAME = "Harbor Lights"
+# Seconds between the caller's own lines. NetBBS refuses to relay a caller who
+# outruns MRC's rate limit, and puts RATE_LIMIT_NOTICE on screen in place of
+# the line; a person typing never hits it, so neither should a capture.
+TYPING_GAP = 1.5
+RATE_LIMIT_NOTICE = "not relayed to MRC"
 
 
 def loopback_only(port: int):
@@ -99,6 +105,20 @@ def mrc(nick: str, site: str, body: str, action: bool = False) -> str:
     return f"{nick}~{site}~lobby~~~lobby~{coloured}~"
 
 
+def extract_body(wire: str) -> str:
+    """The message text of a wire line, for confirming it reached the screen.
+
+    Only the text is a reliable thing to look for. NetBBS re-renders the
+    sender as `nick@site (MRC)` and supplies its own colours, so neither the
+    wire's `|NN` codes nor its embedded `<nick>` survives to the screen.
+    """
+    nick, *_ = wire.split("~")
+    plain = re.sub(r"\|\d\d", "", wire.split("~")[6])
+    plain = re.sub(r"^\*\s*", "", plain)        # an action's leading marker
+    plain = re.sub(r"^<[^>]*>\s*", "", plain)   # a message's <nick> prefix
+    return plain.removeprefix(nick).strip()     # an action repeats the nick
+
+
 # Said before the caller joins, so it is real scrollback the join replays.
 EARLIER = [
     mrc("jasper", "Vertigo", "evening all -- who else is on tonight?"),
@@ -133,12 +153,26 @@ LIVE = [
 ]
 
 
+async def until(predicate, seconds: float, what: str) -> None:
+    """Wait for `predicate()`, raising rather than asserting on timeout.
+
+    `assert` is removed under `python -O`, which would turn a bridge that
+    never connects into a loop that spins forever instead of failing.
+    """
+    deadline = asyncio.get_running_loop().time() + seconds
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError(f"timed out after {seconds}s waiting for {what}")
+        await asyncio.sleep(0.01)
+
+
 async def capture(exchanges: int) -> str:
     tmp = Path(tempfile.mkdtemp(prefix="netbbs-shot-"))
     db = Database(tmp / "node.db")
     lane = DatabaseLane(db.path)
     fake = FakeMrcHub()
     bridge = None
+    task = None
     try:
         sysop = create_user(db, "carrier", password="hunter2", user_level=255)
         alice = create_user(db, "alice", password="hunter2", user_level=10)
@@ -154,10 +188,8 @@ async def capture(exchanges: int) -> str:
                            rng=random.Random(1), min_backoff_seconds=0.05,
                            max_backoff_seconds=0.2, stable_after_seconds=0.0)
         await bridge.start()
-        deadline = asyncio.get_running_loop().time() + 5
-        while bridge.state is not MrcState.CONNECTED:
-            assert asyncio.get_running_loop().time() < deadline, bridge.status()
-            await asyncio.sleep(0.01)
+        await until(lambda: bridge.state is MrcState.CONNECTED, 5,
+                    f"the bridge to connect ({bridge.status()})")
 
         for line in EARLIER:
             await fake.send_line(line)
@@ -168,31 +200,59 @@ async def capture(exchanges: int) -> str:
             session, lane, hub, PresenceRegistry(), MessageMailbox(),
             InputHistory(), channel, alice, mrc_bridge=bridge))
 
-        deadline = asyncio.get_running_loop().time() + 5
-        while hub.participant_count(channel.name) == 0:
-            assert asyncio.get_running_loop().time() < deadline, "caller never joined"
-            await asyncio.sleep(0.01)
+        await until(lambda: hub.participant_count(channel.name) > 0, 5,
+                    "the caller to join the channel")
 
         # Let the join notice and the scrollback replay finish before any live
         # line arrives, or it lands in scrollback in time to be replayed as
         # history too and then appears twice on the screen.
         await asyncio.sleep(1.0)
 
-        for inbound, typed in LIVE[:exchanges]:
+        # Each line is fed only once the previous one has actually reached the
+        # screen. A fixed sleep does not prove the packet crossed the bridge
+        # and rendered, so on a loaded host the capture could come out short
+        # or reordered -- and nothing would say so.
+        #
+        # The caller's own lines still keep a human gap between them: NetBBS
+        # rate-limits a caller's outbound relay, and typing them as fast as
+        # the bridge can confirm renders trips it, so the screen shows
+        # RATE_LIMIT_NOTICE where the line should be.
+        played = LIVE[:exchanges]
+        typed_at = 0.0
+        for inbound, typed in played:
+            body = extract_body(inbound) if inbound is not None else typed
             if inbound is not None:
                 await fake.send_line(inbound)
             else:
+                waited = asyncio.get_running_loop().time() - typed_at
+                if waited < TYPING_GAP:
+                    await asyncio.sleep(TYPING_GAP - waited)
                 session.inputs.put_nowait(typed)
-            await asyncio.sleep(0.4)
-        await asyncio.sleep(0.6)
+                typed_at = asyncio.get_running_loop().time()
+            await until(lambda b=body: b in "".join(session.written), 10,
+                        f"this line to reach the screen: {body[:48]!r}")
 
         # The screen as the caller sees it while still in the channel: /quit
         # clears it on the way out, so snapshot before leaving.
         snapshot = "".join(session.written)
+        missing = [extract_body(i) if i is not None else t for i, t in played
+                   if (extract_body(i) if i is not None else t) not in snapshot]
+        if missing:
+            raise RuntimeError(f"{len(missing)} line(s) never rendered: {missing[:3]}")
+        if RATE_LIMIT_NOTICE in snapshot:
+            raise RuntimeError("the caller's lines were rate-limited; raise TYPING_GAP")
         session.inputs.put_nowait("/quit")
         await asyncio.wait_for(task, timeout=6)
         return snapshot
     finally:
+        # Stop the chat loop before anything it uses goes away. If a wait
+        # above raised, `_chat_loop` is still running, and closing the lane
+        # under it makes its leave-record cleanup throw a second exception
+        # that buries the first. `asyncio.run` only cancels stragglers after
+        # this function has already unwound, which is too late.
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         if bridge is not None:
             await bridge.close()
         await fake.close()
