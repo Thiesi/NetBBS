@@ -294,13 +294,26 @@ def test_voidrunner_backup_limits_fail_without_success_manifest(tmp_path, db_pat
     assert not (destination / "manifest.json").exists()
 
 
-@pytest.mark.parametrize("target_kind", ["backup", "database_parent", "identity"])
+@pytest.mark.parametrize("target_kind", ["backup", "database_parent", "identity", "files", "inside_files", "credential"])
 def test_voidrunner_restore_rejects_overlapping_destinations(tmp_path, db_path, identity_dir, target_kind):
     _populate_voidrunner()
     source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
-    target = {"backup": source, "database_parent": db_path.parent, "identity": identity_dir}[target_kind]
+    storage = backup_module._storage_root_for(db_path)
+    target = {"backup": source, "database_parent": db_path.parent, "identity": identity_dir,
+              "files": storage, "inside_files": storage / "game",
+              "credential": backup_module._managed_dns_credential_path_for(db_path)}[target_kind]
     with pytest.raises(BackupError, match="overlaps"):
         restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=target)
+
+
+@pytest.mark.parametrize("parent", ["", "scores"])
+def test_voidrunner_backup_does_not_ignore_directories_named_like_temporary_files(
+    tmp_path, db_path, identity_dir, parent,
+):
+    game = _populate_voidrunner()
+    (game / parent / ".unrelated.tmp").mkdir()
+    with pytest.raises(BackupError, match="Unsupported Voidrunner"):
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
 
 
 def test_voidrunner_restore_refuses_a_directory_with_unrelated_files(tmp_path, db_path, identity_dir):

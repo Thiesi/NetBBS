@@ -356,14 +356,16 @@ def _voidrunner_files(root: Path, *, archive: bool = False) -> list[Path]:
             raise BackupError(f"Voidrunner data contains a symbolic link: {entry.name}")
         if entry.name == "scores" and entry.is_dir():
             for score in entry.iterdir():
-                if not archive and score.name.startswith(".") and score.name.endswith(".tmp"):
+                if score.is_symlink():
+                    raise BackupError(f"Voidrunner data contains a symbolic link: {score.name}")
+                if not archive and score.is_file() and score.name.startswith(".") and score.name.endswith(".tmp"):
                     continue
                 if score.is_symlink() or not score.is_file() or not re.fullmatch(r"[0-9]+\.json", score.name):
                     raise BackupError(f"Unsupported Voidrunner score entry: {score.name}")
                 result.append(score.relative_to(root))
                 if len(result) > _VOIDRUNNER_MAX_FILES:
                     raise BackupError("Voidrunner backup exceeds its file count limit.")
-        elif not archive and re.fullmatch(r"\.[0-9]+\.lock|\..+\.tmp", entry.name):
+        elif not archive and entry.is_file() and re.fullmatch(r"\.[0-9]+\.lock|\..+\.tmp", entry.name):
             continue
         elif entry.is_file() and (entry.name == "leaderboard.json" or
                 re.fullmatch(r"[0-9]+(?:(?:\.previous|\.recovery-[a-zA-Z0-9_-]+)?\.json|\.corrupt-[0-9]+)", entry.name)):
@@ -908,7 +910,12 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
         if voidrunner_to is None:
             raise BackupError("This backup contains Voidrunner careers; specify --voidrunner-to for the restored service.")
         target = voidrunner_to.resolve()
-        for protected in (source.resolve(), db_path.resolve(), identity_dir.resolve()):
+        protected_paths = [source, db_path, identity_dir, _storage_root_for(db_path),
+                           _restore_state_path_for(db_path)]
+        protected_paths.extend(live for _, _, live in _restore_switch_plan(
+            source, db_path, identity_dir, _database_filename_from_manifest(manifest)))
+        for protected_path in protected_paths:
+            protected = protected_path.resolve()
             if target.is_relative_to(protected) or protected.is_relative_to(target):
                 raise BackupError("Voidrunner restore target overlaps node or backup paths.")
         if target.exists():
