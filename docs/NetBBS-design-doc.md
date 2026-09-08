@@ -4745,6 +4745,23 @@ cargo, and does not repost the offer. Completion, expiry and abandonment clear
 tracking. Contract lists and detail text paginate to terminal dimensions, with
 Back on every page. Broader map/route planning remains in issue #310.
 
+Contract details offer a read-only Route screen, including for posted jobs before
+acceptance. It plots every connection to the named target, while uncharted
+intermediate names, economy and danger remain hidden. The contract target's name
+and coordinates are public terms, not a chart discovery. Active routes account
+for queued bounty re-entry, fuel, wages, refuelling stops and inclusive deadlines.
+The chart also opens the currently tracked contract route directly.
+
+Jump next is available only for a current, unexpired active contract while docked
+and with fuel for that leg. It tracks the selected contract and checkpoints that
+intent, then uses ordinary durable travel for exactly one jump. The pilot chooses
+again after each outcome; diversion, completion, failure, expiry, fuel or crew
+changes cause a fresh route/budget. No unattended remainder is resumed after a
+restart. Browsing, Back and EOF do not track, accept or travel. At the destination,
+delivery shortages are explained; bounty jobs still require ordinary re-entry
+rather than a fabricated in-place encounter. General named-destination routing
+and broader route-plan controls remain the next route-planning scope.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 500-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. Buying and same-station recycling do not grant

@@ -55,6 +55,22 @@ First Flight can be accepted once per career. Abandoning it closes that offer;
 the guide remains available. Completion points toward a first upgrade and regular
 trading or contracts. The normal risks of travel still apply.
 
+### Navigating contracts
+
+Open a contract's details and choose **[R]oute** to inspect every leg to its named
+target, even when the target is uncharted. Names of uncharted intermediate
+stations and their danger remain hidden. The preview shows fuel, wages, manual
+refuelling stops, arrival day and deadline warnings, including queued bounty
+leave/re-enter legs. Browsing a posted job does not accept or track it.
+
+For an active contract, **[J]ump next** tracks that contract and flies exactly one
+leg using normal encounters, customs and mission resolution. Fuel must cover that
+leg. Review the refreshed route after arriving or being diverted, then choose
+another jump or Back. Completion, failure and expiry stop contract navigation.
+Refuelling is manual at the yard, and delivery cargo must still be procured.
+The chart's **[R]oute for tracked contract** reopens this view. After a disconnect,
+any saved encounter resumes first; the rest of a route never runs unattended.
+
 ### Station stock and buying demand
 
 Spot markets carry a limited quantity of each good and have a limited buying

@@ -4958,3 +4958,18 @@ Public bulletin names do not count as chart discoveries or market observations.
 Opportunity candidates must call the same read-only route quote as the detailed
 estimator, reserve fuel/wage cash before selecting quantity, and use only current
 local prices plus timestamped remote observations.
+
+
+Contract navigation consumes the same `mission_route` as its details and tracked
+bearing; queued bounties require real leave/re-enter legs. Validate active status,
+pending travel and next-leg fuel before changing tracked intent. Checkpoint that
+intent before calling ordinary durable travel, then recompute after its outcome.
+Do not execute a cached remainder after diversion, failure or restart. Public
+contract targets are named bearings, not chart discoveries; intermediate names and
+threats stay hidden until discovered. Reserve chart action keys independently of
+whether the tracked action is currently visible, including the Back key Q.
+
+Route-page budgets derive page-number width from actual wrapped rows, not a fixed
+three-digit placeholder: preserved legacy bounty queues can exceed 999 pages.
+Cache a read-only route's pages while paging; rebuild only after a jump/error so
+large legacy queues do not multiply route construction work by the page count.
