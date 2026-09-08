@@ -1488,3 +1488,227 @@ def test_sync_runs_no_pass_at_all_when_stop_event_is_already_set(tmp_path):
     finally:
         dialer.close()
         seed.close()
+
+
+def _run_passes(node, node_db, seeds, *, passes: int, outgoing_only: bool = True):
+    """Run exactly `passes` sync passes, then stop. Counts passes from
+    `refresh`, which `run_link_sync` calls once at the top of every
+    pass, and sets `stop_event` on the last one -- the loop condition is
+    only re-checked between passes, so the pass in progress still
+    finishes normally (`run_link_sync`'s own docstring)."""
+    stop_event = asyncio.Event()
+    seen = {"passes": 0}
+
+    class CountingHello:
+        async def refresh(self, lane):
+            seen["passes"] += 1
+            if seen["passes"] >= passes:
+                stop_event.set()
+
+        def __call__(self):
+            return node.build_hello(
+                addresses=None if outgoing_only else [
+                    {"protocol": "http", "address": "127.0.0.1", "port": 7862}
+                ],
+                outgoing_only=outgoing_only,
+                created_at="2026-01-01T00:00:00+00:00",
+            )
+
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            await run_link_sync(
+                node, session, seeds, CountingHello(), node_db.lane,
+                interval_seconds=0.0, stop_event=stop_event,
+            )
+
+    asyncio.run(scenario())
+    return seen["passes"]
+
+
+def _isolation_warnings(caplog):
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and "consecutive passes" in record.getMessage()
+    ]
+
+
+def test_sync_warns_once_a_node_has_reached_nothing_for_several_passes(tmp_path, caplog):
+    """Issue #313: every individual dial failure is already logged, but
+    indistinguishable from ordinary churn -- which is how a reliable
+    node that had quietly stopped answering went unnoticed. Reaching
+    nothing at all, pass after pass, gets its own WARNING (and so its
+    own bounded-diagnostic-log entry, §13.11)."""
+    node = LinkNode(identity=bootstrap_node_identity("isolated"))
+    node_db = _NodeDb(tmp_path, "isolated")
+    # Port 1 on loopback: nothing listens, so every pass fails its dial
+    # and there are no discovered candidates to fall back to either.
+    dead_seed = "http://127.0.0.1:1"
+
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [dead_seed], passes=2)
+        assert _isolation_warnings(caplog) == [], "must tolerate a couple of failed passes quietly"
+
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [dead_seed], passes=3)
+        warnings = _isolation_warnings(caplog)
+        assert len(warnings) == 1, warnings
+        assert "3 consecutive passes" in warnings[0]
+        assert dead_seed in warnings[0], "names what it tried, so a SysOp can act on it"
+
+        # Sixth consecutive pass warns again, the third and fourth and
+        # fifth do not -- a proportionate trail, not one per pass.
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [dead_seed], passes=6)
+        assert len(_isolation_warnings(caplog)) == 2
+    finally:
+        node_db.close()
+
+
+def test_sync_isolation_counter_resets_once_a_seed_answers(tmp_path, caplog):
+    """A node that recovers must not accumulate toward the warning
+    across an intervening success -- otherwise a flaky seed eventually
+    reports permanent isolation that never actually happened.
+
+    Six passes inside one `run_link_sync` (the counter is per-loop, so
+    it has to be one call): two that reach nothing, two that reach a
+    real seed, two that reach nothing again. Six failing dials in total,
+    never three in a row, so no warning."""
+    node = LinkNode(identity=bootstrap_node_identity("recovering"))
+    seed_node = LinkNode(identity=bootstrap_node_identity("live-seed"))
+    node_db = _NodeDb(tmp_path, "recovering")
+    seed = _NodeDb(tmp_path, "live-seed")
+    dead_seed = "http://127.0.0.1:1"
+
+    async def scenario():
+        server = await _run_server(seed_node, seed.lane)
+        live_seed = f"http://127.0.0.1:{server.port}"
+        # run_link_sync re-reads this list every pass, so mutating it in
+        # place from `refresh` is how one loop sees a seed go away and
+        # come back without restarting. `refresh` runs at the *top* of a
+        # pass, before that pass reads the list, so switching on pass N
+        # takes effect from pass N: dead, dead, live, live, dead, dead.
+        seeds = [dead_seed]
+        stop_event = asyncio.Event()
+        seen = {"passes": 0}
+
+        class FlakyNetwork:
+            async def refresh(self, lane):
+                seen["passes"] += 1
+                if seen["passes"] in (3, 5):
+                    seeds[:] = [live_seed] if seen["passes"] == 3 else [dead_seed]
+                if seen["passes"] >= 6:
+                    stop_event.set()
+
+            def __call__(self):
+                return _hello_for(node)
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                await run_link_sync(
+                    node, session, seeds, FlakyNetwork(), node_db.lane,
+                    interval_seconds=0.0, stop_event=stop_event,
+                )
+        finally:
+            await server.stop()
+        return seen["passes"]
+
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            assert asyncio.run(scenario()) == 6
+        assert _isolation_warnings(caplog) == []
+    finally:
+        node_db.close()
+        seed.close()
+
+
+def test_sync_does_not_call_an_inbound_only_node_isolated(tmp_path, caplog):
+    """Issue #313 review: a full peer may decline the reliable roster,
+    configure no seeds, and serve inbound helloes perfectly well. This
+    outbound loop never observes that inbound traffic, and completed
+    peers are removed from candidate_descriptors, so counting "reached
+    nothing" would accuse a healthy node of being cut off -- forever,
+    every third pass. A pass with nowhere to reach is not an isolated
+    pass."""
+    node = LinkNode(identity=bootstrap_node_identity("inbound-only"))
+    node_db = _NodeDb(tmp_path, "inbound-only")
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [], passes=9, outgoing_only=False)
+        assert _isolation_warnings(caplog) == []
+    finally:
+        node_db.close()
+
+
+def test_sync_ignores_undialable_candidates_when_counting_isolation(tmp_path, caplog):
+    """Issue #313 review round 2: the guard added for an inbound-only
+    node checked that `candidate_descriptors` was non-empty, but a
+    candidate whose descriptor is outgoing-only carries no address, so
+    `_try_candidate_fallback` skips it without ever attempting a dial.
+    Merely knowing of such peers is not "somewhere to reach", and
+    counting it as such walks straight back into the false warning."""
+    node = LinkNode(identity=bootstrap_node_identity("knows-only-undialable"))
+    other = bootstrap_node_identity("outgoing-only-peer")
+    node.candidate_descriptors[other.fingerprint] = build_endpoint_descriptor(
+        signing_identity=other.signing_key,
+        subject_fingerprint=other.fingerprint,
+        addresses=None,
+        outgoing_only=True,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    node_db = _NodeDb(tmp_path, "knows-only-undialable")
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [], passes=9, outgoing_only=False)
+        assert _isolation_warnings(caplog) == []
+    finally:
+        node_db.close()
+
+
+def test_sync_still_warns_an_outgoing_only_node_with_nothing_to_dial(tmp_path, caplog):
+    """Issue #313 review round 3: the "nowhere to reach" exemption is
+    only valid for a node that can still be *reached*. An outgoing-only
+    node accepts nothing inbound, so with no seed, no roster entry and
+    no dialable candidate it genuinely cannot touch the network at all
+    — exactly the state the warning exists for. Exempting it would have
+    made the silent case silent again."""
+    node = LinkNode(identity=bootstrap_node_identity("outgoing-and-stranded"))
+    node_db = _NodeDb(tmp_path, "outgoing-and-stranded")
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [], passes=3, outgoing_only=True)
+        warnings = _isolation_warnings(caplog)
+        assert len(warnings) == 1, warnings
+        assert "(none configured)" in warnings[0]
+    finally:
+        node_db.close()
+
+
+def test_sync_still_warns_when_a_retained_relay_is_offline(tmp_path, caplog):
+    """Issue #313 review round 5: keying the exemption on
+    `relays_serving_me` being non-empty was wrong. A pickup failure is
+    logged and skipped *without* recording a dial outcome, so a relay
+    that has gone offline sits in that mapping indefinitely — and would
+    have suppressed this warning forever, which is the exact blind spot
+    the issue is about. Only actually reaching a relay counts."""
+    node = LinkNode(identity=bootstrap_node_identity("dead-relay"))
+    dead = bootstrap_node_identity("offline-relay")
+    node.relays_serving_me[dead.fingerprint] = "http://127.0.0.1:1"
+    node.candidate_descriptors[dead.fingerprint] = build_endpoint_descriptor(
+        signing_identity=dead.signing_key,
+        subject_fingerprint=dead.fingerprint,
+        # Port 1: nothing listens, so every pickup fails.
+        addresses=[{"protocol": "http", "address": "127.0.0.1", "port": 1}],
+        outgoing_only=False,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    node_db = _NodeDb(tmp_path, "dead-relay")
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [], passes=3, outgoing_only=True)
+        assert len(_isolation_warnings(caplog)) == 1
+    finally:
+        node_db.close()

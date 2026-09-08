@@ -96,6 +96,24 @@ by anything"). Never a first resort: the normal seed list is always
 tried first, every pass, regardless of whether the previous pass had to
 fall back.
 
+**Isolation warning (issue #313)**: when neither the seed list nor the
+candidate fallback reaches anything for `_ISOLATION_WARNING_PASS_
+INTERVAL` consecutive passes, *and there was something to reach in the
+first place*, that is logged as a single WARNING naming the seeds
+tried, rather than being left implicit in the per-dial failures. The
+qualifier matters, and only for a node that accepts inbound: a full
+peer that declines the roster, configures no seeds, and only serves
+inbound helloes is working exactly as configured, and nothing in this
+outbound loop would ever observe the traffic proving it. An
+outgoing-only node with nothing to dial is the opposite -- it can
+neither reach out nor be reached -- so it still warns, unless a relay
+is currently serving it, which is a working outbound path this loop's
+seed dialling does not represent. Those individual failures are indistinguishable
+from ordinary churn -- which is exactly how a reliable node that had
+quietly stopped answering went unnoticed -- while "reached nothing at
+all, repeatedly" is a state worth putting in front of a SysOp, and a
+WARNING here reaches the bounded diagnostic log (§13.11) unaided.
+
 **Automatic relay selection, pickup, and send-via-relay (design doc
 §12, issue #58)**, both gated on this node's own hello
 currently claiming `outgoing_only` (a full peer never needs relays --
@@ -207,6 +225,19 @@ _logger = logging.getLogger(__name__)
 _MAX_CANDIDATE_FALLBACK_ATTEMPTS = 5
 _MAX_TRUST_PULL_PAGES_PER_PASS = 10
 
+# Issue #313: consecutive passes reaching nothing at all -- no seed, no
+# reliable-roster node, no candidate -- before saying so as a WARNING
+# rather than only as the per-dial failures already logged. Three, at the
+# five-minute default interval, is roughly a quarter hour of total
+# isolation: past any single dial that timed out, a peer restarting, or a
+# NAT rebinding, and short enough that an operator hears about a dead
+# seed roster the same day. The warning repeats every further three
+# passes rather than every pass, so a node left isolated overnight leaves
+# a proportionate trail in the bounded diagnostic log
+# (`netbbs.link.diagnostics`, which captures WARNING and above from this
+# namespace) instead of filling it.
+_ISOLATION_WARNING_PASS_INTERVAL = 3
+
 
 def _reliable_node_urls_if_accepted(db: Database) -> list[str]:
     if not participation_accepted(db):
@@ -298,6 +329,7 @@ async def run_link_sync(
     `LinkServer`'s direct-push path already enforced them (§13.9) --
     that gap is what this issue closes.
     """
+    isolated_passes = 0
     while stop_event is None or not stop_event.is_set():
         refresh = getattr(own_hello_provider, "refresh", None)
         if refresh is not None:
@@ -310,6 +342,12 @@ async def run_link_sync(
         # never merely because the list exists. Re-read from the lane
         # every pass, not captured at startup, so a console answer (or a
         # daily roster refresh) takes effect without a restart.
+        # One view of this node's own hello per pass, taken after the
+        # refresh above: both the isolation gate below and the
+        # relay-selection check further down ask it the same question
+        # (is this node outgoing-only?), and sampling twice invited them
+        # to disagree within a single pass.
+        own_hello = own_hello_provider()
         reliable = await lane.run(_reliable_node_urls_if_accepted)
         # De-duplicated, order-preserving: operator-configured first.
         pass_seeds = list(dict.fromkeys(seeds + reliable))
@@ -332,10 +370,40 @@ async def run_link_sync(
             # again. Never a first resort: an operator's explicit seed
             # configuration and a genuinely live supplementary list
             # always take priority when either actually works.
-            await _try_candidate_fallback(
+            reached_network = await _try_candidate_fallback(
                 node, session, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
             )
+        # Issue #313: a node that reaches nothing at all, pass after
+        # pass, is in a meaningfully broken state -- a dead seed roster,
+        # a firewall change, its own Link participation switched off at
+        # the other end -- but every individual dial failure above is
+        # logged the same way ordinary churn is, so nothing distinguished
+        # "one seed is flaky" from "this node is cut off entirely." This
+        # is the distinguishable signal, and being a WARNING in the
+        # `netbbs.link` namespace it lands in the SysOp-visible bounded
+        # diagnostic log (design doc §13.11) without any further wiring.
+        # Having nothing to dial only excuses a node that can still be
+        # *reached*: a full peer may decline the roster, configure no
+        # seeds, and serve inbound helloes perfectly well, and this
+        # outbound loop never observes that traffic (its completed peers
+        # leave candidate_descriptors), so counting those passes would
+        # accuse a healthy node of being cut off forever.
+        #
+        # An outgoing-only node is the opposite case and must NOT be
+        # exempted: it accepts nothing inbound, so with no seed, no
+        # roster entry and no dialable candidate it genuinely cannot
+        # reach the network at all, and silence is exactly the state
+        # worth reporting.
+        #
+        # "Dialable", not merely present: a candidate whose descriptor is
+        # itself outgoing-only carries no address, so
+        # _try_candidate_fallback skips it without attempting a dial.
+        accepts_inbound = not own_hello.descriptor.payload.get("outgoing_only")
+        had_somewhere_to_reach = bool(pass_seeds) or any(
+            _dialable_addresses(descriptor)
+            for descriptor in node.candidate_descriptors.values()
+        )
         await _pull_trust_subscriptions(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
@@ -348,7 +416,7 @@ async def run_link_sync(
         # `own_hello_provider` already encodes the addresses/outgoing_
         # only decision (this method's own docstring), so there's
         # nothing new to thread through from node startup config.
-        if own_hello_provider().descriptor.payload.get("outgoing_only"):
+        if own_hello.descriptor.payload.get("outgoing_only"):
             # Maintain the outgoing relay set and pick up anything held
             # *before* pushing pending mail below -- so a message that
             # only just became deliverable via a freshly-selected relay
@@ -358,13 +426,45 @@ async def run_link_sync(
                 node, session, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
             )
-            await _pickup_relay_mail(
+            # A relay that answers -- even holding nothing -- is a
+            # working path to the network that the seed loop above
+            # cannot observe, so it counts. Deliberately the *result* of
+            # contacting one rather than the presence of an entry in
+            # `relays_serving_me`: a pickup failure is logged and
+            # skipped without recording a dial outcome, so a relay that
+            # went offline can sit in that mapping indefinitely and
+            # would otherwise suppress this warning forever -- the very
+            # blind spot issue #313 is about.
+            reached_network = await _pickup_relay_mail(
                 node, session, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
-            )
+            ) or reached_network
         await _push_pending_link_mail(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
+        # Issue #313: decided at the end of the pass, so every path that
+        # can reach the network -- seeds, the reliable roster, a fallback
+        # candidate, a relay -- has had its turn first. A node that
+        # reaches nothing at all, pass after pass, is in a meaningfully
+        # broken state, but every individual dial failure is logged the
+        # same way ordinary churn is, so nothing distinguished "one seed
+        # is flaky" from "this node is cut off entirely". This is that
+        # signal, and as a WARNING in the `netbbs.link` namespace it
+        # lands in the SysOp-visible bounded diagnostic log (§13.11)
+        # with no further wiring.
+        if reached_network or (not had_somewhere_to_reach and accepts_inbound):
+            isolated_passes = 0
+        else:
+            isolated_passes += 1
+            if isolated_passes % _ISOLATION_WARNING_PASS_INTERVAL == 0:
+                _logger.warning(
+                    "Link sync: no seed, reliable node, fallback candidate or relay has "
+                    "been reachable for %d consecutive passes -- this node is not reaching "
+                    "out to the network. Tried %d seed URL(s) this pass: %s",
+                    isolated_passes,
+                    len(pass_seeds),
+                    ", ".join(pass_seeds) or "(none configured)",
+                )
         if stop_event is None:
             await asyncio.sleep(interval_seconds)
         else:
@@ -698,8 +798,13 @@ async def _try_candidate_fallback(
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
     *, enforce_trust_policy: bool = False,
-) -> None:
+) -> bool:
     """
+    Returns whether this node reached the network at all through a
+    candidate (issue #313) -- a node that fell back successfully is not
+    isolated, and `run_link_sync` needs to tell those two cases apart to
+    decide whether to raise its isolation warning.
+
     Resilience path, closing the gap named elsewhere in this module's
     docstrings: "a node isn't perpetually dependent
     on the seed list." Only ever called once every configured/cached
@@ -741,13 +846,13 @@ async def _try_candidate_fallback(
     """
     candidates = list(node.candidate_descriptors.items())
     if not candidates:
-        return
+        return False
     random.shuffle(candidates)
 
     attempted = 0
     for fingerprint, descriptor in candidates:
         if attempted >= _MAX_CANDIDATE_FALLBACK_ATTEMPTS:
-            return
+            return False
         base_urls = _dialable_addresses(descriptor)
         if not base_urls:
             continue
@@ -765,7 +870,8 @@ async def _try_candidate_fallback(
                 "via fallback candidate %s instead",
                 fingerprint,
             )
-            return
+            return True
+    return False
 
 
 async def _request_one_relay_consent(
@@ -895,8 +1001,16 @@ async def _pickup_relay_mail(
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
     *, enforce_trust_policy: bool = False,
-) -> None:
+) -> bool:
     """
+    Returns whether any relay was actually reached (issue #313). A
+    mailbox that answers -- even holding nothing -- proves this node
+    still has a working path to the network, which the seed-dialling
+    loop above cannot observe. Presence in `relays_serving_me` proves
+    nothing on its own: a pickup failure below is logged and skipped
+    without recording a dial outcome, so a relay that has gone offline
+    can sit in that mapping indefinitely.
+
     Issue #58 (widened by issue #94 to the full `link_message`-family
     round trip, not just the original message): for every relay
     currently serving this node (`node.relays_serving_me`), pick up
@@ -932,6 +1046,7 @@ async def _pickup_relay_mail(
     so those branches of `persist_accepted_events` are never reached
     from this caller.
     """
+    reached_a_relay = False
     for relay_fingerprint in list(node.relays_serving_me):
         if enforce_trust_policy and not (await lane.run(
             decide_node_action, relay_fingerprint, LinkPolicyAction.RELAY
@@ -945,6 +1060,7 @@ async def _pickup_relay_mail(
         except LinkTransportError as exc:
             _logger.warning("Link sync: could not pick up mail from relay %s: %s", relay_fingerprint, exc)
             continue
+        reached_a_relay = True
 
         for message in messages:
             object_type = message.envelope.get("object_type")
@@ -971,7 +1087,7 @@ async def _pickup_relay_mail(
                     enforce_trust_policy=enforce_trust_policy,
                 )
                 await lane.run(save_peer, node.peers[claimed_sender])
-
+    return reached_a_relay
 
 async def _deposit_one(
     session: ClientSession,
