@@ -76,8 +76,10 @@ the quote they reveal. Remote quotes stay stale until updated, and older chart
 discoveries do not invent price history. Open purchase of contraband remains
 labelled prohibited outside Havens.
 
-**[R]oute** estimates a trade using a remembered destination sale price. Edit
-**[D]estination**, **[C]argo** and **[Q]uantity**; **[H]old** toggles between buying
+**[R]oute** estimates a trade using a remembered destination sale price. Open
+**[E]dit draft**, change **[D]estination**, **[C]argo** and **[Q]uantity**, then
+**[S]Apply** to update the estimate. Back discards edits; rejected combinations
+retain the draft for correction. **[H]old** toggles between buying
 new goods here and using cargo already aboard. The view shows procurement and
 remaining credits, fuel and refuelling stops, wages, quote age, cash shortfall,
 route danger where known and expected margin. Unknown acquisition cost or a

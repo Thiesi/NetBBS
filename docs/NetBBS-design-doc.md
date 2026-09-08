@@ -4781,6 +4781,15 @@ is infeasible. Unknown intermediate systems retain unknown names/threats. Prices
 encounters, detours, repairs, other income and contract deliveries can change the
 outcome; estimates are advisory and never buy cargo or launch travel.
 
+Route parameters use an explicit draft editor: destination, commodity, quantity
+and cargo source are edited together, then applied to the read-only estimate.
+Rejected combinations retain the draft; Back discards edits. Applying a route
+draft never purchases cargo, launches travel or writes a career. The standalone
+door implements this synchronous editor contract locally, because the host's
+async resource editor requires Session and DatabaseLane objects unavailable in
+the subprocess. Remembered station IDs must belong to the saved chart; inconsistent
+observations are rejected at the recovery boundary before names are rendered.
+
 The engineer costs 200 credits to hire and 2 per jump, reducing fuel by 25%,
 rounded up, with a minimum one-unit burn. The role is an investment for longer
 routes; one-unit jumps cannot benefit, and hiring does not refund old hire costs.

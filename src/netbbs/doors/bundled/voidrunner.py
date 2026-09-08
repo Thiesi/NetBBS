@@ -1285,6 +1285,7 @@ def _validate_save_document(data: dict) -> None:
     for sid in discovered:
         system(sid, "chart system")
     require(len(discovered) == len(set(discovered)), "chart systems")
+    require(memory_ids <= set(discovered), "market observations outside the chart")
     drift = data.get("market_drift", {})
     require(isinstance(drift, dict), "market drift")
     seen = set()
@@ -3563,7 +3564,7 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
     name = world.by_id[destination].name if destination is not None else "not selected"
     lines = [f"Destination: {name}. Cargo: {COMMODITIES[commodity]['label']} x{quantity}.",
              f"Source: {'existing hold cargo' if use_hold else 'buy new cargo here'}. Credits: {world.save.pilot.credits:,}cr.",
-             "Edit fields with the action keys. Back makes no changes; this estimate never buys cargo or launches a route."]
+             "Use [E]dit draft to change the route. Back makes no changes; this estimate never buys cargo or launches a route."]
     if destination is None:
         return lines + ["No other station has remembered prices yet. Visit another station or receive a trader's market report first."]
     try:
@@ -3644,14 +3645,95 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]]) -> object |
             return pages[page][1][int(key) - 1]
 
 
-def screen_trade_route(p: Palette, world: World) -> None:
+def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
+                    apply: Callable[[dict], object], error_type: type[Exception]) -> object | None:
+    """Standalone synchronous draft editor: scalar fields, apply/back, retained errors.
+
+    Mirrors the host resource-editor contract without importing Session/DatabaseLane
+    into the self-contained door. Field edits change only the copied draft.
+    """
+    draft = dict(initial)
+    page, error = 0, None
+    footer = " ".join(f"[{key}]{label}" for key, label, _, _ in fields) + " [S]Apply [N]ext [P]rev [B]ack: "
+    while True:
+        lines = [f"[{key}] {label}: {display(draft)}" for key, label, display, _ in fields]
+        lines += ["Apply uses these draft values. Back discards edits; no career data is written."]
+        if error:
+            lines.insert(0, "Cannot apply: " + error)
+        pages = _trade_pages(lines, title, footer)
+        page = min(page, len(pages) - 1)
+        out_line()
+        out_line(f"{title} {page + 1}/{len(pages)}")
+        for line in pages[page]:
+            out_line(line)
+        out_prompt(footer)
+        key = read_command()
+        out_line(key)
+        if key == "B":
+            return None
+        if key == "N":
+            page = min(page + 1, len(pages) - 1)
+        elif key == "P":
+            page = max(0, page - 1)
+        elif key == "S":
+            try:
+                return apply(draft)
+            except error_type as exc:
+                error, page = str(exc), 0
+        else:
+            for hotkey, _, _, edit in fields:
+                if key == hotkey:
+                    try:
+                        edit(draft)
+                        error = None
+                    except error_type as exc:
+                        error = str(exc)
+                    page = 0
+                    break
+
+
+def _edit_trade_route(world: World, initial: dict) -> dict | None:
     destinations = [(sid, world.by_id[sid].name) for sid in world.save.market_memory if sid != world.here.id]
     destinations.sort(key=lambda item: item[1])
-    destination = destinations[0][0] if destinations else None
-    commodity, quantity, use_hold, page = "food", 1, False, 0
-    footer = "[D]est [C]argo [Q]ty [H]old [N]ext [P]rev [B]ack: "
+
+    def pick(draft, field, title, choices):
+        selected = _pick_trade_field(title, choices)
+        if selected is not None:
+            draft[field] = selected
+
+    def quantity(draft):
+        out_prompt(f"Quantity 1-{cargo_capacity(world.save.ship)} (Enter keeps {draft['quantity']}): ")
+        raw = read_line_raw(max_len=5)
+        if not raw:
+            return
+        if not raw.isascii() or not raw.isdecimal() or not 1 <= int(raw) <= cargo_capacity(world.save.ship):
+            raise TradeError("Choose a quantity within your cargo capacity.")
+        draft["quantity"] = int(raw)
+
+    def apply(draft):
+        trade_route_quote(world, **draft)
+        return dict(draft)
+
+    fields = [
+        ("D", "Destination", lambda d: world.by_id[d['destination']].name if d['destination'] is not None else "not selected",
+         lambda d: pick(d, "destination", "Destination", destinations)),
+        ("C", "Cargo", lambda d: COMMODITIES[d['commodity']]['label'],
+         lambda d: pick(d, "commodity", "Cargo", [(c, v['label']) for c, v in COMMODITIES.items()])),
+        ("Q", "Quantity", lambda d: str(d['quantity']), quantity),
+        ("H", "Hold source", lambda d: "existing hold cargo" if d['use_hold'] else "buy new cargo here",
+         lambda d: d.update(use_hold=not d['use_hold'])),
+    ]
+    return edit_door_draft(title="Route Draft", initial=initial, fields=fields, apply=apply, error_type=TradeError)
+
+
+def screen_trade_route(p: Palette, world: World) -> None:
+    destinations = sorted((sid for sid in world.save.market_memory if sid != world.here.id), key=lambda sid: world.by_id[sid].name)
+    parameters = {"destination": destinations[0] if destinations else None,
+                  "commodity": "food", "quantity": 1, "use_hold": False}
+    page = 0
+    footer = "[E]dit draft [N]ext [P]rev [B]ack: "
     while True:
-        pages = _trade_pages(trade_route_lines(world, destination, commodity, quantity, use_hold), "Trade Route", footer)
+        pages = _trade_pages(trade_route_lines(world, **parameters), "Trade Route", footer)
         page = min(page, len(pages) - 1)
         out_line()
         out_line(f"Trade Route {page + 1}/{len(pages)}")
@@ -3666,21 +3748,10 @@ def screen_trade_route(p: Palette, world: World) -> None:
             page = min(page + 1, len(pages) - 1)
         elif key == "P":
             page = max(0, page - 1)
-        elif key == "D":
-            selected = _pick_trade_field("Destination", destinations)
-            if selected is not None:
-                destination, page = selected, 0
-        elif key == "C":
-            selected = _pick_trade_field("Cargo", [(c, info["label"]) for c, info in COMMODITIES.items()])
-            if selected is not None:
-                commodity, page = selected, 0
-        elif key == "H":
-            use_hold, page = not use_hold, 0
-        elif key == "Q":
-            out_prompt(f"Quantity 1-{cargo_capacity(world.save.ship)} (Enter keeps {quantity}): ")
-            raw = read_line_raw(max_len=5)
-            if raw.isascii() and raw.isdecimal() and 1 <= int(raw) <= cargo_capacity(world.save.ship):
-                quantity, page = int(raw), 0
+        elif key == "E":
+            edited = _edit_trade_route(world, parameters)
+            if edited is not None:
+                parameters, page = edited, 0
 
 
 def screen_remembered_markets(p: Palette, world: World) -> None:

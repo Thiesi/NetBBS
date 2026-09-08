@@ -86,6 +86,7 @@ def _world_with_market_memory():
     vr.remember_local_market(world)
     world.save.current_system = 0
     vr.remember_local_market(world)
+    world.save.discovered = [system.id for system in world.galaxy if system.discovered]
     return world, destination
 
 
@@ -403,7 +404,7 @@ def test_trade_route_editing_fields_and_cancelling_is_read_only(monkeypatch):
         vr.remember_local_market(world)
     world.save.current_system = 0
     before = copy.deepcopy(world.save.to_dict())
-    commands = iter("D2C2QHHB")
+    commands = iter("ED2C2QHHSB")
     monkeypatch.setattr(vr, "read_key", lambda: next(commands))
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "2")
     with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -413,7 +414,7 @@ def test_trade_route_editing_fields_and_cancelling_is_read_only(monkeypatch):
     assert world.save.to_dict() == before
 
 
-@pytest.mark.parametrize("commands", [b"TMBRBBQ", b"TR"])
+@pytest.mark.parametrize("commands", [b"TMBRBBQ", b"TR", b"TREQ3\nBBBQ", b"TREQ3\n"])
 def test_real_market_memory_and_route_back_or_eof_preserve_career(tmp_path, commands):
     import json
     import os
@@ -430,6 +431,8 @@ def test_real_market_memory_and_route_back_or_eof_preserve_career(tmp_path, comm
     assert b"Trade Route 1/" in result.stdout
     if b"M" in commands:
         assert b"Market Memory 1/" in result.stdout
+    if b"E" in commands:
+        assert b"Route Draft 1/" in result.stdout and b"Quantity 1-" in result.stdout
     assert (tmp_path / "77.json").read_bytes() == original
 
 
@@ -703,6 +706,54 @@ def test_trading_ledger_combat_dump_accounts_only_for_real_cargo(monkeypatch, qu
     assert world.save.trading_ledger.cargo_loss_cost == cost
     assert world.save.trading_ledger.uncosted_losses == 0
     assert not world.save.cargo_basis
+
+
+def test_market_memory_rejects_uncharted_observation_before_exposing_station(tmp_path):
+    import json
+    world = _world_with_seed(42)
+    sid = next(s.id for s in world.galaxy if s.id not in world.save.discovered)
+    world.save.market_memory[sid] = {"food": {"day": 0, "buy": 12, "sell": 11}}
+    raw = json.dumps(world.save.to_dict()).encode()
+    (tmp_path / "77.json").write_bytes(raw)
+    with pytest.raises(vr.ResumeError, match="outside the chart"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert (tmp_path / "77.json").read_bytes() == raw
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_trade_route_draft_cancel_retains_original_and_fits_pages(monkeypatch, width, height):
+    import copy, re
+    world, destination = _world_with_market_memory()
+    initial = dict(destination=destination, commodity="food", quantity=1, use_hold=False)
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO(); frames = []
+    def choose():
+        frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
+        match = re.search(r"Route Draft (\d+)/(\d+)", " ".join(frame.split()))
+        assert match and len(frames) < 100
+        if len(frames) == 1: return "H"
+        return "B" if match[1] == match[2] else "N"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): assert vr._edit_trade_route(world, initial) is None
+    assert initial["use_hold"] is False and initial["quantity"] == 1
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    assert all(len(frame.splitlines()) <= height for frame in frames)
+    assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
+
+
+def test_trade_route_draft_rejection_keeps_edits_until_apply(monkeypatch):
+    import copy
+    world, destination = _world_with_market_memory()
+    initial = dict(destination=destination, commodity="food", quantity=1, use_hold=False)
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    keys = iter("QHSHS")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "3")
+    with contextlib.redirect_stdout(io.StringIO()) as output: result = vr._edit_trade_route(world, initial)
+    assert result == {**initial, "quantity": 3} and initial["quantity"] == 1
+    assert "Cannot apply" in output.getvalue() and "Quantity: 3" in output.getvalue()
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
 
 # -- galaxy generation -------------------------------------------------
