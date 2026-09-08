@@ -159,6 +159,25 @@ def test_market_memory_data_burst_records_only_the_revealed_remote_quote_without
     assert "Recorded on day 0" in output.getvalue()
 
 
+def test_completed_market_memory_tip_replays_without_quotes_rng_or_checkpoint(monkeypatch):
+    import copy
+    world, destination = _world_with_market_memory()
+    world.save.pending_travel = {"version": 1, "origin": 0, "destination": destination,
+        "was_discovered": True, "destroyed": False, "phase": "primary", "primary": "random",
+        "bounty": None, "escorts": [], "escort_index": 0,
+        "encounter": {"kind": "tip", "done": True, "result": ["Previously recorded market report."]}}
+    world.checkpoint()
+    world = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
+    before = copy.deepcopy(world.save.to_dict())
+    rng = world.event_rng.getstate()
+    world._checkpoint = lambda current: pytest.fail("Completed report wrote another checkpoint")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._encounter_market_tip(vr.Palette(False), world, world.by_id[destination])
+        vr._resolve_random_travel_encounter(vr.Palette(False), world, world.by_id[destination])
+    assert output.getvalue().count("Previously recorded market report.") == 2
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
 def test_trade_route_quote_uses_stale_sale_data_and_exact_fuel_wage_budget(monkeypatch):
     import copy
     world, destination = _world_with_market_memory()
@@ -225,6 +244,20 @@ def test_trade_route_does_not_claim_an_underfilled_delivery_consumes_the_load():
     assert not quote["conflicts"] and quote["margin"] is not None
 
 
+@pytest.mark.parametrize("deliveries,conflicts", [([3], []), ([3, 3], ["Delivery 2"]), ([4], ["Delivery 1"])])
+def test_trade_route_new_purchase_uses_older_cargo_as_delivery_buffer(deliveries, conflicts):
+    world, destination = _world_with_market_memory()
+    world.save.cargo = {"food": 3}
+    world.save.active_missions = [vr.Mission(id=i, kind="delivery", description=f"Delivery {i}",
+        reward=100, origin_system=0, target_system=destination, commodity="food", quantity=quantity)
+        for i, quantity in enumerate(deliveries, 1)]
+    quote = vr.trade_route_quote(world, destination, "food", 3)
+    assert quote["conflicts"] == conflicts
+    assert (quote["margin"] is None) is bool(conflicts)
+    held = vr.trade_route_quote(world, destination, "food", 3, use_hold=True)
+    assert bool(held["conflicts"]) is (deliveries[0] <= 3)
+
+
 def test_trade_route_hides_uncharted_intermediate_names_and_rejects_oversized_legs(monkeypatch):
     world, _ = _world_with_market_memory()
     destination = max(world.by_id, key=lambda sid: len(vr.bfs_path(world.by_id, 0, sid)))
@@ -272,6 +305,7 @@ def test_trade_route_rejections_write_nothing(fault):
     {"1": {"food": {"day": False, "buy": 10, "sell": 8}}},
     {"1": {"food": {"day": 0, "buy": 0, "sell": 8}}},
     {"1": {"food": {"day": 0, "buy": 10, "sell": -1}}},
+    {"1": {"food": {"day": 0, "buy": 10, "sell": 0}}},
     {"1": {"food": {"day": 0, "buy": 10}}},
     {"1": {"food": {"day": 0, "buy": 10, "sell": 8, "future": 1}}},
 ])
@@ -1580,7 +1614,8 @@ def test_market_tip_reveals_a_real_price_at_a_nearby_discovered_system():
     with contextlib.redirect_stdout(buf):
         vr._encounter_market_tip(vr.Palette(truecolor=False), world, dest)
 
-    assert "buy " in buf.getvalue() and "sell " in buf.getvalue()
+    normalized = " ".join(buf.getvalue().split())
+    assert "buy " in normalized and "sell " in normalized
 
 
 def test_market_tip_with_no_discovered_neighbors_shows_fallback_without_crashing():

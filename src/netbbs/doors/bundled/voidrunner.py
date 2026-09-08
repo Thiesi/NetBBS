@@ -1279,7 +1279,7 @@ def _validate_save_document(data: dict) -> None:
             integer(quote["day"], "quote observation day", maximum=data["turn"])
             if quote["buy"] is not None:
                 integer(quote["buy"], "remembered buy price", minimum=1)
-            integer(quote["sell"], "remembered sale price")
+            integer(quote["sell"], "remembered sale price", minimum=1)
     discovered = data["discovered"]
     require(isinstance(discovered, list) and len(discovered) <= GALAXY_SYSTEM_COUNT, "chart")
     for sid in discovered:
@@ -1760,12 +1760,15 @@ def trade_route_quote(world: World, destination: int, commodity: str, quantity: 
     receipts = quantity * remembered["sell"]
     conflicts = []
     available = world.save.cargo.get(commodity, 0) + (0 if use_hold else quantity)
+    older_cargo = 0 if use_hold else world.save.cargo.get(commodity, 0)
     for hop, sid in enumerate(path, 1):
         for mission in world.save.active_missions:
             if (mission.kind == "delivery" and mission.commodity == commodity
                     and mission.target_system == sid and mission.quantity <= available
                     and (mission.deadline_turn is None or world.save.turn + hop <= mission.deadline_turn)):
-                conflicts.append(mission.description)
+                if mission.quantity > older_cargo:
+                    conflicts.append(mission.description)
+                older_cargo = max(0, older_cargo - mission.quantity)
                 available -= mission.quantity
     return {"destination": destination, "commodity": commodity, "quantity": quantity, "use_hold": use_hold,
             "observed_day": remembered["day"], "unit_sale": remembered["sell"], "receipts": receipts,
@@ -4806,6 +4809,10 @@ def _encounter_distress_call(p: Palette, world: World) -> None:
 def _encounter_market_tip(p: Palette, world: World, dest: GalaxySystem) -> None:
     """Remember the revealed quote with the encounter result; RNG order is unchanged."""
     state = _travel_encounter(world)
+    if state.get("done"):
+        for line in state.get("result", []):
+            out_line(f"{p.gold}{line}{RESET}")
+        return
     hops = bfs_hops(world.by_id, dest.id)
     candidates = [sid for sid, h in hops.items() if 1 <= h <= 4 and world.by_id[sid].discovered]
     if not candidates:
