@@ -49,7 +49,11 @@ load_rc_config $name
 : ${netbbs_statedir:="/var/lib/netbbs"}
 : ${netbbs_config:="/etc/netbbs/netbbs.toml"}
 : ${netbbs_python:="${netbbs_statedir}/.venv/bin/python"}
-: ${netbbs_ld_library_path:="/usr/pkg/lib"}
+# `=`, not `:=`: the header documents setting this empty to disable the
+# override, and `:=` would treat an explicitly empty rc.conf value as
+# unset and restore /usr/pkg/lib -- forcing pkgsrc libraries on an
+# operator who asked for none. Only genuinely unset takes the default.
+: ${netbbs_ld_library_path="/usr/pkg/lib"}
 : ${netbbs_logfile:="${netbbs_statedir}/netbbs.service.log"}
 # Graceful stop: SIGTERM makes NetBBS warn connected callers and wait up
 # to shutdown.graceful_delay_seconds (60s default), after which teardown
@@ -343,6 +347,23 @@ netbbs_stop()
 			# shutdown.graceful_delay_seconds so this stays unreached.
 			echo "netbbs did not exit in ${_timeout}s; sending SIGKILL." >&2
 			kill -KILL "${_pid}" 2>/dev/null
+			# Even SIGKILL is not instant -- a process in uninterruptible
+			# sleep stays alive until it leaves that state. Reporting
+			# "stopped" and deleting the pidfile here would let the next
+			# start launch a second node against the same database while
+			# the first is still running, and untracked. Confirm, and
+			# fail honestly if it is still there.
+			_killed=0
+			while [ "${_killed}" -lt 10 ]; do
+				kill -0 "${_pid}" 2>/dev/null || break
+				sleep 1
+				_killed=$((_killed + 1))
+			done
+			if kill -0 "${_pid}" 2>/dev/null; then
+				echo "netbbs (pid ${_pid}) survived SIGKILL -- leaving ${pidfile}" >&2
+				echo "in place so it stays tracked. Do not start another node yet." >&2
+				return 1
+			fi
 			break
 		fi
 		sleep 2

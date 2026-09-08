@@ -3270,6 +3270,20 @@ or a previous run's readiness line is read as this one's. Alive-but-unconfirmed
 at the bound is not a failure that can be asserted — a very slow start looks
 identical — so report the uncertainty rather than claiming either outcome.
 
+`: ${var:="default"}` treats an explicitly *empty* rc.conf value as unset and
+restores the default, so any variable documented as "set empty to disable"
+needs `${var="default"}` instead. Fixing the `load_rc_config` ordering is what
+makes this reachable at all — while overrides were being ignored wholesale, the
+disable mechanism was equally dead and equally invisible.
+
+Signals are requests, not outcomes. Neither SIGTERM nor SIGKILL is instant (a
+process in uninterruptible sleep survives both until it leaves that state), so
+a supervisor must confirm the process is gone before reporting "stopped" and
+dropping its pidfile — otherwise the next start launches a second node against
+the same database while the first is alive and no longer tracked. If it will
+not die, keep the pidfile and fail: staying tracked is worth more than a tidy
+exit status.
+
 `rc.conf` durations are operator input and reach `[ ... -ge ... ]`, where a
 non-integer makes the test error and evaluate false on every iteration. That
 turns a bounded stop into an unbounded one, hanging `service netbbs stop` and,
