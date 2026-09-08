@@ -4798,6 +4798,15 @@ paging and cancelled action prompts do not checkpoint or spend. Confirmation is
 only behind a chosen purchase/dismissal action, and existing durable action
 checkpoints still precede success acknowledgement.
 
+The direct-jump chart uses height-aware connection entries rather than a fixed
+79-column table. Fuel stays in the heading; each connection retains its bearing,
+known sector/economy, danger or unknown label, jump cost and tracked-next marker.
+Entries remain together when they fit a fresh page, and overflow can always be
+browsed with previous/next controls and Back. Standard connection keys stay stable;
+exceptionally dense charts reuse the reserved-key-safe alphabet only on later
+pages. Rejected departures and scan results remain visible on the refreshed chart.
+Browsing does not change the career; scans and travel retain their existing rules.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 500-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. Buying and same-station recycling do not grant
