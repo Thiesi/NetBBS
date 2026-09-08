@@ -55,6 +55,28 @@ First Flight can be accepted once per career. Abandoning it closes that offer;
 the guide remains available. Completion points toward a first upgrade and regular
 trading or contracts. The normal risks of travel still apply.
 
+### Station stock and buying demand
+
+Spot markets carry a limited quantity of each good and have a limited buying
+demand. The market lists stock; commodity details show both available quantities
+and replenishment per day. A producer stocks up to 96 units of its goods and
+replenishes 6 per day; other goods have 48 stock and replenish 3. Stations that
+demand a good buy up to 96 units and regain 6 demand per day; other goods have
+48 demand and regain 3. Only jumps advance days. Revisiting a menu or restarting
+the door does not refill a market. Selling replenishes stock up to its ceiling;
+buying does not restore spent buying demand.
+
+Large holds can carry several commodities or visit additional markets when one
+pool is exhausted. Futures are separate wholesale consignments with their stated
+fee, maturity and station pickup; selling the delivered goods uses ordinary spot
+demand. Contract deliveries use their own contracted quantities. Existing careers
+start with full spot pools when this feature is first used.
+
+The ledger's market memory retains observed quantities with their date. Trader
+price reports do not reveal stock or buying demand. Route estimates warn when a
+load exceeds remembered buying demand; that demand may have replenished since the
+observation. Check a current market before relying on a complete sale.
+
 ### Trading Ledger
 
 Choose **[T] Trading Ledger** on the station deck to inspect cargo costs, sale
