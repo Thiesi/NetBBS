@@ -5146,3 +5146,12 @@ synchronization; those startup writes must not be misattributed to browsing.
 
 Sector danger spans 0-5; opponent tiers span 0-4. Keep their scales distinct in
 encounter labels and test the danger-5 case when deriving rewards or tier ranges.
+
+Archive progress uses optional versioned flags without regenerating the existing
+landmark or drawing encounter RNG. Recovery requires acceptance and the original
+landmark investigation flag; endings are mutually exclusive and require recovery.
+Previously investigated sites must allow transcription without replaying salvage.
+Keep direct landmark investigation and archive recovery on one salvage function.
+Contact and landmark Back paths bypass the station loop's action checkpoint;
+chosen actions checkpoint before results. Route bearings authorize only the
+accepted landmark, leave discovery unchanged and retain ordinary hop validation.

@@ -3162,7 +3162,9 @@ def test_landmark_available_here_false_elsewhere():
     assert not vr.landmark_available_here(world)
 
 
-def test_screen_landmark_grants_reward_once_and_sets_flag():
+def test_screen_landmark_grants_reward_once_and_sets_flag(monkeypatch):
+    keys = iter("IB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     world = _world_with_seed(113)
     world.save.current_system = world.landmark["system_id"]
     before_credits = world.save.pilot.credits
@@ -3300,7 +3302,9 @@ def test_hull_refit_records_a_highlight(monkeypatch):
     assert any("Freighter-class hull refit" in h for h in world.save.pilot.highlights)
 
 
-def test_landmark_investigation_records_a_highlight():
+def test_landmark_investigation_records_a_highlight(monkeypatch):
+    keys = iter("IB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     world = _world_with_seed(121)
     world.save.current_system = world.landmark["system_id"]
 
@@ -3843,7 +3847,7 @@ def test_route_screens_open_map_with_their_exact_path(monkeypatch):
         vr.screen_mission_navigation(vr.Palette(False), world, mission, active=True)
         vr._screen_auto_route(vr.Palette(False), world, destination=target.id)
     assert opened == [{"path":vr.mission_route(world, mission), "public_target":target.id},
-                      {"path":vr.bfs_path(world.by_id,0,target.id)}]
+                      {"path":vr.bfs_path(world.by_id,0,target.id), "public_target":target.id}]
 
 
 @pytest.mark.parametrize("width,height", [(20,10), (40,12), (80,24)])
@@ -9222,6 +9226,264 @@ def test_peaceful_combat_action_discloses_its_standing_gain(patrol):
     lines = vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True)
     action = next(row for row in lines if row.startswith("[S]" if patrol else "[B]"))
     assert ("Concord +2" if patrol else "Blackwake +2") in action
+
+
+# Optional archive story uses the seeded landmark and existing career persistence.
+def _archive_world(stage="idle", *, ending="P", investigated=False):
+    world = _world_with_seed(42)
+    if investigated: world.save.flags["landmark_investigated"] = True
+    if stage != "idle": vr.archive_action(world, "A")
+    if stage in ("recovered", "complete"):
+        world.save.current_system = world.landmark["system_id"]
+        vr.archive_action(world, "I")
+        world.save.current_system = 0
+    if stage == "complete": vr.archive_action(world, ending)
+    return world
+
+
+@pytest.mark.parametrize("ending,reward,concord,blackwake", [("P", 500, 5, 0), ("S", 1500, -2, 5)])
+@pytest.mark.parametrize("investigated", [False, True])
+def test_archive_round_trip_preserves_rng_and_existing_salvage(ending, reward, concord, blackwake, investigated):
+    import copy
+    world = _world_with_seed(42)
+    if investigated: world.save.flags["landmark_investigated"] = True
+    world.save.active_missions = [vr.Mission(i+1, "bounty", "Existing", 500, 0, 1, pirate_tier=1) for i in range(vr.MAX_ACTIVE_MISSIONS)]
+    missions = copy.deepcopy(world.save.active_missions)
+    credits, turn, fuel, rng = world.save.pilot.credits, world.save.turn, world.save.ship.fuel, world.event_rng.getstate()
+    vr.archive_action(world, "A")
+    world.save.current_system = world.landmark["system_id"]
+    text = " ".join(vr.archive_action(world, "I"))
+    assert all(record in text for record in vr.ARCHIVE_RECORDS[world.landmark["label"]])
+    world.save.current_system = 0
+    vr.archive_action(world, ending)
+    assert world.save.pilot.credits == credits + reward + (0 if investigated else 3000)
+    assert world.save.pilot.reputation[vr.FACTION_CONCORD] == concord
+    assert world.save.pilot.reputation[vr.FACTION_BLACKWAKE] == blackwake
+    assert world.save.pilot.missions_completed == 1 and vr.archive_finished(world)
+    assert world.save.active_missions == missions
+    assert (world.save.turn, world.save.ship.fuel, world.event_rng.getstate()) == (turn, fuel, rng)
+    assert any("Archive:" in line for line in world.save.pilot.highlights)
+    loaded = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
+    before = copy.deepcopy(loaded.save.to_dict())
+    for action in ("A", "I", "P", "S"):
+        with pytest.raises(ValueError, match="already complete"): vr.archive_action(loaded, action)
+        assert loaded.save.to_dict() == before
+    assert ("Families" if ending == "P" else "Kest Rel") in " ".join(vr.archive_lines(loaded))
+
+
+@pytest.mark.parametrize("stage,location,action", [
+    ("idle", "site", "A"), ("idle", "site", "I"), ("idle", "home", "P"),
+    ("started", "home", "A"), ("started", "home", "I"), ("started", "home", "S"),
+    ("recovered", "site", "P"), ("recovered", "site", "S"), ("recovered", "site", "I"),
+    ("idle", "home", "?"),
+])
+def test_archive_invalid_decisions_are_atomic(stage, location, action):
+    import copy
+    world = _archive_world(stage)
+    world.save.current_system = world.landmark["system_id"] if location == "site" else 0
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    with pytest.raises(ValueError): vr.archive_action(world, action)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("flags", [
+    {"archive_v1_recovered": True},
+    {"archive_v1_started": True, "archive_v1_recovered": True},
+    {"archive_v1_public": True}, {"archive_v1_private": True},
+    {"archive_v1_started": True, "archive_v1_recovered": True, "landmark_investigated": True,
+     "archive_v1_public": True, "archive_v1_private": True},
+    {"archive_v1_started": "yes"},
+])
+def test_invalid_archive_progress_preserves_original_career(tmp_path, flags):
+    import json
+    data = _world_with_seed(42).save.to_dict(); data["flags"] = flags
+    path = tmp_path / "77.json"; path.write_text(json.dumps(data), encoding="utf-8")
+    original = path.read_bytes()
+    with pytest.raises(vr.ResumeError): vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("stage", ["idle", "started", "recovered", "complete"])
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("style", ["auto", "plain"])
+def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, stage, width, height, style):
+    import copy,re
+    world = _archive_world(stage)
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    output, frames = io.StringIO(), []
+    world._checkpoint = lambda w: pytest.fail("Browsing archive wrote a checkpoint")
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(row) <= width for row in frame.splitlines())
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        page, count = map(int, re.search(r"Archive.*?(\d+)/(\d+)", frame, re.S).groups())
+        return "B" if page == count else ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): vr.screen_archive(vr.Palette(False), world)
+    rows = [vr._ANSI_RE.sub("", row).strip() for frame in frames for row in frame.splitlines()]
+    text = " ".join(row for row in rows if row and row not in (">", "<") and not re.fullmatch(r"\d+/\d+", row) and not row.startswith("Archive ") and "Act" not in row and "[<>]Page:" not in row)
+    for line in vr.archive_lines(world): assert " ".join(line.split()) in text
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_landmark_inspection_back_keeps_unclaimed_salvage(monkeypatch, width, height):
+    import copy,re
+    world = _world_with_seed(42); world.save.current_system = world.landmark["system_id"]
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output, frames = io.StringIO(), []
+    world._checkpoint = lambda w: pytest.fail("Inspecting landmark wrote a checkpoint")
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(row) <= width for row in frame.splitlines())
+        page, count = map(int, re.search(r"(\d+)/(\d+)", frame).groups())
+        return "B" if page == count else ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): vr.screen_landmark(vr.Palette(False), world)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    assert "Unclaimed salvage: 3000cr." in " ".join(" ".join(frames).split())
+
+
+@pytest.mark.parametrize("commands,site", [(b"N", False), (b"N?><BQ", False), (b"NRBBQ", True), (b"L", True), (b"L><BQ", True)])
+def test_real_archive_and_landmark_browsing_preserve_career_bytes(tmp_path, commands, site):
+    import json,os,subprocess
+    world = _world_with_seed(42)
+    if site:
+        world.save.current_system = world.landmark["system_id"]
+        world.by_id[world.here.id].discovered = True
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    before = (tmp_path / "77.json").read_bytes()
+    info = tmp_path / "door_info.json"; info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True, timeout=10,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)))
+    assert result.returncode == 0 and not result.stderr
+    assert (b"Archive" if commands.startswith(b"N") else b"Unclaimed salvage") in result.stdout
+    assert (tmp_path / "77.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("stage,key,flag,ack", [
+    ("idle", b"A", "archive_v1_started", b"assignment accepted."),
+    ("started", b"I", "archive_v1_recovered", b"Salvage recovered:"),
+    ("recovered", b"P", "archive_v1_public", b"Archive complete:"),
+    ("recovered", b"S", "archive_v1_private", b"Archive complete:"),
+])
+def test_real_archive_actions_save_before_ack_and_cannot_replay(tmp_path, stage, key, flag, ack):
+    import os,subprocess
+    world = _archive_world(stage)
+    if stage == "started":
+        world.save.current_system = world.landmark["system_id"]
+        world.by_id[world.here.id].discovered = True
+    world.save.pilot.highest_rank_seen = len(vr.RANKS) - 1
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    with _door_stopped_at(tmp_path, b"N" + key, ack):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert saved.flags[flag] is True
+    before = (tmp_path / "77.json").read_bytes()
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"N" + key + b"BQ", capture_output=True, timeout=10,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")))
+    assert result.returncode == 0 and not result.stderr
+    assert (tmp_path / "77.json").read_bytes() == before
+
+
+def test_archive_bearing_routes_only_accepted_site_without_charting_or_rng():
+    import copy
+    world = _world_with_seed(42); target = world.landmark["system_id"]
+    world.by_id[target].discovered = False
+    with pytest.raises(vr.MissionError, match="charted"): vr.prepare_route_jump(world, target)
+    vr.archive_action(world, "A")
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    assert vr.prepare_route_jump(world, target) == vr.bfs_path(world.by_id, 0, target)[0]
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    assert not world.by_id[target].discovered
+    other = next(sid for sid in world.by_id if sid not in (0, target)); world.by_id[other].discovered = False
+    with pytest.raises(vr.MissionError, match="charted"): vr.prepare_route_jump(world, other)
+    world.save.ship.fuel = 0
+    with pytest.raises(vr.MissionError, match="Not enough fuel"): vr.prepare_route_jump(world, target)
+
+
+def test_archive_record_depends_on_existing_landmark_and_never_awards_salvage_twice():
+    seen = set()
+    for seed in range(30):
+        world = _world_with_seed(seed); label = world.landmark["label"]; seen.add(label)
+        world.save.current_system = world.landmark["system_id"]
+        vr.investigate_landmark(world)
+        with pytest.raises(ValueError, match="no unclaimed"): vr.investigate_landmark(world)
+        world.save.current_system = 0; vr.archive_action(world, "A")
+        world.save.current_system = world.landmark["system_id"]
+        result = vr.archive_action(world, "I")
+        assert all(line in result for line in vr.ARCHIVE_RECORDS[label])
+        assert world.save.pilot.credits == 4200
+    assert seen == set(vr.ARCHIVE_RECORDS)
+
+
+def test_archive_and_landmark_reject_inflight_actions_before_effects():
+    import copy
+    world, _ = _world_with_pending_fight(); world.save.current_system = world.landmark["system_id"]
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    for action in ("A", "I", "P", "S"):
+        with pytest.raises(ValueError, match="journey"): vr.archive_action(world, action)
+    with pytest.raises(ValueError, match="journey"): vr.investigate_landmark(world)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("ending", ["P", "S"])
+def test_archive_story_ui_completes_real_round_trip_and_spends_normal_fuel(monkeypatch, tmp_path, ending):
+    world = _world_with_seed(42)
+    target = world.landmark["system_id"]
+    outward = vr.bfs_path(world.by_id, 0, target); homeward = vr.bfs_path(world.by_id, target, 0)
+    commands = iter("AR" + "J" * len(outward) + "BIR" + "J" * len(homeward) + "B" + ending + "B")
+    monkeypatch.setattr(vr, "read_key", lambda: next(commands))
+    # Fix only the chance draws; real departure, docking and costs still execute.
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.99)
+    world._checkpoint = lambda w: vr.persist(w, tmp_path, 77); world.checkpoint()
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_archive(vr.Palette(False), world)
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert saved.current_system == 0 and saved.turn == len(outward) + len(homeward) == 10
+    assert saved.ship.fuel == 10 and saved.pilot.missions_completed == 1
+    assert saved.pilot.credits == 1200 + 3000 + (500 if ending == "P" else 1500)
+    assert saved.pending_travel is None and saved.flags["archive_v1_public" if ending == "P" else "archive_v1_private"]
+    assert target in saved.discovered
+
+
+@pytest.mark.parametrize("stage,key,ack", [("idle", "A", "assignment accepted"), ("started", "I", "Salvage recovered"), ("recovered", "P", "Archive complete")])
+def test_archive_checkpoint_failure_stops_before_acknowledgement(monkeypatch, stage, key, ack):
+    world = _archive_world(stage)
+    if stage == "started": world.save.current_system = world.landmark["system_id"]
+    output = io.StringIO()
+    def fail(current):
+        assert ack not in output.getvalue()
+        raise vr.SaveError()
+    world._checkpoint = fail
+    monkeypatch.setattr(vr, "read_key", lambda: key)
+    with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError): vr.screen_archive(vr.Palette(False), world)
+    assert ack not in output.getvalue()
+
+
+def test_archive_unfinished_objective_appears_on_station_and_returning_recap():
+    world = _archive_world("started")
+    for stage in ("started", "recovered"):
+        if stage == "recovered":
+            world.save.current_system = world.landmark["system_id"]; vr.archive_action(world, "I"); world.save.current_system = 0
+        for lines in (vr.station_deck_lines(world), vr.pilot_recap(world)):
+            assert vr.archive_objective(world) in " ".join(lines)
+    vr.archive_action(world, "P")
+    assert not any(line.startswith("Archive:") for line in vr.pilot_recap(world))
+    assert not any(key.startswith("archive_v1") for key in vr.retire_pilot(world.save).flags)
+
+
+def test_archive_route_map_includes_uncharted_accepted_bearing(monkeypatch):
+    world = _archive_world("started"); target = world.landmark["system_id"]
+    assert not world.by_id[target].discovered
+    keys = iter("VB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    calls = []
+    monkeypatch.setattr(vr, "screen_galaxy_map", lambda p, w, **kwargs: calls.append(kwargs))
+    with contextlib.redirect_stdout(io.StringIO()): vr._screen_auto_route(vr.Palette(False), world, destination=target)
+    assert calls == [{"path": vr.bfs_path(world.by_id, 0, target), "public_target": target}]
+    assert not world.by_id[target].discovered
 
 
 @pytest.mark.parametrize("identity", ["legacy", "unverified-match", "unverified-mismatch", "confirmed", "mismatch"])
