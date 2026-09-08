@@ -4093,3 +4093,20 @@ def test_unicode_cannot_alias_ascii_commands(monkeypatch, text):
     _use_decoded_input(monkeypatch, (text + "s").encode("utf-8"))
     assert vr.read_command() == vr.IGNORED_KEY
     assert vr.read_command() == "S"
+
+
+@pytest.mark.parametrize("command", [b"P", b"X", b"p", b"x"])
+def test_standalone_escape_does_not_capture_later_hotkeys(command):
+    events = iter([b"\x1b", None, command, b"Q"])
+    reader = vr._DoorInput(lambda timeout: next(events))
+    assert reader.read_key() == vr.ESCAPE_KEY
+    assert reader.read_key() == command.decode("ascii")
+    assert reader.read_key() == "Q"
+
+
+def test_control_string_started_before_timeout_retains_its_payload():
+    events = iter([b"\x1b", b"P", None, b"Y", b"\x1b", b"\\", b"Q"])
+    reader = vr._DoorInput(lambda timeout: next(events))
+    assert reader.read_key() == vr.IGNORED_KEY
+    assert reader.read_key() == vr.IGNORED_KEY
+    assert reader.read_key() == "Q"

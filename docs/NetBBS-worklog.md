@@ -4006,6 +4006,9 @@ remain separate work in issue #310.
 Voidrunner's menu commands case-fold ASCII only; Unicode remains text input,
 so Unicode case aliases cannot surrender cargo or dispatch another hotkey.
 Acknowledgement pauses ignore both incomplete Escape and unsupported keys.
+After standalone Escape times out, only CSI/SS3 introducers are reserved for
+delayed arrow suffixes; P/X are independent hotkeys. Control strings must begin
+before that timeout, then retain their payload across subsequent delays.
 OSC accepts BEL or ST; other control strings require ST, and bracketed paste
 recognizes both CSI encodings of its terminator.
 

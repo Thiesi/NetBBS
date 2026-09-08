@@ -425,13 +425,16 @@ class _DoorInput:
                     self.mode = "csi" if byte == b"[" else "ss3"
                     self.sequence.clear()
                     continue
-                if byte in (b"]", b"P", b"X", b"^", b"_"):
+                if not late and byte in (b"]", b"P", b"X", b"^", b"_"):
                     self.mode = "string"
                     self.string_bel = byte == b"]"
                     continue
                 if 0x20 <= n <= 0x2f:
                     self.mode = "intermediate"
                     continue
+                # After Escape was reported as a standalone key, only the
+                # CSI/SS3 suffixes above remain reserved for delayed arrows.
+                # P/X must be independent hotkeys, not open-ended strings.
                 if not late:
                     # Alt+printable is a single unsupported key, not a command.
                     # Decode the entire UTF-8 character before discarding it.
