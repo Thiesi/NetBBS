@@ -5804,3 +5804,51 @@ def test_contradictory_opening_assignment_progress_cannot_be_saved(tmp_path, cor
     with pytest.raises(vr.SaveError):
         vr.write_save(tmp_path, 77, world.save)
     assert (tmp_path / "77.json").read_bytes() == before
+
+
+def test_opening_tags_on_posted_offers_are_rejected_before_loading_or_writing(tmp_path):
+    import json
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    path = tmp_path / "77.json"
+    before = path.read_bytes()
+    offer = vr.opening_assignment_offer(world)
+    world.save.mission_boards[0]["offers"][0] = offer.to_dict()
+    with pytest.raises(vr.SaveError):
+        vr.write_save(tmp_path, 77, world.save)
+    assert path.read_bytes() == before
+    malformed = json.dumps(world.save.to_dict()).encode("utf-8")
+    path.write_bytes(malformed)
+    with pytest.raises(vr.ResumeError, match="opening assignment placement"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == malformed
+
+
+def test_ordinary_mission_acceptance_rejects_an_opening_tag_without_mutating_the_board():
+    import copy
+    world = _world_with_seed(42)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    world.save.mission_boards[0]["offers"][0] = offer.to_dict()
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(vr.MissionError, match="Pilot Guide"):
+        vr.accept_mission(world, offer)
+    assert world.save.to_dict() == before
+
+
+def test_opening_quote_avoids_cargo_already_promised_to_an_earlier_delivery():
+    world = _world_with_seed(42)
+    world.checkpoint()
+    first = vr.opening_assignment_offer(world)
+    world.save.active_missions.append(vr.Mission(100, "delivery", "Earlier order", 100, 0, first.target_system,
+                                               commodity=first.commodity, quantity=1))
+    offer = vr.opening_assignment_offer(world)
+    assert offer is not None
+    assert (offer.target_system, offer.commodity) != (first.target_system, first.commodity)
+    vr.accept_opening_assignment(world, offer)
+    world.save.cargo[offer.commodity] = offer.quantity
+    world.save.current_system = offer.target_system
+    vr.check_mission_completions(world)
+    assert world.save.flags["opening_assignment_completed"]
+    assert any(m.description == "Earlier order" for m in world.save.active_missions)

@@ -1248,6 +1248,7 @@ def _validate_save_document(data: dict) -> None:
             record(item, cls, key)
             integer(item["id"], "contract ID", minimum=1)
             if cls is Mission:
+                require(not item.get("opening_assignment") or key == "active_missions", "opening assignment placement")
                 require(item["kind"] in ("delivery", "scan", "bounty", "escort"), "contract kind")
                 text(item["description"], "contract description")
                 integer(item["reward"], "contract reward")
@@ -1923,6 +1924,8 @@ def _generate_mission(world: World, kind: str, hops: dict[int, int], *, rng=None
 
 
 def accept_mission(world: World, mission: Mission) -> None:
+    if mission.opening_assignment:
+        raise MissionError("Accept First Flight from the Pilot Guide.")
     if len(world.save.active_missions) >= MAX_ACTIVE_MISSIONS:
         raise MissionError(f"You can carry at most {MAX_ACTIVE_MISSIONS} active contracts. Finish a contract first.")
     if mission_expired(world, mission):
@@ -1963,6 +1966,9 @@ def opening_assignment_offer(world: World) -> Mission | None:
         for commodity in ECONOMY_DEMANDS[target.economy]:
             if not COMMODITIES[commodity]["legal"]:
                 continue
+            if any(m.kind == "delivery" and m.target_system == sid and m.commodity == commodity
+                   and not mission_expired(world, m) for m in save.active_missions):
+                continue  # Earlier deliveries would consume this introductory load first.
             missing = max(0, 3 - save.cargo.get(commodity, 0))
             price = price_for(world, 0, commodity)
             budget = missing * price + max(0, 2 * fuel - ship.fuel) * 6 + 2 * wage
