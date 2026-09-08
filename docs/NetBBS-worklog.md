@@ -3228,13 +3228,27 @@ Identifying the process behind a pidfile by substring is not enough either:
 virtualenv — `netbbs.admin`, a backup run — and the stop path then signals it.
 Match the invocation actually launched (`-m netbbs --config`).
 
+An rc.d launch must `cd` into the node's state directory. `NodeConfig` keeps
+relative defaults (`Path("netbbs.db")`, `Path("netbbs_identity")`) for a config
+that omits them, and those resolve against the caller's working directory — `/`
+for an rc.d start at boot, where the run-as user cannot create them, so the
+service fails with its own state directory perfectly writable. `HOME` does not
+affect `Path` resolution; only `cd` does. systemd gets this from
+`WorkingDirectory=`.
+
 Publishing the pid has to gate the node continuing to run, not follow it. A
 writability check can pass and the write still fail (inodes, quota), by which
 point the node is up; reporting a failed start then leaves an untracked live
 node that the next start duplicates against the same database. Kill what was
-just started if the pid cannot be published.
+just started if the pid cannot be published — with SIGKILL, not SIGTERM: NetBBS
+reads SIGTERM as a graceful shutdown that may wait out
+`graceful_delay_seconds`, which would leave a live untracked node behind
+exactly while the script reports it stopped. At seconds old there is nothing to
+drain and WAL makes an abrupt stop safe.
 
-`newsyslog(8)` cannot bound a log a long-running process holds open. It renames
+Its stdout/stderr capture file shares a filesystem with the database and does
+not rotate — and `newsyslog(8)` cannot bound a log a long-running process holds
+open. It renames
 the path; the writer keeps the old inode, the new file stays empty, and
 size-based rotation never fires again. NetBBS has no reopen-on-signal, so the
 honest options for the rc.d capture file are to turn it off once an install is
@@ -3272,10 +3286,7 @@ including `netbbs_ld_library_path`, which is the one variable the NetBSD
 Tier 1 automatic restart is an operator's own periodic check, not something the
 example script can provide.
 
-Two limits of an rc.d script are worth stating rather than papering over. Its
-stdout/stderr capture file does not rotate itself and shares a filesystem with
-the database; `newsyslog(8)` is the platform's answer and belongs in the
-example's own comments. And a SIGKILLed node cannot run its own door cleanup,
+A SIGKILLed node cannot run its own door cleanup,
 while doors are deliberately spawned with `start_new_session=True`
 (`netbbs.doors.runtime`) — so they are in no process group the script could
 signal instead, and no process-group kill from rc.d can reach them. Only the
