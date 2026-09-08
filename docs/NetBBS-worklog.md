@@ -4025,6 +4025,17 @@ sentinels must be nonempty and non-command strings: empty strings match Python's
 validation. Test the parser with split bytes and timeout events, and exercise
 UTF-8 input, standalone Escape, and partial-key EOF through real subprocess pipes.
 
+Voidrunner caches one bounded contract board per galaxy system. Generation
+allocates each offer ID immediately; acceptance checks unchanged posted terms
+and removes the offer in the same checkpoint as adding the active contract.
+Never replenish a board merely because its last offer was accepted. ID repair
+runs only without pending travel: changing active IDs during an interrupted
+journey would break equality with its contract snapshots. Departure expires jobs
+before constructing encounter snapshots; completion and resumed legacy bounty/
+escort paths also check expiry before consumption, combat, or payment. The
+inclusive deadline boundary is `turn > deadline_turn`, not `>=`.
+
+
 `netbbs.net.admin_flow._door_field_specs`' `args` field is parsed with
 `shlex.split(draft["args_line"])` -- deliberately POSIX-mode (the
 default), matching the "never a shell, always an argv list" posture

@@ -4657,6 +4657,18 @@ Quantity fields accept ASCII decimal digits. Unsupported keys do not dismiss
 result acknowledgement pauses. Responsive layouts and broader retained-result
 presentation remain separate work in #310.
 
+Contract boards retain up to four posted offers per station for three game days
+from generation. Viewing or accepting offers does not replenish them; jumps
+advance game time. Posted terms and consumed offers survive restart. New careers
+may hold at most three active contracts; legacy over-limit careers retain every
+job but cannot accept more until below the limit. IDs are unique across active
+jobs and cached offers. Legacy duplicate IDs are repaired while docked, after any
+interrupted journey has resolved, so its stored contract snapshots still match.
+Deadlines are inclusive: a contract is eligible on its deadline day, expires
+before rewards or mission encounters on the next day, and is never paid late.
+Already-charted survey offers are unavailable. Contract details, abandonment,
+and objective tracking remain the next mission UX slice in issue #310.
+
 Compatibility extension (issues #296/#297):
 
 - A nullable, versioned profile preserves the original JSON/stdio API for
