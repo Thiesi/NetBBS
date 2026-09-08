@@ -3314,6 +3314,9 @@ under a checksummed `voidrunner/` component. Capture preserves career, previous,
 recovery and score JSON bytes, including damaged careers needed for repair;
 temporary files and OS lock files are excluded. A bounded maintenance lease
 prevents new game launches and refuses capture while an existing pilot is active.
+The gate lives inside the save directory. Restore preserves that directory and
+its lock inodes, switching its data entries under the lease; existing provisioned
+save directories require no parent write permission for normal play or capture.
 The BBS may keep running, but Voidrunner sessions must be closed. Capture precedes
 the database snapshot so a newly registered user's captured career cannot refer
 to a user ID newer than that snapshot. This is an offline game-data snapshot,
@@ -3325,7 +3328,9 @@ operator must use that directory for the restored service. The component is
 staged and rolled back beside its destination, allowing a different filesystem
 from the database. Node and game switches share one recovery journal; failures
 roll back both, and any retained external rollback location is recorded beside
-the ordinary rollback generation. Existing backups without Voidrunner leave
+the ordinary rollback generation. Journal updates use flushed atomic replacement;
+a failed post-switch update also triggers rollback, retaining the last usable
+journal if recovery fails. Existing backups without Voidrunner leave
 external careers alone. Cross-host shared directories and simultaneously running
 different game builds remain unsupported. Limits are 10,000 captured files,
 4 MiB per file and 512 MiB total; unsupported entries or exceeded limits fail

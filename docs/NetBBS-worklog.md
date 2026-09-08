@@ -4569,12 +4569,18 @@ exit (status 0), distinguished from failed restoration or input loss so the pare
 runtime does not announce a deliberate departure as an unexpected crash.
 
 
-Voidrunner maintenance gates live beside the resolved save directory, not inside
-it: a restore replaces that directory, and a lock on its old inode would no longer
-exclude new launches. Pilot startup holds the gate briefly while acquiring its
-lifetime pilot lease. Maintenance holds the gate, probes every pilot lock and
-refuses active sessions, then closes its probes before Windows directory renames.
-Never delete the gate or pilot lock files to clear an apparent stale session.
+Voidrunner keeps its maintenance gate inside the resolved save directory. Restore
+preserves that directory and every gate/pilot lock inode, switching only data
+entries while the gate excludes launches. Never rename or replace the directory:
+a waiting opener would retain an obsolete gate and could split ownership.
+Pilot startup holds the gate briefly while acquiring its lifetime pilot lease.
+Maintenance holds the gate, probes every pilot lock and refuses active sessions.
+Existing service-owned save directories need no parent-directory write permission
+for play or capture. Restore still needs permission to stage beside its target.
+Never delete gate or pilot lock files to clear an apparent stale session.
+Restore journal updates use flushed atomic replacement; update failures after a
+switch enter the same rollback path as switch failures. Keep the previous usable
+journal, including external game paths, if automatic rollback cannot complete.
 
 Node backups capture the game component before the DB snapshot, after excluding
 active pilots. This prevents a newly registered caller's captured career from

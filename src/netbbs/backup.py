@@ -89,6 +89,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -394,7 +395,7 @@ def _voidrunner_files(root: Path, *, archive: bool = False) -> list[Path]:
                 result.append(score.relative_to(root))
                 if len(result) > _VOIDRUNNER_MAX_FILES:
                     raise BackupError("Voidrunner backup exceeds its file count limit.")
-        elif not archive and entry.is_file() and re.fullmatch(r"\.[0-9]+\.lock|\..+\.tmp", entry.name):
+        elif not archive and entry.is_file() and re.fullmatch(r"\.(?:[0-9]+|maintenance)\.lock|\..+\.tmp", entry.name):
             continue
         elif entry.is_file() and (entry.name == "leaderboard.json" or
                 re.fullmatch(r"[0-9]+(?:(?:\.previous|\.recovery-[a-zA-Z0-9_-]+)?\.json|\.corrupt-[0-9]+)", entry.name)):
@@ -804,18 +805,25 @@ def _refuse_if_restore_in_progress(db_path: Path) -> None:
 
 def _write_restore_state(state_path: Path, *, staging_dir: Path, rollback_dir: Path, pending: list[str],
                          external: dict | None = None) -> None:
-    state_path.write_text(
-        json.dumps(
-            {
-                "started_at": utc_now_iso(),
-                "staging_dir": str(staging_dir),
-                "rollback_dir": str(rollback_dir),
-                "pending_artifacts": pending,
-                "external_components": external or {},
-            },
-            indent=2,
-        )
-    )
+    payload = json.dumps({
+        "started_at": utc_now_iso(),
+        "staging_dir": str(staging_dir),
+        "rollback_dir": str(rollback_dir),
+        "pending_artifacts": pending,
+        "external_components": external or {},
+    }, indent=2).encode("utf-8")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=state_path.parent, prefix=".restore-state-",
+                                         suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, state_path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _restore_switch_plan(
@@ -867,8 +875,36 @@ class _SwitchRollbackError(BackupError):
     """The failing artifact could not be put back; retain the restore journal."""
 
 
+def _game_data_entries(directory: Path) -> list[Path]:
+    """Keep the directory and lock inodes stable while maintenance excludes play."""
+    return [path for path in sorted(directory.iterdir())
+            if path.name != ".maintenance.lock" and not re.fullmatch(r"\.[0-9]+\.lock", path.name)]
+
+
+def _switch_game(staged_path: Path, live_path: Path, rollback_dir: Path) -> None:
+    old = rollback_dir / "voidrunner"
+    old.mkdir(parents=True)
+    live_path.mkdir(parents=True, exist_ok=True)
+    moved = []
+    try:
+        for source, destination in [(path, old / path.name) for path in _game_data_entries(live_path)] + [
+                (path, live_path / path.name) for path in _game_data_entries(staged_path)]:
+            source.rename(destination)
+            moved.append((source, destination))
+    except Exception:
+        try:
+            for source, destination in reversed(moved):
+                destination.rename(source)
+        except Exception as exc:
+            raise _SwitchRollbackError("Could not roll back failing Voidrunner data switch.") from exc
+        raise
+
+
 def _switch_one(name: str, staged_path: Path | None, live_path: Path, rollback_dir: Path) -> None:
     """Roll back even the artifact whose second rename failed."""
+    if name == "voidrunner":
+        _switch_game(staged_path, live_path, rollback_dir)
+        return
     moved = False
     if live_path.exists():
         rollback_dir.mkdir(parents=True, exist_ok=True)
@@ -893,6 +929,12 @@ def _rollback_switched(switched: list[tuple[str, Path | None, Path]], rollback_d
     never touched by any of this, so nothing is lost); the previous
     generation is renamed back from `rollback_dir`."""
     for name, _staged_path, live_path in reversed(switched):
+        if name == "voidrunner":
+            for path in _game_data_entries(live_path):
+                path.rename(_staged_path / path.name)
+            for path in _game_data_entries(rollback_dir / name):
+                path.rename(live_path / path.name)
+            continue
         if live_path.is_dir():
             shutil.rmtree(live_path)
         elif live_path.exists():
@@ -1000,6 +1042,10 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
                 component_rollback = game_rollback if name == "voidrunner" else rollback_dir
                 try:
                     _switch_one(name, staged_path, live_path, component_rollback)
+                    switched.append((name, staged_path, live_path))
+                    remaining = [n for n, _, _ in plan if n not in {item[0] for item in switched}]
+                    _write_restore_state(state_path, staging_dir=staging_dir, rollback_dir=rollback_dir,
+                                         pending=remaining, external=external)
                 except _SwitchRollbackError as exc:
                     raise BackupError(f"Restore switch and rollback failed; see {state_path} for manual recovery.") from exc
                 except Exception as exc:
@@ -1012,13 +1058,13 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
                     state_path.unlink(missing_ok=True)
                     raise BackupError(f"restore failed while switching {name!r}, automatically rolled back to "
                                       f"the previous generation: {exc}") from exc
-                switched.append((name, staged_path, live_path))
-                remaining = [n for n, _, _ in plan if n not in {item[0] for item in switched}]
-                _write_restore_state(state_path, staging_dir=staging_dir, rollback_dir=rollback_dir,
-                                     pending=remaining, external=external)
             if game_rollback and game_rollback.exists():
-                rollback_dir.mkdir(parents=True, exist_ok=True)
-                (rollback_dir / "voidrunner-rollback.json").write_text(json.dumps(external["voidrunner"], indent=2))
+                try:
+                    rollback_dir.mkdir(parents=True, exist_ok=True)
+                    (rollback_dir / "voidrunner-rollback.json").write_text(json.dumps(external["voidrunner"], indent=2))
+                except OSError as exc:
+                    raise BackupError(f"Restored data is in place, but rollback metadata could not be written; "
+                                      f"see {state_path} for manual recovery before restarting.") from exc
         finally:
             if not state_path.exists():
                 # On unresolved failure, retain staging named by the journal.

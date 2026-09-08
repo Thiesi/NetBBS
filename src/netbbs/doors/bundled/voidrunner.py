@@ -2585,8 +2585,9 @@ def _file_lease(path: Path, *, wait: float = 0):
 
 @contextlib.contextmanager
 def _maintenance_gate(save_dir: Path):
-    # Outside the directory: restoration replaces the directory itself.
-    with _file_lease(save_dir.parent / f".{save_dir.name}.voidrunner-maintenance.lock", wait=1):
+    # Restore preserves this directory and its lock inodes, switching only data.
+    # Existing service-owned directories need no write access to their parent.
+    with _file_lease(save_dir / ".maintenance.lock", wait=1):
         yield
 
 

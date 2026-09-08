@@ -189,7 +189,8 @@ def test_legacy_backup_leaves_existing_voidrunner_data_unchanged(tmp_path, db_pa
     assert _retained_game_bytes(game) == original
 
 
-def test_game_switch_failure_rolls_back_both_node_and_game(tmp_path, db_path, identity_dir, monkeypatch):
+@pytest.mark.parametrize("failed_entry", [1, 3])
+def test_game_switch_failure_rolls_back_both_node_and_game(tmp_path, db_path, identity_dir, monkeypatch, failed_entry):
     from pathlib import Path
     from netbbs.config import get_config, set_config
 
@@ -202,10 +203,13 @@ def test_game_switch_failure_rolls_back_both_node_and_game(tmp_path, db_path, id
     target.mkdir()
     (target / "99.json").write_bytes(b"previous game generation")
     rename = Path.rename
+    entries = []
 
     def fail_game_stage(path, destination):
-        if path.name.startswith(".live-games.netbbs-stage-"):
-            raise OSError("game stage switch failed")
+        if path.parent.name.startswith(".live-games.netbbs-stage-"):
+            entries.append(path.name)
+            if len(entries) == failed_entry:
+                raise OSError("game stage switch failed")
         return rename(path, destination)
 
     monkeypatch.setattr(Path, "rename", fail_game_stage)
@@ -218,6 +222,29 @@ def test_game_switch_failure_rolls_back_both_node_and_game(tmp_path, db_path, id
     finally:
         restored.close()
     assert not (db_path.parent / ".netbbs-restore-state.json").exists()
+
+
+def test_failed_rollback_pointer_names_the_retained_journal(tmp_path, db_path, identity_dir, monkeypatch):
+    from pathlib import Path
+
+    game = _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    (game / "99.json").write_bytes(b"previous generation")
+    write_text = Path.write_text
+
+    def fail_pointer(path, *args, **kwargs):
+        if path.name == "voidrunner-rollback.json":
+            raise OSError("rollback pointer disk full")
+        return write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_pointer)
+    journal_path = db_path.parent / ".netbbs-restore-state.json"
+    with pytest.raises(BackupError, match="Restored data is in place") as caught:
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=game)
+    assert str(journal_path) in str(caught.value)
+    external = json.loads(journal_path.read_text())["external_components"]["voidrunner"]
+    assert (Path(external["rollback"]) / "voidrunner" / "99.json").read_bytes() == b"previous generation"
+    assert _retained_game_bytes(game) == _retained_game_bytes(source / "voidrunner")
 
 
 def test_game_local_stage_and_rollback_stay_beside_destination(tmp_path, db_path, identity_dir, monkeypatch):
@@ -236,6 +263,142 @@ def test_game_local_stage_and_rollback_stay_beside_destination(tmp_path, db_path
     monkeypatch.setattr(backup_module, "_switch_one", checked)
     restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=target)
     assert calls == ["voidrunner"]
+
+
+@pytest.mark.parametrize("rollback_fails", [False, True])
+def test_post_game_journal_failure_rolls_back_or_retains_usable_external_paths(
+    tmp_path, db_path, identity_dir, monkeypatch, rollback_fails,
+):
+    from pathlib import Path
+    from netbbs.config import get_config, set_config
+
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    live = Database(db_path)
+    set_config(live, "node_name", "Previous node")
+    live.close()
+    target = tmp_path / "live-games"
+    target.mkdir()
+    (target / "99.json").write_bytes(b"previous game")
+    original = backup_module._write_restore_state
+    rename = Path.rename
+
+    def fail_last_update(path, **kwargs):
+        if not kwargs["pending"]:
+            raise OSError("journal disk full")
+        original(path, **kwargs)
+
+    def fail_rollback(path, destination):
+        if rollback_fails and path.name == "99.json" and path.parent.name == "voidrunner":
+            raise OSError("rollback unavailable")
+        return rename(path, destination)
+
+    monkeypatch.setattr(backup_module, "_write_restore_state", fail_last_update)
+    monkeypatch.setattr(Path, "rename", fail_rollback)
+    match = "manual recovery" if rollback_fails else "automatically rolled back"
+    with pytest.raises(BackupError, match=match):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=target)
+    journal_path = db_path.parent / ".netbbs-restore-state.json"
+    if rollback_fails:
+        journal = json.loads(journal_path.read_text())
+        external = journal["external_components"]["voidrunner"]
+        assert (Path(external["rollback"]) / "voidrunner" / "99.json").read_bytes() == b"previous game"
+        assert Path(external["staging"]).exists()
+    else:
+        assert not journal_path.exists()
+        assert _retained_game_bytes(target) == {"99.json": b"previous game"}
+        restored = Database(db_path)
+        try:
+            assert get_config(restored, "node_name") == "Previous node"
+        finally:
+            restored.close()
+
+
+def test_restore_journal_replacement_failure_preserves_previous_json(tmp_path, monkeypatch):
+    import os
+
+    state = tmp_path / "state.json"
+    args = dict(staging_dir=tmp_path / "stage", rollback_dir=tmp_path / "old",
+                external={"voidrunner": {"rollback": "original-game-location"}})
+    backup_module._write_restore_state(state, pending=["voidrunner"], **args)
+    previous = state.read_bytes()
+    replace = os.replace
+
+    def fail_journal(source, destination):
+        if destination == state:
+            raise OSError("journal replacement denied")
+        return replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_journal)
+    with pytest.raises(OSError, match="replacement denied"):
+        backup_module._write_restore_state(state, pending=[], **args)
+    assert state.read_bytes() == previous
+    assert json.loads(previous)["external_components"]["voidrunner"]["rollback"] == "original-game-location"
+    assert list(tmp_path.iterdir()) == [state]
+
+
+def test_existing_game_directory_needs_no_parent_write_for_play_or_capture(
+    tmp_path, db_path, identity_dir, monkeypatch,
+):
+    import errno
+    from pathlib import Path
+    from netbbs.doors.bundled import voidrunner as vr
+
+    parent = tmp_path / "operator-owned"
+    game = parent / "service-owned"
+    game.mkdir(parents=True)
+    vr.persist(vr.World(vr._new_career("Provisioned")), game, 77)
+    original = Path.open
+
+    def restricted_open(path, mode="r", *args, **kwargs):
+        if path.parent == parent and any(flag in mode for flag in "wax+"):
+            raise PermissionError(errno.EACCES, "parent is not writable", str(path))
+        return original(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", restricted_open)
+    with vr.pilot_session(game, 77):
+        save, _, _ = vr.load_or_create_save(game, 77, "Provisioned")
+        save.pilot.credits += 1
+        vr.persist(vr.World(save), game, 77)
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup",
+                           voidrunner_save_dir=game)
+    assert (source / "voidrunner" / "77.json").read_bytes() == (game / "77.json").read_bytes()
+    assert list(parent.iterdir()) == [game]
+
+
+def test_restore_keeps_lock_inodes_and_excludes_launch_after_game_switch(
+    tmp_path, db_path, identity_dir, monkeypatch,
+):
+    import os
+    import subprocess
+    import sys
+    from netbbs.doors.bundled import voidrunner as vr
+
+    game = _populate_voidrunner()
+    with vr.pilot_session(game, 77):
+        pass
+    inodes = [path.stat().st_ino for path in (game, game / ".maintenance.lock", game / ".77.lock")]
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    info = tmp_path / "door-info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}))
+    original = backup_module._switch_one
+    checked = []
+
+    def check_switch(name, staged, live, rollback):
+        original(name, staged, live, rollback)
+        if name == "voidrunner":
+            result = subprocess.run([sys.executable, vr.__file__], input=b"Q", capture_output=True,
+                                    env=dict(os.environ, NETBBS_DOOR_INFO=str(info)), timeout=5)
+            assert result.returncode == 0
+            assert b"maintenance is in progress" in b" ".join(result.stdout.split())
+            checked.append(name)
+
+    monkeypatch.setattr(backup_module, "_switch_one", check_switch)
+    restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=game)
+    assert checked == ["voidrunner"]
+    assert [path.stat().st_ino for path in (game, game / ".maintenance.lock", game / ".77.lock")] == inodes
+    with vr.pilot_session(game, 77):
+        pass
 
 
 def test_voidrunner_cli_create_and_restore_reports_activation_step(tmp_path, db_path, identity_dir, capsys):
@@ -468,7 +631,7 @@ def test_failed_game_rollback_retains_journal_with_external_paths(tmp_path, db_p
     rename = Path.rename
 
     def fail_stage_and_rollback(path, destination):
-        if path.name.startswith(".live-games.netbbs-stage-") or path.parent.name.startswith(".live-games.netbbs-rollback-"):
+        if path.parent.name.startswith(".live-games.netbbs-stage-") or path.parent.parent.name.startswith(".live-games.netbbs-rollback-"):
             raise OSError("stage and rollback unavailable")
         return rename(path, destination)
 

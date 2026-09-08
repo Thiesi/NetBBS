@@ -76,7 +76,9 @@ Malformed career bytes are retained for repair. Locks and unfinished temporary
 files are excluded; unrelated files, symlinks and exceeded limits produce an error.
 Limits are 10,000 files, 4 MiB per file and 512 MiB total. Close all Voidrunner
 sessions before creating a backup; the BBS itself can keep running. A maintenance
-lock prevents a game from starting during capture or restore.
+lock inside the save directory prevents a game from starting during capture or
+restore. Play and capture need no write access to its parent. Restore keeps that
+directory and its lock files in place while replacing the retained data.
 If game capture fails, its incomplete backup destination is removed so the same
 path can be retried. If cleanup also fails, the error names the directory to
 remove manually before retrying; source careers are retained.
