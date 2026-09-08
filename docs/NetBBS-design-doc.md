@@ -4828,6 +4828,13 @@ the visit so large legacy records are not reformatted on every key. Retirement
 keeps its existing top-rank eligibility, final chosen-action confirmation, new-career
 bonus and durable checkpoint. Cancelling retains the record with a visible result.
 
+Hall of Fame renders its existing top-20 best-credit ranking as paginated labelled
+pilot entries. Full callsigns, rank titles and score fields remain available at
+narrow widths, with a textual YOU marker for the current pilot when listed. The
+loaded scoreboard and its wrapped pages remain a read-only snapshot for the visit;
+Back and paging never discard or rewrite the independently retained score records.
+Achievement categories and per-career archives remain separate roadmap work.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 500-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. Buying and same-station recycling do not grant
