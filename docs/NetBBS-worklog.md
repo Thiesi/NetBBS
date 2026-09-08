@@ -4041,6 +4041,19 @@ escort paths also check expiry before consumption, combat, or payment. The
 inclusive deadline boundary is `turn > deadline_turn`, not `>=`.
 
 
+Voidrunner contraband standing follows persisted cash-surplus high-water
+milestones. Debit purchases/new futures and credit sales/cancellation principal
+through the same ledger; transaction counts, refund fees, or recovering a prior
+loss must never mint new milestones. Legacy standing is not recalculated.
+
+New futures store origin and principal as a pair; absent metadata retains legacy
+remote settlement/full-refund behavior. New orders wait for room at their origin.
+The departure tick settles only legacy orders; pickup settlement runs after the
+arrival position changes and before mission rewards in that same saved phase.
+Station-entry settlement also handles mature loaded orders and newly freed holds.
+Do not settle by the old origin merely because departure increments the day.
+Per-unit integer fee rounding prevents split orders from avoiding the fee.
+
 Voidrunner contract views must remain read-only, including pagination and Back.
 Keep estimates in pure domain helpers; do not query hidden remote market prices
 or mark bearings discovered. Missing-cargo/current-fuel cash estimates exclude
