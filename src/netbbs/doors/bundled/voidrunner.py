@@ -5122,23 +5122,34 @@ def route_mission_implications(world: World, path: list[int]) -> list[str]:
     lines.append("Contract timing assumes successful travel, unchanged bounty queues and ready delivery cargo. Earlier failures, expiry and scanner use can change it.")
     end = path[-1] if path else world.here.id
     estimates = []
+    arrivals_by_target = {}
+    for index, sid in enumerate(path, 1):
+        arrivals_by_target.setdefault(sid, []).append(index)
+    bounty_counts, onward_lengths = {}, {}
     for mission in world.save.active_missions:
-        arrivals = [i for i, sid in enumerate(path, 1) if sid == mission.target_system]
+        target = mission.target_system
+        arrivals = arrivals_by_target.get(target, [])
         if mission.kind == "scan" and world.by_id[mission.target_system].discovered:
             estimates.append((mission, None))
             continue
         if mission.kind == "bounty":
-            needed = preceding_bounties(world, mission) + 1
+            needed = bounty_counts.get(target, 0) + 1
+            if not mission_expired(world, mission):
+                bounty_counts[target] = needed
             if len(arrivals) >= needed:
                 jumps = arrivals[needed - 1]
             else:
                 remaining = needed - len(arrivals)
-                onward = bfs_path(world.by_id, end, mission.target_system)
-                jumps = len(path) + len(onward) + 2 * (remaining - (1 if onward else 0))
+                if target not in onward_lengths:
+                    onward_lengths[target] = len(bfs_path(world.by_id, end, target))
+                onward = onward_lengths[target]
+                jumps = len(path) + onward + 2 * (remaining - (1 if onward else 0))
         elif arrivals:
             jumps = arrivals[0]
         else:
-            jumps = len(path) + len(bfs_path(world.by_id, end, mission.target_system))
+            if target not in onward_lengths:
+                onward_lengths[target] = len(bfs_path(world.by_id, end, target))
+            jumps = len(path) + onward_lengths[target]
         day = world.save.turn + jumps
         estimates.append((mission, day))
     # Allocate a copy of the hold in predicted arrival order. Jobs resolving on

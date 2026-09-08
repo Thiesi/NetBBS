@@ -2953,6 +2953,57 @@ def test_general_route_fuel_topups_do_not_require_whole_route_in_tank():
     assert "Refuelling is manual" in text and "Additional fuel cash" in text
 
 
+def test_large_legacy_bounty_route_uses_bounded_contract_passes(monkeypatch):
+    import json
+    world=_world_with_seed(42)
+    target=world.here.connections[0]
+    data=world.save.to_dict()
+    data["active_missions"]=[{"id":i+1,"kind":"bounty","description":"Legacy bounty", "reward":1,"origin_system":0,"target_system":target} for i in range(20_000)]
+    assert len(json.dumps(data).encode("utf-8")) < vr.MAX_SAVE_BYTES
+    world=vr.World(vr.SaveData.from_dict(json.loads(json.dumps(data))))
+    class CountedMissions(list):
+        visits=0
+        def __iter__(self):
+            for value in super().__iter__():
+                self.visits+=1
+                assert self.visits <= 3*len(self), "Repeated scans of a preserved large career"
+                yield value
+    missions=CountedMissions(world.save.active_missions);world.save.active_missions=missions
+    calls=[];original=vr.bfs_path
+    def path(*args):
+        calls.append(args[1:])
+        return original(*args)
+    monkeypatch.setattr(vr,"bfs_path",path)
+    lines=vr.route_mission_implications(world,[target])
+    assert len(lines)==20_002
+    assert "Contract #20000: objective day 39999" in lines[-1]
+    assert len(calls)==1
+
+
+@pytest.mark.parametrize("route", ["empty","one_visit","two_visits"])
+def test_route_bounty_counts_preserve_target_order_and_skip_expired_jobs(route):
+    world=_world_with_seed(42);world.save.turn=2
+    first,second=world.here.connections[:2]
+    world.save.active_missions=[
+        vr.Mission(1,"bounty","Expired",1,0,first,deadline_turn=1),
+        vr.Mission(2,"bounty","First",1,0,first,deadline_turn=2),
+        vr.Mission(3,"bounty","Other target",1,0,second),
+        vr.Mission(4,"bounty","Second",1,0,first)]
+    path=[] if route=="empty" else ([first] if route=="one_visit" else [first,0,first])
+    end=path[-1] if path else 0
+    expected=[]
+    for mission in world.save.active_missions:
+        arrivals=[i for i,sid in enumerate(path,1) if sid==mission.target_system]
+        needed=vr.preceding_bounties(world,mission)+1
+        onward=vr.bfs_path(world.by_id,end,mission.target_system)
+        jumps=arrivals[needed-1] if len(arrivals)>=needed else len(path)+len(onward)+2*(needed-len(arrivals)-bool(onward))
+        expected.append(f"Contract #{mission.id}: objective day {world.save.turn+jumps} ")
+    before=world.save.to_dict()
+    lines=vr.route_mission_implications(world,path)[2:]
+    assert all(line.startswith(prefix) for line,prefix in zip(lines,expected))
+    assert world.save.to_dict()==before
+
+
 def test_general_route_deadlines_include_enroute_objectives_and_bounty_queue():
     world = _world_with_seed(42)
     target = max(world.galaxy, key=lambda s: len(vr.bfs_path(world.by_id, 0, s.id)))

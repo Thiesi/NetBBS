@@ -4984,6 +4984,12 @@ Contract timing must account for objectives met en route rather than always addi
 a return journey after the selected destination. Bounty estimates count real target
 entries and the existing queue; label their unchanged-queue/success assumptions.
 
+General route previews count preceding unexpired bounties once per target while
+walking active contracts. Pre-index route arrivals and cache onward distances by
+target too. Preserved legacy careers can contain many thousands of contracts
+within the save byte limit; repeated prefix scans make merely opening a preview
+quadratic. Validate work counts with a reloaded large career, not timing alone.
+
 Route deadline estimates allocate a copy of delivery cargo in projected arrival
 order, with active-mission order breaking ties. Insufficient or already-late jobs
 do not consume it. Missing procurement has an arrival estimate but no promised
