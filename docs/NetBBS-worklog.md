@@ -3294,6 +3294,24 @@ from inside `urlopen`). And a status code alone is not evidence of a Link node:
 a 429 from a CDN fronting a dead node proves only that a CDN is there, so the
 rate-limit body has to be checked like any other signature.
 
+An argparse positional with `nargs="?"` assigns its default *after* optionals
+are processed, so an optional sharing that `dest` is silently overwritten when
+the positional is absent. `--published` therefore resolved to the local file:
+the documented periodic check reported on the copy about to be published and
+never fetched the live one — a monitor structurally unable to observe the thing
+it monitors, with no error anywhere. Resolve such a choice after parsing, and
+test the flag's *effect*, not just that it parses.
+
+Output built from roster data is terminal output. Neither parser rejects control
+characters in a `url` (only in `name`), so a URL carrying a newline can forge
+additional `OK` result lines inside the output an operator reads to learn what
+is OK, and an ANSI escape can rewrite the screen. Sanitize at the print, not at
+the parse: tightening `normalize_entry` instead would diverge from the node
+parser, which is the one thing this checker must never do. Wrapping has the same
+"measure what the terminal sees" requirement — display columns via
+`east_asian_width`, and tokens wider than the terminal have to be split, since a
+256-character URL is within the roster's own limits.
+
 Still unresolved: a roster node must set `outgoing_only = false` to serve its
 purpose, which trips the §15/§12 startup warning recommending `outgoing_only`
 for anything but a small trusted deployment. The project's own reliable node

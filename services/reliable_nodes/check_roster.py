@@ -49,6 +49,7 @@ import shutil
 import socket
 import sys
 import textwrap
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
@@ -305,6 +306,54 @@ def check_roster(
     return results, problems
 
 
+def sanitize(text: str) -> str:
+    """Make roster-supplied text safe to put on a terminal.
+
+    A roster URL is *not* checked for control characters by either
+    parser -- `_parse_entry` checks only the name -- so a published or
+    fetched roster can carry a URL containing a newline or an ANSI
+    escape. Printed verbatim, a newline forges extra `OK` result lines
+    in the output of the very tool an operator is reading to learn what
+    is OK, and an escape can rewrite the screen. Deliberately fixed here
+    rather than by rejecting such URLs in `normalize_entry`: that would
+    diverge from the node parser, which accepts them, and this checker's
+    whole contract is to report exactly what a node would keep.
+    """
+    return "".join(
+        character if character.isprintable() or character == " "
+        else "\\x%02x" % ord(character)
+        for character in text
+    )
+
+
+def display_width(text: str) -> int:
+    """Terminal columns, not characters: a roster name is SysOp-chosen
+    and may be CJK, where one character occupies two columns."""
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in text)
+
+
+def _wrap_to_width(text: str, width: int) -> list[str]:
+    """Wrap on whitespace, and split any single token still wider than
+    the terminal. A 256-character URL is within the roster's own limits,
+    so leaving over-width tokens intact (textwrap's
+    `break_long_words=False`) would still overflow -- AGENTS.md requires
+    an over-width row to wrap rather than run off the screen."""
+    lines: list[str] = []
+    for chunk in textwrap.wrap(text, width=width, break_long_words=False) or [""]:
+        while display_width(chunk) > width:
+            cut, taken = 0, 0
+            for index, character in enumerate(chunk):
+                step = 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
+                if taken + step > width:
+                    break
+                taken += step
+                cut = index + 1
+            lines.append(chunk[:cut])
+            chunk = chunk[cut:]
+        lines.append(chunk)
+    return lines
+
+
 def print_wrapped(text: str, *, file=None) -> None:
     """Local equivalent of `netbbs.rendering.reflow.print_wrapped`
     (AGENTS.md: CLI prose wraps, and errors measure the stream that
@@ -319,12 +368,8 @@ def print_wrapped(text: str, *, file=None) -> None:
     mid-token into something uncopyable.
     """
     destination = file or sys.stdout
-    print(
-        textwrap.fill(text, width=_terminal_columns(destination), break_long_words=False)
-        if text
-        else "",
-        file=destination,
-    )
+    for line in _wrap_to_width(text, _terminal_columns(destination)):
+        print(line, file=destination)
 
 
 def _terminal_columns(stream) -> int:
@@ -351,10 +396,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "problem, so it can gate a publish or run from cron."
         ),
     )
+    # `roster` deliberately has no default and `--published` its own
+    # dest: argparse assigns a `nargs="?"` positional's default *after*
+    # processing optionals, so a shared dest meant `--published` alone
+    # was silently overwritten by the local path -- the documented
+    # periodic check would have reported on the file it was about to
+    # publish and never fetched the published one at all. Resolved in
+    # `_resolve_roster` after parsing instead.
     parser.add_argument(
         "roster",
         nargs="?",
-        default=str(Path(__file__).with_name("reliable-nodes.json")),
+        default=None,
         help=(
             "roster to check: a local path (default: the copy in this directory, i.e. "
             f"the one about to be published) or an http(s) URL such as {DEFAULT_ROSTER_URL}"
@@ -362,10 +414,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--published",
-        action="store_const",
-        const=DEFAULT_ROSTER_URL,
-        dest="roster",
-        help=f"shorthand for checking the live roster at {DEFAULT_ROSTER_URL}",
+        action="store_true",
+        help=f"check the live roster at {DEFAULT_ROSTER_URL} instead",
     )
     parser.add_argument(
         "--timeout",
@@ -381,22 +431,47 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+DEFAULT_ROSTER_PATH = str(Path(__file__).with_name("reliable-nodes.json"))
+
+
+def _resolve_roster(args) -> str:
+    """`--published` wins over the default, but an explicit positional
+    wins over both -- and asking for two different rosters at once is a
+    mistake worth naming rather than silently resolving."""
+    if args.published and args.roster is not None:
+        raise ValueError(f"--published and an explicit roster ({args.roster}) are mutually exclusive")
+    if args.published:
+        return DEFAULT_ROSTER_URL
+    return args.roster if args.roster is not None else DEFAULT_ROSTER_PATH
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
     try:
-        results, problems = check_roster(args.roster, timeout=args.timeout)
-    except (OSError, ValueError, urllib.error.URLError) as exc:
-        print_wrapped(f"could not read roster {args.roster}: {exc}", file=sys.stderr)
+        source = _resolve_roster(args)
+    except ValueError as exc:
+        print_wrapped(str(exc), file=sys.stderr)
+        return 2
+    try:
+        results, problems = check_roster(source, timeout=args.timeout)
+    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as exc:
+        # HTTPException is not an OSError, so a remote roster served over
+        # a malformed or non-HTTP connection would otherwise escape as a
+        # traceback rather than this diagnostic -- the same gap fixed in
+        # probe_link_node, on the other path that reaches urlopen.
+        print_wrapped(f"could not read roster {source}: {exc}", file=sys.stderr)
         return 2
 
     for problem in problems:
-        print_wrapped(f"ROSTER  {problem}", file=sys.stderr)
+        print_wrapped(f"ROSTER  {sanitize(problem)}", file=sys.stderr)
     for result in results:
         if result.healthy and args.quiet:
             continue
         stream = sys.stdout if result.healthy else sys.stderr
         print_wrapped(
-            f"{result.status:<8} {result.name} <{result.url}> -- {result.detail}", file=stream
+            f"{result.status:<8} {sanitize(result.name)} <{sanitize(result.url)}> "
+            f"-- {sanitize(result.detail)}",
+            file=stream,
         )
 
     unhealthy = [result for result in results if not result.healthy]

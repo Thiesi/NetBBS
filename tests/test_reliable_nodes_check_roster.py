@@ -438,3 +438,73 @@ def test_output_wraps_to_the_terminal_width(tmp_path, capsys, monkeypatch):
         if len(line) > 60 and " " in line.strip()
     ]
     assert not overlong, overlong
+
+
+def test_published_flag_actually_selects_the_published_roster():
+    """argparse assigns a `nargs="?"` positional's default *after*
+    processing optionals, so sharing a dest made `--published` alone
+    resolve to the local file — the documented periodic check would have
+    reported on the copy it was about to publish and never fetched the
+    live one. This is the regression test for that silent no-op."""
+    from services.reliable_nodes.check_roster import (
+        DEFAULT_ROSTER_PATH, DEFAULT_ROSTER_URL, _build_arg_parser, _resolve_roster,
+    )
+
+    parse = _build_arg_parser().parse_args
+    assert _resolve_roster(parse(["--published"])) == DEFAULT_ROSTER_URL
+    assert _resolve_roster(parse([])) == DEFAULT_ROSTER_PATH
+    assert _resolve_roster(parse(["other.json"])) == "other.json"
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _resolve_roster(parse(["--published", "other.json"]))
+
+
+def test_main_reports_a_malformed_remote_roster_instead_of_raising(non_http_server):
+    """`http.client.HTTPException` is not an `OSError`, and `load_roster`
+    reaches `urlopen` by a different path than the probe — so fixing
+    only the probe left this one escaping as a traceback."""
+    assert main([non_http_server, "--timeout", "2"]) == 2
+
+
+def test_output_escapes_control_characters_from_a_roster(tmp_path, capsys):
+    """Neither parser rejects control characters in a URL (`_parse_entry`
+    checks only the name), so a roster can carry one. Printed verbatim, a
+    newline forges extra result lines in the output of the tool an
+    operator reads to learn what is OK."""
+    from services.reliable_nodes.check_roster import sanitize
+
+    forged = "http://a.example\nOK       Fake <http://fake> -- answered a Link hello"
+    assert "\n" not in sanitize(forged)
+    assert "\\x1b" in sanitize("http://a\x1b[2J")
+
+    roster = tmp_path / "reliable-nodes.json"
+    roster.write_text(
+        json.dumps({"version": 1, "nodes": [{"name": "Sneaky", "url": forged}]}), encoding="utf-8"
+    )
+    main([str(roster), "--timeout", "2"])
+    captured = capsys.readouterr()
+    assert not any(
+        line.startswith("OK") for line in (captured.out + captured.err).splitlines()
+    ), "a roster must not be able to forge an OK line"
+
+
+def test_wrapping_splits_tokens_wider_than_the_terminal():
+    """A 256-character URL is within the roster's own limits, so leaving
+    over-width tokens intact still overflows. AGENTS.md requires an
+    over-width row to wrap rather than run off the screen."""
+    from services.reliable_nodes.check_roster import _wrap_to_width, display_width
+
+    text = "DOWN     " + "N" * 64 + " <http://" + "d" * 200 + ".example> -- timed out"
+    lines = _wrap_to_width(text, 60)
+    assert lines and all(display_width(line) <= 60 for line in lines)
+    # Wrapping must not lose or reorder content, only add line breaks.
+    assert "".join(lines).replace(" ", "") == text.replace(" ", "")
+
+
+def test_display_width_counts_terminal_columns_not_characters():
+    """Roster names are SysOp-chosen and may be CJK, where one character
+    occupies two columns — `textwrap` alone would let them overflow."""
+    from services.reliable_nodes.check_roster import display_width, _wrap_to_width
+
+    assert display_width("東京ノード") == 10
+    assert display_width("Tokyo") == 5
+    assert all(display_width(line) <= 12 for line in _wrap_to_width("東京ノード" * 6, 12))

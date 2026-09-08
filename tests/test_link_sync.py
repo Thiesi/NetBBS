@@ -1635,3 +1635,28 @@ def test_sync_does_not_call_an_inbound_only_node_isolated(tmp_path, caplog):
         assert _isolation_warnings(caplog) == []
     finally:
         node_db.close()
+
+
+def test_sync_ignores_undialable_candidates_when_counting_isolation(tmp_path, caplog):
+    """Issue #313 review round 2: the guard added for an inbound-only
+    node checked that `candidate_descriptors` was non-empty, but a
+    candidate whose descriptor is outgoing-only carries no address, so
+    `_try_candidate_fallback` skips it without ever attempting a dial.
+    Merely knowing of such peers is not "somewhere to reach", and
+    counting it as such walks straight back into the false warning."""
+    node = LinkNode(identity=bootstrap_node_identity("knows-only-undialable"))
+    other = bootstrap_node_identity("outgoing-only-peer")
+    node.candidate_descriptors[other.fingerprint] = build_endpoint_descriptor(
+        signing_identity=other.signing_key,
+        subject_fingerprint=other.fingerprint,
+        addresses=None,
+        outgoing_only=True,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    node_db = _NodeDb(tmp_path, "knows-only-undialable")
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [], passes=9)
+        assert _isolation_warnings(caplog) == []
+    finally:
+        node_db.close()

@@ -380,7 +380,16 @@ async def run_link_sync(
         # loop would otherwise see "reached nothing" forever and accuse a
         # healthy node of being cut off. Only a pass that actually had
         # somewhere to reach and failed counts toward isolation.
-        had_somewhere_to_reach = bool(pass_seeds) or bool(node.candidate_descriptors)
+        # Dialable, not merely present: a peer-list candidate whose
+        # descriptor is outgoing-only carries no address, so
+        # _try_candidate_fallback skips it without ever attempting a
+        # dial. Counting a non-empty mapping as "somewhere to reach"
+        # would let a node with nothing but such candidates walk back
+        # into the same false warning this gate exists to prevent.
+        had_somewhere_to_reach = bool(pass_seeds) or any(
+            _dialable_addresses(descriptor)
+            for descriptor in node.candidate_descriptors.values()
+        )
         if reached_network or not had_somewhere_to_reach:
             isolated_passes = 0
         else:
