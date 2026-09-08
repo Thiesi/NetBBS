@@ -68,8 +68,27 @@ leg using normal encounters, customs and mission resolution. Fuel must cover tha
 leg. Review the refreshed route after arriving or being diverted, then choose
 another jump or Back. Completion, failure and expiry stop contract navigation.
 Refuelling is manual at the yard, and delivery cargo must still be procured.
+If a destroyed journey charted a survey target without completing the contract,
+it is shown as blocked: revisiting cannot discover it again. Abandon that contract
+from its details to free the active slot.
 The chart's **[R]oute for tracked contract** reopens this view. After a disconnect,
 any saved encounter resumes first; the rest of a route never runs unattended.
+
+### Planning other journeys
+
+Choose **[G]eneral route planner** on the chart, then **[D]estination** to pick a
+charted system by name. The picker paginates all known destinations. Selection
+only changes the preview; Back from the picker keeps the previous selection.
+Inspect each leg, fuel and wage cash, manual refuelling stops, and active-contract
+deadline estimates before choosing **[J]ump next**. Unknown intermediate stations
+retain unknown names and danger. Contract destinations can be previewed through
+their details even when uncharted.
+
+Each Jump next performs one ordinary trip and retains its outcome. Continue,
+select a different destination, or Back out to refuel and trade. The whole journey
+does not have to fit in one tank. This screen's selection is temporary: choose it
+again after leaving or restarting. A saved encounter still resumes before station
+access; subsequent route legs always need a new command.
 
 ### Station stock and buying demand
 

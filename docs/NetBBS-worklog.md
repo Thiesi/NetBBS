@@ -4973,3 +4973,39 @@ Route-page budgets derive page-number width from actual wrapped rows, not a fixe
 three-digit placeholder: preserved legacy bounty queues can exceed 999 pages.
 Cache a read-only route's pages while paging; rebuild only after a jump/error so
 large legacy queues do not multiply route construction work by the page count.
+
+
+General and contract route previews share the pure leg-budget renderer. General
+navigation destination selection is temporary and does not checkpoint; its jump
+validator checks current chart visibility, pending journey, position and next-leg
+fuel without changing the career. Travel owns its durable phases. Every further
+hop requires another command; do not restore an automatic cached path loop.
+Contract timing must account for objectives met en route rather than always adding
+a return journey after the selected destination. Bounty estimates count real target
+entries and the existing queue; label their unchanged-queue/success assumptions.
+
+General route previews count preceding unexpired bounties once per target while
+walking active contracts. Pre-index route arrivals and cache onward distances by
+target too. Preserved legacy careers can contain many thousands of contracts
+within the save byte limit; repeated prefix scans make merely opening a preview
+quadratic. Validate work counts with a reloaded large career, not timing alone.
+
+Route deadline estimates allocate a copy of delivery cargo in projected arrival
+order, with active-mission order breaking ties. Insufficient or already-late jobs
+do not consume it. Missing procurement has an arrival estimate but no promised
+completion day; evaluating every contract against the original hold overstates
+what the same cargo can accomplish.
+
+Destination pickers wrap each label before allocating the next page. Move a
+whole option to a fresh page when it fits there; splitting a multiword station
+name at the page boundary otherwise creates a selectable trailing-word entry.
+When even a fresh page cannot fit an option, use one read-through choice with
+a short heading and selection only after its final part. Continuation fragments
+must not acquire independent choice numbers; budget the wrapped controls too.
+
+Survey completion requires a new discovery, not presence at an already-charted
+system. A destroyed journey can preserve its departure discovery while skipping
+arrival rewards. Estimates and contract navigation must flag that retained survey
+as blocked, with no promised completion day; general travel cannot resolve it by
+revisiting. The existing abandonment action frees the slot without inventing a
+reward or changing discovery history.

@@ -4661,7 +4661,7 @@ Voidrunner's showcase development is tracked in issue #310. Completed station
 actions (including trading, equipment, crew, contracts, scans, faction rewards,
 landmarks and retirement) are committed before their success acknowledgement;
 leaving a nested menu is not a prerequisite for saving. Each completed
-auto-route hop commits before proceeding to the next hop. A failed checkpoint
+route hop commits before another departure can be chosen. A failed checkpoint
 stops play and retains an explicit error instead of accepting further actions.
 Cancelling initial career launch creates no new career, invalid customs keys
 make no changes, and the shipyard's displayed upgrade letters work directly.
@@ -4670,7 +4670,7 @@ advancement, encounter selection, opponent damage, combat outcomes, mission
 payouts, docking, and customs decisions commit with their corresponding progress
 state before narration or further input. A restart preserves the event RNG state
 and cannot reroll an encounter or duplicate a reward. Only the interrupted hop
-resumes; the pilot can plan the rest of an auto-route after resolving it. Existing
+resumes; the pilot can plan the remaining route after resolving it. Existing
 galaxy seeds and legacy careers remain compatible through additive save fields.
 Career loading validates the supported schema and galaxy-generator version,
 record shapes, types, references and gameplay ranges before any startup write.
@@ -4753,14 +4753,26 @@ for queued bounty re-entry, fuel, wages, refuelling stops and inclusive deadline
 The chart also opens the currently tracked contract route directly.
 
 Jump next is available only for a current, unexpired active contract while docked
-and with fuel for that leg. It tracks the selected contract and checkpoints that
+and with fuel for that leg. A survey target must still be uncharted: discovery
+retained from a destroyed journey cannot be repeated for a reward, so its contract
+is explicitly blocked and can be abandoned. It tracks the selected contract and checkpoints that
 intent, then uses ordinary durable travel for exactly one jump. The pilot chooses
 again after each outcome; diversion, completion, failure, expiry, fuel or crew
 changes cause a fresh route/budget. No unattended remainder is resumed after a
 restart. Browsing, Back and EOF do not track, accept or travel. At the destination,
 delivery shortages are explained; bounty jobs still require ordinary re-entry
-rather than a fabricated in-place encounter. General named-destination routing
-and broader route-plan controls remain the next route-planning scope.
+rather than a fabricated in-place encounter. General named-destination routing follows the same one-hop control described below.
+
+General navigation opens a screen before asking for a destination. Its paginated
+picker lists charted system names; uncharted contract targets remain available
+through their contract route. A selection is a temporary route preview and writes
+nothing. Back, destination cancellation and EOF leave the career unchanged.
+The preview shows every leg, unknown threat labels, fuel, wages, manual refuelling
+stops and active-contract deadline estimates. Jump next validates and flies one
+ordinary durable leg, then retains the result and recalculates. Refuelling does
+not need to fit the whole journey into one tank. Choosing a new destination or
+leaving the screen interrupts the plan; selection must be made again after Back
+or restart. No multi-hop execution or yes/no dialogue remains in this screen.
 
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 500-credit high-water milestone in cumulative contraband sales minus purchases
