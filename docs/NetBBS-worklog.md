@@ -3995,6 +3995,11 @@ journeys and comparing each resumed result with uninterrupted execution, alongsi
 a real subprocess kill/relaunch test. The event RNG is independent of galaxy
 generation. New journey state has its own version; unreadable/unsupported state
 must stop play without entering the older corrupt-save/new-career fallback.
+Checkpoints also validate cross-field consistency before any startup write:
+remaining bounty/escort snapshots must match active contracts as a multiset,
+terminal outcomes must agree with opponent HP and destruction state, and the
+saved location must match the journey phase. Completed contract snapshots no
+longer need active membership; requiring it would reject legitimate restarts.
 Broader schema validation, per-pilot concurrency, and shared score transactions
 remain separate work in issue #310.
 
