@@ -42,6 +42,7 @@ it publishes into, so it stays runnable with nothing installed. Unlike
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import http.client
 import json
 import os
@@ -104,6 +105,13 @@ def probe_link_node(url: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Pr
     misbehaving node -- an unreachable node is the answer this function
     exists to report, not an error condition -- so a single bad entry
     can never abort a whole roster run."""
+    try:
+        return with_deadline(lambda: _probe_once(url, timeout=timeout), seconds=timeout)
+    except TimeoutError as exc:
+        return ProbeResult("", url, DOWN, f"could not connect: {exc}")
+
+
+def _probe_once(url: str, *, timeout: float) -> ProbeResult:
     deadline = time.monotonic() + timeout
     endpoint = f"{url.rstrip('/')}{LINK_PATH_PREFIX}/hello"
     request = urllib.request.Request(
@@ -174,6 +182,36 @@ def _classify_http_error(
     return ProbeResult("", url, OK, "answered a Link hello")
 
 
+def with_deadline(work, *, seconds: float):
+    """Run `work()` and give up after `seconds` of wall clock, whatever
+    it is blocked on.
+
+    Socket timeouts bound each individual operation, never the exchange:
+    a server sending one byte just inside the timeout — of the status
+    line, of the headers, of the body — keeps `urlopen` blocked
+    indefinitely without ever tripping one. Reading the body in small
+    pieces fixes only the last of those three, because `urlopen` has not
+    returned yet during the first two.
+
+    A worker thread is the stdlib way to bound the whole thing. The
+    thread cannot be killed and may outlive the call, which is
+    acceptable here and nowhere near a general pattern: this is a
+    short-lived CLI checking at most 32 entries, the threads are daemon
+    threads that die with the process, and the alternative is the cron
+    monitor stopping silently partway through its run — the exact
+    failure this tool exists to detect in others.
+    """
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(work).result(timeout=seconds)
+    except concurrent.futures.TimeoutError:
+        raise TimeoutError(f"gave up after {seconds:g}s") from None
+    finally:
+        # Never join: the point is not to wait for a thread wedged on a
+        # socket that will not finish.
+        pool.shutdown(wait=False)
+
+
 def _read_bounded(response, *, deadline: float | None = None) -> bytes:
     """Read at most the node parser's own response cap, and for at most
     `deadline`. A roster larger than the cap is rejected outright by
@@ -210,8 +248,11 @@ def _read_bounded(response, *, deadline: float | None = None) -> bytes:
 def load_roster(source: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
     """Read a roster from an http(s) URL or a local filesystem path."""
     if source.startswith(("http://", "https://")):
-        with urllib.request.urlopen(source, timeout=timeout) as response:
-            raw = _read_bounded(response, deadline=time.monotonic() + timeout)
+        def fetch() -> bytes:
+            with urllib.request.urlopen(source, timeout=timeout) as response:
+                return _read_bounded(response, deadline=time.monotonic() + timeout)
+
+        raw = with_deadline(fetch, seconds=timeout)
     else:
         raw = Path(source).read_bytes()
     if len(raw) > MAX_RESPONSE_BYTES:

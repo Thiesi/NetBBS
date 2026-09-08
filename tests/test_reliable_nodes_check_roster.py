@@ -629,3 +629,67 @@ def test_load_error_text_from_a_server_is_sanitized(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "\x1b" not in captured.err
     assert "\\x1b" in captured.err
+
+
+@pytest.fixture
+def header_dripping_server():
+    """Sends header bytes forever, each well inside the socket timeout.
+    No individual socket operation ever times out, so `urlopen` never
+    returns and a per-operation timeout bounds nothing."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    stop = threading.Event()
+
+    def serve():
+        try:
+            conn, _ = server.accept()
+            with conn:
+                conn.recv(4096)
+                conn.sendall(b"HTTP/1.1 400 Bad Request\r\n")
+                while not stop.is_set():
+                    conn.sendall(b"X-Pad: x\r\n")
+                    stop.wait(0.02)
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.getsockname()[1]}"
+    finally:
+        stop.set()
+        server.close()
+        thread.join(timeout=5)
+
+
+def test_probe_gives_up_on_a_server_that_drips_headers(header_dripping_server):
+    """A socket timeout bounds each operation, never the exchange, and
+    reading the body in small pieces does not help because `urlopen` has
+    not returned yet. Without a wall-clock bound one roster entry stalls
+    the whole cron run — the checker itself silently stopping partway
+    through, which is precisely the failure it exists to detect."""
+    import time as _time
+
+    started = _time.monotonic()
+    result = probe_link_node(header_dripping_server, timeout=2.0)
+    elapsed = _time.monotonic() - started
+    assert result.status == DOWN
+    assert elapsed < 15, f"probe took {elapsed:.1f}s -- the deadline did not bound it"
+
+
+def test_a_dripping_entry_does_not_stop_the_rest_of_the_run(
+    header_dripping_server, tmp_path, capsys
+):
+    """The point of bounding it: later entries still get checked."""
+    roster = tmp_path / "reliable-nodes.json"
+    roster.write_text(
+        json.dumps({"version": 1, "nodes": [
+            {"name": "Dripping", "url": header_dripping_server},
+            {"name": "Dead", "url": f"http://127.0.0.1:{_free_port()}"},
+        ]}),
+        encoding="utf-8",
+    )
+    assert main([str(roster), "--timeout", "2"]) == 1
+    err = capsys.readouterr().err
+    assert "Dripping" in err and "Dead" in err, err
