@@ -258,6 +258,20 @@ def _extra_artifact_paths(db_path: Path) -> tuple[Path, ...]:
     )
 
 
+def _runtime_reserved_paths(db_path: Path) -> list[Path]:
+    """Runtime namespaces remain reserved even when not captured by a backup."""
+    parent = db_path.parent
+    pat = parent / f"{db_path.stem}_github_pat"
+    credentials = (_managed_dns_credential_path_for(db_path), _managed_dns_previous_credential_path_for(db_path),
+                   _managed_dns_transition_credential_path_for(db_path), pat)
+    return [
+        parent / "netbbs.log", *(parent / f"netbbs.log.{index}" for index in range(1, 6)),
+        pat, *(Path(str(path) + ".tmp") for path in credentials),
+        parent / "doors", parent / "door-nodes", parent / f"{db_path.name}_drafts",
+        parent / f"{db_path.stem}_backups",
+    ]
+
+
 def _sha256_of_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -496,7 +510,17 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
     destination.mkdir(parents=True)
 
     checksums = {}
-    game_metadata = _capture_voidrunner(game_source, destination, checksums)
+    try:
+        game_metadata = _capture_voidrunner(game_source, destination, checksums)
+    except BaseException as exc:
+        # This call created the fresh destination; no prior backup is removed.
+        # A rejected active session or bad file must allow retry at the same path.
+        try:
+            shutil.rmtree(destination)
+        except OSError as cleanup:
+            raise BackupError(f"{exc} Incomplete backup at {destination} could not be removed: {cleanup}. "
+                              "Remove it manually before retrying.") from exc
+        raise
     if game_metadata is not None and database_filename.casefold() == _VOIDRUNNER_DIRNAME:
         # The live custom filename remains valid. Only its archive name changes;
         # the manifest and explicit restore --db already separate those paths.
@@ -925,6 +949,7 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
         protected_paths = [source, db_path, identity_dir, _storage_root_for(db_path),
                            _restore_state_path_for(db_path), _pid_file_path_for(db_path)]
         protected_paths.extend(_extra_artifact_paths(db_path))
+        protected_paths.extend(_runtime_reserved_paths(db_path))
         protected_paths.extend(Path(str(db_path) + suffix) for suffix in ("-wal", "-shm", "-journal"))
         protected_paths.extend(live for _, _, live in _restore_switch_plan(
             source, db_path, identity_dir, _database_filename_from_manifest(manifest)))

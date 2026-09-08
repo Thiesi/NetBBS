@@ -363,6 +363,81 @@ def test_voidrunner_restore_protects_node_paths_absent_from_the_archive(tmp_path
     assert not restored_db.exists() and not target.exists()
 
 
+@pytest.mark.parametrize("name", ["netbbs.log", "netbbs.log.1", "netbbs.log.5", "restored_github_pat",
+                                "restored_github_pat.tmp", "restored_managed_dns_credential.tmp", "doors",
+                                "door-nodes", "restored.db_drafts", "restored_backups"])
+def test_voidrunner_restore_protects_fixed_runtime_namespaces(tmp_path, db_path, identity_dir, name):
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    restored_db = tmp_path / "fresh-node" / "restored.db"
+    target = restored_db.parent / name
+    with pytest.raises(BackupError, match="overlaps"):
+        restore_backup(source=source, db_path=restored_db, identity_dir=tmp_path / "new-identity", voidrunner_to=target)
+    assert not restored_db.exists() and not target.exists()
+
+
+def test_reserved_runtime_paths_match_the_actual_log_handler_and_token_path(db_path):
+    from pathlib import Path
+    from netbbs.__main__ import _create_log_file_handler
+    from netbbs.selfupdate import github_pat_path
+    reserved = {path.resolve() for path in backup_module._runtime_reserved_paths(db_path)}
+    db = Database(db_path)
+    log_path = db_path.parent / "netbbs.log"
+    handler = _create_log_file_handler(log_path)
+    try:
+        pat = github_pat_path(db)
+        assert pat.resolve() in reserved and Path(str(pat) + ".tmp").resolve() in reserved
+        assert log_path.resolve() in reserved
+        for index in range(1, handler.backupCount + 1):
+            assert Path(str(log_path) + f".{index}").resolve() in reserved
+    finally:
+        handler.close()
+        db.close()
+
+
+@pytest.mark.parametrize("failure", ["active", "unsupported", "oversized"])
+def test_failed_game_capture_cleans_only_its_destination_and_allows_same_path_retry(
+    tmp_path, db_path, identity_dir, failure,
+):
+    game = _populate_voidrunner()
+    primary = (game / "77.json").read_bytes()
+    bad = None
+    if failure == "unsupported":
+        bad = game / "unexpected.txt"
+        bad.write_bytes(b"unrelated")
+    elif failure == "oversized":
+        bad = game / "scores" / "999.json"
+        bad.write_bytes(b"x" * (backup_module._VOIDRUNNER_MAX_FILE_BYTES + 1))
+    lease = _real_pilot_lease(game, tmp_path / "ready") if failure == "active" else contextlib.nullcontext()
+    destination = tmp_path / "retry-backup"
+    with lease:
+        with pytest.raises(BackupError):
+            create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+    assert not destination.exists()
+    assert (game / "77.json").read_bytes() == primary
+    if bad is not None:
+        assert bad.exists()
+        bad.unlink()
+    assert create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination) == destination
+    assert (destination / "voidrunner" / "77.json").read_bytes() == primary
+
+
+def test_failed_capture_cleanup_reports_the_incomplete_path_for_manual_removal(tmp_path, db_path, identity_dir, monkeypatch):
+    game = _populate_voidrunner()
+    (game / "unexpected.txt").write_bytes(b"keep source")
+    destination = tmp_path / "incomplete"
+
+    def fail_cleanup(path, *args, **kwargs):
+        assert path == destination
+        raise PermissionError("cleanup denied")
+
+    monkeypatch.setattr(backup_module.shutil, "rmtree", fail_cleanup)
+    with pytest.raises(BackupError, match="Remove it manually before retrying") as error:
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+    assert str(destination) in str(error.value) and "Unsupported Voidrunner" in str(error.value)
+    assert destination.exists() and (game / "unexpected.txt").read_bytes() == b"keep source"
+
+
 def test_voidrunner_restore_refuses_a_directory_with_unrelated_files(tmp_path, db_path, identity_dir):
     _populate_voidrunner()
     source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")

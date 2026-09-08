@@ -4528,8 +4528,9 @@ Read legacy JSON without rewriting it; prefer new metadata while retaining the
 higher historical credit value. The save's additive `best_credits` survives New
 Game+ and commits before the optional score write, so a failed projection can be
 repaired on a later checkpoint even after spending. Private temporary files need
-flush/fsync and replacement in the destination directory. Unsupported shared-host
-filesystems and full directory backup/recovery remain operational boundaries.
+flush/fsync and replacement in the destination directory. Shared-host filesystems
+remain unsupported. Node backups cover supported local game directories; capture,
+restore and manual activation are described below and in the door guide.
 
 
 Voidrunner save decoding validates before constructing dataclasses: otherwise
@@ -4598,3 +4599,11 @@ its own first rename if its second rename fails: the outer loop has not yet adde
 that artifact to the completed list. If that local rollback fails, retain the
 journal and staging, including external staging, for manual recovery. Tests must
 inject failure after the first rename, not only before a switch starts.
+
+Reserved restore targets also include fixed runtime log/rotation files, the update
+token and its temporary path, credential temporary paths, and managed door,
+draft and backup directories. These exclusions do not imply those resources are
+captured in an archive. A failed game capture removes only the fresh destination
+created by that call so closing sessions or repairing data permits the same CLI
+destination to be retried; cleanup failure names the incomplete directory for
+manual removal and preserves the original failure reason.
