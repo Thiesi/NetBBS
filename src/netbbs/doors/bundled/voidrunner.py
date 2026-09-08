@@ -1169,7 +1169,7 @@ def _validate_save_document(data: dict) -> None:
     text(pilot.get("career_started", ""), "career date")
     for key in ("credits", "missions_completed", "kills", "retirements"):
         integer(pilot.get(key, 0), key)
-    integer(pilot.get("notoriety", 0), "notoriety", maximum=100)
+    integer(pilot.get("notoriety", 0), "notoriety")
     integer(pilot.get("highest_rank_seen", 0), "rank", maximum=len(RANKS) - 1)
     for key in ("has_concord_commission", "has_blackwake_made"):
         require(type(pilot.get(key, False)) is bool, key)
@@ -4508,7 +4508,13 @@ def screen_customs(p: Palette, world: World) -> None:
     _encounter_result(p, world, state, [f"You surrender {contraband_qty} units without a fight."])
 
 
-def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: ResumeError) -> SaveData | None:
+@dataclass(frozen=True)
+class RecoveryResult:
+    save: SaveData | None
+    exit_code: int
+
+
+def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: ResumeError) -> RecoveryResult:
     """A failed load is not authorization to reset or roll back a career."""
     candidate = None
     previous = None
@@ -4539,9 +4545,9 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
         try:
             key = read_command()
         except EOFError:
-            return None
+            return RecoveryResult(None, 1)
         if key in ("B", "Q"):
-            return None
+            return RecoveryResult(None, 0)
         if key == "N" and page < len(pages) - 1:
             page += 1
         elif key == "P" and page:
@@ -4550,7 +4556,7 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
             try:
                 confirmed = confirm("Restore this previous checkpoint?", p)
             except EOFError:
-                return None
+                return RecoveryResult(None, 1)
             if confirmed:
                 try:
                     restored = restore_previous_career(save_dir, user_id, previous)
@@ -4560,9 +4566,9 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                         pause(p)
                     except EOFError:
                         pass
-                    return None
+                    return RecoveryResult(None, 1)
                 out_line("Previous checkpoint restored. Resuming this career.")
-                return restored
+                return RecoveryResult(restored, 0)
 
 
 def main() -> int:
@@ -4599,9 +4605,10 @@ def main() -> int:
         try:
             save, is_new, notice = load_or_create_save(save_dir, user_id, info["handle"])
         except ResumeError as exc:
-            save = screen_save_recovery(p, save_dir, user_id, exc)
+            recovery = screen_save_recovery(p, save_dir, user_id, exc)
+            save = recovery.save
             if save is None:
-                return 1
+                return recovery.exit_code
             is_new, notice = False, None
         if notice:
             out_line(f"{p.wrong}{notice}{RESET}")

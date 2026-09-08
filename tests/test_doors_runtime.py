@@ -469,3 +469,18 @@ def test_voidrunner_directory_override_reaches_real_door_without_parent_secrets(
     env = json.loads(bytes(session.written).decode())
     assert env["VOIDRUNNER_SAVE_DIR"] == str(tmp_path / "node-two-careers")
     assert "NETBBS_TEST_SECRET" not in env
+
+
+def test_voidrunner_recovery_back_is_a_normal_door_exit(db, lane, player, tmp_path, monkeypatch):
+    save_dir = tmp_path / "careers"
+    save_dir.mkdir()
+    path = save_dir / f"{player.id}.json"
+    path.write_bytes(b"damaged career")
+    monkeypatch.setenv("VOIDRUNNER_SAVE_DIR", str(save_dir))
+    door = create_door(db, "Voidrunner", sys.executable, args=(str(_VOIDRUNNER_PATH),), creator=player)
+    session = FakeSession()
+    session.type_in("B")
+    result = asyncio.run(_run(session, lane, door, player, wall_time_limit_seconds=5))
+    assert result.exit_code == 0 and result.reason == "exited"
+    assert b"Career recovery" in bytes(session.written)
+    assert path.read_bytes() == b"damaged career"

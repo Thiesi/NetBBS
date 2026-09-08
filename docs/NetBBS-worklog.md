@@ -4553,3 +4553,9 @@ A missing primary with an existing previous copy is recovery, not a new pilot.
 Tests simulating corruption must write the damaged fixture directly; the normal
 writer rejects it before touching primary or previous files. A forced kill after
 recovery acknowledgement proves preservation/replacement happened before output.
+
+
+Notoriety is an uncapped nonnegative counter; encounter probabilities may cap its
+impact, but that does not bound the saved value. Recovery Back/Q is a normal door
+exit (status 0), distinguished from failed restoration or input loss so the parent
+runtime does not announce a deliberate departure as an unexpected crash.

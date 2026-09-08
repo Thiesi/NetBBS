@@ -5313,7 +5313,8 @@ def test_real_recovery_back_decline_eof_and_special_keys_write_nothing(tmp_path,
     before = {p.name: p.read_bytes() for p in tmp_path.glob("*.json")}
     result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
                             env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
-    assert result.returncode == 1 and not result.stderr
+    assert result.returncode == (0 if commands.endswith((b"B", b"Q")) else 1)
+    assert not result.stderr
     assert b"Career recovery" in result.stdout and b"Day 7" in result.stdout
     assert b"Pilot callsign" not in result.stdout
     assert {p.name: p.read_bytes() for p in tmp_path.glob("*.json")} == before
@@ -5374,7 +5375,7 @@ def test_future_schema_never_offers_or_allows_downgrade_recovery(tmp_path, monke
     keys = iter("RB")
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     with contextlib.redirect_stdout(io.StringIO()) as output:
-        assert vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value) is None
+        assert vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value).save is None
     assert "[R]estore" not in output.getvalue()
     with pytest.raises(vr.UnsupportedSave):
         vr.restore_previous_career(tmp_path, 77, previous)
@@ -5403,3 +5404,17 @@ def test_recovery_pages_fit_terminal_and_restore_is_on_last_page(tmp_path, monke
         assert len(rows) <= height, (width, height, rows)
         assert all(vr._visible_width(row) <= width for row in rows)
     assert any("[R]estore" in page for page in chunks)
+
+
+def test_notoriety_above_one_hundred_survives_checkpoint_and_restart(tmp_path):
+    world = _world_with_seed(42)
+    world.save.pilot.notoriety = 99
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    world.save.pilot.notoriety += 3  # A patrol kill crosses the former artificial cap.
+    world.checkpoint()
+    loaded, is_new, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not is_new and loaded.pilot.notoriety == 102
+    loaded.pilot.notoriety = 1000
+    vr.write_save(tmp_path, 77, loaded)
+    assert vr.load_or_create_save(tmp_path, 77, "Tester")[0].pilot.notoriety == 1000
