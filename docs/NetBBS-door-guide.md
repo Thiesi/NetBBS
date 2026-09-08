@@ -170,6 +170,20 @@ Buying or selling retains the result in the refreshed catalog after saving it.
 Cancel a quantity with Enter to leave the career unchanged and keep the prior
 result. **[X] Futures** opens wholesale orders; **[Q] Back** returns to the station.
 
+### Futures exchange pages
+
+Market **[X] Futures** lists wholesale quotes and outstanding orders. Read the
+fee and limit notices, page with **[N] Next / [P] Previous**, and select a numbered
+entry for details. Complete labels stay together or use a read-through view;
+inspection returns to the same list page. **[B] Back** leaves the exchange.
+
+Order drafts and existing orders use **[<] Previous / [>] Next**. Quantity and term
+edits remain unsaved until **[S] Sign** and its final confirmation. Invalid quantity
+input retains the draft; Back discards it. Modern-order cancellation remains an
+explicit **[X] Cancel** with a final refund/fee confirmation. Existing legacy terms
+remain visible. Signed/cancelled results are saved before display and retained when
+returning to the futures list and market.
+
 ### Engineering yard and crew pages
 
 The yard and crew roster fit the terminal height, stacking terms at narrow widths.
