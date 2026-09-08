@@ -5102,3 +5102,18 @@ the existing random draw order (squadron roll, then tier/name per ship); stored
 opponents retain their stats. Verify the actual target resolver when stubbing
 patrol/kill tests: new fights use tactical_round; fight_round remains the legacy
 path. Seeded probes show mechanical tradeoffs and duration, not player engagement.
+
+Bounty identification truth uses its own versioned deterministic career/contract
+namespace; it must not consume encounter RNG or reroll after withdrawal. Cache
+truth, checked and engaged flags in the interception. Verification spends fuel but
+no tactical step, then checkpoints its retained result. Valid combat decisions
+close free verification/withdrawal in the same checkpoint as their effects.
+
+The reported terminal outcome requires a checked mismatch before engagement in a
+primary bounty interception. Persist it before the parent removes the contract,
+and replay without a reward, kill or mission credit. A real kill at its narration
+may observe either the terminal report or the parent's already-consumed state;
+assert both monotonic states and use per-checkpoint replay tests for the exact gap.
+Keep the historical post-win RNG draw for sequence compatibility. Existing cached
+targets without warrant metadata retain their controls and get no new undisclosed
+identity penalty; never retrofit the prompt into an already-started fight.

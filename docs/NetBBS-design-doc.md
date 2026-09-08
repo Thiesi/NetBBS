@@ -4853,6 +4853,23 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
+New bounty interceptions offer identification in the combat screen before engaging.
+Verify costs one fuel and reveals whether the posted identity matches; Withdraw
+continues the journey while keeping the contract. A verified mismatch can be closed
+without combat, bounty payout, mission credit or notoriety. Firing unverified or
+knowingly at a mismatch retains the full bounty but carries the stated notoriety
+and Concord-standing consequence. Once engagement begins, identification and free
+withdrawal are unavailable. No automatic, undisclosed post-kill identity punishment
+is applied to a target already selected under the older rules.
+
+Warrant truth is deterministic per career/contract, using a separate versioned RNG
+namespace, and is cached with checked/engaged flags. It never rerolls on inspection,
+withdrawal or reconnect, and it consumes no encounter RNG. The historical bounty
+completion RNG slot is still consumed after a win for sequence compatibility.
+Verification fuel, flags and retained result checkpoint before acknowledgement;
+closing a mismatch checkpoints its terminal result before the parent removes the
+contract. Validate warrant versions and reported-outcome consistency on load.
+
 New Voidrunner fights use a versioned tactical ruleset with three deterministic
 opponent patterns: Raider (attack, volley, recover), Bulwark (cover, volley,
 recover), and Skirmisher (harry, attack, volley). The current intent and incoming
