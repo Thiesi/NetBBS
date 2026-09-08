@@ -35,6 +35,7 @@ from services.reliable_nodes.check_roster import (
     DOWN,
     NOT_LINK,
     OK,
+    _build_arg_parser,
     load_roster,
     main,
     normalize_entry,
@@ -260,6 +261,12 @@ _ROSTER_CORPUS = [
     {"version": 1, "nodes": ["not-an-object"]},
     {"version": 1, "nodes": [{"name": str(i), "url": f"http://{i}.example"} for i in range(40)]},
     {"version": 1, "nodes": [{"name": str(i), "url": f"http://{i}.example"} for i in range(257)]},
+    # A version mismatch discards the whole document, however good the
+    # entries look -- the corpus was all version 1 before, so nothing
+    # pinned that.
+    {"version": 2, "nodes": [{"name": "Reliable Link", "url": "http://relink.example:7862"}]},
+    {"version": 2, "nodes": []},
+    {"nodes": [{"name": "n", "url": "http://a.example"}]},
 ]
 
 
@@ -508,3 +515,63 @@ def test_display_width_counts_terminal_columns_not_characters():
     assert display_width("東京ノード") == 10
     assert display_width("Tokyo") == 5
     assert all(display_width(line) <= 12 for line in _wrap_to_width("東京ノード" * 6, 12))
+
+
+def test_an_unsupported_version_stops_validation_entirely(tmp_path, capsys):
+    """`parse_reliable_nodes` raises on the version before it looks at
+    `nodes`, so probing those entries would report on nodes nothing will
+    ever dial — and with an empty list the old code printed the
+    retirement message when installed nodes actually keep their
+    previous roster."""
+    entries, problems = validate_roster(
+        {"version": 2, "nodes": [{"name": "Live", "url": "http://a.example"}]}
+    )
+    assert entries == []
+    assert any("version is 2" in problem for problem in problems)
+
+    roster = tmp_path / "reliable-nodes.json"
+    roster.write_text(json.dumps({"version": 2, "nodes": []}), encoding="utf-8")
+    assert main([str(roster)]) == 1
+    assert "retire its built-in fallback" not in capsys.readouterr().out
+
+
+def test_load_roster_accepts_a_bom_exactly_as_a_node_does(tmp_path):
+    """`json.loads` on bytes detects the encoding and a BOM, which is
+    what `parse_reliable_nodes` gets. Decoding UTF-8 first left a
+    leading U+FEFF, so the gate rejected a document — a common result of
+    editing on Windows — that every installed node accepts."""
+    from netbbs.link.reliable_nodes import parse_reliable_nodes
+
+    raw = json.dumps({"version": 1, "nodes": []}).encode("utf-8-sig")
+    roster = tmp_path / "bom.json"
+    roster.write_bytes(raw)
+    assert parse_reliable_nodes(raw) == []          # the node accepts it
+    assert load_roster(str(roster)) == {"version": 1, "nodes": []}
+
+
+def test_timeout_option_rejects_values_a_socket_cannot_use(capsys):
+    """0, a negative, nan or inf would make every probe fail and report
+    a healthy roster as entirely DOWN, or raise OverflowError from
+    inside urllib. A wrong verdict is worse than a usage error."""
+    parser = _build_arg_parser()
+    for bad in ["0", "-1", "nan", "inf"]:
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--timeout", bad])
+    assert parser.parse_args(["--timeout", "2.5"]).timeout == 2.5
+
+
+def test_read_bounded_stops_at_its_deadline():
+    """`urlopen`'s timeout bounds each socket operation, not the whole
+    exchange, so a server dripping bytes below it never reaches the byte
+    cap and holds the read open indefinitely — one entry silently ending
+    a cron run."""
+    import time as _time
+    from services.reliable_nodes.check_roster import _read_bounded
+
+    class Dripping:
+        def read(self, size):
+            _time.sleep(0.05)
+            return b"x" * min(size, 8)
+
+    with pytest.raises(TimeoutError):
+        _read_bounded(Dripping(), deadline=_time.monotonic() + 0.2)

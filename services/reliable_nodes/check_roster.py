@@ -49,6 +49,7 @@ import shutil
 import socket
 import sys
 import textwrap
+import time
 import unicodedata
 import urllib.error
 import urllib.request
@@ -103,6 +104,7 @@ def probe_link_node(url: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Pr
     misbehaving node -- an unreachable node is the answer this function
     exists to report, not an error condition -- so a single bad entry
     can never abort a whole roster run."""
+    deadline = time.monotonic() + timeout
     endpoint = f"{url.rstrip('/')}{LINK_PATH_PREFIX}/hello"
     request = urllib.request.Request(
         endpoint,
@@ -118,7 +120,7 @@ def probe_link_node(url: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Pr
                 f"HTTP {response.status} to an empty hello (expected 400)",
             )
     except urllib.error.HTTPError as exc:
-        return _classify_http_error(url, exc)
+        return _classify_http_error(url, exc, deadline=deadline)
     except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
         return ProbeResult("", url, DOWN, f"could not connect: {reason}")
@@ -142,14 +144,16 @@ def probe_link_node(url: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Pr
         return ProbeResult("", url, DOWN, f"could not probe: {exc!r}")
 
 
-def _classify_http_error(url: str, exc: urllib.error.HTTPError) -> ProbeResult:
+def _classify_http_error(
+    url: str, exc: urllib.error.HTTPError, *, deadline: float | None = None
+) -> ProbeResult:
     if exc.code == 429:
         # Only Link's own middleware answers with this body. A 429 from a
         # CDN or reverse proxy fronting a dead node proves nothing about
         # what is behind it, and reporting that as healthy would recreate
         # exactly the false positive this checker exists to catch.
         try:
-            rate_limited = json.loads(_read_bounded(exc).decode("utf-8", "replace"))
+            rate_limited = json.loads(_read_bounded(exc, deadline=deadline).decode("utf-8", "replace"))
         except (ValueError, OSError, http.client.HTTPException):
             rate_limited = None
         if isinstance(rate_limited, dict) and rate_limited.get("error") == "rate limit exceeded":
@@ -161,7 +165,7 @@ def _classify_http_error(url: str, exc: urllib.error.HTTPError) -> ProbeResult:
     if exc.code != 400:
         return ProbeResult("", url, NOT_LINK, f"HTTP {exc.code} to an empty hello (expected 400)")
     try:
-        body = json.loads(_read_bounded(exc).decode("utf-8", "replace"))
+        body = json.loads(_read_bounded(exc, deadline=deadline).decode("utf-8", "replace"))
         error = body["error"]
     except (ValueError, KeyError, TypeError, AttributeError, OSError, http.client.HTTPException):
         return ProbeResult("", url, NOT_LINK, "HTTP 400 without a Link error body")
@@ -170,19 +174,39 @@ def _classify_http_error(url: str, exc: urllib.error.HTTPError) -> ProbeResult:
     return ProbeResult("", url, OK, "answered a Link hello")
 
 
-def _read_bounded(response) -> bytes:
-    """Read at most the node parser's own response cap. A roster larger
-    than that is rejected outright by every node
-    (`MAX_RELIABLE_NODES_RESPONSE_BYTES`), so buffering more here would
-    only let the checker approve a document the network discards."""
-    return response.read(MAX_RESPONSE_BYTES + 1)
+def _read_bounded(response, *, deadline: float | None = None) -> bytes:
+    """Read at most the node parser's own response cap, and for at most
+    `deadline`. A roster larger than the cap is rejected outright by
+    every node (`MAX_RELIABLE_NODES_RESPONSE_BYTES`), so buffering more
+    would only let the checker approve a document the network discards.
+
+    The byte cap alone is not enough: `urlopen`'s timeout bounds each
+    individual socket operation, not the whole exchange, so a server
+    dripping a byte at a time just under that timeout holds the read
+    open indefinitely without ever reaching the cap. For a cron monitor
+    that means one misbehaving entry silently stops the run before the
+    remaining nodes are checked -- a monitor that quietly stops
+    monitoring, which is the failure this whole tool exists to remove.
+    Reading in chunks makes the deadline observable between them.
+    """
+    chunks: list[bytes] = []
+    remaining = MAX_RESPONSE_BYTES + 1
+    while remaining > 0:
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError("timed out reading the response body")
+        chunk = response.read(min(remaining, 16 * 1024))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def load_roster(source: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
     """Read a roster from an http(s) URL or a local filesystem path."""
     if source.startswith(("http://", "https://")):
         with urllib.request.urlopen(source, timeout=timeout) as response:
-            raw = _read_bounded(response)
+            raw = _read_bounded(response, deadline=time.monotonic() + timeout)
     else:
         raw = Path(source).read_bytes()
     if len(raw) > MAX_RESPONSE_BYTES:
@@ -192,7 +216,11 @@ def load_roster(source: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dic
         raise ValueError(
             f"roster is larger than {MAX_RESPONSE_BYTES} bytes -- every node rejects it outright"
         )
-    document = json.loads(raw.decode("utf-8"))
+    # `json.loads` on *bytes* detects the encoding (and a BOM) exactly
+    # as `parse_reliable_nodes` does. Decoding as UTF-8 first left a
+    # leading U+FEFF on a BOM-prefixed file -- a common result of editing
+    # on Windows -- so the gate rejected documents every node accepts.
+    document = json.loads(raw)
     if not isinstance(document, dict):
         raise ValueError("roster must be a JSON object")
     return document
@@ -252,10 +280,17 @@ def validate_roster(document: dict) -> tuple[list[tuple[str, str]], list[str]]:
     problems: list[str] = []
     version = document.get("version")
     if version != ROSTER_VERSION:
+        # Return immediately, like the other whole-document rejections:
+        # `parse_reliable_nodes` raises on the version before it looks at
+        # `nodes` at all, so probing those entries would report on nodes
+        # nothing will ever dial -- and an empty list here would print
+        # the retirement message when installed nodes actually keep
+        # their previous roster.
         problems.append(
             f"version is {version!r}, not {ROSTER_VERSION} -- every node rejects the "
             "whole document and keeps its last good copy"
         )
+        return [], problems
     nodes = document.get("nodes")
     if not isinstance(nodes, list):
         problems.append("'nodes' is missing or not a list -- every node rejects the whole document")
@@ -387,6 +422,22 @@ def _terminal_columns(stream) -> int:
         return shutil.get_terminal_size(fallback=(80, 24)).columns
 
 
+def _positive_seconds(value: str) -> float:
+    """A socket timeout must be positive and finite. argparse would
+    otherwise accept `0`, a negative, `nan` or `inf`: the first three
+    make every probe fail and report a healthy roster as entirely
+    `DOWN`, and `inf` raises `OverflowError` from deep inside urllib.
+    A wrong verdict from a tool whose only job is verdicts is worse
+    than a usage error."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not seconds > 0 or seconds != seconds or seconds == float("inf"):
+        raise argparse.ArgumentTypeError(f"timeout must be a positive, finite number (got {value!r})")
+    return seconds
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m services.reliable_nodes.check_roster",
@@ -419,7 +470,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timeout",
-        type=float,
+        type=_positive_seconds,
         default=DEFAULT_TIMEOUT_SECONDS,
         help=f"per-request timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS:g})",
     )
@@ -478,10 +529,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.quiet:
         if results:
             print_wrapped(f"{len(results) - len(unhealthy)}/{len(results)} roster nodes reachable.")
-        else:
+        elif not problems:
             # A valid, deliberately empty roster -- see validate_roster:
             # this is how the project retires its last reliable node, so
-            # it is a successful check, not a failed one.
+            # it is a successful check, not a failed one. Only say so
+            # when the document is otherwise sound: "no entries" because
+            # every node discards the whole document (a bad version, say)
+            # means nodes keep their previous roster, which is the
+            # opposite of retiring a fallback.
             print_wrapped("Roster is empty -- every node will retire its built-in fallback.")
     if problems or unhealthy:
         return 1

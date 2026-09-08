@@ -3252,7 +3252,8 @@ node identity or key material, is never persisted as a peer, and still exercises
 connect + HTTP + Link routing. It separates DOWN (nothing listening) from
 NOT_LINK (something answered, but not a Link node — a stale DNS record, a proxy
 in front of a dead node), which a plain TCP or HTTP check cannot. A 429 counts
-as up: it comes from the Link app's own rate-limit middleware. The checker
+as up only when it carries Link's own rate-limit body; a bare 429 proves a CDN
+is there, not a node. The checker
 deliberately does not import `netbbs` (`services/` is standalone), so the test
 that keeps its expected signature honest has to drive a real `LinkServer` — a
 canned 400 would let the two drift apart unnoticed, which is the same blind spot
@@ -3277,12 +3278,14 @@ A checker that duplicates rules is only as good as the pin holding the copy in
 place. `services/` cannot import `netbbs` (it runs where the package is not
 installed), so the roster rules exist twice — and every divergence points the
 same way: the gate approves a roster the network then rejects or truncates,
-which is the same false green the checker exists to remove. Review found three
-at once (a whitespace-only name that a node strips and skips, a trailing-slash
-duplicate a node collapses, a `[]` roster a node treats as deliberate
-retirement), so the fix is not three patches but a mirrored `normalize_entry`
-plus a differential test running both implementations over a corpus. Where a
-constant must be duplicated, pin it with a test, not a comment.
+which is the same false green the checker exists to remove. The divergences are
+not individually obvious ones either — stripping before an emptiness test,
+normalizing before de-duplication, an empty list meaning deliberate retirement,
+a version mismatch discarding the document whole, `json.loads` on bytes
+detecting a BOM that an explicit UTF-8 decode rejects. So the copy is a mirror
+of `_parse_entry` pinned by a differential test that runs both implementations
+over a corpus, not a set of individually reasoned checks. Where a constant must
+be duplicated, pin it with a test, not a comment.
 
 Two properties of that probe are contractual rather than incidental. It must
 never raise: roster URLs are externally authored, and one entry that explodes
@@ -3290,7 +3293,11 @@ aborts the run and leaves every later entry unchecked, so a broad final handler
 is correct here in a way it usually is not — enumerating handlers demonstrably
 does not achieve it (`http.client.HTTPException` is not an `OSError`; an
 over-long DNS label raises `UnicodeError` from IDNA encoding, a `ValueError`,
-from inside `urlopen`). And a status code alone is not evidence of a Link node:
+from inside `urlopen`). Bounding the bytes is likewise not the same as bounding the wait: `urlopen`'s
+timeout applies per socket operation, so a server dripping bytes below it holds
+a read open indefinitely without ever reaching the cap, and a cron monitor then
+stops monitoring without saying so. Read in chunks against a wall-clock
+deadline. And a status code alone is not evidence of a Link node:
 a 429 from a CDN fronting a dead node proves only that a CDN is there, so the
 rate-limit body has to be checked like any other signature.
 
