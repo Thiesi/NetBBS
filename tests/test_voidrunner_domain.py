@@ -2943,6 +2943,27 @@ def test_oversized_picker_keeps_choice_identity_when_returning_from_next_option(
     assert selected == (None if back else 7)
 
 
+@pytest.mark.parametrize("width,height",[(20,10),(40,10),(39,24),(40,12),(80,24)])
+def test_map_list_advertises_only_available_view_actions(monkeypatch,width,height):
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    world=_world_with_seed(42);before=world.save.to_dict()
+    compact=width<40 or height<12
+    commands=iter(["M","N","P","B"] if compact else ["L","M","B"])
+    output=io.StringIO();frames=[]
+    def choose():
+        frame=output.getvalue();output.seek(0);output.truncate(0);frames.append(frame)
+        if "Charted Systems" in " ".join(frame.split()):
+            assert ("[M]ap" in frame) is not compact
+        return next(commands)
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_galaxy_map(vr.Palette(False),world)
+    if compact:
+        assert all("Star Map:" not in frame for frame in frames)
+    else:
+        assert "Star Map:" in frames[-1]
+    assert world.save.to_dict()==before
+
+
 def test_general_route_fuel_topups_do_not_require_whole_route_in_tank():
     world = _world_with_seed(42)
     target = max(world.galaxy, key=lambda s: len(vr.bfs_path(world.by_id, 0, s.id)))

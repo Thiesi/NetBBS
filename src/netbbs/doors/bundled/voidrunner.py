@@ -5198,7 +5198,7 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
     compact = _OUTPUT_WIDTH < 40 or _OUTPUT_HEIGHT < 12
     list_mode, page = compact, 0
     title = "Charted Systems"
-    list_footer = "[N]ext [P]rev [M]ap [I]nfo [B]ack: "
+    list_footer = "[N]ext [P]rev " + ("" if compact else "[M]ap ") + "[I]nfo [B]ack: "
     lines = map_list_lines(world, path, public_target)
     if compact: lines.insert(0, "Spatial map needs 40 columns and 12 rows; exact list is available here.")
     pages = _trade_pages(lines, title, list_footer)
