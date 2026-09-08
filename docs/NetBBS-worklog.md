@@ -3259,6 +3259,21 @@ if the marker is read back out of that file, `netbbs_logfile=/dev/null` must
 degrade to a liveness check rather than waiting out the full timeout on every
 healthy start.
 
+Anything a supervisor reads back has to be type-checked before it is read.
+`netbbs_logfile` is operator-set and legitimately need not be a regular file
+(`/dev/null` is supported; a FIFO is a natural thing to try once told the file
+does not rotate) — and `wc` on a FIFO blocks on open with no writer and reads
+forever with one, hanging the service at boot. Establish whether readiness is
+observable at all, then read. Create the file first when missing, too: `su`
+returns once the pid is published, which can precede the child's redirection
+creating it, so a first start would otherwise fall back to a bare liveness
+check exactly when a misconfiguration is most likely.
+
+`su user -c` runs the command with *that account's* login shell, so a launch
+written in `sh` syntax silently depends on the service account not using
+csh/tcsh. NetBSD's `useradd` default is `/bin/sh`, but an operator reusing an
+existing account can have anything; state the requirement rather than assume it.
+
 Confirming a start needs a readiness signal, not a `sleep`. Startup runs a
 database integrity check before it binds anything, so on a large database "the
 process is still alive after N seconds" is true well before any listener

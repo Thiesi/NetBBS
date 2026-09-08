@@ -12,9 +12,14 @@
 #
 #	netbbs=YES					# enable the service
 #	netbbs_user="netbbs"				# unprivileged user to run as
-#						# (needs a real shell -- this script
-#						# starts the node through su(1), so
-#						# /sbin/nologin will not work)
+#						# (needs a Bourne-compatible login
+#						# shell: this script starts the node
+#						# through su(1), which runs the command
+#						# with that account's own shell, and the
+#						# launch below is sh(1) syntax. /bin/sh
+#						# or /bin/ksh; /sbin/nologin cannot work,
+#						# and csh/tcsh will fail to parse it.
+#						# NetBSD's useradd default is /bin/sh.)
 #	netbbs_statedir="/var/lib/netbbs"		# node state; must be writable by netbbs_user
 #	netbbs_config="/etc/netbbs/netbbs.toml"
 #	netbbs_python="/var/lib/netbbs/.venv/bin/python"
@@ -195,13 +200,33 @@ netbbs_start()
 		return 1
 	fi
 	rm -f "${pidfile}"
-	# The logfile is appended to across restarts, so a readiness line from
-	# an earlier run is already in it. Note where this start's output
-	# begins and only look past that point.
-	_log_from=$(wc -l < "${netbbs_logfile}" 2>/dev/null | tr -d ' ')
-	case "${_log_from}" in
-	"" | *[!0-9]*)	_log_from=0 ;;
-	esac
+	# Decide up front whether readiness can be observed at all, and never
+	# read the logfile before knowing what it is. `netbbs_logfile=/dev/null`
+	# is documented and supported, and an operator who wants the output
+	# piped somewhere may well point this at a FIFO -- `wc` on a FIFO
+	# blocks on open with no writer and reads forever with one, hanging
+	# `service netbbs start` at boot.
+	#
+	# Create it first when it is missing, as netbbs_user so the node can
+	# keep appending: `su` returns once the pid is published, which can be
+	# before the child's redirection has created the file, and a first
+	# start would otherwise look like "readiness cannot be observed" and
+	# fall back to a bare liveness check exactly when a misconfiguration
+	# is most likely.
+	if [ ! -e "${netbbs_logfile}" ]; then
+		su -m "${netbbs_user}" -c ": >> \"${netbbs_logfile}\"" 2>/dev/null
+	fi
+	_readiness_observable=no
+	_log_from=0
+	if [ -f "${netbbs_logfile}" ]; then
+		_readiness_observable=yes
+		# Appended to across restarts, so a readiness line from an earlier
+		# run is already there. Only look past this start's own output.
+		_log_from=$(wc -l < "${netbbs_logfile}" 2>/dev/null | tr -d ' ')
+		case "${_log_from}" in
+		"" | *[!0-9]*)	_log_from=0 ;;
+		esac
+	fi
 	echo "Starting netbbs."
 	# su -m leaves the environment alone, so HOME would still be root's.
 	# Set it explicitly to the state directory: a door that keeps its own
@@ -284,7 +309,7 @@ netbbs_start()
 	# out the full timeout and then report an unconfirmed start, delaying
 	# boot for no reason. Fall back to the weaker liveness check and say
 	# which one was used, rather than silently doing either.
-	if [ ! -f "${netbbs_logfile}" ]; then
+	if [ "${_readiness_observable}" = no ]; then
 		sleep 3
 		if netbbs_running; then
 			echo "netbbs started as pid ${_pid} (readiness unconfirmed:"

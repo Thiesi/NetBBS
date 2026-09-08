@@ -249,8 +249,14 @@ back up all of it together, not just the database (see §5):
 | Logs | `netbbs.log` next to the database, self-rotating at 10 MiB
   with 5 backups kept (50 MiB worst case, never unbounded) — also
   visible via your service supervisor (`journalctl -u netbbs` under
-  systemd; syslog/`daemon` facility under NetBSD's `rc.d`, see
-  `examples/netbbs.rc`) since NetBBS still logs to stderr/stdout too |
+  systemd) since NetBBS still logs to stderr/stdout too. Under NetBSD's
+  `rc.d` that output goes to the example script's own capture file
+  (`netbbs_logfile`, `netbbs.service.log` beside the database by
+  default) — **not** syslog. Check it first when a start fails: a config
+  error or a failed import happens before the rotating handler exists,
+  so that capture file is the only place it is recorded. It does not
+  rotate, which is why `examples/netbbs.rc` suggests pointing it at
+  `/dev/null` once an install is known good |
 | Backups | SysOp-screen backups: `<db-stem>_backups/` beside the database; CLI backups: wherever you choose with `--to` (§5) |
 
 Uninstalling the package (`pip uninstall netbbs`) only ever removes the
