@@ -158,6 +158,20 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### Coordinated raiders
+
+New two-raider contacts disclose both opponents and their covering fire. **[T]
+Target** switches who you fight first before engagement, without spending fuel or
+a combat turn. The partner adds two damage plus twice its tier to return fire
+while both ships remain. **[G] Brace** reduces the combined incoming damage.
+Destroying the target prevents that return volley and ends the covering bonus.
+
+The best order depends on the opponents' tiers, hull and patterns. There is no
+repair between foes. A successful evasion or accepted bribe breaks contact with
+both raiders. Target selection closes after any valid combat decision, and its
+saved order survives a disconnect. Previously cached squadrons retain their
+original sequential rules.
+
 ### Derelicts and distress calls
 
 Use **[<] Previous / [>] Next** to read encounter terms. Derelicts offer **[B]
