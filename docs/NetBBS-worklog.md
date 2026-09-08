@@ -5079,3 +5079,11 @@ action and render the cached exchange only after its checkpoint. Preserve termin
 outcome replay before returning to the parent travel phase. Combat cargo usage is
 numeric capacity, separate from health semantics; unavailable actions retain cost
 explanations but must not advertise a usable hotkey.
+
+Customs decision validation precedes RNG and all effects. An unaffordable offer
+must not enter the refused-bribe branch or checkpoint confiscation. Keep domain
+resolution separate from the UI; completion and result commit with its effects
+through the existing encounter checkpoint. Quote the fine separately from the
+cash collected, since this game caps collection at credits on hand without debt.
+Tests for actual refusal need an affordable offer plus a refusal draw; zero money
+is validation coverage, not a substitute for that domain outcome.
