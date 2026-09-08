@@ -3761,3 +3761,57 @@ def test_legacy_save_gains_resume_fields_without_regenerating_galaxy():
     world.checkpoint()
     restored = vr.World(vr.SaveData.from_dict(world.save.to_dict()))
     assert restored.event_rng.random() == world.event_rng.random()
+
+
+@pytest.mark.parametrize("kind", ["bounty", "escort"])
+@pytest.mark.parametrize("field,value", [
+    ("pirate_tier", "2"), ("pirate_tier", 5), ("pirate_tier", True),
+    ("reward", "500"), ("reward", -1), ("id", False), ("id", 0),
+    ("origin_system", -1), ("target_system", vr.GALAXY_SYSTEM_COUNT),
+    ("target_system", "1"), ("description", []), ("quantity", "2"),
+    ("deadline_turn", -1), ("commodity", []), ("commodity", "unknown"),
+])
+def test_malformed_resume_mission_uses_recovery_error(kind, field, value):
+    mission = vr.Mission(1, kind, "Test contract", 500, 0, 1, pirate_tier=2).to_dict()
+    mission[field] = value
+    travel = {
+        "version": 1, "origin": 0, "destination": 1, "was_discovered": True,
+        "destroyed": False, "phase": "primary", "primary": "bounty" if kind == "bounty" else "random",
+        "bounty": mission if kind == "bounty" else None,
+        "escorts": [mission] if kind == "escort" else [], "escort_index": 0, "encounter": {},
+    }
+    data = _world_with_seed(42).save.to_dict()
+    data["pending_travel"] = travel
+    with pytest.raises(vr.ResumeError, match="cannot be read"):
+        vr.SaveData.from_dict(data)
+
+
+@pytest.mark.parametrize("kind", ["bounty", "escort"])
+def test_real_door_preserves_bad_resume_mission_and_shows_recovery(tmp_path, kind):
+    import json
+    import os
+    import subprocess
+
+    world = _world_with_seed(42)
+    mission = vr.Mission(1, kind, "Test contract", 500, 0, 1, pirate_tier=2).to_dict()
+    mission["pirate_tier"] = "2"
+    world.save.pending_travel = {
+        "version": 1, "origin": 0, "destination": 1, "was_discovered": True,
+        "destroyed": False, "phase": "primary", "primary": "bounty" if kind == "bounty" else "random",
+        "bounty": mission if kind == "bounty" else None,
+        "escorts": [mission] if kind == "escort" else [], "escort_index": 0, "encounter": {},
+    }
+    vr.persist(world, tmp_path, 77)
+    path = tmp_path / "77.json"
+    original = path.read_bytes()
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(_VOIDRUNNER_PATH)], input=b" ", capture_output=True,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10,
+    )
+    assert result.returncode == 1
+    output = " ".join(vr._ANSI_RE.sub("", result.stdout.decode("utf-8")).split())
+    assert "your saved career is unchanged" in output
+    assert not result.stderr
+    assert path.read_bytes() == original

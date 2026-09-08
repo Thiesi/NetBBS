@@ -691,6 +691,29 @@ class ResumeError(Exception):
     """An interrupted career must be preserved, never reset automatically."""
 
 
+def _validate_combat_mission_snapshot(data: dict, kind: str) -> None:
+    """Validate every value a resumed fight, payout, or removal consumes."""
+    if not isinstance(data, dict):
+        raise ValueError("invalid mission snapshot")
+    mission = Mission.from_dict(data)
+    if (mission.kind != kind or not isinstance(mission.description, str)
+            or type(mission.id) is not int or mission.id < 1
+            or type(mission.reward) is not int or mission.reward < 0):
+        raise ValueError("invalid mission identity or reward")
+    for system in (mission.origin_system, mission.target_system):
+        if type(system) is not int or not 0 <= system < GALAXY_SYSTEM_COUNT:
+            raise ValueError("invalid mission system")
+    if mission.pirate_tier is not None and (
+            type(mission.pirate_tier) is not int or not 0 <= mission.pirate_tier <= 4):
+        raise ValueError("invalid mission pirate tier")
+    if mission.commodity is not None and (
+            not isinstance(mission.commodity, str) or mission.commodity not in COMMODITIES):
+        raise ValueError("invalid mission commodity")
+    for number in (mission.quantity, mission.deadline_turn):
+        if number is not None and (type(number) is not int or number < 0):
+            raise ValueError("invalid mission quantity or deadline")
+
+
 def _load_pending_travel(value: dict | None) -> dict | None:
     if value is None:
         return None
@@ -710,10 +733,9 @@ def _load_pending_travel(value: dict | None) -> dict | None:
                 or not 0 <= value["destination"] < GALAXY_SYSTEM_COUNT):
             raise ValueError("invalid journey")
         for mission in value["escorts"]:
-            if Mission.from_dict(mission).kind != "escort":
-                raise ValueError("invalid escort")
-        if value["primary"] == "bounty" and Mission.from_dict(value["bounty"]).kind != "bounty":
-            raise ValueError("invalid bounty")
+            _validate_combat_mission_snapshot(mission, "escort")
+        if value["primary"] == "bounty":
+            _validate_combat_mission_snapshot(value["bounty"], "bounty")
         state = value["encounter"]
         if value["phase"] == "customs" and not isinstance(state["inspect"], bool):
             raise ValueError("invalid inspection")
