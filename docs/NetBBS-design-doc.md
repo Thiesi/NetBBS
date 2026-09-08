@@ -4844,6 +4844,15 @@ unadvertised buy key still rejects without changing state. Completed/rejected tr
 return a retained result to the catalog; cancelled quantities preserve its prior
 result. Existing checkpoint-before-acknowledgement and trade rules remain unchanged.
 
+Futures catalogs use complete-choice pagination with up to four selections per
+page, read-through continuation for oversized labels, and nonselectable fee/limit
+notices. Returning from inspection preserves the list page; a completed action
+returns to its retained result. Signing drafts and existing-order details paginate
+with credits and Back available, preserving quantities/terms through paging and
+rejected input. Draft edits write nothing; signing and cancellation retain their
+existing final confirmations, fees, pickup behavior and legacy-order terms. Their
+durable results remain visible in the futures catalog and on return to the market.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 500-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. Buying and same-station recycling do not grant

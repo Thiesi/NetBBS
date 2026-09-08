@@ -5058,3 +5058,9 @@ Formatting all retained entries for every Next key makes a large legacy record
 quadratic to browse even when a single render is linear. Invalidate the view cache
 when an action changes its result/state; never reduce display volume by silently
 slicing retained history or truncating contract descriptions.
+
+Shared complete-choice pickers include notice rows in page-count and heading
+budgets. Notice-only pages expose navigation rather than unusable selection keys.
+A caller may retain its list position for read-only inspection; reset that position
+after a changed result, and keep oversized-choice read-through protection when
+returning directly to a continuation page.
