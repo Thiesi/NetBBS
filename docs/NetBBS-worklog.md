@@ -3180,6 +3180,163 @@ must not misreport: only "asyncssh is genuinely absent" may produce the
 or the actual cause — a linker search-path gap, not a missing package — is
 undiagnosable from the log alone.
 
+### NetBSD has no supervisor: rc.subr reports success for a `$command` it cannot find (issue #312)
+
+Two independent traps, both of which produce a *silently* unstarted node, and
+both of which the shipped `examples/netbbs.rc` fell into at once.
+
+`daemon(8)` is FreeBSD, not NetBSD. NetBSD ships only the libc `daemon(3)`
+function; there is no `daemon` binary anywhere in base or pkgsrc. Nothing in
+NetBSD's base system backgrounds a foreground process and supervises it, so an
+rc.d script for something that deliberately never daemonizes (design doc §13.8)
+has to background it itself — `su`+`nohup`, its own pidfile, its own
+SIGTERM-and-wait stop. Since an unprivileged run-as user cannot write
+`/var/run`, that pidfile belongs in the node's state directory, which in turn
+means it survives a reboot: verify the pid still belongs to a NetBBS process
+(`ps -p <pid> -o command=`) before believing it, or a recycled pid reads as
+"already running" forever. Treat *empty* `ps` output as "still running" — the
+safe answer is never to start a second node against one database.
+
+`rc.subr`'s `run_rc_command` ends with `[ ! -x $command ] && return 0`. A
+`$command` that does not exist is therefore not an error: `service netbbs
+start` prints nothing, exits 0, and `service netbbs status` then reports the
+service as not running. Any rc.d failure diagnosis has to start from `sh -x`,
+because the exit code carries no information.
+
+A pidfile in a user-writable directory is untrusted input to a root-run
+`kill`. `-1` is the value that matters: it passes `kill -0`, produces no `ps`
+output (so a "treat empty ps as still running" fail-safe calls it live), and
+then `kill -TERM -1` signals every process the caller may signal — a host-wide
+denial of service triggered by the next `service netbbs stop`. Validate a plain
+positive decimal before any signal. Do not write that check as
+`read -r pid < file || return 1`: `read` reports failure at EOF on a final line
+with no newline *after* assigning the value, so a pidfile without a trailing
+newline would read as "not running" and start a second node against the same
+database. Judge the value, not `read`'s exit status.
+
+An rc.d pidfile must not be `<statedir>/netbbs.pid`. NetBBS already writes its
+own pidfile beside the database as `<db-stem>.pid` (`netbbs.backup.
+write_pid_file`, called from `__main__` on every start, removed on every exit),
+which for the documented layout is exactly `/var/lib/netbbs/netbbs.pid` — and
+`netbbs.backup` reads it to refuse a restore over a running node. A supervisor
+script clearing that path before a start would delete another subsystem's
+data-safety signal. Use a distinct name (`netbbs.service.pid`).
+
+Identifying the process behind a pidfile by substring is not enough either:
+`netbbs_python` defaults to a path *inside* `/var/lib/netbbs`, so matching
+`*netbbs*` in `ps -o command=` accepts every unrelated process from that
+virtualenv — `netbbs.admin`, a backup run — and the stop path then signals it.
+Match the invocation actually launched (`-m netbbs --config`).
+
+An rc.d launch must `cd` into the node's state directory. `NodeConfig` keeps
+relative defaults (`Path("netbbs.db")`, `Path("netbbs_identity")`) for a config
+that omits them, and those resolve against the caller's working directory — `/`
+for an rc.d start at boot, where the run-as user cannot create them, so the
+service fails with its own state directory perfectly writable. `HOME` does not
+affect `Path` resolution; only `cd` does. systemd gets this from
+`WorkingDirectory=`.
+
+Log data a supervisor replays to an operator is untrusted too. The capture file
+is deliberately owned and writable by the run-as user, and a failed start
+replays its tail into what is usually a root terminal — so a compromised node,
+door, or any same-UID process could plant escape sequences the terminal then
+executes. Strip control characters on the way out. And scan it by *byte*
+offset: `tail -n +N` counts lines from the start, so a readiness loop polling a
+large capture log re-reads it in full every second, with the start timeout
+unable to bound that because its counter only advances once the pipeline
+returns.
+
+Publishing the pid has to gate the node continuing to run, not follow it. A
+writability check can pass and the write still fail (inodes, quota), by which
+point the node is up; reporting a failed start then leaves an untracked live
+node that the next start duplicates against the same database. Kill what was
+just started if the pid cannot be published — with SIGKILL, not SIGTERM: NetBBS
+reads SIGTERM as a graceful shutdown that may wait out
+`graceful_delay_seconds`, which would leave a live untracked node behind
+exactly while the script reports it stopped. At seconds old there is nothing to
+drain and WAL makes an abrupt stop safe.
+
+Its stdout/stderr capture file shares a filesystem with the database and does
+not rotate — and `newsyslog(8)` cannot bound a log a long-running process holds
+open. It renames
+the path; the writer keeps the old inode, the new file stays empty, and
+size-based rotation never fires again. NetBBS has no reopen-on-signal, so the
+honest options for the rc.d capture file are to turn it off once an install is
+known good (everything after logging setup is already in the self-rotating
+`netbbs.log`; its unique content is the pre-logging startup window) or to accept
+that it only rotates across restarts. Which then constrains readiness detection:
+if the marker is read back out of that file, `netbbs_logfile=/dev/null` must
+degrade to a liveness check rather than waiting out the full timeout on every
+healthy start.
+
+A supervisor's log path is operator input and needs validating like any other.
+`netbbs_logfile` is a natural thing to point at a FIFO once an operator is told
+the file does not rotate, and a FIFO breaks it twice over: `wc` on one blocks
+on open with no writer and reads forever with one, and — worse — the launcher
+blocks opening its own `>>` redirection *before* it can exec Python, while its
+pid has already been published and its command text still matches the
+process-identity check. The start then reports success with no listener
+anywhere, which is the precise failure the script exists to remove. Supporting
+that shape is not worth it: accept a regular file, accept `/dev/null` as "no
+capture log", refuse the rest before launching anything. Create the file when
+missing, too — `su` returns once the pid is published, which can precede the
+child's redirection creating it, so a first start would otherwise fall back to
+a bare liveness check exactly when a misconfiguration is most likely.
+
+`su user -c` runs the command with *that account's* login shell, so a launch
+written in `sh` syntax silently depends on the service account not using
+csh/tcsh. NetBSD's `useradd` default is `/bin/sh`, but an operator reusing an
+existing account can have anything; state the requirement rather than assume it.
+
+Confirming a start needs a readiness signal, not a `sleep`. Startup runs a
+database integrity check before it binds anything, so on a large database "the
+process is still alive after N seconds" is true well before any listener
+exists — and if setup then fails, the service has already reported success with
+no node running, which is the same silent success this whole entry is about.
+Wait for the node's own "ready to accept connections" line instead, bounded, and
+only past the point in the (appended) logfile where this start's output begins,
+or a previous run's readiness line is read as this one's. Alive-but-unconfirmed
+at the bound is not a failure that can be asserted — a very slow start looks
+identical — so report the uncertainty rather than claiming either outcome.
+
+`: ${var:="default"}` treats an explicitly *empty* rc.conf value as unset and
+restores the default, so any variable documented as "set empty to disable"
+needs `${var="default"}` instead. Fixing the `load_rc_config` ordering is what
+makes this reachable at all — while overrides were being ignored wholesale, the
+disable mechanism was equally dead and equally invisible.
+
+Signals are requests, not outcomes. Neither SIGTERM nor SIGKILL is instant (a
+process in uninterruptible sleep survives both until it leaves that state), so
+a supervisor must confirm the process is gone before reporting "stopped" and
+dropping its pidfile — otherwise the next start launches a second node against
+the same database while the first is alive and no longer tracked. If it will
+not die, keep the pidfile and fail: staying tracked is worth more than a tidy
+exit status.
+
+`rc.conf` durations are operator input and reach `[ ... -ge ... ]`, where a
+non-integer makes the test error and evaluate false on every iteration. That
+turns a bounded stop into an unbounded one, hanging `service netbbs stop` and,
+with `KEYWORD: shutdown`, system shutdown with it; a negative value skips
+straight to SIGKILL. Validate, fall back to the documented default, and say so.
+
+`load_rc_config $name` must be called *before* the `: ${var:=default}` block,
+per `rc.subr(8)`. Called after, as it was, every documented `rc.conf` override
+is read too late to have any effect and the built-in defaults always win —
+including `netbbs_ld_library_path`, which is the one variable the NetBSD
+`libssl.so.3` trap above requires an operator to set. Also note NetBSD's
+`rc.subr` rejects `status` as an unknown directive unless it appears in
+`extra_commands`, and that the platform has no `Restart=on-failure` equivalent:
+Tier 1 automatic restart is an operator's own periodic check, not something the
+example script can provide.
+
+A SIGKILLed node cannot run its own door cleanup,
+while doors are deliberately spawned with `start_new_session=True`
+(`netbbs.doors.runtime`) — so they are in no process group the script could
+signal instead, and no process-group kill from rc.d can reach them. Only the
+node itself can reap its doors, which makes "keep the stop timeout above
+`graceful_delay_seconds`" the real mitigation, not a bigger hammer in the
+supervisor.
+
 ### Platform-specific code stays in exactly three narrow places (issue #81)
 
 A full-repo audit (`grep` for `sys.platform`/`os.name` across `src/`)

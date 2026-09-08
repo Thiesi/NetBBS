@@ -3,16 +3,27 @@
 ## Service supervisor examples (issue #82)
 
 - `netbbs.service` — a systemd unit for Linux (design doc §2.1 Tier 2).
-- `netbbs.rc` — an rc.d script for NetBSD (design doc §2.1 Tier 1),
-  following standard `rc.subr(8)` conventions but **not yet run-tested
-  on real NetBSD hardware** — see the file's own header comment.
+- `netbbs.rc` — an rc.d script for NetBSD (design doc §2.1 Tier 1).
+  It backgrounds the node itself rather than delegating to `daemon(8)`,
+  which is a FreeBSD program NetBSD does not ship (issue #312) — see the
+  file's own header for that and for the `load_rc_config` ordering rule
+  it depends on. Its shape is the one supervising the project's own
+  ReLink node on NetBSD 11.0; the defaults it ships are the operator
+  guide's layout rather than that node's paths, so confirm yours with
+  `service netbbs status` after the first start.
 
-Both assume a config file at a fixed path (`/etc/netbbs/netbbs.toml` on
-Linux, `/usr/pkg/etc/netbbs/netbbs.toml` on NetBSD) and run NetBBS in
-the foreground, letting the service supervisor manage backgrounding and
-restart — NetBBS never daemonizes itself (design doc §13.8). See
-`docs/NetBBS-operator-guide.md` for the full install-through-running
-path these fit into.
+Both default to a config file at `/etc/netbbs/netbbs.toml` — the path
+`docs/NetBBS-operator-guide.md` §2 tells you to create, on either
+platform — and both run NetBBS in the foreground and background it
+themselves, because NetBBS never daemonizes (design doc §13.8).
+
+**Automatic restart is not the same on both.** The systemd unit restarts
+a node that dies (`Restart=on-failure`). NetBSD's `rc.d` has no
+equivalent in base, so `netbbs.rc` starts, stops and reports status but
+will not bring a crashed node back — a Tier 1 node needs an operator's
+own periodic `service netbbs status || service netbbs start` check for
+that. See `docs/NetBBS-operator-guide.md` §3 for the full
+install-through-running path these fit into.
 
 ## Welcome banners and main-menu mastheads
 

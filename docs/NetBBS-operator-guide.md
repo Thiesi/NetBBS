@@ -191,7 +191,21 @@ didn't use the layout above, then enable it with your platform's
 ordinary tooling (`systemctl enable --now netbbs` / NetBSD's
 `rc.conf`+`service netbbs start`). NetBBS never daemonizes itself
 (design doc §13.8) — it runs in the foreground and expects the service
-supervisor to background and restart it, which both example units do.
+supervisor to background it, which both example units do.
+
+Confirm it actually came up rather than assuming a silent exit 0 meant
+success — `systemctl status netbbs` / `service netbbs status`, then a
+real connection to one of your listeners. (Issue #312: the NetBSD
+example previously delegated backgrounding to `daemon(8)`, a FreeBSD
+program NetBSD does not ship, and `rc.subr` reports success when
+`$command` is missing. `service netbbs start` printed nothing, exited 0,
+and started no node at all. It now backgrounds the node itself.)
+
+**Automatic restart differs by platform.** The systemd unit restarts a
+node that dies (`Restart=on-failure`). NetBSD's `rc.d` has no equivalent
+in base, so the rc.d script starts, stops and reports status but will
+not bring a crashed node back — if you want that on Tier 1, pair it with
+your own periodic `service netbbs status || service netbbs start` check.
 
 Graceful shutdown: sending `SIGTERM` (what `systemctl stop`/`service
 ... stop` both do) warns any connected users, waits up to
@@ -235,8 +249,14 @@ back up all of it together, not just the database (see §5):
 | Logs | `netbbs.log` next to the database, self-rotating at 10 MiB
   with 5 backups kept (50 MiB worst case, never unbounded) — also
   visible via your service supervisor (`journalctl -u netbbs` under
-  systemd; syslog/`daemon` facility under NetBSD's `rc.d`, see
-  `examples/netbbs.rc`) since NetBBS still logs to stderr/stdout too |
+  systemd) since NetBBS still logs to stderr/stdout too. Under NetBSD's
+  `rc.d` that output goes to the example script's own capture file
+  (`netbbs_logfile`, `netbbs.service.log` beside the database by
+  default) — **not** syslog. Check it first when a start fails: a config
+  error or a failed import happens before the rotating handler exists,
+  so that capture file is the only place it is recorded. It does not
+  rotate, which is why `examples/netbbs.rc` suggests pointing it at
+  `/dev/null` once an install is known good |
 | Backups | SysOp-screen backups: `<db-stem>_backups/` beside the database; CLI backups: wherever you choose with `--to` (§5) |
 
 Uninstalling the package (`pip uninstall netbbs`) only ever removes the
