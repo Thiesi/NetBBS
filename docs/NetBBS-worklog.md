@@ -5047,3 +5047,8 @@ Station settlement, stranded rescue and promotion run once before the deck's
 paging loop. Do not rerun these domain hooks for paging, invalid keys or view
 toggles. Build cockpit entries from the current world without RNG draws or save
 writes; scalar cargo usage must not share the health gauge's color semantics.
+
+Retained station outcomes belong exclusively inside the page budget. Printing
+settlement messages before the paging loop duplicates acknowledgements and can
+overflow even the first 20x10 frame; validate pending one-order and multi-order
+settlements between actual input requests, not only an idle command deck.

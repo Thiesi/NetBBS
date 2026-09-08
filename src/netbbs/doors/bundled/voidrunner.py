@@ -3401,8 +3401,6 @@ def screen_station_menu(p: Palette, world: World) -> str:
     completed += check_mission_completions(world)
     if completed:
         world.checkpoint()
-    for msg in completed:
-        out_line(f"{p.gold}{msg}{RESET}")
     if is_stranded(world):
         # Checked here, not only right after the action that could cause
         # it -- this is the outer loop's own home base, reached after

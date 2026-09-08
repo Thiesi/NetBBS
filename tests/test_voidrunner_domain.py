@@ -7672,3 +7672,44 @@ def test_opening_quote_avoids_cargo_already_promised_to_an_earlier_delivery():
     vr.check_mission_completions(world)
     assert world.save.flags["opening_assignment_completed"]
     assert any(m.description == "Earlier order" for m in world.save.active_missions)
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("orders", [1, 3])
+def test_cockpit_settlement_results_stay_inside_height_budget(monkeypatch, width, height, orders):
+    import re
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    world = _world_with_seed(42)
+    for commodity in ["food", "textiles", "medicine"][:orders]:
+        vr.buy_futures_contract(world, commodity, 1, 5)
+    world.save.turn = 5
+    settled, calls, snapshots, frames = [], [], [], []
+    real_settle = vr.settle_futures_contracts
+    def settle(current):
+        calls.append(1)
+        result = real_settle(current)
+        settled.extend(result)
+        return result
+    monkeypatch.setattr(vr, "settle_futures_contracts", settle)
+    world._checkpoint = lambda current: snapshots.append(current.save.to_dict())
+    output = io.StringIO()
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0)
+        frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(line) <= width for line in frame.splitlines())
+        assert "[Q]Exit:" in frame
+        page, count = map(int, re.search(r"Command Deck:.*?(\d+)/(\d+)", frame, re.S).groups())
+        return "Q" if page == count else ">"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
+    assert calls == [1] and len(snapshots) == 1 and len(settled) == orders
+    content = []
+    for frame in frames:
+        plain = vr._ANSI_RE.sub("", frame)
+        assert plain.split("Command Deck:", 1)[0].strip() in ("", ">")
+        content.append(re.search(r"\d+/\d+\r\n(.*?)\r\n\[<\]", plain, re.S).group(1))
+    text = " ".join(" ".join(content).split())
+    for message in settled: assert text.count(message) == 1
