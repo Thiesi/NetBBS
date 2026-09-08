@@ -4644,8 +4644,26 @@ state before narration or further input. A restart preserves the event RNG state
 and cannot reroll an encounter or duplicate a reward. Only the interrupted hop
 resumes; the pilot can plan the rest of an auto-route after resolving it. Existing
 galaxy seeds and legacy careers remain compatible through additive save fields.
-Unrecognized or unreadable journey/RNG state stops play and preserves the career
-file for manual SysOp recovery; broader save validation/recovery remains in #310.
+Career loading validates the supported schema and galaxy-generator version,
+record shapes, types, references and gameplay ranges before any startup write.
+Missing additive fields retain their legacy defaults; unknown structural fields
+or unsupported versions stop play rather than being silently stripped. Galaxy
+generation remains version 1 with its original seed/RNG call sequence.
+
+Unreadable or invalid careers enter a read-only recovery screen; they are never
+renamed or replaced by an automatic new career. Each changed checkpoint retains
+the preceding readable file at `<user_id>.previous.json` before replacing the
+current save. Rewriting an identical checkpoint does not age this copy. If the
+current file is missing but a previous copy exists, recovery is still required.
+The screen shows the candidate's callsign, day, credits and whether travel is
+pending. Restoring it explicitly rolls back progress to that checkpoint, requires
+a final confirmation, and first retains the original bytes in a unique recovery
+copy. Back/EOF writes nothing. Unreadable or oversized originals, invalid previous
+copies, unsupported versions and failed preservation require manual SysOp repair;
+there is no caller-facing reset that bypasses preservation. Recovery copies are
+limited to eight per pilot; a SysOp must archive older copies manually before
+another restore. The pilot session lease covers recovery as well as normal play.
+This local previous-checkpoint copy is not a substitute for node backup coverage.
 
 Voidrunner uses one UTF-8 and terminal-key decoder for menus and text fields.
 Unsupported special keys, terminal control strings, and bracketed paste cannot

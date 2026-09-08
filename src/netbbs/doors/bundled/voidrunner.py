@@ -74,6 +74,7 @@ import contextlib
 import dataclasses
 import errno
 import json
+import math
 import os
 import random
 import re
@@ -1057,10 +1058,12 @@ class SaveData:
     contraband_trade_balance: int = 0
     contraband_trade_milestones: int = 0
     best_credits: int = 0
+    galaxy_version: int = 1
 
     def to_dict(self) -> dict:
         return {
             "schema_version": self.schema_version,
+            "galaxy_version": self.galaxy_version,
             "seed": self.seed,
             "pilot": self.pilot.to_dict(),
             "ship": self.ship.to_dict(),
@@ -1086,8 +1089,13 @@ class SaveData:
 
     @classmethod
     def from_dict(cls, d: dict) -> "SaveData":
+        try:
+            _validate_save_document(d)
+        except (KeyError, TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise ResumeError("The saved career contains invalid fields.") from exc
         return cls(
             schema_version=d["schema_version"],
+            galaxy_version=d.get("galaxy_version", 1),
             seed=d["seed"],
             pilot=Pilot.from_dict(d["pilot"]),
             ship=Ship.from_dict(d["ship"]),
@@ -1110,6 +1118,138 @@ class SaveData:
             contraband_trade_balance=_load_trade_total(d.get("contraband_trade_balance", 0)),
             contraband_trade_milestones=_load_trade_total(d.get("contraband_trade_milestones", 0), nonnegative=True),
         )
+
+
+class UnsupportedSave(ResumeError):
+    """Use a compatible game build; do not offer a potentially destructive downgrade."""
+
+
+def _validate_save_document(data: dict) -> None:
+    """Validate before coercion can hide wrong types or discard future fields."""
+    def require(ok, field):
+        if not ok:
+            raise ResumeError(f"The saved {field} is invalid.")
+
+    def integer(value, field, minimum=0, maximum=2**63 - 1):
+        require(type(value) is int and minimum <= value <= maximum, field)
+
+    def record(value, cls, field):
+        require(isinstance(value, dict), field)
+        known = {f.name for f in dataclasses.fields(cls)}
+        if set(value) - known:
+            raise UnsupportedSave(f"The saved {field} contains unsupported fields.")
+        for f in dataclasses.fields(cls):
+            legacy_defaults = {"market_drift", "active_missions", "next_mission_id", "flags"} if cls is SaveData else set()
+            if (f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
+                    and f.name not in legacy_defaults):
+                require(f.name in value, field)
+
+    def text(value, field):
+        require(isinstance(value, str) and len(value) <= 4096, field)
+        require(all(ord(c) >= 32 and not 127 <= ord(c) <= 159 for c in value), field)
+
+    def system(value, field):
+        integer(value, field, maximum=GALAXY_SYSTEM_COUNT - 1)
+
+    record(data, SaveData, "career")
+    for key, expected in (("schema_version", SCHEMA_VERSION), ("galaxy_version", 1)):
+        if type(data.get(key, expected)) is not int or data.get(key, expected) != expected:
+            raise UnsupportedSave("This career uses an unsupported save or galaxy version.")
+    integer(data["seed"], "galaxy seed", minimum=-(2**63))
+    system(data["current_system"], "current system")
+    integer(data["turn"], "day")
+    for key in ("next_mission_id", "next_futures_id"):
+        integer(data.get(key, 1), key, minimum=1)
+    for key in ("best_credits", "contraband_trade_milestones"):
+        integer(data.get(key, 0), key)
+    integer(data.get("contraband_trade_balance", 0), "trade balance", minimum=-(2**63))
+    pilot, ship = data["pilot"], data["ship"]
+    record(pilot, Pilot, "pilot")
+    text(pilot["handle"], "callsign")
+    text(pilot.get("career_started", ""), "career date")
+    for key in ("credits", "missions_completed", "kills", "retirements"):
+        integer(pilot.get(key, 0), key)
+    integer(pilot.get("notoriety", 0), "notoriety", maximum=100)
+    integer(pilot.get("highest_rank_seen", 0), "rank", maximum=len(RANKS) - 1)
+    for key in ("has_concord_commission", "has_blackwake_made"):
+        require(type(pilot.get(key, False)) is bool, key)
+    for key in ("log", "highlights"):
+        require(isinstance(pilot.get(key, []), list), key)
+        for line in pilot.get(key, []):
+            text(line, key)
+    reputation = pilot["reputation"]
+    require(isinstance(reputation, dict) and set(reputation) <= set(FACTIONS), "faction reputation")
+    for value in reputation.values():
+        integer(value, "faction reputation", minimum=-100, maximum=100)
+    record(ship, Ship, "ship")
+    require(isinstance(ship["hull_class"], str) and ship["hull_class"] in HULL_CLASSES, "hull class")
+    for key, upgrade in UPGRADES.items():
+        integer(ship.get(key + "_tier", 0), key + " tier", maximum=upgrade["max_tier"])
+    for key in ("has_gunner", "has_engineer", "has_navigator"):
+        require(type(ship.get(key, False)) is bool, key)
+    vessel = Ship.from_dict(ship)
+    integer(ship["fuel"], "fuel", maximum=fuel_capacity(vessel))
+    integer(ship["hull_hp"], "hull health", maximum=hull_hp_max(vessel))
+    cargo = data["cargo"]
+    require(isinstance(cargo, dict) and set(cargo) <= set(COMMODITIES), "cargo")
+    for value in cargo.values():
+        integer(value, "cargo quantity")
+    require(sum(cargo.values()) <= cargo_capacity(vessel), "cargo capacity")
+    discovered = data["discovered"]
+    require(isinstance(discovered, list) and len(discovered) <= GALAXY_SYSTEM_COUNT, "chart")
+    for sid in discovered:
+        system(sid, "chart system")
+    require(len(discovered) == len(set(discovered)), "chart systems")
+    drift = data.get("market_drift", {})
+    require(isinstance(drift, dict), "market drift")
+    seen = set()
+    for key, table in drift.items():
+        require(isinstance(key, str) and key.isascii() and key.isdecimal(), "market system")
+        sid = int(key)
+        system(sid, "market system")
+        require(sid not in seen, "duplicate market system")
+        seen.add(sid)
+        require(isinstance(table, dict) and set(table) <= set(COMMODITIES), "market commodities")
+        for value in table.values():
+            require(type(value) in (int, float) and math.isfinite(value) and 0 < value <= 10, "market price")
+    flags = data.get("flags", {})
+    require(isinstance(flags, dict) and all(isinstance(k, str) and type(v) is bool for k, v in flags.items()), "flags")
+    boards = data.get("mission_boards", {})
+    _load_mission_boards(boards)
+    posted = []
+    for board in boards.values():
+        if set(board) != {"refresh_turn", "offers"}:
+            raise UnsupportedSave("The saved contract board contains unsupported fields.")
+        posted.extend(board["offers"])
+    for key, cls in (("active_missions", Mission), ("active_futures", FuturesContract), ("posted", Mission)):
+        records = posted if key == "posted" else data.get(key, [])
+        require(isinstance(records, list), key)
+        for item in records:
+            record(item, cls, key)
+            integer(item["id"], "contract ID", minimum=1)
+            if cls is Mission:
+                require(item["kind"] in ("delivery", "scan", "bounty", "escort"), "contract kind")
+                text(item["description"], "contract description")
+                integer(item["reward"], "contract reward")
+                if item.get("deadline_turn") is not None:
+                    integer(item["deadline_turn"], "contract deadline")
+                _validate_combat_mission_snapshot(item, item["kind"])
+                if item["kind"] == "delivery":
+                    require(item.get("commodity") in COMMODITIES, "delivery goods")
+                    integer(item.get("quantity"), "delivery quantity", minimum=1)
+            else:
+                require(isinstance(item["commodity"], str) and item["commodity"] in COMMODITIES, "order goods")
+                integer(item["quantity"], "order quantity", minimum=1)
+                integer(item["locked_price"], "order payment")
+                integer(item["settle_turn"], "order maturity")
+    event = data.get("active_event")
+    if event is not None:
+        require(isinstance(event, dict) and set(event) ==
+                {"economy", "commodity", "direction", "turns_remaining", "description"}, "economy event")
+        require(event["economy"] in ECONOMIES and event["commodity"] in COMMODITIES and
+                event["direction"] in ("boom", "crash"), "economy event")
+        integer(event["turns_remaining"], "event duration", minimum=1, maximum=ECONOMY_EVENT_MAX_TURNS)
+        text(event["description"], "economy news")
 
 
 class World:
@@ -2280,35 +2420,96 @@ def retire_pilot(old_save: SaveData) -> SaveData:
     return new_save
 
 
+MAX_SAVE_BYTES = 4 * 1024 * 1024
+MAX_RECOVERY_COPIES = 8
+
+
+def _previous_save_path(save_dir: Path, user_id: int) -> Path:
+    return save_dir / f"{user_id}.previous.json"
+
+
+def _read_save_bytes(path: Path) -> bytes:
+    with path.open("rb") as handle:
+        data = handle.read(MAX_SAVE_BYTES + 1)
+    if len(data) > MAX_SAVE_BYTES:
+        raise ResumeError("The saved career exceeds the supported file size.")
+    return data
+
+
+def _unique_save_object(pairs) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ResumeError("The saved career contains duplicate fields.")
+        result[key] = value
+    return result
+
+
+def _decode_career(raw: bytes) -> SaveData:
+    """Verify a restart without committing or normalizing the stored document."""
+    try:
+        data = json.loads(raw, object_pairs_hook=_unique_save_object)
+        save = SaveData.from_dict(data)
+        # Validate journey relationships and RNG without normalizing contract IDs.
+        _validate_pending_travel_consistency(save)
+        if save.event_rng_state is not None:
+            version, state, gaussian = save.event_rng_state
+            if gaussian is not None and (type(gaussian) not in (int, float) or not math.isfinite(gaussian)):
+                raise ValueError("invalid random state")
+            random.Random().setstate((version, tuple(state), gaussian))
+        elif save.pending_travel is not None:
+            raise ResumeError("The interrupted journey has no saved random state.")
+        return save
+    except (ValueError, KeyError, TypeError, OverflowError, RecursionError) as exc:
+        raise ResumeError("The saved career cannot be decoded safely.") from exc
+
+
 def load_or_create_save(save_dir: Path, user_id: int, handle: str) -> tuple[SaveData, bool, str | None]:
-    """Returns (save, is_new_career, notice). `notice`, if not None, is a
-    message the UI should show the player once (e.g. a corrupt save was
-    preserved rather than silently discarded)."""
+    """Only an absent career with no previous checkpoint may start fresh."""
     path = _save_path(save_dir, user_id)
-    if path.exists():
+    try:
+        raw = _read_save_bytes(path)
+    except FileNotFoundError:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            save = SaveData.from_dict(data)
-            # `handle` (the caller's current login name) is deliberately
-            # never written back onto `save.pilot.handle` here -- a
-            # dogfood playtest caught this line unconditionally
-            # clobbering a player's chosen in-game callsign back to
-            # their BBS handle on *every* login, silently discarding the
-            # whole point of `create_career`'s own callsign prompt. The
-            # save is already keyed by the stable numeric `user_id`
-            # (never the handle -- see this module's own docstring), so
-            # nothing here actually depends on the two staying in sync.
-            return save, False, None
-        except (OSError, ValueError, KeyError, TypeError):
-            backup = path.with_suffix(f".corrupt-{int(time.time())}")
-            try:
-                path.rename(backup)
-                notice = f"Your previous save could not be read; it was preserved as {backup.name}."
-            except OSError:
-                notice = "Your previous save could not be read and a new career was started."
-    else:
-        notice = None
-    return _new_career(handle), True, notice
+            _previous_save_path(save_dir, user_id).stat()
+        except FileNotFoundError:
+            return _new_career(handle), True, None
+        except OSError as exc:
+            raise ResumeError("The previous checkpoint cannot be inspected.") from exc
+        raise ResumeError("The career file is missing; a previous checkpoint exists.")
+    except OSError as exc:
+        raise ResumeError("The career file could not be read.") from exc
+    return _decode_career(raw), False, None
+
+
+def restore_previous_career(save_dir: Path, user_id: int, expected: bytes) -> SaveData:
+    """Under the session lease, preserve the current file before explicit rollback."""
+    previous = _read_save_bytes(_previous_save_path(save_dir, user_id))
+    if previous != expected:
+        raise ResumeError("The previous checkpoint changed; reopen recovery to inspect it.")
+    restored = _decode_career(previous)
+    path = _save_path(save_dir, user_id)
+    try:
+        original = _read_save_bytes(path)
+    except FileNotFoundError:
+        original = None
+    if original is not None:
+        # A newer build's career must be opened with that build, never downgraded.
+        try:
+            _decode_career(original)
+        except UnsupportedSave:
+            raise
+        except ResumeError:
+            pass
+        if len(list(save_dir.glob(f"{user_id}.recovery-*.json"))) >= MAX_RECOVERY_COPIES:
+            raise ResumeError("Recovery copies are full; ask your SysOp to archive them.")
+        with tempfile.NamedTemporaryFile(mode="wb", dir=save_dir, prefix=f"{user_id}.recovery-",
+                                         suffix=".json", delete=False) as archive:
+            archive.write(original)
+            archive.flush()
+            os.fsync(archive.fileno())
+    _write_bytes_atomic(path, previous)
+    return restored
 
 
 class PilotBusy(Exception):
@@ -2343,16 +2544,16 @@ def pilot_session(save_dir: Path, user_id: int):
         yield
 
 
-def _write_json_atomic(path: Path, data: dict) -> None:
+def _write_bytes_atomic(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent,
+            mode="wb", dir=path.parent,
             prefix=f".{path.stem}-", suffix=".tmp", delete=False,
         ) as handle:
             tmp = Path(handle.name)
-            json.dump(data, handle)
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
@@ -2362,9 +2563,33 @@ def _write_json_atomic(path: Path, data: dict) -> None:
                 tmp.unlink(missing_ok=True)
 
 
+def _write_json_atomic(path: Path, data: dict) -> None:
+    _write_bytes_atomic(path, json.dumps(data).encode("utf-8"))
+
+
 def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
-    """Write under the caller's session lock; atomic replacement alone is not a lease."""
-    _write_json_atomic(_save_path(save_dir, user_id), save.to_dict())
+    """Retain the preceding readable checkpoint under the pilot session lease."""
+    path = _save_path(save_dir, user_id)
+    new = json.dumps(save.to_dict()).encode("utf-8")
+    try:
+        if len(new) > MAX_SAVE_BYTES:
+            raise ResumeError("The career exceeds the supported file size.")
+        _decode_career(new)
+    except ResumeError as exc:
+        raise SaveError("Refusing to write an invalid career checkpoint.") from exc
+    try:
+        old = _read_save_bytes(path)
+    except FileNotFoundError:
+        old = None
+    if old == new:
+        return
+    if old is not None:
+        try:
+            _decode_career(old)
+        except ResumeError as exc:
+            raise SaveError("Refusing to replace an unreadable saved career.") from exc
+        _write_bytes_atomic(_previous_save_path(save_dir, user_id), old)
+    _write_bytes_atomic(path, new)
 
 
 HALL_OF_FAME_SIZE = 20
@@ -4283,6 +4508,63 @@ def screen_customs(p: Palette, world: World) -> None:
     _encounter_result(p, world, state, [f"You surrender {contraband_qty} units without a fight."])
 
 
+def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: ResumeError) -> SaveData | None:
+    """A failed load is not authorization to reset or roll back a career."""
+    candidate = None
+    previous = None
+    if not isinstance(error, UnsupportedSave):
+        try:
+            previous = _read_save_bytes(_previous_save_path(save_dir, user_id))
+            candidate = _decode_career(previous)
+        except (OSError, ResumeError):
+            pass
+    lines = ["Career recovery", str(error),
+             "Play has stopped; your saved career is unchanged."]
+    if candidate is None:
+        lines += ["No supported previous checkpoint is available.", "Please contact your SysOp."]
+    else:
+        lines += [f"Previous: {candidate.pilot.handle}",
+                  f"Day {candidate.turn}; {candidate.pilot.credits:,} credits.",
+                  "Journey pending: " + ("yes" if candidate.pending_travel else "no"),
+                  "Restoring rolls back progress to this checkpoint.",
+                  "Your current file will be kept as a recovery copy."]
+    pages = _mission_text_pages(lines, overhead=4)
+    page = 0
+    while True:
+        out_line()
+        for line in pages[page]:
+            out_line(line)
+        action = "[R]estore  " if candidate is not None and page == len(pages) - 1 else ""
+        out_prompt(action + "[N]ext [P]revious [B]ack: ")
+        try:
+            key = read_command()
+        except EOFError:
+            return None
+        if key in ("B", "Q"):
+            return None
+        if key == "N" and page < len(pages) - 1:
+            page += 1
+        elif key == "P" and page:
+            page -= 1
+        elif key == "R" and candidate is not None and page == len(pages) - 1:
+            try:
+                confirmed = confirm("Restore this previous checkpoint?", p)
+            except EOFError:
+                return None
+            if confirmed:
+                try:
+                    restored = restore_previous_career(save_dir, user_id, previous)
+                except (OSError, ResumeError):
+                    out_line("Recovery failed. No replacement was completed. Please contact your SysOp.")
+                    try:
+                        pause(p)
+                    except EOFError:
+                        pass
+                    return None
+                out_line("Previous checkpoint restored. Resuming this career.")
+                return restored
+
+
 def main() -> int:
     global _OUTPUT_WIDTH, _OUTPUT_HEIGHT
 
@@ -4314,7 +4596,13 @@ def main() -> int:
         except OSError as exc:
             raise SaveError from exc
         screen_title(p, info)
-        save, is_new, notice = load_or_create_save(save_dir, user_id, info["handle"])
+        try:
+            save, is_new, notice = load_or_create_save(save_dir, user_id, info["handle"])
+        except ResumeError as exc:
+            save = screen_save_recovery(p, save_dir, user_id, exc)
+            if save is None:
+                return 1
+            is_new, notice = False, None
         if notice:
             out_line(f"{p.wrong}{notice}{RESET}")
         if is_new:
