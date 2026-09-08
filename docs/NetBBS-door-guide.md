@@ -125,6 +125,19 @@ Uncharted intermediate names, danger and other connections remain unknown;
 contract target names are public bearings. Map and list browsing never charts,
 tracks or travels, and Back returns to the route preview.
 
+### Station command deck
+
+Use **[<] Previous / [>] Next** to page the station cockpit and **[X] Expand**
+for pilot, sector, crew and progress details. Press X again for Compact; this view
+choice lasts for the current deck visit. Every service letter works from every
+page, and **[Q] Exit** saves and disembarks. Credits stay in the heading.
+
+Hull and fuel show current/maximum; cargo shows used/capacity. Contraband and
+regional-event notices are separate, and low fuel, critical hull or wages beyond
+available credits give a next action. The tracked objective includes its deadline
+and chart entry point. Station settlement results remain in the paginated deck.
+Browsing and toggling do not advance a day or spend credits.
+
 ### Engineering yard and crew pages
 
 The yard and crew roster fit the terminal height, stacking terms at narrow widths.

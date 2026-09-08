@@ -4807,6 +4807,17 @@ exceptionally dense charts reuse the reserved-key-safe alphabet only on later
 pages. Rejected departures and scan results remain visible on the refreshed chart.
 Browsing does not change the career; scans and travel retain their existing rules.
 
+The station command deck uses the same bounded paragraph pagination as service
+screens. Credits and Exit remain in every page's controls; service hotkeys keep
+their meaning even when their labels are on another page. Compact telemetry uses
+explicit hull/fuel fractions and cargo used/capacity, without treating a full hold
+as healthy or an empty hold as damage. Contraband and economy-event warnings can
+appear together; low fuel, critical hull, unaffordable wages and the tracked
+objective provide contextual next actions. Expand adds pilot, location, commitment
+and achievement details for this visit; it is a read-only view toggle, not a saved
+career option. Paging and invalid keys do not repeat station settlement. Completed
+settlements retain their result in the deck after the existing durable checkpoint.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 500-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. Buying and same-station recycling do not grant

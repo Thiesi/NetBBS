@@ -5042,3 +5042,8 @@ for graphs exceeding the alphabet, resolve only the current page's mapping.
 Continuation rows repeat the same key. Chart browsing never syncs discoveries or
 checkpoints; scan result retention follows the existing discovery checkpoint.
 A blocked already-charted survey must not mark a next jump as actionable progress.
+
+Station settlement, stranded rescue and promotion run once before the deck's
+paging loop. Do not rerun these domain hooks for paging, invalid keys or view
+toggles. Build cockpit entries from the current world without RNG draws or save
+writes; scalar cargo usage must not share the health gauge's color semantics.
