@@ -3030,15 +3030,26 @@ def abandon_mission(world: World, mission_id: int) -> str:
     return message
 
 
+def preceding_bounties(world: World, mission: Mission) -> int:
+    count = 0
+    if mission.kind == "bounty":
+        for active in world.save.active_missions:
+            if active.id == mission.id:
+                break
+            if active.kind == "bounty" and active.target_system == mission.target_system and not mission_expired(world, active):
+                count += 1
+    return count
+
+
 def mission_route(world: World, mission: Mission) -> list[int]:
-    if (mission.kind == "bounty" and mission.target_system == world.save.current_system
-            and any(m.id == mission.id for m in world.save.active_missions)):
-        # An escaped bounty remains active after arrival. It triggers again only
-        # on re-entry; choose a deterministic, cheapest adjacent return trip.
-        neighbor = min(world.here.connections,
-                       key=lambda sid: (fuel_cost_for_jump(world.here, world.by_id[sid], world.save.ship), sid))
-        return [neighbor, mission.target_system]
-    return bfs_path(world.by_id, world.save.current_system, mission.target_system)
+    path = bfs_path(world.by_id, world.save.current_system, mission.target_system)
+    if mission.kind == "bounty":
+        target = world.by_id[mission.target_system]
+        neighbor = min(target.connections,
+                       key=lambda sid: (fuel_cost_for_jump(target, world.by_id[sid], world.save.ship), sid))
+        retries = preceding_bounties(world, mission) + (1 if not path else 0)
+        path += [neighbor, mission.target_system] * retries
+    return path
 
 
 def mission_bearing(world: World, mission: Mission) -> str:
@@ -3058,6 +3069,9 @@ def mission_details(world: World, mission: Mission) -> list[str]:
     target = world.by_id[mission.target_system]
     lines = [mission.description, f"Destination: {mission_bearing(world, mission)}",
              f"Target danger: {target.danger}" if target.discovered else "Target danger: uncharted"]
+    ahead = preceding_bounties(world, mission)
+    if ahead:
+        lines.append(f"Queued bounties: {ahead} earlier contract(s) at this target resolve first. Budget includes re-entry after each, assuming they remain active and you win.")
     if mission.kind == "bounty" and path and path[-1] == world.save.current_system:
         lines.append("Retry: leave this system and jump back to re-engage the bounty; budget includes both jumps.")
     if mission.deadline_turn is None:
@@ -3120,9 +3134,9 @@ def mission_details(world: World, mission: Mission) -> list[str]:
     return [_mission_plain(line) for line in lines]
 
 
-def _mission_text_pages(lines: list[str]) -> list[list[str]]:
+def _mission_text_pages(lines: list[str], *, overhead: int = 7) -> list[list[str]]:
     rows = [row for line in lines for row in _wrap_output(_mission_plain(line), max(1, _OUTPUT_WIDTH - 1)).split("\r\n")]
-    size = max(1, _OUTPUT_HEIGHT - 7)
+    size = max(1, _OUTPUT_HEIGHT - overhead)
     return [rows[i:i + size] for i in range(0, len(rows), size)] or [[]]
 
 
@@ -3136,17 +3150,24 @@ def _show_tracked_mission(p: Palette, world: World) -> None:
 def screen_mission_details(p: Palette, world: World, mission: Mission, *, active: bool) -> None:
     page = 0
     while True:
-        pages = _mission_text_pages(mission_details(world, mission))
+        lines = mission_details(world, mission)
+        max_pages = sum(len(_wrap_output(line, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")) for line in lines)
+        title = f"Contract #{mission.id} {max_pages}/{max_pages}"
+        footer = "[N]ext [P]rev [B]ack > "
+        overhead = max(7, 1 + len(_wrap_output(title, _OUTPUT_WIDTH).split("\r\n"))
+                       + len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
+                       + (2 if active else 1))
+        pages = _mission_text_pages(lines, overhead=overhead)
         page = min(page, len(pages) - 1)
         out_line()
-        out_line(f"{p.gold}{'Active contract' if active else 'Contract offer'} #{mission.id} - {page + 1}/{len(pages)}{RESET}")
+        out_line(f"{p.gold}Contract #{mission.id} {page + 1}/{len(pages)}{RESET}")
         for row in pages[page]:
             out_line(row)
         actions = "[N]ext [P]rev [B]ack"
         if active:
             toggle = "Untrack" if world.save.tracked_mission_id == mission.id else "Track"
             out_line(f"[T] {toggle}")
-            out_line("[D] Abandon (forfeit reward)")
+            out_line("[D] Abandon")
         elif page == len(pages) - 1:
             out_line("[A]ccept contract")
         out_prompt(actions + " > ")
@@ -3186,30 +3207,45 @@ def screen_missions(p: Palette, world: World) -> None:
     page = 0
     while True:
         entries = [(m, False) for m in posted_mission_offers(world)] + [(m, True) for m in world.save.active_missions]
-        pages = [[]]
-        used = 0
+        wrapped = []
         for mission, active in entries:
             kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
             state = "TRACKED" if active and world.save.tracked_mission_id == mission.id else "ACTIVE" if active else "OFFER"
             label = _mission_plain(f"{state} {kind}: {world.by_id[mission.target_system].name} (+{mission.reward:,}cr)")
-            rows = len(_wrap_output("[9] " + label, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
-            if pages[-1] and (len(pages[-1]) >= 9 or used + rows > max(1, _OUTPUT_HEIGHT - 8)):
-                pages.append([])
-                used = 0
-            pages[-1].append((mission, active, label))
-            used += rows
-        page = min(page, len(pages) - 1)
-        out_line()
-        out_line(f"{p.gold}Contracts - page {page + 1}/{len(pages)}{RESET}")
-        for index, (_, _, label) in enumerate(pages[page], 1):
-            out_line(f"[{index}] {label}")
-        if not entries:
-            out_line("No contracts currently available.")
+            wrapped.append((mission, active, _wrap_output(label, max(1, _OUTPUT_WIDTH - 5)).split("\r\n")))
+        summary = [f"Active: {len(world.save.active_missions)}/{MAX_ACTIVE_MISSIONS}"]
         posted = world.save.mission_boards.get(world.save.current_system)
         if posted:
-            out_line(f"Offers refresh day {posted['refresh_turn']}; jumps advance days.")
-        out_line(f"Active contracts: {len(world.save.active_missions)}/{MAX_ACTIVE_MISSIONS}.")
-        out_prompt("[1-9] Details [N]ext [P]rev [B]ack > ")
+            summary.append(f"Refresh day {posted['refresh_turn']}")
+        footer = "[1-9] Details [N]ext [P]rev [B]ack > "
+        max_pages = max(1, sum(len(rows) for _, _, rows in wrapped))
+        overhead = 1 + len(_wrap_output(f"Contracts {max_pages}/{max_pages}", _OUTPUT_WIDTH).split("\r\n"))
+        overhead += sum(len(_wrap_output(line, _OUTPUT_WIDTH).split("\r\n")) for line in summary)
+        overhead += len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
+        capacity = max(1, _OUTPUT_HEIGHT - overhead)
+        pages = [([], [])]  # rows, selectable contracts; continued rows stay selectable
+        for mission, active, rows in wrapped:
+            for row in rows:
+                body, choices = pages[-1]
+                choice = next((i for i, (m, _) in enumerate(choices) if m is mission), None)
+                if len(body) >= capacity or (choice is None and len(choices) >= 9):
+                    pages.append(([], []))
+                    body, choices = pages[-1]
+                    choice = None
+                if choice is None:
+                    choice = len(choices)
+                    choices.append((mission, active))
+                body.append(f"[{choice + 1}] {row}")
+        page = min(page, len(pages) - 1)
+        out_line()
+        out_line(f"{p.gold}Contracts {page + 1}/{len(pages)}{RESET}")
+        for row in pages[page][0]:
+            out_line(row)
+        if not entries:
+            out_line("No contracts currently available.")
+        for line in summary:
+            out_line(line)
+        out_prompt(footer)
         key = read_command()
         if key in ("B", "Q"):
             return
@@ -3217,8 +3253,8 @@ def screen_missions(p: Palette, world: World) -> None:
             page = min(page + 1, len(pages) - 1)
         elif key == "P":
             page = max(0, page - 1)
-        elif len(key) == 1 and "1" <= key <= "9" and int(key) <= len(pages[page]):
-            mission, active, _ = pages[page][int(key) - 1]
+        elif len(key) == 1 and "1" <= key <= "9" and int(key) <= len(pages[page][1]):
+            mission, active = pages[page][1][int(key) - 1]
             screen_mission_details(p, world, mission, active=active)
 
 

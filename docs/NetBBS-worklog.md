@@ -4052,6 +4052,9 @@ Tracking cleanup itself runs at every checkpoint, including pending mission
 removals. An active bounty at the current station needs an outbound/return pair
 to trigger again; its budget and chart hint must use that same route. Chart
 tracking must name the actual displayed connection key, including uncharted legs.
+Later same-target bounties budget earlier contracts and their re-entry legs.
+Contract list pages reserve the actual wrapped footer/header height and split
+oversized entries into selectable continuations; row-count tests include 20x10.
 Scripted acceptance tests must navigate the details pages before pressing A;
 otherwise they no longer exercise acceptance. Test compact screens by counting
 display columns and physical rows between successive input requests.

@@ -4429,7 +4429,7 @@ def test_acceptance_requires_last_details_page_and_checkpoints_before_ack(monkey
     assert not world.save.mission_boards[0]["offers"]
 
 
-@pytest.mark.parametrize("width,height", [(40, 24), (80, 24), (40, 12)])
+@pytest.mark.parametrize("width,height", [(40, 24), (80, 24), (40, 12), (20, 10)])
 def test_full_contract_details_fit_each_page_and_retain_back(monkeypatch, width, height):
     world, mission = _mission_details_world("escort")
     mission.description = "Very long objective " * 20
@@ -4452,7 +4452,9 @@ def test_full_contract_details_fit_each_page_and_retain_back(monkeypatch, width,
     monkeypatch.setattr(vr, "read_key", key)
     with contextlib.redirect_stdout(output):
         vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
-    joined = " ".join(vr._ANSI_RE.sub("", output.getvalue()).split())
+    body_rows = [row for row in vr._ANSI_RE.sub("", output.getvalue()).split("\r\n")
+                 if not row.startswith(("Contract #", "[N]", "[B]", "[A]"))]
+    joined = " ".join(" ".join(body_rows).split())
     assert "EVERY jump" in joined and "including detours" in joined
     assert "no cargo space" in joined
     assert len(frames) == count
@@ -4466,7 +4468,7 @@ def test_legacy_active_contract_list_is_paginated_and_selectable(monkeypatch):
     output = io.StringIO()
     selected = []
     def key():
-        return "N" if "page 2/" not in output.getvalue() else "1" if not selected else "B"
+        return "N" if "Contracts 2/" not in output.getvalue() else "1" if not selected else "B"
     monkeypatch.setattr(vr, "read_key", key)
     monkeypatch.setattr(vr, "screen_mission_details", lambda p, w, m, active: selected.append((m.id, active)))
     with contextlib.redirect_stdout(output):
@@ -4645,3 +4647,46 @@ def test_pending_mission_resolution_checkpoint_clears_tracking(monkeypatch, kind
         else:
             vr._resolve_escort_missions(vr.Palette(False), world, mission.target_system)
     assert seen
+
+
+
+def test_queued_bounty_route_budgets_preceding_fights():
+    world, mission = _mission_details_world("bounty")
+    earlier = vr.Mission(9, "bounty", "Earlier", 500, 0, mission.target_system, pirate_tier=1)
+    world.save.active_missions = [earlier]
+    base = vr.bfs_path(world.by_id, 0, mission.target_system)
+    assert len(vr.mission_route(world, mission)) == len(base) + 2
+    vr.accept_mission(world, mission)
+    assert len(vr.mission_route(world, mission)) == len(base) + 2
+    assert "1 earlier contract" in " ".join(vr.mission_details(world, mission))
+    world.save.current_system = mission.target_system
+    assert len(vr.mission_route(world, mission)) == 4
+    world.save.active_missions.remove(earlier)
+    assert len(vr.mission_route(world, mission)) == 2
+
+
+def test_tiny_contract_board_splits_entries_and_keeps_selection(monkeypatch):
+    import re
+    world, mission = _mission_details_world("escort")
+    world.by_id[mission.target_system].name = "A particularly long system name that cannot fit one page"
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 20)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 10)
+    output = io.StringIO()
+    offset = 0
+    frames = []
+    selected = []
+    def key():
+        nonlocal offset
+        frame = output.getvalue()[offset:]
+        offset = len(output.getvalue())
+        frames.append(frame)
+        assert len(frame.split("\r\n")) <= 10
+        assert all(vr._visible_width(row) <= 20 for row in frame.split("\r\n"))
+        plain = vr._ANSI_RE.sub("", frame)
+        page, total = map(int, re.search(r"Contracts (\d+)/(\d+)", plain).groups())
+        return "N" if page < total else "1" if not selected else "B"
+    monkeypatch.setattr(vr, "read_key", key)
+    monkeypatch.setattr(vr, "screen_mission_details", lambda p, w, m, active: selected.append(m.id))
+    with contextlib.redirect_stdout(output):
+        vr.screen_missions(vr.Palette(False), world)
+    assert len(frames) > 2 and selected == [mission.id]
