@@ -1687,18 +1687,28 @@ def test_sync_still_warns_an_outgoing_only_node_with_nothing_to_dial(tmp_path, c
         node_db.close()
 
 
-def test_sync_does_not_call_a_relay_served_node_isolated(tmp_path, caplog):
-    """Issue #313 review round 4: an outgoing-only node that has retired
-    its seeds — after an intentionally empty roster, say — but still has
-    a relay serving it exchanges mail through that relay later in the
-    same pass. Warning that it "is not reaching out to the network"
-    would simply be false."""
-    node = LinkNode(identity=bootstrap_node_identity("relay-served"))
-    node.relays_serving_me["deadbeef" * 8] = "http://relay.example:7862"
-    node_db = _NodeDb(tmp_path, "relay-served")
+def test_sync_still_warns_when_a_retained_relay_is_offline(tmp_path, caplog):
+    """Issue #313 review round 5: keying the exemption on
+    `relays_serving_me` being non-empty was wrong. A pickup failure is
+    logged and skipped *without* recording a dial outcome, so a relay
+    that has gone offline sits in that mapping indefinitely — and would
+    have suppressed this warning forever, which is the exact blind spot
+    the issue is about. Only actually reaching a relay counts."""
+    node = LinkNode(identity=bootstrap_node_identity("dead-relay"))
+    dead = bootstrap_node_identity("offline-relay")
+    node.relays_serving_me[dead.fingerprint] = "http://127.0.0.1:1"
+    node.candidate_descriptors[dead.fingerprint] = build_endpoint_descriptor(
+        signing_identity=dead.signing_key,
+        subject_fingerprint=dead.fingerprint,
+        # Port 1: nothing listens, so every pickup fails.
+        addresses=[{"protocol": "http", "address": "127.0.0.1", "port": 1}],
+        outgoing_only=False,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    node_db = _NodeDb(tmp_path, "dead-relay")
     try:
         with caplog.at_level("WARNING", logger="netbbs.link.sync"):
-            _run_passes(node, node_db, [], passes=9, outgoing_only=True)
-        assert _isolation_warnings(caplog) == []
+            _run_passes(node, node_db, [], passes=3, outgoing_only=True)
+        assert len(_isolation_warnings(caplog)) == 1
     finally:
         node_db.close()

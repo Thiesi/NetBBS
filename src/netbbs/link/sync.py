@@ -404,31 +404,6 @@ async def run_link_sync(
             _dialable_addresses(descriptor)
             for descriptor in node.candidate_descriptors.values()
         )
-        # A relay currently serving this node is a working outbound path
-        # this loop's seed dialling does not represent: an outgoing-only
-        # node that has retired its seeds (an intentionally empty roster,
-        # say) still exchanges mail through it in `_pickup_relay_mail`
-        # and `_push_pending_link_mail` later in this same pass. Warning
-        # that such a node "is not reaching out to the network" would be
-        # simply false. Safe to key on because a relay that stops working
-        # is pruned from `relays_serving_me` by `_maintain_relay_
-        # selection`, so this cannot mask a genuine loss indefinitely.
-        reaches_via_relay = bool(node.relays_serving_me)
-        if reaches_via_relay or (not had_somewhere_to_reach and accepts_inbound):
-            isolated_passes = 0
-        elif reached_network:
-            isolated_passes = 0
-        else:
-            isolated_passes += 1
-            if isolated_passes % _ISOLATION_WARNING_PASS_INTERVAL == 0:
-                _logger.warning(
-                    "Link sync: no seed, reliable node, or fallback candidate has been "
-                    "reachable for %d consecutive passes -- this node is not reaching out to "
-                    "the network. Tried %d seed URL(s) this pass: %s",
-                    isolated_passes,
-                    len(pass_seeds),
-                    ", ".join(pass_seeds) or "(none configured)",
-                )
         await _pull_trust_subscriptions(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
@@ -451,13 +426,45 @@ async def run_link_sync(
                 node, session, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
             )
-            await _pickup_relay_mail(
+            # A relay that answers -- even holding nothing -- is a
+            # working path to the network that the seed loop above
+            # cannot observe, so it counts. Deliberately the *result* of
+            # contacting one rather than the presence of an entry in
+            # `relays_serving_me`: a pickup failure is logged and
+            # skipped without recording a dial outcome, so a relay that
+            # went offline can sit in that mapping indefinitely and
+            # would otherwise suppress this warning forever -- the very
+            # blind spot issue #313 is about.
+            reached_network = await _pickup_relay_mail(
                 node, session, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
-            )
+            ) or reached_network
         await _push_pending_link_mail(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
+        # Issue #313: decided at the end of the pass, so every path that
+        # can reach the network -- seeds, the reliable roster, a fallback
+        # candidate, a relay -- has had its turn first. A node that
+        # reaches nothing at all, pass after pass, is in a meaningfully
+        # broken state, but every individual dial failure is logged the
+        # same way ordinary churn is, so nothing distinguished "one seed
+        # is flaky" from "this node is cut off entirely". This is that
+        # signal, and as a WARNING in the `netbbs.link` namespace it
+        # lands in the SysOp-visible bounded diagnostic log (§13.11)
+        # with no further wiring.
+        if reached_network or (not had_somewhere_to_reach and accepts_inbound):
+            isolated_passes = 0
+        else:
+            isolated_passes += 1
+            if isolated_passes % _ISOLATION_WARNING_PASS_INTERVAL == 0:
+                _logger.warning(
+                    "Link sync: no seed, reliable node, fallback candidate or relay has "
+                    "been reachable for %d consecutive passes -- this node is not reaching "
+                    "out to the network. Tried %d seed URL(s) this pass: %s",
+                    isolated_passes,
+                    len(pass_seeds),
+                    ", ".join(pass_seeds) or "(none configured)",
+                )
         if stop_event is None:
             await asyncio.sleep(interval_seconds)
         else:
@@ -994,8 +1001,16 @@ async def _pickup_relay_mail(
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
     *, enforce_trust_policy: bool = False,
-) -> None:
+) -> bool:
     """
+    Returns whether any relay was actually reached (issue #313). A
+    mailbox that answers -- even holding nothing -- proves this node
+    still has a working path to the network, which the seed-dialling
+    loop above cannot observe. Presence in `relays_serving_me` proves
+    nothing on its own: a pickup failure below is logged and skipped
+    without recording a dial outcome, so a relay that has gone offline
+    can sit in that mapping indefinitely.
+
     Issue #58 (widened by issue #94 to the full `link_message`-family
     round trip, not just the original message): for every relay
     currently serving this node (`node.relays_serving_me`), pick up
@@ -1031,6 +1046,7 @@ async def _pickup_relay_mail(
     so those branches of `persist_accepted_events` are never reached
     from this caller.
     """
+    reached_a_relay = False
     for relay_fingerprint in list(node.relays_serving_me):
         if enforce_trust_policy and not (await lane.run(
             decide_node_action, relay_fingerprint, LinkPolicyAction.RELAY
@@ -1044,6 +1060,7 @@ async def _pickup_relay_mail(
         except LinkTransportError as exc:
             _logger.warning("Link sync: could not pick up mail from relay %s: %s", relay_fingerprint, exc)
             continue
+        reached_a_relay = True
 
         for message in messages:
             object_type = message.envelope.get("object_type")
@@ -1070,7 +1087,7 @@ async def _pickup_relay_mail(
                     enforce_trust_policy=enforce_trust_policy,
                 )
                 await lane.run(save_peer, node.peers[claimed_sender])
-
+    return reached_a_relay
 
 async def _deposit_one(
     session: ClientSession,

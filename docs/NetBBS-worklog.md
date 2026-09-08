@@ -3353,9 +3353,8 @@ liveness probe precisely because it stops short of a real hello: it needs no
 node identity or key material, is never persisted as a peer, and still exercises
 connect + HTTP + Link routing. It separates DOWN (nothing listening) from
 NOT_LINK (something answered, but not a Link node — a stale DNS record, a proxy
-in front of a dead node), which a plain TCP or HTTP check cannot. A 429 counts
-as up only when it carries Link's own rate-limit body; a bare 429 proves a CDN
-is there, not a node. The checker
+in front of a dead node), which a plain TCP or HTTP check cannot. A 429 is
+neither — see below — and reports as unconfirmed. The checker
 deliberately does not import `netbbs` (`services/` is standalone), so the test
 that keeps its expected signature honest has to drive a real `LinkServer` — a
 canned 400 would let the two drift apart unnoticed, which is the same blind spot
@@ -3369,10 +3368,15 @@ different states and only the second is worth a SysOp's attention. Being a
 WARNING in the `netbbs.link` namespace, it reaches the bounded diagnostic log
 (§13.11) with no further wiring. The counter lives in the loop, so it resets on
 any success and a test of the reset has to drive one `run_link_sync` call whose
-seed list changes underneath it, not several calls. The count is also gated on this node having an
-outbound path at all — including a relay currently serving it, which is one the
-seed-dialling loop does not represent — and on there having been somewhere to
-reach: a full peer may decline the roster,
+seed list changes underneath it, not several calls. The verdict is taken at the *end* of a pass, after every path that can reach
+the network has had its turn — seeds, the roster, a fallback candidate, and a
+relay pickup, which the seed-dialling loop does not represent. Note the
+distinction that matters: what counts is having *reached* a relay, not having
+one listed. A pickup failure is logged and skipped without recording a dial
+outcome, so an offline relay stays in `relays_serving_me` indefinitely, and
+keying on the mapping would suppress the warning forever — reinstating the
+blind spot the whole entry is about. The count is also gated on there having
+been somewhere to reach: a full peer may decline the roster,
 configure no seeds, and serve inbound helloes correctly, and this outbound loop
 never observes that inbound traffic (completed peers leave
 `candidate_descriptors`), so an ungated counter would accuse a healthy
