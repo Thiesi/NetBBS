@@ -4853,6 +4853,19 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
+Long-range scanning is a deliberate area survey. With a scanner installed, the
+chart's Scan action opens read-only terms showing two fuel required, remaining
+fuel, range and the number of uncharted contacts. Survey charts every new system
+within 2 + scanner tier + navigator bonus connection hops, in stable distance/ID
+order. It advances no day and consumes no encounter RNG; no contacts or insufficient
+fuel means no charge. Valid survey contracts complete through ordinary discovery
+rules in the same checkpoint as fuel spending and chart updates.
+
+The report retains each discovered system's name, station, economy and danger,
+plus mission outcomes, using height-aware pages. It creates no remote price
+observation. Back before surveying writes nothing and preserves the chart's prior
+result. No galaxy generation or existing discovered state changes on load.
+
 Derelict and distress decisions page complete terms with credits, fuel and actions
 available on every page. Browsing and invalid input have no effects. Derelict
 boarding discloses its 70% salvage / 30% ambush split, credit range and opponent
