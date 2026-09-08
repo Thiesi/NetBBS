@@ -96,6 +96,16 @@ by anything"). Never a first resort: the normal seed list is always
 tried first, every pass, regardless of whether the previous pass had to
 fall back.
 
+**Isolation warning (issue #313)**: when neither the seed list nor the
+candidate fallback reaches anything for `_ISOLATION_WARNING_PASS_
+INTERVAL` consecutive passes, that is logged as a single WARNING
+naming the seeds tried, rather than being left implicit in the
+per-dial failures. Those individual failures are indistinguishable
+from ordinary churn -- which is exactly how a reliable node that had
+quietly stopped answering went unnoticed -- while "reached nothing at
+all, repeatedly" is a state worth putting in front of a SysOp, and a
+WARNING here reaches the bounded diagnostic log (§13.11) unaided.
+
 **Automatic relay selection, pickup, and send-via-relay (design doc
 §12, issue #58)**, both gated on this node's own hello
 currently claiming `outgoing_only` (a full peer never needs relays --
@@ -207,6 +217,19 @@ _logger = logging.getLogger(__name__)
 _MAX_CANDIDATE_FALLBACK_ATTEMPTS = 5
 _MAX_TRUST_PULL_PAGES_PER_PASS = 10
 
+# Issue #313: consecutive passes reaching nothing at all -- no seed, no
+# reliable-roster node, no candidate -- before saying so as a WARNING
+# rather than only as the per-dial failures already logged. Three, at the
+# five-minute default interval, is roughly a quarter hour of total
+# isolation: past any single dial that timed out, a peer restarting, or a
+# NAT rebinding, and short enough that an operator hears about a dead
+# seed roster the same day. The warning repeats every further three
+# passes rather than every pass, so a node left isolated overnight leaves
+# a proportionate trail in the bounded diagnostic log
+# (`netbbs.link.diagnostics`, which captures WARNING and above from this
+# namespace) instead of filling it.
+_ISOLATION_WARNING_PASS_INTERVAL = 3
+
 
 def _reliable_node_urls_if_accepted(db: Database) -> list[str]:
     if not participation_accepted(db):
@@ -298,6 +321,7 @@ async def run_link_sync(
     `LinkServer`'s direct-push path already enforced them (§13.9) --
     that gap is what this issue closes.
     """
+    isolated_passes = 0
     while stop_event is None or not stop_event.is_set():
         refresh = getattr(own_hello_provider, "refresh", None)
         if refresh is not None:
@@ -332,10 +356,32 @@ async def run_link_sync(
             # again. Never a first resort: an operator's explicit seed
             # configuration and a genuinely live supplementary list
             # always take priority when either actually works.
-            await _try_candidate_fallback(
+            reached_network = await _try_candidate_fallback(
                 node, session, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
             )
+        # Issue #313: a node that reaches nothing at all, pass after
+        # pass, is in a meaningfully broken state -- a dead seed roster,
+        # a firewall change, its own Link participation switched off at
+        # the other end -- but every individual dial failure above is
+        # logged the same way ordinary churn is, so nothing distinguished
+        # "one seed is flaky" from "this node is cut off entirely." This
+        # is the distinguishable signal, and being a WARNING in the
+        # `netbbs.link` namespace it lands in the SysOp-visible bounded
+        # diagnostic log (design doc §13.11) without any further wiring.
+        if reached_network:
+            isolated_passes = 0
+        else:
+            isolated_passes += 1
+            if isolated_passes % _ISOLATION_WARNING_PASS_INTERVAL == 0:
+                _logger.warning(
+                    "Link sync: no seed, reliable node, or fallback candidate has been "
+                    "reachable for %d consecutive passes -- this node is not exchanging "
+                    "anything with the network. Tried %d seed URL(s) this pass: %s",
+                    isolated_passes,
+                    len(pass_seeds),
+                    ", ".join(pass_seeds) or "(none configured)",
+                )
         await _pull_trust_subscriptions(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
@@ -698,8 +744,13 @@ async def _try_candidate_fallback(
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
     *, enforce_trust_policy: bool = False,
-) -> None:
+) -> bool:
     """
+    Returns whether this node reached the network at all through a
+    candidate (issue #313) -- a node that fell back successfully is not
+    isolated, and `run_link_sync` needs to tell those two cases apart to
+    decide whether to raise its isolation warning.
+
     Resilience path, closing the gap named elsewhere in this module's
     docstrings: "a node isn't perpetually dependent
     on the seed list." Only ever called once every configured/cached
@@ -741,13 +792,13 @@ async def _try_candidate_fallback(
     """
     candidates = list(node.candidate_descriptors.items())
     if not candidates:
-        return
+        return False
     random.shuffle(candidates)
 
     attempted = 0
     for fingerprint, descriptor in candidates:
         if attempted >= _MAX_CANDIDATE_FALLBACK_ATTEMPTS:
-            return
+            return False
         base_urls = _dialable_addresses(descriptor)
         if not base_urls:
             continue
@@ -765,7 +816,8 @@ async def _try_candidate_fallback(
                 "via fallback candidate %s instead",
                 fingerprint,
             )
-            return
+            return True
+    return False
 
 
 async def _request_one_relay_consent(

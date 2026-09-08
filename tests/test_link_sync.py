@@ -1488,3 +1488,132 @@ def test_sync_runs_no_pass_at_all_when_stop_event_is_already_set(tmp_path):
     finally:
         dialer.close()
         seed.close()
+
+
+def _run_passes(node, node_db, seeds, *, passes: int):
+    """Run exactly `passes` sync passes, then stop. Counts passes from
+    `refresh`, which `run_link_sync` calls once at the top of every
+    pass, and sets `stop_event` on the last one -- the loop condition is
+    only re-checked between passes, so the pass in progress still
+    finishes normally (`run_link_sync`'s own docstring)."""
+    stop_event = asyncio.Event()
+    seen = {"passes": 0}
+
+    class CountingHello:
+        async def refresh(self, lane):
+            seen["passes"] += 1
+            if seen["passes"] >= passes:
+                stop_event.set()
+
+        def __call__(self):
+            return _hello_for(node)
+
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            await run_link_sync(
+                node, session, seeds, CountingHello(), node_db.lane,
+                interval_seconds=0.0, stop_event=stop_event,
+            )
+
+    asyncio.run(scenario())
+    return seen["passes"]
+
+
+def _isolation_warnings(caplog):
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and "consecutive passes" in record.getMessage()
+    ]
+
+
+def test_sync_warns_once_a_node_has_reached_nothing_for_several_passes(tmp_path, caplog):
+    """Issue #313: every individual dial failure is already logged, but
+    indistinguishable from ordinary churn -- which is how a reliable
+    node that had quietly stopped answering went unnoticed. Reaching
+    nothing at all, pass after pass, gets its own WARNING (and so its
+    own bounded-diagnostic-log entry, §13.11)."""
+    node = LinkNode(identity=bootstrap_node_identity("isolated"))
+    node_db = _NodeDb(tmp_path, "isolated")
+    # Port 1 on loopback: nothing listens, so every pass fails its dial
+    # and there are no discovered candidates to fall back to either.
+    dead_seed = "http://127.0.0.1:1"
+
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [dead_seed], passes=2)
+        assert _isolation_warnings(caplog) == [], "must tolerate a couple of failed passes quietly"
+
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [dead_seed], passes=3)
+        warnings = _isolation_warnings(caplog)
+        assert len(warnings) == 1, warnings
+        assert "3 consecutive passes" in warnings[0]
+        assert dead_seed in warnings[0], "names what it tried, so a SysOp can act on it"
+
+        # Sixth consecutive pass warns again, the third and fourth and
+        # fifth do not -- a proportionate trail, not one per pass.
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [dead_seed], passes=6)
+        assert len(_isolation_warnings(caplog)) == 2
+    finally:
+        node_db.close()
+
+
+def test_sync_isolation_counter_resets_once_a_seed_answers(tmp_path, caplog):
+    """A node that recovers must not accumulate toward the warning
+    across an intervening success -- otherwise a flaky seed eventually
+    reports permanent isolation that never actually happened.
+
+    Six passes inside one `run_link_sync` (the counter is per-loop, so
+    it has to be one call): two that reach nothing, two that reach a
+    real seed, two that reach nothing again. Six failing dials in total,
+    never three in a row, so no warning."""
+    node = LinkNode(identity=bootstrap_node_identity("recovering"))
+    seed_node = LinkNode(identity=bootstrap_node_identity("live-seed"))
+    node_db = _NodeDb(tmp_path, "recovering")
+    seed = _NodeDb(tmp_path, "live-seed")
+    dead_seed = "http://127.0.0.1:1"
+
+    async def scenario():
+        server = await _run_server(seed_node, seed.lane)
+        live_seed = f"http://127.0.0.1:{server.port}"
+        # run_link_sync re-reads this list every pass, so mutating it in
+        # place from `refresh` is how one loop sees a seed go away and
+        # come back without restarting. `refresh` runs at the *top* of a
+        # pass, before that pass reads the list, so switching on pass N
+        # takes effect from pass N: dead, dead, live, live, dead, dead.
+        seeds = [dead_seed]
+        stop_event = asyncio.Event()
+        seen = {"passes": 0}
+
+        class FlakyNetwork:
+            async def refresh(self, lane):
+                seen["passes"] += 1
+                if seen["passes"] in (3, 5):
+                    seeds[:] = [live_seed] if seen["passes"] == 3 else [dead_seed]
+                if seen["passes"] >= 6:
+                    stop_event.set()
+
+            def __call__(self):
+                return _hello_for(node)
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                await run_link_sync(
+                    node, session, seeds, FlakyNetwork(), node_db.lane,
+                    interval_seconds=0.0, stop_event=stop_event,
+                )
+        finally:
+            await server.stop()
+        return seen["passes"]
+
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            assert asyncio.run(scenario()) == 6
+        assert _isolation_warnings(caplog) == []
+    finally:
+        node_db.close()
+        seed.close()
