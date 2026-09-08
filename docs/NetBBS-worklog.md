@@ -4993,3 +4993,10 @@ what the same cargo can accomplish.
 Destination pickers wrap each label before allocating the next page. Move a
 whole option to a fresh page when it fits there; splitting a multiword station
 name at the page boundary otherwise creates a selectable trailing-word entry.
+
+Survey completion requires a new discovery, not presence at an already-charted
+system. A destroyed journey can preserve its departure discovery while skipping
+arrival rewards. Estimates and contract navigation must flag that retained survey
+as blocked, with no promised completion day; general travel cannot resolve it by
+revisiting. The existing abandonment action frees the slot without inventing a
+reward or changing discovery history.

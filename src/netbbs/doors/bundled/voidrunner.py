@@ -4358,6 +4358,8 @@ def mission_bearing(world: World, mission: Mission) -> str:
     target = world.by_id[mission.target_system]
     path = mission_route(world, mission)
     location = f"{target.name} ({target.x},{target.y})"
+    if mission.kind == "scan" and target.discovered:
+        return f"{location}: already charted; survey blocked"
     if not path:
         return f"{location}: at this station"
     first = world.by_id[path[0]]
@@ -4402,7 +4404,9 @@ def mission_details(world: World, mission: Mission) -> list[str]:
         if missing > free:
             lines.append("WARNING: make cargo space or upgrade before procuring the full load.")
     elif mission.kind == "scan":
-        lines.append("Survey: chart this target by arriving or discovering it with your scanner. No cargo required.")
+        if target.discovered:
+            lines.append("BLOCKED SURVEY: target already charted. Revisiting cannot complete it; abandon an active contract to free its slot.")
+        lines.append("Survey: newly chart this target by arriving or discovering it with your scanner. No cargo required.")
         lines.append("Accepting or tracking the bearing does not chart the system.")
     elif mission.kind == "bounty":
         lines.append(f"Combat: intercept a tier {mission.pirate_tier} raider at the target. Escape leaves the bounty active; destruction fails it.")
@@ -4561,6 +4565,8 @@ def prepare_mission_jump(world: World, mission_id: int) -> int:
     mission = next((m for m in world.save.active_missions if m.id == mission_id), None)
     if mission is None or mission_expired(world, mission):
         raise MissionError("This contract is no longer active.")
+    if mission.kind == "scan" and world.by_id[mission.target_system].discovered:
+        raise MissionError("Survey target already charted; revisiting cannot complete it. Abandon it from contract details.")
     path = mission_route(world, mission)
     if not path:
         raise MissionError("Already at the contract destination. Check its remaining objective.")
@@ -4578,6 +4584,9 @@ def mission_navigation_lines(world: World, mission: Mission, *, active: bool) ->
     lines = [f"{mission.description}", f"Target: {target.name} ({target.x},{target.y}).",
              "Contract bearings do not chart destinations. Uncharted danger remains unknown."]
     live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
+    if mission.kind == "scan" and target.discovered:
+        lines.append("BLOCKED SURVEY: target already charted. Revisiting cannot complete it; no completion day. An active contract can be abandoned from its details to free the slot.")
+        return [_mission_plain(line) for line in lines]
     if live:
         lines.append("Jump next tracks this contract and flies one leg. Review the next step after each outcome.")
     else:
@@ -4654,7 +4663,7 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
     while True:
         if pages is None:
             live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
-            footer = ("[J]ump next " if live and mission_route(world, mission) else "") + "[N]ext [P]rev [B]ack: "
+            footer = ("[J]ump next " if live and not (mission.kind == "scan" and world.by_id[mission.target_system].discovered) and mission_route(world, mission) else "") + "[N]ext [P]rev [B]ack: "
             lines = ([mission.description, "Contract is no longer active. Return to the board or career log."]
                      if active and not live else mission_navigation_lines(world, mission, active=active))
             if result:
@@ -5099,9 +5108,10 @@ def route_mission_implications(world: World, path: list[int]) -> list[str]:
     estimates = []
     for mission in world.save.active_missions:
         arrivals = [i for i, sid in enumerate(path, 1) if sid == mission.target_system]
-        if mission.kind == "scan" and world.by_id[mission.target_system].discovered and path:
-            jumps = 1
-        elif mission.kind == "bounty":
+        if mission.kind == "scan" and world.by_id[mission.target_system].discovered:
+            estimates.append((mission, None))
+            continue
+        if mission.kind == "bounty":
             needed = preceding_bounties(world, mission) + 1
             if len(arrivals) >= needed:
                 jumps = arrivals[needed - 1]
@@ -5119,15 +5129,16 @@ def route_mission_implications(world: World, path: list[int]) -> list[str]:
     # the same arrival follow active-mission order, just like actual completion.
     remaining = dict(world.save.cargo)
     ready = {}
-    for index, (mission, day) in sorted(enumerate(estimates), key=lambda item: (item[1][1], item[0])):
-        if mission.kind != "delivery":
-            continue
+    for index, (mission, day) in sorted(((i, estimate) for i, estimate in enumerate(estimates) if estimate[0].kind == "delivery"), key=lambda item: (item[1][1], item[0])):
         available = remaining.get(mission.commodity, 0)
         ready[index] = available >= mission.quantity
         if ready[index] and (mission.deadline_turn is None or day <= mission.deadline_turn):
             remaining[mission.commodity] = available - mission.quantity
     lines.append("Cargo is allocated by estimated arrival, then active-contract order. Late contracts consume none; missing cargo leaves completion day unknown.")
     for index, (mission, day) in enumerate(estimates):
+        if day is None:
+            lines.append(f"Contract #{mission.id}: BLOCKED SURVEY - target already charted; no completion day. Revisiting cannot complete it. Abandon it from contract details to free the slot.")
+            continue
         timing = "no deadline" if mission.deadline_turn is None else f"deadline {mission.deadline_turn} inclusive; " + ("travel within deadline" if day <= mission.deadline_turn else "TRAVEL ESTIMATE LATE")
         suffix = ""
         label = "objective day"

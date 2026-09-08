@@ -2903,6 +2903,51 @@ def test_general_route_deadlines_include_enroute_objectives_and_bounty_queue():
     assert "TRAVEL ESTIMATE LATE" in lines[4]
 
 
+@pytest.mark.parametrize("destination", ["target","elsewhere","current"])
+def test_charted_survey_has_no_promised_completion_or_contract_departure(destination,monkeypatch):
+    import copy
+    world,mission=_mission_details_world("scan");vr.accept_mission(world,mission)
+    world.by_id[mission.target_system].discovered=True
+    target=mission.target_system if destination=="target" else (0 if destination=="current" else next(s.id for s in world.galaxy if s.id not in (0,mission.target_system)))
+    before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
+    text=" ".join(vr.route_mission_implications(world,vr.bfs_path(world.by_id,0,target)))
+    assert "BLOCKED SURVEY" in text and "no completion day" in text
+    assert "objective day" not in text and "within deadline" not in text
+    assert "survey blocked" in vr.mission_bearing(world,mission)
+    assert "BLOCKED SURVEY" in " ".join(vr.mission_details(world,mission))
+    assert "BLOCKED SURVEY" in " ".join(vr.mission_navigation_lines(world,mission,active=True))
+    with pytest.raises(vr.MissionError,match="already charted"): vr.prepare_mission_jump(world,mission.id)
+    keys=iter("JB");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    monkeypatch.setattr(world,"checkpoint",lambda:pytest.fail("Blocked survey saved"))
+    with contextlib.redirect_stdout(io.StringIO()) as output: vr.screen_mission_navigation(vr.Palette(False),world,mission,active=True)
+    assert "[J]ump next" not in output.getvalue()
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+def test_failed_discovery_leaves_survey_blocked_after_save_reload_and_revisit(tmp_path,monkeypatch):
+    world=_world_with_seed(42);world.event_rng.seed(0)
+    target=sorted(world.here.connections)[0];world.by_id[target].discovered=False
+    mission=vr.Mission(1,"scan","Survey after failed flight",500,0,target)
+    world.save.active_missions=[mission]
+    world._checkpoint=lambda current:vr.persist(current,tmp_path,77);world.checkpoint()
+    monkeypatch.setattr(vr,"_resolve_random_travel_encounter",lambda p,w,d:vr.destroy_ship(w))
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_travel(vr.Palette(False),world,target)
+    loaded,_,_=vr.load_or_create_save(tmp_path,77,"Tester");resumed=vr.World(loaded)
+    assert resumed.by_id[target].discovered and resumed.save.active_missions and resumed.here.id==0
+    assert "BLOCKED SURVEY" in " ".join(vr.route_mission_implications(resumed,[target]))
+    credits=resumed.save.pilot.credits
+    monkeypatch.setattr(vr,"_resolve_random_travel_encounter",lambda *args:None)
+    with contextlib.redirect_stdout(io.StringIO()): vr.screen_travel(vr.Palette(False),resumed,target)
+    assert resumed.save.active_missions and resumed.save.pilot.credits==credits
+
+
+def test_uncharted_survey_estimate_uses_the_first_new_discovery_on_route():
+    world,mission=_mission_details_world("scan");vr.accept_mission(world,mission)
+    path=vr.bfs_path(world.by_id,0,mission.target_system)
+    text=" ".join(vr.route_mission_implications(world,path))
+    assert f"objective day {len(path)}" in text and "BLOCKED" not in text
+
+
 @pytest.mark.parametrize("order", ["same_arrival", "reverse_arrivals", "expired_first", "short_first"])
 def test_general_route_delivery_estimates_allocate_cargo_in_resolution_order(order):
     import copy

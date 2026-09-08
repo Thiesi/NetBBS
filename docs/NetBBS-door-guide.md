@@ -68,6 +68,9 @@ leg using normal encounters, customs and mission resolution. Fuel must cover tha
 leg. Review the refreshed route after arriving or being diverted, then choose
 another jump or Back. Completion, failure and expiry stop contract navigation.
 Refuelling is manual at the yard, and delivery cargo must still be procured.
+If a destroyed journey charted a survey target without completing the contract,
+it is shown as blocked: revisiting cannot discover it again. Abandon that contract
+from its details to free the active slot.
 The chart's **[R]oute for tracked contract** reopens this view. After a disconnect,
 any saved encounter resumes first; the rest of a route never runs unattended.
 

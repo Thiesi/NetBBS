@@ -4753,7 +4753,9 @@ for queued bounty re-entry, fuel, wages, refuelling stops and inclusive deadline
 The chart also opens the currently tracked contract route directly.
 
 Jump next is available only for a current, unexpired active contract while docked
-and with fuel for that leg. It tracks the selected contract and checkpoints that
+and with fuel for that leg. A survey target must still be uncharted: discovery
+retained from a destroyed journey cannot be repeated for a reward, so its contract
+is explicitly blocked and can be abandoned. It tracks the selected contract and checkpoints that
 intent, then uses ordinary durable travel for exactly one jump. The pilot chooses
 again after each outcome; diversion, completion, failure, expiry, fuel or crew
 changes cause a fresh route/budget. No unattended remainder is resumed after a
