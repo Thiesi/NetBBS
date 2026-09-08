@@ -2491,8 +2491,8 @@ def generate_concord_patrol(world: World) -> Pirate:
     return Pirate(name=rng.choice(CONCORD_PATROL_NAMES), tier=tier, hp=hp, hp_max=hp)
 
 
-def cargo_load_fraction(world: World) -> float:
-    total = sum(world.save.cargo.values())
+def cargo_load_fraction(world: World, *, cargo_units: int | None = None) -> float:
+    total = sum(world.save.cargo.values()) if cargo_units is None else cargo_units
     cap = cargo_capacity(world.save.ship)
     return 0.0 if cap == 0 else min(1.0, total / cap)
 
@@ -2518,9 +2518,9 @@ def fight_round(world: World, pirate: Pirate) -> tuple[int, int, list[str]]:
     return dmg_to_pirate, dmg_to_player, lines
 
 
-def evade_chance(world: World, pirate: Pirate, *, dumped_cargo: bool) -> float:
+def evade_chance(world: World, pirate: Pirate, *, dumped_cargo: bool, cargo_units: int | None = None) -> float:
     ship = world.save.ship
-    chance = 0.5 + ship.engine_tier * 0.08 - pirate.tier * 0.07 - cargo_load_fraction(world) * 0.15
+    chance = 0.5 + ship.engine_tier * 0.08 - pirate.tier * 0.07 - cargo_load_fraction(world, cargo_units=cargo_units) * 0.15
     if dumped_cargo:
         chance += 0.20
     return max(0.05, min(0.90, chance))
@@ -5798,7 +5798,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         lines.append((f"[S] Surrender: pay {cost}cr, clear notoriety and escape. " if pilot.credits >= cost else f"Surrender requires {cost}cr. ") +
                      ("Available." if pilot.credits >= cost else "UNAFFORDABLE; surrender unavailable."))
     else:
-        chance = evade_chance(world, pirate, dumped_cargo=bool(used))
+        chance = evade_chance(world, pirate, dumped_cargo=bool(used), cargo_units=max(0, used - 1))
         lines.append(f"[D] Dump & evade: about {chance:.0%} success; " +
                      ("lose one unit of a random held commodity; failure draws fire."
                       if used else "hold empty; same chance as Evade."))

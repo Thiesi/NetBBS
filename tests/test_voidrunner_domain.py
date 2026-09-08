@@ -8268,12 +8268,17 @@ def test_review_combat_info_keeps_exchange_before_tactical_heading(monkeypatch, 
 
 
 @pytest.mark.parametrize("tier", [0, 4])
-@pytest.mark.parametrize("cargo", [0, 1])
+@pytest.mark.parametrize("cargo", [0, 1, 12, 24])
 def test_review_combat_dump_terms_disclose_actual_escape_probability(tier, cargo):
+    import copy
     world = _world_with_seed(42); world.save.cargo = {"food": cargo}
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
     pirate = vr.Pirate("Raider", tier, 80, 80)
     line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False) if row.startswith("[D]"))
-    assert f"{vr.evade_chance(world, pirate, dumped_cargo=bool(cargo)):.0%}" in line
+    after = copy.deepcopy(world)
+    if cargo: vr._dispose_cargo(after, "food", 1)
+    assert f"{vr.evade_chance(after, pirate, dumped_cargo=bool(cargo)):.0%}" in line
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
     assert "one unit" in line if cargo else "hold empty" in line
 
 
@@ -8292,3 +8297,14 @@ def test_review_combat_kill_terms_name_both_factions_and_notoriety(patrol):
     assert ("Concord -10" if patrol else "Concord +2") in lines
     assert ("Blackwake +3" if patrol else "Blackwake -1") in lines
     if patrol: assert "notoriety +3" in lines
+
+
+
+def test_dump_preview_matches_actual_post_disposal_escape_boundary(monkeypatch):
+    world = _world_with_seed(42); world.save.cargo = {"food": 1}
+    pirate = vr.Pirate("Raider", 0, 50, 50)
+    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False) if row.startswith("[D]"))
+    monkeypatch.setattr(vr, "read_key", lambda: "D")
+    monkeypatch.setattr(world.event_rng, "random", lambda: 0.695)
+    with contextlib.redirect_stdout(io.StringIO()): assert vr.screen_combat(vr.Palette(False), world, pirate) == "escaped"
+    assert not world.save.cargo and "70%" in line
