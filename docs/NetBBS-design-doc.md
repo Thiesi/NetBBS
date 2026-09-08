@@ -4853,6 +4853,14 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
+Voidrunner combat uses height-aware pages with numeric opponent/hull, fuel and
+cargo telemetry and current credits in the heading. The last checkpointed exchange
+remains available while paging or toggling tactical details. Browsing consumes no
+combat turn or encounter randomness. Escape odds, conditional bribe payment and
+refusal retaliation, random one-unit cargo sacrifice and patrol surrender terms
+are visible before choosing an action. Existing action hotkeys work across pages;
+this presentation slice preserves combat rules, RNG order and resumable state.
+
 Voidrunner offers saved display presets from station Display Options: full palette
 using the existing terminal color depth, basic 16-color, monochrome Unicode, and
 plain text with ASCII artwork. Monochrome/plain suppress ANSI styling; plain maps

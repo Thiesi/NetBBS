@@ -158,6 +158,21 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### Combat telemetry and last exchange
+
+Combat pages show current credits, enemy HP, hull/fuel and cargo usage. Browse
+with **[<] Previous / [>] Next** and toggle **[Q] Info** for shields, weapons,
+notoriety and faction consequences. These keys spend no turn; the last saved
+exchange stays available at the front of the pages, including after reconnecting.
+
+**[F] Fight** exchanges one round, **[E] Evade** attempts escape, and pirates also
+allow **[D] Dump & evade** (one random cargo unit) and an affordable **[B] Bribe**.
+Read the displayed odds and consequences: failed evasion or refused bribery draws
+fire; a pirate takes bribe credits only on acceptance. Patrols instead allow an
+affordable **[S] Surrender**, which pays the stated fine and clears notoriety.
+Action letters work from every page. Unaffordable choices retain explanatory
+terms but expose no action key. Disconnecting preserves the existing pending fight.
+
 ### Saved display presets
 
 Station **[O] Display Options** offers **[1] Full palette**, **[2] 16-color**,
