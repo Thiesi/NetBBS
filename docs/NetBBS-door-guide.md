@@ -158,6 +158,18 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### Commodity market pages
+
+Station **[M] Commodity Market** pages with **[<] Previous / [>] Next**; each
+commodity letter works from every page. Credits stay in the heading, while entries
+show per-unit quotes, stock, station buying demand and cargo aboard. Cargo usage
+is labelled as capacity rather than a health gauge. Illegal and price-event notices
+can appear together; prohibited purchases are identified before a trade.
+
+Buying or selling retains the result in the refreshed catalog after saving it.
+Cancel a quantity with Enter to leave the career unchanged and keep the prior
+result. **[X] Futures** opens wholesale orders; **[Q] Back** returns to the station.
+
 ### Engineering yard and crew pages
 
 The yard and crew roster fit the terminal height, stacking terms at narrow widths.

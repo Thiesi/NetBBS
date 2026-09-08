@@ -4835,6 +4835,15 @@ loaded scoreboard and its wrapped pages remain a read-only snapshot for the visi
 Back and paging never discard or rewrite the independently retained score records.
 Achievement categories and per-career archives remain separate roadmap work.
 
+The spot-market catalog uses height-aware commodity entries with credits in the
+heading, numeric cargo usage, unit buy/sell prices, stock, station buying demand
+and held quantities. Commodity letters retain their meanings across pages. Illegal
+cargo and regional price-event labels are shown together, and prohibited purchases
+at ordinary stations are labelled unavailable in both catalog and details. A manual
+unadvertised buy key still rejects without changing state. Completed/rejected trades
+return a retained result to the catalog; cancelled quantities preserve its prior
+result. Existing checkpoint-before-acknowledgement and trade rules remain unchanged.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 500-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. Buying and same-station recycling do not grant
