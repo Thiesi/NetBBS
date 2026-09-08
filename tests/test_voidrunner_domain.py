@@ -8255,3 +8255,40 @@ def test_combat_telemetry_unaffordable_actions_have_terms_without_hotkeys(patrol
     assert "UNAFFORDABLE" in text
     assert str(vr.notoriety_fine_cost(0) if patrol else vr.bribe_cost(pirate)) + "cr" in text
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_review_combat_info_keeps_exchange_before_tactical_heading(monkeypatch, width, height):
+    world = _world_with_seed(42); pirate = vr.Pirate("Raider", 0, 50, 50)
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    lines = vr.combat_display_lines(world, pirate, ["Your last shot hit."], patrol=False, details=True)
+    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/B]Act [Q]Info [< >]Page: ")
+    assert pages[0][0] == "Last exchange:"
+    assert lines.index("Your last shot hit.") < lines.index("Tactical Systems:")
+
+
+@pytest.mark.parametrize("tier", [0, 4])
+@pytest.mark.parametrize("cargo", [0, 1])
+def test_review_combat_dump_terms_disclose_actual_escape_probability(tier, cargo):
+    world = _world_with_seed(42); world.save.cargo = {"food": cargo}
+    pirate = vr.Pirate("Raider", tier, 80, 80)
+    line = next(row for row in vr.combat_display_lines(world, pirate, [], patrol=False) if row.startswith("[D]"))
+    assert f"{vr.evade_chance(world, pirate, dumped_cargo=bool(cargo)):.0%}" in line
+    assert "one unit" in line if cargo else "hold empty" in line
+
+
+@pytest.mark.parametrize("hull", [20, 60])
+def test_review_combat_low_hull_warning_does_not_invent_one_hit_risk(hull):
+    world = _world_with_seed(42); world.save.ship.hull_hp = hull
+    lines = " ".join(vr.combat_display_lines(world, vr.Pirate("Weak raider", 0, 20, 20), [], patrol=False))
+    assert "another hit may destroy" not in lines
+    assert ("LOW HULL" in lines) == (hull <= 20)
+
+
+@pytest.mark.parametrize("patrol", [False, True])
+def test_review_combat_kill_terms_name_both_factions_and_notoriety(patrol):
+    world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 2, 50, 50)
+    lines = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True))
+    assert ("Concord -10" if patrol else "Concord +2") in lines
+    assert ("Blackwake +3" if patrol else "Blackwake -1") in lines
+    if patrol: assert "notoriety +3" in lines

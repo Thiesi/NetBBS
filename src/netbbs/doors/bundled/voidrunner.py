@@ -5779,15 +5779,16 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     """Read-only combat terms; no random draw or persisted presentation state."""
     ship, pilot = world.save.ship, world.save.pilot
     used = sum(world.save.cargo.values())
-    lines = ["Tactical Systems:"] if details else []
+    lines = []
     if result:
         lines += ["Last exchange:"] + result
+    if details: lines.append("Tactical Systems:")
     lines += [
         f"{pirate.name} (tier {pirate.tier}): HP {pirate.hp}/{pirate.hp_max}.",
         f"Your hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}.",
         f"Cargo {used}/{cargo_capacity(ship)} used; Day {world.save.turn}.",
     ]
-    if ship.hull_hp * 3 <= hull_hp_max(ship): lines.append("LOW HULL: another hit may destroy your ship.")
+    if ship.hull_hp * 3 <= hull_hp_max(ship): lines.append("LOW HULL: one third of maximum hull or less.")
     lines += [
         "[F] Fight: fire once; a surviving enemy returns fire.",
         f"[E] Evade: about {evade_chance(world, pirate, dumped_cargo=False):.0%} success; failure draws enemy fire.",
@@ -5797,8 +5798,10 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         lines.append((f"[S] Surrender: pay {cost}cr, clear notoriety and escape. " if pilot.credits >= cost else f"Surrender requires {cost}cr. ") +
                      ("Available." if pilot.credits >= cost else "UNAFFORDABLE; surrender unavailable."))
     else:
-        lines.append("[D] Dump & evade: lose one unit of a random held commodity for a better escape chance; failure draws fire."
-                     if used else "[D] Dump & evade: hold empty; same chance as Evade.")
+        chance = evade_chance(world, pirate, dumped_cargo=bool(used))
+        lines.append(f"[D] Dump & evade: about {chance:.0%} success; " +
+                     ("lose one unit of a random held commodity; failure draws fire."
+                      if used else "hold empty; same chance as Evade."))
         cost = bribe_cost(pirate)
         lines.append((f"[B] Bribe: " if pilot.credits >= cost else "Bribe unavailable: ") +
                      f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
@@ -5806,8 +5809,8 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     if details:
         lines += [f"Shields Tier {ship.shield_tier}: reduce incoming damage by {ship.shield_tier * 3}, minimum 1.",
                   f"Weapons Tier {ship.weapon_tier}: +{ship.weapon_tier * 4} damage; gunner bonus +{3 if ship.has_gunner else 0}.",
-                  f"Notoriety {pilot.notoriety}. " + ("Destroying this patrol worsens notoriety and Concord standing; no salvage."
-                  if patrol else "Destroying this pirate earns salvage and changes faction standing.")]
+                  f"Notoriety {pilot.notoriety}. " + ("Destroying this patrol: notoriety +3, Concord -10, Blackwake +3; no salvage."
+                  if patrol else "Destroying this pirate earns salvage; Concord +2, Blackwake -1.")]
     return lines
 
 
