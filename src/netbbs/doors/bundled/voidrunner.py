@@ -965,8 +965,10 @@ def _validate_combat_mission_snapshot(data: dict, kind: str) -> None:
 def _load_pending_travel(value: dict | None) -> dict | None:
     if value is None:
         return None
-    if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
-        raise ResumeError("This interrupted journey uses an unsupported format.")
+    if not isinstance(value, dict) or type(value.get("version")) is not int:
+        raise ResumeError("This interrupted journey has an invalid format version.")
+    if value["version"] != 1:
+        raise UnsupportedSave("This interrupted journey uses an unsupported format.")
     try:
         if any(type(value[key]) is not int for key in ("origin", "destination", "escort_index")):
             raise ValueError("invalid journey position")
@@ -2454,6 +2456,8 @@ def _decode_career(raw: bytes) -> SaveData:
         _validate_pending_travel_consistency(save)
         if save.event_rng_state is not None:
             version, state, gaussian = save.event_rng_state
+            if type(version) is int and version > random.Random.VERSION:
+                raise UnsupportedSave("The saved random state requires a newer runtime.")
             if gaussian is not None and (type(gaussian) not in (int, float) or not math.isfinite(gaussian)):
                 raise ValueError("invalid random state")
             random.Random().setstate((version, tuple(state), gaussian))

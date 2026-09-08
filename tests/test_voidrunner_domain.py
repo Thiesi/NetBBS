@@ -5423,12 +5423,20 @@ def test_missing_primary_requires_recovery_and_validated_previous_can_be_restore
     assert restored.turn == 7 and (tmp_path / "77.json").read_bytes() == expected
 
 
-def test_future_schema_never_offers_or_allows_downgrade_recovery(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["schema", "galaxy", "journey", "rng"])
+def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkeypatch, kind):
     import json
+    import os
+    import subprocess
 
     previous = _broken_career_with_previous(tmp_path)
     future = json.loads(previous)
-    future["schema_version"] = 99
+    if kind in {"schema", "galaxy"}:
+        future[f"{kind}_version"] = 99
+    elif kind == "journey":
+        future["pending_travel"] = {"version": 99}
+    else:
+        future["event_rng_state"] = [99, [], None]
     path = tmp_path / "77.json"
     path.write_text(json.dumps(future), encoding="utf-8")
     original = path.read_bytes()
@@ -5441,6 +5449,13 @@ def test_future_schema_never_offers_or_allows_downgrade_recovery(tmp_path, monke
     assert "[R]estore" not in output.getvalue()
     with pytest.raises(vr.UnsupportedSave):
         vr.restore_previous_career(tmp_path, 77, previous)
+    assert path.read_bytes() == original and not list(tmp_path.glob("77.recovery-*"))
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"RYB", capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == 0 and not result.stderr
+    assert b"[R]estore" not in result.stdout and b"Pilot callsign" not in result.stdout
     assert path.read_bytes() == original and not list(tmp_path.glob("77.recovery-*"))
 
 
