@@ -4878,6 +4878,21 @@ Verification fuel, flags and retained result checkpoint before acknowledgement;
 closing a mismatch checkpoints its terminal result before the parent removes the
 contract. Validate warrant versions and reported-outcome consistency on load.
 
+New two-raider encounters use a versioned coordinated formation. Before the first
+combat decision, Target switches which raider to engage first without spending a
+turn. Both opponents and the covering-fire contribution are disclosed. While both
+remain, the other raider adds 2 + twice its tier to a surviving target's return
+fire, after shields and before Brace reduction. Killing the target prevents that
+exchange's return fire and ends covering fire for the remaining duel. Brace
+therefore protects against the pair, while target selection can remove a fragile
+or dangerous partner first. No healing occurs between foes; successful evasion or
+bribery breaks contact with the whole squadron, as before.
+
+Formation metadata is attached only when a new pair is generated. Existing cached
+squadrons retain their original sequential behavior. Target selection checkpoints
+order and combat state before acknowledgement and closes after any valid combat
+decision. Formation creation and target changes consume no encounter RNG.
+
 New Voidrunner fights use a versioned tactical ruleset with three deterministic
 opponent patterns: Raider (attack, volley, recover), Bulwark (cover, volley,
 recover), and Skirmisher (harry, attack, volley). The current intent and incoming

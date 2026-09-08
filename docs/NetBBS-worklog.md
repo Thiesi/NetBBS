@@ -5125,5 +5125,15 @@ Stored ambushes resume directly without redisplaying or resolving boarding.
 Distress cost disclosure preserves the original capped 2-4 fuel draw, including
 low/zero-fuel careers, and must warn when that cap can empty the tank.
 
+Coordinated squadron rules are opt-in through versioned encounter formation
+metadata, created only alongside a newly generated pair. Do not retrofit it into
+a cached encounter. The ordered source opponents and combat target must agree;
+Target changes both, resets only an unengaged target's fresh tactics, and consumes
+no encounter RNG. Reject contradictory targets or pre-engagement advancement.
+Cover derives from the remaining partner while index is zero, after shield damage
+and before Brace reduction. Advance the index and clear combat together before
+checkpointing; cover then disappears for the final duel. Seeded target-order
+probes demonstrate profile-dependent mechanical tradeoffs, not human engagement.
+
 Sector danger spans 0-5; opponent tiers span 0-4. Keep their scales distinct in
 encounter labels and test the danger-5 case when deriving rewards or tier ranges.
