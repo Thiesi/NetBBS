@@ -12,8 +12,9 @@
   guide's layout rather than that node's paths, so confirm yours with
   `service netbbs status` after the first start.
 
-Both default to a config file at a fixed path (`/etc/netbbs/netbbs.toml`
-on Linux, `/usr/pkg/etc/netbbs/netbbs.toml` on NetBSD) and run NetBBS in
+Both default to a config file at `/etc/netbbs/netbbs.toml` — the path
+`docs/NetBBS-operator-guide.md` §2 tells you to create, on either
+platform — and run NetBBS in
 the foreground, letting the service supervisor manage backgrounding and
 restart — NetBBS never daemonizes itself (design doc §13.8). See
 `docs/NetBBS-operator-guide.md` for the full install-through-running

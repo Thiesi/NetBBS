@@ -16,7 +16,7 @@
 #						# starts the node through su(1), so
 #						# /sbin/nologin will not work)
 #	netbbs_statedir="/var/lib/netbbs"		# node state; must be writable by netbbs_user
-#	netbbs_config="/usr/pkg/etc/netbbs/netbbs.toml"
+#	netbbs_config="/etc/netbbs/netbbs.toml"
 #	netbbs_python="/var/lib/netbbs/.venv/bin/python"
 #	netbbs_logfile="/var/lib/netbbs/netbbs.service.log"
 #	netbbs_stop_timeout="150"			# seconds to wait for a graceful stop
@@ -46,7 +46,7 @@ load_rc_config $name
 
 : ${netbbs_user:="netbbs"}
 : ${netbbs_statedir:="/var/lib/netbbs"}
-: ${netbbs_config:="/usr/pkg/etc/netbbs/netbbs.toml"}
+: ${netbbs_config:="/etc/netbbs/netbbs.toml"}
 : ${netbbs_python:="${netbbs_statedir}/.venv/bin/python"}
 : ${netbbs_ld_library_path:="/usr/pkg/lib"}
 : ${netbbs_logfile:="${netbbs_statedir}/netbbs.service.log"}
@@ -78,11 +78,38 @@ status_cmd="netbbs_status"
 # declared here.
 extra_commands="status"
 
+# Read the pidfile into $_pid, validated. This runs as root and the
+# pidfile lives in a directory writable by netbbs_user, so its contents
+# are untrusted input to `kill` -- not a number we can assume. `-1` is
+# the case that matters: it passes `kill -0`, yields no `ps` output (so
+# the deliberate "empty ps means still running" fail-safe below would
+# call it live), and then `kill -TERM -1` signals every process on the
+# host. Only a plain positive decimal is accepted. `read` also takes
+# just the first line, so trailing junk cannot ride along.
+netbbs_read_pid()
+{
+	_pid=""
+	[ -f "${pidfile}" ] || return 1
+	# Not `read ... || return 1`: read reports failure at EOF on a final
+	# line with no newline, having still assigned the value. Judge the
+	# value itself -- an unreadable or empty file leaves $_pid empty and
+	# is caught below, while a pidfile written without a trailing newline
+	# must not read as "not running" and start a second node.
+	read -r _pid < "${pidfile}" 2>/dev/null
+	case "${_pid}" in
+	"" | *[!0-9]*)	_pid=""; return 1 ;;
+	esac
+	# kill(2) reads 0 as "my whole process group"; a real pid is >= 1.
+	if [ "${_pid}" -lt 1 ]; then
+		_pid=""
+		return 1
+	fi
+	return 0
+}
+
 netbbs_running()
 {
-	[ -f "${pidfile}" ] || return 1
-	_pid=$(cat "${pidfile}" 2>/dev/null)
-	[ -n "${_pid}" ] || return 1
+	netbbs_read_pid || return 1
 	kill -0 "${_pid}" 2>/dev/null || return 1
 	# The pidfile lives in the state directory, so it survives a reboot
 	# -- and a recycled pid belonging to some unrelated process would
@@ -103,7 +130,7 @@ netbbs_running()
 netbbs_start()
 {
 	if netbbs_running; then
-		echo "netbbs already running as pid $(cat "${pidfile}")."
+		echo "netbbs already running as pid ${_pid}."
 		return 1
 	fi
 	if [ ! -x "${netbbs_python}" ]; then
@@ -143,7 +170,17 @@ netbbs_start()
 	# NetBBS logs to its own self-rotating netbbs.log beside the database
 	# as well (operator guide §4); netbbs_logfile only captures what it
 	# still writes to stdout/stderr, including a startup failure that
-	# happens before logging is configured. It does not rotate itself.
+	# happens before logging is configured.
+	#
+	# This file does NOT rotate itself, and it shares a filesystem with
+	# the database. Bound it with newsyslog(8) -- add to
+	# /etc/newsyslog.conf, adjusting the path and owner to match:
+	#
+	#   /var/lib/netbbs/netbbs.service.log netbbs:netbbs 640 5 10240 * -
+	#
+	# (five generations, rotate at 10 MiB -- the same bound netbbs.log
+	# applies to itself.) Set netbbs_logfile=/dev/null in rc.conf if you
+	# would rather not keep this second copy at all.
 	su -m "${netbbs_user}" -c "nohup env HOME=\"${netbbs_statedir}\" LD_LIBRARY_PATH=\"${netbbs_ld_library_path}\" \"${netbbs_python}\" -m netbbs --config \"${netbbs_config}\" >> \"${netbbs_logfile}\" 2>&1 & echo \$! > \"${pidfile}\""
 	# NetBBS binds its listeners during startup; a config or import error
 	# surfaces within a second or two. Waiting here turns "the service
@@ -151,7 +188,7 @@ netbbs_start()
 	# the point the operator ran the command.
 	sleep 3
 	if netbbs_running; then
-		echo "netbbs started as pid $(cat "${pidfile}")."
+		echo "netbbs started as pid ${_pid}."
 	else
 		echo "netbbs failed to start -- see ${netbbs_logfile}." >&2
 		tail -5 "${netbbs_logfile}" >&2
@@ -167,12 +204,19 @@ netbbs_stop()
 		rm -f "${pidfile}"
 		return 0
 	fi
-	_pid=$(cat "${pidfile}")
 	echo "Stopping netbbs (pid ${_pid}), up to ${netbbs_stop_timeout}s."
 	kill -TERM "${_pid}"
 	_waited=0
 	while kill -0 "${_pid}" 2>/dev/null; do
 		if [ "${_waited}" -ge "${netbbs_stop_timeout}" ]; then
+			# Last resort. A SIGKILLed node cannot run its own door
+			# cleanup, and doors are deliberately spawned into their
+			# own sessions (netbbs.doors.runtime: start_new_session),
+			# so they are not in any process group this script could
+			# signal instead -- only the node itself can reap them.
+			# A door subprocess can therefore outlive a forced stop.
+			# Keep netbbs_stop_timeout comfortably above
+			# shutdown.graceful_delay_seconds so this stays unreached.
 			echo "netbbs did not exit in ${netbbs_stop_timeout}s; sending SIGKILL." >&2
 			kill -KILL "${_pid}" 2>/dev/null
 			break
@@ -187,7 +231,7 @@ netbbs_stop()
 netbbs_status()
 {
 	if netbbs_running; then
-		echo "netbbs is running as pid $(cat "${pidfile}")."
+		echo "netbbs is running as pid ${_pid}."
 	else
 		echo "netbbs is not running."
 		return 1
