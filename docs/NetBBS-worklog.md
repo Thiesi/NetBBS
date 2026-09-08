@@ -5052,3 +5052,9 @@ Retained station outcomes belong exclusively inside the page budget. Printing
 settlement messages before the paging loop duplicates acknowledgements and can
 overflow even the first 20x10 frame; validate pending one-order and multi-order
 settlements between actual input requests, not only an idle command deck.
+
+Pilot-record pagination caches wrapped pages separately for each read-only view.
+Formatting all retained entries for every Next key makes a large legacy record
+quadratic to browse even when a single render is linear. Invalidate the view cache
+when an action changes its result/state; never reduce display volume by silently
+slicing retained history or truncating contract descriptions.

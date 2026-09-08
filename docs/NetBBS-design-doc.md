@@ -4818,6 +4818,16 @@ and achievement details for this visit; it is a read-only view toggle, not a sav
 career option. Paging and invalid keys do not repeat station settlement. Completed
 settlements retain their result in the deck after the existing durable checkpoint.
 
+Pilot records provide direct Overview, Contracts and History views with Back and
+pagination on every page. Contracts retain complete descriptions, public target
+coordinates, inclusive deadlines and reward context; the mission board remains
+the place for contract actions. History exposes every already-retained highlight
+and log entry newest first, without extending storage retention or silently hiding
+earlier entries behind a display limit. Read-only pages are cached per view for
+the visit so large legacy records are not reformatted on every key. Retirement
+keeps its existing top-rank eligibility, final chosen-action confirmation, new-career
+bonus and durable checkpoint. Cancelling retains the record with a visible result.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 500-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. Buying and same-station recycling do not grant
