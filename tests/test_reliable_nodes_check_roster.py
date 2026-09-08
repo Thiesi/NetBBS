@@ -575,3 +575,57 @@ def test_read_bounded_stops_at_its_deadline():
 
     with pytest.raises(TimeoutError):
         _read_bounded(Dripping(), deadline=_time.monotonic() + 0.2)
+
+
+def test_read_bounded_deadline_survives_a_sub_chunk_drip():
+    """`read(n)` blocks until it has n bytes or EOF, so a deadline
+    checked only between `read` calls is never reached during exactly
+    the slow drip it exists to catch. `read1` returns after one
+    underlying socket read, which is what makes it observable."""
+    import time as _time
+    from services.reliable_nodes.check_roster import _read_bounded
+
+    class Dripping:
+        """Never returns a full chunk, and never reaches EOF."""
+
+        def read1(self, size):
+            _time.sleep(0.02)
+            return b"x"
+
+        def read(self, size):  # pragma: no cover - read1 is preferred
+            raise AssertionError("must not block on a full-size read")
+
+    started = _time.monotonic()
+    with pytest.raises(TimeoutError):
+        _read_bounded(Dripping(), deadline=started + 0.3)
+    assert _time.monotonic() - started < 5, "must give up near its deadline"
+
+
+def test_wrapping_terminates_when_a_glyph_is_wider_than_the_terminal():
+    """At width 1 a double-width glyph can never fit; a zero-length cut
+    would append "" and reassign the same chunk forever, hanging the
+    checker instead of printing a verdict."""
+    from services.reliable_nodes.check_roster import _wrap_to_width
+
+    lines = _wrap_to_width("東京ノード", 1)
+    assert lines and "".join(lines) == "東京ノード"
+
+
+def test_load_error_text_from_a_server_is_sanitized(tmp_path, capsys):
+    """An HTTP reason phrase is server-controlled and reaches stderr on
+    this path, so it gets the same treatment as any other roster-derived
+    string bound for a terminal."""
+    from services.reliable_nodes import check_roster as module
+
+    def exploding(source, timeout=None):
+        raise OSError("HTTP 500 \x1b[2Jcleared your screen")
+
+    original = module.load_roster
+    module.load_roster = exploding
+    try:
+        assert main([str(tmp_path / "any.json")]) == 2
+    finally:
+        module.load_roster = original
+    captured = capsys.readouterr()
+    assert "\x1b" not in captured.err
+    assert "\\x1b" in captured.err

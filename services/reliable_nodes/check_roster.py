@@ -194,7 +194,12 @@ def _read_bounded(response, *, deadline: float | None = None) -> bytes:
     while remaining > 0:
         if deadline is not None and time.monotonic() > deadline:
             raise TimeoutError("timed out reading the response body")
-        chunk = response.read(min(remaining, 16 * 1024))
+        # `read(n)` waits for n bytes or EOF, so a server dripping under
+        # the socket timeout never returns control to the check above.
+        # `read1` returns as soon as one underlying socket read
+        # completes, which is what makes the deadline observable at all.
+        read1 = getattr(response, "read1", None)
+        chunk = read1(min(remaining, 16 * 1024)) if read1 else response.read(min(remaining, 1024))
         if not chunk:
             break
         chunks.append(chunk)
@@ -383,6 +388,11 @@ def _wrap_to_width(text: str, width: int) -> list[str]:
                     break
                 taken += step
                 cut = index + 1
+            # Always consume at least one character: at width 1 a
+            # double-width glyph can never fit, and a zero-length cut
+            # would append "" and reassign the same chunk forever --
+            # hanging the checker instead of printing a verdict.
+            cut = max(cut, 1)
             lines.append(chunk[:cut])
             chunk = chunk[cut:]
         lines.append(chunk)
@@ -501,7 +511,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         source = _resolve_roster(args)
     except ValueError as exc:
-        print_wrapped(str(exc), file=sys.stderr)
+        print_wrapped(sanitize(str(exc)), file=sys.stderr)
         return 2
     try:
         results, problems = check_roster(source, timeout=args.timeout)
@@ -510,7 +520,10 @@ def main(argv: list[str] | None = None) -> int:
         # a malformed or non-HTTP connection would otherwise escape as a
         # traceback rather than this diagnostic -- the same gap fixed in
         # probe_link_node, on the other path that reaches urlopen.
-        print_wrapped(f"could not read roster {source}: {exc}", file=sys.stderr)
+        # `exc` can carry server-controlled text (an HTTP reason phrase),
+        # so it gets the same treatment as any other roster-derived
+        # string reaching a terminal.
+        print_wrapped(sanitize(f"could not read roster {source}: {exc}"), file=sys.stderr)
         return 2
 
     for problem in problems:

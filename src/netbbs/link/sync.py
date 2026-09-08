@@ -101,10 +101,12 @@ candidate fallback reaches anything for `_ISOLATION_WARNING_PASS_
 INTERVAL` consecutive passes, *and there was something to reach in the
 first place*, that is logged as a single WARNING naming the seeds
 tried, rather than being left implicit in the per-dial failures. The
-qualifier matters: a full peer that declines the roster, configures no
-seeds, and only accepts inbound helloes is working exactly as
-configured, and nothing in this outbound loop would ever observe the
-inbound traffic proving it. Those individual failures are indistinguishable
+qualifier matters, and only for a node that accepts inbound: a full
+peer that declines the roster, configures no seeds, and only serves
+inbound helloes is working exactly as configured, and nothing in this
+outbound loop would ever observe the traffic proving it. An
+outgoing-only node with nothing to dial is the opposite -- it can
+neither reach out nor be reached -- so it still warns. Those individual failures are indistinguishable
 from ordinary churn -- which is exactly how a reliable node that had
 quietly stopped answering went unnoticed -- while "reached nothing at
 all, repeatedly" is a state worth putting in front of a SysOp, and a
@@ -338,6 +340,12 @@ async def run_link_sync(
         # never merely because the list exists. Re-read from the lane
         # every pass, not captured at startup, so a console answer (or a
         # daily roster refresh) takes effect without a restart.
+        # One view of this node's own hello per pass, taken after the
+        # refresh above: both the isolation gate below and the
+        # relay-selection check further down ask it the same question
+        # (is this node outgoing-only?), and sampling twice invited them
+        # to disagree within a single pass.
+        own_hello = own_hello_provider()
         reliable = await lane.run(_reliable_node_urls_if_accepted)
         # De-duplicated, order-preserving: operator-configured first.
         pass_seeds = list(dict.fromkeys(seeds + reliable))
@@ -373,24 +381,30 @@ async def run_link_sync(
         # is the distinguishable signal, and being a WARNING in the
         # `netbbs.link` namespace it lands in the SysOp-visible bounded
         # diagnostic log (design doc §13.11) without any further wiring.
-        # A node with nothing to dial is not isolated, it is inbound-only
-        # by configuration: a full peer may decline the roster, configure
-        # no seeds, and serve inbound helloes perfectly well. Its
-        # completed peers are removed from candidate_descriptors, so this
-        # loop would otherwise see "reached nothing" forever and accuse a
-        # healthy node of being cut off. Only a pass that actually had
-        # somewhere to reach and failed counts toward isolation.
-        # Dialable, not merely present: a peer-list candidate whose
-        # descriptor is outgoing-only carries no address, so
-        # _try_candidate_fallback skips it without ever attempting a
-        # dial. Counting a non-empty mapping as "somewhere to reach"
-        # would let a node with nothing but such candidates walk back
-        # into the same false warning this gate exists to prevent.
+        # Having nothing to dial only excuses a node that can still be
+        # *reached*: a full peer may decline the roster, configure no
+        # seeds, and serve inbound helloes perfectly well, and this
+        # outbound loop never observes that traffic (its completed peers
+        # leave candidate_descriptors), so counting those passes would
+        # accuse a healthy node of being cut off forever.
+        #
+        # An outgoing-only node is the opposite case and must NOT be
+        # exempted: it accepts nothing inbound, so with no seed, no
+        # roster entry and no dialable candidate it genuinely cannot
+        # reach the network at all, and silence is exactly the state
+        # worth reporting.
+        #
+        # "Dialable", not merely present: a candidate whose descriptor is
+        # itself outgoing-only carries no address, so
+        # _try_candidate_fallback skips it without attempting a dial.
+        accepts_inbound = not own_hello.descriptor.payload.get("outgoing_only")
         had_somewhere_to_reach = bool(pass_seeds) or any(
             _dialable_addresses(descriptor)
             for descriptor in node.candidate_descriptors.values()
         )
-        if reached_network or not had_somewhere_to_reach:
+        if not had_somewhere_to_reach and accepts_inbound:
+            isolated_passes = 0
+        elif reached_network:
             isolated_passes = 0
         else:
             isolated_passes += 1
@@ -415,7 +429,7 @@ async def run_link_sync(
         # `own_hello_provider` already encodes the addresses/outgoing_
         # only decision (this method's own docstring), so there's
         # nothing new to thread through from node startup config.
-        if own_hello_provider().descriptor.payload.get("outgoing_only"):
+        if own_hello.descriptor.payload.get("outgoing_only"):
             # Maintain the outgoing relay set and pick up anything held
             # *before* pushing pending mail below -- so a message that
             # only just became deliverable via a freshly-selected relay

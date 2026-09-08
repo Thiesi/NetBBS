@@ -3276,9 +3276,12 @@ inbound-only node of isolation forever.
 
 A checker that duplicates rules is only as good as the pin holding the copy in
 place. `services/` cannot import `netbbs` (it runs where the package is not
-installed), so the roster rules exist twice — and every divergence points the
-same way: the gate approves a roster the network then rejects or truncates,
-which is the same false green the checker exists to remove. The divergences are
+installed), so the roster rules exist twice. Drift runs both ways and both
+matter: a looser checker approves a roster the network then rejects or
+truncates (the false green this tool exists to remove), a stricter one blocks
+publishing a roster every node would have accepted. Differential coverage has
+to assert the two agree, not merely that the checker is conservative. The
+divergences are
 not individually obvious ones either — stripping before an emptiness test,
 normalizing before de-duplication, an empty list meaning deliberate retirement,
 a version mismatch discarding the document whole, `json.loads` on bytes
@@ -3296,8 +3299,10 @@ over-long DNS label raises `UnicodeError` from IDNA encoding, a `ValueError`,
 from inside `urlopen`). Bounding the bytes is likewise not the same as bounding the wait: `urlopen`'s
 timeout applies per socket operation, so a server dripping bytes below it holds
 a read open indefinitely without ever reaching the cap, and a cron monitor then
-stops monitoring without saying so. Read in chunks against a wall-clock
-deadline. And a status code alone is not evidence of a Link node:
+stops monitoring without saying so. Read against a wall-clock deadline — and
+with `read1`, not `read`: `read(n)` blocks until it has n bytes or EOF, so a
+deadline checked between `read` calls is never reached during exactly the drip
+it is meant to catch. And a status code alone is not evidence of a Link node:
 a 429 from a CDN fronting a dead node proves only that a CDN is there, so the
 rate-limit body has to be checked like any other signature.
 

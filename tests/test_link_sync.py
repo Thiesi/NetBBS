@@ -1490,7 +1490,7 @@ def test_sync_runs_no_pass_at_all_when_stop_event_is_already_set(tmp_path):
         seed.close()
 
 
-def _run_passes(node, node_db, seeds, *, passes: int):
+def _run_passes(node, node_db, seeds, *, passes: int, outgoing_only: bool = True):
     """Run exactly `passes` sync passes, then stop. Counts passes from
     `refresh`, which `run_link_sync` calls once at the top of every
     pass, and sets `stop_event` on the last one -- the loop condition is
@@ -1506,7 +1506,13 @@ def _run_passes(node, node_db, seeds, *, passes: int):
                 stop_event.set()
 
         def __call__(self):
-            return _hello_for(node)
+            return node.build_hello(
+                addresses=None if outgoing_only else [
+                    {"protocol": "http", "address": "127.0.0.1", "port": 7862}
+                ],
+                outgoing_only=outgoing_only,
+                created_at="2026-01-01T00:00:00+00:00",
+            )
 
     async def scenario():
         async with aiohttp.ClientSession() as session:
@@ -1631,7 +1637,7 @@ def test_sync_does_not_call_an_inbound_only_node_isolated(tmp_path, caplog):
     node_db = _NodeDb(tmp_path, "inbound-only")
     try:
         with caplog.at_level("WARNING", logger="netbbs.link.sync"):
-            _run_passes(node, node_db, [], passes=9)
+            _run_passes(node, node_db, [], passes=9, outgoing_only=False)
         assert _isolation_warnings(caplog) == []
     finally:
         node_db.close()
@@ -1656,7 +1662,26 @@ def test_sync_ignores_undialable_candidates_when_counting_isolation(tmp_path, ca
     node_db = _NodeDb(tmp_path, "knows-only-undialable")
     try:
         with caplog.at_level("WARNING", logger="netbbs.link.sync"):
-            _run_passes(node, node_db, [], passes=9)
+            _run_passes(node, node_db, [], passes=9, outgoing_only=False)
         assert _isolation_warnings(caplog) == []
+    finally:
+        node_db.close()
+
+
+def test_sync_still_warns_an_outgoing_only_node_with_nothing_to_dial(tmp_path, caplog):
+    """Issue #313 review round 3: the "nowhere to reach" exemption is
+    only valid for a node that can still be *reached*. An outgoing-only
+    node accepts nothing inbound, so with no seed, no roster entry and
+    no dialable candidate it genuinely cannot touch the network at all
+    — exactly the state the warning exists for. Exempting it would have
+    made the silent case silent again."""
+    node = LinkNode(identity=bootstrap_node_identity("outgoing-and-stranded"))
+    node_db = _NodeDb(tmp_path, "outgoing-and-stranded")
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [], passes=3, outgoing_only=True)
+        warnings = _isolation_warnings(caplog)
+        assert len(warnings) == 1, warnings
+        assert "(none configured)" in warnings[0]
     finally:
         node_db.close()
