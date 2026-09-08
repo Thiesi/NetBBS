@@ -4853,6 +4853,17 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
+Voidrunner offers saved display presets from station Display Options: full palette
+using the existing terminal color depth, basic 16-color, monochrome Unicode, and
+plain text with ASCII artwork. Monochrome/plain suppress ANSI styling; plain maps
+box/block/star decorations to equal-width ASCII characters while retaining Unicode
+pilot text and input. This is an artwork fallback, not a change to the UTF-8 door
+transport. A chosen preset checkpoints before acknowledgement; browsing and
+reselecting the current preset write nothing. The validated additive preference
+defaults to full palette for older careers and survives retirement. Apply it after
+loading a valid career and before its normal title/welcome output; recovery uses
+the default presentation until a valid career is available. No animation is added.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 500-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. Buying and same-station recycling do not grant

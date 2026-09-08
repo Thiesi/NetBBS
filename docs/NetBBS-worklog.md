@@ -5064,3 +5064,11 @@ budgets. Notice-only pages expose navigation rather than unusable selection keys
 A caller may retain its list position for read-only inspection; reset that position
 after a changed result, and keep oversized-choice read-through protection when
 returning directly to a continuation page.
+
+Display preferences are additive validated career metadata and survive retirement.
+Apply a valid saved preference before the normal title; preserving recovery uses
+the default until a valid career is selected. A changed preset checkpoints before
+applying output transformations or acknowledging success. ASCII art substitutions
+preserve display columns and must not change the UTF-8 input decoder or Unicode
+letter handling. Monochrome/plain output strips styling at the shared output
+boundary, including trusted reset/bold sequences outside the palette.
