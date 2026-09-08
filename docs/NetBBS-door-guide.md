@@ -158,6 +158,33 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### Named crew and service
+
+The yard's **[K] Crew** roster introduces three named specialists with distinct
+personalities. It shows hire cost, ongoing wages, current benefits and the next
+promotion before hiring. **[A-C]** hires or dismisses the selected role after a
+final confirmation. Paging or choosing No writes nothing. Named crew also appear
+in the expanded cockpit and pilot record.
+
+| Recorded paid jumps | Service rank | Gunner damage bonus | Engineer fuel saving | Navigator survey bonus |
+| --- | --- | --- | --- | --- |
+| 0 | Recruit | +3 | 25% | +1 hop |
+| 5 | Seasoned | +4 | 30% | +2 hops |
+| 15 | Veteran | +5 | 35% | +3 hops |
+| 30 | Ace | +6 | 40% | +4 hops |
+
+Engineer savings round up, with at least one fuel burned per jump. Promotions
+are earned when wages are paid; fuel for that departure is already spent, so an
+engine promotion helps the following jump. Route budgets use current efficiency
+and may overestimate later fuel if a crew member advances along the way.
+
+Service stops at mastery. Dismissal and unpaid resignation retain the specialist's
+identity and experience; rehiring costs the ordinary hire fee. Unhired crew give
+no bonus. Older hired crew begin tracked service on their next paid jump; earlier
+unrecorded service is unknown. Wages, promotion and the departure save together,
+so reconnecting cannot repay salaries or award the same service twice. Existing
+salvage recovery keeps crew and their records; retirement starts a fresh roster.
+
 ### Specialist workshops
 
 In **[Y] Engineering Yard**, **[S] Specialists** opens the public workshop
