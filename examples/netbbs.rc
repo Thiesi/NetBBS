@@ -213,11 +213,28 @@ netbbs_start()
 	# start would otherwise look like "readiness cannot be observed" and
 	# fall back to a bare liveness check exactly when a misconfiguration
 	# is most likely.
-	if [ ! -e "${netbbs_logfile}" ]; then
-		su -m "${netbbs_user}" -c ": >> \"${netbbs_logfile}\"" 2>/dev/null
-	fi
 	_readiness_observable=no
 	_log_from=0
+	if [ "${netbbs_logfile}" != /dev/null ]; then
+		# Anything other than a regular file (or /dev/null) is refused
+		# rather than tolerated. A FIFO is the case that matters: with no
+		# reader, the launcher below blocks opening its own `>>`
+		# redirection *before* it can exec Python -- yet its pid has
+		# already been published, and its command text contains
+		# "-m netbbs --config", so netbbs_running would accept the blocked
+		# launcher and this start would report success with no listener
+		# anywhere. That is exactly the silent success this script exists
+		# to remove, so the shape that causes it is not supported.
+		if [ -e "${netbbs_logfile}" ] && [ ! -f "${netbbs_logfile}" ]; then
+			echo "netbbs: ${netbbs_logfile} is not a regular file." >&2
+			echo "Set netbbs_logfile to a regular file, or to /dev/null to keep no" >&2
+			echo "capture log at all. A FIFO or device cannot be used here." >&2
+			return 1
+		fi
+		if [ ! -e "${netbbs_logfile}" ]; then
+			su -m "${netbbs_user}" -c ": >> \"${netbbs_logfile}\"" 2>/dev/null
+		fi
+	fi
 	if [ -f "${netbbs_logfile}" ]; then
 		_readiness_observable=yes
 		# Appended to across restarts, so a readiness line from an earlier

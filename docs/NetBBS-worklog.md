@@ -3259,15 +3259,19 @@ if the marker is read back out of that file, `netbbs_logfile=/dev/null` must
 degrade to a liveness check rather than waiting out the full timeout on every
 healthy start.
 
-Anything a supervisor reads back has to be type-checked before it is read.
-`netbbs_logfile` is operator-set and legitimately need not be a regular file
-(`/dev/null` is supported; a FIFO is a natural thing to try once told the file
-does not rotate) — and `wc` on a FIFO blocks on open with no writer and reads
-forever with one, hanging the service at boot. Establish whether readiness is
-observable at all, then read. Create the file first when missing, too: `su`
-returns once the pid is published, which can precede the child's redirection
-creating it, so a first start would otherwise fall back to a bare liveness
-check exactly when a misconfiguration is most likely.
+A supervisor's log path is operator input and needs validating like any other.
+`netbbs_logfile` is a natural thing to point at a FIFO once an operator is told
+the file does not rotate, and a FIFO breaks it twice over: `wc` on one blocks
+on open with no writer and reads forever with one, and — worse — the launcher
+blocks opening its own `>>` redirection *before* it can exec Python, while its
+pid has already been published and its command text still matches the
+process-identity check. The start then reports success with no listener
+anywhere, which is the precise failure the script exists to remove. Supporting
+that shape is not worth it: accept a regular file, accept `/dev/null` as "no
+capture log", refuse the rest before launching anything. Create the file when
+missing, too — `su` returns once the pid is published, which can precede the
+child's redirection creating it, so a first start would otherwise fall back to
+a bare liveness check exactly when a misconfiguration is most likely.
 
 `su user -c` runs the command with *that account's* login shell, so a launch
 written in `sh` syntax silently depends on the service account not using
