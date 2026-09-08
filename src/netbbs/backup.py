@@ -243,6 +243,21 @@ def _chat_channel_picker_banner_path_for(db_path: Path) -> Path:
     return db_path.parent / f"{db_path.stem}_chat_channel_picker_banner.ans"
 
 
+def _extra_artifact_paths(db_path: Path) -> tuple[Path, ...]:
+    """Known node paths, including optional artifacts absent from an archive."""
+    return (
+        _ssh_host_key_path_for(db_path),
+        _welcome_banner_path_for(db_path),
+        _main_menu_banner_path_for(db_path),
+        _logoff_banner_path_for(db_path),
+        _new_account_banner_before_path_for(db_path),
+        _new_account_banner_after_path_for(db_path),
+        _board_list_banner_path_for(db_path),
+        _file_area_banner_path_for(db_path),
+        _chat_channel_picker_banner_path_for(db_path),
+    )
+
+
 def _sha256_of_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -509,17 +524,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
             if entry.is_file():
                 checksums[f"{_IDENTITY_DIRNAME}/{entry.name}"] = _sha256_of_file(entry)
 
-    for extra_path in (
-        _ssh_host_key_path_for(db_path),
-        _welcome_banner_path_for(db_path),
-        _main_menu_banner_path_for(db_path),
-        _logoff_banner_path_for(db_path),
-        _new_account_banner_before_path_for(db_path),
-        _new_account_banner_after_path_for(db_path),
-        _board_list_banner_path_for(db_path),
-        _file_area_banner_path_for(db_path),
-        _chat_channel_picker_banner_path_for(db_path),
-    ):
+    for extra_path in _extra_artifact_paths(db_path):
         if extra_path.exists():
             shutil.copy2(extra_path, destination / extra_path.name)
             checksums[extra_path.name] = _sha256_of_file(destination / extra_path.name)
@@ -919,6 +924,8 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
         target = voidrunner_to.resolve()
         protected_paths = [source, db_path, identity_dir, _storage_root_for(db_path),
                            _restore_state_path_for(db_path), _pid_file_path_for(db_path)]
+        protected_paths.extend(_extra_artifact_paths(db_path))
+        protected_paths.extend(Path(str(db_path) + suffix) for suffix in ("-wal", "-shm", "-journal"))
         protected_paths.extend(live for _, _, live in _restore_switch_plan(
             source, db_path, identity_dir, _database_filename_from_manifest(manifest)))
         for protected_path in protected_paths:

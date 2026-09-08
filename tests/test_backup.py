@@ -348,6 +348,21 @@ def test_voidrunner_backup_does_not_ignore_directories_named_like_temporary_file
         create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
 
 
+@pytest.mark.parametrize("suffix", ["_ssh_host_key", "_welcome_banner.ans", "_main_menu_banner.ans", "_logoff_banner.ans",
+                                   "_new_account_banner_before.ans", "_new_account_banner_after.ans", "_board_list_banner.ans",
+                                   "_file_area_banner.ans", "_chat_channel_picker_banner.ans", "-wal", "-shm", "-journal"])
+def test_voidrunner_restore_protects_node_paths_absent_from_the_archive(tmp_path, db_path, identity_dir, suffix):
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    restored_db = tmp_path / "fresh-node" / "restored.db"
+    name = (restored_db.name if suffix.startswith("-") else restored_db.stem) + suffix
+    target = restored_db.parent / name
+    assert not target.exists()
+    with pytest.raises(BackupError, match="overlaps"):
+        restore_backup(source=source, db_path=restored_db, identity_dir=tmp_path / "new-identity", voidrunner_to=target)
+    assert not restored_db.exists() and not target.exists()
+
+
 def test_voidrunner_restore_refuses_a_directory_with_unrelated_files(tmp_path, db_path, identity_dir):
     _populate_voidrunner()
     source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")

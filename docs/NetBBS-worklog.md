@@ -4589,8 +4589,9 @@ manifest; the explicit restore database path still chooses the live filename.
 Check this collision case-insensitively for archives moved between platforms.
 
 An archive's source-directory metadata is informational only. Restoring game data
-requires an explicit, nonoverlapping destination, including exclusion of the node
-PID path even when no PID file currently exists. Stage and retain game rollback
+requires an explicit, nonoverlapping destination, including the node PID, SSH key,
+banner and SQLite sidecar paths even when absent. Use the full known artifact
+list, not only entries present in that backup's switch plan. Stage and retain game rollback
 beside that target so atomic renames work across database/game filesystem layouts;
 the common restore journal records the external paths. `_switch_one` must undo
 its own first rename if its second rename fails: the outer loop has not yet added
