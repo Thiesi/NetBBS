@@ -3304,9 +3304,16 @@ saying so. Body reads need `read1` rather than `read` (which blocks until it
 has n bytes or EOF, so a deadline checked between calls is never reached during
 exactly the drip it targets), but that only covers the body: during the status
 line and headers `urlopen` has not returned, so no body-level check exists yet.
-Bounding the whole call needs a worker thread. Its unkillable thread is
-acceptable only because this is a short-lived CLI over at most 32 entries with
-daemon threads, and the alternative is the monitor silently halting mid-run. And a status code alone is not evidence of a Link node:
+Bounding the whole call needs a worker thread — a raw `threading.Thread(daemon=
+True)`, never `ThreadPoolExecutor`, whose workers are non-daemon and which
+registers an atexit hook joining them: a wedged worker there lets the timeout
+print and then hangs the interpreter on the way out, moving the stalled run to
+process exit rather than removing it. Verified directly: a pool whose worker is
+still blocked never exits, the daemon-thread form exits immediately. An
+unkillable thread is acceptable only because this is a short-lived CLI over at
+most 32 entries, and the alternative is the monitor silently halting mid-run.
+Proving that property needs a real subprocess — an in-process test cannot
+observe interpreter shutdown. And a status code alone is not evidence of a Link node:
 a 429 from a CDN fronting a dead node proves only that a CDN is there, so the
 rate-limit body has to be checked like any other signature.
 

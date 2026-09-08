@@ -42,7 +42,6 @@ it publishes into, so it stays runnable with nothing installed. Unlike
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import http.client
 import json
 import os
@@ -50,6 +49,7 @@ import shutil
 import socket
 import sys
 import textwrap
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -191,25 +191,37 @@ def with_deadline(work, *, seconds: float):
     line, of the headers, of the body — keeps `urlopen` blocked
     indefinitely without ever tripping one. Reading the body in small
     pieces fixes only the last of those three, because `urlopen` has not
-    returned yet during the first two.
+    returned during the first two.
 
-    A worker thread is the stdlib way to bound the whole thing. The
-    thread cannot be killed and may outlive the call, which is
-    acceptable here and nowhere near a general pattern: this is a
-    short-lived CLI checking at most 32 entries, the threads are daemon
-    threads that die with the process, and the alternative is the cron
-    monitor stopping silently partway through its run — the exact
-    failure this tool exists to detect in others.
+    A *daemon* thread, deliberately, and not `ThreadPoolExecutor`: its
+    workers are non-daemon and `concurrent.futures` registers an atexit
+    hook that joins them, so a wedged worker would let this print its
+    timeout and then hang the interpreter on the way out — the same
+    stalled cron run, moved to process exit. A daemon thread is not
+    joined at shutdown.
+
+    The thread still cannot be killed and may outlive the call. That is
+    acceptable here and is not a general pattern: this is a short-lived
+    CLI checking at most 32 entries, and the alternative is the monitor
+    silently halting mid-run — the exact failure it exists to detect in
+    others.
     """
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        return pool.submit(work).result(timeout=seconds)
-    except concurrent.futures.TimeoutError:
-        raise TimeoutError(f"gave up after {seconds:g}s") from None
-    finally:
-        # Never join: the point is not to wait for a thread wedged on a
-        # socket that will not finish.
-        pool.shutdown(wait=False)
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["value"] = work()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise TimeoutError(f"gave up after {seconds:g}s")
+    if "error" in outcome:
+        raise outcome["error"]  # type: ignore[misc]
+    return outcome.get("value")
 
 
 def _read_bounded(response, *, deadline: float | None = None) -> bytes:

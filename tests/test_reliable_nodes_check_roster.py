@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import pathlib
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -693,3 +695,30 @@ def test_a_dripping_entry_does_not_stop_the_rest_of_the_run(
     assert main([str(roster), "--timeout", "2"]) == 1
     err = capsys.readouterr().err
     assert "Dripping" in err and "Dead" in err, err
+
+
+def test_the_checker_process_exits_after_a_drip_timeout(tmp_path, header_dripping_server):
+    """The timeout is worthless if the process then hangs on the way
+    out. `ThreadPoolExecutor` workers are non-daemon and
+    `concurrent.futures` registers an atexit hook that joins them, so a
+    wedged worker would let the checker print its verdict and then never
+    exit — the same stalled cron run, moved to process shutdown. Only a
+    real subprocess can prove it terminates.
+    """
+    import subprocess
+    import sys as _sys
+
+    roster = tmp_path / "reliable-nodes.json"
+    roster.write_text(
+        json.dumps({"version": 1, "nodes": [{"name": "Dripping", "url": header_dripping_server}]}),
+        encoding="utf-8",
+    )
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(repo_root), str(repo_root / "src")]))
+    completed = subprocess.run(
+        [_sys.executable, "-m", "services.reliable_nodes.check_roster",
+         str(roster), "--timeout", "2"],
+        cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=45,
+    )
+    assert completed.returncode == 1, completed.stderr
+    assert "DOWN" in completed.stderr
