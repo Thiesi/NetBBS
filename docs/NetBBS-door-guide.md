@@ -138,6 +138,18 @@ available credits give a next action. The tracked objective includes its deadlin
 and chart entry point. Station settlement results remain in the paginated deck.
 Browsing and toggling do not advance a day or spend credits.
 
+### Pilot record and history
+
+Open station **[S] Pilot Status**, then choose **[O] Pilot**, **[C] Jobs**, or
+**[H] Log** directly. Previous/Next pages and **[B] Back** work in every view.
+Jobs show complete descriptions and deadlines; use the station Mission Board for
+tracking, navigation, acceptance and abandonment. Log includes every retained
+highlight and log entry, newest first. Paging does not alter the career.
+
+At the existing top rank, **[R] Retire** is available from every record view. Only
+the final confirmation starts a new career with the existing retirement bonus;
+No retains the current record and displays the cancellation result.
+
 ### Engineering yard and crew pages
 
 The yard and crew roster fit the terminal height, stacking terms at narrow widths.
