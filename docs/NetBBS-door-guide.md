@@ -158,6 +158,20 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### Derelicts and distress calls
+
+Use **[<] Previous / [>] Next** to read encounter terms. Derelicts offer **[B]
+Board** with a 70% salvage chance and a 30% ambush chance. The displayed reward
+and opponent tier ranges follow the sector you are entering. Boarding itself
+costs no fuel; an ambush uses ordinary combat choices and losses.
+
+Distress calls offer **[H] Help** for 2-4 fuel, capped at your remaining fuel,
+with a 60-180 credit reward and up to three Concord standing, capped at 100.
+The screen shows the
+possible fuel balance and warns when helping can empty your tank. **[I] Ignore**
+on either screen continues the journey without a reward or penalty. Paging and
+invalid keys spend nothing; completed choices save before their result appears.
+
 ### Bounty identification
 
 Before engaging a new bounty contact, **[V] Verify** spends one fuel to check the

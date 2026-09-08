@@ -4853,6 +4853,14 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
+Derelict and distress decisions page complete terms with credits, fuel and actions
+available on every page. Browsing and invalid input have no effects. Derelict
+boarding discloses its 70% salvage / 30% ambush split, credit range and opponent
+tier range; new salvage and ambush generation use the destination sector danger.
+Cached opponents retain their stats. Distress calls disclose the existing capped
+2-4 fuel cost, 60-180 credit reward and up to +3 Concord standing (capped at
+100), including an empty-tank warning. Ignoring either encounter continues the journey without a penalty.
+
 New bounty interceptions offer identification in the combat screen before engaging.
 Verify costs one fuel and reveals whether the posted identity matches; Withdraw
 continues the journey while keeping the contract. A verified mismatch can be closed
