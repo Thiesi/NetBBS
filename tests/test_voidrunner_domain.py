@@ -49,6 +49,35 @@ def _load_voidrunner():
 vr = _load_voidrunner()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows byte-range lock initialization")
+def test_empty_windows_lease_reports_busy_without_writing_before_lock(tmp_path):
+    import msvcrt
+    import subprocess
+
+    path = tmp_path / "empty.lock"
+    path.write_bytes(b"")
+    script = """
+import runpy, sys
+from pathlib import Path
+vr = runpy.run_path(sys.argv[1])
+try:
+    with vr['_file_lease'](Path(sys.argv[2])):
+        print('acquired')
+except vr['PilotBusy']:
+    print('busy')
+"""
+    args = [sys.executable, "-c", script, str(_VOIDRUNNER_PATH), str(path)]
+    with path.open("r+b") as owner:
+        msvcrt.locking(owner.fileno(), msvcrt.LK_NBLCK, 1)
+        blocked = subprocess.run(args, capture_output=True, timeout=5)
+        assert blocked.returncode == 0 and not blocked.stderr
+        assert blocked.stdout.strip() == b"busy"
+    assert path.read_bytes() == b""
+    acquired = subprocess.run(args, capture_output=True, timeout=5)
+    assert acquired.returncode == 0 and not acquired.stderr
+    assert acquired.stdout.strip() == b"acquired" and path.read_bytes() == b""
+
+
 # -- galaxy generation -------------------------------------------------
 
 
@@ -330,17 +359,13 @@ def test_loading_an_existing_save_never_overwrites_the_chosen_callsign(tmp_path)
     assert loaded.pilot.handle == "Voyager1"
 
 
-def test_corrupt_save_is_backed_up_not_silently_discarded(tmp_path):
+def test_corrupt_save_is_preserved_in_place_without_automatic_reset(tmp_path):
     path = tmp_path / "5.json"
     path.write_text("not valid json{{{", encoding="utf-8")
-
-    save, is_new, notice = vr.load_or_create_save(tmp_path, user_id=5, handle="Recovered")
-    assert is_new is True
-    assert notice is not None
-    assert "preserved" in notice
-    backups = list(tmp_path.glob("5.corrupt-*"))
-    assert len(backups) == 1
-    assert backups[0].read_text(encoding="utf-8") == "not valid json{{{"
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, user_id=5, handle="Recovered")
+    assert path.read_text(encoding="utf-8") == "not valid json{{{"
+    assert not list(tmp_path.glob("5.corrupt-*"))
 
 
 def test_write_save_is_atomic_no_tmp_file_left_behind(tmp_path):
@@ -2107,7 +2132,7 @@ def test_update_hall_of_fame_caps_at_hall_of_fame_size(tmp_path):
 
     entries = vr.load_hall_of_fame(tmp_path)
     assert len(entries) == vr.HALL_OF_FAME_SIZE
-    # The lowest-credit pilots were the ones dropped, not the highest.
+    # The lowest-credit pilots are omitted from the view, but retained on disk.
     assert entries[-1]["best_credits"] == 5
 
 
@@ -2306,7 +2331,7 @@ def test_engineer_discounts_fuel_cost_but_never_below_one():
     world.save.ship.has_engineer = True
     discounted = vr.fuel_cost_for_jump(a, b, world.save.ship)
 
-    assert discounted == max(1, base - 1)
+    assert discounted == max(1, base - (base + 3) // 4)
 
 
 def test_engineer_discount_never_goes_below_one_even_on_the_cheapest_jump():
@@ -2345,7 +2370,7 @@ def test_pay_crew_wages_deducts_for_each_hired_role():
 
 def test_pay_crew_wages_resigns_a_crew_member_who_cant_be_paid():
     world = _world_with_seed(152)
-    world.save.pilot.credits = 5
+    world.save.pilot.credits = 1
     world.save.ship.has_engineer = True
 
     messages = vr.pay_crew_wages(world)
@@ -2353,7 +2378,7 @@ def test_pay_crew_wages_resigns_a_crew_member_who_cant_be_paid():
     assert len(messages) == 1
     assert "resigns" in messages[0]
     assert not world.save.ship.has_engineer
-    assert world.save.pilot.credits == 5  # never driven negative
+    assert world.save.pilot.credits == 1  # never driven negative
 
 
 def test_pay_crew_wages_never_drives_credits_negative():
@@ -2665,7 +2690,7 @@ def test_buy_futures_contract_charges_the_premium_and_locks_the_price():
 
     vr.buy_futures_contract(world, "food", 5, 10)
 
-    expected_unit = round(spot * vr.FUTURES_PREMIUM)
+    expected_unit = spot + max(1, (spot * 8 + 99) // 100)
     assert len(world.save.active_futures) == 1
     contract = world.save.active_futures[0]
     assert contract.commodity == "food"
@@ -2708,10 +2733,10 @@ def test_settle_futures_contracts_delivers_to_cargo_when_due():
     assert world.save.active_futures == []
 
 
-def test_settle_futures_contracts_refunds_when_cargo_is_full():
+def test_legacy_futures_refund_when_cargo_is_full():
     world = _world_with_seed(173)
     cap = vr.cargo_capacity(world.save.ship)
-    vr.buy_futures_contract(world, "food", cap, 5)
+    world.save.active_futures = [vr.FuturesContract(1, "food", cap, 200, 5)]
     world.save.cargo["textiles"] = cap  # fill the hold with something else before settlement
     before_credits = world.save.pilot.credits
     contract = world.save.active_futures[0]
@@ -2725,9 +2750,9 @@ def test_settle_futures_contracts_refunds_when_cargo_is_full():
     assert world.save.pilot.credits == before_credits + contract.locked_price
 
 
-def test_settle_futures_contracts_settles_regardless_of_current_location():
+def test_legacy_futures_settle_regardless_of_current_location():
     world = _world_with_seed(174)
-    vr.buy_futures_contract(world, "food", 2, 5)
+    world.save.active_futures = [vr.FuturesContract(1, "food", 2, 26, 5)]
     world.save.current_system = world.by_id[0].connections[0]  # moved away before settlement
     world.save.turn += 5
 
@@ -2759,46 +2784,40 @@ def test_screen_futures_lists_tradeable_goods_and_outstanding_contracts(monkeypa
 
     text = buf.getvalue()
     assert "Food" in text
-    assert "Outstanding contracts" in text
+    assert "Outstanding orders" in text
 
 
-def test_screen_buy_futures_rejects_an_invalid_duration(monkeypatch):
+def test_buy_futures_rejects_invalid_duration_without_mutation():
     world = _world_with_seed(177)
-    world.save.pilot.credits = 100_000
-    inputs = iter(["10", "7"])  # 7 isn't one of FUTURES_DURATIONS
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: next(inputs))
-
-    with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_buy_futures(vr.Palette(truecolor=False), world, "food")
-
-    assert world.save.active_futures == []
+    before = world.save.pilot.credits
+    with pytest.raises(vr.TradeError, match="term"):
+        vr.buy_futures_contract(world, "food", 10, 7)
+    assert world.save.pilot.credits == before
+    assert not world.save.active_futures
 
 
 def test_screen_buy_futures_creates_a_contract_on_confirmation(monkeypatch):
     world = _world_with_seed(178)
     world.save.pilot.credits = 100_000
-    inputs = iter(["10", str(vr.FUTURES_DURATIONS[0])])
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: next(inputs))
+    keys = iter("QS")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "10")
     monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
-
+    monkeypatch.setattr(vr, "pause", lambda p: None)
     with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_buy_futures(vr.Palette(truecolor=False), world, "food")
-
+        vr._screen_buy_futures(vr.Palette(False), world, "food")
     assert len(world.save.active_futures) == 1
     assert world.save.active_futures[0].quantity == 10
 
 
 def test_screen_buy_futures_declines_on_confirmation_refusal(monkeypatch):
     world = _world_with_seed(179)
-    world.save.pilot.credits = 100_000
-    inputs = iter(["10", str(vr.FUTURES_DURATIONS[0])])
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: next(inputs))
+    keys = iter("SB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
-
     with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_buy_futures(vr.Palette(truecolor=False), world, "food")
-
-    assert world.save.active_futures == []
+        vr._screen_buy_futures(vr.Palette(False), world, "food")
+    assert not world.save.active_futures
 
 
 def test_retiring_resets_futures_contracts():
@@ -3118,7 +3137,7 @@ def test_screen_shipyard_effect_column_aligns_between_tiered_and_maxed_rows(monk
     assert len(effect_columns) == 1, f"effect column drifted between rows: {effect_columns}"
 
 
-def test_screen_missions_reward_column_aligns_across_reward_digit_widths(monkeypatch):
+def test_screen_missions_preserves_rewards_in_compact_entries(monkeypatch):
     world = _world_with_seed(310)
     world.save.pilot.credits = 5_000
     monkeypatch.setattr(
@@ -3134,10 +3153,10 @@ def test_screen_missions_reward_column_aligns_across_reward_digit_widths(monkeyp
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         vr.screen_missions(vr.Palette(truecolor=False), world)
-    _assert_box_rows_match_border(buf.getvalue(), "screen_missions@mixed-rewards")
-    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n")]
-    reward_ends = {line.index("cr") for line in stripped if "cr" in line and "[" in line}
-    assert len(reward_ends) == 1, f"reward column drifted between rows: {reward_ends}"
+    output = buf.getvalue()
+    assert "+5cr" in output and "+123,456cr" in output
+    assert "[1]" in output and "[2]" in output
+    assert "Details" in output and "[B]ack" in output
 
 
 def test_screen_chart_danger_and_fuel_columns_align_between_safe_and_danger_rows(monkeypatch):
@@ -3217,7 +3236,7 @@ def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):
     assert map_borders == {79}
 
 
-def test_empty_mission_board_renders_clean_notice_in_box(monkeypatch):
+def test_empty_mission_board_renders_clean_notice_and_back(monkeypatch):
     world = _world_with_seed(313)
     p = vr.Palette(truecolor=False)
     monkeypatch.setattr(vr, "posted_mission_offers", lambda w: [])
@@ -3227,7 +3246,7 @@ def test_empty_mission_board_renders_clean_notice_in_box(monkeypatch):
         vr.screen_missions(p, world)
     output = buf.getvalue()
     assert "No contracts currently available" in output
-    _assert_box_rows_match_border(output, "screen_missions@empty")
+    assert "[B]ack" in output
 
 
 def test_commission_and_cartel_screens_use_tactical_framing(monkeypatch):
@@ -3274,8 +3293,8 @@ def test_status_bar_separator_is_79_columns():
         (b"YKAY", b"Gunner hired", "ship.has_gunner", True),
         (b"YR2\r", b"Refueled 2 units", "ship.fuel", 22),
         (b"YPY", b"Hull repaired", "ship.hull_hp", 60),
-        (b"MXA1\r5\rY", b"Futures contract: 1x Food", "active_futures", "nonempty"),
-        (b"BA", b"Accepted:", "active_missions", "nonempty"),
+        (b"MX1SY", b"Futures contract: 1x Food", "active_futures", "nonempty"),
+        (b"B1NNNNNNNNA", b"Accepted:", "active_missions", "nonempty"),
         (b"DY", b"Jettisoned 1 units", "cargo", {}),
         (b"PY", b"Commission accepted", "pilot.has_concord_commission", True),
         (b"WY", b"Welcome to the family", "pilot.has_blackwake_made", True),
@@ -3449,7 +3468,8 @@ def test_auto_route_checkpoints_each_completed_hop_before_next_hop(tmp_path, mon
         system.discovered = True
     target = next(sid for sid, hops in vr.bfs_hops(world.by_id, 0).items() if hops == 3)
     path = vr.bfs_path(world.by_id, 0, target)
-    world.save.ship.fuel = 100
+    world.save.ship.engine_tier = 3
+    world.save.ship.fuel = vr.fuel_capacity(world.save.ship)
     world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
     vr.persist(world, tmp_path, 77)
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: world.by_id[target].name)
@@ -3812,8 +3832,10 @@ def test_real_door_preserves_bad_resume_mission_and_shows_recovery(tmp_path, kin
         "bounty": mission if kind == "bounty" else None,
         "escorts": [mission] if kind == "escort" else [], "escort_index": 0, "encounter": {},
     }
-    vr.persist(world, tmp_path, 77)
+    # Simulate on-disk damage; the production writer now rejects this state.
+    world.save.event_rng_state = world.event_rng.getstate()
     path = tmp_path / "77.json"
+    path.write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
     original = path.read_bytes()
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
@@ -3873,8 +3895,10 @@ def test_inconsistent_resume_stops_before_rewriting_save(tmp_path, fault):
     elif fault == "wrong_position":
         world.save.current_system = 1
     world.save.pending_travel = travel
-    vr.persist(world, tmp_path, 77)
+    # Simulate on-disk damage; the production writer now rejects this state.
+    world.save.event_rng_state = world.event_rng.getstate()
     path = tmp_path / "77.json"
+    path.write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
     original = path.read_bytes()
     info = tmp_path / "door_info.json"
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
@@ -4289,9 +4313,9 @@ def test_legacy_over_limit_career_keeps_every_contract():
 def test_real_board_reopen_and_kill_retains_posted_terms(tmp_path):
     world = _world_with_seed(42)
     vr.persist(world, tmp_path, 77)
-    with _door_stopped_at(tmp_path, b"B", b"Accept which"):
+    with _door_stopped_at(tmp_path, b"B", b"Details"):
         first, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
-    with _door_stopped_at(tmp_path, b"B", b"Accept which"):
+    with _door_stopped_at(tmp_path, b"B", b"Details"):
         reopened, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert first.mission_boards and reopened.mission_boards == first.mission_boards
     assert reopened.next_mission_id == first.next_mission_id
@@ -4378,3 +4402,1482 @@ def test_board_preparation_does_not_advance_encounter_rng(seed):
     world.checkpoint()
     assert world.event_rng.getstate() == before
     assert vr.posted_mission_offers(world)
+
+
+
+def _mission_details_world(kind="delivery"):
+    world = _world_with_seed(42)
+    target = next(s.id for s in world.galaxy if not s.discovered)
+    mission = vr.Mission(1, kind, "Complete and unabridged contract objective", 500, 0, target,
+                         commodity="food" if kind == "delivery" else None,
+                         quantity=3 if kind == "delivery" else None, deadline_turn=10, pirate_tier=2)
+    world.save.mission_boards[0] = {"refresh_turn": 3, "offers": [mission.to_dict()]}
+    return world, mission
+
+
+def test_mission_preview_back_and_paging_are_read_only(monkeypatch):
+    import copy
+    world, mission = _mission_details_world()
+    before = copy.deepcopy(world.save.to_dict())
+    rng = world.event_rng.getstate()
+    keys = iter("1NPBB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Preview saved"))
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        vr.screen_missions(vr.Palette(False), world)
+    assert mission.description in output.getvalue()
+    assert world.save.to_dict() == before
+    assert world.event_rng.getstate() == rng
+    assert not world.by_id[mission.target_system].discovered
+
+
+def test_acceptance_requires_last_details_page_and_checkpoints_before_ack(monkeypatch):
+    world, mission = _mission_details_world()
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 12)
+    pages = vr._mission_text_pages(vr.mission_details(world, mission))
+    assert len(pages) > 1
+    # Premature A is ignored. Only the final A commits, before acknowledgement.
+    keys = iter("A" + "N" * (len(pages) - 1) + "AK")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    output = io.StringIO()
+    commits = []
+    def commit(current):
+        assert "Accepted:" not in output.getvalue()
+        commits.append(current.save.to_dict())
+    world._checkpoint = commit
+    with contextlib.redirect_stdout(output):
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
+    assert len(commits) == 1
+    assert [m.id for m in world.save.active_missions] == [mission.id]
+    assert not world.save.mission_boards[0]["offers"]
+
+
+@pytest.mark.parametrize("width,height", [(40, 24), (80, 24), (40, 12), (20, 10)])
+def test_full_contract_details_fit_each_page_and_retain_back(monkeypatch, width, height):
+    world, mission = _mission_details_world("escort")
+    mission.description = "Very long objective " * 20
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO()
+    frames = []
+    offset = 0
+    count = len(vr._mission_text_pages(vr.mission_details(world, mission)))
+    def key():
+        nonlocal offset
+        frame = output.getvalue()[offset:]
+        offset = len(output.getvalue())
+        frames.append(frame)
+        rows = frame.split("\r\n")
+        assert len(rows) <= height
+        assert all(vr._visible_width(row) <= width for row in rows)
+        assert "[B]ack" in frame
+        return "N" if len(frames) < count else "B"
+    monkeypatch.setattr(vr, "read_key", key)
+    with contextlib.redirect_stdout(output):
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=False)
+    body_rows = [row for row in vr._ANSI_RE.sub("", output.getvalue()).split("\r\n")
+                 if not row.startswith(("Contract #", "[N]", "[B]", "[A]"))]
+    joined = " ".join(" ".join(body_rows).split())
+    assert "EVERY jump" in joined and "including detours" in joined
+    assert "no cargo space" in joined
+    assert len(frames) == count
+
+
+def test_legacy_active_contract_list_is_paginated_and_selectable(monkeypatch):
+    world = _world_with_seed(42)
+    world.save.active_missions = [vr.Mission(i + 1, "scan", f"Survey {i}", 500, 0, 1) for i in range(30)]
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    output = io.StringIO()
+    selected = []
+    def key():
+        return "N" if "Contracts 2/" not in output.getvalue() else "1" if not selected else "B"
+    monkeypatch.setattr(vr, "read_key", key)
+    monkeypatch.setattr(vr, "screen_mission_details", lambda p, w, m, active: selected.append((m.id, active)))
+    with contextlib.redirect_stdout(output):
+        vr.screen_missions(vr.Palette(False), world)
+    assert selected and selected[0][0] > 1 and selected[0][1]
+    assert "SURVEY" in output.getvalue()
+    assert "CARGO" not in output.getvalue()
+    assert len(world.save.active_missions) == 30
+
+
+@pytest.mark.parametrize("kind", ["delivery", "scan", "bounty", "escort"])
+def test_contract_terms_show_kind_obligations_and_cost_limits(kind):
+    world, mission = _mission_details_world(kind)
+    world.save.ship.has_navigator = True
+    world.save.cargo = {"food": 1}
+    lines = " ".join(vr.mission_details(world, mission))
+    assert "inclusive" in lines and "Target danger: uncharted" in lines
+    assert "Gross payout" in lines and "not total profit" in lines
+    assert "repairs" in lines and "wages" in lines
+    if kind == "delivery":
+        price = vr.price_for(world, 0, "food")
+        assert f"2 x {price} = {2 * price:,} cr" in lines
+        assert "Delivery consumes the cargo" in lines
+    elif kind == "scan":
+        assert "scanner" in lines and "does not chart" in lines
+    elif kind == "bounty":
+        assert "tier 2" in lines and "mistaken-identity" in lines
+    else:
+        assert "EVERY jump" in lines and "Other escort contracts" in lines
+
+
+@pytest.mark.parametrize("action", ["complete", "expire", "abandon"])
+def test_tracking_roundtrips_and_clears_with_contract_removal(tmp_path, action):
+    world, mission = _mission_details_world()
+    vr.accept_mission(world, mission)
+    vr.track_mission(world, mission.id)
+    world.checkpoint()
+    vr.persist(world, tmp_path, 77)
+    save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    world = vr.World(save)
+    assert vr.tracked_mission(world).id == mission.id
+    if action == "complete":
+        world.save.current_system = mission.target_system
+        world.save.cargo = {"food": 3}
+        vr.check_mission_completions(world)
+    elif action == "expire":
+        world.save.turn = 11
+        vr.expire_missions(world)
+    else:
+        vr.abandon_mission(world, mission.id)
+    assert vr.tracked_mission(world) is None
+    assert world.save.tracked_mission_id is None
+
+
+def test_abandonment_cancel_is_read_only_and_confirmed_action_keeps_cargo(monkeypatch):
+    import copy
+    world, mission = _mission_details_world()
+    vr.accept_mission(world, mission)
+    vr.track_mission(world, mission.id)
+    world.save.cargo = {"food": 3}
+    before = copy.deepcopy(world.save.to_dict())
+    keys = iter("DNB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=True)
+    assert world.save.to_dict() == before
+    keys = iter("DYK")
+    commits = []
+    world._checkpoint = lambda current: commits.append(current.save.to_dict())
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=True)
+    assert len(commits) == 1
+    assert world.save.cargo == {"food": 3}
+    assert world.save.pilot.credits == before["pilot"]["credits"]
+    assert not world.save.active_missions and world.save.tracked_mission_id is None
+    assert not world.save.mission_boards[0]["offers"]
+
+
+def test_real_tracking_action_survives_termination_and_is_visible_on_return(tmp_path):
+    world, mission = _mission_details_world("scan")
+    vr.accept_mission(world, mission)
+    world.checkpoint()
+    vr.persist(world, tmp_path, 77)
+    choice = len(vr.posted_mission_offers(world)) + 1
+    with _door_stopped_at(tmp_path, f"B{choice}T".encode(), b"Tracking updated."):
+        save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert save.tracked_mission_id == mission.id
+    with _door_stopped_at(tmp_path, b"", b"Tracked") as output:
+        assert b"Tracked" in output
+
+
+def test_tracking_and_abandonment_reject_pending_travel():
+    world, mission = _mission_details_world()
+    vr.accept_mission(world, mission)
+    world.save.pending_travel = {"phase": "primary"}
+    with pytest.raises(vr.MissionError, match="interrupted journey"):
+        vr.track_mission(world, mission.id)
+    with pytest.raises(vr.MissionError, match="interrupted journey"):
+        vr.abandon_mission(world, mission.id)
+    assert world.save.active_missions == [mission]
+
+
+@pytest.mark.parametrize("keys,ack", [("T", "Tracking updated"), ("DY", "Abandoned:")])
+def test_contract_management_save_failure_precedes_acknowledgement(monkeypatch, keys, ack):
+    world, mission = _mission_details_world()
+    vr.accept_mission(world, mission)
+    commands = iter(keys)
+    monkeypatch.setattr(vr, "read_key", lambda: next(commands))
+    def fail(current):
+        raise OSError("disk full")
+    world._checkpoint = fail
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError):
+        vr.screen_mission_details(vr.Palette(False), world, mission, active=True)
+    assert ack not in output.getvalue()
+
+
+@pytest.mark.parametrize("discovered", [False, True])
+def test_tracked_chart_hint_identifies_the_actual_destination_key(monkeypatch, discovered):
+    world, mission = _mission_details_world("scan")
+    vr.accept_mission(world, mission)
+    vr.track_mission(world, mission.id)
+    first = vr.mission_route(world, mission)[0]
+    world.by_id[first].discovered = discovered
+    world.save.ship.fuel = 100
+    key = vr.CHART_CONNECTION_LETTERS[sorted(world.here.connections).index(first)]
+    monkeypatch.setattr(vr, "read_key", lambda: key)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        dest = vr.screen_chart(vr.Palette(False), world)
+    assert dest == first
+    assert f"Tracked route: [{key}]" in output.getvalue()
+    assert world.by_id[first].discovered is discovered
+
+
+def test_bounty_retry_requires_reentry_and_budgets_two_jumps():
+    world, mission = _mission_details_world("bounty")
+    vr.accept_mission(world, mission)
+    world.save.current_system = mission.target_system
+    world.save.turn = mission.deadline_turn - 1
+    world.save.ship.has_navigator = True
+    world.save.ship.fuel = 0
+    route = vr.mission_route(world, mission)
+    assert len(route) == 2 and route[-1] == mission.target_system
+    lines = " ".join(vr.mission_details(world, mission))
+    assert "jump back" in lines and "both jumps" in lines
+    assert "shortest route misses the deadline" in lines
+    assert "2 jump(s)" in vr.mission_bearing(world, mission)
+    assert "wages 10 cr/jump, 20 cr total" in lines
+
+
+@pytest.mark.parametrize("kind", ["bounty", "escort"])
+@pytest.mark.parametrize("outcome", ["won", "destroyed", "expired"])
+def test_pending_mission_resolution_checkpoint_clears_tracking(monkeypatch, kind, outcome):
+    world, mission = _mission_details_world(kind)
+    vr.accept_mission(world, mission)
+    vr.track_mission(world, mission.id)
+    world.save.pending_travel = {
+        "phase": "primary" if kind == "bounty" else "escorts", "bounty": mission.to_dict(),
+        "escorts": [mission.to_dict()] if kind == "escort" else [], "escort_index": 0,
+        "encounter": {},
+    }
+    if outcome == "expired":
+        world.save.turn = 11
+    monkeypatch.setattr(vr, "screen_combat", lambda *args: outcome)
+    seen = []
+    def checkpoint(current):
+        if not current.save.active_missions:
+            assert current.save.pending_travel is not None
+            assert current.save.tracked_mission_id is None
+            seen.append(1)
+    world._checkpoint = checkpoint
+    with contextlib.redirect_stdout(io.StringIO()):
+        if kind == "bounty":
+            vr._resolve_bounty(vr.Palette(False), world, world.save.pending_travel)
+        else:
+            vr._resolve_escort_missions(vr.Palette(False), world, mission.target_system)
+    assert seen
+
+
+
+def test_queued_bounty_route_budgets_preceding_fights():
+    world, mission = _mission_details_world("bounty")
+    earlier = vr.Mission(9, "bounty", "Earlier", 500, 0, mission.target_system, pirate_tier=1)
+    world.save.active_missions = [earlier]
+    base = vr.bfs_path(world.by_id, 0, mission.target_system)
+    assert len(vr.mission_route(world, mission)) == len(base) + 2
+    vr.accept_mission(world, mission)
+    assert len(vr.mission_route(world, mission)) == len(base) + 2
+    assert "1 earlier contract" in " ".join(vr.mission_details(world, mission))
+    world.save.current_system = mission.target_system
+    assert len(vr.mission_route(world, mission)) == 4
+    world.save.active_missions.remove(earlier)
+    assert len(vr.mission_route(world, mission)) == 2
+
+
+def test_tiny_contract_board_splits_entries_and_keeps_selection(monkeypatch):
+    import re
+    world, mission = _mission_details_world("escort")
+    world.by_id[mission.target_system].name = "A particularly long system name that cannot fit one page"
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 20)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 10)
+    output = io.StringIO()
+    offset = 0
+    frames = []
+    selected = []
+    def key():
+        nonlocal offset
+        frame = output.getvalue()[offset:]
+        offset = len(output.getvalue())
+        frames.append(frame)
+        assert len(frame.split("\r\n")) <= 10
+        assert all(vr._visible_width(row) <= 20 for row in frame.split("\r\n"))
+        plain = vr._ANSI_RE.sub("", frame)
+        page, total = map(int, re.search(r"Contracts (\d+)/(\d+)", plain).groups())
+        return "N" if page < total else "1" if not selected else "B"
+    monkeypatch.setattr(vr, "read_key", key)
+    monkeypatch.setattr(vr, "screen_mission_details", lambda p, w, m, active: selected.append(m.id))
+    with contextlib.redirect_stdout(output):
+        vr.screen_missions(vr.Palette(False), world)
+    assert len(frames) > 2 and selected == [mission.id]
+
+
+def test_repeated_one_unit_contraband_recycling_cannot_unlock_membership(monkeypatch):
+    world = _world_with_seed(42)
+    world.here.economy = "Haven"
+    world.save.pilot.credits = 10000
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "1")
+    with contextlib.redirect_stdout(io.StringIO()):
+        for _ in range(38):
+            monkeypatch.setattr(vr, "read_key", lambda: "B")
+            vr._trade_commodity(vr.Palette(False), world, "weapons")
+            monkeypatch.setattr(vr, "read_key", lambda: "S")
+            vr._trade_commodity(vr.Palette(False), world, "weapons")
+    assert world.save.pilot.credits < 10000
+    assert world.save.pilot.reputation[vr.FACTION_BLACKWAKE] == 0
+    assert not vr.blackwake_made_available(world)
+    assert world.save.contraband_trade_balance < 0
+
+
+def test_trade_milestones_survive_splitting_losses_and_restart(tmp_path):
+    whole, split = _world_with_seed(42), _world_with_seed(42)
+    vr.record_contraband_trade(whole, "weapons", -200)
+    vr.record_contraband_trade(whole, "weapons", 1700)
+    for _ in range(200):
+        vr.record_contraband_trade(split, "weapons", -1)
+    for _ in range(1700):
+        vr.record_contraband_trade(split, "weapons", 1)
+    assert whole.save.pilot.reputation == split.save.pilot.reputation
+    assert split.save.pilot.reputation[vr.FACTION_BLACKWAKE] == 3
+    vr.persist(split, tmp_path, 77)
+    save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    split = vr.World(save)
+    vr.record_contraband_trade(split, "weapons", -1000)
+    vr.record_contraband_trade(split, "weapons", 1000)
+    assert split.save.pilot.reputation[vr.FACTION_BLACKWAKE] == 3
+    vr.record_contraband_trade(split, "weapons", 500)
+    assert split.save.pilot.reputation[vr.FACTION_BLACKWAKE] == 4
+
+
+def test_legacy_trade_ledger_defaults_preserve_existing_standing():
+    world = _world_with_seed(42)
+    world.save.pilot.reputation[vr.FACTION_BLACKWAKE] = 80
+    data = world.save.to_dict()
+    data.pop("contraband_trade_balance")
+    data.pop("contraband_trade_milestones")
+    loaded = vr.SaveData.from_dict(data)
+    assert loaded.pilot.reputation[vr.FACTION_BLACKWAKE] == 80
+    assert loaded.contraband_trade_balance == loaded.contraband_trade_milestones == 0
+
+
+def test_engineer_pays_for_hire_and_wages_on_twenty_medium_jumps():
+    world = _world_with_seed(42)
+    class Start:
+        x, y = 0, 0
+    class End:
+        x, y = 30, 0
+    base = vr.fuel_cost_for_jump(Start(), End())
+    world.save.ship.has_engineer = True
+    saved = base - vr.fuel_cost_for_jump(Start(), End(), world.save.ship)
+    role = vr.CREW_ROLES["engineer"]
+    assert 20 * (saved * 6 - role["wage"]) >= role["hire_cost"]
+    assert role["wage"] < 6
+
+
+def test_new_futures_wait_for_origin_and_space_and_preserve_fee(tmp_path):
+    world = _world_with_seed(42)
+    before = world.save.pilot.credits
+    vr.buy_futures_contract(world, "food", 3, 5)
+    contract = world.save.active_futures[0]
+    assert contract.principal < contract.locked_price
+    world.save.turn = 5
+    world.save.current_system = 1
+    assert vr.settle_futures_contracts(world) == []
+    assert not world.save.cargo
+    world.save.current_system = 0
+    world.save.cargo = {"ore": vr.cargo_capacity(world.save.ship)}
+    assert vr.settle_futures_contracts(world) == []
+    assert world.save.active_futures == [contract]
+    assert world.save.pilot.credits == before - contract.locked_price
+    vr.persist(world, tmp_path, 77)
+    save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    restored = vr.World(save)
+    vr.cancel_futures_contract(restored, contract.id)
+    assert restored.save.pilot.credits == before - (contract.locked_price - contract.principal)
+    assert not restored.save.active_futures
+    with pytest.raises(vr.TradeError):
+        vr.cancel_futures_contract(restored, contract.id)
+
+
+def test_futures_fee_is_nonzero_and_cannot_be_reduced_by_order_splitting():
+    world = _world_with_seed(42)
+    for commodity in vr.LEGAL_COMMODITIES:
+        principal, fee = vr.futures_quote(world, commodity, 12)
+        unit_principal, unit_fee = vr.futures_quote(world, commodity, 1)
+        assert principal == unit_principal * 12
+        assert fee == unit_fee * 12 and unit_fee >= 1
+
+
+@pytest.mark.parametrize("fault", ["negative", "bool", "too_large", "bad_term", "unaffordable", "illegal", "limit"])
+def test_futures_rejection_is_atomic(fault):
+    import copy
+    world = _world_with_seed(42)
+    commodity, quantity, duration = "food", 1, 5
+    if fault == "negative": quantity = -1
+    elif fault == "bool": quantity = True
+    elif fault == "too_large": quantity = vr.cargo_capacity(world.save.ship) + 1
+    elif fault == "bad_term": duration = 7
+    elif fault == "unaffordable": world.save.pilot.credits = 0
+    elif fault == "illegal": commodity = "weapons"
+    elif fault == "limit":
+        for _ in range(vr.MAX_FUTURES_CONTRACTS):
+            vr.buy_futures_contract(world, "food", 1, 5)
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(vr.TradeError):
+        vr.buy_futures_contract(world, commodity, quantity, duration)
+    assert world.save.to_dict() == before
+
+
+def test_cancelled_contraband_futures_cannot_award_standing():
+    world = _world_with_seed(42)
+    world.here.economy = "Haven"
+    world.save.pilot.credits = 10000
+    for _ in range(40):
+        vr.buy_futures_contract(world, "weapons", 1, 5)
+        vr.cancel_futures_contract(world, world.save.active_futures[0].id)
+    assert world.save.contraband_trade_balance < 0
+    assert world.save.pilot.reputation[vr.FACTION_BLACKWAKE] == 0
+
+
+def test_futures_draft_edit_and_back_write_nothing(monkeypatch):
+    import copy
+    world = _world_with_seed(42)
+    before = copy.deepcopy(world.save.to_dict())
+    commands = iter("QTTB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(commands))
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "3")
+    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Draft persisted"))
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._screen_buy_futures(vr.Palette(False), world, "food")
+    assert world.save.to_dict() == before
+
+
+def test_futures_cancel_decline_keeps_order_and_money(monkeypatch):
+    import copy
+    world = _world_with_seed(42)
+    vr.buy_futures_contract(world, "food", 2, 5)
+    before = copy.deepcopy(world.save.to_dict())
+    commands = iter("XNB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(commands))
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr._screen_futures_order(vr.Palette(False), world, world.save.active_futures[0])
+    assert world.save.to_dict() == before
+
+
+def test_pickup_arrival_and_delivery_reward_resume_exactly_once(monkeypatch):
+    import copy
+    world = _world_with_seed(42)
+    dest = world.here.connections[0]
+    world.save.active_futures = [vr.FuturesContract(1, "food", 2, 22, 1, origin_system=dest, principal=20)]
+    world.save.active_missions = [vr.Mission(1, "delivery", "Pickup delivery", 500, 0, dest, commodity="food", quantity=2)]
+    snapshots = []
+    world._checkpoint = lambda current: snapshots.append(copy.deepcopy(current.save.to_dict()))
+    monkeypatch.setattr(vr, "_resolve_random_travel_encounter", lambda *args: None)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), world, dest)
+    expected = world.save.to_dict()
+    assert world.save.pilot.credits == 1700
+    assert not world.save.active_futures and not world.save.active_missions
+    for snapshot in snapshots:
+        if snapshot["pending_travel"] is None:
+            continue
+        resumed = vr.World(vr.SaveData.from_dict(snapshot))
+        with contextlib.redirect_stdout(io.StringIO()):
+            vr.screen_travel(vr.Palette(False), resumed, dest)
+        assert resumed.save.to_dict() == expected
+
+
+def test_departure_does_not_teleport_new_pickup_goods(monkeypatch):
+    world = _world_with_seed(42)
+    vr.buy_futures_contract(world, "food", 2, 5)
+    world.save.turn = 4
+    dest = world.here.connections[0]
+    monkeypatch.setattr(vr, "_resolve_random_travel_encounter", lambda *args: None)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), world, dest)
+    assert world.save.turn == 5
+    assert not world.save.cargo and len(world.save.active_futures) == 1
+
+
+
+def test_real_futures_cancellation_survives_forced_termination(tmp_path):
+    world = _world_with_seed(42)
+    before = world.save.pilot.credits
+    vr.buy_futures_contract(world, "food", 2, 5)
+    contract = world.save.active_futures[0]
+    vr.persist(world, tmp_path, 77)
+    index = len(vr.LEGAL_COMMODITIES)
+    commands = b"MX" + b"N" * (index // 4) + str(index % 4 + 1).encode() + b"XY"
+    with _door_stopped_at(tmp_path, commands, b"Order cancelled:"):
+        saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not saved.active_futures
+    assert saved.pilot.credits == before - (contract.locked_price - contract.principal)
+
+
+@pytest.mark.parametrize("field,value", [("origin_system", "0"), ("principal", -1), ("commodity", [])])
+def test_new_futures_corrupt_metadata_uses_preserving_recovery(field, value):
+    world = _world_with_seed(42)
+    vr.buy_futures_contract(world, "food", 1, 5)
+    data = world.save.to_dict()
+    data["active_futures"][0][field] = value
+    with pytest.raises(vr.ResumeError):
+        vr.SaveData.from_dict(data)
+
+
+def test_ready_pickup_prevents_premature_stranded_tow(monkeypatch):
+    world = _world_with_seed(42)
+    world.save.current_system = world.here.connections[0]
+    vr.buy_futures_contract(world, "food", 2, 5)
+    world.save.turn = 5
+    world.save.ship.fuel = 0
+    world.save.pilot.credits = 0
+    station = world.save.current_system
+    assert vr.is_stranded(world)
+    snapshots = []
+    world._checkpoint = lambda current: snapshots.append(current.save.to_dict())
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
+    assert world.save.current_system == station
+    assert world.save.cargo == {"food": 2}
+    assert not world.save.active_futures
+    assert snapshots[0]["cargo"] == {"food": 2}
+    assert "tug" not in output.getvalue().lower()
+
+
+@pytest.mark.parametrize("fields", [("origin_system",), ("principal",), ("origin_system", "principal")])
+def test_explicit_null_futures_metadata_preserves_original_save(tmp_path, fields):
+    import json
+
+    world = _world_with_seed(42)
+    vr.buy_futures_contract(world, "food", 1, 5)
+    data = world.save.to_dict()
+    for field in fields:
+        data["active_futures"][0][field] = None
+    path = tmp_path / "77.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
+
+
+def test_legacy_futures_keep_absent_pickup_metadata_across_checkpoints():
+    original = vr.FuturesContract(1, "food", 1, 100, 5)
+    data = original.to_dict()
+    assert "origin_system" not in data and "principal" not in data
+    assert vr.FuturesContract.from_dict(data).to_dict() == data
+
+
+@contextlib.contextmanager
+def _live_voidrunner(tmp_path, user_id=77, commands=b"", acknowledgement=b"Station Services"):
+    """Own a real door process until the test exits, draining its output."""
+    import json
+    import os
+    import subprocess
+    import threading
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    info = tmp_path / f"info-{user_id}.json"
+    info.write_text(json.dumps({"user_id": user_id, "handle": "Tester"}), encoding="utf-8")
+    env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info))
+    proc = subprocess.Popen([sys.executable, str(_VOIDRUNNER_PATH)], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    output = bytearray()
+    reached = threading.Event()
+
+    def drain():
+        while byte := proc.stdout.read(1):
+            if len(output) < 128_000:
+                output.extend(byte)
+                if acknowledgement in output:
+                    reached.set()
+
+    reader = threading.Thread(target=drain)
+    reader.start()
+    try:
+        proc.stdin.write(commands)
+        proc.stdin.flush()
+        assert reached.wait(10), output.decode("utf-8", errors="replace")
+        yield proc, env
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+        reader.join(timeout=5)
+        assert not reader.is_alive()
+        proc.stdin.close()
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+@pytest.mark.parametrize("new_career", [False, True])
+def test_second_real_launch_cannot_load_or_replace_an_active_pilot(tmp_path, new_career):
+    import subprocess
+
+    if not new_career:
+        vr.write_save(tmp_path, 77, _world_with_seed(42).save)
+    ack = b"Pilot callsign" if new_career else b"Station Services"
+    with _live_voidrunner(tmp_path, acknowledgement=ack) as (_, env):
+        before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")}
+        result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"Q",
+                                capture_output=True, env=env, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert b"already has an active Voidrunner session" in result.stdout
+        assert b"Welcome back" not in result.stdout and b"Pilot callsign" not in result.stdout
+        assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")} == before
+
+
+@pytest.mark.parametrize("end", ["kill", "quit", "eof"])
+def test_pilot_lease_releases_and_acknowledged_trade_survives(tmp_path, end):
+    import subprocess
+
+    vr.write_save(tmp_path, 77, _world_with_seed(42).save)
+    with _live_voidrunner(tmp_path, commands=b"MAB1\r", acknowledgement=b"Bought 1x Food") as (proc, env):
+        if end == "kill":
+            proc.kill()
+        elif end == "quit":
+            proc.stdin.write(b"QQ")
+            proc.stdin.flush()
+        else:
+            proc.stdin.close()
+        proc.wait(timeout=5)
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"Q",
+                            capture_output=True, env=env, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert b"Welcome back" in result.stdout
+    assert b"already has" not in result.stdout
+    save, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert save.cargo == {"food": 1}
+    assert (tmp_path / ".77.lock").exists()
+
+
+def test_independent_pilots_and_installations_can_play_concurrently(tmp_path):
+    first, second = tmp_path / "one", tmp_path / "two"
+    vr.write_save(first, 77, _world_with_seed(42).save)
+    vr.write_save(first, 88, _world_with_seed(43).save)
+    vr.write_save(second, 77, _world_with_seed(44).save)
+    with _live_voidrunner(first), _live_voidrunner(first, 88), _live_voidrunner(second):
+        assert {e["user_id"] for e in vr.load_hall_of_fame(first)} == {77, 88}
+        assert {e["user_id"] for e in vr.load_hall_of_fame(second)} == {77}
+
+
+def test_simultaneous_processes_retain_every_pilot_score(tmp_path):
+    import subprocess
+
+    script = """
+import runpy, sys
+from pathlib import Path
+vr = runpy.run_path(sys.argv[1])
+uid = int(sys.argv[3])
+directory = Path(sys.argv[2])
+print('ready', flush=True)
+sys.stdin.read(1)
+with vr['pilot_session'](directory, uid):
+    world = vr['World'](vr['_new_career']('Pilot' + str(uid)))
+    for count in range(12):
+        world.save.pilot.credits = uid * 1000 + count
+        vr['persist'](world, directory, uid)
+"""
+    processes = []
+    try:
+        for uid in range(1, 9):
+            processes.append(subprocess.Popen(
+                [sys.executable, "-c", script, str(_VOIDRUNNER_PATH), str(tmp_path), str(uid)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        for proc in processes:
+            proc.stdin.write(b"x")
+            proc.stdin.flush()
+        for proc in processes:
+            _, errors = proc.communicate(timeout=15)
+            assert proc.returncode == 0, errors
+    finally:
+        for proc in processes:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                pipe.close()
+    entries = vr.load_hall_of_fame(tmp_path)
+    assert {e["user_id"]: e["best_credits"] for e in entries} == {uid: uid * 1000 + 11 for uid in range(1, 9)}
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_score_outside_top_twenty_retains_its_peak_on_return(tmp_path):
+    veteran = vr._new_career("Veteran")
+    veteran.pilot.credits = 9000
+    vr.update_hall_of_fame(tmp_path, 1, veteran)
+    for uid in range(2, 23):
+        save = vr._new_career(f"Pilot{uid}")
+        save.pilot.credits = 10_000 + uid
+        vr.update_hall_of_fame(tmp_path, uid, save)
+    assert all(e["user_id"] != 1 for e in vr.load_hall_of_fame(tmp_path))
+    veteran.pilot.credits = 100
+    vr.update_hall_of_fame(tmp_path, 1, veteran)
+    # Temporarily reduce only the display population, as in a restored subset.
+    retained = tmp_path / "subset"
+    retained.mkdir()
+    (retained / "scores").mkdir()
+    (retained / "scores" / "1.json").write_bytes((tmp_path / "scores" / "1.json").read_bytes())
+    assert vr.load_hall_of_fame(retained)[0]["best_credits"] == 9000
+
+
+def test_legacy_scores_are_preserved_and_new_counters_take_precedence(tmp_path):
+    import json
+
+    legacy = [{"user_id": 77, "handle": "Old", "best_credits": 9000, "kills": 2}]
+    path = tmp_path / "leaderboard.json"
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    original = path.read_bytes()
+    world = _world_with_seed(42)
+    world.save.pilot.handle = "Renamed"
+    world.save.pilot.kills = 10
+    vr.persist(world, tmp_path, 77)
+    entry = vr.load_hall_of_fame(tmp_path)[0]
+    assert entry["best_credits"] == world.save.best_credits == 9000
+    assert entry["handle"] == "Renamed" and entry["kills"] == 10
+    assert path.read_bytes() == original
+
+
+def test_failed_score_write_is_repaired_from_saved_peak_after_spending_and_retirement(tmp_path, monkeypatch):
+    world = _world_with_seed(42)
+    world.save.pilot.credits = 12_000
+    replace = vr.os.replace
+
+    def fail_score(source, target):
+        if target.parent.name == "scores":
+            raise OSError("score directory temporarily unavailable")
+        return replace(source, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vr.os, "replace", fail_score)
+        vr.persist(world, tmp_path, 77)
+    loaded, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert loaded.best_credits == 12_000
+    assert vr.load_hall_of_fame(tmp_path) == []
+    loaded.pilot.credits = 10
+    retired = vr.retire_pilot(loaded)
+    vr.persist(vr.World(retired), tmp_path, 77)
+    assert vr.load_hall_of_fame(tmp_path)[0]["best_credits"] == 12_000
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+@pytest.mark.parametrize("malformed", [None, [], {"user_id": 77, "handle": [], "best_credits": 9},
+                                      {"user_id": 77, "handle": "Bad", "best_credits": "9"}])
+def test_malformed_score_entries_do_not_break_career_checkpoint(tmp_path, malformed):
+    import json
+
+    (tmp_path / "leaderboard.json").write_text(json.dumps([malformed]), encoding="utf-8")
+    (tmp_path / "scores").mkdir()
+    (tmp_path / "scores" / "77.json").write_text(json.dumps(malformed), encoding="utf-8")
+    world = _world_with_seed(42)
+    vr.persist(world, tmp_path, 77)
+    assert vr.load_hall_of_fame(tmp_path)[0]["best_credits"] == world.save.pilot.credits
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", 999), ("schema_version", True), ("galaxy_version", 2),
+    ("seed", "42"), ("turn", -1), ("current_system", 48),
+    ("pilot", []), ("pilot.credits", -1), ("pilot.credits", True),
+    ("pilot.reputation", {"unknown": 4}), ("pilot.log", "not a list"),
+    ("pilot.handle", "Bad\x1b[2J"), ("pilot.highest_rank_seen", 100),
+    ("ship.hull_class", "Unknown"), ("ship.fuel", 999), ("ship.hull_hp", -1),
+    ("ship.engine_tier", 99), ("ship.has_gunner", "yes"),
+    ("cargo", {"unknown": 1}), ("cargo", {"food": -1}), ("cargo", {"food": 999}),
+    ("discovered", [0, 0]), ("discovered", [True]), ("discovered", [49]),
+    ("market_drift", {"0": {"food": float("nan")}}),
+    ("market_drift", {"0": {"food": -1}}), ("market_drift", {"48": {}}),
+    ("flags", {"landmark_investigated": "no"}), ("active_event", []),
+    ("active_missions", "bad"), ("active_futures", {}), ("future_field", {}),
+])
+def test_invalid_career_fields_preserve_original_bytes(tmp_path, field, value):
+    import json
+
+    data = _world_with_seed(42).save.to_dict()
+    target = data
+    keys = field.split(".")
+    for key in keys[:-1]:
+        target = target[key]
+    target[keys[-1]] = value
+    path = tmp_path / "77.json"
+    original = json.dumps(data).encode()
+    path.write_bytes(original)
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("raw", [b"[]", b"null", b"\xff\xfe\xff", b"{" + b'"seed":1,"seed":2}',
+                                b"[" * 1100 + b"]" * 1100])
+def test_invalid_json_document_stops_without_reset(tmp_path, raw):
+    path = tmp_path / "77.json"
+    path.write_bytes(raw)
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == raw
+
+
+def test_oversized_career_and_unreadable_file_never_start_new(tmp_path, monkeypatch):
+    path = tmp_path / "77.json"
+    path.write_bytes(b"x" * (vr.MAX_SAVE_BYTES + 1))
+    with pytest.raises(vr.ResumeError, match="file size"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.stat().st_size == vr.MAX_SAVE_BYTES + 1
+    monkeypatch.setattr(vr, "_read_save_bytes", lambda path: (_ for _ in ()).throw(PermissionError()))
+    with pytest.raises(vr.ResumeError, match="could not be read"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+
+
+def test_legacy_optional_fields_and_overlimit_contracts_remain_compatible():
+    import json
+
+    world = _world_with_seed(42)
+    world.save.active_missions = [vr.Mission(1, "bounty", "Old contract", 50, 0, 1, pirate_tier=1)] * 5
+    data = world.save.to_dict()
+    for key in ("galaxy_version", "mission_boards", "best_credits", "active_futures", "pending_travel",
+                "event_rng_state", "next_mission_id", "flags", "market_drift"):
+        data.pop(key)
+    loaded = vr._decode_career(json.dumps(data).encode())
+    assert loaded.galaxy_version == 1 and len(loaded.active_missions) == 5
+    assert vr.generate_galaxy(loaded.seed) == vr.generate_galaxy(world.save.seed)
+    resumed = vr.World(loaded)
+    assert len({m.id for m in resumed.save.active_missions}) == 5
+
+
+def test_previous_checkpoint_tracks_changes_and_identical_writes_do_not_age_it(tmp_path):
+    save = _world_with_seed(42).save
+    vr.write_save(tmp_path, 77, save)
+    original = (tmp_path / "77.json").read_bytes()
+    save.pilot.credits += 100
+    vr.write_save(tmp_path, 77, save)
+    previous = tmp_path / "77.previous.json"
+    assert previous.read_bytes() == original
+    vr.write_save(tmp_path, 77, save)
+    assert previous.read_bytes() == original
+    current = (tmp_path / "77.json").read_bytes()
+    save.pilot.credits += 100
+    vr.write_save(tmp_path, 77, save)
+    assert previous.read_bytes() == current
+
+
+def test_invalid_outgoing_checkpoint_does_not_replace_either_saved_copy(tmp_path):
+    save = _world_with_seed(42).save
+    vr.write_save(tmp_path, 77, save)
+    save.pilot.credits += 10
+    vr.write_save(tmp_path, 77, save)
+    before = {p.name: p.read_bytes() for p in tmp_path.glob("*.json")}
+    save.ship.fuel = -1
+    with pytest.raises(vr.SaveError, match="invalid career"):
+        vr.write_save(tmp_path, 77, save)
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("*.json")} == before
+
+
+def test_failed_previous_copy_prevents_current_save_replacement(tmp_path, monkeypatch):
+    save = _world_with_seed(42).save
+    vr.write_save(tmp_path, 77, save)
+    original = (tmp_path / "77.json").read_bytes()
+    replace = vr.os.replace
+
+    def fail_previous(source, target):
+        if target.name == "77.previous.json":
+            raise OSError("previous copy unavailable")
+        return replace(source, target)
+
+    monkeypatch.setattr(vr.os, "replace", fail_previous)
+    save.pilot.credits += 10
+    with pytest.raises(OSError):
+        vr.write_save(tmp_path, 77, save)
+    assert (tmp_path / "77.json").read_bytes() == original
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_pending_journey_is_validated_and_preserved_through_recovery(tmp_path, monkeypatch):
+    import json
+
+    world = _world_with_seed(42)
+    world.event_rng.seed(0)
+    destination = world.here.connections[0]
+    snapshots = []
+    world._checkpoint = lambda current: snapshots.append(json.dumps(current.save.to_dict()).encode())
+    monkeypatch.setattr(vr, "read_key", lambda: "F")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), world, destination)
+    pending = next(raw for raw in snapshots if json.loads(raw)["pending_travel"] is not None)
+    (tmp_path / "77.previous.json").write_bytes(pending)
+    (tmp_path / "77.json").write_bytes(b"broken")
+    restored = vr.restore_previous_career(tmp_path, 77, pending)
+    assert restored.pending_travel == json.loads(pending)["pending_travel"]
+    resumed = vr.World(restored)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_travel(vr.Palette(False), resumed, destination)
+    assert resumed.save.to_dict() == world.save.to_dict()
+
+
+def _broken_career_with_previous(tmp_path):
+    save = _world_with_seed(42).save
+    save.turn = 7
+    save.pilot.handle = "Recovered Pilot"
+    vr.write_save(tmp_path, 77, save)
+    expected = (tmp_path / "77.json").read_bytes()
+    save.turn = 8
+    vr.write_save(tmp_path, 77, save)
+    (tmp_path / "77.json").write_bytes(b"damaged original")
+    return expected
+
+
+@pytest.mark.parametrize("commands", [b"B", b"RNB", b"R", b"", b"\x1b[AQ"])
+def test_real_recovery_back_decline_eof_and_special_keys_write_nothing(tmp_path, commands):
+    import json
+    import os
+    import subprocess
+
+    _broken_career_with_previous(tmp_path)
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in tmp_path.glob("*.json")}
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == (0 if commands.endswith((b"B", b"Q")) else 1)
+    assert not result.stderr
+    assert b"Career recovery" in result.stdout and b"Day 7" in result.stdout
+    assert b"Pilot callsign" not in result.stdout
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("*.json")} == before
+
+
+def test_real_confirmed_recovery_preserves_original_before_success_and_resumes(tmp_path):
+    expected = _broken_career_with_previous(tmp_path)
+    with _door_stopped_at(tmp_path, b"RY", b"Previous checkpoint restored"):
+        restored, is_new, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert not is_new and restored.turn == 7
+        archives = list(tmp_path.glob("77.recovery-*.json"))
+        assert len(archives) == 1 and archives[0].read_bytes() == b"damaged original"
+        assert (tmp_path / "77.previous.json").read_bytes() == expected
+    with _door_stopped_at(tmp_path, b"Q", b"Welcome back, Recovered Pilot"):
+        restored, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert restored.turn == 7
+
+
+@pytest.mark.parametrize("failure", ["archive", "replacement", "changed", "full"])
+def test_recovery_failure_keeps_primary_and_previous(tmp_path, monkeypatch, failure):
+    expected = _broken_career_with_previous(tmp_path)
+    if failure == "archive":
+        monkeypatch.setattr(vr.tempfile, "NamedTemporaryFile", lambda **kw: (_ for _ in ()).throw(PermissionError()))
+    elif failure == "replacement":
+        replace = vr.os.replace
+
+        def fail_primary(source, destination):
+            if Path(destination).name == "77.json":
+                raise OSError("primary replacement failed")
+            return replace(source, destination)
+
+        monkeypatch.setattr(vr.os, "replace", fail_primary)
+    elif failure == "changed":
+        expected = expected + b" "
+    else:
+        for index in range(vr.MAX_RECOVERY_COPIES):
+            (tmp_path / f"77.recovery-{index}.json").write_bytes(b"retained")
+    before_previous = (tmp_path / "77.previous.json").read_bytes()
+    with pytest.raises((OSError, vr.ResumeError)):
+        vr.restore_previous_career(tmp_path, 77, expected)
+    assert (tmp_path / "77.json").read_bytes() == b"damaged original"
+    assert (tmp_path / "77.previous.json").read_bytes() == before_previous
+    if failure == "replacement":
+        archives = list(tmp_path.glob("77.recovery-*.json"))
+        assert len(archives) == 1 and archives[0].read_bytes() == b"damaged original"
+
+
+@pytest.mark.parametrize("failure", ["write", "flush", "fsync", "close", "publish"])
+def test_failed_recovery_archive_never_consumes_a_retained_slot(tmp_path, monkeypatch, failure):
+    previous = _broken_career_with_previous(tmp_path)
+    create_temporary = vr.tempfile.NamedTemporaryFile
+
+    class FailingArchive:
+        def __init__(self, **kwargs):
+            self.file = create_temporary(**kwargs)
+            self.name = self.file.name
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.file.close()
+            if failure == "close":
+                raise OSError("archive close failed")
+
+        def write(self, data):
+            if failure == "write":
+                self.file.write(data[:3])
+                raise OSError("archive write failed")
+            return self.file.write(data)
+
+        def flush(self):
+            if failure == "flush":
+                raise OSError("archive flush failed")
+            self.file.flush()
+
+        def fileno(self):
+            return self.file.fileno()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vr.tempfile, "NamedTemporaryFile", FailingArchive)
+        if failure in {"fsync", "publish"}:
+            def fail(*args):
+                raise OSError(f"archive {failure} failed")
+            patch.setattr(vr.os, "fsync" if failure == "fsync" else "replace", fail)
+        for _ in range(vr.MAX_RECOVERY_COPIES + 1):
+            with pytest.raises(OSError, match="archive"):
+                vr.restore_previous_career(tmp_path, 77, previous)
+            assert not list(tmp_path.glob("77.recovery-*.json"))
+            assert not list(tmp_path.glob("*.tmp"))
+            assert (tmp_path / "77.json").read_bytes() == b"damaged original"
+            assert (tmp_path / "77.previous.json").read_bytes() == previous
+
+    vr.restore_previous_career(tmp_path, 77, previous)
+    assert (tmp_path / "77.json").read_bytes() == previous
+    archives = list(tmp_path.glob("77.recovery-*.json"))
+    assert len(archives) == 1 and archives[0].read_bytes() == b"damaged original"
+
+
+@pytest.mark.parametrize("full_archives", [False, True])
+def test_missing_primary_requires_recovery_and_validated_previous_can_be_restored(tmp_path, full_archives):
+    expected = _broken_career_with_previous(tmp_path)
+    (tmp_path / "77.json").unlink()
+    if full_archives:
+        for index in range(vr.MAX_RECOVERY_COPIES):
+            (tmp_path / f"77.recovery-{index}.json").write_bytes(b"retained")
+    with pytest.raises(vr.ResumeError, match="missing"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    restored = vr.restore_previous_career(tmp_path, 77, expected)
+    assert restored.turn == 7 and (tmp_path / "77.json").read_bytes() == expected
+
+
+@pytest.mark.parametrize("kind", ["schema", "galaxy", "journey", "rng", "event", "journey_field",
+                                 "encounter_field", "pirate_field", "combat_field", "snapshot_field"])
+def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkeypatch, kind):
+    import json
+    import os
+    import subprocess
+
+    previous = _broken_career_with_previous(tmp_path)
+    future = json.loads(previous)
+    if kind in {"schema", "galaxy"}:
+        future[f"{kind}_version"] = 99
+    elif kind == "journey":
+        future["pending_travel"] = {"version": 99}
+    elif kind == "rng":
+        future["event_rng_state"] = [99, [], None]
+    elif kind == "event":
+        future["active_event"] = {"economy": "Industrial", "commodity": "metals", "direction": "boom",
+                                  "turns_remaining": 2, "description": "News", "future_rule": True}
+    else:
+        destination = vr.World(vr.SaveData.from_dict(future)).here.connections[0]
+        travel = {"version": 1, "origin": 0, "destination": destination, "escort_index": 0, "phase": "primary",
+                  "primary": "random", "encounter": {}, "escorts": [], "destroyed": False, "was_discovered": True,
+                  "bounty": None}
+        future["pending_travel"] = travel
+        pirate = {"name": "Raider", "tier": 1, "hp": 35, "hp_max": 35}
+        if kind == "journey_field":
+            travel["future_rule"] = True
+        elif kind == "encounter_field":
+            travel["encounter"]["future_rule"] = True
+        elif kind == "pirate_field":
+            travel["encounter"]["pirate"] = dict(pirate, future_rule=True)
+        elif kind == "combat_field":
+            travel["encounter"]["combat"] = {"pirate": pirate, "outcome": None, "lines": [], "future_rule": True}
+        else:
+            mission = vr.Mission(1, "bounty", "Raider", 100, 0, destination, pirate_tier=1).to_dict()
+            future["active_missions"] = [mission]
+            travel["primary"] = "bounty"
+            travel["bounty"] = dict(mission, future_rule=True)
+    path = tmp_path / "77.json"
+    path.write_text(json.dumps(future), encoding="utf-8")
+    original = path.read_bytes()
+    with pytest.raises(vr.UnsupportedSave) as error:
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    keys = iter("RB")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value).save is None
+    assert "[R]estore" not in output.getvalue()
+    with pytest.raises(vr.UnsupportedSave):
+        vr.restore_previous_career(tmp_path, 77, previous)
+    assert path.read_bytes() == original and not list(tmp_path.glob("77.recovery-*"))
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"RYB", capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == 0 and not result.stderr
+    assert b"[R]estore" not in result.stdout and b"Pilot callsign" not in result.stdout
+    assert path.read_bytes() == original and not list(tmp_path.glob("77.recovery-*"))
+
+
+@pytest.mark.parametrize("problem", ["oversized", "unreadable", "full"])
+def test_recovery_hides_restore_and_explains_impossible_preservation(tmp_path, monkeypatch, problem):
+    _broken_career_with_previous(tmp_path)
+    primary = tmp_path / "77.json"
+    read = vr._read_save_bytes
+    if problem == "oversized":
+        primary.write_bytes(b"x" * (vr.MAX_SAVE_BYTES + 1))
+    elif problem == "unreadable":
+        def fail_primary(path):
+            if path == primary:
+                raise PermissionError("cannot read primary")
+            return read(path)
+        monkeypatch.setattr(vr, "_read_save_bytes", fail_primary)
+    else:
+        for index in range(vr.MAX_RECOVERY_COPIES):
+            (tmp_path / f"77.recovery-{index}.json").write_bytes(b"retained")
+    before = {path.name: path.read_bytes() for path in tmp_path.glob("*.json")}
+    keys = iter("R" + "N" * 20 + "B")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        result = vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, vr.ResumeError("Career unavailable"))
+    rendered = " ".join(output.getvalue().split())
+    assert result.save is None and result.exit_code == 0
+    assert "[R]estore" not in rendered and "manual recovery" in rendered
+    reason = {"oversized": "file size", "unreadable": "cannot be read", "full": "copies are full"}[problem]
+    assert reason in rendered
+    assert {path.name: path.read_bytes() for path in tmp_path.glob("*.json")} == before
+
+
+def test_missing_economy_event_fields_remain_recoverable_corruption(tmp_path, monkeypatch):
+    import json
+    previous = _broken_career_with_previous(tmp_path)
+    broken = json.loads(previous)
+    broken["active_event"] = {"economy": "Industrial"}
+    (tmp_path / "77.json").write_text(json.dumps(broken), encoding="utf-8")
+    with pytest.raises(vr.ResumeError) as error:
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not isinstance(error.value, vr.UnsupportedSave)
+    keys = iter("B")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value)
+    assert "[R]estore" in output.getvalue()
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_recovery_pages_fit_terminal_and_restore_is_on_last_page(tmp_path, monkeypatch, width, height):
+    _broken_career_with_previous(tmp_path)
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    chunks, current = [], io.StringIO()
+    keys = iter("N" * 40 + "B")
+
+    def read():
+        chunks.append(current.getvalue())
+        current.seek(0)
+        current.truncate(0)
+        return next(keys)
+
+    monkeypatch.setattr(vr, "read_key", read)
+    with contextlib.redirect_stdout(current):
+        vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, vr.ResumeError("Damaged career"))
+    for page in chunks:
+        rows = page.splitlines()
+        assert len(rows) <= height, (width, height, rows)
+        assert all(vr._visible_width(row) <= width for row in rows)
+    assert any("[R]estore" in page for page in chunks)
+
+
+def test_notoriety_above_one_hundred_survives_checkpoint_and_restart(tmp_path):
+    world = _world_with_seed(42)
+    world.save.pilot.notoriety = 99
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    world.save.pilot.notoriety += 3  # A patrol kill crosses the former artificial cap.
+    world.checkpoint()
+    loaded, is_new, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not is_new and loaded.pilot.notoriety == 102
+    loaded.pilot.notoriety = 1000
+    vr.write_save(tmp_path, 77, loaded)
+    assert vr.load_or_create_save(tmp_path, 77, "Tester")[0].pilot.notoriety == 1000
+
+
+def test_opening_assignment_quotes_real_affordable_neighborhoods_without_rng_or_save_changes():
+    import copy
+    for seed in range(64):
+        world = _world_with_seed(seed)
+        world.checkpoint()
+        before = copy.deepcopy(world.save.to_dict())
+        rng_before = world.event_rng.getstate()
+        offer = vr.opening_assignment_offer(world)
+        assert offer is not None, seed
+        assert offer.target_system in world.here.connections and offer.quantity == 3
+        assert offer.commodity in vr.ECONOMY_DEMANDS[world.by_id[offer.target_system].economy]
+        assert vr.COMMODITIES[offer.commodity]["legal"] and offer.deadline_turn is None
+        fuel = vr.fuel_cost_for_jump(world.here, world.by_id[offer.target_system], world.save.ship)
+        cost = 3 * vr.price_for(world, 0, offer.commodity)
+        assert 2 * fuel <= world.save.ship.fuel and cost <= world.save.pilot.credits
+        assert offer.reward - cost - 12 * fuel == 200
+        assert world.save.to_dict() == before and world.event_rng.getstate() == rng_before
+        assert vr.opening_assignment_offer(world).to_dict() == offer.to_dict()
+
+
+@pytest.mark.parametrize("reason", ["later", "away", "taken", "broke", "full", "stale", "capacity", "pending"])
+def test_opening_assignment_rejection_is_atomic(reason):
+    import copy
+    world = _world_with_seed(42)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    if reason == "later":
+        world.save.turn = 1
+    elif reason == "away":
+        world.save.current_system = offer.target_system
+    elif reason == "taken":
+        world.save.flags["opening_assignment_taken"] = True
+    elif reason == "broke":
+        world.save.pilot.credits = 0
+    elif reason == "full":
+        other = next(c for c in vr.LEGAL_COMMODITIES if c != offer.commodity)
+        world.save.cargo = {other: vr.cargo_capacity(world.save.ship)}
+    elif reason == "stale":
+        offer.reward += 1
+    elif reason == "capacity":
+        world.save.active_missions = [vr.Mission(100 + i, "delivery", "Existing", 10, 0, offer.target_system,
+                                               commodity="food", quantity=1) for i in range(vr.MAX_ACTIVE_MISSIONS)]
+    else:
+        world.save.pending_travel = {"version": 1}
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(vr.MissionError):
+        vr.accept_opening_assignment(world, offer)
+    assert world.save.to_dict() == before
+
+
+def test_opening_assignment_is_tracked_durable_and_pays_only_once_without_deadline(tmp_path):
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    vr.accept_opening_assignment(world, offer)
+    world.checkpoint()
+    loaded, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    world = vr.World(loaded, checkpoint=lambda current: vr.persist(current, tmp_path, 77))
+    assert vr.tracked_mission(world).opening_assignment
+    assert world.save.flags["opening_assignment_taken"] and vr.opening_assignment_offer(world) is None
+    before = world.save.pilot.credits
+    world.save.current_system = offer.target_system
+    world.save.turn = 100
+    world.save.cargo[offer.commodity] = 4
+    assert len(vr.check_mission_completions(world)) == 1
+    assert world.save.cargo[offer.commodity] == 1
+    assert world.save.pilot.credits == before + offer.reward
+    assert world.save.flags["opening_assignment_completed"]
+    assert vr.check_mission_completions(world) == []
+    world.checkpoint()
+    loaded, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert loaded.pilot.missions_completed == 1 and loaded.pilot.credits == before + offer.reward
+    assert "First Flight complete" in " ".join(vr.pilot_guide_lines(vr.World(loaded)))
+
+
+def test_abandoned_opening_assignment_cannot_be_repeated_until_a_new_career():
+    world = _world_with_seed(42)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    vr.accept_opening_assignment(world, offer)
+    vr.abandon_mission(world, offer.id)
+    assert vr.opening_assignment_offer(world) is None
+    assert "First Flight is closed" in " ".join(vr.pilot_guide_lines(world))
+    world.reset(vr.retire_pilot(world.save))
+    assert not world.save.flags.get("opening_assignment_taken")
+    assert vr.opening_assignment_offer(world) is not None
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("screen", ["guide", "offer"])
+def test_opening_guide_and_offer_pages_fit_and_browsing_is_read_only(monkeypatch, width, height, screen):
+    import copy
+    world = _world_with_seed(42)
+    world.checkpoint()
+    before = copy.deepcopy(world.save.to_dict())
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO()
+    pages = []
+    guide_count = len(vr._mission_text_pages(vr.pilot_guide_lines(world), overhead=5))
+
+    def choose():
+        value = output.getvalue()
+        pages.append(value)
+        output.seek(0)
+        output.truncate(0)
+        assert world.save.to_dict() == before
+        assert len(pages) <= 100
+        return "B" if ("[A]ccept" in value if screen == "offer" else len(pages) == guide_count) else "N"
+
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        if screen == "guide":
+            vr.screen_pilot_guide(vr.Palette(False), world)
+        else:
+            vr._screen_opening_offer(vr.Palette(False), world, vr.opening_assignment_offer(world))
+    assert world.save.to_dict() == before
+    for page in pages:
+        rows = page.splitlines()
+        assert len(rows) <= height, (width, height, rows)
+        assert all(vr._visible_width(row) <= width for row in rows)
+    if screen == "offer":
+        assert all("[A]ccept" not in page for page in pages[:-1])
+
+
+def test_real_first_flight_survives_kills_through_acceptance_purchase_delivery_and_upgrade(tmp_path):
+    import os
+    import subprocess
+    world = _world_with_seed(42)
+    world.event_rng.seed(0)  # Ordinary first hop has no random encounter.
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    cargo_cost = 3 * vr.price_for(world, 0, offer.commodity)
+    with _door_stopped_at(tmp_path, b"GO" + b"N" * 10 + b"A", b"First Flight accepted and tracked"):
+        accepted, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert accepted.active_missions[0].opening_assignment and accepted.tracked_mission_id == offer.id
+    market_key = vr.LETTERS[vr.LEGAL_COMMODITIES.index(offer.commodity)].encode()
+    with _door_stopped_at(tmp_path, b"M" + market_key + b"B3\n", b"Bought 3x"):
+        bought, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert bought.cargo[offer.commodity] == 3 and bought.pilot.credits == 1200 - cargo_cost
+    jump_key = vr.CHART_CONNECTION_LETTERS[sorted(world.here.connections).index(offer.target_system)].encode()
+    with _door_stopped_at(tmp_path, b"C" + jump_key, b"Mission complete: First Flight:"):
+        delivered, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert delivered.flags["opening_assignment_completed"]
+        assert delivered.pilot.credits == 1200 - cargo_cost + offer.reward
+        assert delivered.turn == 1 and not delivered.active_missions
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=b"QQ", capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path),
+                                     NETBBS_DOOR_INFO=str(tmp_path / "door_info.json")), timeout=10)
+    assert result.returncode == 0 and not result.stderr
+    resumed, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert resumed.pending_travel is None and resumed.pilot.credits == delivered.pilot.credits
+    with _door_stopped_at(tmp_path, b"YAY", b"Cargo Bay Expansion upgraded to tier 1"):
+        upgraded, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+        assert upgraded.ship.cargo_tier == 1 and upgraded.pilot.credits == resumed.pilot.credits - 800
+
+
+@pytest.mark.parametrize("commands", [b"GBQ", b"GOBBQ", b"G", b"GO"])
+def test_real_opening_guide_back_and_eof_leave_career_unchanged(tmp_path, commands):
+    import os
+    import json
+    import subprocess
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    before = (tmp_path / "77.json").read_bytes()
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
+                            env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == 0 and not result.stderr
+    assert b"Pilot Guide 1/" in result.stdout
+    if b"O" in commands:
+        assert b"First Flight 1/" in result.stdout
+    assert (tmp_path / "77.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("invalid_flag", [None, 0, 1, "yes"])
+def test_invalid_opening_assignment_flag_is_rejected_before_checkpoint_write(tmp_path, invalid_flag):
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    before = (tmp_path / "77.json").read_bytes()
+    offer = vr.opening_assignment_offer(world)
+    offer.opening_assignment = invalid_flag
+    world.save.active_missions.append(offer)
+    with pytest.raises(vr.SaveError):
+        vr.write_save(tmp_path, 77, world.save)
+    assert (tmp_path / "77.json").read_bytes() == before
+
+
+def test_opening_quote_budgets_crew_and_return_fuel_before_acceptance():
+    world = _world_with_seed(42)
+    world.save.ship.has_gunner = True
+    world.save.ship.has_engineer = True
+    world.save.ship.fuel = 0
+    offer = vr.opening_assignment_offer(world)
+    assert offer is not None
+    fuel = vr.fuel_cost_for_jump(world.here, world.by_id[offer.target_system], world.save.ship)
+    price = vr.price_for(world, 0, offer.commodity)
+    assert offer.reward == 3 * price + 12 * fuel + 2 * (15 + 2) + 200
+    # Enough for three cheapest units alone is insufficient for the reserve/wages.
+    world.save.pilot.credits = 3 * min(vr.price_for(world, 0, c) for c in vr.LEGAL_COMMODITIES)
+    assert vr.opening_assignment_offer(world) is None
+
+
+def test_ordinary_legacy_missions_keep_their_serialized_shape():
+    mission = vr.Mission(1, "delivery", "Old job", 100, 0, 1, commodity="food", quantity=3)
+    assert "opening_assignment" not in mission.to_dict()
+    loaded = vr.Mission.from_dict(mission.to_dict())
+    assert loaded.opening_assignment is False and loaded.to_dict() == mission.to_dict()
+
+
+@pytest.mark.parametrize("corruption", ["missing_acceptance", "duplicate", "completed_but_active"])
+def test_contradictory_opening_assignment_progress_cannot_be_saved(tmp_path, corruption):
+    import dataclasses
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    vr.accept_opening_assignment(world, offer)
+    world.checkpoint()
+    before = (tmp_path / "77.json").read_bytes()
+    if corruption == "missing_acceptance":
+        del world.save.flags["opening_assignment_taken"]
+    elif corruption == "duplicate":
+        world.save.active_missions.append(dataclasses.replace(offer, id=999))
+    else:
+        world.save.flags["opening_assignment_completed"] = True
+    with pytest.raises(vr.SaveError):
+        vr.write_save(tmp_path, 77, world.save)
+    assert (tmp_path / "77.json").read_bytes() == before
+
+
+def test_opening_tags_on_posted_offers_are_rejected_before_loading_or_writing(tmp_path):
+    import json
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
+    world.checkpoint()
+    path = tmp_path / "77.json"
+    before = path.read_bytes()
+    offer = vr.opening_assignment_offer(world)
+    world.save.mission_boards[0]["offers"][0] = offer.to_dict()
+    with pytest.raises(vr.SaveError):
+        vr.write_save(tmp_path, 77, world.save)
+    assert path.read_bytes() == before
+    malformed = json.dumps(world.save.to_dict()).encode("utf-8")
+    path.write_bytes(malformed)
+    with pytest.raises(vr.ResumeError, match="opening assignment placement"):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == malformed
+
+
+def test_ordinary_mission_acceptance_rejects_an_opening_tag_without_mutating_the_board():
+    import copy
+    world = _world_with_seed(42)
+    world.checkpoint()
+    offer = vr.opening_assignment_offer(world)
+    world.save.mission_boards[0]["offers"][0] = offer.to_dict()
+    before = copy.deepcopy(world.save.to_dict())
+    with pytest.raises(vr.MissionError, match="Pilot Guide"):
+        vr.accept_mission(world, offer)
+    assert world.save.to_dict() == before
+
+
+def test_opening_quote_avoids_cargo_already_promised_to_an_earlier_delivery():
+    world = _world_with_seed(42)
+    world.checkpoint()
+    first = vr.opening_assignment_offer(world)
+    world.save.active_missions.append(vr.Mission(100, "delivery", "Earlier order", 100, 0, first.target_system,
+                                               commodity=first.commodity, quantity=1))
+    offer = vr.opening_assignment_offer(world)
+    assert offer is not None
+    assert (offer.target_system, offer.commodity) != (first.target_system, first.commodity)
+    vr.accept_opening_assignment(world, offer)
+    world.save.cargo[offer.commodity] = offer.quantity
+    world.save.current_system = offer.target_system
+    vr.check_mission_completions(world)
+    assert world.save.flags["opening_assignment_completed"]
+    assert any(m.description == "Earlier order" for m in world.save.active_missions)

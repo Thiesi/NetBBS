@@ -2,6 +2,134 @@
 
 NetBBS supplies the integration, not third-party games or their execution
 environments. The bundled games remain available without a legacy profile.
+
+## Voidrunner careers and concurrent sessions
+
+Voidrunner stores careers outside its disposable session directory, under
+`~/.netbbs/voidrunner_saves` by default. This default is shared by NetBBS services
+running under the same OS account. Pilot identity is the numeric BBS user ID
+within this directory, so independent nodes must use independent save directories.
+
+**Manual SysOp configuration:** set `VOIDRUNNER_SAVE_DIR` to a distinct absolute
+directory in each NetBBS service's environment, then restart that service. NetBBS
+passes this specific override through its restricted door environment. Standalone
+Voidrunner also honors it. Do not use a node display name as a directory identity.
+
+**Manual move of existing data:** stop every service/standalone game using the
+old directory, retain a copy of the whole directory, move its contents into the
+chosen directory, set the override, then restart. Include all numeric career
+JSON files, the `scores` subdirectory, and the retained legacy `leaderboard.json`.
+If independent nodes previously shared the default, their overlapping numeric
+IDs cannot be assigned safely by an automatic migration; inspect ownership before
+copying careers. Merely pointing at an empty directory starts a separate set of
+careers. Ordinary node backups include this directory as described below.
+
+One session may own a pilot at a time. A second launch displays an in-use message
+and leaves the career unchanged; different pilots can play together. OS locks
+release even if the game is killed. The small `.USER_ID.lock` files remain and
+are not evidence of a stuck session; never delete them while games are running.
+Use a local filesystem with OS locking and atomic file replacement. A directory
+shared between hosts is not a supported multiplayer setup.
+
+Each pilot's Hall of Fame record is retained in `scores/USER_ID.json`, including
+pilots outside the displayed top 20. Older `leaderboard.json` remains readable and
+is not rewritten. A pilot's next checkpoint carries their legacy high-water score
+forward. Scores are optional; a temporary score-write failure does not lose the
+career, and a later checkpoint retries publication from its saved high-water mark.
+
+### Starting and returning to Voidrunner
+
+Choose **[G] Pilot Guide** on the station deck for flight instructions and a recap
+of contracts, tracked plans and futures orders. Pages fit the negotiated terminal
+size; **[B]ack** leaves without changing the career or advancing the day.
+
+On day zero at Freeport, **[O]ffer** shows an optional First Flight delivery to a
+real adjacent station. The terms show the legal cargo to buy, payment, danger,
+fuel reserve and crew costs before **[A]ccept** appears on the final page. It uses
+one normal contract slot and automatically tracks the destination. Buy the cargo
+at the market, refuel at the yard if necessary, and select the station on the
+chart. Docking with the full load delivers it automatically. Jumps advance the
+day; this introductory contract has no deadline.
+
+First Flight can be accepted once per career. Abandoning it closes that offer;
+the guide remains available. Completion points toward a first upgrade and regular
+trading or contracts. The normal risks of travel still apply.
+
+### Voidrunner recovery
+
+Invalid or unreadable career files remain in place. The game shows a recovery
+screen with **[B]ack**, and never silently starts a replacement career. If
+`USER_ID.previous.json` is valid, the screen shows its callsign, day, credits and
+pending-journey status. **[R]estore** appears on the final page and requires a
+confirmation: progress after that checkpoint will be rolled back. Before
+replacement, the current bytes are retained as `USER_ID.recovery-UNIQUE.json`.
+Back, declined confirmation and disconnection leave the files unchanged.
+
+Changed checkpoints retain the preceding valid save; identical writes leave the
+previous copy alone. Validation covers file structure, schema/generator versions,
+numeric types and ranges, references, ship/cargo capacity and resume state. The
+file limit is 4 MiB; excessive or malformed data requires manual inspection.
+Legacy additive fields default normally, including pre-limit active contracts.
+An unsupported schema, generator version or structural field requires the matching
+game build or manual repair; the game does not offer a downgrade to an older copy.
+
+**Manual SysOp recovery:** stop all sessions using this pilot's save directory,
+retain a separate copy of the whole directory, and inspect the reported file.
+Fix access/storage problems first. For an unsupported version, restore the matching
+NetBBS/game installation rather than changing version numbers in the JSON. If
+restoring from an independently retained backup, replace the pilot's current JSON
+with that verified copy while sessions are stopped, then relaunch to validate it.
+Never delete the current career merely to bypass the recovery screen. Archive
+older recovery copies manually if the eight-copy limit is reached; the game never
+deletes them for you. A failed archive or replacement leaves the current save in
+place. Include previous and recovery copies when moving or backing up this folder.
+The local previous-checkpoint file does not provide off-machine backup protection.
+
+### Backing up and restoring Voidrunner
+
+The SysOp **Backup** screen shows the effective Voidrunner save directory. Node
+backups include its retained careers, scores, previous checkpoints, recovery copies
+and old `.corrupt-TIMESTAMP` files under a checksummed `voidrunner` component.
+Malformed career bytes are retained for repair. Locks and unfinished temporary
+files are excluded; unrelated files, symlinks and exceeded limits produce an error.
+Limits are 10,000 files, 4 MiB per file and 512 MiB total. Close all Voidrunner
+sessions before creating a backup; the BBS itself can keep running. A maintenance
+lock inside the save directory prevents a game from starting during capture or
+restore. Play and capture need no write access to its parent. Restore keeps that
+directory and its lock files in place while replacing the retained data.
+If game capture fails, its incomplete backup destination is removed so the same
+path can be retried. If cleanup also fails, the error names the directory to
+remove manually before retrying; source careers are retained.
+
+**Manual CLI backup:** use the same environment as the running service, or supply
+its exact save directory explicitly:
+
+```text
+python -m netbbs.backup create --db netbbs.db --identity-dir netbbs_identity --to backup-2026-09-08 --voidrunner-save-dir /srv/netbbs/voidrunner
+```
+
+**Manual restore:** stop the node and every game using the target directory. A
+backup containing Voidrunner requires an explicit destination; the source path
+recorded in the archive never chooses where restoration writes:
+
+```text
+python -m netbbs.backup restore --from backup-2026-09-08 --db netbbs.db --identity-dir netbbs_identity --voidrunner-to /srv/netbbs/voidrunner
+```
+
+**Manual activation:** configure the restored service's `VOIDRUNNER_SAVE_DIR` to
+that destination before restarting. The target must be a separate game directory;
+restore refuses overlap with node/backup paths or unrelated files. Game data can
+live on another filesystem: staging and rollback stay beside its target. The
+ordinary retained rollback directory contains `voidrunner-rollback.json` naming
+any external game rollback generation. If rollback fails, the restore state file
+records those paths and staging is retained for manual recovery. Never delete
+the journal or retained generations merely to bypass a failed restore.
+
+Backups predating this component restore the node without touching external game
+data. Restore a separately retained, matching game backup manually in that case.
+Copy completed backups off-machine and manage retention separately; NetBBS does
+not configure a scheduler, remote storage, or automatic deletion.
+
 Existing registrations keep their JSON metadata and UTF-8 stdio API.
 
 **MANUAL — outside NetBBS** labels below identify work the SysOp must do on

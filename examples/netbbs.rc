@@ -12,14 +12,20 @@
 #
 #	netbbs=YES					# enable the service
 #	netbbs_user="netbbs"				# unprivileged user to run as
-#						# (needs a real shell -- this script
-#						# starts the node through su(1), so
-#						# /sbin/nologin will not work)
+#						# (needs a Bourne-compatible login
+#						# shell: this script starts the node
+#						# through su(1), which runs the command
+#						# with that account's own shell, and the
+#						# launch below is sh(1) syntax. /bin/sh
+#						# or /bin/ksh; /sbin/nologin cannot work,
+#						# and csh/tcsh will fail to parse it.
+#						# NetBSD's useradd default is /bin/sh.)
 #	netbbs_statedir="/var/lib/netbbs"		# node state; must be writable by netbbs_user
 #	netbbs_config="/etc/netbbs/netbbs.toml"
 #	netbbs_python="/var/lib/netbbs/.venv/bin/python"
 #	netbbs_logfile="/var/lib/netbbs/netbbs.service.log"
 #	netbbs_stop_timeout="150"			# seconds to wait for a graceful stop
+#	netbbs_start_timeout="60"			# seconds to wait for the node to report readiness
 #
 # Install: copy this file from the official GitHub release/source tree to
 # /etc/rc.d/netbbs, add netbbs=YES to /etc/rc.conf, then run
@@ -48,7 +54,11 @@ load_rc_config $name
 : ${netbbs_statedir:="/var/lib/netbbs"}
 : ${netbbs_config:="/etc/netbbs/netbbs.toml"}
 : ${netbbs_python:="${netbbs_statedir}/.venv/bin/python"}
-: ${netbbs_ld_library_path:="/usr/pkg/lib"}
+# `=`, not `:=`: the header documents setting this empty to disable the
+# override, and `:=` would treat an explicitly empty rc.conf value as
+# unset and restore /usr/pkg/lib -- forcing pkgsrc libraries on an
+# operator who asked for none. Only genuinely unset takes the default.
+: ${netbbs_ld_library_path="/usr/pkg/lib"}
 : ${netbbs_logfile:="${netbbs_statedir}/netbbs.service.log"}
 # Graceful stop: SIGTERM makes NetBBS warn connected callers and wait up
 # to shutdown.graceful_delay_seconds (60s default), after which teardown
@@ -56,11 +66,29 @@ load_rc_config $name
 # real headroom above both -- the same reasoning as the example systemd
 # unit's TimeoutStopSec. Raise it if you raised graceful_delay_seconds.
 : ${netbbs_stop_timeout:="150"}
+# How long to wait for the node to report that its listeners are up
+# before giving up on confirming the start. Generous: a first start on a
+# large database runs an integrity check before it ever binds a socket.
+: ${netbbs_start_timeout:="60"}
+
+# The line netbbs logs once every listener is bound and it is actually
+# serving (netbbs.__main__). Seeing this, rather than merely seeing the
+# process alive, is what makes a reported start true.
+netbbs_ready_marker="NetBBS is ready to accept connections"
 
 # The pidfile lives in the node's own state directory rather than
 # /var/run: this script backgrounds the node as netbbs_user (see
 # netbbs_start below), and an unprivileged user cannot write /var/run.
-pidfile="${netbbs_statedir}/netbbs.pid"
+#
+# Deliberately NOT ${netbbs_statedir}/netbbs.pid. NetBBS writes its own
+# pidfile beside the database as <db-stem>.pid (netbbs.backup's
+# write_pid_file, called from netbbs.__main__ on every start and removed
+# on every exit), which for the documented layout is exactly
+# /var/lib/netbbs/netbbs.pid. That file is not ours to touch:
+# netbbs.backup reads it to refuse a restore over a node that is still
+# running, so this script clearing it before a start would remove a
+# data-safety signal another subsystem depends on.
+pidfile="${netbbs_statedir}/netbbs.service.pid"
 
 # NetBBS deliberately never daemonizes itself (design doc §13.8): it runs
 # in the foreground and expects a supervisor to background and restart
@@ -86,6 +114,27 @@ extra_commands="status"
 # call it live), and then `kill -TERM -1` signals every process on the
 # host. Only a plain positive decimal is accepted. `read` also takes
 # just the first line, so trailing junk cannot ride along.
+# rc.conf values are operator input and reach `[ ... -ge ... ]`, where
+# a non-integer makes the test error and evaluate false forever -- which
+# would turn the bounded stop below into an unbounded wait, hanging
+# `service netbbs stop` and, with KEYWORD: shutdown, the system
+# shutdown with it. A negative value would instead skip straight to
+# SIGKILL. Fall back to the documented default and say so, rather than
+# either.
+netbbs_seconds()
+{
+	# $1 = value, $2 = default, $3 = variable name (for the message)
+	case "$1" in
+	"" | *[!0-9]*)	;;
+	*)	if [ "$1" -ge 1 ]; then
+			echo "$1"
+			return 0
+		fi ;;
+	esac
+	echo "netbbs: ignoring invalid $3=\"$1\"; using $2 seconds." >&2
+	echo "$2"
+}
+
 netbbs_read_pid()
 {
 	_pid=""
@@ -121,9 +170,9 @@ netbbs_running()
 	# second node against the same database on a guess.
 	_cmd=$(ps -p "${_pid}" -o command= 2>/dev/null)
 	case "${_cmd}" in
-	"")		return 0 ;;
-	*netbbs*)	return 0 ;;
-	*)		return 1 ;;
+	"")				return 0 ;;
+	*"-m netbbs --config ${netbbs_config}"*)	return 0 ;;
+	*)				return 1 ;;
 	esac
 }
 
@@ -151,6 +200,55 @@ netbbs_start()
 		return 1
 	fi
 	rm -f "${pidfile}"
+	# Decide up front whether readiness can be observed at all, and never
+	# read the logfile before knowing what it is. `netbbs_logfile=/dev/null`
+	# is documented and supported, and an operator who wants the output
+	# piped somewhere may well point this at a FIFO -- `wc` on a FIFO
+	# blocks on open with no writer and reads forever with one, hanging
+	# `service netbbs start` at boot.
+	#
+	# Create it first when it is missing, as netbbs_user so the node can
+	# keep appending: `su` returns once the pid is published, which can be
+	# before the child's redirection has created the file, and a first
+	# start would otherwise look like "readiness cannot be observed" and
+	# fall back to a bare liveness check exactly when a misconfiguration
+	# is most likely.
+	_readiness_observable=no
+	_log_from=0
+	if [ "${netbbs_logfile}" != /dev/null ]; then
+		# Anything other than a regular file (or /dev/null) is refused
+		# rather than tolerated. A FIFO is the case that matters: with no
+		# reader, the launcher below blocks opening its own `>>`
+		# redirection *before* it can exec Python -- yet its pid has
+		# already been published, and its command text contains
+		# "-m netbbs --config", so netbbs_running would accept the blocked
+		# launcher and this start would report success with no listener
+		# anywhere. That is exactly the silent success this script exists
+		# to remove, so the shape that causes it is not supported.
+		if [ -e "${netbbs_logfile}" ] && [ ! -f "${netbbs_logfile}" ]; then
+			echo "netbbs: ${netbbs_logfile} is not a regular file." >&2
+			echo "Set netbbs_logfile to a regular file, or to /dev/null to keep no" >&2
+			echo "capture log at all. A FIFO or device cannot be used here." >&2
+			return 1
+		fi
+		if [ ! -e "${netbbs_logfile}" ]; then
+			su -m "${netbbs_user}" -c ": >> \"${netbbs_logfile}\"" 2>/dev/null
+		fi
+	fi
+	if [ -f "${netbbs_logfile}" ]; then
+		_readiness_observable=yes
+		# Appended to across restarts, so a readiness line from an earlier
+		# run is already there. Only look past this start's own output.
+		# Bytes, not lines: `tail -n +N` counts lines from the start, so a
+		# large capture log would be re-read in full on every iteration of
+		# the readiness loop below -- and netbbs_start_timeout would not
+		# bound that, since the counter only advances once the pipeline
+		# returns. `tail -c +N` seeks.
+		_log_from=$(wc -c < "${netbbs_logfile}" 2>/dev/null | tr -d ' ')
+		case "${_log_from}" in
+		"" | *[!0-9]*)	_log_from=0 ;;
+		esac
+	fi
 	echo "Starting netbbs."
 	# su -m leaves the environment alone, so HOME would still be root's.
 	# Set it explicitly to the state directory: a door that keeps its own
@@ -172,29 +270,112 @@ netbbs_start()
 	# still writes to stdout/stderr, including a startup failure that
 	# happens before logging is configured.
 	#
-	# This file does NOT rotate itself, and it shares a filesystem with
-	# the database. Bound it with newsyslog(8) -- add to
-	# /etc/newsyslog.conf, adjusting the path and owner to match:
+	# This file does NOT rotate, and newsyslog(8) cannot make it: the
+	# node holds this descriptor open for its whole life and has no
+	# reopen-on-signal, so renaming the path just leaves it writing to
+	# the renamed inode while the new file stays empty -- unbounded
+	# growth on the same filesystem as the database, and rotation that
+	# never fires again. Do not paper over that with a newsyslog entry.
 	#
-	#   /var/lib/netbbs/netbbs.service.log netbbs:netbbs 640 5 10240 * -
+	# What it is actually for is the startup window: everything NetBBS
+	# logs after logging is configured is already in its own
+	# self-rotating netbbs.log beside the database (10 MiB, 5 backups,
+	# operator guide §4). This file's unique content is what it writes
+	# *before* that -- a config error, a failed import, a bad interpreter.
 	#
-	# (five generations, rotate at 10 MiB -- the same bound netbbs.log
-	# applies to itself.) Set netbbs_logfile=/dev/null in rc.conf if you
-	# would rather not keep this second copy at all.
-	su -m "${netbbs_user}" -c "nohup env HOME=\"${netbbs_statedir}\" LD_LIBRARY_PATH=\"${netbbs_ld_library_path}\" \"${netbbs_python}\" -m netbbs --config \"${netbbs_config}\" >> \"${netbbs_logfile}\" 2>&1 & echo \$! > \"${pidfile}\""
-	# NetBBS binds its listeners during startup; a config or import error
-	# surfaces within a second or two. Waiting here turns "the service
-	# reported success and there is no node" into a visible failure at
-	# the point the operator ran the command.
-	sleep 3
-	if netbbs_running; then
-		echo "netbbs started as pid ${_pid}."
-	else
-		echo "netbbs failed to start -- see ${netbbs_logfile}." >&2
-		tail -5 "${netbbs_logfile}" >&2
+	# So on a long-running node, set netbbs_logfile=/dev/null in rc.conf
+	# once the install is known good and let netbbs.log be the log; keep
+	# a real file while commissioning, or point it somewhere you rotate
+	# by restarting the node. Readiness detection degrades gracefully
+	# when it is not a regular file (see netbbs_start).
+	# Publishing the pid is a precondition for letting the node keep
+	# running, not a step after it. `test -w` above can pass and the
+	# write still fail (exhausted inodes or quota), and by then the node
+	# is already up -- so reporting a failed start would leave an
+	# untracked live node that the next start would happily duplicate
+	# against the same database. If the write fails, stop what we just
+	# started and fail honestly.
+	# Start from the state directory. A config may legitimately omit
+	# [database].path, and NodeConfig then keeps relative defaults
+	# (Path("netbbs.db"), Path("netbbs_identity")) which resolve
+	# against the caller's working directory -- "/" for an rc.d start
+	# at boot, where netbbs_user cannot create them, so the service
+	# would fail with its own state directory perfectly writable.
+	# HOME does not affect Path resolution; only cd does. The systemd
+	# unit gets this from WorkingDirectory=.
+	#
+	# If the pid cannot be published, SIGKILL rather than SIGTERM: the
+	# node is seconds old with no callers to warn, and SIGTERM would
+	# start a graceful shutdown that may wait out
+	# shutdown.graceful_delay_seconds -- leaving a live, untracked
+	# node behind precisely while reporting it was stopped. WAL makes
+	# an abrupt stop safe, and `wait` reaps it before we return.
+	su -m "${netbbs_user}" -c "cd \"${netbbs_statedir}\" || exit 1; nohup env HOME=\"${netbbs_statedir}\" LD_LIBRARY_PATH=\"${netbbs_ld_library_path}\" \"${netbbs_python}\" -m netbbs --config \"${netbbs_config}\" >> \"${netbbs_logfile}\" 2>&1 & _child=\$!; if echo \$_child > \"${pidfile}\"; then :; else kill -KILL \$_child 2>/dev/null; wait \$_child 2>/dev/null; exit 1; fi"
+	if [ $? -ne 0 ]; then
+		echo "netbbs: could not write ${pidfile}; the node was stopped again." >&2
 		rm -f "${pidfile}"
 		return 1
 	fi
+	# Wait for the node to say it is serving, not for a fixed interval:
+	# startup runs a database integrity check before binding anything, so
+	# on a large database "the process is still alive after N seconds"
+	# can be true well before any listener exists -- and if setup then
+	# fails, the service has already reported success with no node
+	# running. That is the exact failure this script exists to remove, so
+	# it must not be reintroduced by a hopeful `sleep`.
+	_start_timeout=$(netbbs_seconds "${netbbs_start_timeout}" 60 netbbs_start_timeout)
+	# The readiness marker is read back out of the logfile, so it only
+	# exists if that is a regular file. netbbs_logfile=/dev/null is a
+	# documented and recommended setting (see above), and a char device
+	# swallows the marker -- without this, every healthy start would sit
+	# out the full timeout and then report an unconfirmed start, delaying
+	# boot for no reason. Fall back to the weaker liveness check and say
+	# which one was used, rather than silently doing either.
+	if [ "${_readiness_observable}" = no ]; then
+		sleep 3
+		if netbbs_running; then
+			echo "netbbs started as pid ${_pid} (readiness unconfirmed:"
+			echo "${netbbs_logfile} is not a regular file, so the node's"
+			echo "ready marker cannot be read back)."
+			return 0
+		fi
+		echo "netbbs failed to start -- ${netbbs_logfile} is not a regular" >&2
+		echo "file, so there is no captured output to show." >&2
+		rm -f "${pidfile}"
+		return 1
+	fi
+	_waited=0
+	while :; do
+		if ! netbbs_running; then
+			echo "netbbs failed to start -- see ${netbbs_logfile}." >&2
+			# Strip terminal control characters (keeping tab, LF and CR,
+			# and leaving UTF-8 alone). This file is deliberately owned
+			# and writable by netbbs_user, and this replay usually lands
+			# in a root terminal -- a compromised node, door, or any
+			# same-UID process could otherwise plant escape sequences
+			# that the operator's terminal executes on the next failed
+			# start.
+			tail -20 "${netbbs_logfile}" | tr -d '\000-\010\013\014\016-\037\177' >&2
+			rm -f "${pidfile}"
+			return 1
+		fi
+		if tail -c "+$((_log_from + 1))" "${netbbs_logfile}" 2>/dev/null |
+		   grep -q "${netbbs_ready_marker}"; then
+			echo "netbbs started as pid ${_pid}."
+			return 0
+		fi
+		if [ "${_waited}" -ge "${_start_timeout}" ]; then
+			# Alive but unconfirmed. Not a failure we can assert -- a
+			# very slow start looks the same from here -- so leave it
+			# running and make the uncertainty the operator's to judge
+			# rather than claiming either outcome.
+			echo "netbbs is running as pid ${_pid} but has not reported readiness" >&2
+			echo "within ${_start_timeout}s -- check ${netbbs_logfile}." >&2
+			return 0
+		fi
+		sleep 1
+		_waited=$((_waited + 1))
+	done
 }
 
 netbbs_stop()
@@ -204,11 +385,12 @@ netbbs_stop()
 		rm -f "${pidfile}"
 		return 0
 	fi
-	echo "Stopping netbbs (pid ${_pid}), up to ${netbbs_stop_timeout}s."
+	_timeout=$(netbbs_seconds "${netbbs_stop_timeout}" 150 netbbs_stop_timeout)
+	echo "Stopping netbbs (pid ${_pid}), up to ${_timeout}s."
 	kill -TERM "${_pid}"
 	_waited=0
 	while kill -0 "${_pid}" 2>/dev/null; do
-		if [ "${_waited}" -ge "${netbbs_stop_timeout}" ]; then
+		if [ "${_waited}" -ge "${_timeout}" ]; then
 			# Last resort. A SIGKILLed node cannot run its own door
 			# cleanup, and doors are deliberately spawned into their
 			# own sessions (netbbs.doors.runtime: start_new_session),
@@ -217,8 +399,25 @@ netbbs_stop()
 			# A door subprocess can therefore outlive a forced stop.
 			# Keep netbbs_stop_timeout comfortably above
 			# shutdown.graceful_delay_seconds so this stays unreached.
-			echo "netbbs did not exit in ${netbbs_stop_timeout}s; sending SIGKILL." >&2
+			echo "netbbs did not exit in ${_timeout}s; sending SIGKILL." >&2
 			kill -KILL "${_pid}" 2>/dev/null
+			# Even SIGKILL is not instant -- a process in uninterruptible
+			# sleep stays alive until it leaves that state. Reporting
+			# "stopped" and deleting the pidfile here would let the next
+			# start launch a second node against the same database while
+			# the first is still running, and untracked. Confirm, and
+			# fail honestly if it is still there.
+			_killed=0
+			while [ "${_killed}" -lt 10 ]; do
+				kill -0 "${_pid}" 2>/dev/null || break
+				sleep 1
+				_killed=$((_killed + 1))
+			done
+			if kill -0 "${_pid}" 2>/dev/null; then
+				echo "netbbs (pid ${_pid}) survived SIGKILL -- leaving ${pidfile}" >&2
+				echo "in place so it stays tracked. Do not start another node yet." >&2
+				return 1
+			fi
 			break
 		fi
 		sleep 2

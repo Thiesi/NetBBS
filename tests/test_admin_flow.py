@@ -153,6 +153,13 @@ def _openssh_line(verify_key: nacl.signing.VerifyKey) -> str:
     return "ssh-ed25519 " + base64.b64encode(blob).decode() + " test@comment"
 
 
+@pytest.fixture(autouse=True)
+def isolated_door_career_directory(tmp_path, monkeypatch):
+    directory = tmp_path / "voidrunner-careers"
+    monkeypatch.setenv("VOIDRUNNER_SAVE_DIR", str(directory))
+    return directory
+
+
 @pytest.fixture
 def db(tmp_path):
     database = Database(tmp_path / "node.db")
@@ -6669,6 +6676,7 @@ def test_backup_status_shows_no_backup_yet_message(db, lane, sysop):
     session = FakeSession(["s", "k", " ", "b", "b"])
     _run(session, lane, sysop)
     assert "No backup has been taken on this node yet." in _written_text(session)
+    assert "Voidrunner source:" in _written_text(session)
 
 
 def test_backup_status_pauses_for_a_keypress_before_returning(db, lane, sysop):
@@ -6733,8 +6741,10 @@ def test_backup_status_hides_history_section_with_only_one_backup(db, lane, syso
 
 
 def test_live_backup_screen_creates_a_complete_backup_with_configured_identity(
-    db, lane, sysop,
+    db, lane, sysop, isolated_door_career_directory,
 ):
+    isolated_door_career_directory.mkdir()
+    (isolated_door_career_directory / "77.json").write_bytes(b"retained career")
     identity_dir = db.path.parent / "custom-identity"
     identity_dir.mkdir()
     (identity_dir / "identity-marker").write_text("configured identity")
@@ -6748,6 +6758,7 @@ def test_live_backup_screen_creates_a_complete_backup_with_configured_identity(
     destination = destinations[0]
     assert (destination / db.path.name).exists()
     assert (destination / "identity" / "identity-marker").read_text() == "configured identity"
+    assert (destination / "voidrunner" / "77.json").read_bytes() == b"retained career"
     assert (destination / "manifest.json").exists()
     assert "BACKUP COMPLETE" in _visible(_written_text(session))
     assert "This is a local backup" in _written_text(session)

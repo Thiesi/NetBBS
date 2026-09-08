@@ -19,6 +19,11 @@ detection (§13.10) is guaranteed to behave exactly as documented.
   and edits, an uploaded file, a linked (or Link-disabled, either is
   fine) node identity, SSH enabled with a generated host key, and a
   custom welcome banner.
+- A saved Voidrunner career and Hall of Fame record in the service's actual
+  save directory. The commands below use `/path/to/voidrunner`; substitute that
+  directory explicitly. Close every game session before capture. If rehearsing
+  an older backup without a `voidrunner` manifest component, omit
+  `--voidrunner-to`; such backups do not restore external careers.
 - Enough free disk to hold a second full copy of the node's database and
   file area (`netbbs.backup restore` stages a complete copy before
   switching anything into place -- see §13.10).
@@ -26,19 +31,22 @@ detection (§13.10) is guaranteed to behave exactly as documented.
 ## 1. Take a real backup
 
 ```sh
-python -m netbbs.backup create --db netbbs.db --identity-dir netbbs_identity --to /path/to/backup1
+python -m netbbs.backup create --db netbbs.db --identity-dir netbbs_identity --to /path/to/backup1 --voidrunner-save-dir /path/to/voidrunner
 ```
 
 Confirm `backup1/manifest.json` exists and its `checksums` object lists
 the database snapshot, every identity file, the SSH host key, and the
-welcome banner.
+welcome banner, plus every retained file listed in the `voidrunner` component.
+Confirm its source directory matches the service and that careers, previous
+checkpoints and scores are present. The maintenance gate must refuse capture
+while a pilot is active; retry the same destination after closing that session.
 
 ## 2. Confirm restore refuses against a running node
 
 With the node still running:
 
 ```sh
-python -m netbbs.backup restore --from /path/to/backup1 --db netbbs.db --identity-dir netbbs_identity
+python -m netbbs.backup restore --from /path/to/backup1 --db netbbs.db --identity-dir netbbs_identity --voidrunner-to /path/to/voidrunner
 ```
 
 Expect a refusal naming the node's PID file (`<db-stem>.pid`, written by
@@ -47,7 +55,8 @@ still refuses even if the node has been sitting idle for a while (not
 mid-transaction) -- this is exactly the case the pre-issue-#75 restore
 could not reliably catch.
 
-Stop the node (`SIGTERM`/`Ctrl+C`) and confirm the PID file is gone.
+Stop the node (`SIGTERM`/`Ctrl+C`) and every game using the target directory,
+and confirm the PID file is gone.
 
 ## 3. Confirm a corrupt or truncated backup is refused before anything live is touched
 
@@ -61,6 +70,8 @@ are all byte-for-byte unchanged afterward:
 - Edit `manifest.json` to change one recorded checksum without changing
   the file it describes.
 - Delete one identity file (e.g. `backup1-corrupt/identity/signing.identity`).
+- Change or remove a listed file in `backup1-corrupt/voidrunner/`; confirm the
+  live game directory is unchanged too.
 
 Each should raise before any live path is touched -- verify this
 directly (checksum the live database/files before and after each
@@ -77,11 +88,12 @@ present-but-corrupt one.
 
 ## 5. Confirm an interrupted restore is recoverable
 
-This is the step worth taking seriously: restore is a five-artifact
-switch, and a real crash could land between any two of them.
+Restore switches multiple node artifacts and the game data entries. A real
+crash could land between any two switches; keep the node and all games stopped
+until the journal and every component have been reconciled.
 
 1. Start a real restore in the background against a genuinely stopped
-   node: `python -m netbbs.backup restore --from backup1 --db netbbs.db --identity-dir netbbs_identity &`
+   node: `python -m netbbs.backup restore --from backup1 --db netbbs.db --identity-dir netbbs_identity --voidrunner-to /path/to/voidrunner &`
 2. Kill it hard, mid-run: `sleep 0.2; kill -9 %1` (adjust the delay so
    the kill lands after staging has started but before the whole
    restore finishes -- a large file area gives more of a window; the
@@ -90,7 +102,9 @@ switch, and a real crash could land between any two of them.
    rollback logic directly and does not depend on timing).
 3. Check `netbbs.db`'s directory for `.netbbs-restore-state.json`. If
    present, it names exactly which staging/rollback directories exist
-   and which artifacts were still pending -- this is the "clearly
+   and which artifacts were still pending. Its `external_components` also names
+   the game target, staging and rollback directories, which can be on another
+   filesystem. Inspect those paths too -- this is the "clearly
    identified, not a silent mixture" record the design promises.
    Resolve it by hand (the state file names the rollback directory to
    restore from) or, if the kill landed before any live artifact was
@@ -107,12 +121,14 @@ switch, and a real crash could land between any two of them.
 With the node stopped:
 
 ```sh
-python -m netbbs.backup restore --from backup1 --db netbbs.db --identity-dir netbbs_identity
+python -m netbbs.backup restore --from backup1 --db netbbs.db --identity-dir netbbs_identity --voidrunner-to /path/to/voidrunner
 ```
 
 Note the printed rollback-generation path (not deleted automatically --
-remove it yourself once satisfied). Then verify, starting the node
-again:
+remove it yourself once satisfied), including `voidrunner-rollback.json` for
+an external game generation. **Manual activation:** configure the service's
+`VOIDRUNNER_SAVE_DIR` to the chosen restore destination before restarting. Restore
+does not change that service setting. Then start the node and verify:
 
 - **Identity continuity**: the startup log's `fingerprint` line matches
   the fingerprint from before the drill began.
@@ -121,6 +137,9 @@ again:
   For SSH specifically, confirm the client does **not** show a host-key
   warning -- proof the SSH host key restored correctly, not just that a
   *a* key exists.
+- **Voidrunner survived**: load the same pilot and verify credits, cargo, day,
+  commitments and the Hall of Fame entry against the captured career. Confirm
+  the restore destination is the directory the running door now uses.
 - **Local content survived**: the board posts/edits/uploaded file from
   the Prerequisites step are all present and correct.
 - **Link resumes correctly** (if Link is enabled): the node reaches its

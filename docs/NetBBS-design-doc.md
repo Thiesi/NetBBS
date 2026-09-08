@@ -3308,6 +3308,34 @@ introduced.
 
 ### 13.4 Backup and restore (issue #60's first operational slice)
 
+Voidrunner coverage (issue #310): ordinary CLI and SysOp node backups include the
+effective `VOIDRUNNER_SAVE_DIR` (or legacy home-directory default), when present,
+under a checksummed `voidrunner/` component. Capture preserves career, previous,
+recovery and score JSON bytes, including damaged careers needed for repair;
+temporary files and OS lock files are excluded. A bounded maintenance lease
+prevents new game launches and refuses capture while an existing pilot is active.
+The gate lives inside the save directory. Restore preserves that directory and
+its lock inodes, switching its data entries under the lease; existing provisioned
+save directories require no parent write permission for normal play or capture.
+The BBS may keep running, but Voidrunner sessions must be closed. Capture precedes
+the database snapshot so a newly registered user's captured career cannot refer
+to a user ID newer than that snapshot. This is an offline game-data snapshot,
+not a guarantee that every node artifact was written at one global instant.
+
+Restoring a backup containing this component requires an explicit
+`--voidrunner-to` destination; archive metadata never chooses a live path. The
+operator must use that directory for the restored service. The component is
+staged and rolled back beside its destination, allowing a different filesystem
+from the database. Node and game switches share one recovery journal; failures
+roll back both, and any retained external rollback location is recorded beside
+the ordinary rollback generation. Journal updates use flushed atomic replacement;
+a failed post-switch update also triggers rollback, retaining the last usable
+journal if recovery fails. Existing backups without Voidrunner leave
+external careers alone. Cross-host shared directories and simultaneously running
+different game builds remain unsupported. Limits are 10,000 captured files,
+4 MiB per file and 512 MiB total; unsupported entries or exceeded limits fail
+clearly rather than silently producing incomplete coverage.
+
 A node's recoverable state is not only its database — it is fourteen
 artifacts, today scattered across derived, `db_path`-relative filenames
 with no single existing tool that treats them as one recoverable set:
@@ -4644,8 +4672,40 @@ state before narration or further input. A restart preserves the event RNG state
 and cannot reroll an encounter or duplicate a reward. Only the interrupted hop
 resumes; the pilot can plan the rest of an auto-route after resolving it. Existing
 galaxy seeds and legacy careers remain compatible through additive save fields.
-Unrecognized or unreadable journey/RNG state stops play and preserves the career
-file for manual SysOp recovery; broader save validation/recovery remains in #310.
+Career loading validates the supported schema and galaxy-generator version,
+record shapes, types, references and gameplay ranges before any startup write.
+Missing additive fields retain their legacy defaults; unknown structural fields
+or unsupported versions stop play rather than being silently stripped. Galaxy
+generation remains version 1 with its original seed/RNG call sequence.
+
+Unreadable or invalid careers enter a read-only recovery screen; they are never
+renamed or replaced by an automatic new career. Each changed checkpoint retains
+the preceding readable file at `<user_id>.previous.json` before replacing the
+current save. Rewriting an identical checkpoint does not age this copy. If the
+current file is missing but a previous copy exists, recovery is still required.
+The screen shows the candidate's callsign, day, credits and whether travel is
+pending. Restoring it explicitly rolls back progress to that checkpoint, requires
+a final confirmation, and first retains the original bytes in a unique recovery
+copy. Back/EOF writes nothing. Unreadable or oversized originals, invalid previous
+copies, unsupported versions and failed preservation require manual SysOp repair;
+there is no caller-facing reset that bypasses preservation. Recovery copies are
+limited to eight per pilot; a SysOp must archive older copies manually before
+another restore. The pilot session lease covers recovery as well as normal play.
+This local previous-checkpoint copy is not a substitute for node backup coverage.
+
+The optional Pilot Guide is reachable from the station deck without changing
+state. A new pilot still docked at Freeport on day zero may accept one introductory
+delivery to an actual connected station. Its legal cargo follows that station's
+demand; the quote includes procurement, a return fuel reserve, crew wages, gross
+payment and destination danger. No galaxy RNG calls or generated systems change.
+Acceptance is explicit after paginated terms, consumes an ordinary active-contract
+slot and tracks the objective. The job has no deadline, uses normal market and
+delivery rules, and cannot be taken again after completion or abandonment in the
+same career. Its payment covers the quoted cargo and round-trip fuel/wages plus
+200 credits; changing prices, detours and encounters can change the result.
+The guide explains buying cargo, jumps advancing game time, refuelling, first
+upgrades and encounter choices, and retains a recap of active commitments for
+returning pilots. Reading or declining it neither writes a save nor advances time.
 
 Voidrunner uses one UTF-8 and terminal-key decoder for menus and text fields.
 Unsupported special keys, terminal control strings, and bracketed paste cannot
@@ -4668,8 +4728,69 @@ jobs and cached offers. Legacy duplicate IDs are repaired while docked, after an
 interrupted journey has resolved, so its stored contract snapshots still match.
 Deadlines are inclusive: a contract is eligible on its deadline day, expires
 before rewards or mission encounters on the next day, and is never paid late.
-Already-charted survey offers are unavailable. Contract details, abandonment,
-and objective tracking remain the next mission UX slice in issue #310.
+Already-charted survey offers are unavailable. Selecting a posted or active
+contract opens its complete terms without writing. Details include the named
+target and coordinates (without charting it), minimum hops and first bearing,
+inclusive deadline, cargo procurement and hold needs, gross payout, and estimated
+remaining cash outlay at current prices. Estimates explicitly exclude sunk cargo
+cost, repairs, detours and market changes. Escorts warn of a fight on every jump,
+including detours and other concurrent escort jobs. Survey contracts use a
+SURVEY label and explain that arrival or a scanner discovery can complete them.
+
+Acceptance is a separate action on the final details page. One active contract
+may be tracked, persisted across sessions and shown at the station and chart.
+Tracking reveals its bearing, not remote market or danger information. Abandonment
+requires a final confirmation, forfeits the reward with no extra fee, retains
+cargo, and does not repost the offer. Completion, expiry and abandonment clear
+tracking. Contract lists and detail text paginate to terminal dimensions, with
+Back on every page. Broader map/route planning remains in issue #310.
+
+Economy safeguards (issue #310): Blackwake standing from trade follows each new
+500-credit high-water milestone in cumulative contraband sales minus purchases
+and new futures outlay/refunds. Buying and same-station recycling do not grant
+standing; splitting transactions cannot reset milestones. Existing standing is
+retained and the new ledger starts at zero for old careers (old cargo has no
+recorded acquisition cost). Combat/faction rewards remain separate.
+
+The engineer costs 200 credits to hire and 2 per jump, reducing fuel by 25%,
+rounded up, with a minimum one-unit burn. The role is an investment for longer
+routes; one-unit jumps cannot benefit, and hiring does not refund old hire costs.
+
+New futures orders lock goods for pickup at their issuing station after maturity.
+Up to eight orders may be active; insufficient hold space leaves a ready order
+waiting. Orders can be cancelled remotely for their recorded goods principal;
+the 8% brokerage fee (rounded up per unit, at least one credit) is never refunded.
+Splitting orders cannot reduce that per-unit fee. Purchase screens show quantity,
+term, pickup station, principal and fee before signing, with Back writing nothing.
+Mature goods settle on arrival or station entry before mission completion checks.
+Legacy orders without pickup/principal metadata retain their original remote
+settlement/full-refund terms, explicitly labelled as legacy, until consumed.
+
+Voidrunner permits one active session per pilot within a save directory. A
+nonblocking OS file lock is held from before loading through the final checkpoint;
+a second launch reports that the career is already in use and changes no career
+or score. Process exit, including forced termination, releases the lock. Distinct
+pilots may play concurrently. Lock files remain in place and must not be deleted
+while the service is running. This requires a local filesystem with working OS
+locks and atomic replacement; cross-host shared directories are not supported.
+
+The resolved save directory is the installation namespace. The legacy default
+`~/.netbbs/voidrunner_saves` remains unchanged. SysOps running multiple independent
+nodes under one OS account must set a different `VOIDRUNNER_SAVE_DIR` for each
+NetBBS service; NetBBS passes this specific setting as an absolute path to doors.
+Changing a node's display name does not change career identity. See the door guide
+for the manual directory move and service configuration steps.
+
+Hall of Fame records are retained independently at `scores/<user_id>.json`; only
+the displayed ranking is limited to 20. Existing `leaderboard.json` entries stay
+readable and are carried into each pilot's new record on their next update, with
+the old file retained. Updates replace only that pilot's file using a flushed
+private temporary file. The career save also retains the credit high-water mark
+across retirement and temporary score-write failures, allowing a later checkpoint
+to repair its score. Scores remain optional presentation data, never gameplay
+authority. Historical records already discarded by older top-20 storage cannot
+be reconstructed. Node backup coverage and explicit external-directory restore
+are specified in section 13.4 and the door guide.
 
 Compatibility extension (issues #296/#297):
 

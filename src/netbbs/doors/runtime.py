@@ -61,6 +61,10 @@ def _door_environment(info_path):
         env["USERPROFILE" if os.name == "nt" else "HOME"] = str(Path.home())
     except RuntimeError:
         pass
+    # A deliberate, narrow persistent-data override; resolve before entering
+    # the disposable door cwd. Never forward the complete parent environment.
+    if save_dir := os.environ.get("VOIDRUNNER_SAVE_DIR"):
+        env["VOIDRUNNER_SAVE_DIR"] = str(Path(save_dir).expanduser().resolve())
     return env
 
 

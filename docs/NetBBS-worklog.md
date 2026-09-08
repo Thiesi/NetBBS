@@ -3214,6 +3214,111 @@ with no newline *after* assigning the value, so a pidfile without a trailing
 newline would read as "not running" and start a second node against the same
 database. Judge the value, not `read`'s exit status.
 
+An rc.d pidfile must not be `<statedir>/netbbs.pid`. NetBBS already writes its
+own pidfile beside the database as `<db-stem>.pid` (`netbbs.backup.
+write_pid_file`, called from `__main__` on every start, removed on every exit),
+which for the documented layout is exactly `/var/lib/netbbs/netbbs.pid` — and
+`netbbs.backup` reads it to refuse a restore over a running node. A supervisor
+script clearing that path before a start would delete another subsystem's
+data-safety signal. Use a distinct name (`netbbs.service.pid`).
+
+Identifying the process behind a pidfile by substring is not enough either:
+`netbbs_python` defaults to a path *inside* `/var/lib/netbbs`, so matching
+`*netbbs*` in `ps -o command=` accepts every unrelated process from that
+virtualenv — `netbbs.admin`, a backup run — and the stop path then signals it.
+Match the invocation actually launched (`-m netbbs --config`).
+
+An rc.d launch must `cd` into the node's state directory. `NodeConfig` keeps
+relative defaults (`Path("netbbs.db")`, `Path("netbbs_identity")`) for a config
+that omits them, and those resolve against the caller's working directory — `/`
+for an rc.d start at boot, where the run-as user cannot create them, so the
+service fails with its own state directory perfectly writable. `HOME` does not
+affect `Path` resolution; only `cd` does. systemd gets this from
+`WorkingDirectory=`.
+
+Log data a supervisor replays to an operator is untrusted too. The capture file
+is deliberately owned and writable by the run-as user, and a failed start
+replays its tail into what is usually a root terminal — so a compromised node,
+door, or any same-UID process could plant escape sequences the terminal then
+executes. Strip control characters on the way out. And scan it by *byte*
+offset: `tail -n +N` counts lines from the start, so a readiness loop polling a
+large capture log re-reads it in full every second, with the start timeout
+unable to bound that because its counter only advances once the pipeline
+returns.
+
+Publishing the pid has to gate the node continuing to run, not follow it. A
+writability check can pass and the write still fail (inodes, quota), by which
+point the node is up; reporting a failed start then leaves an untracked live
+node that the next start duplicates against the same database. Kill what was
+just started if the pid cannot be published — with SIGKILL, not SIGTERM: NetBBS
+reads SIGTERM as a graceful shutdown that may wait out
+`graceful_delay_seconds`, which would leave a live untracked node behind
+exactly while the script reports it stopped. At seconds old there is nothing to
+drain and WAL makes an abrupt stop safe.
+
+Its stdout/stderr capture file shares a filesystem with the database and does
+not rotate — and `newsyslog(8)` cannot bound a log a long-running process holds
+open. It renames
+the path; the writer keeps the old inode, the new file stays empty, and
+size-based rotation never fires again. NetBBS has no reopen-on-signal, so the
+honest options for the rc.d capture file are to turn it off once an install is
+known good (everything after logging setup is already in the self-rotating
+`netbbs.log`; its unique content is the pre-logging startup window) or to accept
+that it only rotates across restarts. Which then constrains readiness detection:
+if the marker is read back out of that file, `netbbs_logfile=/dev/null` must
+degrade to a liveness check rather than waiting out the full timeout on every
+healthy start.
+
+A supervisor's log path is operator input and needs validating like any other.
+`netbbs_logfile` is a natural thing to point at a FIFO once an operator is told
+the file does not rotate, and a FIFO breaks it twice over: `wc` on one blocks
+on open with no writer and reads forever with one, and — worse — the launcher
+blocks opening its own `>>` redirection *before* it can exec Python, while its
+pid has already been published and its command text still matches the
+process-identity check. The start then reports success with no listener
+anywhere, which is the precise failure the script exists to remove. Supporting
+that shape is not worth it: accept a regular file, accept `/dev/null` as "no
+capture log", refuse the rest before launching anything. Create the file when
+missing, too — `su` returns once the pid is published, which can precede the
+child's redirection creating it, so a first start would otherwise fall back to
+a bare liveness check exactly when a misconfiguration is most likely.
+
+`su user -c` runs the command with *that account's* login shell, so a launch
+written in `sh` syntax silently depends on the service account not using
+csh/tcsh. NetBSD's `useradd` default is `/bin/sh`, but an operator reusing an
+existing account can have anything; state the requirement rather than assume it.
+
+Confirming a start needs a readiness signal, not a `sleep`. Startup runs a
+database integrity check before it binds anything, so on a large database "the
+process is still alive after N seconds" is true well before any listener
+exists — and if setup then fails, the service has already reported success with
+no node running, which is the same silent success this whole entry is about.
+Wait for the node's own "ready to accept connections" line instead, bounded, and
+only past the point in the (appended) logfile where this start's output begins,
+or a previous run's readiness line is read as this one's. Alive-but-unconfirmed
+at the bound is not a failure that can be asserted — a very slow start looks
+identical — so report the uncertainty rather than claiming either outcome.
+
+`: ${var:="default"}` treats an explicitly *empty* rc.conf value as unset and
+restores the default, so any variable documented as "set empty to disable"
+needs `${var="default"}` instead. Fixing the `load_rc_config` ordering is what
+makes this reachable at all — while overrides were being ignored wholesale, the
+disable mechanism was equally dead and equally invisible.
+
+Signals are requests, not outcomes. Neither SIGTERM nor SIGKILL is instant (a
+process in uninterruptible sleep survives both until it leaves that state), so
+a supervisor must confirm the process is gone before reporting "stopped" and
+dropping its pidfile — otherwise the next start launches a second node against
+the same database while the first is alive and no longer tracked. If it will
+not die, keep the pidfile and fail: staying tracked is worth more than a tidy
+exit status.
+
+`rc.conf` durations are operator input and reach `[ ... -ge ... ]`, where a
+non-integer makes the test error and evaluate false on every iteration. That
+turns a bounded stop into an unbounded one, hanging `service netbbs stop` and,
+with `KEYWORD: shutdown`, system shutdown with it; a negative value skips
+straight to SIGKILL. Validate, fall back to the documented default, and say so.
+
 `load_rc_config $name` must be called *before* the `: ${var:=default}` block,
 per `rc.subr(8)`. Called after, as it was, every documented `rc.conf` override
 is read too late to have any effect and the built-in defaults always win —
@@ -3224,10 +3329,7 @@ including `netbbs_ld_library_path`, which is the one variable the NetBSD
 Tier 1 automatic restart is an operator's own periodic check, not something the
 example script can provide.
 
-Two limits of an rc.d script are worth stating rather than papering over. Its
-stdout/stderr capture file does not rotate itself and shares a filesystem with
-the database; `newsyslog(8)` is the platform's answer and belongs in the
-example's own comments. And a SIGKILLed node cannot run its own door cleanup,
+A SIGKILLed node cannot run its own door cleanup,
 while doors are deliberately spawned with `start_new_session=True`
 (`netbbs.doors.runtime`) — so they are in no process group the script could
 signal instead, and no process-group kill from rc.d can reach them. Only the
@@ -4145,7 +4247,8 @@ commit their discovery and mission rewards together; auto-routing checkpoints
 each completed hop. Save errors escape to a stop-and-acknowledge screen and must
 not be swallowed as successful actions. A private temporary file is flushed
 before atomic replacement; this prevents shared-temp collisions but does not
-serialize concurrent pilot sessions or leaderboard updates. Tests must kill the
+by itself serialize concurrent pilot sessions or leaderboard updates. The
+session lease described below provides that read/play/write boundary. Tests must kill the
 real subprocess after its success output while a nested menu still owns input;
 EOF and orderly menu-exit tests do not prove this boundary.
 
@@ -4169,8 +4272,8 @@ remaining bounty/escort snapshots must match active contracts as a multiset,
 terminal outcomes must agree with opponent HP and destruction state, and the
 saved location must match the journey phase. Completed contract snapshots no
 longer need active membership; requiring it would reject legitimate restarts.
-Broader schema validation, per-pilot concurrency, and shared score transactions
-remain separate work in issue #310.
+The storage boundary also validates career structure and gameplay ranges before
+loading or writing, as described below.
 
 Voidrunner's menu commands case-fold ASCII only; Unicode remains text input,
 so Unicode case aliases cannot surrender cargo or dispatch another hotkey.
@@ -4209,6 +4312,39 @@ before constructing encounter snapshots; completion and resumed legacy bounty/
 escort paths also check expiry before consumption, combat, or payment. The
 inclusive deadline boundary is `turn > deadline_turn`, not `>=`.
 
+
+Voidrunner contraband standing follows persisted cash-surplus high-water
+milestones. Debit purchases/new futures and credit sales/cancellation principal
+through the same ledger; transaction counts, refund fees, or recovering a prior
+loss must never mint new milestones. Legacy standing is not recalculated.
+
+New futures store origin and principal as a pair; absent metadata retains legacy
+remote settlement/full-refund behavior. New orders wait for room at their origin.
+The departure tick settles only legacy orders; pickup settlement runs after the
+arrival position changes and before mission rewards in that same saved phase.
+Station-entry settlement also handles mature loaded orders and newly freed holds,
+before rescue decides whether the pilot is stranded. Missing legacy pickup keys
+stay absent on serialization; explicit nulls are malformed new metadata.
+Do not settle by the old origin merely because departure increments the day.
+Per-unit integer fee rounding prevents split orders from avoiding the fee.
+
+Voidrunner contract views must remain read-only, including pagination and Back.
+Keep estimates in pure domain helpers; do not query hidden remote market prices
+or mark bearings discovered. Missing-cargo/current-fuel cash estimates exclude
+sunk costs and must not be labelled total profit. Acceptance is a distinct action
+on the final details page; tracking and confirmed abandonment checkpoint before
+acknowledgement. Clear the tracked ID when its active contract disappears, and
+reject contract-management actions during pending travel so snapshots remain valid.
+Tracking cleanup itself runs at every checkpoint, including pending mission
+removals. An active bounty at the current station needs an outbound/return pair
+to trigger again; its budget and chart hint must use that same route. Chart
+tracking must name the actual displayed connection key, including uncharted legs.
+Later same-target bounties budget earlier contracts and their re-entry legs.
+Contract list pages reserve the actual wrapped footer/header height and split
+oversized entries into selectable continuations; row-count tests include 20x10.
+Scripted acceptance tests must navigate the details pages before pressing A;
+otherwise they no longer exercise acceptance. Test compact screens by counting
+display columns and physical rows between successive input requests.
 
 `netbbs.net.admin_flow._door_field_specs`' `args` field is parsed with
 `shlex.split(draft["args_line"])` -- deliberately POSIX-mode (the
@@ -4647,3 +4783,124 @@ crash-between-two-writes finding in the interrupted-cancellation path was
 declined: the managed-DNS service is a single-operator service where manual
 repair of one row is the realistic recovery, and the branch already carries
 twice the feature's own size in such safeguards.
+
+
+Voidrunner holds its per-pilot OS lock before load, including new-career prompts,
+through the EOF/final checkpoint. Hold a descriptor on a stable lock file: never
+unlink it on release or reclaim it by PID/age, which can let different processes
+lock different inodes for the same pilot. Windows locks the first byte with
+`msvcrt.locking`; POSIX uses `flock`. Process termination releases ownership.
+Test competing real processes, independent pilots/directories, and kill/relaunch;
+thread-only tests cannot establish process-level ownership.
+
+Hall of Fame writes replace independent `scores/<user_id>.json` records under the
+same pilot lease. Never truncate retained records when computing a top-20 view.
+Read legacy JSON without rewriting it; prefer new metadata while retaining the
+higher historical credit value. The save's additive `best_credits` survives New
+Game+ and commits before the optional score write, so a failed projection can be
+repaired on a later checkpoint even after spending. Private temporary files need
+flush/fsync and replacement in the destination directory. Shared-host filesystems
+remain unsupported. Node backups cover supported local game directories; capture,
+restore and manual activation are described below and in the door guide.
+
+
+Voidrunner save decoding validates before constructing dataclasses: otherwise
+`dict`/`list` coercion or ignored fields can hide malformed and future data.
+Reject unsupported schema/generator versions and unknown structural fields rather
+than loading then stripping them in the startup checkpoint. Legacy optional fields
+keep their original defaults and active mission IDs can still be normalized while
+docked. Validate RNG and pending journey consistency without normalization when
+checking a previous-copy candidate. Galaxy version 1 retains the original seeded
+call sequence; adding the field does not regenerate a different galaxy.
+
+Under the pilot lease, a changed save first replaces the previous-checkpoint file
+with the validated old bytes, then replaces the primary file. Both use private,
+flushed temporary files. Identical bytes must not age the previous copy. A failure
+before the primary replace leaves the old career available. The recovery screen
+never offers a reset and never writes on Back, EOF or declined confirmation.
+Use the same read-only preservation preflight for the recovery screen and the
+final action. Unreadable/oversized originals and full copy slots need an explicit
+manual-recovery reason before offering a doomed action. Unknown fields in nested
+journey, encounter, opponent, mission-snapshot and economy-event records receive
+the unsupported-format guard too; checking only the outer schema is insufficient.
+Restoration rechecks the exact candidate, archives the current bytes with an
+exclusive unique temporary filename and fsync, promotes only a successfully
+closed archive, then atomically replaces the primary. Failed archive writes must
+not consume retained recovery slots. Keep
+an unsupported-version career for manual repair rather than enabling a downgrade.
+A missing primary with an existing previous copy is recovery, not a new pilot.
+Tests simulating corruption must write the damaged fixture directly; the normal
+writer rejects it before touching primary or previous files. A forced kill after
+recovery acknowledgement proves preservation/replacement happened before output.
+
+
+Notoriety is an uncapped nonnegative counter; encounter probabilities may cap its
+impact, but that does not bound the saved value. Recovery Back/Q is a normal door
+exit (status 0), distinguished from failed restoration or input loss so the parent
+runtime does not announce a deliberate departure as an unexpected crash.
+
+
+Voidrunner keeps its maintenance gate inside the resolved save directory. Restore
+preserves that directory and every gate/pilot lock inode, switching only data
+entries while the gate excludes launches. Never rename or replace the directory:
+a waiting opener would retain an obsolete gate and could split ownership.
+Pilot startup holds the gate briefly while acquiring its lifetime pilot lease.
+Maintenance holds the gate, probes every pilot lock and refuses active sessions.
+Close each probe immediately: the gate already prevents new owners, and permanent
+lock files from past callers must not consume one descriptor each during backup.
+Existing service-owned save directories need no parent-directory write permission
+for play or capture. Restore still needs permission to stage beside its target.
+Never delete gate or pilot lock files to clear an apparent stale session.
+On Windows, acquire the one-byte lease even when the file is empty; do not write
+a dummy byte before locking. A competing opener can already own that byte range,
+making the initialization flush fail with `PermissionError` instead of reporting
+a busy pilot. [Microsoft's `_locking` contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/locking)
+permits ranges beyond EOF. A deterministic regression holds an empty file's first
+byte from another handle/process, then checks refusal and successful reacquisition
+without any file-content initialization.
+Restore journal updates use flushed atomic replacement; update failures after a
+switch enter the same rollback path as switch failures. Keep the previous usable
+journal, including external game paths, if automatic rollback cannot complete.
+
+Node backups capture the game component before the DB snapshot, after excluding
+active pilots. This prevents a newly registered caller's captured career from
+having an ID newer than the captured database. Game bytes, including prior damaged
+copies, are archival data; verify their checksums without loading/migrating them.
+Coverage enumerates every retained file deterministically and rejects missing,
+extra, unchecked, symlinked, case-colliding or over-limit entries. Temporary and
+lock files may be ignored in the live source but must not appear in an archive.
+The live database filename `voidrunner` predates this component and remains valid.
+Without game coverage, preserve its legacy archive shape. With game coverage,
+store that database snapshot as `netbbs.db` and record the archive filename in the
+manifest; the explicit restore database path still chooses the live filename.
+Check this collision case-insensitively for archives moved between platforms.
+
+An archive's source-directory metadata is informational only. Restoring game data
+requires an explicit, nonoverlapping destination, including the node PID, SSH key,
+banner and SQLite sidecar paths even when absent. Use the full known artifact
+list, not only entries present in that backup's switch plan. Stage and retain game rollback
+beside that target so atomic renames work across database/game filesystem layouts;
+the common restore journal records the external paths. `_switch_one` must undo
+its own first rename if its second rename fails: the outer loop has not yet added
+that artifact to the completed list. If that local rollback fails, retain the
+journal and staging, including external staging, for manual recovery. Tests must
+inject failure after the first rename, not only before a switch starts.
+
+Reserved restore targets also include fixed runtime log/rotation files, the update
+token and its temporary path, banner `.ans.draft` recovery paths, credential
+temporary paths, and managed door,
+draft and backup directories. These exclusions do not imply those resources are
+captured in an archive. A failed game capture removes only the fresh destination
+created by that call so closing sessions or repairing data permits the same CLI
+destination to be retried; cleanup failure names the incomplete directory for
+manual removal and preserves the original failure reason.
+
+
+The First Flight quote is a read-only calculation over current local prices,
+connected stations and the pilot's fuel/cash/hold budget. It consumes no galaxy
+or encounter randomness. Acceptance revalidates the entire displayed quote and
+contract capacity before mutating state, then checkpoints before acknowledging it.
+The tagged delivery uses the ordinary completion path; acceptance/completion flags
+prevent replay, survive restart and reset with a new career. Save validation must
+reject contradictory flags or multiple tagged jobs. Omit the default false tag
+from ordinary mission serialization to preserve their existing document shape.
