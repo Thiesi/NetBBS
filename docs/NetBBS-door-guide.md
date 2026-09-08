@@ -111,6 +111,24 @@ remembered price and an intact load; market changes, encounters, repairs, fines,
 detours and other income/spending can change the result. These views are read-only
 and never purchase cargo or engage travel. Use the market and chart to act.
 
+### Regional opportunities
+
+Within the Trading Ledger, **[O]pportunities** shows active economy news and up to
+six trade candidates. New events affect at most three nearby stations. A boom
+suggests bringing the named commodity; a crash suggests checking for cheaper
+supplies. The bulletin names affected stations, coordinates, hops and remaining
+event time, while uncharted danger stays unknown. Public news does not chart a
+station or record its prices. Older saved economy-wide events keep their scope
+until they finish. An event changes prices, not the spot market's supply limits.
+
+Candidates use current local stock, cash and hold space plus remembered sale
+prices and buying demand. They reserve cash for fuel and wages, exclude delivery
+conflicts and rank estimated margin per outbound jump. Return travel, encounters,
+repairs and market changes are excluded; unobserved demand and contraband risks
+are labelled. **[1-6] Route** opens the selected estimate, where **[E]dit draft**
+can adjust it. Back or disconnect changes nothing; the board never buys cargo or
+starts travel. Visit markets and compare alternatives when a pool is exhausted.
+
 ### Voidrunner recovery
 
 Invalid or unreadable career files remain in place. The game shows a recovery
