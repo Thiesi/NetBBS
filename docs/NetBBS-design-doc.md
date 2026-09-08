@@ -4668,8 +4668,22 @@ jobs and cached offers. Legacy duplicate IDs are repaired while docked, after an
 interrupted journey has resolved, so its stored contract snapshots still match.
 Deadlines are inclusive: a contract is eligible on its deadline day, expires
 before rewards or mission encounters on the next day, and is never paid late.
-Already-charted survey offers are unavailable. Contract details, abandonment,
-and objective tracking remain the next mission UX slice in issue #310.
+Already-charted survey offers are unavailable. Selecting a posted or active
+contract opens its complete terms without writing. Details include the named
+target and coordinates (without charting it), minimum hops and first bearing,
+inclusive deadline, cargo procurement and hold needs, gross payout, and estimated
+remaining cash outlay at current prices. Estimates explicitly exclude sunk cargo
+cost, repairs, detours and market changes. Escorts warn of a fight on every jump,
+including detours and other concurrent escort jobs. Survey contracts use a
+SURVEY label and explain that arrival or a scanner discovery can complete them.
+
+Acceptance is a separate action on the final details page. One active contract
+may be tracked, persisted across sessions and shown at the station and chart.
+Tracking reveals its bearing, not remote market or danger information. Abandonment
+requires a final confirmation, forfeits the reward with no extra fee, retains
+cargo, and does not repost the offer. Completion, expiry and abandonment clear
+tracking. Contract lists and detail text paginate to terminal dimensions, with
+Back on every page. Broader map/route planning remains in issue #310.
 
 Compatibility extension (issues #296/#297):
 

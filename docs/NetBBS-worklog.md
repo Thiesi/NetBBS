@@ -4041,6 +4041,24 @@ escort paths also check expiry before consumption, combat, or payment. The
 inclusive deadline boundary is `turn > deadline_turn`, not `>=`.
 
 
+Voidrunner contract views must remain read-only, including pagination and Back.
+Keep estimates in pure domain helpers; do not query hidden remote market prices
+or mark bearings discovered. Missing-cargo/current-fuel cash estimates exclude
+sunk costs and must not be labelled total profit. Acceptance is a distinct action
+on the final details page; tracking and confirmed abandonment checkpoint before
+acknowledgement. Clear the tracked ID when its active contract disappears, and
+reject contract-management actions during pending travel so snapshots remain valid.
+Tracking cleanup itself runs at every checkpoint, including pending mission
+removals. An active bounty at the current station needs an outbound/return pair
+to trigger again; its budget and chart hint must use that same route. Chart
+tracking must name the actual displayed connection key, including uncharted legs.
+Later same-target bounties budget earlier contracts and their re-entry legs.
+Contract list pages reserve the actual wrapped footer/header height and split
+oversized entries into selectable continuations; row-count tests include 20x10.
+Scripted acceptance tests must navigate the details pages before pressing A;
+otherwise they no longer exercise acceptance. Test compact screens by counting
+display columns and physical rows between successive input requests.
+
 `netbbs.net.admin_flow._door_field_specs`' `args` field is parsed with
 `shlex.split(draft["args_line"])` -- deliberately POSIX-mode (the
 default), matching the "never a shell, always an argv list" posture
