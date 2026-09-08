@@ -4582,3 +4582,66 @@ def test_contract_management_save_failure_precedes_acknowledgement(monkeypatch, 
     with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError):
         vr.screen_mission_details(vr.Palette(False), world, mission, active=True)
     assert ack not in output.getvalue()
+
+
+@pytest.mark.parametrize("discovered", [False, True])
+def test_tracked_chart_hint_identifies_the_actual_destination_key(monkeypatch, discovered):
+    world, mission = _mission_details_world("scan")
+    vr.accept_mission(world, mission)
+    vr.track_mission(world, mission.id)
+    first = vr.mission_route(world, mission)[0]
+    world.by_id[first].discovered = discovered
+    world.save.ship.fuel = 100
+    key = vr.CHART_CONNECTION_LETTERS[sorted(world.here.connections).index(first)]
+    monkeypatch.setattr(vr, "read_key", lambda: key)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        dest = vr.screen_chart(vr.Palette(False), world)
+    assert dest == first
+    assert f"Tracked route: [{key}]" in output.getvalue()
+    assert world.by_id[first].discovered is discovered
+
+
+def test_bounty_retry_requires_reentry_and_budgets_two_jumps():
+    world, mission = _mission_details_world("bounty")
+    vr.accept_mission(world, mission)
+    world.save.current_system = mission.target_system
+    world.save.turn = mission.deadline_turn - 1
+    world.save.ship.has_navigator = True
+    world.save.ship.fuel = 0
+    route = vr.mission_route(world, mission)
+    assert len(route) == 2 and route[-1] == mission.target_system
+    lines = " ".join(vr.mission_details(world, mission))
+    assert "jump back" in lines and "both jumps" in lines
+    assert "shortest route misses the deadline" in lines
+    assert "2 jump(s)" in vr.mission_bearing(world, mission)
+    assert "wages 10 cr/jump, 20 cr total" in lines
+
+
+@pytest.mark.parametrize("kind", ["bounty", "escort"])
+@pytest.mark.parametrize("outcome", ["won", "destroyed", "expired"])
+def test_pending_mission_resolution_checkpoint_clears_tracking(monkeypatch, kind, outcome):
+    world, mission = _mission_details_world(kind)
+    vr.accept_mission(world, mission)
+    vr.track_mission(world, mission.id)
+    world.save.pending_travel = {
+        "phase": "primary" if kind == "bounty" else "escorts", "bounty": mission.to_dict(),
+        "escorts": [mission.to_dict()] if kind == "escort" else [], "escort_index": 0,
+        "encounter": {},
+    }
+    if outcome == "expired":
+        world.save.turn = 11
+    monkeypatch.setattr(vr, "screen_combat", lambda *args: outcome)
+    seen = []
+    def checkpoint(current):
+        if not current.save.active_missions:
+            assert current.save.pending_travel is not None
+            assert current.save.tracked_mission_id is None
+            seen.append(1)
+    world._checkpoint = checkpoint
+    with contextlib.redirect_stdout(io.StringIO()):
+        if kind == "bounty":
+            vr._resolve_bounty(vr.Palette(False), world, world.save.pending_travel)
+        else:
+            vr._resolve_escort_missions(vr.Palette(False), world, mission.target_system)
+    assert seen

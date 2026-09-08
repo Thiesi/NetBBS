@@ -4048,6 +4048,10 @@ sunk costs and must not be labelled total profit. Acceptance is a distinct actio
 on the final details page; tracking and confirmed abandonment checkpoint before
 acknowledgement. Clear the tracked ID when its active contract disappears, and
 reject contract-management actions during pending travel so snapshots remain valid.
+Tracking cleanup itself runs at every checkpoint, including pending mission
+removals. An active bounty at the current station needs an outbound/return pair
+to trigger again; its budget and chart hint must use that same route. Chart
+tracking must name the actual displayed connection key, including uncharted legs.
 Scripted acceptance tests must navigate the details pages before pressing A;
 otherwise they no longer exercise acceptance. Test compact screens by counting
 display columns and physical rows between successive input requests.

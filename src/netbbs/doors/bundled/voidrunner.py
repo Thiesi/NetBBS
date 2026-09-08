@@ -1105,10 +1105,10 @@ class World:
         self.sync_discovered()
         if self.save.pending_travel is None:
             expire_missions(self)
-            if tracked_mission(self) is None:
-                self.save.tracked_mission_id = None
             _normalize_mission_ids(self.save)
             generate_mission_board(self)
+        if tracked_mission(self) is None:
+            self.save.tracked_mission_id = None
         self.save.event_rng_state = self.event_rng.getstate()
         if self.save.pending_travel is not None:
             self.save.pending_travel["destroyed"] = self.ship_destroyed_this_hop
@@ -3030,9 +3030,20 @@ def abandon_mission(world: World, mission_id: int) -> str:
     return message
 
 
+def mission_route(world: World, mission: Mission) -> list[int]:
+    if (mission.kind == "bounty" and mission.target_system == world.save.current_system
+            and any(m.id == mission.id for m in world.save.active_missions)):
+        # An escaped bounty remains active after arrival. It triggers again only
+        # on re-entry; choose a deterministic, cheapest adjacent return trip.
+        neighbor = min(world.here.connections,
+                       key=lambda sid: (fuel_cost_for_jump(world.here, world.by_id[sid], world.save.ship), sid))
+        return [neighbor, mission.target_system]
+    return bfs_path(world.by_id, world.save.current_system, mission.target_system)
+
+
 def mission_bearing(world: World, mission: Mission) -> str:
     target = world.by_id[mission.target_system]
-    path = bfs_path(world.by_id, world.save.current_system, target.id)
+    path = mission_route(world, mission)
     location = f"{target.name} ({target.x},{target.y})"
     if not path:
         return f"{location}: at this station"
@@ -3042,11 +3053,13 @@ def mission_bearing(world: World, mission: Mission) -> str:
 
 def mission_details(world: World, mission: Mission) -> list[str]:
     """Read-only terms and explicit estimates; never reveal remote market state."""
-    path = bfs_path(world.by_id, world.save.current_system, mission.target_system)
+    path = mission_route(world, mission)
     reward = bounty_reward_for(world, mission.reward) if mission.kind in ("bounty", "escort") else mission.reward
     target = world.by_id[mission.target_system]
     lines = [mission.description, f"Destination: {mission_bearing(world, mission)}",
              f"Target danger: {target.danger}" if target.discovered else "Target danger: uncharted"]
+    if mission.kind == "bounty" and path and path[-1] == world.save.current_system:
+        lines.append("Retry: leave this system and jump back to re-engage the bounty; budget includes both jumps.")
     if mission.deadline_turn is None:
         lines.append("Deadline: none. Jumps advance the day.")
     else:
@@ -3385,6 +3398,12 @@ def screen_chart(p: Palette, world: World) -> str | None:
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
 
         out_line(_box_bottom(p))
+        mission = tracked_mission(world)
+        route = mission_route(world, mission) if mission is not None else []
+        if route and route[0] in options:
+            letter = CHART_CONNECTION_LETTERS[options.index(route[0])]
+            next_system = world.by_id[route[0]]
+            out_line(f"{p.gold}Tracked route: [{letter}] next bearing ({next_system.x},{next_system.y}){RESET}")
         scan_available = world.save.ship.scanner_tier > 0
         actions = []
         if scan_available:
