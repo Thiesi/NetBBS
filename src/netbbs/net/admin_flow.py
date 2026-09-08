@@ -81,6 +81,7 @@ from netbbs.backup import (
     BackupError,
     create_backup,
     default_backup_destination,
+    voidrunner_save_directory,
     get_last_backup_summary,
 )
 from netbbs.managed_dns.state import (
@@ -4716,6 +4717,15 @@ async def _backup_status_screen(
                     override_timezone=display_timezone,
                 )
                 await session.write_line(f"  {when}: {sanitize_text(run.outcome)}")
+
+        await session.write_line(
+            colored("Voidrunner source: ", fg_color=LABEL_COLOR)
+            + colored(sanitize_text(str(voidrunner_save_directory())), fg_color=METADATA_COLOR)
+        )
+        await session.write_line(
+            "Includes saved careers and scores when this directory exists. "
+            "Close Voidrunner sessions before creating a backup."
+        )
 
         if not can_create:
             await session.write_line(

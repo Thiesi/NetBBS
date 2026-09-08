@@ -3308,6 +3308,34 @@ introduced.
 
 ### 13.4 Backup and restore (issue #60's first operational slice)
 
+Voidrunner coverage (issue #310): ordinary CLI and SysOp node backups include the
+effective `VOIDRUNNER_SAVE_DIR` (or legacy home-directory default), when present,
+under a checksummed `voidrunner/` component. Capture preserves career, previous,
+recovery and score JSON bytes, including damaged careers needed for repair;
+temporary files and OS lock files are excluded. A bounded maintenance lease
+prevents new game launches and refuses capture while an existing pilot is active.
+The gate lives inside the save directory. Restore preserves that directory and
+its lock inodes, switching its data entries under the lease; existing provisioned
+save directories require no parent write permission for normal play or capture.
+The BBS may keep running, but Voidrunner sessions must be closed. Capture precedes
+the database snapshot so a newly registered user's captured career cannot refer
+to a user ID newer than that snapshot. This is an offline game-data snapshot,
+not a guarantee that every node artifact was written at one global instant.
+
+Restoring a backup containing this component requires an explicit
+`--voidrunner-to` destination; archive metadata never chooses a live path. The
+operator must use that directory for the restored service. The component is
+staged and rolled back beside its destination, allowing a different filesystem
+from the database. Node and game switches share one recovery journal; failures
+roll back both, and any retained external rollback location is recorded beside
+the ordinary rollback generation. Journal updates use flushed atomic replacement;
+a failed post-switch update also triggers rollback, retaining the last usable
+journal if recovery fails. Existing backups without Voidrunner leave
+external careers alone. Cross-host shared directories and simultaneously running
+different game builds remain unsupported. Limits are 10,000 captured files,
+4 MiB per file and 512 MiB total; unsupported entries or exceeded limits fail
+clearly rather than silently producing incomplete coverage.
+
 A node's recoverable state is not only its database — it is fourteen
 artifacts, today scattered across derived, `db_path`-relative filenames
 with no single existing tool that treats them as one recoverable set:
@@ -4747,7 +4775,8 @@ private temporary file. The career save also retains the credit high-water mark
 across retirement and temporary score-write failures, allowing a later checkpoint
 to repair its score. Scores remain optional presentation data, never gameplay
 authority. Historical records already discarded by older top-20 storage cannot
-be reconstructed. Supported backup/recovery workflows remain in issue #310.
+be reconstructed. Node backup coverage and explicit external-directory restore
+are specified in section 13.4 and the door guide.
 
 Compatibility extension (issues #296/#297):
 

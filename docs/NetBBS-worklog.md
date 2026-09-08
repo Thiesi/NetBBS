@@ -4528,8 +4528,9 @@ Read legacy JSON without rewriting it; prefer new metadata while retaining the
 higher historical credit value. The save's additive `best_credits` survives New
 Game+ and commits before the optional score write, so a failed projection can be
 repaired on a later checkpoint even after spending. Private temporary files need
-flush/fsync and replacement in the destination directory. Unsupported shared-host
-filesystems and full directory backup/recovery remain operational boundaries.
+flush/fsync and replacement in the destination directory. Shared-host filesystems
+remain unsupported. Node backups cover supported local game directories; capture,
+restore and manual activation are described below and in the door guide.
 
 
 Voidrunner save decoding validates before constructing dataclasses: otherwise
@@ -4566,3 +4567,52 @@ Notoriety is an uncapped nonnegative counter; encounter probabilities may cap it
 impact, but that does not bound the saved value. Recovery Back/Q is a normal door
 exit (status 0), distinguished from failed restoration or input loss so the parent
 runtime does not announce a deliberate departure as an unexpected crash.
+
+
+Voidrunner keeps its maintenance gate inside the resolved save directory. Restore
+preserves that directory and every gate/pilot lock inode, switching only data
+entries while the gate excludes launches. Never rename or replace the directory:
+a waiting opener would retain an obsolete gate and could split ownership.
+Pilot startup holds the gate briefly while acquiring its lifetime pilot lease.
+Maintenance holds the gate, probes every pilot lock and refuses active sessions.
+Close each probe immediately: the gate already prevents new owners, and permanent
+lock files from past callers must not consume one descriptor each during backup.
+Existing service-owned save directories need no parent-directory write permission
+for play or capture. Restore still needs permission to stage beside its target.
+Never delete gate or pilot lock files to clear an apparent stale session.
+Restore journal updates use flushed atomic replacement; update failures after a
+switch enter the same rollback path as switch failures. Keep the previous usable
+journal, including external game paths, if automatic rollback cannot complete.
+
+Node backups capture the game component before the DB snapshot, after excluding
+active pilots. This prevents a newly registered caller's captured career from
+having an ID newer than the captured database. Game bytes, including prior damaged
+copies, are archival data; verify their checksums without loading/migrating them.
+Coverage enumerates every retained file deterministically and rejects missing,
+extra, unchecked, symlinked, case-colliding or over-limit entries. Temporary and
+lock files may be ignored in the live source but must not appear in an archive.
+The live database filename `voidrunner` predates this component and remains valid.
+Without game coverage, preserve its legacy archive shape. With game coverage,
+store that database snapshot as `netbbs.db` and record the archive filename in the
+manifest; the explicit restore database path still chooses the live filename.
+Check this collision case-insensitively for archives moved between platforms.
+
+An archive's source-directory metadata is informational only. Restoring game data
+requires an explicit, nonoverlapping destination, including the node PID, SSH key,
+banner and SQLite sidecar paths even when absent. Use the full known artifact
+list, not only entries present in that backup's switch plan. Stage and retain game rollback
+beside that target so atomic renames work across database/game filesystem layouts;
+the common restore journal records the external paths. `_switch_one` must undo
+its own first rename if its second rename fails: the outer loop has not yet added
+that artifact to the completed list. If that local rollback fails, retain the
+journal and staging, including external staging, for manual recovery. Tests must
+inject failure after the first rename, not only before a switch starts.
+
+Reserved restore targets also include fixed runtime log/rotation files, the update
+token and its temporary path, banner `.ans.draft` recovery paths, credential
+temporary paths, and managed door,
+draft and backup directories. These exclusions do not imply those resources are
+captured in an archive. A failed game capture removes only the fresh destination
+created by that call so closing sessions or repairing data permits the same CLI
+destination to be retried; cleanup failure names the incomplete directory for
+manual removal and preserves the original failure reason.

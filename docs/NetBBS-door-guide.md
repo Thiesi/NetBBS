@@ -22,7 +22,7 @@ JSON files, the `scores` subdirectory, and the retained legacy `leaderboard.json
 If independent nodes previously shared the default, their overlapping numeric
 IDs cannot be assigned safely by an automatic migration; inspect ownership before
 copying careers. Merely pointing at an empty directory starts a separate set of
-careers. Ordinary node backup coverage is still tracked in issue #310.
+careers. Ordinary node backups include this directory as described below.
 
 One session may own a pilot at a time. A second launch displays an in-use message
 and leaves the career unchanged; different pilots can play together. OS locks
@@ -65,8 +65,52 @@ Never delete the current career merely to bypass the recovery screen. Archive
 older recovery copies manually if the eight-copy limit is reached; the game never
 deletes them for you. A failed archive or replacement leaves the current save in
 place. Include previous and recovery copies when moving or backing up this folder.
-The local previous-checkpoint file does not provide off-machine backup protection;
-ordinary node backup coverage remains tracked in issue #310.
+The local previous-checkpoint file does not provide off-machine backup protection.
+
+### Backing up and restoring Voidrunner
+
+The SysOp **Backup** screen shows the effective Voidrunner save directory. Node
+backups include its retained careers, scores, previous checkpoints, recovery copies
+and old `.corrupt-TIMESTAMP` files under a checksummed `voidrunner` component.
+Malformed career bytes are retained for repair. Locks and unfinished temporary
+files are excluded; unrelated files, symlinks and exceeded limits produce an error.
+Limits are 10,000 files, 4 MiB per file and 512 MiB total. Close all Voidrunner
+sessions before creating a backup; the BBS itself can keep running. A maintenance
+lock inside the save directory prevents a game from starting during capture or
+restore. Play and capture need no write access to its parent. Restore keeps that
+directory and its lock files in place while replacing the retained data.
+If game capture fails, its incomplete backup destination is removed so the same
+path can be retried. If cleanup also fails, the error names the directory to
+remove manually before retrying; source careers are retained.
+
+**Manual CLI backup:** use the same environment as the running service, or supply
+its exact save directory explicitly:
+
+```text
+python -m netbbs.backup create --db netbbs.db --identity-dir netbbs_identity --to backup-2026-09-08 --voidrunner-save-dir /srv/netbbs/voidrunner
+```
+
+**Manual restore:** stop the node and every game using the target directory. A
+backup containing Voidrunner requires an explicit destination; the source path
+recorded in the archive never chooses where restoration writes:
+
+```text
+python -m netbbs.backup restore --from backup-2026-09-08 --db netbbs.db --identity-dir netbbs_identity --voidrunner-to /srv/netbbs/voidrunner
+```
+
+**Manual activation:** configure the restored service's `VOIDRUNNER_SAVE_DIR` to
+that destination before restarting. The target must be a separate game directory;
+restore refuses overlap with node/backup paths or unrelated files. Game data can
+live on another filesystem: staging and rollback stay beside its target. The
+ordinary retained rollback directory contains `voidrunner-rollback.json` naming
+any external game rollback generation. If rollback fails, the restore state file
+records those paths and staging is retained for manual recovery. Never delete
+the journal or retained generations merely to bypass a failed restore.
+
+Backups predating this component restore the node without touching external game
+data. Restore a separately retained, matching game backup manually in that case.
+Copy completed backups off-machine and manage retention separately; NetBBS does
+not configure a scheduler, remote storage, or automatic deletion.
 
 Existing registrations keep their JSON metadata and UTF-8 stdio API.
 

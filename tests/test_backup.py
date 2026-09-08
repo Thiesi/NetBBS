@@ -8,6 +8,7 @@ invariants around them, and the `python -m netbbs.backup` CLI.
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import json
 import shutil
 import sqlite3
@@ -35,6 +36,662 @@ from netbbs.managed_dns.state import (
     set_pending_rename_state,
 )
 from netbbs.storage.database import Database
+
+
+@pytest.fixture(autouse=True)
+def isolated_voidrunner_backup_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("VOIDRUNNER_SAVE_DIR", str(tmp_path / "voidrunner-careers"))
+
+
+def _populate_voidrunner():
+    from netbbs.doors.bundled import voidrunner as vr
+    directory = backup_module.voidrunner_save_directory()
+    world = vr.World(vr._new_career("Backup Pilot"))
+    vr.persist(world, directory, 77)
+    world.save.pilot.credits += 100
+    vr.persist(world, directory, 77)
+    (directory / "77.recovery-retained.json").write_bytes(b"damaged original")
+    (directory / "77.corrupt-1234").write_bytes(b"legacy damaged original")
+    (directory / "leaderboard.json").write_text("[]", encoding="utf-8")
+    return directory
+
+
+def _retained_game_bytes(directory):
+    return {path.relative_to(directory).as_posix(): path.read_bytes()
+            for path in directory.rglob("*") if path.is_file() and not path.name.startswith(".")}
+
+
+def test_voidrunner_component_round_trip_preserves_every_retained_file(tmp_path, db_path, identity_dir):
+    game = _populate_voidrunner()
+    expected = _retained_game_bytes(game)
+    (game / ".77.lock").write_bytes(b"0")
+    (game / ".77-private.tmp").write_bytes(b"incomplete")
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    manifest = json.loads((source / "manifest.json").read_text())
+    assert manifest["voidrunner"]["files"] == sorted(expected)
+    assert _retained_game_bytes(source / "voidrunner") == expected
+    assert not list((source / "voidrunner").glob(".*"))
+    for relative, raw in expected.items():
+        assert manifest["checksums"][f"voidrunner/{relative}"] == hashlib.sha256(raw).hexdigest()
+    restored = tmp_path / "restored-games"
+    restored.mkdir()
+    (restored / "99.json").write_bytes(b"old generation")
+    rollback = restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=restored)
+    assert _retained_game_bytes(restored) == expected
+    external = json.loads((rollback / "voidrunner-rollback.json").read_text())
+    from pathlib import Path
+    assert (Path(external["rollback"]) / "voidrunner" / "99.json").read_bytes() == b"old generation"
+    assert _retained_game_bytes(game) == expected
+
+
+def test_voidrunner_capture_precedes_database_snapshot(tmp_path, db_path, identity_dir, monkeypatch):
+    _populate_voidrunner()
+    original = backup_module._snapshot_database_and_managed_dns_credentials
+    calls = []
+
+    def snapshot(db_path, destination, database_filename):
+        assert (destination / "voidrunner" / "77.json").exists()
+        calls.append("snapshot")
+        return original(db_path, destination, database_filename)
+
+    monkeypatch.setattr(backup_module, "_snapshot_database_and_managed_dns_credentials", snapshot)
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    assert calls == ["snapshot"]
+
+
+@pytest.mark.parametrize("filename", ["voidrunner", "Voidrunner"])
+@pytest.mark.parametrize("include_game", [False, True])
+def test_voidrunner_named_databases_and_legacy_archives_remain_restorable(
+    tmp_path, db_path, identity_dir, filename, include_game,
+):
+    custom = tmp_path / "custom-node" / filename
+    custom.parent.mkdir()
+    shutil.copy2(db_path, custom)
+    with sqlite3.connect(custom) as connection:
+        connection.execute("INSERT OR REPLACE INTO node_config(key,value) VALUES('node_name','Custom DB')")
+    if include_game:
+        game = _populate_voidrunner()
+        expected = _retained_game_bytes(game)
+    source = create_backup(db_path=custom, identity_dir=identity_dir, destination=tmp_path / "backup")
+    manifest_path = source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if include_game:
+        assert manifest["database_filename"] == "netbbs.db"
+    else:
+        assert manifest["database_filename"] == filename
+        del manifest["voidrunner"]  # The manifest shape used before game coverage.
+        manifest_path.write_text(json.dumps(manifest))
+    restored_db = tmp_path / "restored-node" / filename
+    target = tmp_path / "restored-games" if include_game else None
+    restore_backup(source=source, db_path=restored_db, identity_dir=tmp_path / "restored-identity", voidrunner_to=target)
+    with sqlite3.connect(restored_db) as connection:
+        assert connection.execute("SELECT value FROM node_config WHERE key='node_name'").fetchone()[0] == "Custom DB"
+    if include_game:
+        assert _retained_game_bytes(target) == expected
+
+
+@pytest.mark.parametrize("damage", ["bytes", "missing", "unlisted", "unchecked", "metadata", "traversal", "temporary"])
+def test_voidrunner_component_rejects_damaged_or_ambiguous_archives_before_node_changes(
+    tmp_path, db_path, identity_dir, damage,
+):
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    manifest_path = source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if damage == "bytes":
+        (source / "voidrunner" / "77.json").write_bytes(b"changed")
+    elif damage == "missing":
+        (source / "voidrunner" / "77.json").unlink()
+    elif damage == "unlisted":
+        (source / "voidrunner" / "88.json").write_bytes(b"extra")
+    elif damage == "unchecked":
+        del manifest["checksums"]["voidrunner/77.json"]
+    elif damage == "metadata":
+        del manifest["voidrunner"]
+    elif damage == "traversal":
+        manifest["voidrunner"]["files"].append("../elsewhere.json")
+    else:
+        (source / "voidrunner" / ".77-private.tmp").write_bytes(b"unlisted")
+    manifest_path.write_text(json.dumps(manifest))
+    before = db_path.read_bytes()
+    target = tmp_path / "restored-games"
+    with pytest.raises(BackupError):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=target)
+    assert db_path.read_bytes() == before and not target.exists()
+
+
+def test_voidrunner_restore_requires_explicit_destination_and_ignores_recorded_source_path(
+    tmp_path, db_path, identity_dir,
+):
+    game = _populate_voidrunner()
+    original = _retained_game_bytes(game)
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    with pytest.raises(BackupError, match="voidrunner-to"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir)
+    manifest_path = source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["voidrunner"]["source_directory"] = str(tmp_path / "must-not-touch")
+    manifest_path.write_text(json.dumps(manifest))
+    restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=tmp_path / "chosen")
+    assert not (tmp_path / "must-not-touch").exists()
+    assert _retained_game_bytes(game) == original
+
+
+def test_legacy_backup_leaves_existing_voidrunner_data_unchanged(tmp_path, db_path, identity_dir):
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    manifest_path = source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest.pop("voidrunner")
+    manifest_path.write_text(json.dumps(manifest))
+    game = _populate_voidrunner()
+    original = _retained_game_bytes(game)
+    restore_backup(source=source, db_path=db_path, identity_dir=identity_dir)
+    assert _retained_game_bytes(game) == original
+
+
+@pytest.mark.parametrize("failed_entry", [1, 3])
+def test_game_switch_failure_rolls_back_both_node_and_game(tmp_path, db_path, identity_dir, monkeypatch, failed_entry):
+    from pathlib import Path
+    from netbbs.config import get_config, set_config
+
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    live = Database(db_path)
+    set_config(live, "node_name", "Before rollback")
+    live.close()
+    target = tmp_path / "live-games"
+    target.mkdir()
+    (target / "99.json").write_bytes(b"previous game generation")
+    rename = Path.rename
+    entries = []
+
+    def fail_game_stage(path, destination):
+        if path.parent.name.startswith(".live-games.netbbs-stage-"):
+            entries.append(path.name)
+            if len(entries) == failed_entry:
+                raise OSError("game stage switch failed")
+        return rename(path, destination)
+
+    monkeypatch.setattr(Path, "rename", fail_game_stage)
+    with pytest.raises(BackupError, match="automatically rolled back"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=target)
+    assert (target / "99.json").read_bytes() == b"previous game generation"
+    restored = Database(db_path)
+    try:
+        assert get_config(restored, "node_name") == "Before rollback"
+    finally:
+        restored.close()
+    assert not (db_path.parent / ".netbbs-restore-state.json").exists()
+
+
+def test_failed_rollback_pointer_names_the_retained_journal(tmp_path, db_path, identity_dir, monkeypatch):
+    from pathlib import Path
+
+    game = _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    (game / "99.json").write_bytes(b"previous generation")
+    write_text = Path.write_text
+
+    def fail_pointer(path, *args, **kwargs):
+        if path.name == "voidrunner-rollback.json":
+            raise OSError("rollback pointer disk full")
+        return write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_pointer)
+    journal_path = db_path.parent / ".netbbs-restore-state.json"
+    with pytest.raises(BackupError, match="Restored data is in place") as caught:
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=game)
+    assert str(journal_path) in str(caught.value)
+    external = json.loads(journal_path.read_text())["external_components"]["voidrunner"]
+    assert (Path(external["rollback"]) / "voidrunner" / "99.json").read_bytes() == b"previous generation"
+    assert _retained_game_bytes(game) == _retained_game_bytes(source / "voidrunner")
+
+
+def test_game_local_stage_and_rollback_stay_beside_destination(tmp_path, db_path, identity_dir, monkeypatch):
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    target = tmp_path / "different-mount" / "games"
+    original = backup_module._switch_one
+    calls = []
+
+    def checked(name, staged, live, rollback):
+        if name == "voidrunner":
+            assert staged.parent == rollback.parent == live.parent == target.parent
+            calls.append(name)
+        return original(name, staged, live, rollback)
+
+    monkeypatch.setattr(backup_module, "_switch_one", checked)
+    restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=target)
+    assert calls == ["voidrunner"]
+
+
+@pytest.mark.parametrize("rollback_fails", [False, True])
+def test_post_game_journal_failure_rolls_back_or_retains_usable_external_paths(
+    tmp_path, db_path, identity_dir, monkeypatch, rollback_fails,
+):
+    from pathlib import Path
+    from netbbs.config import get_config, set_config
+
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    live = Database(db_path)
+    set_config(live, "node_name", "Previous node")
+    live.close()
+    target = tmp_path / "live-games"
+    target.mkdir()
+    (target / "99.json").write_bytes(b"previous game")
+    original = backup_module._write_restore_state
+    rename = Path.rename
+
+    def fail_last_update(path, **kwargs):
+        if not kwargs["pending"]:
+            raise OSError("journal disk full")
+        original(path, **kwargs)
+
+    def fail_rollback(path, destination):
+        if rollback_fails and path.name == "99.json" and path.parent.name == "voidrunner":
+            raise OSError("rollback unavailable")
+        return rename(path, destination)
+
+    monkeypatch.setattr(backup_module, "_write_restore_state", fail_last_update)
+    monkeypatch.setattr(Path, "rename", fail_rollback)
+    match = "manual recovery" if rollback_fails else "automatically rolled back"
+    with pytest.raises(BackupError, match=match):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=target)
+    journal_path = db_path.parent / ".netbbs-restore-state.json"
+    if rollback_fails:
+        journal = json.loads(journal_path.read_text())
+        external = journal["external_components"]["voidrunner"]
+        assert (Path(external["rollback"]) / "voidrunner" / "99.json").read_bytes() == b"previous game"
+        assert Path(external["staging"]).exists()
+    else:
+        assert not journal_path.exists()
+        assert _retained_game_bytes(target) == {"99.json": b"previous game"}
+        restored = Database(db_path)
+        try:
+            assert get_config(restored, "node_name") == "Previous node"
+        finally:
+            restored.close()
+
+
+def test_restore_journal_replacement_failure_preserves_previous_json(tmp_path, monkeypatch):
+    import os
+
+    state = tmp_path / "state.json"
+    args = dict(staging_dir=tmp_path / "stage", rollback_dir=tmp_path / "old",
+                external={"voidrunner": {"rollback": "original-game-location"}})
+    backup_module._write_restore_state(state, pending=["voidrunner"], **args)
+    previous = state.read_bytes()
+    replace = os.replace
+
+    def fail_journal(source, destination):
+        if destination == state:
+            raise OSError("journal replacement denied")
+        return replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_journal)
+    with pytest.raises(OSError, match="replacement denied"):
+        backup_module._write_restore_state(state, pending=[], **args)
+    assert state.read_bytes() == previous
+    assert json.loads(previous)["external_components"]["voidrunner"]["rollback"] == "original-game-location"
+    assert list(tmp_path.iterdir()) == [state]
+
+
+def test_existing_game_directory_needs_no_parent_write_for_play_or_capture(
+    tmp_path, db_path, identity_dir, monkeypatch,
+):
+    import errno
+    from pathlib import Path
+    from netbbs.doors.bundled import voidrunner as vr
+
+    parent = tmp_path / "operator-owned"
+    game = parent / "service-owned"
+    game.mkdir(parents=True)
+    vr.persist(vr.World(vr._new_career("Provisioned")), game, 77)
+    original = Path.open
+
+    def restricted_open(path, mode="r", *args, **kwargs):
+        if path.parent == parent and any(flag in mode for flag in "wax+"):
+            raise PermissionError(errno.EACCES, "parent is not writable", str(path))
+        return original(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", restricted_open)
+    with vr.pilot_session(game, 77):
+        save, _, _ = vr.load_or_create_save(game, 77, "Provisioned")
+        save.pilot.credits += 1
+        vr.persist(vr.World(save), game, 77)
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup",
+                           voidrunner_save_dir=game)
+    assert (source / "voidrunner" / "77.json").read_bytes() == (game / "77.json").read_bytes()
+    assert list(parent.iterdir()) == [game]
+
+
+def test_restore_keeps_lock_inodes_and_excludes_launch_after_game_switch(
+    tmp_path, db_path, identity_dir, monkeypatch,
+):
+    import os
+    import subprocess
+    import sys
+    from netbbs.doors.bundled import voidrunner as vr
+
+    game = _populate_voidrunner()
+    with vr.pilot_session(game, 77):
+        pass
+    inodes = [path.stat().st_ino for path in (game, game / ".maintenance.lock", game / ".77.lock")]
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    info = tmp_path / "door-info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}))
+    original = backup_module._switch_one
+    checked = []
+
+    def check_switch(name, staged, live, rollback):
+        original(name, staged, live, rollback)
+        if name == "voidrunner":
+            result = subprocess.run([sys.executable, vr.__file__], input=b"Q", capture_output=True,
+                                    env=dict(os.environ, NETBBS_DOOR_INFO=str(info)), timeout=5)
+            assert result.returncode == 0
+            assert b"maintenance is in progress" in b" ".join(result.stdout.split())
+            checked.append(name)
+
+    monkeypatch.setattr(backup_module, "_switch_one", check_switch)
+    restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=game)
+    assert checked == ["voidrunner"]
+    assert [path.stat().st_ino for path in (game, game / ".maintenance.lock", game / ".77.lock")] == inodes
+    with vr.pilot_session(game, 77):
+        pass
+
+
+def test_voidrunner_cli_create_and_restore_reports_activation_step(tmp_path, db_path, identity_dir, capsys):
+    game = _populate_voidrunner()
+    source, target = tmp_path / "backup", tmp_path / "restored-games"
+    main(["create", "--db", str(db_path), "--identity-dir", str(identity_dir), "--to", str(source),
+          "--voidrunner-save-dir", str(game)])
+    main(["restore", "--db", str(db_path), "--identity-dir", str(identity_dir), "--from", str(source),
+          "--voidrunner-to", str(target)])
+    output = capsys.readouterr().out
+    assert "MANUAL" in output and "VOIDRUNNER_SAVE_DIR" in output
+    assert (target / "77.json").exists()
+
+
+@contextlib.contextmanager
+def _real_pilot_lease(directory, ready):
+    import subprocess
+    import sys
+    import time
+    from netbbs.doors.bundled import voidrunner as vr
+
+    script = """
+import runpy, sys
+from pathlib import Path
+vr = runpy.run_path(sys.argv[1])
+with vr['pilot_session'](Path(sys.argv[2]), 77):
+    Path(sys.argv[3]).write_text('ready')
+    sys.stdin.read(1)
+"""
+    proc = subprocess.Popen([sys.executable, "-c", script, vr.__file__, str(directory), str(ready)],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists() and proc.poll() is None
+        yield
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            stream.close()
+
+
+@pytest.mark.parametrize("operation", ["create", "restore"])
+def test_backup_and_restore_refuse_an_active_real_pilot(tmp_path, db_path, identity_dir, operation):
+    game = _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    before = _retained_game_bytes(game)
+    db_before = db_path.read_bytes()
+    with _real_pilot_lease(game, tmp_path / "ready"):
+        with pytest.raises(BackupError, match="Voidrunner is active"):
+            if operation == "create":
+                create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "second")
+            else:
+                restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=game)
+    assert _retained_game_bytes(game) == before and db_path.read_bytes() == db_before
+
+
+def test_maintenance_prevents_a_new_real_game_launch(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from netbbs.doors.bundled import voidrunner as vr
+
+    game = _populate_voidrunner()
+    before = _retained_game_bytes(game)
+    info = tmp_path / "door-info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}))
+    with vr.maintenance_session(game):
+        result = subprocess.run([sys.executable, vr.__file__], input=b"Q", capture_output=True,
+                                env=dict(os.environ, NETBBS_DOOR_INFO=str(info)), timeout=5)
+    assert result.returncode == 0 and b"maintenance is in progress" in b" ".join(result.stdout.split())
+    assert _retained_game_bytes(game) == before
+
+
+@pytest.mark.parametrize("limit", ["files", "file_bytes", "total_bytes"])
+def test_voidrunner_backup_limits_fail_without_success_manifest(tmp_path, db_path, identity_dir, monkeypatch, limit):
+    _populate_voidrunner()
+    key = {"files": "_VOIDRUNNER_MAX_FILES", "file_bytes": "_VOIDRUNNER_MAX_FILE_BYTES",
+           "total_bytes": "_VOIDRUNNER_MAX_TOTAL_BYTES"}[limit]
+    monkeypatch.setattr(backup_module, key, 1)
+    destination = tmp_path / "backup"
+    with pytest.raises(BackupError, match="exceeds"):
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+    assert not (destination / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("target_kind", ["backup", "database_parent", "identity", "files", "inside_files", "credential", "pid"])
+def test_voidrunner_restore_rejects_overlapping_destinations(tmp_path, db_path, identity_dir, target_kind):
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    storage = backup_module._storage_root_for(db_path)
+    target = {"backup": source, "database_parent": db_path.parent, "identity": identity_dir,
+              "files": storage, "inside_files": storage / "game",
+              "credential": backup_module._managed_dns_credential_path_for(db_path),
+              "pid": backup_module._pid_file_path_for(db_path)}[target_kind]
+    with pytest.raises(BackupError, match="overlaps"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=target)
+
+
+@pytest.mark.parametrize("parent", ["", "scores"])
+def test_voidrunner_backup_does_not_ignore_directories_named_like_temporary_files(
+    tmp_path, db_path, identity_dir, parent,
+):
+    game = _populate_voidrunner()
+    (game / parent / ".unrelated.tmp").mkdir()
+    with pytest.raises(BackupError, match="Unsupported Voidrunner"):
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+
+
+@pytest.mark.parametrize("suffix", ["_ssh_host_key", "_welcome_banner.ans", "_main_menu_banner.ans", "_logoff_banner.ans",
+                                   "_new_account_banner_before.ans", "_new_account_banner_after.ans", "_board_list_banner.ans",
+                                   "_file_area_banner.ans", "_chat_channel_picker_banner.ans", "-wal", "-shm", "-journal"])
+def test_voidrunner_restore_protects_node_paths_absent_from_the_archive(tmp_path, db_path, identity_dir, suffix):
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    restored_db = tmp_path / "fresh-node" / "restored.db"
+    name = (restored_db.name if suffix.startswith("-") else restored_db.stem) + suffix
+    target = restored_db.parent / name
+    assert not target.exists()
+    with pytest.raises(BackupError, match="overlaps"):
+        restore_backup(source=source, db_path=restored_db, identity_dir=tmp_path / "new-identity", voidrunner_to=target)
+    assert not restored_db.exists() and not target.exists()
+
+
+@pytest.mark.parametrize("name", ["netbbs.log", "netbbs.log.1", "netbbs.log.5", "restored_github_pat",
+                                "restored_github_pat.tmp", "restored_managed_dns_credential.tmp", "doors",
+                                "door-nodes", "restored.db_drafts", "restored_backups"])
+def test_voidrunner_restore_protects_fixed_runtime_namespaces(tmp_path, db_path, identity_dir, name):
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    restored_db = tmp_path / "fresh-node" / "restored.db"
+    target = restored_db.parent / name
+    with pytest.raises(BackupError, match="overlaps"):
+        restore_backup(source=source, db_path=restored_db, identity_dir=tmp_path / "new-identity", voidrunner_to=target)
+    assert not restored_db.exists() and not target.exists()
+
+
+def test_reserved_runtime_paths_match_the_actual_log_handler_and_token_path(db_path):
+    from pathlib import Path
+    from netbbs.__main__ import _create_log_file_handler
+    from netbbs.selfupdate import github_pat_path
+    reserved = {path.resolve() for path in backup_module._runtime_reserved_paths(db_path)}
+    db = Database(db_path)
+    log_path = db_path.parent / "netbbs.log"
+    handler = _create_log_file_handler(log_path)
+    try:
+        pat = github_pat_path(db)
+        assert pat.resolve() in reserved and Path(str(pat) + ".tmp").resolve() in reserved
+        assert log_path.resolve() in reserved
+        for index in range(1, handler.backupCount + 1):
+            assert Path(str(log_path) + f".{index}").resolve() in reserved
+    finally:
+        handler.close()
+        db.close()
+
+
+@pytest.mark.parametrize("banner", ["welcome", "main_menu", "logoff", "new_account_banner_before",
+                                    "new_account_banner_after", "board_list", "file_area", "chat_channel_picker"])
+def test_restore_protects_absent_banner_recovery_drafts(tmp_path, db_path, identity_dir, banner):
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    restored_db = tmp_path / "restored.db"
+    suffix = banner if banner.startswith("new_account") else banner + "_banner"
+    target = tmp_path / f"restored_{suffix}.ans.draft"
+    with pytest.raises(BackupError, match="overlaps"):
+        restore_backup(source=source, db_path=restored_db, identity_dir=tmp_path / "new-identity", voidrunner_to=target)
+    assert not target.exists() and not restored_db.exists()
+
+
+def test_maintenance_probes_historical_pilot_files_with_bounded_descriptors(tmp_path, monkeypatch):
+    import errno
+    from netbbs.doors.bundled import voidrunner as vr
+
+    game = tmp_path / "many-pilots"
+    game.mkdir()
+    for pilot in range(128):
+        (game / f".{pilot}.lock").write_bytes(b"0")
+    original = vr._file_lease
+    live = maximum = 0
+
+    @contextlib.contextmanager
+    def limited(path, **kwargs):
+        nonlocal live, maximum
+        if live >= 3:
+            raise OSError(errno.EMFILE, "descriptor ceiling")
+        with original(path, **kwargs):
+            live += 1
+            maximum = max(maximum, live)
+            try:
+                yield
+            finally:
+                live -= 1
+
+    monkeypatch.setattr(vr, "_file_lease", limited)
+    with vr.maintenance_session(game):
+        assert live == 1  # Only the gate survives into capture or restore.
+    assert maximum == 2 and live == 0
+    with original(game / ".127.lock"):
+        with pytest.raises(vr.PilotBusy):
+            with vr.maintenance_session(game):
+                pytest.fail("Active pilot was missed")
+    assert live == 0
+    assert all((game / f".{pilot}.lock").read_bytes() == b"0" for pilot in range(128))
+
+
+@pytest.mark.parametrize("failure", ["active", "unsupported", "oversized"])
+def test_failed_game_capture_cleans_only_its_destination_and_allows_same_path_retry(
+    tmp_path, db_path, identity_dir, failure,
+):
+    game = _populate_voidrunner()
+    primary = (game / "77.json").read_bytes()
+    bad = None
+    if failure == "unsupported":
+        bad = game / "unexpected.txt"
+        bad.write_bytes(b"unrelated")
+    elif failure == "oversized":
+        bad = game / "scores" / "999.json"
+        bad.write_bytes(b"x" * (backup_module._VOIDRUNNER_MAX_FILE_BYTES + 1))
+    lease = _real_pilot_lease(game, tmp_path / "ready") if failure == "active" else contextlib.nullcontext()
+    destination = tmp_path / "retry-backup"
+    with lease:
+        with pytest.raises(BackupError):
+            create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+    assert not destination.exists()
+    assert (game / "77.json").read_bytes() == primary
+    if bad is not None:
+        assert bad.exists()
+        bad.unlink()
+    assert create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination) == destination
+    assert (destination / "voidrunner" / "77.json").read_bytes() == primary
+
+
+def test_failed_capture_cleanup_reports_the_incomplete_path_for_manual_removal(tmp_path, db_path, identity_dir, monkeypatch):
+    game = _populate_voidrunner()
+    (game / "unexpected.txt").write_bytes(b"keep source")
+    destination = tmp_path / "incomplete"
+
+    def fail_cleanup(path, *args, **kwargs):
+        assert path == destination
+        raise PermissionError("cleanup denied")
+
+    monkeypatch.setattr(backup_module.shutil, "rmtree", fail_cleanup)
+    with pytest.raises(BackupError, match="Remove it manually before retrying") as error:
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+    assert str(destination) in str(error.value) and "Unsupported Voidrunner" in str(error.value)
+    assert destination.exists() and (game / "unexpected.txt").read_bytes() == b"keep source"
+
+
+def test_voidrunner_restore_refuses_a_directory_with_unrelated_files(tmp_path, db_path, identity_dir):
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    target = tmp_path / "unrelated"
+    target.mkdir()
+    (target / "important.txt").write_bytes(b"keep")
+    with pytest.raises(BackupError, match="Unsupported Voidrunner"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=target)
+    assert (target / "important.txt").read_bytes() == b"keep"
+
+
+def test_voidrunner_backup_refuses_nested_destination_before_creating_it(tmp_path, db_path, identity_dir):
+    game = _populate_voidrunner()
+    destination = game / "nested-backup"
+    with pytest.raises(BackupError, match="inside"):
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+    assert not destination.exists()
+
+
+def test_failed_game_rollback_retains_journal_with_external_paths(tmp_path, db_path, identity_dir, monkeypatch):
+    from pathlib import Path
+
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    target = tmp_path / "live-games"
+    target.mkdir()
+    (target / "99.json").write_bytes(b"old game")
+    rename = Path.rename
+
+    def fail_stage_and_rollback(path, destination):
+        if path.parent.name.startswith(".live-games.netbbs-stage-") or path.parent.parent.name.startswith(".live-games.netbbs-rollback-"):
+            raise OSError("stage and rollback unavailable")
+        return rename(path, destination)
+
+    monkeypatch.setattr(Path, "rename", fail_stage_and_rollback)
+    with pytest.raises(BackupError, match="manual recovery"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=target)
+    journal = json.loads((db_path.parent / ".netbbs-restore-state.json").read_text())
+    external = journal["external_components"]["voidrunner"]
+    assert external["target"] == str(target)
+    assert (Path(external["rollback"]) / "voidrunner" / "99.json").read_bytes() == b"old game"
+    assert Path(external["staging"]).exists()
 
 _BLOB_CONTENT = b"blob content"
 # A real content-addressed store always names a blob after its own
