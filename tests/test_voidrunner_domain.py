@@ -3122,7 +3122,7 @@ def test_screen_missions_reward_column_aligns_across_reward_digit_widths(monkeyp
     world = _world_with_seed(310)
     world.save.pilot.credits = 5_000
     monkeypatch.setattr(
-        vr, "generate_mission_board",
+        vr, "posted_mission_offers",
         lambda world: [
             vr.Mission(id=1, kind="bounty", description="Short", reward=5,
                        origin_system=0, target_system=1, pirate_tier=1, deadline_turn=None),
@@ -3220,7 +3220,7 @@ def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):
 def test_empty_mission_board_renders_clean_notice_in_box(monkeypatch):
     world = _world_with_seed(313)
     p = vr.Palette(truecolor=False)
-    monkeypatch.setattr(vr, "generate_mission_board", lambda w: [])
+    monkeypatch.setattr(vr, "posted_mission_offers", lambda w: [])
     monkeypatch.setattr(vr, "read_key", lambda: "Q")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -3667,6 +3667,7 @@ def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkey
     world.save.active_missions = [
         vr.Mission(1, "bounty", "Intercept raider", 500, 0, destination, pirate_tier=2),
     ]
+    world.checkpoint()  # Include the station preparation before real startup.
     vr.persist(world, tmp_path, 77)
     initial = json.loads((tmp_path / "77.json").read_text(encoding="utf-8"))
     with _door_stopped_at(tmp_path, b"CAF", b" damage."):
@@ -4330,13 +4331,50 @@ def test_resumed_legacy_expired_combat_job_cannot_pay_or_start_another_wave(kind
         assert world.save.pending_travel["escort_index"] == 1
 
 
-def test_board_save_failure_stops_before_offers_or_input(monkeypatch):
+def test_board_browsing_never_checkpoints_or_changes_state(monkeypatch):
+    import copy
     world = _world_with_seed(42)
-    def fail():
-        raise vr.SaveError("disk unavailable")
-    monkeypatch.setattr(world, "checkpoint", fail)
-    monkeypatch.setattr(vr, "read_key", lambda: pytest.fail("Input accepted after failed checkpoint"))
-    output = io.StringIO()
-    with contextlib.redirect_stdout(output), pytest.raises(vr.SaveError):
+    world.checkpoint()
+    before = copy.deepcopy(world.save.to_dict())
+    rng = world.event_rng.getstate()
+    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Browsing wrote the save"))
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    with contextlib.redirect_stdout(io.StringIO()):
         vr.screen_missions(vr.Palette(False), world)
-    assert "Accept which" not in output.getvalue()
+    assert world.save.to_dict() == before
+    assert world.event_rng.getstate() == rng
+
+
+def test_station_checkpoint_prepares_board_and_expires_jobs():
+    world = _world_with_seed(42)
+    world.save.turn = 5
+    world.save.active_missions = [vr.Mission(1, "scan", "Expired", 500, 0, 1, deadline_turn=4)]
+    writes = []
+    world._checkpoint = lambda current: writes.append(current.save.to_dict())
+    world.checkpoint()
+    assert len(writes) == 1
+    assert writes[0]["mission_boards"]["0"]["refresh_turn"] == 8
+    assert not writes[0]["active_missions"]
+    assert vr.posted_mission_offers(world)
+
+
+def test_unprepared_board_browsing_does_not_generate_or_expire(monkeypatch):
+    import copy
+    world = _world_with_seed(42)
+    world.save.turn = 5
+    world.save.active_missions = [vr.Mission(1, "scan", "Expired", 500, 0, 1, deadline_turn=4)]
+    before = copy.deepcopy(world.save.to_dict())
+    monkeypatch.setattr(world, "checkpoint", lambda: pytest.fail("Browsing wrote the save"))
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.screen_missions(vr.Palette(False), world)
+    assert world.save.to_dict() == before
+
+
+@pytest.mark.parametrize("seed", [0, 42, 310])
+def test_board_preparation_does_not_advance_encounter_rng(seed):
+    world = _world_with_seed(seed)
+    before = world.event_rng.getstate()
+    world.checkpoint()
+    assert world.event_rng.getstate() == before
+    assert vr.posted_mission_offers(world)

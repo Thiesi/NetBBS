@@ -1100,7 +1100,9 @@ class World:
         """
         self.sync_discovered()
         if self.save.pending_travel is None:
+            expire_missions(self)
             _normalize_mission_ids(self.save)
+            generate_mission_board(self)
         self.save.event_rng_state = self.event_rng.getstate()
         if self.save.pending_travel is not None:
             self.save.pending_travel["destroyed"] = self.ship_destroyed_this_hop
@@ -1612,24 +1614,32 @@ def generate_mission_board(world: World) -> list[Mission]:
     cached = world.save.mission_boards.get(sid)
     if cached is None or world.save.turn >= cached["refresh_turn"]:
         _normalize_mission_ids(world.save)
-        rng = world.event_rng
+        rng = random.Random(f"voidrunner-board-v1:{world.save.seed}:{sid}:{world.save.turn}")
         hops = bfs_hops(world.by_id, sid)
         offers = []
         for kind in rng.sample(["delivery", "delivery", "bounty", "scan", "escort"], k=rng.randint(3, 4)):
-            mission = _generate_mission(world, kind, hops)
+            mission = _generate_mission(world, kind, hops, rng=rng)
             if mission is not None:
                 offers.append(mission.to_dict())
                 world.save.next_mission_id += 1
         cached = {"refresh_turn": world.save.turn + MISSION_BOARD_DAYS, "offers": offers}
         world.save.mission_boards[sid] = cached
+    return posted_mission_offers(world)
+
+
+def posted_mission_offers(world: World) -> list[Mission]:
+    """Read-only view of offers prepared at the preceding station checkpoint."""
+    cached = world.save.mission_boards.get(world.save.current_system)
+    if cached is None or world.save.turn >= cached["refresh_turn"]:
+        return []
     # Return copies: a UI list or stale caller must not mutate the posted terms.
     return [Mission.from_dict(m) for m in cached["offers"]
             if not mission_expired(world, Mission.from_dict(m))
             and not (m["kind"] == "scan" and world.by_id[m["target_system"]].discovered)]
 
 
-def _generate_mission(world: World, kind: str, hops: dict[int, int]) -> Mission | None:
-    rng = world.event_rng
+def _generate_mission(world: World, kind: str, hops: dict[int, int], *, rng=None) -> Mission | None:
+    rng = world.event_rng if rng is None else rng
     origin = world.save.current_system
     if kind == "delivery":
         candidates = [sid for sid, h in hops.items() if 1 <= h <= 5 and sid != origin]
@@ -2972,11 +2982,7 @@ def _hull_refit_screen(p: Palette, world: World, target_class: str, cost: int) -
 
 
 def screen_missions(p: Palette, world: World) -> None:
-    expired = expire_missions(world)
-    board = generate_mission_board(world)
-    world.checkpoint()  # Save posted terms before revealing them, even on Q/EOF.
-    for message in expired:
-        out_line(f"{p.wrong}{message}{RESET}")
+    board = posted_mission_offers(world)
     while True:
         out_line()
         out_line(_box_title(p, f"Bounty & Contract Board: {world.here.station_name}"))
@@ -3929,6 +3935,7 @@ def main() -> int:
                 screen_shipyard(p, world)
             elif choice == "B":
                 screen_missions(p, world)
+                continue  # Browsing is read-only; acceptance checkpoints itself.
             elif choice == "C":
                 dest = screen_chart(p, world)
                 if dest is not None:

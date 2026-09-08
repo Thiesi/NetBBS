@@ -4025,7 +4025,12 @@ sentinels must be nonempty and non-command strings: empty strings match Python's
 validation. Test the parser with split bytes and timeout events, and exercise
 UTF-8 input, standalone Escape, and partial-key EOF through real subprocess pipes.
 
-Voidrunner caches one bounded contract board per galaxy system. Generation
+Voidrunner caches one bounded contract board per galaxy system. Prepare/refresh
+it in station checkpoints (never during pending travel), before browsing. The
+board reads posted copies and only acceptance checkpoints; returning to the
+station skips the outer-loop fallback save. Board generation uses a separate
+version-tagged seed (galaxy seed, station, generation day), so preparing offers
+never consumes encounter randomness or changes a resumed fight. Generation
 allocates each offer ID immediately; acceptance checks unchanged posted terms
 and removes the offer in the same checkpoint as adding the active contract.
 Never replenish a board merely because its last offer was accepted. ID repair

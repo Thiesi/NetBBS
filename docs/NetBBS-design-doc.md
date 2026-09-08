@@ -4658,7 +4658,9 @@ result acknowledgement pauses. Responsive layouts and broader retained-result
 presentation remain separate work in #310.
 
 Contract boards retain up to four posted offers per station for three game days
-from generation. Viewing or accepting offers does not replenish them; jumps
+from generation. Station checkpoints prepare offers and expire old jobs before
+the caller opens the board; browsing and backing out write nothing. Viewing or
+accepting offers does not replenish them; jumps
 advance game time. Posted terms and consumed offers survive restart. New careers
 may hold at most three active contracts; legacy over-limit careers retain every
 job but cannot accept more until below the limit. IDs are unique across active
