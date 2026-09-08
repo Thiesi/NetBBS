@@ -4637,9 +4637,15 @@ auto-route hop commits before proceeding to the next hop. A failed checkpoint
 stops play and retains an explicit error instead of accepting further actions.
 Cancelling initial career launch creates no new career, invalid customs keys
 make no changes, and the shipyard's displayed upgrade letters work directly.
-Resuming an interrupted encounter is still outstanding: this checkpoint boundary
-does not yet promise persistence of individual combat decisions. Existing galaxy
-seeds and the legacy save format remain compatible.
+Interrupted journeys resume before station access. Departure costs and turn
+advancement, encounter selection, opponent damage, combat outcomes, mission
+payouts, docking, and customs decisions commit with their corresponding progress
+state before narration or further input. A restart preserves the event RNG state
+and cannot reroll an encounter or duplicate a reward. Only the interrupted hop
+resumes; the pilot can plan the rest of an auto-route after resolving it. Existing
+galaxy seeds and legacy careers remain compatible through additive save fields.
+Unrecognized or unreadable journey/RNG state stops play and preserves the career
+file for manual SysOp recovery; broader save validation/recovery remains in #310.
 
 Compatibility extension (issues #296/#297):
 
