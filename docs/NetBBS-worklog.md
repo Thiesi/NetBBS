@@ -4047,6 +4047,18 @@ milestones. Debit purchases/new futures and credit sales/cancellation principal
 through the same ledger; transaction counts, refund fees, or recovering a prior
 loss must never mint new milestones. Legacy standing is not recalculated.
 
+Trading acquisition basis is separate from the contraband standing balance.
+Only known FIFO lots are stored; hold quantity outside those lots is older,
+unknown-cost cargo. Every removal path must consume both cargo and basis in
+the same checkpoint: market sales, deliveries, combat dumping, customs,
+voluntary jettison and destruction. Futures add their full recorded payment
+when collected, never again on repeated settlement. Partial lot cost uses integer
+allocation with the remainder retained, so disposing of a whole lot preserves
+its exact paid amount. Never infer old cargo cost from current prices. Validate
+lot totals against the hold and ledger dates against the career day before load
+or persistence. Ledger views are pure; RNG state and checkpoint callbacks must
+not change when paging or backing out.
+
 New futures store origin and principal as a pair; absent metadata retains legacy
 remote settlement/full-refund behavior. New orders wait for room at their origin.
 The departure tick settles only legacy orders; pickup settlement runs after the

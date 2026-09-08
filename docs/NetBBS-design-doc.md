@@ -4752,6 +4752,21 @@ standing; splitting transactions cannot reset milestones. Existing standing is
 retained and the new ledger starts at zero for old careers (old cargo has no
 recorded acquisition cost). Combat/faction rewards remain separate.
 
+The trading ledger records cargo acquisition costs from this version onward.
+Market purchases and collected futures carry their actual paid cost, including
+brokerage; older cargo has unknown cost and is never assigned a fabricated basis.
+Disposals consume older unknown cargo first, then recorded purchase lots in order.
+Partial lots retain integer cost remainders so disposing of a complete lot always
+accounts for its exact cost. Market sales and delivery contracts show separate
+realized margins for costed cargo and receipts whose acquisition cost is unknown.
+Mixed delivery payments are allocated by quantity; these are trading margins,
+not total career profit. Lost cargo basis, cancelled-order fees, actual fuel
+purchases and paid crew wages are reported separately. Unrecorded historical
+activity, repairs, fines, hire costs and other career income are excluded.
+The ledger resets with a new career, checkpoints with each affected action and
+is read-only when viewed. Remembered remote prices and route estimates remain
+the next trading-ledger scope in issue #310.
+
 The engineer costs 200 credits to hire and 2 per jump, reducing fuel by 25%,
 rounded up, with a minimum one-unit burn. The role is an investment for longer
 routes; one-unit jumps cannot benefit, and hiring does not refund old hire costs.
