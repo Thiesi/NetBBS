@@ -4693,6 +4693,20 @@ limited to eight per pilot; a SysOp must archive older copies manually before
 another restore. The pilot session lease covers recovery as well as normal play.
 This local previous-checkpoint copy is not a substitute for node backup coverage.
 
+The optional Pilot Guide is reachable from the station deck without changing
+state. A new pilot still docked at Freeport on day zero may accept one introductory
+delivery to an actual connected station. Its legal cargo follows that station's
+demand; the quote includes procurement, a return fuel reserve, crew wages, gross
+payment and destination danger. No galaxy RNG calls or generated systems change.
+Acceptance is explicit after paginated terms, consumes an ordinary active-contract
+slot and tracks the objective. The job has no deadline, uses normal market and
+delivery rules, and cannot be taken again after completion or abandonment in the
+same career. Its payment covers the quoted cargo and round-trip fuel/wages plus
+200 credits; changing prices, detours and encounters can change the result.
+The guide explains buying cargo, jumps advancing game time, refuelling, first
+upgrades and encounter choices, and retains a recap of active commitments for
+returning pilots. Reading or declining it neither writes a save nor advances time.
+
 Voidrunner uses one UTF-8 and terminal-key decoder for menus and text fields.
 Unsupported special keys, terminal control strings, and bracketed paste cannot
 become menu commands or confirmations. Partial sequences survive transport gaps;
