@@ -1324,15 +1324,19 @@ def test_real_mission_navigation_back_and_eof_preserve_career(tmp_path,active,co
     assert not vr.World(vr.load_or_create_save(tmp_path,77,"Tester")[0]).by_id[mission.target_system].discovered
 
 
-def test_real_mission_navigation_completes_delivery_once_before_retained_result(tmp_path):
+@pytest.mark.parametrize("commands", [b"CRJ", b"CGD1J"])
+def test_real_mission_navigation_completes_delivery_once_before_retained_result(tmp_path, commands):
     import json,os,subprocess
     world=_world_with_seed(42); world.event_rng.seed(0)
     destination=sorted(world.here.connections)[0]
     mission=vr.Mission(1,"delivery","Navigation delivery",500,0,destination,commodity="food",quantity=3)
     world.save.active_missions=[mission]; world.save.tracked_mission_id=1; world.save.cargo={"food":3}
+    if commands.startswith(b"CG"):
+        for station in world.galaxy: station.discovered = station.id in (0, destination)
+        world.sync_discovered()
     world._checkpoint=lambda current:vr.persist(current,tmp_path,77); world.checkpoint()
     credits=world.save.pilot.credits
-    with _door_stopped_at(tmp_path,b"CRJ",b"Last hop: arrived"):
+    with _door_stopped_at(tmp_path,commands,b"Last hop: arrived"):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert saved.current_system==destination and saved.turn==1 and saved.pending_travel is None
         assert saved.pilot.credits==credits+500 and not saved.active_missions and not saved.cargo
@@ -2742,136 +2746,139 @@ def test_bfs_path_on_a_small_synthetic_graph():
     assert vr.bfs_path(by_id, 0, 3) == [1, 3]
 
 
-def test_auto_route_rejects_an_unknown_system_name(monkeypatch):
-    world = _world_with_seed(101)
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "Nonexistent Place")
-
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr._screen_auto_route(vr.Palette(truecolor=False), world)
-
-    assert "no charted system matches" in buf.getvalue().lower()
-    assert world.save.current_system == 0
-
-
-def test_auto_route_wont_match_an_undiscovered_system_by_name(monkeypatch):
-    world = _world_with_seed(102)
-    undiscovered = next(s for s in world.galaxy if not s.discovered)
-
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: undiscovered.name)
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr._screen_auto_route(vr.Palette(truecolor=False), world)
-
-    assert "no charted system matches" in buf.getvalue().lower()
-
-
-def test_auto_route_declines_without_enough_fuel(monkeypatch):
+@pytest.mark.parametrize("fault", ["unknown", "uncharted", "fuel", "here", "pending", "boolean"])
+def test_general_route_invalid_departure_is_read_only(fault):
+    import copy
     world = _world_with_seed(103)
-    dest = next(s for s in world.galaxy if s.discovered and s.id != 0)
-    world.save.ship.fuel = 0
-
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: dest.name)
-    calls = []
-    monkeypatch.setattr(vr, "screen_travel", lambda p, w, hop_id: calls.append(hop_id))
-
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        vr._screen_auto_route(vr.Palette(truecolor=False), world)
-
-    assert "not enough fuel" in buf.getvalue().lower()
-    assert calls == []
+    target = next(s.id for s in world.galaxy if s.discovered and s.id != 0)
+    if fault == "unknown": target = 999
+    if fault == "uncharted": target = next(s.id for s in world.galaxy if not s.discovered)
+    if fault == "fuel": world.save.ship.fuel = 0
+    if fault == "here": target = 0
+    if fault == "pending": world.save.pending_travel = {"existing": True}
+    if fault == "boolean": target = True
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    with pytest.raises(vr.MissionError): vr.prepare_route_jump(world, target)
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
 
-def test_auto_route_travels_every_hop_on_confirmation(monkeypatch):
-    world = _world_with_seed(104)
-    dest = next(s for s in world.galaxy if s.discovered and s.id != 0)
-    world.save.ship.fuel = 999
-    expected_path = vr.bfs_path(world.by_id, 0, dest.id)
-
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: dest.name)
-    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
-    calls = []
-
-    def fake_travel(p, w, hop_id):
-        calls.append(hop_id)
-        w.save.current_system = hop_id
-
-    monkeypatch.setattr(vr, "screen_travel", fake_travel)
-
-    with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_auto_route(vr.Palette(truecolor=False), world)
-
-    assert calls == expected_path
-    assert world.save.current_system == dest.id
-
-
-def test_auto_route_declines_on_confirmation_refusal(monkeypatch):
-    world = _world_with_seed(105)
-    dest = next(s for s in world.galaxy if s.discovered and s.id != 0)
-    world.save.ship.fuel = 999
-
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: dest.name)
-    monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
-    calls = []
-    monkeypatch.setattr(vr, "screen_travel", lambda p, w, hop_id: calls.append(hop_id))
-
-    with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_auto_route(vr.Palette(truecolor=False), world)
-
-    assert calls == []
-
-
-def test_auto_route_disambiguation_reserves_q_for_cancel_with_many_matches(monkeypatch):
-    """Regression guard for a real dogfood-caught bug: a short, common
-    substring can match 17+ discovered systems at once, and with plain
-    `LETTERS` that reaches "Q" as a real row letter (the 17th) --
-    colliding with this same prompt's own "[Q] cancel", so pressing Q
-    would silently pick a system instead of backing out."""
-    world = _world_with_seed(200)
-    for system in world.galaxy:
-        system.discovered = True  # every system is now a candidate for a 1-char search
-    world.save.ship.fuel = 999
-
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: "a")
-    calls = []
-    monkeypatch.setattr(vr, "screen_travel", lambda p, w, hop_id: calls.append(hop_id))
-    # A single "Q" -- if this regresses, the buggy path selects a system
-    # instead of canceling and falls through to `confirm()`, whose own
-    # read-until-Y/N loop would call read_key() again; StopIteration
-    # fails the test fast instead of hanging forever on a constant mock.
-    keys = iter(["Q"])
-    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
-
-    with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_auto_route(vr.Palette(truecolor=False), world)
-
-    assert calls == []
-
-
-def test_auto_route_stops_early_when_a_hop_diverts_the_plan(monkeypatch):
-    """Simulates a mid-route ship loss: `screen_travel` sends the pilot
-    back to Freeport instead of the planned hop, and the route must not
-    barrel on to the next hop regardless."""
+@pytest.mark.parametrize("outcome", ["arrive", "divert"])
+def test_general_route_flies_only_one_leg_until_another_command(monkeypatch, outcome):
     world = _world_with_seed(106)
-    dest = next(s for s in world.galaxy if s.id != 0 and len(vr.bfs_path(world.by_id, 0, s.id)) >= 2)
-    dest.discovered = True  # otherwise no far-away system is nameable yet, this early in a career
-    world.save.ship.fuel = 999
-
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: dest.name)
-    monkeypatch.setattr(vr, "confirm", lambda prompt, p: True)
+    target = next(s for s in world.galaxy if len(vr.bfs_path(world.by_id, 0, s.id)) >= 2)
+    target.discovered = True
+    expected = vr.bfs_path(world.by_id, 0, target.id)[0]
     calls = []
+    def travel(p, current, hop):
+        calls.append(hop); current.save.current_system = hop if outcome == "arrive" else 0
+    monkeypatch.setattr(vr, "screen_travel", travel)
+    keys = iter("JB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr._screen_auto_route(vr.Palette(False), world, destination=target.id)
+    assert calls == [expected]
+    assert ("Last hop: arrived" if outcome == "arrive" else "Travel diverted") in output.getvalue()
 
-    def fake_travel(p, w, hop_id):
-        calls.append(hop_id)
-        w.save.current_system = 0  # diverted back to Freeport
 
-    monkeypatch.setattr(vr, "screen_travel", fake_travel)
+@pytest.mark.parametrize("width,height", [(20,10), (40,12), (80,24)])
+def test_general_route_pages_are_read_only_and_hide_unknown_details(monkeypatch, width, height):
+    import copy, re
+    world, mission = _mission_details_world("delivery")
+    target = world.by_id[mission.target_system]; target.discovered = True
+    vr.accept_mission(world, mission)
+    path = vr.bfs_path(world.by_id, 0, target.id)
+    for sid in path[:-1]: world.by_id[sid].discovered = False
+    before = copy.deepcopy(world.save.to_dict()); rng = world.event_rng.getstate()
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    output = io.StringIO(); frames = []
+    def choose():
+        frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
+        match = re.search(r"Route Planner (\d+)/(\d+)", " ".join(frame.split()))
+        assert match and len(frames) < 200
+        return "B" if match[1] == match[2] else "N"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): vr._screen_auto_route(vr.Palette(False), world, destination=target.id)
+    assert all(len(frame.splitlines()) <= height for frame in frames)
+    assert all(vr._visible_width(line) <= width for frame in frames for line in frame.splitlines())
+    text = " ".join(" ".join(frames).split())
+    assert target.name in text and "Contract #1" in text
+    for sid in path[:-1]: assert world.by_id[sid].name not in text
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
 
-    with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_auto_route(vr.Palette(truecolor=False), world)
 
-    assert len(calls) == 1
+def test_general_route_is_screen_first_and_destination_cancel_preserves_preview(monkeypatch):
+    world = _world_with_seed(42); chosen = next(s.id for s in world.galaxy if s.discovered and s.id != 0)
+    destinations = iter([chosen, None]); choices_seen = []
+    def pick(title, options):
+        choices_seen.extend(options); return next(destinations)
+    monkeypatch.setattr(vr, "_pick_trade_field", pick)
+    monkeypatch.setattr(vr, "read_line_raw", lambda **kw: pytest.fail("Entry asked a question"))
+    keys = iter("DDB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output: vr._screen_auto_route(vr.Palette(False), world)
+    text = output.getvalue()
+    assert "Choose a charted destination" in text
+    assert text.count("Destination: " + world.by_id[chosen].name) == 2
+    assert all(world.by_id[sid].discovered for sid, label in choices_seen)
+    assert world.save.turn == 0
+
+
+def test_general_route_all_destinations_reachable_in_compact_picker(monkeypatch):
+    import re
+    world = _world_with_seed(200)
+    for station in world.galaxy: station.discovered = True
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 20); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 10)
+    options = sorted([(s.id, s.name) for s in world.galaxy], key=lambda item: item[1])
+    output = io.StringIO(); frames = []
+    def choose():
+        frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
+        # Titles can wrap between words at 20 columns.
+        match = re.search(r"Charted Destination (\d+)/(\d+)", " ".join(frame.split()))
+        assert match
+        if match[1] != match[2]: return "N"
+        return re.findall(r"\[(\d)\] ", frame)[-1]
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output): selected = vr._pick_trade_field("Charted Destination", options)
+    assert selected == options[-1][0]
+    assert all(len(frame.splitlines()) <= 10 for frame in frames)
+    assert all(vr._visible_width(line) <= 20 for frame in frames for line in frame.splitlines())
+
+
+@pytest.mark.parametrize("commands", [b"CGBQQ", b"CG", b"CGD1BQQ", b"CGD1"])
+def test_real_general_route_back_and_eof_preserve_career(tmp_path, commands):
+    import json, os, subprocess
+    world = _world_with_seed(42)
+    world._checkpoint = lambda current: vr.persist(current, tmp_path, 77); world.checkpoint()
+    original = (tmp_path / "77.json").read_bytes()
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id":77, "handle":"Tester"}), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_VOIDRUNNER_PATH)], input=commands, capture_output=True,
+        env=dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info)), timeout=10)
+    assert result.returncode == 0 and not result.stderr and b"Route Planner" in result.stdout
+    if b"D1" in commands: assert b"Destination:" in result.stdout
+    assert (tmp_path / "77.json").read_bytes() == original
+
+
+def test_general_route_fuel_topups_do_not_require_whole_route_in_tank():
+    world = _world_with_seed(42)
+    target = max(world.galaxy, key=lambda s: len(vr.bfs_path(world.by_id, 0, s.id)))
+    target.discovered = True; path = vr.bfs_path(world.by_id, 0, target.id)
+    world.save.ship.fuel = vr.fuel_cost_for_jump(world.here, world.by_id[path[0]], world.save.ship)
+    assert vr.prepare_route_jump(world, target.id) == path[0]
+    text = " ".join(vr.navigation_route_lines(world, target.id))
+    assert "Refuelling is manual" in text and "Additional fuel cash" in text
+
+
+def test_general_route_deadlines_include_enroute_objectives_and_bounty_queue():
+    world = _world_with_seed(42)
+    target = max(world.galaxy, key=lambda s: len(vr.bfs_path(world.by_id, 0, s.id)))
+    path = vr.bfs_path(world.by_id, 0, target.id); first = path[0]
+    world.save.active_missions = [
+        vr.Mission(1, "delivery", "Enroute delivery", 500, 0, first, commodity="food", quantity=3, deadline_turn=1),
+        vr.Mission(2, "bounty", "First bounty", 500, 0, first, pirate_tier=1),
+        vr.Mission(3, "bounty", "Queued bounty", 500, 0, first, pirate_tier=1, deadline_turn=1)]
+    lines = vr.route_mission_implications(world, path)
+    assert "objective day 1" in lines[1] and "within deadline" in lines[1] and "Missing delivery cargo" in lines[1]
+    assert "objective day 1" in lines[2]
+    assert "TRAVEL ESTIMATE LATE" in lines[3]
 
 
 # -- landmark systems --------------------------------------------------
@@ -4742,8 +4749,8 @@ def test_auto_route_checkpoints_each_completed_hop_before_next_hop(tmp_path, mon
     world.save.ship.fuel = vr.fuel_capacity(world.save.ship)
     world._checkpoint = lambda current: vr.persist(current, tmp_path, 77)
     vr.persist(world, tmp_path, 77)
-    monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: world.by_id[target].name)
-    monkeypatch.setattr(vr, "confirm", lambda *args: True)
+    keys = iter("J" * len(path) + "B")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     visited = []
 
     def travel(p, current, dest):
@@ -4755,7 +4762,7 @@ def test_auto_route_checkpoints_each_completed_hop_before_next_hop(tmp_path, mon
 
     monkeypatch.setattr(vr, "screen_travel", travel)
     with contextlib.redirect_stdout(io.StringIO()):
-        vr._screen_auto_route(vr.Palette(False), world)
+        vr._screen_auto_route(vr.Palette(False), world, destination=target)
     saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert visited == path
     assert saved.current_system == target
@@ -4948,7 +4955,7 @@ def _door_stopped_at(tmp_path, commands: bytes, acknowledgement: bytes):
         proc.stderr.close()
 
 
-@pytest.mark.parametrize("commands", [b"CAF", b"CRJF"])
+@pytest.mark.parametrize("commands", [b"CAF", b"CRJF", b"CGD1JF"])
 def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkeypatch, commands):
     import json
 
@@ -4960,6 +4967,9 @@ def test_combat_survives_kill_and_resumes_before_station_access(tmp_path, monkey
     ]
     if commands.startswith(b"CR"):
         world.save.tracked_mission_id = 1
+    if commands.startswith(b"CG"):
+        for station in world.galaxy: station.discovered = station.id in (0, destination)
+        world.sync_discovered()
     world.checkpoint()  # Include the station preparation before real startup.
     vr.persist(world, tmp_path, 77)
     initial = json.loads((tmp_path / "77.json").read_text(encoding="utf-8"))

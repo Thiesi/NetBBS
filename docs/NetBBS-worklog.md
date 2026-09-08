@@ -4973,3 +4973,13 @@ Route-page budgets derive page-number width from actual wrapped rows, not a fixe
 three-digit placeholder: preserved legacy bounty queues can exceed 999 pages.
 Cache a read-only route's pages while paging; rebuild only after a jump/error so
 large legacy queues do not multiply route construction work by the page count.
+
+
+General and contract route previews share the pure leg-budget renderer. General
+navigation destination selection is temporary and does not checkpoint; its jump
+validator checks current chart visibility, pending journey, position and next-leg
+fuel without changing the career. Travel owns its durable phases. Every further
+hop requires another command; do not restore an automatic cached path loop.
+Contract timing must account for objectives met en route rather than always adding
+a return journey after the selected destination. Bounty estimates count real target
+entries and the existing queue; label their unchanged-queue/success assumptions.
