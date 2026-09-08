@@ -4706,6 +4706,31 @@ Mature goods settle on arrival or station entry before mission completion checks
 Legacy orders without pickup/principal metadata retain their original remote
 settlement/full-refund terms, explicitly labelled as legacy, until consumed.
 
+Voidrunner permits one active session per pilot within a save directory. A
+nonblocking OS file lock is held from before loading through the final checkpoint;
+a second launch reports that the career is already in use and changes no career
+or score. Process exit, including forced termination, releases the lock. Distinct
+pilots may play concurrently. Lock files remain in place and must not be deleted
+while the service is running. This requires a local filesystem with working OS
+locks and atomic replacement; cross-host shared directories are not supported.
+
+The resolved save directory is the installation namespace. The legacy default
+`~/.netbbs/voidrunner_saves` remains unchanged. SysOps running multiple independent
+nodes under one OS account must set a different `VOIDRUNNER_SAVE_DIR` for each
+NetBBS service; NetBBS passes this specific setting as an absolute path to doors.
+Changing a node's display name does not change career identity. See the door guide
+for the manual directory move and service configuration steps.
+
+Hall of Fame records are retained independently at `scores/<user_id>.json`; only
+the displayed ranking is limited to 20. Existing `leaderboard.json` entries stay
+readable and are carried into each pilot's new record on their next update, with
+the old file retained. Updates replace only that pilot's file using a flushed
+private temporary file. The career save also retains the credit high-water mark
+across retirement and temporary score-write failures, allowing a later checkpoint
+to repair its score. Scores remain optional presentation data, never gameplay
+authority. Historical records already discarded by older top-20 storage cannot
+be reconstructed. Supported backup/recovery workflows remain in issue #310.
+
 Compatibility extension (issues #296/#297):
 
 - A nullable, versioned profile preserves the original JSON/stdio API for

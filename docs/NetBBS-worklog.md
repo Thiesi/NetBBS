@@ -3976,7 +3976,8 @@ commit their discovery and mission rewards together; auto-routing checkpoints
 each completed hop. Save errors escape to a stop-and-acknowledge screen and must
 not be swallowed as successful actions. A private temporary file is flushed
 before atomic replacement; this prevents shared-temp collisions but does not
-serialize concurrent pilot sessions or leaderboard updates. Tests must kill the
+by itself serialize concurrent pilot sessions or leaderboard updates. The
+session lease described below provides that read/play/write boundary. Tests must kill the
 real subprocess after its success output while a nested menu still owns input;
 EOF and orderly menu-exit tests do not prove this boundary.
 
@@ -4000,8 +4001,7 @@ remaining bounty/escort snapshots must match active contracts as a multiset,
 terminal outcomes must agree with opponent HP and destruction state, and the
 saved location must match the journey phase. Completed contract snapshots no
 longer need active membership; requiring it would reject legitimate restarts.
-Broader schema validation, per-pilot concurrency, and shared score transactions
-remain separate work in issue #310.
+Broader schema validation and supported recovery remain separate work in issue #310.
 
 Voidrunner's menu commands case-fold ASCII only; Unicode remains text input,
 so Unicode case aliases cannot surrender cargo or dispatch another hotkey.
@@ -4511,3 +4511,21 @@ crash-between-two-writes finding in the interrupted-cancellation path was
 declined: the managed-DNS service is a single-operator service where manual
 repair of one row is the realistic recovery, and the branch already carries
 twice the feature's own size in such safeguards.
+
+
+Voidrunner holds its per-pilot OS lock before load, including new-career prompts,
+through the EOF/final checkpoint. Hold a descriptor on a stable lock file: never
+unlink it on release or reclaim it by PID/age, which can let different processes
+lock different inodes for the same pilot. Windows locks the first byte with
+`msvcrt.locking`; POSIX uses `flock`. Process termination releases ownership.
+Test competing real processes, independent pilots/directories, and kill/relaunch;
+thread-only tests cannot establish process-level ownership.
+
+Hall of Fame writes replace independent `scores/<user_id>.json` records under the
+same pilot lease. Never truncate retained records when computing a top-20 view.
+Read legacy JSON without rewriting it; prefer new metadata while retaining the
+higher historical credit value. The save's additive `best_credits` survives New
+Game+ and commits before the optional score write, so a failed projection can be
+repaired on a later checkpoint even after spending. Private temporary files need
+flush/fsync and replacement in the destination directory. Unsupported shared-host
+filesystems and full directory backup/recovery remain operational boundaries.

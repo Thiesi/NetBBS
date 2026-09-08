@@ -2,6 +2,40 @@
 
 NetBBS supplies the integration, not third-party games or their execution
 environments. The bundled games remain available without a legacy profile.
+
+## Voidrunner careers and concurrent sessions
+
+Voidrunner stores careers outside its disposable session directory, under
+`~/.netbbs/voidrunner_saves` by default. This default is shared by NetBBS services
+running under the same OS account. Pilot identity is the numeric BBS user ID
+within this directory, so independent nodes must use independent save directories.
+
+**Manual SysOp configuration:** set `VOIDRUNNER_SAVE_DIR` to a distinct absolute
+directory in each NetBBS service's environment, then restart that service. NetBBS
+passes this specific override through its restricted door environment. Standalone
+Voidrunner also honors it. Do not use a node display name as a directory identity.
+
+**Manual move of existing data:** stop every service/standalone game using the
+old directory, retain a copy of the whole directory, move its contents into the
+chosen directory, set the override, then restart. Include all numeric career
+JSON files, the `scores` subdirectory, and the retained legacy `leaderboard.json`.
+If independent nodes previously shared the default, their overlapping numeric
+IDs cannot be assigned safely by an automatic migration; inspect ownership before
+copying careers. Merely pointing at an empty directory starts a separate set of
+careers. Ordinary node backup coverage is still tracked in issue #310.
+
+One session may own a pilot at a time. A second launch displays an in-use message
+and leaves the career unchanged; different pilots can play together. OS locks
+release even if the game is killed. The small `.USER_ID.lock` files remain and
+are not evidence of a stuck session; never delete them while games are running.
+Use a local filesystem with OS locking and atomic file replacement. A directory
+shared between hosts is not a supported multiplayer setup.
+
+Each pilot's Hall of Fame record is retained in `scores/USER_ID.json`, including
+pilots outside the displayed top 20. Older `leaderboard.json` remains readable and
+is not rewritten. A pilot's next checkpoint carries their legacy high-water score
+forward. Scores are optional; a temporary score-write failure does not lose the
+career, and a later checkpoint retries publication from its saved high-water mark.
 Existing registrations keep their JSON metadata and UTF-8 stdio API.
 
 **MANUAL — outside NetBBS** labels below identify work the SysOp must do on
