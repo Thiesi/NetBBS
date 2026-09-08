@@ -4616,3 +4616,13 @@ captured in an archive. A failed game capture removes only the fresh destination
 created by that call so closing sessions or repairing data permits the same CLI
 destination to be retried; cleanup failure names the incomplete directory for
 manual removal and preserves the original failure reason.
+
+
+The First Flight quote is a read-only calculation over current local prices,
+connected stations and the pilot's fuel/cash/hold budget. It consumes no galaxy
+or encounter randomness. Acceptance revalidates the entire displayed quote and
+contract capacity before mutating state, then checkpoints before acknowledging it.
+The tagged delivery uses the ordinary completion path; acceptance/completion flags
+prevent replay, survive restart and reset with a new career. Save validation must
+reject contradictory flags or multiple tagged jobs. Omit the default false tag
+from ordinary mission serialization to preserve their existing document shape.

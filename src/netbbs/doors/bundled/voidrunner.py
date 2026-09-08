@@ -893,7 +893,7 @@ class Mission:
 
     def to_dict(self) -> dict:
         data = dataclasses.asdict(self)
-        if not self.opening_assignment:
+        if self.opening_assignment is False:
             del data["opening_assignment"]
         return data
 
@@ -1262,6 +1262,13 @@ def _validate_save_document(data: dict) -> None:
                 integer(item["quantity"], "order quantity", minimum=1)
                 integer(item["locked_price"], "order payment")
                 integer(item["settle_turn"], "order maturity")
+    opening_jobs = [item for item in data.get("active_missions", []) if item.get("opening_assignment") is True]
+    require(len(opening_jobs) <= 1, "opening assignment count")
+    if opening_jobs:
+        require(flags.get("opening_assignment_taken") is True and not flags.get("opening_assignment_completed"),
+                "opening assignment progress")
+    if flags.get("opening_assignment_completed"):
+        require(flags.get("opening_assignment_taken") is True, "opening assignment progress")
     event = data.get("active_event")
     if event is not None:
         event_fields = {"economy", "commodity", "direction", "turns_remaining", "description"}
@@ -3678,7 +3685,8 @@ def pilot_recap(world: World) -> list[str]:
 
 
 def pilot_guide_lines(world: World) -> list[str]:
-    lines = ["Your ship is your livelihood. Supply outlying stations, build capital, and choose what kind of pilot to become."]
+    lines = ["Use [B]ack to return to the station deck before using its market, yard or chart commands.",
+             "Your ship is your livelihood. Supply outlying stations, build capital, and choose what kind of pilot to become."]
     lines += pilot_recap(world)
     active = next((m for m in world.save.active_missions if m.opening_assignment), None)
     if active is not None:
@@ -3708,9 +3716,11 @@ def pilot_guide_lines(world: World) -> list[str]:
 
 def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> None:
     fuel = fuel_cost_for_jump(world.here, world.by_id[offer.target_system], world.save.ship)
+    wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     lines = ["Freeport merchants need a reliable new pilot. First Flight sponsors one delivery; acceptance also tracks it."]
     lines += mission_details(world, offer)
     lines += [f"Reserve {2 * fuel} fuel for delivery and return; {world.save.ship.fuel} aboard. Fuel replacement costs {12 * fuel} cr for both jumps.",
+              f"Current crew: {wage} cr per jump, {2 * wage} cr for delivery and return.",
               "Payment covers the quoted three units, round-trip fuel and current crew wages plus 200 cr. Detours, repairs, encounters and later prices can change your result.",
               "No deadline. This uses one active-contract slot. Abandonment closes First Flight for this career; the guide stays available.",
               "After acceptance, use [M]arket to buy the goods, [Y]ard to refuel if needed, then [C]hart to jump to the named station."]
@@ -3736,7 +3746,7 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> None:
                 out_line(str(exc))
             else:
                 world.checkpoint()
-                out_line("First Flight accepted and tracked. Buy your cargo at the market when ready.")
+                out_line("First Flight accepted and tracked. Return with [B]ack, then use [M]arket to buy your cargo.")
             pause(p)
             return
 

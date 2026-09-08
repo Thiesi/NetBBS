@@ -37,6 +37,24 @@ is not rewritten. A pilot's next checkpoint carries their legacy high-water scor
 forward. Scores are optional; a temporary score-write failure does not lose the
 career, and a later checkpoint retries publication from its saved high-water mark.
 
+### Starting and returning to Voidrunner
+
+Choose **[G] Pilot Guide** on the station deck for flight instructions and a recap
+of contracts, tracked plans and futures orders. Pages fit the negotiated terminal
+size; **[B]ack** leaves without changing the career or advancing the day.
+
+On day zero at Freeport, **[O]ffer** shows an optional First Flight delivery to a
+real adjacent station. The terms show the legal cargo to buy, payment, danger,
+fuel reserve and crew costs before **[A]ccept** appears on the final page. It uses
+one normal contract slot and automatically tracks the destination. Buy the cargo
+at the market, refuel at the yard if necessary, and select the station on the
+chart. Docking with the full load delivers it automatically. Jumps advance the
+day; this introductory contract has no deadline.
+
+First Flight can be accepted once per career. Abandoning it closes that offer;
+the guide remains available. Completion points toward a first upgrade and regular
+trading or contracts. The normal risks of travel still apply.
+
 ### Voidrunner recovery
 
 Invalid or unreadable career files remain in place. The game shows a recovery
