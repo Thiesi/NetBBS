@@ -158,6 +158,20 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### Saved display presets
+
+Station **[O] Display Options** offers **[1] Full palette**, **[2] 16-color**,
+**[3] Monochrome**, and **[4] Plain / ASCII artwork**. Full palette uses the
+terminal's existing truecolor or 256-color setting. Monochrome retains Unicode
+artwork without ANSI styling; Plain also substitutes ASCII decorations. Unicode
+letters and text input remain UTF-8 in every mode. Numeric telemetry and warning
+labels do not depend on color.
+
+Selecting a different preset saves it immediately before acknowledging the
+change. **[B] Back**, paging, and selecting the current preset make no change.
+The preference applies from the first title on the next visit and survives
+retirement. Existing careers default to Full palette. No animation is added.
+
 ### Commodity market pages
 
 Station **[M] Commodity Market** pages with **[<] Previous / [>] Next**; each
