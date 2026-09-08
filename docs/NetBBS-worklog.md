@@ -5009,3 +5009,13 @@ arrival rewards. Estimates and contract navigation must flag that retained surve
 as blocked, with no promised completion day; general travel cannot resolve it by
 revisiting. The existing abandonment action frees the slot without inventing a
 reward or changing discovery history.
+
+Spatial-map projections use existing integer coordinates and are capped at
+119 columns by 36 rows; they never use RNG or add save fields. Include command
+echo, wrapped heading/legend/footer and borders in height budgets. A projected
+cell is not an authoritative station or link: multiple systems and crossing lines
+can overlap, so retain the exact paginated list and inspection links. Draw ordinary
+edges only between charted endpoints, while supplied route edges may cross
+uncharted bearings. Public contract names do not expose their economy, danger or
+other connections. Keep both the plotted route and tracked objective visible when
+the general planner supplies a path.

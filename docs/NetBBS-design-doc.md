@@ -4774,6 +4774,19 @@ not need to fit the whole journey into one tank. Choosing a new destination or
 leaving the screen interrupts the plan; selection must be made again after Back
 or restart. No multi-hop execution or yes/no dialogue remains in this screen.
 
+The spatial star map is a read-only view of the existing seeded coordinates and
+connections; it does not change galaxy generation or save state. It opens in the
+current sector with next/previous sector navigation and a galaxy overview. Known
+stations, the current position, tracked objective and an explicitly plotted route
+have distinct ASCII markers, with a paginated list alternative and exact-coordinate
+station inspection. Narrow terminals below 40 columns or 12 rows use the list.
+Projected cell collisions are labelled; the exact list/inspection remains authoritative.
+Only discovered station details are public, except a contract's named target.
+Uncharted route points show bearings and unknown danger. Ordinary connection lines
+join charted endpoints; the plotted path can cross uncharted space without revealing
+other links there. Contract/general navigation opens the map with its current path.
+Map Back returns to the same route; inspecting never charts, tracks or travels.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 500-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. Buying and same-station recycling do not grant

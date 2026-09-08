@@ -90,6 +90,27 @@ does not have to fit in one tank. This screen's selection is temporary: choose i
 again after leaving or restarting. A saved encounter still resumes before station
 access; subsequent route legs always need a new command.
 
+### Reading the spatial map
+
+The chart's **[V]iew spatial map / list** opens the current sector. **[N/P]** move
+between the six named sectors, **[O]verview** shows the galaxy, and **[L]ist** opens
+a paginated list with exact positions. **[I]nfo** selects a station for its known
+connections and details. **[B]ack** returns without changing the career. Terminals
+below 40 columns or 12 rows start in the list; larger terminals can return to the
+map with **[M]ap**.
+
+Markers distinguish **@** current position, **!** contract objective, **X** route
+end, **\*** plotted stops, **o** charted stations and **+** clustered cells. Dots
+join known stations; colons show plotted legs. Lines can overlap at this scale;
+Info provides exact links and the list preserves every station. Important position
+markers take precedence in overlapping cells. Sector views show links between
+visible points; use Overview to see the full plotted route.
+
+Contract and general route previews offer **[V]Map** with their actual path.
+Uncharted intermediate names, danger and other connections remain unknown;
+contract target names are public bearings. Map and list browsing never charts,
+tracks or travels, and Back returns to the route preview.
+
 ### Station stock and buying demand
 
 Spot markets carry a limited quantity of each good and have a limited buying
