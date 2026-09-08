@@ -3214,6 +3214,37 @@ with no newline *after* assigning the value, so a pidfile without a trailing
 newline would read as "not running" and start a second node against the same
 database. Judge the value, not `read`'s exit status.
 
+An rc.d pidfile must not be `<statedir>/netbbs.pid`. NetBBS already writes its
+own pidfile beside the database as `<db-stem>.pid` (`netbbs.backup.
+write_pid_file`, called from `__main__` on every start, removed on every exit),
+which for the documented layout is exactly `/var/lib/netbbs/netbbs.pid` — and
+`netbbs.backup` reads it to refuse a restore over a running node. A supervisor
+script clearing that path before a start would delete another subsystem's
+data-safety signal. Use a distinct name (`netbbs.service.pid`).
+
+Identifying the process behind a pidfile by substring is not enough either:
+`netbbs_python` defaults to a path *inside* `/var/lib/netbbs`, so matching
+`*netbbs*` in `ps -o command=` accepts every unrelated process from that
+virtualenv — `netbbs.admin`, a backup run — and the stop path then signals it.
+Match the invocation actually launched (`-m netbbs --config`).
+
+Publishing the pid has to gate the node continuing to run, not follow it. A
+writability check can pass and the write still fail (inodes, quota), by which
+point the node is up; reporting a failed start then leaves an untracked live
+node that the next start duplicates against the same database. Kill what was
+just started if the pid cannot be published.
+
+`newsyslog(8)` cannot bound a log a long-running process holds open. It renames
+the path; the writer keeps the old inode, the new file stays empty, and
+size-based rotation never fires again. NetBBS has no reopen-on-signal, so the
+honest options for the rc.d capture file are to turn it off once an install is
+known good (everything after logging setup is already in the self-rotating
+`netbbs.log`; its unique content is the pre-logging startup window) or to accept
+that it only rotates across restarts. Which then constrains readiness detection:
+if the marker is read back out of that file, `netbbs_logfile=/dev/null` must
+degrade to a liveness check rather than waiting out the full timeout on every
+healthy start.
+
 Confirming a start needs a readiness signal, not a `sleep`. Startup runs a
 database integrity check before it binds anything, so on a large database "the
 process is still alive after N seconds" is true well before any listener

@@ -70,7 +70,16 @@ netbbs_ready_marker="NetBBS is ready to accept connections"
 # The pidfile lives in the node's own state directory rather than
 # /var/run: this script backgrounds the node as netbbs_user (see
 # netbbs_start below), and an unprivileged user cannot write /var/run.
-pidfile="${netbbs_statedir}/netbbs.pid"
+#
+# Deliberately NOT ${netbbs_statedir}/netbbs.pid. NetBBS writes its own
+# pidfile beside the database as <db-stem>.pid (netbbs.backup's
+# write_pid_file, called from netbbs.__main__ on every start and removed
+# on every exit), which for the documented layout is exactly
+# /var/lib/netbbs/netbbs.pid. That file is not ours to touch:
+# netbbs.backup reads it to refuse a restore over a node that is still
+# running, so this script clearing it before a start would remove a
+# data-safety signal another subsystem depends on.
+pidfile="${netbbs_statedir}/netbbs.service.pid"
 
 # NetBBS deliberately never daemonizes itself (design doc §13.8): it runs
 # in the foreground and expects a supervisor to background and restart
@@ -152,9 +161,9 @@ netbbs_running()
 	# second node against the same database on a guess.
 	_cmd=$(ps -p "${_pid}" -o command= 2>/dev/null)
 	case "${_cmd}" in
-	"")		return 0 ;;
-	*netbbs*)	return 0 ;;
-	*)		return 1 ;;
+	"")				return 0 ;;
+	*"-m netbbs --config"*)		return 0 ;;
+	*)				return 1 ;;
 	esac
 }
 
@@ -210,16 +219,37 @@ netbbs_start()
 	# still writes to stdout/stderr, including a startup failure that
 	# happens before logging is configured.
 	#
-	# This file does NOT rotate itself, and it shares a filesystem with
-	# the database. Bound it with newsyslog(8) -- add to
-	# /etc/newsyslog.conf, adjusting the path and owner to match:
+	# This file does NOT rotate, and newsyslog(8) cannot make it: the
+	# node holds this descriptor open for its whole life and has no
+	# reopen-on-signal, so renaming the path just leaves it writing to
+	# the renamed inode while the new file stays empty -- unbounded
+	# growth on the same filesystem as the database, and rotation that
+	# never fires again. Do not paper over that with a newsyslog entry.
 	#
-	#   /var/lib/netbbs/netbbs.service.log netbbs:netbbs 640 5 10240 * -
+	# What it is actually for is the startup window: everything NetBBS
+	# logs after logging is configured is already in its own
+	# self-rotating netbbs.log beside the database (10 MiB, 5 backups,
+	# operator guide §4). This file's unique content is what it writes
+	# *before* that -- a config error, a failed import, a bad interpreter.
 	#
-	# (five generations, rotate at 10 MiB -- the same bound netbbs.log
-	# applies to itself.) Set netbbs_logfile=/dev/null in rc.conf if you
-	# would rather not keep this second copy at all.
-	su -m "${netbbs_user}" -c "nohup env HOME=\"${netbbs_statedir}\" LD_LIBRARY_PATH=\"${netbbs_ld_library_path}\" \"${netbbs_python}\" -m netbbs --config \"${netbbs_config}\" >> \"${netbbs_logfile}\" 2>&1 & echo \$! > \"${pidfile}\""
+	# So on a long-running node, set netbbs_logfile=/dev/null in rc.conf
+	# once the install is known good and let netbbs.log be the log; keep
+	# a real file while commissioning, or point it somewhere you rotate
+	# by restarting the node. Readiness detection degrades gracefully
+	# when it is not a regular file (see netbbs_start).
+	# Publishing the pid is a precondition for letting the node keep
+	# running, not a step after it. `test -w` above can pass and the
+	# write still fail (exhausted inodes or quota), and by then the node
+	# is already up -- so reporting a failed start would leave an
+	# untracked live node that the next start would happily duplicate
+	# against the same database. If the write fails, stop what we just
+	# started and fail honestly.
+	su -m "${netbbs_user}" -c "nohup env HOME=\"${netbbs_statedir}\" LD_LIBRARY_PATH=\"${netbbs_ld_library_path}\" \"${netbbs_python}\" -m netbbs --config \"${netbbs_config}\" >> \"${netbbs_logfile}\" 2>&1 & _child=\$!; if echo \$_child > \"${pidfile}\"; then :; else kill \$_child 2>/dev/null; exit 1; fi"
+	if [ $? -ne 0 ]; then
+		echo "netbbs: could not write ${pidfile}; the node was stopped again." >&2
+		rm -f "${pidfile}"
+		return 1
+	fi
 	# Wait for the node to say it is serving, not for a fixed interval:
 	# startup runs a database integrity check before binding anything, so
 	# on a large database "the process is still alive after N seconds"
@@ -228,6 +258,26 @@ netbbs_start()
 	# running. That is the exact failure this script exists to remove, so
 	# it must not be reintroduced by a hopeful `sleep`.
 	_start_timeout=$(netbbs_seconds "${netbbs_start_timeout}" 60 netbbs_start_timeout)
+	# The readiness marker is read back out of the logfile, so it only
+	# exists if that is a regular file. netbbs_logfile=/dev/null is a
+	# documented and recommended setting (see above), and a char device
+	# swallows the marker -- without this, every healthy start would sit
+	# out the full timeout and then report an unconfirmed start, delaying
+	# boot for no reason. Fall back to the weaker liveness check and say
+	# which one was used, rather than silently doing either.
+	if [ ! -f "${netbbs_logfile}" ]; then
+		sleep 3
+		if netbbs_running; then
+			echo "netbbs started as pid ${_pid} (readiness unconfirmed:"
+			echo "${netbbs_logfile} is not a regular file, so the node's"
+			echo "ready marker cannot be read back)."
+			return 0
+		fi
+		echo "netbbs failed to start -- ${netbbs_logfile} is not a regular" >&2
+		echo "file, so there is no captured output to show." >&2
+		rm -f "${pidfile}"
+		return 1
+	fi
 	_waited=0
 	while :; do
 		if ! netbbs_running; then
