@@ -55,6 +55,21 @@ First Flight can be accepted once per career. Abandoning it closes that offer;
 the guide remains available. Completion points toward a first upgrade and regular
 trading or contracts. The normal risks of travel still apply.
 
+### Trading Ledger
+
+Choose **[T] Trading Ledger** on the station deck to inspect cargo costs, sale
+and delivery margins, losses, fuel purchases and crew wages. It also shows the
+current station's production and demand and your present per-jump wage budget.
+Pages fit the terminal; **[B]ack** leaves without changing anything.
+
+Costs are recorded for new purchases and futures pickups, including brokerage.
+Older cargo remains labelled **unknown cost**. Disposals use older unknown cargo
+first, then recorded purchases in order. Receipts from unknown-cost cargo are
+shown separately; they are not called profit. Sale and delivery margins exclude
+travel and other career spending. The ledger reports actual fuel purchases,
+paid wages, cancelled-order fees and lost cargo cost separately; it cannot
+reconstruct activity before recording began. A new career starts a fresh ledger.
+
 ### Voidrunner recovery
 
 Invalid or unreadable career files remain in place. The game shows a recovery
