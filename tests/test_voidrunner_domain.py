@@ -8329,3 +8329,18 @@ def test_peaceful_combat_action_discloses_its_standing_gain(patrol):
     lines = vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True)
     action = next(row for row in lines if row.startswith("[S]" if patrol else "[B]"))
     assert ("Concord +2" if patrol else "Blackwake +2") in action
+
+
+@pytest.mark.parametrize("phase,primary,patrol,expected", [
+    ("primary", "bounty", False, True), ("primary", "random", False, False),
+    ("escorts", "bounty", False, False), ("primary", "bounty", True, False),
+])
+def test_bounty_combat_info_discloses_post_win_inquiry_without_drawing_rng(phase, primary, patrol, expected):
+    import copy
+    world = _world_with_seed(42)
+    world.save.pending_travel = {"phase": phase, "primary": primary}
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    pirate = vr.Pirate("Opponent", 2, 50, 50)
+    text = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True))
+    assert ("12%" in text and "inquiry" in text and "Concord -3" in text and "notoriety +2" in text) == expected
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng

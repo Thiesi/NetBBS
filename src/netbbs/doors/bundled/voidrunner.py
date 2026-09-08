@@ -5813,6 +5813,9 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                   f"Weapons Tier {ship.weapon_tier}: +{ship.weapon_tier * 4} damage; gunner bonus +{3 if ship.has_gunner else 0}.",
                   f"Notoriety {pilot.notoriety}. " + ("Destroying this patrol: notoriety +3, Concord -10, Blackwake +3; no salvage."
                   if patrol else "Destroying this pirate earns salvage; Concord +2, Blackwake -1.")]
+        travel = world.save.pending_travel
+        if not patrol and travel is not None and travel.get("phase") == "primary" and travel.get("primary") == "bounty":
+            lines.append(f"After a bounty victory, a {WRONG_BOUNTY_KILL_CHANCE:.0%} mistaken-identity inquiry can add notoriety +{NOTORIETY_PER_WRONG_BOUNTY_KILL} and Concord -3, on top of the kill's standing changes.")
     return lines
 
 
