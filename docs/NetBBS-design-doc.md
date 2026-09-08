@@ -4853,6 +4853,15 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
+Voidrunner customs inspections show complete surrender/bribe terms in height-aware
+pages: detected contraband, current credits, the conditional bribe payment and
+60% acceptance chance, confiscation/fine on refusal, and standing/notoriety effects.
+A fine is capped at credits on hand and creates no debt. Unaffordable bribery is
+unavailable; typing its key is harmless and retains the inspection without RNG,
+cargo, credit or reputation changes. Valid decisions keep the existing outcomes
+and checkpoint their effects and completion before acknowledging them. Browsing
+and invalid input preserve the pending inspection across disconnect/restart.
+
 Voidrunner combat uses height-aware pages with numeric opponent/hull, fuel and
 cargo telemetry and current credits in the heading. The last checkpointed exchange
 remains available while paging or toggling tactical details. Browsing consumes no

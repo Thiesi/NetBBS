@@ -158,6 +158,21 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### Customs decisions
+
+An inspection pages its full terms with **[<] Previous / [>] Next**, keeping
+credits and action keys visible. **[S] Surrender** gives up all contraband without
+a fine, improves Concord standing within its limit, and leaves notoriety unchanged.
+An affordable **[B] Bribe** has a 60% acceptance chance: you pay only on acceptance
+and keep the cargo. Refusal confiscates contraband, reduces Concord standing and
+raises notoriety. The stated fine takes at most your available credits and leaves
+no debt; the result reports the amount actually collected.
+
+An unaffordable bribe is unavailable. Typing B anyway changes no cargo, money,
+standing, notoriety or randomness. Paging and invalid input are read-only; if you
+disconnect before choosing, the same inspection resumes next visit. Completed
+outcomes save before acknowledgement and replay without repeating their effects.
+
 ### Combat telemetry and last exchange
 
 Combat pages show current credits, enemy HP, hull/fuel and cargo usage. Browse
