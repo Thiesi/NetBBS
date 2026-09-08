@@ -4764,8 +4764,22 @@ not total career profit. Lost cargo basis, cancelled-order fees, actual fuel
 purchases and paid crew wages are reported separately. Unrecorded historical
 activity, repairs, fines, hire costs and other career income are excluded.
 The ledger resets with a new career, checkpoints with each affected action and
-is read-only when viewed. Remembered remote prices and route estimates remain
-the next trading-ledger scope in issue #310.
+is read-only when viewed.
+
+Docked checkpoints remember visible local buy/sell quotes with their observation
+day; browsing never refreshes remote data. Earlier discoveries have no inferred
+price history. Trader data-burst encounters also retain the actual quote they
+reveal, checkpointed with the encounter result without changing RNG call order.
+Each commodity keeps its last observed quote, including contraband
+previously carried through a station that does not openly sell it. The ledger's
+route estimator compares a new purchase or existing hold cargo with a remembered
+destination sale quote. It displays the route, quote age, acquisition basis,
+replacement fuel at 6 credits/unit, crew wages, cash shortfall and estimated
+margin. Unknown acquisition costs suppress a total-profit claim. Refuelling is
+budgeted at intermediate stations where necessary; a leg exceeding tank capacity
+is infeasible. Unknown intermediate systems retain unknown names/threats. Prices,
+encounters, detours, repairs, other income and contract deliveries can change the
+outcome; estimates are advisory and never buy cargo or launch travel.
 
 The engineer costs 200 credits to hire and 2 per jump, reducing fuel by 25%,
 rounded up, with a minimum one-unit burn. The role is an investment for longer

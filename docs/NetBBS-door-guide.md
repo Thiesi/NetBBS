@@ -70,6 +70,23 @@ travel and other career spending. The ledger reports actual fuel purchases,
 paid wages, cancelled-order fees and lost cargo cost separately; it cannot
 reconstruct activity before recording began. A new career starts a fresh ledger.
 
+Within the ledger, **[M]arkets** shows remembered buy/sell quotes and their
+observation day. Docking updates local quotes; trader data bursts also record
+the quote they reveal. Remote quotes stay stale until updated, and older chart
+discoveries do not invent price history. Open purchase of contraband remains
+labelled prohibited outside Havens.
+
+**[R]oute** estimates a trade using a remembered destination sale price. Edit
+**[D]estination**, **[C]argo** and **[Q]uantity**; **[H]old** toggles between buying
+new goods here and using cargo already aboard. The view shows procurement and
+remaining credits, fuel and refuelling stops, wages, quote age, cash shortfall,
+route danger where known and expected margin. Unknown acquisition cost or a
+delivery that would consume this cargo prevents a total-margin claim. A leg
+longer than the ship's tank capacity is marked infeasible. Estimates assume the
+remembered price and an intact load; market changes, encounters, repairs, fines,
+detours and other income/spending can change the result. These views are read-only
+and never purchase cargo or engage travel. Use the market and chart to act.
+
 ### Voidrunner recovery
 
 Invalid or unreadable career files remain in place. The game shows a recovery

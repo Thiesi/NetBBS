@@ -4216,6 +4216,18 @@ lot totals against the hold and ledger dates against the career day before load
 or persistence. Ledger views are pure; RNG state and checkpoint callbacks must
 not change when paging or backing out.
 
+Market memory stores one last-observed buy/sell/day tuple per system/commodity.
+Record visible local quotes at docked checkpoints, not while a journey is pending;
+trader tips record only their disclosed remote quote with the encounter result.
+Neither observation adds RNG calls. Route advice uses saved destination quotes
+and pure local procurement/basis calculations, never `price_for` on a remote
+system. Keep replacement fuel cost separate from additional cash needed with
+fuel already in the tank. Use current crew wages per hop, inclusive arrival-day
+contract expiry and actual hold capacity; label unknown basis and infeasible legs.
+View state and field selections are transient. Height budgets must include the
+wrapped action bar and numbered title, and picker continuations must retain a
+selectable key after a long station name crosses a page boundary.
+
 New futures store origin and principal as a pair; absent metadata retains legacy
 remote settlement/full-refund behavior. New orders wait for room at their origin.
 The departure tick settles only legacy orders; pickup settlement runs after the
