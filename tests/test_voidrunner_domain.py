@@ -2445,7 +2445,8 @@ def test_notoriety_patrol_surrender_is_not_offered_without_enough_credits():
     with contextlib.redirect_stdout(buf):
         vr.screen_notoriety_patrol(vr.Palette(truecolor=False), world)
 
-    assert "Surrender" not in buf.getvalue()
+    assert "[S]" not in buf.getvalue()
+    assert "UNAFFORDABLE" in buf.getvalue()
     assert world.save.pilot.notoriety == 10  # the stray "S" did nothing
 
 
@@ -8179,3 +8180,78 @@ def test_real_display_saved_before_ack_and_applied_from_restart_title(tmp_path, 
         if style in ("mono", "plain"): assert b"\x1b" not in result.stdout
         if style == "basic": assert b"38;" not in result.stdout
         if style == "plain": assert result.stdout.isascii()
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("patrol", [False, True])
+@pytest.mark.parametrize("style", ["auto", "plain"])
+def test_combat_telemetry_pages_fit_and_browsing_preserves_exchange(monkeypatch, width, height, patrol, style):
+    import re
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    world = _world_with_seed(42)
+    world.save.cargo["food"] = 3
+    pirate = vr.generate_pirate(world, tier=2)
+    snapshots, frames = [], []
+    world._checkpoint = lambda current: snapshots.append(current.save.to_dict())
+    output = io.StringIO()
+    state = {"fired": False, "details": False, "saved": None, "rng": None}
+    def choose():
+        frame = output.getvalue(); output.seek(0); output.truncate(0)
+        frames.append(frame)
+        assert len(frame.splitlines()) <= height
+        assert all(vr._visible_width(line) <= width for line in frame.splitlines())
+        assert "[Q]Info" in frame and "[< >]Page:" in frame
+        if not state["fired"]:
+            state["fired"] = True
+            return "F"
+        if state["saved"] is None:
+            state["saved"] = world.save.to_dict()
+            state["rng"] = world.event_rng.getstate()
+        assert world.save.to_dict() == state["saved"]
+        assert world.event_rng.getstate() == state["rng"]
+        page, count = map(int, re.search(r"Combat.*?(\d+)/(\d+)", frame, re.S).groups())
+        if page < count: return ">"
+        if not state["details"]:
+            state["details"] = True
+            return "Q"
+        raise EOFError
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output), pytest.raises(EOFError):
+        vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=patrol)
+    assert len(snapshots) == 2
+    text = " ".join(" ".join(frames).split())
+    for label in ("Last exchange:", "damage.", "Tactical Systems:", "Cargo 3/24 used", "Your hull", "Fuel", "Shields Tier"):
+        assert label in text
+    if patrol: assert "clear notoriety" in text and "no salvage" in text
+    else: assert "one unit" in text and "only if accepted" in text and "refusal draws" in text
+
+
+@pytest.mark.parametrize("patrol", [False, True])
+def test_combat_telemetry_browsing_does_not_change_fight_result(monkeypatch, patrol):
+    worlds = [_world_with_seed(42), _world_with_seed(42)]
+    results = []
+    for index, world in enumerate(worlds):
+        world.event_rng.seed(42)
+        pirate = vr.generate_pirate(world, tier=2)
+        keys = iter("Q><Q?" * 5 if index else "")
+        monkeypatch.setattr(vr, "read_key", lambda: next(keys, "F"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            results.append(vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=patrol))
+    assert results[0] == results[1]
+    assert worlds[0].save.to_dict() == worlds[1].save.to_dict()
+    assert worlds[0].event_rng.getstate() == worlds[1].event_rng.getstate()
+
+
+@pytest.mark.parametrize("patrol", [False, True])
+def test_combat_telemetry_unaffordable_actions_have_terms_without_hotkeys(patrol):
+    world = _world_with_seed(42)
+    world.save.pilot.credits = 0
+    pirate = vr.generate_pirate(world, tier=2)
+    before, rng = world.save.to_dict(), world.event_rng.getstate()
+    text = " ".join(vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True))
+    assert ("[S]" if patrol else "[B]") not in text
+    assert "UNAFFORDABLE" in text
+    assert str(vr.notoriety_fine_cost(0) if patrol else vr.bribe_cost(pirate)) + "cr" in text
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng

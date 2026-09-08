@@ -5072,3 +5072,10 @@ applying output transformations or acknowledging success. ASCII art substitution
 preserve display columns and must not change the UTF-8 input decoder or Unicode
 letter handling. Monochrome/plain output strips styling at the shared output
 boundary, including trusted reset/bold sequences outside the palette.
+
+Combat presentation reads current opponent/state without RNG draws. Paging and
+info toggles do not checkpoint or consume an exchange; reset the page after an
+action and render the cached exchange only after its checkpoint. Preserve terminal
+outcome replay before returning to the parent travel phase. Combat cargo usage is
+numeric capacity, separate from health semantics; unavailable actions retain cost
+explanations but must not advertise a usable hotkey.
