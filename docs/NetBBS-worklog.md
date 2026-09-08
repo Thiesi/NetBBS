@@ -3203,6 +3203,17 @@ start` prints nothing, exits 0, and `service netbbs status` then reports the
 service as not running. Any rc.d failure diagnosis has to start from `sh -x`,
 because the exit code carries no information.
 
+A pidfile in a user-writable directory is untrusted input to a root-run
+`kill`. `-1` is the value that matters: it passes `kill -0`, produces no `ps`
+output (so a "treat empty ps as still running" fail-safe calls it live), and
+then `kill -TERM -1` signals every process the caller may signal — a host-wide
+denial of service triggered by the next `service netbbs stop`. Validate a plain
+positive decimal before any signal. Do not write that check as
+`read -r pid < file || return 1`: `read` reports failure at EOF on a final line
+with no newline *after* assigning the value, so a pidfile without a trailing
+newline would read as "not running" and start a second node against the same
+database. Judge the value, not `read`'s exit status.
+
 `load_rc_config $name` must be called *before* the `: ${var:=default}` block,
 per `rc.subr(8)`. Called after, as it was, every documented `rc.conf` override
 is read too late to have any effect and the built-in defaults always win —
@@ -3212,6 +3223,17 @@ including `netbbs_ld_library_path`, which is the one variable the NetBSD
 `extra_commands`, and that the platform has no `Restart=on-failure` equivalent:
 Tier 1 automatic restart is an operator's own periodic check, not something the
 example script can provide.
+
+Two limits of an rc.d script are worth stating rather than papering over. Its
+stdout/stderr capture file does not rotate itself and shares a filesystem with
+the database; `newsyslog(8)` is the platform's answer and belongs in the
+example's own comments. And a SIGKILLed node cannot run its own door cleanup,
+while doors are deliberately spawned with `start_new_session=True`
+(`netbbs.doors.runtime`) — so they are in no process group the script could
+signal instead, and no process-group kill from rc.d can reach them. Only the
+node itself can reap its doors, which makes "keep the stop timeout above
+`graceful_delay_seconds`" the real mitigation, not a bigger hammer in the
+supervisor.
 
 ### A published roster nobody probes is indistinguishable from a healthy one (issue #313)
 
