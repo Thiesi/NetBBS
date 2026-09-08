@@ -939,10 +939,16 @@ class ResumeError(Exception):
     """An interrupted career must be preserved, never reset automatically."""
 
 
+def _reject_unknown_save_fields(value, fields: set[str], label: str) -> None:
+    if isinstance(value, dict) and set(value) - fields:
+        raise UnsupportedSave(f"The saved {label} contains unsupported fields.")
+
+
 def _validate_combat_mission_snapshot(data: dict, kind: str) -> None:
     """Validate every value a resumed fight, payout, or removal consumes."""
     if not isinstance(data, dict):
         raise ValueError("invalid mission snapshot")
+    _reject_unknown_save_fields(data, {f.name for f in dataclasses.fields(Mission)}, "mission snapshot")
     mission = Mission.from_dict(data)
     if (mission.kind != kind or not isinstance(mission.description, str)
             or type(mission.id) is not int or mission.id < 1
@@ -969,6 +975,8 @@ def _load_pending_travel(value: dict | None) -> dict | None:
         raise ResumeError("This interrupted journey has an invalid format version.")
     if value["version"] != 1:
         raise UnsupportedSave("This interrupted journey uses an unsupported format.")
+    _reject_unknown_save_fields(value, {"version", "origin", "destination", "escort_index", "phase", "primary",
+                                       "encounter", "escorts", "destroyed", "was_discovered", "bounty"}, "journey")
     try:
         if any(type(value[key]) is not int for key in ("origin", "destination", "escort_index")):
             raise ValueError("invalid journey position")
@@ -987,6 +995,8 @@ def _load_pending_travel(value: dict | None) -> dict | None:
         if value["primary"] == "bounty":
             _validate_combat_mission_snapshot(value["bounty"], "bounty")
         state = value["encounter"]
+        _reject_unknown_save_fields(state, {"inspect", "done", "kind", "pirates", "index", "pirate", "ambush",
+                                           "combat", "result"}, "encounter")
         if value["phase"] == "customs" and not isinstance(state["inspect"], bool):
             raise ValueError("invalid inspection")
         if "done" in state and not isinstance(state["done"], bool):
@@ -1007,12 +1017,14 @@ def _load_pending_travel(value: dict | None) -> dict | None:
                 pirates.append(state[key])
         if "combat" in state:
             combat = state["combat"]
+            _reject_unknown_save_fields(combat, {"pirate", "outcome", "lines"}, "combat")
             pirates.append(combat["pirate"])
             if (combat["outcome"] not in (None, "won", "escaped", "destroyed")
                     or not isinstance(combat["lines"], list)
                     or not all(isinstance(line, str) for line in combat["lines"])):
                 raise ValueError("invalid combat")
         for data in pirates:
+            _reject_unknown_save_fields(data, {f.name for f in dataclasses.fields(Pirate)}, "opponent")
             pirate = Pirate(**data)
             if (any(type(data[key]) is not int for key in ("tier", "hp", "hp_max"))
                     or not isinstance(pirate.name, str) or not 0 <= pirate.tier <= 4
@@ -1246,8 +1258,11 @@ def _validate_save_document(data: dict) -> None:
                 integer(item["settle_turn"], "order maturity")
     event = data.get("active_event")
     if event is not None:
-        require(isinstance(event, dict) and set(event) ==
-                {"economy", "commodity", "direction", "turns_remaining", "description"}, "economy event")
+        event_fields = {"economy", "commodity", "direction", "turns_remaining", "description"}
+        require(isinstance(event, dict), "economy event")
+        if set(event) - event_fields:
+            raise UnsupportedSave("The saved economy event contains unsupported fields.")
+        require(set(event) == event_fields, "economy event")
         require(event["economy"] in ECONOMIES and event["commodity"] in COMMODITIES and
                 event["direction"] in ("boom", "crash"), "economy event")
         integer(event["turns_remaining"], "event duration", minimum=1, maximum=ECONOMY_EVENT_MAX_TURNS)
@@ -2486,6 +2501,24 @@ def load_or_create_save(save_dir: Path, user_id: int, handle: str) -> tuple[Save
     return _decode_career(raw), False, None
 
 
+def _recovery_original(save_dir: Path, user_id: int) -> bytes | None:
+    """Read-only preservation preflight, repeated immediately before rollback."""
+    try:
+        original = _read_save_bytes(_save_path(save_dir, user_id))
+    except FileNotFoundError:
+        return None
+    # A newer build's career must be opened with that build, never downgraded.
+    try:
+        _decode_career(original)
+    except UnsupportedSave:
+        raise
+    except ResumeError:
+        pass
+    if len(list(save_dir.glob(f"{user_id}.recovery-*.json"))) >= MAX_RECOVERY_COPIES:
+        raise ResumeError("Recovery copies are full; ask your SysOp to archive them.")
+    return original
+
+
 def restore_previous_career(save_dir: Path, user_id: int, expected: bytes) -> SaveData:
     """Under the session lease, preserve the current file before explicit rollback."""
     previous = _read_save_bytes(_previous_save_path(save_dir, user_id))
@@ -2493,20 +2526,8 @@ def restore_previous_career(save_dir: Path, user_id: int, expected: bytes) -> Sa
         raise ResumeError("The previous checkpoint changed; reopen recovery to inspect it.")
     restored = _decode_career(previous)
     path = _save_path(save_dir, user_id)
-    try:
-        original = _read_save_bytes(path)
-    except FileNotFoundError:
-        original = None
+    original = _recovery_original(save_dir, user_id)
     if original is not None:
-        # A newer build's career must be opened with that build, never downgraded.
-        try:
-            _decode_career(original)
-        except UnsupportedSave:
-            raise
-        except ResumeError:
-            pass
-        if len(list(save_dir.glob(f"{user_id}.recovery-*.json"))) >= MAX_RECOVERY_COPIES:
-            raise ResumeError("Recovery copies are full; ask your SysOp to archive them.")
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(mode="wb", dir=save_dir, prefix=f".{user_id}.recovery-",
@@ -4531,12 +4552,20 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
     """A failed load is not authorization to reset or roll back a career."""
     candidate = None
     previous = None
+    preservation_problem = None
     if not isinstance(error, UnsupportedSave):
         try:
             previous = _read_save_bytes(_previous_save_path(save_dir, user_id))
             candidate = _decode_career(previous)
         except (OSError, ResumeError):
             pass
+    if candidate is not None:
+        try:
+            _recovery_original(save_dir, user_id)
+        except ResumeError as exc:
+            preservation_problem = str(exc)
+        except OSError:
+            preservation_problem = "The current career or recovery storage cannot be read."
     lines = ["Career recovery", str(error),
              "Play has stopped; your saved career is unchanged."]
     if candidate is None:
@@ -4547,13 +4576,17 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                   "Journey pending: " + ("yes" if candidate.pending_travel else "no"),
                   "Restoring rolls back progress to this checkpoint.",
                   "Your current file will be kept as a recovery copy."]
+        if preservation_problem is not None:
+            lines += ["Automatic restoration is unavailable: " + preservation_problem,
+                      "Please contact your SysOp for manual recovery."]
     pages = _mission_text_pages(lines, overhead=4)
     page = 0
     while True:
         out_line()
         for line in pages[page]:
             out_line(line)
-        action = "[R]estore  " if candidate is not None and page == len(pages) - 1 else ""
+        can_restore = candidate is not None and preservation_problem is None and page == len(pages) - 1
+        action = "[R]estore  " if can_restore else ""
         out_prompt(action + "[N]ext [P]revious [B]ack: ")
         try:
             key = read_command()
@@ -4565,7 +4598,7 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
             page += 1
         elif key == "P" and page:
             page -= 1
-        elif key == "R" and candidate is not None and page == len(pages) - 1:
+        elif key == "R" and can_restore:
             try:
                 confirmed = confirm("Restore this previous checkpoint?", p)
             except EOFError:

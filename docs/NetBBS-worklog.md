@@ -4546,8 +4546,15 @@ with the validated old bytes, then replaces the primary file. Both use private,
 flushed temporary files. Identical bytes must not age the previous copy. A failure
 before the primary replace leaves the old career available. The recovery screen
 never offers a reset and never writes on Back, EOF or declined confirmation.
+Use the same read-only preservation preflight for the recovery screen and the
+final action. Unreadable/oversized originals and full copy slots need an explicit
+manual-recovery reason before offering a doomed action. Unknown fields in nested
+journey, encounter, opponent, mission-snapshot and economy-event records receive
+the unsupported-format guard too; checking only the outer schema is insufficient.
 Restoration rechecks the exact candidate, archives the current bytes with an
-exclusive unique filename and fsync, then atomically replaces the primary. Keep
+exclusive unique temporary filename and fsync, promotes only a successfully
+closed archive, then atomically replaces the primary. Failed archive writes must
+not consume retained recovery slots. Keep
 an unsupported-version career for manual repair rather than enabling a downgrade.
 A missing primary with an existing previous copy is recovery, not a new pilot.
 Tests simulating corruption must write the damaged fixture directly; the normal

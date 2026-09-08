@@ -5414,16 +5414,21 @@ def test_failed_recovery_archive_never_consumes_a_retained_slot(tmp_path, monkey
     assert len(archives) == 1 and archives[0].read_bytes() == b"damaged original"
 
 
-def test_missing_primary_requires_recovery_and_validated_previous_can_be_restored(tmp_path):
+@pytest.mark.parametrize("full_archives", [False, True])
+def test_missing_primary_requires_recovery_and_validated_previous_can_be_restored(tmp_path, full_archives):
     expected = _broken_career_with_previous(tmp_path)
     (tmp_path / "77.json").unlink()
+    if full_archives:
+        for index in range(vr.MAX_RECOVERY_COPIES):
+            (tmp_path / f"77.recovery-{index}.json").write_bytes(b"retained")
     with pytest.raises(vr.ResumeError, match="missing"):
         vr.load_or_create_save(tmp_path, 77, "Tester")
     restored = vr.restore_previous_career(tmp_path, 77, expected)
     assert restored.turn == 7 and (tmp_path / "77.json").read_bytes() == expected
 
 
-@pytest.mark.parametrize("kind", ["schema", "galaxy", "journey", "rng"])
+@pytest.mark.parametrize("kind", ["schema", "galaxy", "journey", "rng", "event", "journey_field",
+                                 "encounter_field", "pirate_field", "combat_field", "snapshot_field"])
 def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkeypatch, kind):
     import json
     import os
@@ -5435,8 +5440,31 @@ def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkey
         future[f"{kind}_version"] = 99
     elif kind == "journey":
         future["pending_travel"] = {"version": 99}
-    else:
+    elif kind == "rng":
         future["event_rng_state"] = [99, [], None]
+    elif kind == "event":
+        future["active_event"] = {"economy": "Industrial", "commodity": "metals", "direction": "boom",
+                                  "turns_remaining": 2, "description": "News", "future_rule": True}
+    else:
+        destination = vr.World(vr.SaveData.from_dict(future)).here.connections[0]
+        travel = {"version": 1, "origin": 0, "destination": destination, "escort_index": 0, "phase": "primary",
+                  "primary": "random", "encounter": {}, "escorts": [], "destroyed": False, "was_discovered": True,
+                  "bounty": None}
+        future["pending_travel"] = travel
+        pirate = {"name": "Raider", "tier": 1, "hp": 35, "hp_max": 35}
+        if kind == "journey_field":
+            travel["future_rule"] = True
+        elif kind == "encounter_field":
+            travel["encounter"]["future_rule"] = True
+        elif kind == "pirate_field":
+            travel["encounter"]["pirate"] = dict(pirate, future_rule=True)
+        elif kind == "combat_field":
+            travel["encounter"]["combat"] = {"pirate": pirate, "outcome": None, "lines": [], "future_rule": True}
+        else:
+            mission = vr.Mission(1, "bounty", "Raider", 100, 0, destination, pirate_tier=1).to_dict()
+            future["active_missions"] = [mission]
+            travel["primary"] = "bounty"
+            travel["bounty"] = dict(mission, future_rule=True)
     path = tmp_path / "77.json"
     path.write_text(json.dumps(future), encoding="utf-8")
     original = path.read_bytes()
@@ -5457,6 +5485,51 @@ def test_future_formats_never_offer_or_allow_downgrade_recovery(tmp_path, monkey
     assert result.returncode == 0 and not result.stderr
     assert b"[R]estore" not in result.stdout and b"Pilot callsign" not in result.stdout
     assert path.read_bytes() == original and not list(tmp_path.glob("77.recovery-*"))
+
+
+@pytest.mark.parametrize("problem", ["oversized", "unreadable", "full"])
+def test_recovery_hides_restore_and_explains_impossible_preservation(tmp_path, monkeypatch, problem):
+    _broken_career_with_previous(tmp_path)
+    primary = tmp_path / "77.json"
+    read = vr._read_save_bytes
+    if problem == "oversized":
+        primary.write_bytes(b"x" * (vr.MAX_SAVE_BYTES + 1))
+    elif problem == "unreadable":
+        def fail_primary(path):
+            if path == primary:
+                raise PermissionError("cannot read primary")
+            return read(path)
+        monkeypatch.setattr(vr, "_read_save_bytes", fail_primary)
+    else:
+        for index in range(vr.MAX_RECOVERY_COPIES):
+            (tmp_path / f"77.recovery-{index}.json").write_bytes(b"retained")
+    before = {path.name: path.read_bytes() for path in tmp_path.glob("*.json")}
+    keys = iter("R" + "N" * 20 + "B")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        result = vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, vr.ResumeError("Career unavailable"))
+    rendered = " ".join(output.getvalue().split())
+    assert result.save is None and result.exit_code == 0
+    assert "[R]estore" not in rendered and "manual recovery" in rendered
+    reason = {"oversized": "file size", "unreadable": "cannot be read", "full": "copies are full"}[problem]
+    assert reason in rendered
+    assert {path.name: path.read_bytes() for path in tmp_path.glob("*.json")} == before
+
+
+def test_missing_economy_event_fields_remain_recoverable_corruption(tmp_path, monkeypatch):
+    import json
+    previous = _broken_career_with_previous(tmp_path)
+    broken = json.loads(previous)
+    broken["active_event"] = {"economy": "Industrial"}
+    (tmp_path / "77.json").write_text(json.dumps(broken), encoding="utf-8")
+    with pytest.raises(vr.ResumeError) as error:
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not isinstance(error.value, vr.UnsupportedSave)
+    keys = iter("B")
+    monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_save_recovery(vr.Palette(False), tmp_path, 77, error.value)
+    assert "[R]estore" in output.getvalue()
 
 
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
