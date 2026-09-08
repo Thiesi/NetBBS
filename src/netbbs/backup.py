@@ -116,7 +116,7 @@ _VOIDRUNNER_DIRNAME = "voidrunner"
 _VOIDRUNNER_MAX_FILES = 10_000
 _VOIDRUNNER_MAX_FILE_BYTES = 4 * 1024 * 1024
 _VOIDRUNNER_MAX_TOTAL_BYTES = 512 * 1024 * 1024
-_RESERVED_BACKUP_ENTRIES = (_MANIFEST_FILENAME, _FILES_DIRNAME, _IDENTITY_DIRNAME, _VOIDRUNNER_DIRNAME)
+_RESERVED_BACKUP_ENTRIES = (_MANIFEST_FILENAME, _FILES_DIRNAME, _IDENTITY_DIRNAME)
 
 # node_config keys (netbbs.config's generic key-value store) -- same
 # reasoning as netbbs.selfupdate's own last-check bookkeeping: purely
@@ -410,9 +410,12 @@ def _validate_voidrunner_component(source: Path, manifest: dict) -> bool:
     metadata = manifest.get("voidrunner")
     root = source / _VOIDRUNNER_DIRNAME
     if metadata is None:
-        if root.exists():
+        legacy_database = _database_filename_from_manifest(manifest).casefold() == _VOIDRUNNER_DIRNAME
+        if root.exists() and not (legacy_database and root.is_file()):
             raise BackupError("Voidrunner component has no coverage manifest.")
         return False
+    if _database_filename_from_manifest(manifest).casefold() == _VOIDRUNNER_DIRNAME:
+        raise BackupError("Voidrunner component collides with the database snapshot filename.")
     if (not isinstance(metadata, dict) or type(metadata.get("version")) is not int or metadata["version"] != 1
             or not isinstance(metadata.get("files"), list) or not root.is_dir() or root.is_symlink()):
         raise BackupError("Invalid Voidrunner coverage manifest.")
@@ -479,6 +482,10 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
 
     checksums = {}
     game_metadata = _capture_voidrunner(game_source, destination, checksums)
+    if game_metadata is not None and database_filename.casefold() == _VOIDRUNNER_DIRNAME:
+        # The live custom filename remains valid. Only its archive name changes;
+        # the manifest and explicit restore --db already separate those paths.
+        database_filename = _LEGACY_DB_FILENAME
     _snapshot_database_and_managed_dns_credentials(db_path, destination, database_filename)
     checksums[database_filename] = _sha256_of_file(destination / database_filename)
     for credential_path in (
@@ -802,7 +809,7 @@ def _restore_switch_plan(
         plan.append(("identity", staged_identity, identity_dir))
 
     for entry in sorted(staging_dir.iterdir()):
-        if entry.name in (*_RESERVED_BACKUP_ENTRIES, database_filename):
+        if entry.name in (*_RESERVED_BACKUP_ENTRIES, _VOIDRUNNER_DIRNAME, database_filename):
             continue
         if entry.is_file():
             live_path = db_path.parent / entry.name
@@ -911,7 +918,7 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
             raise BackupError("This backup contains Voidrunner careers; specify --voidrunner-to for the restored service.")
         target = voidrunner_to.resolve()
         protected_paths = [source, db_path, identity_dir, _storage_root_for(db_path),
-                           _restore_state_path_for(db_path)]
+                           _restore_state_path_for(db_path), _pid_file_path_for(db_path)]
         protected_paths.extend(live for _, _, live in _restore_switch_plan(
             source, db_path, identity_dir, _database_filename_from_manifest(manifest)))
         for protected_path in protected_paths:

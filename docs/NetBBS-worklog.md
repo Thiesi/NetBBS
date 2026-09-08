@@ -4582,9 +4582,15 @@ copies, are archival data; verify their checksums without loading/migrating them
 Coverage enumerates every retained file deterministically and rejects missing,
 extra, unchecked, symlinked, case-colliding or over-limit entries. Temporary and
 lock files may be ignored in the live source but must not appear in an archive.
+The live database filename `voidrunner` predates this component and remains valid.
+Without game coverage, preserve its legacy archive shape. With game coverage,
+store that database snapshot as `netbbs.db` and record the archive filename in the
+manifest; the explicit restore database path still chooses the live filename.
+Check this collision case-insensitively for archives moved between platforms.
 
 An archive's source-directory metadata is informational only. Restoring game data
-requires an explicit, nonoverlapping destination. Stage and retain game rollback
+requires an explicit, nonoverlapping destination, including exclusion of the node
+PID path even when no PID file currently exists. Stage and retain game rollback
 beside that target so atomic renames work across database/game filesystem layouts;
 the common restore journal records the external paths. `_switch_one` must undo
 its own first rename if its second rename fails: the outer loop has not yet added

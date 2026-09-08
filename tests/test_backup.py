@@ -99,6 +99,37 @@ def test_voidrunner_capture_precedes_database_snapshot(tmp_path, db_path, identi
     assert calls == ["snapshot"]
 
 
+@pytest.mark.parametrize("filename", ["voidrunner", "Voidrunner"])
+@pytest.mark.parametrize("include_game", [False, True])
+def test_voidrunner_named_databases_and_legacy_archives_remain_restorable(
+    tmp_path, db_path, identity_dir, filename, include_game,
+):
+    custom = tmp_path / "custom-node" / filename
+    custom.parent.mkdir()
+    shutil.copy2(db_path, custom)
+    with sqlite3.connect(custom) as connection:
+        connection.execute("INSERT OR REPLACE INTO node_config(key,value) VALUES('node_name','Custom DB')")
+    if include_game:
+        game = _populate_voidrunner()
+        expected = _retained_game_bytes(game)
+    source = create_backup(db_path=custom, identity_dir=identity_dir, destination=tmp_path / "backup")
+    manifest_path = source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if include_game:
+        assert manifest["database_filename"] == "netbbs.db"
+    else:
+        assert manifest["database_filename"] == filename
+        del manifest["voidrunner"]  # The manifest shape used before game coverage.
+        manifest_path.write_text(json.dumps(manifest))
+    restored_db = tmp_path / "restored-node" / filename
+    target = tmp_path / "restored-games" if include_game else None
+    restore_backup(source=source, db_path=restored_db, identity_dir=tmp_path / "restored-identity", voidrunner_to=target)
+    with sqlite3.connect(restored_db) as connection:
+        assert connection.execute("SELECT value FROM node_config WHERE key='node_name'").fetchone()[0] == "Custom DB"
+    if include_game:
+        assert _retained_game_bytes(target) == expected
+
+
 @pytest.mark.parametrize("damage", ["bytes", "missing", "unlisted", "unchecked", "metadata", "traversal", "temporary"])
 def test_voidrunner_component_rejects_damaged_or_ambiguous_archives_before_node_changes(
     tmp_path, db_path, identity_dir, damage,
@@ -294,14 +325,15 @@ def test_voidrunner_backup_limits_fail_without_success_manifest(tmp_path, db_pat
     assert not (destination / "manifest.json").exists()
 
 
-@pytest.mark.parametrize("target_kind", ["backup", "database_parent", "identity", "files", "inside_files", "credential"])
+@pytest.mark.parametrize("target_kind", ["backup", "database_parent", "identity", "files", "inside_files", "credential", "pid"])
 def test_voidrunner_restore_rejects_overlapping_destinations(tmp_path, db_path, identity_dir, target_kind):
     _populate_voidrunner()
     source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
     storage = backup_module._storage_root_for(db_path)
     target = {"backup": source, "database_parent": db_path.parent, "identity": identity_dir,
               "files": storage, "inside_files": storage / "game",
-              "credential": backup_module._managed_dns_credential_path_for(db_path)}[target_kind]
+              "credential": backup_module._managed_dns_credential_path_for(db_path),
+              "pid": backup_module._pid_file_path_for(db_path)}[target_kind]
     with pytest.raises(BackupError, match="overlaps"):
         restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, voidrunner_to=target)
 
