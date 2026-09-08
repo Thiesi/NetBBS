@@ -453,3 +453,19 @@ def test_the_real_space_trading_door_plays_a_full_opening_loop_through_run_door(
     ]
     assert not overflows
     assert save_path.exists()  # the door manages its own save, unmediated by NetBBS
+
+
+def test_voidrunner_directory_override_reaches_real_door_without_parent_secrets(
+    db, lane, player, tmp_path, monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VOIDRUNNER_SAVE_DIR", "node-two-careers")
+    monkeypatch.setenv("NETBBS_TEST_SECRET", "must-not-reach-door")
+    script = _write_script(tmp_path, "check_env.py", "import os, json; print(json.dumps(dict(os.environ)))")
+    door = create_door(db, "Environment check", sys.executable, args=(str(script),), creator=player)
+    session = FakeSession()
+    result = asyncio.run(_run(session, lane, door, player))
+    assert result.exit_code == 0
+    env = json.loads(bytes(session.written).decode())
+    assert env["VOIDRUNNER_SAVE_DIR"] == str(tmp_path / "node-two-careers")
+    assert "NETBBS_TEST_SECRET" not in env
