@@ -910,12 +910,17 @@ class FuturesContract:
     principal: int | None = None
 
     def to_dict(self) -> dict:
-        return dataclasses.asdict(self)
+        data = dataclasses.asdict(self)
+        if self.origin_system is None and self.principal is None:
+            # Legacy orders retain absent metadata when checkpointed again.
+            del data["origin_system"]
+            del data["principal"]
+        return data
 
     @classmethod
     def from_dict(cls, d: dict) -> "FuturesContract":
         contract = cls(**{f.name: d[f.name] for f in dataclasses.fields(cls) if f.name in d})
-        if contract.origin_system is not None or contract.principal is not None:
+        if "origin_system" in d or "principal" in d:
             if (type(contract.origin_system) is not int or not 0 <= contract.origin_system < GALAXY_SYSTEM_COUNT
                     or type(contract.principal) is not int or type(contract.locked_price) is not int
                     or not 0 <= contract.principal <= contract.locked_price
@@ -2571,6 +2576,12 @@ def create_career(p: Palette, info: dict) -> str | None:
 
 
 def screen_station_menu(p: Palette, world: World) -> str:
+    completed = settle_futures_contracts(world)
+    completed += check_mission_completions(world)
+    if completed:
+        world.checkpoint()
+    for msg in completed:
+        out_line(f"{p.gold}{msg}{RESET}")
     if is_stranded(world):
         # Checked here, not only right after the action that could cause
         # it -- this is the outer loop's own home base, reached after
@@ -2588,12 +2599,6 @@ def screen_station_menu(p: Palette, world: World) -> str:
         out_line()
         out_line(f"{p.gold}{BOLD}★ ★ ★ Promoted to {promoted}! ★ ★ ★{RESET}")
         pause(p)
-    completed = settle_futures_contracts(world)
-    completed += check_mission_completions(world)
-    if completed:
-        world.checkpoint()
-    for msg in completed:
-        out_line(f"{p.gold}{msg}{RESET}")
     out_line()
     draw_status_bar(p, world)
     _show_tracked_mission(p, world)

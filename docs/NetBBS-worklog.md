@@ -4050,7 +4050,9 @@ New futures store origin and principal as a pair; absent metadata retains legacy
 remote settlement/full-refund behavior. New orders wait for room at their origin.
 The departure tick settles only legacy orders; pickup settlement runs after the
 arrival position changes and before mission rewards in that same saved phase.
-Station-entry settlement also handles mature loaded orders and newly freed holds.
+Station-entry settlement also handles mature loaded orders and newly freed holds,
+before rescue decides whether the pilot is stranded. Missing legacy pickup keys
+stay absent on serialization; explicit nulls are malformed new metadata.
 Do not settle by the old origin merely because departure increments the day.
 Per-unit integer fee rounding prevents split orders from avoiding the fee.
 

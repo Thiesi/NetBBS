@@ -4896,3 +4896,48 @@ def test_new_futures_corrupt_metadata_uses_preserving_recovery(field, value):
     data["active_futures"][0][field] = value
     with pytest.raises(vr.ResumeError):
         vr.SaveData.from_dict(data)
+
+
+def test_ready_pickup_prevents_premature_stranded_tow(monkeypatch):
+    world = _world_with_seed(42)
+    world.save.current_system = world.here.connections[0]
+    vr.buy_futures_contract(world, "food", 2, 5)
+    world.save.turn = 5
+    world.save.ship.fuel = 0
+    world.save.pilot.credits = 0
+    station = world.save.current_system
+    assert vr.is_stranded(world)
+    snapshots = []
+    world._checkpoint = lambda current: snapshots.append(current.save.to_dict())
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.screen_station_menu(vr.Palette(False), world) == "Q"
+    assert world.save.current_system == station
+    assert world.save.cargo == {"food": 2}
+    assert not world.save.active_futures
+    assert snapshots[0]["cargo"] == {"food": 2}
+    assert "tug" not in output.getvalue().lower()
+
+
+@pytest.mark.parametrize("fields", [("origin_system",), ("principal",), ("origin_system", "principal")])
+def test_explicit_null_futures_metadata_preserves_original_save(tmp_path, fields):
+    import json
+
+    world = _world_with_seed(42)
+    vr.buy_futures_contract(world, "food", 1, 5)
+    data = world.save.to_dict()
+    for field in fields:
+        data["active_futures"][0][field] = None
+    path = tmp_path / "77.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(vr.ResumeError):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert path.read_bytes() == before
+
+
+def test_legacy_futures_keep_absent_pickup_metadata_across_checkpoints():
+    original = vr.FuturesContract(1, "food", 1, 100, 5)
+    data = original.to_dict()
+    assert "origin_system" not in data and "principal" not in data
+    assert vr.FuturesContract.from_dict(data).to_dict() == data
