@@ -4003,6 +4003,12 @@ longer need active membership; requiring it would reject legitimate restarts.
 Broader schema validation, per-pilot concurrency, and shared score transactions
 remain separate work in issue #310.
 
+Voidrunner's menu commands case-fold ASCII only; Unicode remains text input,
+so Unicode case aliases cannot surrender cargo or dispatch another hotkey.
+Acknowledgement pauses ignore both incomplete Escape and unsupported keys.
+OSC accepts BEL or ST; other control strings require ST, and bracketed paste
+recognizes both CSI encodings of its terminator.
+
 Voidrunner's standalone input decoder reads unbuffered stdin bytes. Mixing
 buffered `sys.stdin.buffer.read` with readiness checks can hide prefetched bytes
 from the OS and strand a partial key. POSIX uses `select` for partial-key waits;

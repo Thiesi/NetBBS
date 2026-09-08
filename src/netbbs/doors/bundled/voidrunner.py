@@ -379,6 +379,7 @@ class _DoorInput:
         self.skip_lf = False
         self.after_timeout = False
         self.mouse_remaining = 0
+        self.string_bel = False
 
     def read_key(self) -> str:
         for _ in range(256):
@@ -406,13 +407,13 @@ class _DoorInput:
             if self.mode == "paste":
                 self.sequence.extend(byte)
                 del self.sequence[:-6]
-                if self.sequence == b"\x1b[201~":
+                if self.sequence.endswith((b"\x1b[201~", b"\x9b201~")):
                     self.mode = "text"
                     self.sequence.clear()
                     return IGNORED_KEY
                 continue
             if self.mode in ("string", "string_escape"):
-                if (self.mode == "string_escape" and byte == b"\\") or n in (7, 0x9c):
+                if (self.mode == "string_escape" and byte == b"\\") or n == 0x9c or (n == 7 and self.string_bel):
                     self.mode = "text"
                     return IGNORED_KEY
                 self.mode = "string_escape" if n == 27 else "string"
@@ -426,6 +427,7 @@ class _DoorInput:
                     continue
                 if byte in (b"]", b"P", b"X", b"^", b"_"):
                     self.mode = "string"
+                    self.string_bel = byte == b"]"
                     continue
                 if 0x20 <= n <= 0x2f:
                     self.mode = "intermediate"
@@ -480,6 +482,7 @@ class _DoorInput:
                 continue
             elif n in (0x90, 0x98, 0x9d, 0x9e, 0x9f):
                 self.mode = "string"
+                self.string_bel = n == 0x9d
                 continue
             elif n >= 0x80:
                 self.utf8_size = 2 if 0xc2 <= n <= 0xdf else 3 if 0xe0 <= n <= 0xef else 4 if 0xf0 <= n <= 0xf4 else 0
@@ -518,6 +521,12 @@ def read_key() -> str:
     return _INPUT_READER.read_key()
 
 
+def read_command() -> str:
+    """Match displayed ASCII hotkeys without Unicode case-fold aliases."""
+    key = read_key()
+    return key.upper() if len(key) == 1 and key.isascii() else IGNORED_KEY
+
+
 def read_line_raw(max_len: int = 20, allowed=lambda c: "0" <= c <= "9") -> str:
     """Edit bounded Unicode text; numeric fields accept ASCII decimal digits.
 
@@ -550,7 +559,7 @@ def read_line_raw(max_len: int = 20, allowed=lambda c: "0" <= c <= "9") -> str:
 def confirm(prompt: str, p: Palette) -> bool:
     out_prompt(f"{p.muted}{prompt} [Y/N] {RESET}")
     while True:
-        key = read_key().upper()
+        key = read_command()
         if key == "Y":
             out_line("Y")
             return True
@@ -561,7 +570,7 @@ def confirm(prompt: str, p: Palette) -> bool:
 
 def pause(p: Palette, msg: str = "Press any key to continue...") -> None:
     out_prompt(f"{p.muted}{msg}{RESET}")
-    while read_key() == IGNORED_KEY:
+    while read_key() in (IGNORED_KEY, ESCAPE_KEY):
         pass
     out_line()
 
@@ -2430,7 +2439,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
             out_line(f"{p.accent}│{RESET}{row}{' ' * pad_len}{p.accent}│{RESET}")
     out_line(_box_bottom(p))
     out_prompt(f"  {p.gold}Command Deck{RESET} {p.muted}> {RESET}")
-    choice = read_key().upper()
+    choice = read_command()
     out_line(choice)
     return choice
 
@@ -2510,7 +2519,7 @@ def screen_market(p: Palette, world: World) -> None:
         hold_bar = _gauge_bar(used, cap, 10, p)
         out_line(f"  {p.accent}Cargo Hold:{RESET} {hold_bar} {used}/{cap} units   │   {p.gold}[X]{RESET} Futures Exchange")
         out_prompt(f"  {p.muted}Trade which [A-{LETTERS[len(rows)-1]}], or [Q] back? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return
@@ -2557,7 +2566,7 @@ def screen_futures(p: Palette, world: World, goods: list[str]) -> None:
             out_line(f"{p.accent}│{RESET}{f_row}{' ' * pad_len}{p.accent}│{RESET}")
         out_line(f"{p.accent}╰─────────────────────────────────────────────────────────────────────────────╯{RESET}")
         out_prompt(f"  {p.muted}Buy forward contract for which, or [Q] back? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return
@@ -2601,7 +2610,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> None:
     sell = round(buy * SELL_SPREAD)
     out_line(f"{p.accent}{label}{RESET} -- Buy {buy}cr  Sell {sell}cr")
     out_prompt(f"{p.muted}[B]uy [S]ell [Q]cancel: {RESET}")
-    action = read_key().upper()
+    action = read_command()
     out_line(action)
     if action == "B":
         if not COMMODITIES[commodity]["legal"] and world.here.economy != "Haven":
@@ -2692,7 +2701,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
         out_line(f"  {p.accent}Fuel:{RESET} {ship.fuel}/{fuel_capacity(ship)} (6 cr/unit)  │  {p.accent}Hull:{RESET} {ship.hull_hp}/{hull_hp_max(ship)} (4 cr/HP)")
         out_prompt(f"  {p.gold}[U]{RESET}pgrade  {p.gold}[R]{RESET}efuel  {p.gold}[P]{RESET} Repair hull  "
             f"{p.gold}[K] Crew{RESET}  {p.gold}[Q]{RESET} Return: ")
-        action = read_key().upper()
+        action = read_command()
         out_line(action)
         if action == "Q":
             return
@@ -2705,7 +2714,7 @@ def screen_shipyard(p: Palette, world: World) -> None:
             continue
         if action == "U":
             out_prompt(f"  {p.muted}Which upgrade [A-{LETTERS[len(keys)-1]}]? {RESET}")
-            key_choice = read_key().upper()
+            key_choice = read_command()
             out_line(key_choice)
             if key_choice not in LETTERS[: len(keys)]:
                 continue
@@ -2741,7 +2750,7 @@ def screen_crew(p: Palette, world: World) -> None:
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
         out_line(_box_bottom(p))
         out_prompt(f"  {p.muted}Hire/dismiss which [A-{LETTERS[len(keys)-1]}], or [Q] back? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return
@@ -2895,7 +2904,7 @@ def screen_missions(p: Palette, world: World) -> None:
             for m in world.save.active_missions:
                 out_line(f"  {p.muted}- {m.description} (+{m.reward}cr){RESET}")
         out_prompt(f"  {p.muted}Accept which, or [Q] back? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return
@@ -2997,7 +3006,7 @@ def screen_status(p: Palette, world: World) -> None:
 
     if rank_for(pilot.credits) == RANKS[-1][1]:
         out_prompt(f"{p.muted}[R]etire and start a new career, or any other key to continue... {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "R":
             if confirm("This ends your current career for good and begins a new one. Retire?", p):
@@ -3091,7 +3100,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
         actions.append(f"{p.gold}[V]{RESET}iew full chart by sector")
         out_line(f"  {'   '.join(actions)}")
         out_prompt(f"  {p.muted}Jump to which, or [Q] back? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return None
@@ -3204,7 +3213,7 @@ def _screen_auto_route(p: Palette, world: World) -> None:
         for i, s in enumerate(shown):
             out_line(f"  {p.gold}[{pick_letters[i]}]{RESET} {s.name}")
         out_prompt(f"  {p.muted}Which one, or [Q] cancel? {RESET}")
-        key = read_key().upper()
+        key = read_command()
         out_line(key)
         if key == "Q":
             return
@@ -3306,7 +3315,7 @@ def _encounter_derelict(p: Palette, world: World) -> None:
         out_line(f"{p.muted}Sensors pick up a derelict hulk drifting nearby.{RESET}")
         while True:
             out_prompt(f"{p.muted}[B]oard for salvage or [I]gnore and continue? {RESET}")
-            action = read_key().upper()
+            action = read_command()
             out_line(action)
             if action in ("B", "I"):
                 break
@@ -3333,7 +3342,7 @@ def _encounter_distress_call(p: Palette, world: World) -> None:
     out_line(f"{p.muted}A garbled distress signal reaches your comms.{RESET}")
     while True:
         out_prompt(f"{p.muted}[H]elp (costs fuel) or [I]gnore and continue? {RESET}")
-        action = read_key().upper()
+        action = read_command()
         out_line(action)
         if action in ("H", "I"):
             break
@@ -3605,7 +3614,7 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             if can_pay:
                 actions += " [B]ribe"
         out_prompt(f"{p.muted}{actions} [Q]uick status: {RESET}")
-        action = read_key().upper()
+        action = read_command()
         out_line(action)
         lines = []
         outcome = None
@@ -3705,7 +3714,7 @@ def screen_customs(p: Palette, world: World) -> None:
     value = sum(q * COMMODITIES[c]["base"] for c, q in world.save.cargo.items() if not COMMODITIES[c]["legal"])
     while True:
         out_prompt(f"  {p.muted}[S]urrender contraband [B]ribe the inspector: {RESET}")
-        action = read_key().upper()
+        action = read_command()
         out_line(action)
         if action in ("S", "B"):
             break

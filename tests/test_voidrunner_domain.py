@@ -4039,7 +4039,7 @@ def test_real_door_accepts_utf8_name_and_coalesces_crlf(tmp_path):
 def test_real_pipe_lone_escape_returns_without_waiting_for_another_byte(tmp_path):
     world = _world_with_seed(42)
     vr.persist(world, tmp_path, 77)
-    with _door_stopped_at(tmp_path, b"\x1b", b"<ESC>"):
+    with _door_stopped_at(tmp_path, b"\x1b", b"<key>"):
         saved, is_new, notice = vr.load_or_create_save(tmp_path, 77, "Tester")
     assert not is_new and notice is None
     assert saved.turn == 0
@@ -4060,3 +4060,36 @@ def test_real_pipe_eof_in_partial_key_never_launches_career(tmp_path, partial):
     assert result.returncode == 0
     assert not result.stderr
     assert not list(tmp_path.glob("*.json"))
+
+
+@pytest.mark.parametrize("prefix", [b"\x1bP", b"\x1bX", b"\x1b^", b"\x1b_", b"\x90", b"\x98", b"\x9e", b"\x9f"])
+def test_st_only_control_strings_do_not_leak_keys_after_bel(prefix):
+    stream = io.BytesIO(prefix + b"data\x07YBUY\x1b\\Z")
+    reader = vr._DoorInput(lambda timeout: stream.read(1))
+    assert reader.read_key() == vr.IGNORED_KEY
+    assert reader.read_key() == "Z"
+
+
+@pytest.mark.parametrize("start", [b"\x1b[200~", b"\x9b200~"])
+@pytest.mark.parametrize("end", [b"\x1b[201~", b"\x9b201~"])
+def test_paste_accepts_both_csi_terminators(start, end):
+    stream = io.BytesIO(start + b"BUY" + end + b"Q")
+    reader = vr._DoorInput(lambda timeout: stream.read(1))
+    assert reader.read_key() == vr.IGNORED_KEY
+    assert reader.read_key() == "Q"
+
+
+def test_fragmented_escape_cannot_dismiss_result_pause(monkeypatch):
+    events = iter([b"\x1b", None, b"[", b"A", b"K", b"N"])
+    reader = vr._DoorInput(lambda timeout: next(events))
+    monkeypatch.setattr(vr, "read_key", reader.read_key)
+    with contextlib.redirect_stdout(io.StringIO()):
+        vr.pause(vr.Palette(False))
+    assert reader.read_key() == "N"
+
+
+@pytest.mark.parametrize("text", ["\u017f", "\u0131", "\u00df"])
+def test_unicode_cannot_alias_ascii_commands(monkeypatch, text):
+    _use_decoded_input(monkeypatch, (text + "s").encode("utf-8"))
+    assert vr.read_command() == vr.IGNORED_KEY
+    assert vr.read_command() == "S"
