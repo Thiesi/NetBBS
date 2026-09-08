@@ -5117,3 +5117,13 @@ assert both monotonic states and use per-checkpoint replay tests for the exact g
 Keep the historical post-win RNG draw for sequence compatibility. Existing cached
 targets without warrant metadata retain their controls and get no new undisclosed
 identity penalty; never retrofit the prompt into an already-started fight.
+
+Exploration decision previews must derive ranges without drawing encounter RNG.
+For in-flight derelicts, current_system is still the departure point; use the
+pending destination for both salvage limits and newly generated ambush tiers.
+Stored ambushes resume directly without redisplaying or resolving boarding.
+Distress cost disclosure preserves the original capped 2-4 fuel draw, including
+low/zero-fuel careers, and must warn when that cap can empty the tank.
+
+Sector danger spans 0-5; opponent tiers span 0-4. Keep their scales distinct in
+encounter labels and test the danger-5 case when deriving rewards or tier ranges.
