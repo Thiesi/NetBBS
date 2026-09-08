@@ -4685,6 +4685,27 @@ cargo, and does not repost the offer. Completion, expiry and abandonment clear
 tracking. Contract lists and detail text paginate to terminal dimensions, with
 Back on every page. Broader map/route planning remains in issue #310.
 
+Economy safeguards (issue #310): Blackwake standing from trade follows each new
+500-credit high-water milestone in cumulative contraband sales minus purchases
+and new futures outlay/refunds. Buying and same-station recycling do not grant
+standing; splitting transactions cannot reset milestones. Existing standing is
+retained and the new ledger starts at zero for old careers (old cargo has no
+recorded acquisition cost). Combat/faction rewards remain separate.
+
+The engineer costs 200 credits to hire and 2 per jump, reducing fuel by 25%,
+rounded up, with a minimum one-unit burn. The role is an investment for longer
+routes; one-unit jumps cannot benefit, and hiring does not refund old hire costs.
+
+New futures orders lock goods for pickup at their issuing station after maturity.
+Up to eight orders may be active; insufficient hold space leaves a ready order
+waiting. Orders can be cancelled remotely for their recorded goods principal;
+the 8% brokerage fee (rounded up per unit, at least one credit) is never refunded.
+Splitting orders cannot reduce that per-unit fee. Purchase screens show quantity,
+term, pickup station, principal and fee before signing, with Back writing nothing.
+Mature goods settle on arrival or station entry before mission completion checks.
+Legacy orders without pickup/principal metadata retain their original remote
+settlement/full-refund terms, explicitly labelled as legacy, until consumed.
+
 Compatibility extension (issues #296/#297):
 
 - A nullable, versioned profile preserves the original JSON/stdio API for
