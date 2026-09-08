@@ -158,6 +158,25 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### Bounty identification
+
+Before engaging a new bounty contact, **[V] Verify** spends one fuel to check the
+posted identity. It spends no combat turn. **[W] Withdraw** continues the journey
+and keeps the contract; the identity stays the same on a later attempt. A confirmed
+mismatch offers **[R] Close incorrect warrant**, ending the contract without a
+fight, bounty payout, mission credit or notoriety penalty.
+
+Posted matches have a 12% error rate. If you fire unverified or knowingly attack a
+mismatch, the full bounty still pays, but the identification penalty adds two
+notoriety and subtracts three Concord standing in addition to normal combat
+rewards. Verification, reporting and free withdrawal close after engaging,
+including an attempted evasion or bribe. Without one fuel, verification is
+unavailable; withdrawal remains available before engagement.
+
+Verified identity, fuel spending and report completion save before acknowledgement.
+A target selected under older rules keeps its existing controls and receives no
+new undisclosed post-kill identity penalty. Earlier career history stays intact.
+
 ### Customs decisions
 
 An inspection pages its full terms with **[<] Previous / [>] Next**, keeping
