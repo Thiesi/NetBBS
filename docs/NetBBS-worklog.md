@@ -3978,9 +3978,25 @@ not be swallowed as successful actions. A private temporary file is flushed
 before atomic replacement; this prevents shared-temp collisions but does not
 serialize concurrent pilot sessions or leaderboard updates. Tests must kill the
 real subprocess after its success output while a nested menu still owns input;
-EOF and orderly menu-exit tests do not prove this boundary. Interrupted encounters
-still need persisted resumable state (issue #310), and are not covered by the
-completed-hop checkpoint guarantee.
+EOF and orderly menu-exit tests do not prove this boundary.
+
+A Voidrunner journey saves monotonic primary/escort/arrival/customs phases. Every
+combat decision commits opponent HP, the event RNG state, ship/pilot changes, and
+a terminal outcome together before narration. The parent consumes that outcome
+with its mission reward or next-wave index in a separate atomic checkpoint; never
+clear the outcome before the parent effects are committed. Escort snapshots carry
+the full contract because legacy offers can share IDs. The per-hop destruction
+signal persists too: a resumed loss must resolve its failed bounty/escort, skip
+later encounters, and retain the tow to Freeport. Only the current hop resumes;
+an interrupted auto-route does not continue to later hops without pilot input.
+The latest combat exchange is bounded to one decision, not an expanding replay
+log. Validate this boundary by serializing every checkpoint of representative
+journeys and comparing each resumed result with uninterrupted execution, alongside
+a real subprocess kill/relaunch test. The event RNG is independent of galaxy
+generation. New journey state has its own version; unreadable/unsupported state
+must stop play without entering the older corrupt-save/new-career fallback.
+Broader schema validation, per-pilot concurrency, and shared score transactions
+remain separate work in issue #310.
 
 `netbbs.net.admin_flow._door_field_specs`' `args` field is parsed with
 `shlex.split(draft["args_line"])` -- deliberately POSIX-mode (the
