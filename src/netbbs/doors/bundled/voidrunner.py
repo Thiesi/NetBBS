@@ -3720,6 +3720,14 @@ def investigate_landmark(world: World) -> list[str]:
     return lines
 
 
+def archive_standing_terms(world: World, public: bool) -> str:
+    concord = world.save.pilot.reputation.get(FACTION_CONCORD, 0)
+    delta = min(100, concord + 5) - concord if public else max(-100, concord - 2) - concord
+    if public: return f"Concord {delta:+d}"
+    blackwake = world.save.pilot.reputation.get(FACTION_BLACKWAKE, 0)
+    return f"Blackwake {min(100, blackwake + 5) - blackwake:+d}; Concord {delta:+d}"
+
+
 def archive_action(world: World, action: str) -> list[str]:
     flags = world.save.flags
     if world.save.pending_travel is not None: raise ValueError("Finish the current journey first.")
@@ -3739,6 +3747,7 @@ def archive_action(world: World, action: str) -> list[str]:
     if action not in ("P", "S") or not flags.get("archive_v1_recovered") or world.here.id != 0:
         raise ValueError("Return the recovered record to Freeport first.")
     public = action == "P"
+    standing = archive_standing_terms(world, public)
     flags["archive_v1_public" if public else "archive_v1_private"] = True
     reward = 500 if public else 1500
     world.save.pilot.credits += reward
@@ -3748,7 +3757,7 @@ def archive_action(world: World, action: str) -> list[str]:
     ending = "preserved the archive for Freeport" if public else "sold the archive to Kest Rel"
     world.save.pilot.note(f"Archive complete: {ending} (+{reward}cr).")
     world.save.pilot.highlight(f"Archive: {ending}.")
-    return [f"Archive complete: +{reward}cr. " + ("Concord +5." if public else "Blackwake +5; Concord -2."),
+    return [f"Archive complete: +{reward}cr. {standing}.",
             "Mara: Now the families can read their own history." if public else
             "Kest Rel: The sealed copy is safe with me. Mara keeps only your account of the journey."]
 
@@ -3762,7 +3771,7 @@ def archive_lines(world: World) -> list[str]:
                   ["Kest Rel holds the sealed record. Mara preserves your travel account, but the source remains private."])
         return lines + ["Assignment complete. Rewards cannot be claimed again."]
     lines += ["Optional assignment: no deadline, deposit or contract-slot cost. Ordinary fuel, wages and travel risks apply.",
-              "On return: public preservation pays 500cr and Concord +5; private sale pays 1,500cr, Blackwake +5 and Concord -2."]
+              f"At current standing: public preservation pays 500cr; {archive_standing_terms(world, True)}. Private sale pays 1,500cr; {archive_standing_terms(world, False)}. Standing stays within -100 to 100."]
     if not flags.get("archive_v1_started"):
         lines += [f"Site: {world.landmark['label']} near {target.name} ({target.x},{target.y}). Visiting the site is required; scanning it is not enough.",
                   "[A] Accept at Freeport." if world.here.id == 0 else "Meet Mara at Freeport to accept. [R] Route there."]

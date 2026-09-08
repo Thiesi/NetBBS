@@ -174,7 +174,9 @@ The four landmark types hold different records and interpretations.
 
 Return to Freeport. **[P] Publish** preserves the record for the public archive,
 paying 500 credits and Concord +5. **[S] Sell privately** gives it to broker Kest
-Rel for 1,500 credits, Blackwake +5 and Concord -2. The choice closes the assignment,
+Rel for 1,500 credits, Blackwake +5 and Concord -2. Standing stays within -100 to
+100; the screen shows the effective changes at your current standing. The choice
+closes the assignment,
 adds one completed mission and records a career highlight. Revisit the contact to
 read the response to your choice. Acceptance, recovery and the ending save before
 their acknowledgement; reconnecting cannot repeat a reward.

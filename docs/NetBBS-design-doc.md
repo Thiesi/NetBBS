@@ -4862,8 +4862,9 @@ record and interpretation. Previously investigated sites can supply a transcript
 without paying their salvage twice.
 
 On returning to Freeport, the pilot chooses public preservation (500 credits,
-Concord +5) or a private sale (1,500 credits, Blackwake +5, Concord -2). Each ending
-awards one completed assignment and a career highlight, once. The contact's closing
+Concord +5) or a private sale (1,500 credits, Blackwake +5, Concord -2). Standing
+is capped within -100 to 100; previews use current standing and results report
+the effective change. Each ending awards one completed assignment and a career highlight, once. The contact's closing
 response reflects that choice. Optional versioned flags record acceptance, recovery
 and mutually exclusive endings; recovery requires an investigated landmark. Every
 action validates before mutation and checkpoints before acknowledgement. Browsing,

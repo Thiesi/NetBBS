@@ -9522,3 +9522,21 @@ def test_distress_terms_disclose_actual_capped_standing_gain(monkeypatch, standi
     monkeypatch.setattr(vr, "read_key", lambda: "H")
     with contextlib.redirect_stdout(io.StringIO()): vr._encounter_distress_call(vr.Palette(False), world)
     assert world.save.pilot.reputation[vr.FACTION_CONCORD] - standing == gain
+
+
+@pytest.mark.parametrize("concord,blackwake", [(-100, 100), (-99, 99), (-98, 98), (0, 0), (95, 95), (96, 96), (99, 99), (100, 100)])
+@pytest.mark.parametrize("ending", ["P", "S"])
+def test_archive_preview_and_result_report_effective_standing(ending, concord, blackwake):
+    import copy
+    world = _archive_world("recovered")
+    world.save.pilot.reputation = {vr.FACTION_CONCORD: concord, vr.FACTION_BLACKWAKE: blackwake}
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    concord_gain = min(100, concord + 5) - concord if ending == "P" else max(-100, concord - 2) - concord
+    blackwake_gain = min(100, blackwake + 5) - blackwake
+    terms = f"Concord {concord_gain:+d}" if ending == "P" else f"Blackwake {blackwake_gain:+d}; Concord {concord_gain:+d}"
+    assert terms in " ".join(vr.archive_lines(world))
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    assert terms in " ".join(vr.archive_action(world, ending))
+    assert world.save.pilot.reputation[vr.FACTION_CONCORD] - concord == concord_gain
+    assert world.save.pilot.reputation[vr.FACTION_BLACKWAKE] - blackwake == (0 if ending == "P" else blackwake_gain)
+    assert world.event_rng.getstate() == rng
