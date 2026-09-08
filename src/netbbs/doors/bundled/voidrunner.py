@@ -5580,7 +5580,7 @@ def exploration_choice(p: Palette, world: World, title: str, lines: list[str], a
     page = 0
     while True:
         action, page, count = _draw_service_page(
-            p, f"{title} {world.save.pilot.credits:,}cr", lines,
+            p, f"{title} {world.save.pilot.credits:,}cr Fuel {world.save.ship.fuel}", lines,
             f"[{actions}]Act [<>]Page: ", page,
         )
         if action == ">": page = min(page + 1, count - 1)
@@ -5605,11 +5605,11 @@ def distress_terms(world: World) -> list[str]:
     cost = str(low) if low == high else f"{low}-{high}"
     lines = [
         f"[H] Help: spend {cost} fuel.",
-        f"Survivors offer 60-180cr and Concord standing +3. No combat. Current fuel: {fuel}.",
+        f"Survivors offer 60-180cr and Concord standing +{min(3, 100 - world.save.pilot.reputation.get(FACTION_CONCORD, 0))} (cap 100). No combat. Current fuel: {fuel}.",
         f"Fuel after helping: {fuel - high}-{fuel - low}.",
         "[I] Ignore: spend nothing, no reputation penalty; continue your journey.",
     ]
-    if fuel <= 4: lines.insert(1, "May leave tank empty.")
+    if fuel <= 4: lines.insert(1, "Risk: tank empty.")
     return lines
 
 

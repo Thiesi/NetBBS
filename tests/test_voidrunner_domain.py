@@ -8775,6 +8775,7 @@ def test_exploration_terms_fit_and_browsing_has_no_effects(monkeypatch, kind, wi
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(line) <= width for line in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+        assert "Fuel 3" in " ".join(vr._ANSI_RE.sub("", frame).split())
         page, count = map(int, re.search(r"(?:Derelict|Distress).*?(\d+)/(\d+)", frame, re.S).groups())
         if len(frames) == 1:
             first = " ".join(frame.split())
@@ -8843,7 +8844,9 @@ def _world_with_exploration_choice(kind):
 def test_real_exploration_browsing_and_disconnect_preserve_pending_save(tmp_path, kind):
     world = _world_with_exploration_choice(kind); vr.persist(world, tmp_path, 77)
     path = tmp_path / "77.json"; before = path.read_bytes()
-    with _door_stopped_at(tmp_path, b">?<", b"[B/I]Act" if kind == "derelict" else b"[H/I]Act"):
+    with _door_stopped_at(tmp_path, b">?<", b"Page: <") as output:
+        # This echo exists only after both navigation keys and invalid input were read.
+        assert b"Page: >" in output and b"Page: ?" in output and b"Page: <" in output
         assert path.read_bytes() == before
 
 
@@ -8974,3 +8977,17 @@ def test_bounty_combat_risk_terms_match_identification_state_without_rng(identit
     else:
         assert "Concord -3" not in text and "12%" not in text
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("standing", [-100, 0, 97, 98, 99, 100])
+def test_distress_terms_disclose_actual_capped_standing_gain(monkeypatch, standing):
+    world = _world_with_seed(42); world.save.pilot.reputation[vr.FACTION_CONCORD] = standing
+    rng = world.event_rng.getstate()
+    terms = " ".join(vr.distress_terms(world))
+    gain = min(3, 100 - standing)
+    assert f"Concord standing +{gain}" in terms
+    assert world.event_rng.getstate() == rng
+    monkeypatch.setattr(world.event_rng, "randint", lambda low, high: low)
+    monkeypatch.setattr(vr, "read_key", lambda: "H")
+    with contextlib.redirect_stdout(io.StringIO()): vr._encounter_distress_call(vr.Palette(False), world)
+    assert world.save.pilot.reputation[vr.FACTION_CONCORD] - standing == gain
