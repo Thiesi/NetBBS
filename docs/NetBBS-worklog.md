@@ -3214,6 +3214,23 @@ with no newline *after* assigning the value, so a pidfile without a trailing
 newline would read as "not running" and start a second node against the same
 database. Judge the value, not `read`'s exit status.
 
+Confirming a start needs a readiness signal, not a `sleep`. Startup runs a
+database integrity check before it binds anything, so on a large database "the
+process is still alive after N seconds" is true well before any listener
+exists — and if setup then fails, the service has already reported success with
+no node running, which is the same silent success this whole entry is about.
+Wait for the node's own "ready to accept connections" line instead, bounded, and
+only past the point in the (appended) logfile where this start's output begins,
+or a previous run's readiness line is read as this one's. Alive-but-unconfirmed
+at the bound is not a failure that can be asserted — a very slow start looks
+identical — so report the uncertainty rather than claiming either outcome.
+
+`rc.conf` durations are operator input and reach `[ ... -ge ... ]`, where a
+non-integer makes the test error and evaluate false on every iteration. That
+turns a bounded stop into an unbounded one, hanging `service netbbs stop` and,
+with `KEYWORD: shutdown`, system shutdown with it; a negative value skips
+straight to SIGKILL. Validate, fall back to the documented default, and say so.
+
 `load_rc_config $name` must be called *before* the `: ${var:=default}` block,
 per `rc.subr(8)`. Called after, as it was, every documented `rc.conf` override
 is read too late to have any effect and the built-in defaults always win —

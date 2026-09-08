@@ -14,11 +14,16 @@
 
 Both default to a config file at `/etc/netbbs/netbbs.toml` — the path
 `docs/NetBBS-operator-guide.md` §2 tells you to create, on either
-platform — and run NetBBS in
-the foreground, letting the service supervisor manage backgrounding and
-restart — NetBBS never daemonizes itself (design doc §13.8). See
-`docs/NetBBS-operator-guide.md` for the full install-through-running
-path these fit into.
+platform — and both run NetBBS in the foreground and background it
+themselves, because NetBBS never daemonizes (design doc §13.8).
+
+**Automatic restart is not the same on both.** The systemd unit restarts
+a node that dies (`Restart=on-failure`). NetBSD's `rc.d` has no
+equivalent in base, so `netbbs.rc` starts, stops and reports status but
+will not bring a crashed node back — a Tier 1 node needs an operator's
+own periodic `service netbbs status || service netbbs start` check for
+that. See `docs/NetBBS-operator-guide.md` §3 for the full
+install-through-running path these fit into.
 
 ## Welcome banners and main-menu mastheads
 

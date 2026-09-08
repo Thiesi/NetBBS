@@ -20,6 +20,7 @@
 #	netbbs_python="/var/lib/netbbs/.venv/bin/python"
 #	netbbs_logfile="/var/lib/netbbs/netbbs.service.log"
 #	netbbs_stop_timeout="150"			# seconds to wait for a graceful stop
+#	netbbs_start_timeout="60"			# seconds to wait for the node to report readiness
 #
 # Install: copy this file from the official GitHub release/source tree to
 # /etc/rc.d/netbbs, add netbbs=YES to /etc/rc.conf, then run
@@ -56,6 +57,15 @@ load_rc_config $name
 # real headroom above both -- the same reasoning as the example systemd
 # unit's TimeoutStopSec. Raise it if you raised graceful_delay_seconds.
 : ${netbbs_stop_timeout:="150"}
+# How long to wait for the node to report that its listeners are up
+# before giving up on confirming the start. Generous: a first start on a
+# large database runs an integrity check before it ever binds a socket.
+: ${netbbs_start_timeout:="60"}
+
+# The line netbbs logs once every listener is bound and it is actually
+# serving (netbbs.__main__). Seeing this, rather than merely seeing the
+# process alive, is what makes a reported start true.
+netbbs_ready_marker="NetBBS is ready to accept connections"
 
 # The pidfile lives in the node's own state directory rather than
 # /var/run: this script backgrounds the node as netbbs_user (see
@@ -86,6 +96,27 @@ extra_commands="status"
 # call it live), and then `kill -TERM -1` signals every process on the
 # host. Only a plain positive decimal is accepted. `read` also takes
 # just the first line, so trailing junk cannot ride along.
+# rc.conf values are operator input and reach `[ ... -ge ... ]`, where
+# a non-integer makes the test error and evaluate false forever -- which
+# would turn the bounded stop below into an unbounded wait, hanging
+# `service netbbs stop` and, with KEYWORD: shutdown, the system
+# shutdown with it. A negative value would instead skip straight to
+# SIGKILL. Fall back to the documented default and say so, rather than
+# either.
+netbbs_seconds()
+{
+	# $1 = value, $2 = default, $3 = variable name (for the message)
+	case "$1" in
+	"" | *[!0-9]*)	;;
+	*)	if [ "$1" -ge 1 ]; then
+			echo "$1"
+			return 0
+		fi ;;
+	esac
+	echo "netbbs: ignoring invalid $3=\"$1\"; using $2 seconds." >&2
+	echo "$2"
+}
+
 netbbs_read_pid()
 {
 	_pid=""
@@ -151,6 +182,13 @@ netbbs_start()
 		return 1
 	fi
 	rm -f "${pidfile}"
+	# The logfile is appended to across restarts, so a readiness line from
+	# an earlier run is already in it. Note where this start's output
+	# begins and only look past that point.
+	_log_from=$(wc -l < "${netbbs_logfile}" 2>/dev/null | tr -d ' ')
+	case "${_log_from}" in
+	"" | *[!0-9]*)	_log_from=0 ;;
+	esac
 	echo "Starting netbbs."
 	# su -m leaves the environment alone, so HOME would still be root's.
 	# Set it explicitly to the state directory: a door that keeps its own
@@ -182,19 +220,39 @@ netbbs_start()
 	# applies to itself.) Set netbbs_logfile=/dev/null in rc.conf if you
 	# would rather not keep this second copy at all.
 	su -m "${netbbs_user}" -c "nohup env HOME=\"${netbbs_statedir}\" LD_LIBRARY_PATH=\"${netbbs_ld_library_path}\" \"${netbbs_python}\" -m netbbs --config \"${netbbs_config}\" >> \"${netbbs_logfile}\" 2>&1 & echo \$! > \"${pidfile}\""
-	# NetBBS binds its listeners during startup; a config or import error
-	# surfaces within a second or two. Waiting here turns "the service
-	# reported success and there is no node" into a visible failure at
-	# the point the operator ran the command.
-	sleep 3
-	if netbbs_running; then
-		echo "netbbs started as pid ${_pid}."
-	else
-		echo "netbbs failed to start -- see ${netbbs_logfile}." >&2
-		tail -5 "${netbbs_logfile}" >&2
-		rm -f "${pidfile}"
-		return 1
-	fi
+	# Wait for the node to say it is serving, not for a fixed interval:
+	# startup runs a database integrity check before binding anything, so
+	# on a large database "the process is still alive after N seconds"
+	# can be true well before any listener exists -- and if setup then
+	# fails, the service has already reported success with no node
+	# running. That is the exact failure this script exists to remove, so
+	# it must not be reintroduced by a hopeful `sleep`.
+	_start_timeout=$(netbbs_seconds "${netbbs_start_timeout}" 60 netbbs_start_timeout)
+	_waited=0
+	while :; do
+		if ! netbbs_running; then
+			echo "netbbs failed to start -- see ${netbbs_logfile}." >&2
+			tail -20 "${netbbs_logfile}" >&2
+			rm -f "${pidfile}"
+			return 1
+		fi
+		if tail -n "+$((_log_from + 1))" "${netbbs_logfile}" 2>/dev/null |
+		   grep -q "${netbbs_ready_marker}"; then
+			echo "netbbs started as pid ${_pid}."
+			return 0
+		fi
+		if [ "${_waited}" -ge "${_start_timeout}" ]; then
+			# Alive but unconfirmed. Not a failure we can assert -- a
+			# very slow start looks the same from here -- so leave it
+			# running and make the uncertainty the operator's to judge
+			# rather than claiming either outcome.
+			echo "netbbs is running as pid ${_pid} but has not reported readiness" >&2
+			echo "within ${_start_timeout}s -- check ${netbbs_logfile}." >&2
+			return 0
+		fi
+		sleep 1
+		_waited=$((_waited + 1))
+	done
 }
 
 netbbs_stop()
@@ -204,11 +262,12 @@ netbbs_stop()
 		rm -f "${pidfile}"
 		return 0
 	fi
-	echo "Stopping netbbs (pid ${_pid}), up to ${netbbs_stop_timeout}s."
+	_timeout=$(netbbs_seconds "${netbbs_stop_timeout}" 150 netbbs_stop_timeout)
+	echo "Stopping netbbs (pid ${_pid}), up to ${_timeout}s."
 	kill -TERM "${_pid}"
 	_waited=0
 	while kill -0 "${_pid}" 2>/dev/null; do
-		if [ "${_waited}" -ge "${netbbs_stop_timeout}" ]; then
+		if [ "${_waited}" -ge "${_timeout}" ]; then
 			# Last resort. A SIGKILLed node cannot run its own door
 			# cleanup, and doors are deliberately spawned into their
 			# own sessions (netbbs.doors.runtime: start_new_session),
@@ -217,7 +276,7 @@ netbbs_stop()
 			# A door subprocess can therefore outlive a forced stop.
 			# Keep netbbs_stop_timeout comfortably above
 			# shutdown.graceful_delay_seconds so this stays unreached.
-			echo "netbbs did not exit in ${netbbs_stop_timeout}s; sending SIGKILL." >&2
+			echo "netbbs did not exit in ${_timeout}s; sending SIGKILL." >&2
 			kill -KILL "${_pid}" 2>/dev/null
 			break
 		fi
