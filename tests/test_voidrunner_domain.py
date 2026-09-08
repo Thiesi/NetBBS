@@ -5339,7 +5339,14 @@ def test_recovery_failure_keeps_primary_and_previous(tmp_path, monkeypatch, fail
     if failure == "archive":
         monkeypatch.setattr(vr.tempfile, "NamedTemporaryFile", lambda **kw: (_ for _ in ()).throw(PermissionError()))
     elif failure == "replacement":
-        monkeypatch.setattr(vr.os, "replace", lambda *args: (_ for _ in ()).throw(OSError()))
+        replace = vr.os.replace
+
+        def fail_primary(source, destination):
+            if Path(destination).name == "77.json":
+                raise OSError("primary replacement failed")
+            return replace(source, destination)
+
+        monkeypatch.setattr(vr.os, "replace", fail_primary)
     elif failure == "changed":
         expected = expected + b" "
     else:
@@ -5350,6 +5357,61 @@ def test_recovery_failure_keeps_primary_and_previous(tmp_path, monkeypatch, fail
         vr.restore_previous_career(tmp_path, 77, expected)
     assert (tmp_path / "77.json").read_bytes() == b"damaged original"
     assert (tmp_path / "77.previous.json").read_bytes() == before_previous
+    if failure == "replacement":
+        archives = list(tmp_path.glob("77.recovery-*.json"))
+        assert len(archives) == 1 and archives[0].read_bytes() == b"damaged original"
+
+
+@pytest.mark.parametrize("failure", ["write", "flush", "fsync", "close", "publish"])
+def test_failed_recovery_archive_never_consumes_a_retained_slot(tmp_path, monkeypatch, failure):
+    previous = _broken_career_with_previous(tmp_path)
+    create_temporary = vr.tempfile.NamedTemporaryFile
+
+    class FailingArchive:
+        def __init__(self, **kwargs):
+            self.file = create_temporary(**kwargs)
+            self.name = self.file.name
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.file.close()
+            if failure == "close":
+                raise OSError("archive close failed")
+
+        def write(self, data):
+            if failure == "write":
+                self.file.write(data[:3])
+                raise OSError("archive write failed")
+            return self.file.write(data)
+
+        def flush(self):
+            if failure == "flush":
+                raise OSError("archive flush failed")
+            self.file.flush()
+
+        def fileno(self):
+            return self.file.fileno()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vr.tempfile, "NamedTemporaryFile", FailingArchive)
+        if failure in {"fsync", "publish"}:
+            def fail(*args):
+                raise OSError(f"archive {failure} failed")
+            patch.setattr(vr.os, "fsync" if failure == "fsync" else "replace", fail)
+        for _ in range(vr.MAX_RECOVERY_COPIES + 1):
+            with pytest.raises(OSError, match="archive"):
+                vr.restore_previous_career(tmp_path, 77, previous)
+            assert not list(tmp_path.glob("77.recovery-*.json"))
+            assert not list(tmp_path.glob("*.tmp"))
+            assert (tmp_path / "77.json").read_bytes() == b"damaged original"
+            assert (tmp_path / "77.previous.json").read_bytes() == previous
+
+    vr.restore_previous_career(tmp_path, 77, previous)
+    assert (tmp_path / "77.json").read_bytes() == previous
+    archives = list(tmp_path.glob("77.recovery-*.json"))
+    assert len(archives) == 1 and archives[0].read_bytes() == b"damaged original"
 
 
 def test_missing_primary_requires_recovery_and_validated_previous_can_be_restored(tmp_path):

@@ -2503,11 +2503,20 @@ def restore_previous_career(save_dir: Path, user_id: int, expected: bytes) -> Sa
             pass
         if len(list(save_dir.glob(f"{user_id}.recovery-*.json"))) >= MAX_RECOVERY_COPIES:
             raise ResumeError("Recovery copies are full; ask your SysOp to archive them.")
-        with tempfile.NamedTemporaryFile(mode="wb", dir=save_dir, prefix=f"{user_id}.recovery-",
-                                         suffix=".json", delete=False) as archive:
-            archive.write(original)
-            archive.flush()
-            os.fsync(archive.fileno())
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="wb", dir=save_dir, prefix=f".{user_id}.recovery-",
+                                             suffix=".tmp", delete=False) as archive:
+                temporary = Path(archive.name)
+                archive.write(original)
+                archive.flush()
+                os.fsync(archive.fileno())
+            # Only complete, closed archives enter the retained recovery namespace.
+            retained = temporary.with_name(temporary.name[1:]).with_suffix(".json")
+            os.replace(temporary, retained)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
     _write_bytes_atomic(path, previous)
     return restored
 
