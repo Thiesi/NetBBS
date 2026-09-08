@@ -4993,6 +4993,9 @@ what the same cargo can accomplish.
 Destination pickers wrap each label before allocating the next page. Move a
 whole option to a fresh page when it fits there; splitting a multiword station
 name at the page boundary otherwise creates a selectable trailing-word entry.
+When even a fresh page cannot fit an option, use one read-through choice with
+a short heading and selection only after its final part. Continuation fragments
+must not acquire independent choice numbers; budget the wrapped controls too.
 
 Survey completion requires a new discovery, not presence at an already-charted
 system. A destroyed journey can preserve its departure discovery while skipping

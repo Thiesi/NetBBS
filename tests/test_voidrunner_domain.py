@@ -2879,6 +2879,70 @@ def test_destination_picker_keeps_wrapped_names_on_one_page(monkeypatch,title):
     assert all(vr._visible_width(line)<=20 for frame in frames for line in frame.splitlines())
 
 
+@pytest.mark.parametrize("label",["Yellowstone Deep", "A very long station name " * 12])
+def test_tiny_picker_keeps_oversized_label_as_one_read_through_choice(monkeypatch,label):
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",15);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",10)
+    output=io.StringIO();frames=[]
+    def choose():
+        frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
+        assert len(frames)<200
+        if "[1]Pick" in frame:return "1"
+        assert "[1]" not in frame
+        return "N"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):selected=vr._pick_trade_field("Charted Destination",[(77,label)])
+    assert selected==77
+    assert all("Choice 1" in frame for frame in frames)
+    assert all(len(frame.splitlines())<=10 for frame in frames)
+    assert all(vr._visible_width(line)<=15 for frame in frames for line in frame.splitlines())
+    rows=[]
+    for frame in frames:
+        rows.extend(row for row in frame.splitlines() if row and row not in ("N","P") and not row.startswith(("Choice ","[")))
+    assert " ".join(" ".join(rows).split())==" ".join(label.split())
+
+
+def test_oversized_picker_ignores_selection_on_incomplete_parts(monkeypatch):
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",15);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",10)
+    output=io.StringIO();attempted=False
+    def choose():
+        nonlocal attempted
+        frame=output.getvalue();output.seek(0);output.truncate(0)
+        if not attempted:
+            attempted=True
+            assert "[1]Pick" not in frame
+            return "1"
+        return "1" if "[1]Pick" in frame else "N"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):assert vr._pick_trade_field("Destination",[(9,"unusually long label "*20)])==9
+
+
+@pytest.mark.parametrize("back", [False, True])
+def test_oversized_picker_keeps_choice_identity_when_returning_from_next_option(monkeypatch, back):
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 15)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 10)
+    output = io.StringIO()
+    returned = False
+    frames = []
+    def choose():
+        nonlocal returned
+        frame = output.getvalue()
+        output.seek(0); output.truncate(0)
+        frames.append(frame)
+        assert len(frames) < 200
+        if "[1] Next" in frame:
+            returned = True
+            return "P"
+        if returned:
+            assert "Choice 1" in frame and "[1]Pick" in frame
+            return "B" if back else "1"
+        return "N"
+    monkeypatch.setattr(vr, "read_key", choose)
+    with contextlib.redirect_stdout(output):
+        selected = vr._pick_trade_field("Destination", [(7, "unusually long label " * 20), (8, "Next")])
+    assert returned
+    assert selected == (None if back else 7)
+
+
 def test_general_route_fuel_topups_do_not_require_whole_route_in_tank():
     world = _world_with_seed(42)
     target = max(world.galaxy, key=lambda s: len(vr.bfs_path(world.by_id, 0, s.id)))

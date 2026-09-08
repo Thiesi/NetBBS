@@ -3724,45 +3724,61 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
 
 def _pick_trade_field(title: str, options: list[tuple[object, str]]) -> object | None:
     footer = "[1-9] Select [N]ext [P]rev [B]ack: "
-    budget = len(_trade_pages(["row"] * _OUTPUT_HEIGHT, title, footer)[0])
-    pages = [([], [])]
-    for value, label in options:
-        wrapped = _wrap_output(_mission_plain(label), max(1, _OUTPUT_WIDTH - 5)).split("\r\n")
-        rows, choices = pages[-1]
-        # Keep a complete choice together whenever it fits on a fresh page.
-        # Do not turn the trailing word of a station name into another entry.
-        if rows and (len(rows) + len(wrapped) > budget or len(choices) >= 9):
-            pages.append(([], []))
-        choice = None
-        for row in wrapped:
-            rows, choices = pages[-1]
-            if len(rows) >= budget or (choice is None and len(choices) >= 9):
-                pages.append(([], []))
-                rows, choices = pages[-1]
-                choice = None
-            if choice is None:
-                choices.append(value)
-                choice = len(choices)
-            rows.append(f"[{choice}] {row}")
-    page = 0
+    wrapped_options = [(value, _mission_plain(label), _wrap_output(_mission_plain(label), max(1, _OUTPUT_WIDTH - 5)).split("\r\n"))
+                       for value, label in options]
+    maximum_pages = max(1, sum(len(rows) for _, _, rows in wrapped_options) + len(options))
+    def budget(heading, controls):
+        width = max(1, _OUTPUT_WIDTH - 1)
+        overhead = len(_wrap_output(f"{heading} {maximum_pages}/{maximum_pages}", width).split("\r\n"))
+        overhead += len(_wrap_output(controls, width).split("\r\n")) + 3
+        return max(1, _OUTPUT_HEIGHT - overhead)
+    capacity = budget(title, footer)
+    def ordinary_page():
+        return {"title": title, "footer": footer, "rows": [], "choices": [], "required": ()}
+    pages = [ordinary_page()]
+    for ordinal, (value, label, wrapped) in enumerate(wrapped_options, 1):
+        if len(wrapped) > capacity:
+            # One logical choice, with a short heading and a complete label.
+            # Only its final part is selectable, after every part was viewed.
+            if not pages[-1]["rows"]: pages.pop()
+            heading = f"Choice {ordinal}"
+            select_footer = "[1]Pick [N/P] [B]Back: "
+            more_footer = "[N]More [P]Prev [B]Back: "
+            size = min(budget(heading, select_footer), budget(heading, more_footer))
+            rows = _wrap_output(label, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")
+            chunks = [rows[i:i + size] for i in range(0, len(rows), size)]
+            first = len(pages)
+            required = tuple(range(first, first + len(chunks)))
+            for part, chunk in enumerate(chunks):
+                final = part == len(chunks) - 1
+                pages.append({"title": heading, "footer": select_footer if final else more_footer,
+                              "rows": chunk, "choices": [value] if final else [], "required": required})
+            pages.append(ordinary_page())
+            continue
+        current = pages[-1]
+        if current["rows"] and (len(current["rows"]) + len(wrapped) > capacity or len(current["choices"]) == 9):
+            pages.append(ordinary_page()); current = pages[-1]
+        current["choices"].append(value)
+        choice = len(current["choices"])
+        current["rows"].extend(f"[{choice}] {row}" for row in wrapped)
+    if len(pages) > 1 and not pages[-1]["rows"]: pages.pop()
+    if not options: pages[0]["rows"] = ["No observed destinations yet."]
+    page, seen = 0, set()
     while True:
-        out_line()
-        out_line(f"{title} {page + 1}/{len(pages)}")
-        for row in pages[page][0]:
-            out_line(row)
-        if not options:
-            out_line("No observed destinations yet.")
-        out_prompt(footer)
-        key = read_command()
-        out_line(key)
-        if key == "B":
-            return None
-        if key == "N":
-            page = min(page + 1, len(pages) - 1)
-        elif key == "P":
-            page = max(0, page - 1)
-        elif len(key) == 1 and "1" <= key <= "9" and int(key) <= len(pages[page][1]):
-            return pages[page][1][int(key) - 1]
+        current = pages[page]
+        out_line(); out_line(f"{current['title']} {page + 1}/{len(pages)}")
+        for row in current["rows"]: out_line(row)
+        seen.add(page)
+        out_prompt(current["footer"]); key = read_command(); out_line(key)
+        if key == "B": return None
+        if key == "N": page = min(page + 1, len(pages) - 1)
+        elif key == "P": page = max(0, page - 1)
+        elif len(key) == 1 and "1" <= key <= "9" and int(key) <= len(current["choices"]):
+            unseen = [part for part in current["required"] if part not in seen]
+            if unseen:
+                page = unseen[0]
+            else:
+                return current["choices"][int(key) - 1]
 
 
 def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
