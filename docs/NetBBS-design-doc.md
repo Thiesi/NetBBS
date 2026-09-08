@@ -4629,6 +4629,18 @@ here since #172 is self-contained):
   every screen in its tactical HUD — v5.4.0 release notes carry the full
   list, not repeated here).
 
+Voidrunner's showcase development is tracked in issue #310. Completed station
+actions (including trading, equipment, crew, contracts, scans, faction rewards,
+landmarks and retirement) are committed before their success acknowledgement;
+leaving a nested menu is not a prerequisite for saving. Each completed
+auto-route hop commits before proceeding to the next hop. A failed checkpoint
+stops play and retains an explicit error instead of accepting further actions.
+Cancelling initial career launch creates no new career, invalid customs keys
+make no changes, and the shipyard's displayed upgrade letters work directly.
+Resuming an interrupted encounter is still outstanding: this checkpoint boundary
+does not yet promise persistence of individual combat decisions. Existing galaxy
+seeds and the legacy save format remain compatible.
+
 Compatibility extension (issues #296/#297):
 
 - A nullable, versioned profile preserves the original JSON/stdio API for

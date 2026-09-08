@@ -3967,12 +3967,20 @@ of that function would silently regenerate a different galaxy for every
 existing save (system ids drifting to different names/economies/
 connections underneath a `discovered`-ids list that no longer matches).
 New randomness there is safe to add only at the very end of the
-function. (2) state is written to disk after every player action, not
-only on quit -- a door can be killed at any moment (caller disconnect,
-the wall-time watchdog) with no graceful-shutdown guarantee, so
-save-on-quit-only would routinely lose real progress; the write itself
-is a temp-file-plus-`os.replace` to stay atomic against exactly that
-kind of mid-write kill.
+function. (2) completed station actions must call `World.checkpoint()` after
+all their rule changes and before success output or another input read.
+`main` binds the storage callback; domain-only worlds can remain filesystem-free,
+and career reset preserves the callback. The outer menu loop alone cannot provide
+this guarantee because markets, yards and charts own nested input loops. Scans
+commit their discovery and mission rewards together; auto-routing checkpoints
+each completed hop. Save errors escape to a stop-and-acknowledge screen and must
+not be swallowed as successful actions. A private temporary file is flushed
+before atomic replacement; this prevents shared-temp collisions but does not
+serialize concurrent pilot sessions or leaderboard updates. Tests must kill the
+real subprocess after its success output while a nested menu still owns input;
+EOF and orderly menu-exit tests do not prove this boundary. Interrupted encounters
+still need persisted resumable state (issue #310), and are not covered by the
+completed-hop checkpoint guarantee.
 
 `netbbs.net.admin_flow._door_field_specs`' `args` field is parsed with
 `shlex.split(draft["args_line"])` -- deliberately POSIX-mode (the
