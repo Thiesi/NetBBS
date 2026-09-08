@@ -166,7 +166,8 @@ and opponent tier ranges follow the sector you are entering. Boarding itself
 costs no fuel; an ambush uses ordinary combat choices and losses.
 
 Distress calls offer **[H] Help** for 2-4 fuel, capped at your remaining fuel,
-with a 60-180 credit reward and three Concord standing. The screen shows the
+with a 60-180 credit reward and up to three Concord standing, capped at 100.
+The screen shows the
 possible fuel balance and warns when helping can empty your tank. **[I] Ignore**
 on either screen continues the journey without a reward or penalty. Paging and
 invalid keys spend nothing; completed choices save before their result appears.

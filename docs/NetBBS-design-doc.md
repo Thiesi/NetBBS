@@ -4858,8 +4858,8 @@ available on every page. Browsing and invalid input have no effects. Derelict
 boarding discloses its 70% salvage / 30% ambush split, credit range and opponent
 tier range; new salvage and ambush generation use the destination sector danger.
 Cached opponents retain their stats. Distress calls disclose the existing capped
-2-4 fuel cost, 60-180 credit reward and +3 Concord standing, including an empty-tank
-warning. Ignoring either encounter continues the journey without a penalty.
+2-4 fuel cost, 60-180 credit reward and up to +3 Concord standing (capped at
+100), including an empty-tank warning. Ignoring either encounter continues the journey without a penalty.
 
 New bounty interceptions offer identification in the combat screen before engaging.
 Verify costs one fuel and reveals whether the posted identity matches; Withdraw
