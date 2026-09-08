@@ -1685,3 +1685,20 @@ def test_sync_still_warns_an_outgoing_only_node_with_nothing_to_dial(tmp_path, c
         assert "(none configured)" in warnings[0]
     finally:
         node_db.close()
+
+
+def test_sync_does_not_call_a_relay_served_node_isolated(tmp_path, caplog):
+    """Issue #313 review round 4: an outgoing-only node that has retired
+    its seeds — after an intentionally empty roster, say — but still has
+    a relay serving it exchanges mail through that relay later in the
+    same pass. Warning that it "is not reaching out to the network"
+    would simply be false."""
+    node = LinkNode(identity=bootstrap_node_identity("relay-served"))
+    node.relays_serving_me["deadbeef" * 8] = "http://relay.example:7862"
+    node_db = _NodeDb(tmp_path, "relay-served")
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [], passes=9, outgoing_only=True)
+        assert _isolation_warnings(caplog) == []
+    finally:
+        node_db.close()

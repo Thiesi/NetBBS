@@ -3267,8 +3267,10 @@ different states and only the second is worth a SysOp's attention. Being a
 WARNING in the `netbbs.link` namespace, it reaches the bounded diagnostic log
 (§13.11) with no further wiring. The counter lives in the loop, so it resets on
 any success and a test of the reset has to drive one `run_link_sync` call whose
-seed list changes underneath it, not several calls. The count is also gated on
-there having been somewhere to reach: a full peer may decline the roster,
+seed list changes underneath it, not several calls. The count is also gated on this node having an
+outbound path at all — including a relay currently serving it, which is one the
+seed-dialling loop does not represent — and on there having been somewhere to
+reach: a full peer may decline the roster,
 configure no seeds, and serve inbound helloes correctly, and this outbound loop
 never observes that inbound traffic (completed peers leave
 `candidate_descriptors`), so an ungated counter would accuse a healthy
@@ -3313,9 +3315,14 @@ still blocked never exits, the daemon-thread form exits immediately. An
 unkillable thread is acceptable only because this is a short-lived CLI over at
 most 32 entries, and the alternative is the monitor silently halting mid-run.
 Proving that property needs a real subprocess — an in-process test cannot
-observe interpreter shutdown. And a status code alone is not evidence of a Link node:
-a 429 from a CDN fronting a dead node proves only that a CDN is there, so the
-rate-limit body has to be checked like any other signature.
+observe interpreter shutdown. And a status code is not evidence of a Link
+node at all: `_rate_limit_middleware` is applied application-wide and answers
+*before* routing, so a 429 is returned for a wrong base path exactly as for a
+right one, and a CDN fronting a dead node can produce one on its own behalf.
+Checking the body does not rescue it — the body is Link's own either way. A
+throttled probe is unconfirmed, and unconfirmed must never be reported as
+healthy; that a "reachability" verdict needs a third state is the actual
+lesson.
 
 An argparse positional with `nargs="?"` assigns its default *after* optionals
 are processed, so an optional sharing that `dest` is silently overwritten when

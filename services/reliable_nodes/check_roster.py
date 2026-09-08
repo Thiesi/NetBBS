@@ -28,11 +28,13 @@ outcomes a roster operator cares about are distinguishable:
 - HTTP answered, but not that 400    -> `NOT_LINK` (something else on the port,
                                         or a proxy in front of it)
 - 400 `{"error": "malformed hello"}` -> `OK`
+- 429 rate-limited before routing    -> `THROTTLED` (unconfirmed, not healthy)
 
-A 429 from the server's own rate-limit middleware also counts as `OK`:
-it is served by that same Link app, so it still proves a live Link node
-is on the other end (and it is what a checker run too often against a
-throttled node would legitimately see).
+A 429 is deliberately *not* a pass. `_rate_limit_middleware` is applied
+to the whole application and answers before routing, so a roster URL
+with a wrong base path is throttled exactly like a correct one while a
+real dial would 404 once throttling clears. It proves something with
+Link's middleware is there, never that the hello route works.
 
 Stdlib only, on purpose -- this runs on the web host beside the docroot
 it publishes into, so it stays runnable with nothing installed. Unlike
@@ -82,6 +84,9 @@ DEFAULT_TIMEOUT_SECONDS = 10.0
 OK = "OK"
 DOWN = "DOWN"
 NOT_LINK = "NOT_LINK"
+# Rate-limited before routing: neither a pass nor a proven failure. Not
+# healthy, because "unconfirmed" must never read as "checked and fine".
+THROTTLED = "THROTTLED"
 
 
 @dataclass(frozen=True)
@@ -156,19 +161,19 @@ def _classify_http_error(
     url: str, exc: urllib.error.HTTPError, *, deadline: float | None = None
 ) -> ProbeResult:
     if exc.code == 429:
-        # Only Link's own middleware answers with this body. A 429 from a
-        # CDN or reverse proxy fronting a dead node proves nothing about
-        # what is behind it, and reporting that as healthy would recreate
-        # exactly the false positive this checker exists to catch.
-        try:
-            rate_limited = json.loads(_read_bounded(exc, deadline=deadline).decode("utf-8", "replace"))
-        except (ValueError, OSError, http.client.HTTPException):
-            rate_limited = None
-        if isinstance(rate_limited, dict) and rate_limited.get("error") == "rate limit exceeded":
-            return ProbeResult("", url, OK, "rate-limited by the Link server (429) -- node is up")
+        # Never OK. `_rate_limit_middleware` is applied to the whole
+        # application and answers *before* routing, so even a roster URL
+        # with a wrong base path returns Link's own rate-limit body while
+        # a real dial would 404 once throttling clears. A 429 therefore
+        # says "something with Link's middleware is here", never "the
+        # hello route works" -- which is the only thing this probe is
+        # supposed to establish. Reporting it unconfirmed is honest;
+        # reporting it healthy would be the false green the checker
+        # exists to remove, arrived at from a new direction.
         return ProbeResult(
-            "", url, NOT_LINK,
-            "HTTP 429 from something other than Link's rate limiter (a proxy or CDN?)",
+            "", url, THROTTLED,
+            "HTTP 429 -- rate-limited before the hello route ran, so liveness is "
+            "unconfirmed. Re-run once throttling clears.",
         )
     if exc.code != 400:
         return ProbeResult("", url, NOT_LINK, f"HTTP {exc.code} to an empty hello (expected 400)")

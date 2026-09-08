@@ -45,10 +45,14 @@ python -m services.reliable_nodes.check_roster              # the copy in this d
 python -m services.reliable_nodes.check_roster --published  # the live www.netbbs.org one
 ```
 
-Each node gets `OK` (answered a Link hello), `DOWN` (nothing listening)
-or `NOT_LINK` (something answered, but it is not a Link node — a stale
-DNS record, a proxy in front of a node that is itself down, or a CDN
-rate-limiting on its behalf). Anything other than a fully reachable,
+Each node gets `OK` (answered a Link hello), `DOWN` (nothing listening),
+`NOT_LINK` (something answered, but it is not a Link node — a stale DNS
+record, or a proxy in front of a node that is itself down) or
+`THROTTLED` (rate-limited before the hello route ran, so liveness is
+unconfirmed — re-run once it clears). `THROTTLED` is deliberately not a
+pass: Link's rate limiter answers before routing, so a roster URL with
+the wrong base path is throttled exactly like a correct one while a real
+dial would 404. Anything other than a fully reachable,
 structurally valid roster exits non-zero, so this can gate the publish
 below or run from cron; `--quiet` prints only problems, which makes
 silence the healthy outcome for a cron job that mails its output.

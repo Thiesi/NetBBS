@@ -37,6 +37,7 @@ from services.reliable_nodes.check_roster import (
     DOWN,
     NOT_LINK,
     OK,
+    THROTTLED,
     _build_arg_parser,
     load_roster,
     main,
@@ -164,29 +165,41 @@ def test_probe_reports_not_link_for_a_400_that_is_not_a_link_rejection(plain_htt
     assert "unexpected body" in result.detail
 
 
-def test_probe_treats_link_s_own_rate_limiter_as_up(plain_http_server):
-    """The Link server's rate-limit middleware answers 429 before the
-    hello handler runs — still proof a Link node is there, and what a
-    checker run too often would legitimately see."""
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps({"error": "rate limit exceeded"}).encode(),  # Link's own
+        b"<html>Too Many Requests</html>",                      # a CDN's
+    ],
+    ids=["link-body", "cdn-body"],
+)
+def test_a_429_is_unconfirmed_rather_than_healthy(plain_http_server, body):
+    """`_rate_limit_middleware` is applied to the whole application and
+    answers *before* routing, so a roster URL with a wrong base path is
+    throttled exactly like a correct one while a real dial would 404
+    once throttling clears. A 429 therefore proves something with Link's
+    middleware is present, never that the hello route works — and a CDN
+    fronting a dead node can return one on its own behalf. Neither may
+    read as healthy."""
+    url, responses = plain_http_server
+    responses["status"] = 429
+    responses["body"] = body
+    result = probe_link_node(url, timeout=5.0)
+    assert result.status == THROTTLED
+    assert not result.healthy, "unconfirmed must never count as checked-and-fine"
+    assert "unconfirmed" in result.detail
+
+
+def test_a_throttled_roster_does_not_pass_the_gate(plain_http_server, tmp_path, capsys):
     url, responses = plain_http_server
     responses["status"] = 429
     responses["body"] = json.dumps({"error": "rate limit exceeded"}).encode()
-    result = probe_link_node(url, timeout=5.0)
-    assert result.status == OK
-    assert "429" in result.detail
-
-
-def test_probe_does_not_trust_a_429_from_something_other_than_link(plain_http_server):
-    """A CDN or reverse proxy fronting a dead node can rate-limit on its
-    own. 429 alone proves nothing about what is behind it, so treating
-    it as healthy would recreate the false positive this tool exists to
-    catch."""
-    url, responses = plain_http_server
-    responses["status"] = 429
-    responses["body"] = b"<html>Too Many Requests</html>"
-    result = probe_link_node(url, timeout=5.0)
-    assert result.status == NOT_LINK
-    assert "proxy or CDN" in result.detail
+    roster = tmp_path / "reliable-nodes.json"
+    roster.write_text(
+        json.dumps({"version": 1, "nodes": [{"name": "Throttled", "url": url}]}), encoding="utf-8"
+    )
+    assert main([str(roster), "--timeout", "5"]) == 1
+    assert "THROTTLED" in capsys.readouterr().err
 
 
 @pytest.fixture

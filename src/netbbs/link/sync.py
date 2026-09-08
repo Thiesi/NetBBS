@@ -106,7 +106,9 @@ peer that declines the roster, configures no seeds, and only serves
 inbound helloes is working exactly as configured, and nothing in this
 outbound loop would ever observe the traffic proving it. An
 outgoing-only node with nothing to dial is the opposite -- it can
-neither reach out nor be reached -- so it still warns. Those individual failures are indistinguishable
+neither reach out nor be reached -- so it still warns, unless a relay
+is currently serving it, which is a working outbound path this loop's
+seed dialling does not represent. Those individual failures are indistinguishable
 from ordinary churn -- which is exactly how a reliable node that had
 quietly stopped answering went unnoticed -- while "reached nothing at
 all, repeatedly" is a state worth putting in front of a SysOp, and a
@@ -402,7 +404,17 @@ async def run_link_sync(
             _dialable_addresses(descriptor)
             for descriptor in node.candidate_descriptors.values()
         )
-        if not had_somewhere_to_reach and accepts_inbound:
+        # A relay currently serving this node is a working outbound path
+        # this loop's seed dialling does not represent: an outgoing-only
+        # node that has retired its seeds (an intentionally empty roster,
+        # say) still exchanges mail through it in `_pickup_relay_mail`
+        # and `_push_pending_link_mail` later in this same pass. Warning
+        # that such a node "is not reaching out to the network" would be
+        # simply false. Safe to key on because a relay that stops working
+        # is pruned from `relays_serving_me` by `_maintain_relay_
+        # selection`, so this cannot mask a genuine loss indefinitely.
+        reaches_via_relay = bool(node.relays_serving_me)
+        if reaches_via_relay or (not had_somewhere_to_reach and accepts_inbound):
             isolated_passes = 0
         elif reached_network:
             isolated_passes = 0
