@@ -4580,6 +4580,13 @@ lock files from past callers must not consume one descriptor each during backup.
 Existing service-owned save directories need no parent-directory write permission
 for play or capture. Restore still needs permission to stage beside its target.
 Never delete gate or pilot lock files to clear an apparent stale session.
+On Windows, acquire the one-byte lease even when the file is empty; do not write
+a dummy byte before locking. A competing opener can already own that byte range,
+making the initialization flush fail with `PermissionError` instead of reporting
+a busy pilot. [Microsoft's `_locking` contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/locking)
+permits ranges beyond EOF. A deterministic regression holds an empty file's first
+byte from another handle/process, then checks refusal and successful reacquisition
+without any file-content initialization.
 Restore journal updates use flushed atomic replacement; update failures after a
 switch enter the same rollback path as switch failures. Keep the previous usable
 journal, including external game paths, if automatic rollback cannot complete.
