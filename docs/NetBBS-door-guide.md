@@ -180,6 +180,18 @@ with **[<] Previous / [>] Next** and toggle **[Q] Info** for shields, weapons,
 notoriety and faction consequences. These keys spend no turn; the last saved
 exchange stays available at the front of the pages, including after reconnecting.
 
+New fights show an enemy pattern and its current intent, including the incoming
+damage range. **[G] Brace** fires at reduced strength and cuts incoming damage to
+a quarter; **[F] Fight** recharges it. Brace a dangerous volley when you cannot
+finish the opponent first. Cover/harry reduce your shot, while recovery exposes
+the enemy; harry also lowers your escape chance. The Info view shows the pattern.
+
+Raider, Bulwark and Skirmisher patterns reward different timing. Ship upgrades
+still matter, and high-tier fire can seriously damage even heavy hulls. New raiders
+use destination danger; already stored opponents retain their stats. A fight saved
+under the original rules keeps those rules until resolved, then new fights use
+intents and Brace. Invalid repeat-Brace input spends no turn or randomness.
+
 **[F] Fight** exchanges one round, **[E] Evade** attempts escape, and pirates also
 allow **[D] Dump & evade** (one random cargo unit) and an affordable **[B] Bribe**.
 Read the displayed odds and consequences: failed evasion or refused bribery draws

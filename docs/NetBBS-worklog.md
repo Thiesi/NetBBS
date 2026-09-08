@@ -5087,3 +5087,18 @@ through the existing encounter checkpoint. Quote the fine separately from the
 cash collected, since this game caps collection at credits on hand without debt.
 Tests for actual refusal need an affordable offer plus a refusal draw; zero money
 is validation coverage, not a substitute for that domain outcome.
+
+Tactical combat metadata is optional only for already-started legacy fights.
+Absence keeps legacy fire/retaliation and RNG order; explicit null or unknown
+versions are preserving-recovery errors. Never fill missing tactics during load.
+Versioned pattern/step/Brace readiness commits with HP/result before narration;
+no presentation call selects a new intent or advances it. Future changes to a
+version's combat math must preserve that version for pending fights. Pattern
+selection uses no RNG and step wraps at the profile length, keeping state bounded.
+
+Destination danger controls newly generated raider tiers and squadron chance.
+Pass it explicitly while current_system remains the origin until arrival. Keep
+the existing random draw order (squadron roll, then tier/name per ship); stored
+opponents retain their stats. Verify the actual target resolver when stubbing
+patrol/kill tests: new fights use tactical_round; fight_round remains the legacy
+path. Seeded probes show mechanical tradeoffs and duration, not player engagement.

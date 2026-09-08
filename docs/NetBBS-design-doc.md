@@ -4853,6 +4853,27 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
+New Voidrunner fights use a versioned tactical ruleset with three deterministic
+opponent patterns: Raider (attack, volley, recover), Bulwark (cover, volley,
+recover), and Skirmisher (harry, attack, volley). The current intent and incoming
+damage range are visible. Fire deals full damage and recharges Brace; Brace fires
+a reduced shot and cuts incoming damage to a quarter, then requires Fire before
+reuse. Cover/harry reduce outgoing damage, recovery exposes the enemy, and harry
+reduces escape chance. Failed evasion/bribery receives and advances the same intent.
+New damage curves smooth starter tier-2 fights and make high-tier fire consequential
+for heavy hulls; enemy HP is not inflated to lengthen fights. Existing rewards,
+ship upgrades, faction consequences and squadron sequencing remain in force. Newly
+generated raiders use destination danger for both squadron chance and tier; stored
+opponents retain their stats, and tier/name RNG draw ordering stays unchanged.
+
+The tactical pattern step and Brace readiness checkpoint with opponent HP and the
+last exchange. Pattern selection consumes no extra RNG. Interrupted fights without
+tactical metadata keep the original combat rules and RNG sequence until resolved;
+new fights then use tactical rules. Reject malformed or unknown tactical versions
+through preserving recovery, and never invent tactical state while loading an
+already-started legacy fight. Automated probes establish bounded fight lengths and
+mechanical tradeoffs; human playtesting remains required for engagement/balance.
+
 Voidrunner customs inspections show complete surrender/bribe terms in height-aware
 pages: detected contraband, current credits, the conditional bribe payment and
 60% acceptance chance, confiscation/fine on refusal, and standing/notoriety effects.
@@ -4868,7 +4889,7 @@ remains available while paging or toggling tactical details. Browsing consumes n
 combat turn or encounter randomness. Escape odds, conditional bribe payment and
 refusal retaliation, random one-unit cargo sacrifice and patrol surrender terms
 are visible before choosing an action. Existing action hotkeys work across pages;
-this presentation slice preserves combat rules, RNG order and resumable state.
+browsing preserves encounter RNG and resumable state.
 
 Voidrunner offers saved display presets from station Display Options: full palette
 using the existing terminal color depth, basic 16-color, monochrome Unicode, and
