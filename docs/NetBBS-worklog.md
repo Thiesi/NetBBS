@@ -4989,3 +4989,7 @@ order, with active-mission order breaking ties. Insufficient or already-late job
 do not consume it. Missing procurement has an arrival estimate but no promised
 completion day; evaluating every contract against the original hold overstates
 what the same cargo can accomplish.
+
+Destination pickers wrap each label before allocating the next page. Move a
+whole option to a fresh page when it fits there; splitting a multiword station
+name at the page boundary otherwise creates a selectable trailing-word entry.

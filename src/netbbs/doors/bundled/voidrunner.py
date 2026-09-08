@@ -3727,8 +3727,14 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]]) -> object |
     budget = len(_trade_pages(["row"] * _OUTPUT_HEIGHT, title, footer)[0])
     pages = [([], [])]
     for value, label in options:
+        wrapped = _wrap_output(_mission_plain(label), max(1, _OUTPUT_WIDTH - 5)).split("\r\n")
+        rows, choices = pages[-1]
+        # Keep a complete choice together whenever it fits on a fresh page.
+        # Do not turn the trailing word of a station name into another entry.
+        if rows and (len(rows) + len(wrapped) > budget or len(choices) >= 9):
+            pages.append(([], []))
         choice = None
-        for row in _wrap_output(_mission_plain(label), max(1, _OUTPUT_WIDTH - 5)).split("\r\n"):
+        for row in wrapped:
             rows, choices = pages[-1]
             if len(rows) >= budget or (choice is None and len(choices) >= 9):
                 pages.append(([], []))

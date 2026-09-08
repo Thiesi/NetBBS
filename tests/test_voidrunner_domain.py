@@ -2857,6 +2857,28 @@ def test_real_general_route_back_and_eof_preserve_career(tmp_path, commands):
     assert (tmp_path / "77.json").read_bytes() == original
 
 
+@pytest.mark.parametrize("title", ["Charted Destination", "Destination", "Inspect Station"])
+def test_destination_picker_keeps_wrapped_names_on_one_page(monkeypatch,title):
+    import re
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",20); monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",10)
+    options=[(1,"Alpha"),(2,"Beta"),(3,"Yellowstone Deep"),(4,"Zeta")]
+    output=io.StringIO(); frames=[]
+    def choose():
+        frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
+        match=re.search(re.escape(title)+r" (\d+)/(\d+)"," ".join(frame.split()))
+        assert match
+        return "B" if match[1]==match[2] else "N"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output): assert vr._pick_trade_field(title,options) is None
+    containing=[frame for frame in frames if "Yellowstone" in frame or "Deep" in frame]
+    assert len(containing)==1
+    assert "Yellowstone" in containing[0] and "Deep" in containing[0]
+    choices=re.findall(r"\[(\d)\] (?:Yellowstone|Deep)",containing[0])
+    assert len(choices)==2 and choices[0]==choices[1]
+    assert all(len(frame.splitlines())<=10 for frame in frames)
+    assert all(vr._visible_width(line)<=20 for frame in frames for line in frame.splitlines())
+
+
 def test_general_route_fuel_topups_do_not_require_whole_route_in_tank():
     world = _world_with_seed(42)
     target = max(world.galaxy, key=lambda s: len(vr.bfs_path(world.by_id, 0, s.id)))
