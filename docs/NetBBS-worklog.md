@@ -4566,3 +4566,28 @@ Notoriety is an uncapped nonnegative counter; encounter probabilities may cap it
 impact, but that does not bound the saved value. Recovery Back/Q is a normal door
 exit (status 0), distinguished from failed restoration or input loss so the parent
 runtime does not announce a deliberate departure as an unexpected crash.
+
+
+Voidrunner maintenance gates live beside the resolved save directory, not inside
+it: a restore replaces that directory, and a lock on its old inode would no longer
+exclude new launches. Pilot startup holds the gate briefly while acquiring its
+lifetime pilot lease. Maintenance holds the gate, probes every pilot lock and
+refuses active sessions, then closes its probes before Windows directory renames.
+Never delete the gate or pilot lock files to clear an apparent stale session.
+
+Node backups capture the game component before the DB snapshot, after excluding
+active pilots. This prevents a newly registered caller's captured career from
+having an ID newer than the captured database. Game bytes, including prior damaged
+copies, are archival data; verify their checksums without loading/migrating them.
+Coverage enumerates every retained file deterministically and rejects missing,
+extra, unchecked, symlinked, case-colliding or over-limit entries. Temporary and
+lock files may be ignored in the live source but must not appear in an archive.
+
+An archive's source-directory metadata is informational only. Restoring game data
+requires an explicit, nonoverlapping destination. Stage and retain game rollback
+beside that target so atomic renames work across database/game filesystem layouts;
+the common restore journal records the external paths. `_switch_one` must undo
+its own first rename if its second rename fails: the outer loop has not yet added
+that artifact to the completed list. If that local rollback fails, retain the
+journal and staging, including external staging, for manual recovery. Tests must
+inject failure after the first rename, not only before a switch starts.

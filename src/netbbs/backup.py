@@ -21,6 +21,12 @@ seriously, the Link node identity -- root-key custody is explicitly
 separate ceremony. This module treats all fourteen as one atomic backup
 operation, never a DB-only one.
 
+When its save directory exists, Voidrunner adds a checksummed component
+containing careers, recovery copies, and scores. Capture it while game
+sessions are closed, before the node database snapshot, so its user IDs
+cannot be newer than that snapshot. Restore requires an explicit game
+destination and stages that component on the destination filesystem.
+
 Deliberately path-based, not `Database`-based: a backup must be safely
 takeable against a live, running node, and opening a second `Database`
 handle (migration-check side effects, a second long-lived WAL-mode
@@ -73,9 +79,11 @@ any form of automatic scheduling.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -104,7 +112,11 @@ _MANIFEST_FILENAME = "manifest.json"
 _LEGACY_DB_FILENAME = "netbbs.db"
 _FILES_DIRNAME = "files"
 _IDENTITY_DIRNAME = "identity"
-_RESERVED_BACKUP_ENTRIES = (_MANIFEST_FILENAME, _FILES_DIRNAME, _IDENTITY_DIRNAME)
+_VOIDRUNNER_DIRNAME = "voidrunner"
+_VOIDRUNNER_MAX_FILES = 10_000
+_VOIDRUNNER_MAX_FILE_BYTES = 4 * 1024 * 1024
+_VOIDRUNNER_MAX_TOTAL_BYTES = 512 * 1024 * 1024
+_RESERVED_BACKUP_ENTRIES = (_MANIFEST_FILENAME, _FILES_DIRNAME, _IDENTITY_DIRNAME, _VOIDRUNNER_DIRNAME)
 
 # node_config keys (netbbs.config's generic key-value store) -- same
 # reasoning as netbbs.selfupdate's own last-check bookkeeping: purely
@@ -319,7 +331,107 @@ def _snapshot_database_and_managed_dns_credentials(
     )
 
 
-def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Path:
+def voidrunner_save_directory() -> Path:
+    from netbbs.doors.bundled.voidrunner import _default_save_dir
+    return _default_save_dir().resolve()
+
+
+@contextlib.contextmanager
+def _voidrunner_maintenance(directory: Path):
+    from netbbs.doors.bundled.voidrunner import PilotBusy, maintenance_session
+    try:
+        with maintenance_session(directory):
+            yield
+    except PilotBusy as exc:
+        raise BackupError("Voidrunner is active or undergoing maintenance; close its sessions and retry.") from exc
+    except OSError as exc:
+        raise BackupError(f"Voidrunner storage operation failed: {exc}") from exc
+
+
+def _voidrunner_files(root: Path, *, archive: bool = False) -> list[Path]:
+    """Only the game's retained files belong in the supported component."""
+    result = []
+    for entry in root.iterdir():
+        if entry.is_symlink():
+            raise BackupError(f"Voidrunner data contains a symbolic link: {entry.name}")
+        if entry.name == "scores" and entry.is_dir():
+            for score in entry.iterdir():
+                if not archive and score.name.startswith(".") and score.name.endswith(".tmp"):
+                    continue
+                if score.is_symlink() or not score.is_file() or not re.fullmatch(r"[0-9]+\.json", score.name):
+                    raise BackupError(f"Unsupported Voidrunner score entry: {score.name}")
+                result.append(score.relative_to(root))
+                if len(result) > _VOIDRUNNER_MAX_FILES:
+                    raise BackupError("Voidrunner backup exceeds its file count limit.")
+        elif not archive and re.fullmatch(r"\.[0-9]+\.lock|\..+\.tmp", entry.name):
+            continue
+        elif entry.is_file() and (entry.name == "leaderboard.json" or
+                re.fullmatch(r"[0-9]+(?:(?:\.previous|\.recovery-[a-zA-Z0-9_-]+)?\.json|\.corrupt-[0-9]+)", entry.name)):
+            result.append(entry.relative_to(root))
+        else:
+            raise BackupError(f"Unsupported Voidrunner data entry: {entry.name}")
+        if len(result) > _VOIDRUNNER_MAX_FILES:
+            raise BackupError("Voidrunner backup exceeds 10000 files.")
+    names = [path.as_posix().casefold() for path in result]
+    if len(set(names)) != len(names):
+        raise BackupError("Voidrunner backup contains case-colliding filenames.")
+    return sorted(result, key=lambda path: path.as_posix())
+
+
+def _capture_voidrunner(directory: Path, destination: Path, checksums: dict) -> dict | None:
+    if not directory.exists():
+        return None
+    if not directory.is_dir():
+        raise BackupError("The configured Voidrunner save directory is not a directory.")
+    if destination.resolve().is_relative_to(directory.resolve()):
+        raise BackupError("A backup destination cannot be inside the Voidrunner save directory.")
+    with _voidrunner_maintenance(directory):
+        files = _voidrunner_files(directory)
+        output = destination / _VOIDRUNNER_DIRNAME
+        output.mkdir()
+        total = 0
+        for relative in files:
+            with (directory / relative).open("rb") as handle:
+                raw = handle.read(_VOIDRUNNER_MAX_FILE_BYTES + 1)
+            total += len(raw)
+            if len(raw) > _VOIDRUNNER_MAX_FILE_BYTES or total > _VOIDRUNNER_MAX_TOTAL_BYTES:
+                raise BackupError("Voidrunner backup exceeds its file or total size limit.")
+            target = output / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+            checksums[f"voidrunner/{relative.as_posix()}"] = hashlib.sha256(raw).hexdigest()
+        return {"version": 1, "source_directory": str(directory),
+                "files": [relative.as_posix() for relative in files]}
+
+
+def _validate_voidrunner_component(source: Path, manifest: dict) -> bool:
+    metadata = manifest.get("voidrunner")
+    root = source / _VOIDRUNNER_DIRNAME
+    if metadata is None:
+        if root.exists():
+            raise BackupError("Voidrunner component has no coverage manifest.")
+        return False
+    if (not isinstance(metadata, dict) or type(metadata.get("version")) is not int or metadata["version"] != 1
+            or not isinstance(metadata.get("files"), list) or not root.is_dir() or root.is_symlink()):
+        raise BackupError("Invalid Voidrunner coverage manifest.")
+    actual = _voidrunner_files(root, archive=True)
+    names = [path.as_posix() for path in actual]
+    if metadata["files"] != names:
+        raise BackupError("Voidrunner backup files do not match their coverage manifest.")
+    total = 0
+    for path in actual:
+        key = f"voidrunner/{path.as_posix()}"
+        size = (root / path).stat().st_size
+        total += size
+        if size > _VOIDRUNNER_MAX_FILE_BYTES or total > _VOIDRUNNER_MAX_TOTAL_BYTES:
+            raise BackupError("Voidrunner backup exceeds its file or total size limit.")
+        if key not in manifest.get("checksums", {}):
+            raise BackupError(f"Voidrunner backup is missing checksum for {key}.")
+    return True
+
+
+def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
+                  voidrunner_save_dir: Path | None = None) -> Path:
     """
     Create a complete, self-contained backup of one node's recoverable
     state at `destination` (created fresh -- refuses if it already
@@ -358,10 +470,15 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Pa
 
     database_filename = _validate_database_filename(db_path.name)
 
+    game_source = (voidrunner_save_dir or voidrunner_save_directory()).resolve()
+    if destination.resolve().is_relative_to(game_source):
+        raise BackupError("A backup destination cannot be inside the Voidrunner save directory.")
     destination.mkdir(parents=True)
 
+    checksums = {}
+    game_metadata = _capture_voidrunner(game_source, destination, checksums)
     _snapshot_database_and_managed_dns_credentials(db_path, destination, database_filename)
-    checksums = {database_filename: _sha256_of_file(destination / database_filename)}
+    checksums[database_filename] = _sha256_of_file(destination / database_filename)
     for credential_path in (
         _managed_dns_credential_path_for(db_path),
         _managed_dns_previous_credential_path_for(db_path),
@@ -406,6 +523,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Pa
         "source_db_path": str(db_path),
         "source_identity_dir": str(identity_dir),
         "checksums": checksums,
+        "voidrunner": game_metadata,
     }
     (destination / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2))
 
@@ -484,6 +602,7 @@ def _validate_backup_source(source: Path, *, allow_migrate: bool) -> dict:
         raise BackupError(f"could not read manifest at {manifest_path}: {exc}") from exc
 
     database_filename = _database_filename_from_manifest(manifest)
+    _validate_voidrunner_component(source, manifest)
     db_snapshot = source / database_filename
     if not db_snapshot.exists():
         raise BackupError(f"backup is missing its database snapshot: {db_snapshot}")
@@ -645,7 +764,8 @@ def _refuse_if_restore_in_progress(db_path: Path) -> None:
         )
 
 
-def _write_restore_state(state_path: Path, *, staging_dir: Path, rollback_dir: Path, pending: list[str]) -> None:
+def _write_restore_state(state_path: Path, *, staging_dir: Path, rollback_dir: Path, pending: list[str],
+                         external: dict | None = None) -> None:
     state_path.write_text(
         json.dumps(
             {
@@ -653,6 +773,7 @@ def _write_restore_state(state_path: Path, *, staging_dir: Path, rollback_dir: P
                 "staging_dir": str(staging_dir),
                 "rollback_dir": str(rollback_dir),
                 "pending_artifacts": pending,
+                "external_components": external or {},
             },
             indent=2,
         )
@@ -704,16 +825,27 @@ def _restore_switch_plan(
     return plan
 
 
+class _SwitchRollbackError(BackupError):
+    """The failing artifact could not be put back; retain the restore journal."""
+
+
 def _switch_one(name: str, staged_path: Path | None, live_path: Path, rollback_dir: Path) -> None:
-    """Atomic (same-filesystem) rename in each direction -- never a
-    copy. `rollback_dir` is created lazily, only once something
-    actually needs preserving (a fresh target with nothing live yet
-    leaves no rollback directory behind at all)."""
+    """Roll back even the artifact whose second rename failed."""
+    moved = False
     if live_path.exists():
         rollback_dir.mkdir(parents=True, exist_ok=True)
         live_path.rename(rollback_dir / name)
-    if staged_path is not None:
-        staged_path.rename(live_path)
+        moved = True
+    try:
+        if staged_path is not None:
+            staged_path.rename(live_path)
+    except Exception:
+        if moved:
+            try:
+                (rollback_dir / name).rename(live_path)
+            except Exception as exc:
+                raise _SwitchRollbackError(f"Could not roll back failing artifact {name}.") from exc
+        raise
 
 
 def _rollback_switched(switched: list[tuple[str, Path | None, Path]], rollback_dir: Path) -> None:
@@ -732,7 +864,8 @@ def _rollback_switched(switched: list[tuple[str, Path | None, Path]], rollback_d
             rolled_back.rename(live_path)
 
 
-def restore_backup(*, source: Path, db_path: Path, identity_dir: Path) -> Path | None:
+def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
+                   voidrunner_to: Path | None = None) -> Path | None:
     """
     Restore a backup created by `create_backup` into `db_path`/
     `identity_dir` (and their derived sibling paths) -- staged and
@@ -768,8 +901,22 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path) -> Path |
     running on a *different* machine remains an accepted, documented
     operator responsibility no PID file on this machine can catch.
     """
-    _validate_backup_source(source, allow_migrate=False)
-
+    manifest = _validate_backup_source(source, allow_migrate=False)
+    has_game = manifest.get("voidrunner") is not None
+    target = None
+    if has_game:
+        if voidrunner_to is None:
+            raise BackupError("This backup contains Voidrunner careers; specify --voidrunner-to for the restored service.")
+        target = voidrunner_to.resolve()
+        for protected in (source.resolve(), db_path.resolve(), identity_dir.resolve()):
+            if target.is_relative_to(protected) or protected.is_relative_to(target):
+                raise BackupError("Voidrunner restore target overlaps node or backup paths.")
+        if target.exists():
+            if not target.is_dir():
+                raise BackupError("Voidrunner restore destination is not a directory.")
+            _voidrunner_files(target)  # Refuse unrelated data before any live switch.
+    elif voidrunner_to is not None:
+        raise BackupError("This backup has no Voidrunner component; its save directory will not be changed.")
     if db_path.exists():
         _require_not_in_use(db_path)
     _require_node_not_running(db_path)
@@ -779,48 +926,63 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path) -> Path |
     staging_dir = db_path.parent / f"{_RESTORE_STAGING_PREFIX}{token}"
     rollback_dir = db_path.parent / f"{_RESTORE_ROLLBACK_PREFIX}{token}"
     state_path = _restore_state_path_for(db_path)
+    game_stage = target.parent / f".{target.name}.netbbs-stage-{token}" if target else None
+    game_rollback = target.parent / f".{target.name}.netbbs-rollback-{token}" if target else None
+    external = ({"voidrunner": {"target": str(target), "staging": str(game_stage),
+                                  "rollback": str(game_rollback)}} if target else {})
 
-    staging_dir.mkdir(parents=True)
-    try:
-        shutil.copytree(source, staging_dir, dirs_exist_ok=True)
-        staged_manifest = _validate_backup_source(staging_dir, allow_migrate=True)
-
-        plan = _restore_switch_plan(
-            staging_dir,
-            db_path,
-            identity_dir,
-            _database_filename_from_manifest(staged_manifest),
-        )
-        _write_restore_state(
-            state_path, staging_dir=staging_dir, rollback_dir=rollback_dir, pending=[name for name, _, _ in plan]
-        )
-
-        switched: list[tuple[str, Path | None, Path]] = []
-        for name, staged_path, live_path in plan:
-            try:
-                _switch_one(name, staged_path, live_path, rollback_dir)
-            except Exception as exc:
+    with contextlib.ExitStack() as leases:
+        if target:
+            leases.enter_context(_voidrunner_maintenance(target))
+        staging_dir.mkdir(parents=True)
+        try:
+            shutil.copytree(source, staging_dir, dirs_exist_ok=True)
+            staged_manifest = _validate_backup_source(staging_dir, allow_migrate=True)
+            plan = _restore_switch_plan(staging_dir, db_path, identity_dir,
+                                        _database_filename_from_manifest(staged_manifest))
+            if target:
+                shutil.copytree(staging_dir / _VOIDRUNNER_DIRNAME, game_stage)
+                # Verify the final filesystem-local staging copy too.
+                for relative in staged_manifest["voidrunner"]["files"]:
+                    if _sha256_of_file(game_stage / relative) != staged_manifest["checksums"][f"voidrunner/{relative}"]:
+                        raise BackupError("Voidrunner local staging checksum mismatch.")
+                plan.append(("voidrunner", game_stage, target))
+            _write_restore_state(state_path, staging_dir=staging_dir, rollback_dir=rollback_dir,
+                                 pending=[name for name, _, _ in plan], external=external)
+            switched = []
+            for name, staged_path, live_path in plan:
+                component_rollback = game_rollback if name == "voidrunner" else rollback_dir
                 try:
-                    _rollback_switched(switched, rollback_dir)
-                except Exception:
-                    raise BackupError(
-                        f"restore failed while switching {name!r} and the automatic rollback "
-                        f"also failed -- see {state_path} for exactly what's where; manual "
-                        "recovery needed"
-                    ) from exc
-                state_path.unlink(missing_ok=True)
-                raise BackupError(
-                    f"restore failed while switching {name!r}, automatically rolled back to "
-                    f"the previous generation: {exc}"
-                ) from exc
-            switched.append((name, staged_path, live_path))
-            remaining = [n for n, _, _ in plan if n not in {s[0] for s in switched}]
-            _write_restore_state(state_path, staging_dir=staging_dir, rollback_dir=rollback_dir, pending=remaining)
-    finally:
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir, ignore_errors=True)
-
-    state_path.unlink(missing_ok=True)
+                    _switch_one(name, staged_path, live_path, component_rollback)
+                except _SwitchRollbackError as exc:
+                    raise BackupError(f"Restore switch and rollback failed; see {state_path} for manual recovery.") from exc
+                except Exception as exc:
+                    try:
+                        for entry in reversed(switched):
+                            root = game_rollback if entry[0] == "voidrunner" else rollback_dir
+                            _rollback_switched([entry], root)
+                    except Exception:
+                        raise BackupError(f"Restore and automatic rollback failed; see {state_path} for manual recovery.") from exc
+                    state_path.unlink(missing_ok=True)
+                    raise BackupError(f"restore failed while switching {name!r}, automatically rolled back to "
+                                      f"the previous generation: {exc}") from exc
+                switched.append((name, staged_path, live_path))
+                remaining = [n for n, _, _ in plan if n not in {item[0] for item in switched}]
+                _write_restore_state(state_path, staging_dir=staging_dir, rollback_dir=rollback_dir,
+                                     pending=remaining, external=external)
+            if game_rollback and game_rollback.exists():
+                rollback_dir.mkdir(parents=True, exist_ok=True)
+                (rollback_dir / "voidrunner-rollback.json").write_text(json.dumps(external["voidrunner"], indent=2))
+        finally:
+            if not state_path.exists():
+                # On unresolved failure, retain staging named by the journal.
+                for path in (staging_dir, game_stage):
+                    if path is not None and path.exists():
+                        shutil.rmtree(path, ignore_errors=True)
+        state_path.unlink(missing_ok=True)
+        for path in (staging_dir, game_stage):
+            if path is not None and path.exists():
+                shutil.rmtree(path, ignore_errors=True)
     return rollback_dir if rollback_dir.exists() else None
 
 
@@ -856,20 +1018,35 @@ def main(argv: list[str] | None = None) -> None:
         help=f"path to restore the identity directory to (default: {_DEFAULT_IDENTITY_DIR})",
     )
 
+    create_parser.add_argument("--voidrunner-save-dir", type=Path,
+                               help="Voidrunner source directory (default: service environment or home default)")
+    restore_parser.add_argument("--voidrunner-to", type=Path,
+                                help="explicit destination for backed-up Voidrunner careers")
     args = parser.parse_args(argv)
 
     if args.command == "create":
         try:
-            destination = create_backup(db_path=args.db, identity_dir=args.identity_dir, destination=args.destination)
+            destination = create_backup(db_path=args.db, identity_dir=args.identity_dir, destination=args.destination,
+                                        voidrunner_save_dir=args.voidrunner_save_dir)
         except BackupError as exc:
             raise SystemExit(terminal_wrapped(f"backup failed: {exc}", stream=sys.stderr)) from exc
         print_wrapped(f"Backup created at {destination}")
+        coverage = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("voidrunner")
+        source_directory = args.voidrunner_save_dir or voidrunner_save_directory()
+        if coverage is None:
+            print_wrapped(f"Voidrunner: no save directory found at {source_directory}.")
+        else:
+            print_wrapped(f"Voidrunner: included {len(coverage['files'])} retained files from {source_directory}.")
     else:
         try:
-            rollback_dir = restore_backup(source=args.source, db_path=args.db, identity_dir=args.identity_dir)
+            rollback_dir = restore_backup(source=args.source, db_path=args.db, identity_dir=args.identity_dir,
+                                          voidrunner_to=args.voidrunner_to)
         except BackupError as exc:
             raise SystemExit(terminal_wrapped(f"restore failed: {exc}", stream=sys.stderr)) from exc
         print_wrapped(f"Restored {args.source} into {args.db} / {args.identity_dir}")
+        if args.voidrunner_to is not None:
+            print_wrapped(f"Voidrunner restored to {args.voidrunner_to.resolve()}. MANUAL: configure the restored service's "
+                          "VOIDRUNNER_SAVE_DIR to this directory before restarting.")
         if rollback_dir is not None:
             print_wrapped(
                 f"Previous generation preserved at {rollback_dir} -- not deleted automatically, "
