@@ -504,7 +504,7 @@ EXCHANGE_SEEDS: tuple[tuple[str, int], ...] = (
     ("213-555 Sunset Exchange", 45),
     ("312-555 Loop Exchange", 42),
     ("415-555 Bay Exchange", 50),
-    ("512-555 Hill Country Exchange", 35),
+    ("512-555 Hill County Exchange", 35),
     ("617-555 Harbor Exchange", 38),
     ("702-555 Neon Exchange", 48),
     ("770-555 Peachtree Exchange", 36),
