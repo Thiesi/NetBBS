@@ -1617,3 +1617,21 @@ def test_sync_isolation_counter_resets_once_a_seed_answers(tmp_path, caplog):
     finally:
         node_db.close()
         seed.close()
+
+
+def test_sync_does_not_call_an_inbound_only_node_isolated(tmp_path, caplog):
+    """Issue #313 review: a full peer may decline the reliable roster,
+    configure no seeds, and serve inbound helloes perfectly well. This
+    outbound loop never observes that inbound traffic, and completed
+    peers are removed from candidate_descriptors, so counting "reached
+    nothing" would accuse a healthy node of being cut off -- forever,
+    every third pass. A pass with nowhere to reach is not an isolated
+    pass."""
+    node = LinkNode(identity=bootstrap_node_identity("inbound-only"))
+    node_db = _NodeDb(tmp_path, "inbound-only")
+    try:
+        with caplog.at_level("WARNING", logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [], passes=9)
+        assert _isolation_warnings(caplog) == []
+    finally:
+        node_db.close()

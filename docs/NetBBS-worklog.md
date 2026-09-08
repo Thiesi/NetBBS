@@ -3266,7 +3266,33 @@ different states and only the second is worth a SysOp's attention. Being a
 WARNING in the `netbbs.link` namespace, it reaches the bounded diagnostic log
 (§13.11) with no further wiring. The counter lives in the loop, so it resets on
 any success and a test of the reset has to drive one `run_link_sync` call whose
-seed list changes underneath it, not several calls.
+seed list changes underneath it, not several calls. The count is also gated on
+there having been somewhere to reach: a full peer may decline the roster,
+configure no seeds, and serve inbound helloes correctly, and this outbound loop
+never observes that inbound traffic (completed peers leave
+`candidate_descriptors`), so an ungated counter would accuse a healthy
+inbound-only node of isolation forever.
+
+A checker that duplicates rules is only as good as the pin holding the copy in
+place. `services/` cannot import `netbbs` (it runs where the package is not
+installed), so the roster rules exist twice — and every divergence points the
+same way: the gate approves a roster the network then rejects or truncates,
+which is the same false green the checker exists to remove. Review found three
+at once (a whitespace-only name that a node strips and skips, a trailing-slash
+duplicate a node collapses, a `[]` roster a node treats as deliberate
+retirement), so the fix is not three patches but a mirrored `normalize_entry`
+plus a differential test running both implementations over a corpus. Where a
+constant must be duplicated, pin it with a test, not a comment.
+
+Two properties of that probe are contractual rather than incidental. It must
+never raise: roster URLs are externally authored, and one entry that explodes
+aborts the run and leaves every later entry unchecked, so a broad final handler
+is correct here in a way it usually is not — enumerating handlers demonstrably
+does not achieve it (`http.client.HTTPException` is not an `OSError`; an
+over-long DNS label raises `UnicodeError` from IDNA encoding, a `ValueError`,
+from inside `urlopen`). And a status code alone is not evidence of a Link node:
+a 429 from a CDN fronting a dead node proves only that a CDN is there, so the
+rate-limit body has to be checked like any other signature.
 
 Still unresolved: a roster node must set `outgoing_only = false` to serve its
 purpose, which trips the §15/§12 startup warning recommending `outgoing_only`

@@ -3,15 +3,17 @@ Tests for `services.reliable_nodes.check_roster` (issue #313) — the
 roster reachability checker the project runs before publishing
 `reliable-nodes.json` and periodically against the published copy.
 
-The reachability tests drive a **real** `LinkServer`, not a stub of one.
-That is the whole point of them: the checker asserts a specific
-signature (HTTP 400 with a `malformed hello` error body) produced by
-`netbbs.link.transport.LinkServer._handle_hello`, and the checker lives
-in `services/` and deliberately does not import `netbbs`, so nothing but
-a test that dials the real server would notice if that signature ever
-changed. A checker that silently started reporting a live roster node as
-`NOT_LINK` — or, worse, a dead one as `OK` — would recreate exactly the
-blind spot it was written to close.
+Two things here are deliberately tested against the **real** node-side
+code rather than against fixtures, and for the same reason. The checker
+lives in `services/` and cannot import `netbbs` — it runs on the web
+host, where the package is not installed — so both the HTTP signature it
+keys on and its copy of the roster rules are duplicated, and duplication
+is this module's real risk. Every place the two drift apart produces a
+*false green*: a roster this gate approves that the network then rejects
+or silently truncates, which is precisely the blind spot the checker was
+written to close. So the reachability tests drive a real `LinkServer`,
+and `test_validator_agrees_with_the_real_node_parser` cross-checks the
+validator against the real `parse_reliable_nodes` over a corpus.
 """
 
 from __future__ import annotations
@@ -33,7 +35,9 @@ from services.reliable_nodes.check_roster import (
     DOWN,
     NOT_LINK,
     OK,
+    load_roster,
     main,
+    normalize_entry,
     probe_link_node,
     validate_roster,
 )
@@ -78,7 +82,7 @@ def _probe_a_real_link_server(tmp_path) -> tuple[str, str]:
 
 def test_probe_reports_ok_against_a_real_link_server(tmp_path):
     """The signature the checker keys on is the one a real LinkServer
-    actually produces -- see this module's docstring for why this is
+    actually produces — see this module's docstring for why this is
     tested against the real thing rather than a canned 400."""
     status, detail = _probe_a_real_link_server(tmp_path)
     assert status == OK, detail
@@ -96,7 +100,7 @@ def test_probe_reports_down_when_nothing_listens():
 
 @pytest.fixture
 def plain_http_server():
-    """An ordinary HTTP server that is not a Link node -- a stale DNS
+    """An ordinary HTTP server that is not a Link node — a stale DNS
     record now pointing at someone's web server, or a reverse proxy in
     front of a node that is itself down."""
     responses: dict[str, object] = {"status": 404, "body": b"not found"}
@@ -106,7 +110,7 @@ def plain_http_server():
             # Drain the request body before replying. Closing a socket
             # with unread data still buffered makes Windows answer with
             # an RST, which the client sees as a connection error rather
-            # than the HTTP status this fixture exists to serve -- a
+            # than the HTTP status this fixture exists to serve — a
             # flaky DOWN instead of the intended NOT_LINK.
             length = int(self.headers.get("Content-Length") or 0)
             if length:
@@ -137,7 +141,7 @@ def test_probe_reports_not_link_for_an_unrelated_http_server(plain_http_server):
 
 
 def test_probe_reports_not_link_when_something_answers_a_hello_with_success(plain_http_server):
-    """A 2xx to an unparseable hello is never a Link node -- catching it
+    """A 2xx to an unparseable hello is never a Link node — catching it
     matters because a captive portal or a proxy answering everything
     with 200 would otherwise read as a healthy roster entry."""
     url, responses = plain_http_server
@@ -157,10 +161,10 @@ def test_probe_reports_not_link_for_a_400_that_is_not_a_link_rejection(plain_htt
     assert "unexpected body" in result.detail
 
 
-def test_probe_treats_a_rate_limited_node_as_up(plain_http_server):
-    """The Link server's own rate-limit middleware answers 429 before
-    the hello handler runs -- still proof a Link node is there, and what
-    a checker run too often would legitimately see."""
+def test_probe_treats_link_s_own_rate_limiter_as_up(plain_http_server):
+    """The Link server's rate-limit middleware answers 429 before the
+    hello handler runs — still proof a Link node is there, and what a
+    checker run too often would legitimately see."""
     url, responses = plain_http_server
     responses["status"] = 429
     responses["body"] = json.dumps({"error": "rate limit exceeded"}).encode()
@@ -169,9 +173,146 @@ def test_probe_treats_a_rate_limited_node_as_up(plain_http_server):
     assert "429" in result.detail
 
 
+def test_probe_does_not_trust_a_429_from_something_other_than_link(plain_http_server):
+    """A CDN or reverse proxy fronting a dead node can rate-limit on its
+    own. 429 alone proves nothing about what is behind it, so treating
+    it as healthy would recreate the false positive this tool exists to
+    catch."""
+    url, responses = plain_http_server
+    responses["status"] = 429
+    responses["body"] = b"<html>Too Many Requests</html>"
+    result = probe_link_node(url, timeout=5.0)
+    assert result.status == NOT_LINK
+    assert "proxy or CDN" in result.detail
+
+
+@pytest.fixture
+def non_http_server():
+    """A TCP service that is not HTTP at all — a stale roster URL now
+    pointing at an SSH or SMTP port."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def serve():
+        try:
+            conn, _ = server.accept()
+            with conn:
+                conn.recv(4096)
+                conn.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.getsockname()[1]}"
+    finally:
+        server.close()
+        thread.join(timeout=5)
+
+
+def test_probe_reports_a_non_http_service_instead_of_raising(non_http_server):
+    """`http.client.HTTPException` is not an `OSError`, so it escapes the
+    connection-error handler. Unhandled, one stale roster entry pointing
+    at a non-HTTP port would abort the whole run with a traceback and
+    leave every later entry unchecked."""
+    result = probe_link_node(non_http_server, timeout=5.0)
+    assert result.status in (NOT_LINK, DOWN)
+    assert result.detail
+
+
+def test_probe_reports_an_unencodable_hostname_instead_of_raising():
+    """A host label over 63 characters makes urllib raise UnicodeError
+    from IDNA encoding. It is a ValueError, so no connection-error
+    handler matches it, and unhandled it aborts the entire run -- while
+    both roster parsers accept the URL as structurally valid, so an
+    entry like this really can be published."""
+    url = "http://" + "d" * 120 + ".example:7862"
+    assert normalize_entry({"name": "Long", "url": url}) is not None, (
+        "the roster parsers accept this URL, so the probe must cope with it"
+    )
+    result = probe_link_node(url, timeout=2.0)
+    assert result.status in (DOWN, NOT_LINK)
+    assert result.detail
+
+
+# Documents whose interpretation must be identical on both sides. The
+# interesting ones are the divergences the first cut of this checker had:
+# a whitespace-only name, an unstripped URL, a trailing-slash duplicate,
+# a deliberately empty roster, and an over-cap document.
+_ROSTER_CORPUS = [
+    {"version": 1, "nodes": [{"name": "Reliable Link", "url": "http://relink.netbbs.org:7862"}]},
+    {"version": 1, "nodes": []},
+    {"version": 1, "nodes": [{"name": "   ", "url": "http://a.example"}]},
+    {"version": 1, "nodes": [{"name": "  Padded  ", "url": "  http://a.example/  "}]},
+    {"version": 1, "nodes": [{"name": "a", "url": "http://a.example"},
+                             {"name": "b", "url": "http://a.example/"}]},
+    {"version": 1, "nodes": [{"name": "a", "url": "http://a.example"},
+                             {"name": "b", "url": "HTTP://A.EXAMPLE"}]},
+    {"version": 1, "nodes": [{"name": "n", "url": "ftp://a.example"}]},
+    {"version": 1, "nodes": [{"name": "n", "url": "http://"}]},
+    {"version": 1, "nodes": [{"name": "n", "url": "http://a.example:0"}]},
+    {"version": 1, "nodes": [{"name": "n", "url": "http://[unbalanced"}]},
+    {"version": 1, "nodes": [{"name": "x" * 65, "url": "http://a.example"}]},
+    {"version": 1, "nodes": [{"name": "n\x07", "url": "http://a.example"}]},
+    {"version": 1, "nodes": [{"url": "http://a.example"}]},
+    {"version": 1, "nodes": ["not-an-object"]},
+    {"version": 1, "nodes": [{"name": str(i), "url": f"http://{i}.example"} for i in range(40)]},
+    {"version": 1, "nodes": [{"name": str(i), "url": f"http://{i}.example"} for i in range(257)]},
+]
+
+
+@pytest.mark.parametrize("document", _ROSTER_CORPUS, ids=range(len(_ROSTER_CORPUS)))
+def test_validator_agrees_with_the_real_node_parser(document):
+    """The checker cannot import `netbbs`, so its copy of the roster
+    rules is the thing most likely to drift — and every divergence is a
+    false green. Pin the two together against the real parser rather
+    than trusting inspection to keep them in step."""
+    from netbbs.link.reliable_nodes import ReliableNodesError, parse_reliable_nodes
+
+    raw = json.dumps(document)
+    try:
+        expected = [(node.name, node.url) for node in parse_reliable_nodes(raw)]
+        node_rejected_outright = False
+    except ReliableNodesError:
+        expected, node_rejected_outright = [], True
+
+    entries, problems = validate_roster(document)
+    assert entries == expected, f"checker keeps {entries}, node keeps {expected}"
+    if node_rejected_outright:
+        assert problems, "a document every node discards must never pass the gate"
+    if len(entries) < len(document.get("nodes", [])):
+        assert problems, "anything a node silently drops has to surface as a problem"
+
+
+def test_normalize_entry_strips_like_the_node_does():
+    """The specific divergence that mattered: a node strips before
+    testing emptiness, so a whitespace-only name is skipped there. If it
+    were the sole entry, nodes would cache an empty list and retire
+    their built-in fallback while this gate reported a healthy roster."""
+    assert normalize_entry({"name": "   ", "url": "http://a.example"}) is None
+    assert normalize_entry({"name": " N ", "url": " http://a.example/ "}) == ("N", "http://a.example")
+
+
+def test_validator_accepts_a_deliberately_empty_roster():
+    """A fetched empty roster is the supported way to retire every
+    built-in entry — `get_cached_reliable_nodes` preserves `[]` rather
+    than falling back. The gate must not block that mechanism."""
+    entries, problems = validate_roster({"version": 1, "nodes": []})
+    assert entries == [] and problems == []
+
+
+def test_main_exits_zero_for_a_deliberately_empty_roster(tmp_path, capsys):
+    roster = tmp_path / "reliable-nodes.json"
+    roster.write_text(json.dumps({"version": 1, "nodes": []}), encoding="utf-8")
+    assert main([str(roster)]) == 0
+    assert "empty" in capsys.readouterr().out
+
+
 def test_validate_roster_accepts_the_shipped_roster():
     """The roster this repository actually publishes must be valid on
-    its own terms -- a structural regression in it is exactly what a
+    its own terms — a structural regression in it is exactly what a
     pre-publish check is for."""
     import pathlib
 
@@ -184,21 +325,24 @@ def test_validate_roster_accepts_the_shipped_roster():
     assert entries, "the shipped roster must list at least one node"
 
 
+def test_validate_roster_still_probes_the_entries_a_node_would_keep():
+    """One bad entry must not suppress checking the good ones — a node
+    skips malformed entries individually, so the checker does too."""
+    entries, problems = validate_roster(
+        {"version": 1, "nodes": [{"name": "bad"}, {"name": "good", "url": "http://good.example"}]}
+    )
+    assert entries == [("good", "http://good.example")]
+    assert len(problems) == 1
+
+
 @pytest.mark.parametrize(
     "document, expected_fragment",
     [
-        ({"version": 2, "nodes": [{"name": "n", "url": "http://a"}]}, "version is 2"),
+        ({"version": 2, "nodes": [{"name": "n", "url": "http://a.example"}]}, "version is 2"),
         ({"version": 1}, "'nodes' is missing"),
-        ({"version": 1, "nodes": []}, "empty"),
-        ({"version": 1, "nodes": [{"url": "http://a"}]}, "'name' must be"),
-        ({"version": 1, "nodes": [{"name": "n", "url": "ftp://a"}]}, "must start with"),
-        ({"version": 1, "nodes": [{"name": "n", "url": "http://a"},
-                                  {"name": "m", "url": "http://a/"}]}, "duplicate URL"),
-        ({"version": 1, "nodes": [{"name": "x" * 65, "url": "http://a"}]}, "'name' must be"),
-        ({"version": 1, "nodes": [{"name": "n\x07", "url": "http://a"}]}, "control characters"),
-        ({"version": 1, "nodes": ["not-an-object"]}, "not an object"),
-        ({"version": 1, "nodes": [{"name": str(i), "url": f"http://{i}"} for i in range(33)]},
-         "keep only the first 32"),
+        ({"version": 1, "nodes": [{"name": "  ", "url": "http://a.example"}]}, "malformed"),
+        ({"version": 1, "nodes": [{"name": str(i), "url": f"http://{i}.e"} for i in range(257)]},
+         "rejects the whole document"),
     ],
 )
 def test_validate_roster_reports_what_a_node_would_reject(document, expected_fragment):
@@ -206,18 +350,29 @@ def test_validate_roster_reports_what_a_node_would_reject(document, expected_fra
     assert any(expected_fragment in problem for problem in problems), problems
 
 
-def test_validate_roster_still_probes_the_entries_a_node_would_keep():
-    """One bad entry must not suppress checking the good ones -- a node
-    skips malformed entries individually, so the checker does too."""
-    entries, problems = validate_roster(
-        {"version": 1, "nodes": [{"name": "bad"}, {"name": "good", "url": "http://good"}]}
+def test_load_roster_rejects_an_oversized_document(tmp_path):
+    """Larger than the node parser's cap means every node discards it
+    and keeps its previous roster — a publish that looks fine and is
+    inert."""
+    roster = tmp_path / "big.json"
+    roster.write_text(
+        json.dumps({"version": 1, "padding": "x" * (64 * 1024), "nodes": []}), encoding="utf-8"
     )
-    assert entries == [("good", "http://good")]
-    assert len(problems) == 1
+    with pytest.raises(ValueError, match="larger than"):
+        load_roster(str(roster))
+
+
+def test_main_exits_two_for_an_oversized_document(tmp_path, capsys):
+    roster = tmp_path / "big.json"
+    roster.write_text(
+        json.dumps({"version": 1, "padding": "x" * (64 * 1024), "nodes": []}), encoding="utf-8"
+    )
+    assert main([str(roster)]) == 2
+    assert "could not read roster" in capsys.readouterr().err
 
 
 def test_main_exits_non_zero_for_an_unreachable_roster(tmp_path, capsys):
-    """The exit code is the whole point of the pre-publish/cron use --
+    """The exit code is the whole point of the pre-publish/cron use —
     it has to fail on a roster whose nodes do not answer."""
     roster = tmp_path / "reliable-nodes.json"
     roster.write_text(
@@ -239,7 +394,7 @@ def test_main_exits_zero_for_a_healthy_roster(tmp_path, capsys, monkeypatch):
     )
     roster = tmp_path / "reliable-nodes.json"
     roster.write_text(
-        json.dumps({"version": 1, "nodes": [{"name": "Reliable Link", "url": "http://relink"}]}),
+        json.dumps({"version": 1, "nodes": [{"name": "Reliable Link", "url": "http://relink.example"}]}),
         encoding="utf-8",
     )
     assert main([str(roster)]) == 0
@@ -257,3 +412,29 @@ def test_main_exits_non_zero_when_the_roster_itself_is_malformed(tmp_path):
 def test_main_exits_two_for_a_roster_that_cannot_be_read(tmp_path, capsys):
     assert main([str(tmp_path / "missing.json")]) == 2
     assert "could not read roster" in capsys.readouterr().err
+
+
+def test_output_wraps_to_the_terminal_width(tmp_path, capsys, monkeypatch):
+    """AGENTS.md: CLI prose wraps, measuring the stream it goes to. A
+    64-character name plus a 256-character URL are both within the
+    roster's own limits and would otherwise run past 300 columns,
+    clipping the status word that matters."""
+    from services.reliable_nodes import check_roster as module
+
+    monkeypatch.setenv("COLUMNS", "60")
+    long_url = "http://" + "d" * 200 + ".example"
+    monkeypatch.setattr(
+        module, "probe_link_node",
+        lambda url, timeout=None: module.ProbeResult("", url, DOWN, "could not connect: timed out"),
+    )
+    roster = tmp_path / "reliable-nodes.json"
+    roster.write_text(
+        json.dumps({"version": 1, "nodes": [{"name": "N" * 64, "url": long_url}]}), encoding="utf-8"
+    )
+    main([str(roster)])
+    captured = capsys.readouterr()
+    overlong = [
+        line for line in (captured.out + captured.err).splitlines()
+        if len(line) > 60 and " " in line.strip()
+    ]
+    assert not overlong, overlong

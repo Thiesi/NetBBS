@@ -98,9 +98,13 @@ fall back.
 
 **Isolation warning (issue #313)**: when neither the seed list nor the
 candidate fallback reaches anything for `_ISOLATION_WARNING_PASS_
-INTERVAL` consecutive passes, that is logged as a single WARNING
-naming the seeds tried, rather than being left implicit in the
-per-dial failures. Those individual failures are indistinguishable
+INTERVAL` consecutive passes, *and there was something to reach in the
+first place*, that is logged as a single WARNING naming the seeds
+tried, rather than being left implicit in the per-dial failures. The
+qualifier matters: a full peer that declines the roster, configures no
+seeds, and only accepts inbound helloes is working exactly as
+configured, and nothing in this outbound loop would ever observe the
+inbound traffic proving it. Those individual failures are indistinguishable
 from ordinary churn -- which is exactly how a reliable node that had
 quietly stopped answering went unnoticed -- while "reached nothing at
 all, repeatedly" is a state worth putting in front of a SysOp, and a
@@ -369,15 +373,23 @@ async def run_link_sync(
         # is the distinguishable signal, and being a WARNING in the
         # `netbbs.link` namespace it lands in the SysOp-visible bounded
         # diagnostic log (design doc §13.11) without any further wiring.
-        if reached_network:
+        # A node with nothing to dial is not isolated, it is inbound-only
+        # by configuration: a full peer may decline the roster, configure
+        # no seeds, and serve inbound helloes perfectly well. Its
+        # completed peers are removed from candidate_descriptors, so this
+        # loop would otherwise see "reached nothing" forever and accuse a
+        # healthy node of being cut off. Only a pass that actually had
+        # somewhere to reach and failed counts toward isolation.
+        had_somewhere_to_reach = bool(pass_seeds) or bool(node.candidate_descriptors)
+        if reached_network or not had_somewhere_to_reach:
             isolated_passes = 0
         else:
             isolated_passes += 1
             if isolated_passes % _ISOLATION_WARNING_PASS_INTERVAL == 0:
                 _logger.warning(
                     "Link sync: no seed, reliable node, or fallback candidate has been "
-                    "reachable for %d consecutive passes -- this node is not exchanging "
-                    "anything with the network. Tried %d seed URL(s) this pass: %s",
+                    "reachable for %d consecutive passes -- this node is not reaching out to "
+                    "the network. Tried %d seed URL(s) this pass: %s",
                     isolated_passes,
                     len(pass_seeds),
                     ", ".join(pass_seeds) or "(none configured)",

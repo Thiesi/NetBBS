@@ -47,11 +47,27 @@ python -m services.reliable_nodes.check_roster --published  # the live www.netbb
 
 Each node gets `OK` (answered a Link hello), `DOWN` (nothing listening)
 or `NOT_LINK` (something answered, but it is not a Link node — a stale
-DNS record, a proxy in front of a node that is itself down). Anything
-other than a fully reachable, structurally valid roster exits non-zero,
-so this can gate the publish below or run from cron; `--quiet` prints
-only problems, which makes silence the healthy outcome for a cron job
-that mails its output.
+DNS record, a proxy in front of a node that is itself down, or a CDN
+rate-limiting on its behalf). Anything other than a fully reachable,
+structurally valid roster exits non-zero, so this can gate the publish
+below or run from cron; `--quiet` prints only problems, which makes
+silence the healthy outcome for a cron job that mails its output.
+
+Structural checking mirrors the node-side parser exactly — the same
+normalization (both fields stripped, trailing slashes removed before
+de-duplication), the same limits (64-character names, 256-character
+URLs, 32 kept entries, 256 raw entries, a 64 KiB document), and the same
+verdicts. Anything a node would silently drop is reported here rather
+than discovered after publishing. That duplication is deliberate (this
+runs where `netbbs` is not installed) and therefore load-bearing:
+`tests/test_reliable_nodes_check_roster.py` cross-checks it against the
+real `parse_reliable_nodes` over a corpus of documents, because every
+divergence would be a roster this gate approves and the network refuses.
+
+**An empty roster is valid and exits zero.** Publishing `"nodes": []` is
+the supported way to retire every entry, including the built-in
+fallback — `get_cached_reliable_nodes` deliberately preserves an empty
+fetched list rather than falling back — so the gate must not block it.
 
 The probe needs no node identity and changes nothing on the node it
 probes — it POSTs an unparseable hello to the one unauthenticated Link

@@ -42,24 +42,35 @@ it publishes into, so it stays runnable with nothing installed. Unlike
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
+import os
+import shutil
 import socket
 import sys
+import textwrap
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
-# Kept in step with `netbbs.link.reliable_nodes` and this directory's
-# README. Duplicated rather than imported: `services/` is standalone by
-# construction (see `__init__.py`), and the node-side parser stays the
-# authority on what a node will actually accept -- these bounds exist
-# here only so a roster that would be silently truncated or rejected out
-# there is reported before it goes live rather than after.
+# These mirror `netbbs.link.reliable_nodes` exactly, and must keep doing
+# so. Duplicated rather than imported because `services/` is standalone
+# by construction (see `__init__.py`) -- this runs on the web host, where
+# `netbbs` is not installed. That duplication is the risk this checker is
+# most exposed to: every place the two disagree, the checker approves a
+# roster the network would reject, which is the same false-green blind
+# spot it exists to close. `tests/test_reliable_nodes_check_roster.py`
+# therefore cross-checks this module against the real
+# `parse_reliable_nodes` on a corpus of documents rather than trusting
+# the constants below to stay in step by inspection.
 ROSTER_VERSION = 1
 MAX_NODES = 32
+MAX_RAW_ENTRIES = 256
 MAX_NAME_LENGTH = 64
 MAX_URL_LENGTH = 256
+MAX_RESPONSE_BYTES = 64 * 1024
 
 LINK_PATH_PREFIX = "/link/v1"
 DEFAULT_ROSTER_URL = "https://www.netbbs.org/reliable-nodes.json"
@@ -110,45 +121,132 @@ def probe_link_node(url: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Pr
     except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
         return ProbeResult("", url, DOWN, f"could not connect: {reason}")
+    except http.client.HTTPException as exc:
+        # A non-HTTP service on the port, or a malformed status line:
+        # `urllib` raises these straight through, and they are not
+        # OSErrors, so without this a single bad roster entry would
+        # abort the whole run with a traceback instead of being
+        # reported -- breaking this function's own contract above.
+        return ProbeResult("", url, NOT_LINK, f"not a usable HTTP response: {exc!r}")
+    except Exception as exc:  # noqa: BLE001 - deliberate, see below
+        # The contract above ("never raises") is the important part, and
+        # enumerating handlers does not achieve it: a hostname with an
+        # over-long DNS label, for instance, makes urllib raise
+        # UnicodeError from IDNA encoding, which is a ValueError and so
+        # matches none of the handlers above. Any such escape aborts the
+        # whole run and leaves every later roster entry unchecked -- far
+        # worse, for a diagnostic tool, than reporting one entry with a
+        # less specific reason. Roster URLs are externally authored, so
+        # the set of ways one can be malformed is not ours to enumerate.
+        return ProbeResult("", url, DOWN, f"could not probe: {exc!r}")
 
 
 def _classify_http_error(url: str, exc: urllib.error.HTTPError) -> ProbeResult:
     if exc.code == 429:
-        return ProbeResult("", url, OK, "rate-limited by the Link server (429) -- node is up")
+        # Only Link's own middleware answers with this body. A 429 from a
+        # CDN or reverse proxy fronting a dead node proves nothing about
+        # what is behind it, and reporting that as healthy would recreate
+        # exactly the false positive this checker exists to catch.
+        try:
+            rate_limited = json.loads(_read_bounded(exc).decode("utf-8", "replace"))
+        except (ValueError, OSError, http.client.HTTPException):
+            rate_limited = None
+        if isinstance(rate_limited, dict) and rate_limited.get("error") == "rate limit exceeded":
+            return ProbeResult("", url, OK, "rate-limited by the Link server (429) -- node is up")
+        return ProbeResult(
+            "", url, NOT_LINK,
+            "HTTP 429 from something other than Link's rate limiter (a proxy or CDN?)",
+        )
     if exc.code != 400:
         return ProbeResult("", url, NOT_LINK, f"HTTP {exc.code} to an empty hello (expected 400)")
     try:
-        body = json.loads(exc.read().decode("utf-8", "replace"))
+        body = json.loads(_read_bounded(exc).decode("utf-8", "replace"))
         error = body["error"]
-    except (ValueError, KeyError, TypeError, AttributeError):
+    except (ValueError, KeyError, TypeError, AttributeError, OSError, http.client.HTTPException):
         return ProbeResult("", url, NOT_LINK, "HTTP 400 without a Link error body")
     if not isinstance(error, str) or not error.startswith("malformed hello"):
         return ProbeResult("", url, NOT_LINK, f"HTTP 400 with an unexpected body: {error!r}")
     return ProbeResult("", url, OK, "answered a Link hello")
 
 
+def _read_bounded(response) -> bytes:
+    """Read at most the node parser's own response cap. A roster larger
+    than that is rejected outright by every node
+    (`MAX_RELIABLE_NODES_RESPONSE_BYTES`), so buffering more here would
+    only let the checker approve a document the network discards."""
+    return response.read(MAX_RESPONSE_BYTES + 1)
+
+
 def load_roster(source: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
     """Read a roster from an http(s) URL or a local filesystem path."""
     if source.startswith(("http://", "https://")):
         with urllib.request.urlopen(source, timeout=timeout) as response:
-            raw = response.read()
+            raw = _read_bounded(response)
     else:
         raw = Path(source).read_bytes()
+    if len(raw) > MAX_RESPONSE_BYTES:
+        # Not a warning: `parse_reliable_nodes` raises on this before it
+        # parses anything, so every node keeps its previous roster and a
+        # publish would be silently inert.
+        raise ValueError(
+            f"roster is larger than {MAX_RESPONSE_BYTES} bytes -- every node rejects it outright"
+        )
     document = json.loads(raw.decode("utf-8"))
     if not isinstance(document, dict):
         raise ValueError("roster must be a JSON object")
     return document
 
 
+def normalize_entry(entry: object) -> tuple[str, str] | None:
+    """Mirror of `netbbs.link.reliable_nodes._parse_entry`: the exact
+    normalization and acceptance rules a node applies, returning the
+    `(name, url)` it would keep or `None` for an entry it would skip.
+
+    The stripping matters as much as the rejecting. A node strips both
+    fields before testing them, so a whitespace-only `name` is skipped
+    *there* while reading as present here -- and if it were the roster's
+    only entry, nodes would cache an empty list and retire their
+    built-in fallback while this checker reported a healthy roster.
+    """
+    if not isinstance(entry, dict):
+        return None
+    name = entry.get("name")
+    url = entry.get("url")
+    if not isinstance(name, str) or not isinstance(url, str):
+        return None
+    name = name.strip()
+    url = url.strip().rstrip("/")
+    if not name or not url:
+        return None
+    if len(name) > MAX_NAME_LENGTH or len(url) > MAX_URL_LENGTH:
+        return None
+    if not url.startswith(("http://", "https://")):
+        return None
+    try:
+        parts = urlsplit(url)
+        if not parts.hostname or parts.port is not None and not 1 <= parts.port <= 65535:
+            return None
+    except ValueError:
+        return None  # non-numeric port, unbalanced IPv6 brackets, ...
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in name):
+        return None
+    return name, url
+
+
 def validate_roster(document: dict) -> tuple[list[tuple[str, str]], list[str]]:
     """Return `(entries, problems)` for a loaded roster.
 
-    `problems` collects everything a node would reject or silently drop
-    -- a wrong `version`, a malformed entry, a duplicate URL, an
-    over-cap list -- so publishing a roster that is *reachable* but
-    partly unusable is caught by the same run. `entries` is what is
-    worth probing: only the entries a node would actually keep, in the
-    order it would dial them.
+    `entries` is what a node would actually keep, normalized, in the
+    order it would dial them -- so those are the URLs worth probing.
+    `problems` collects everything a node would reject or silently drop,
+    so a roster that is *reachable* but partly unusable fails the same
+    run.
+
+    An empty `nodes` list is deliberately **not** a problem: a fetched
+    empty roster is the project's supported way to retire every built-in
+    entry, and `get_cached_reliable_nodes` preserves `[]` rather than
+    falling back for exactly that reason. Refusing to approve it here
+    would make this gate block the one mechanism that retires a node.
     """
     problems: list[str] = []
     version = document.get("version")
@@ -159,40 +257,40 @@ def validate_roster(document: dict) -> tuple[list[tuple[str, str]], list[str]]:
         )
     nodes = document.get("nodes")
     if not isinstance(nodes, list):
-        problems.append("'nodes' is missing or not a list")
+        problems.append("'nodes' is missing or not a list -- every node rejects the whole document")
         return [], problems
-    if not nodes:
-        problems.append("'nodes' is empty -- nodes fall back to the compiled-in roster")
-    if len(nodes) > MAX_NODES:
-        problems.append(f"{len(nodes)} entries -- nodes keep only the first {MAX_NODES}")
+    if len(nodes) > MAX_RAW_ENTRIES:
+        problems.append(
+            f"{len(nodes)} entries, more than the {MAX_RAW_ENTRIES} accepted -- every node "
+            "rejects the whole document rather than truncating it"
+        )
+        return [], problems
 
     entries: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for index, entry in enumerate(nodes[:MAX_NODES]):
-        label = f"entry {index}"
-        if not isinstance(entry, dict):
-            problems.append(f"{label}: not an object -- skipped by every node")
+    truncated = False
+    for index, entry in enumerate(nodes):
+        normalized = normalize_entry(entry)
+        if normalized is None:
+            problems.append(f"entry {index}: skipped by every node as malformed ({entry!r})")
             continue
-        name = entry.get("name")
-        url = entry.get("url")
-        if not isinstance(name, str) or not name or len(name) > MAX_NAME_LENGTH:
-            problems.append(f"{label}: 'name' must be 1-{MAX_NAME_LENGTH} characters")
+        name, url = normalized
+        if url in seen:
+            problems.append(f"entry {index} ({name}): duplicate URL {url} -- collapsed by every node")
             continue
-        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in name):
-            problems.append(f"{label}: 'name' contains control characters")
-            continue
-        if not isinstance(url, str) or len(url) > MAX_URL_LENGTH:
-            problems.append(f"{label}: 'url' must be a string of at most {MAX_URL_LENGTH} characters")
-            continue
-        if not url.startswith(("http://", "https://")):
-            problems.append(f"{label} ({name}): 'url' must start with http:// or https://")
-            continue
-        key = url.rstrip("/").lower()
-        if key in seen:
-            problems.append(f"{label} ({name}): duplicate URL {url} -- collapsed by every node")
-            continue
-        seen.add(key)
+        seen.add(url)
         entries.append((name, url))
+        # A node stops once it has kept MAX_NODES, so entries past that
+        # point are never dialed -- and dedup happens first, so the cut
+        # is on kept entries, not on raw ones.
+        if len(entries) >= MAX_NODES:
+            if len(nodes) > index + 1:
+                truncated = True
+            break
+    if truncated:
+        problems.append(
+            f"more than {MAX_NODES} usable entries -- nodes keep only the first {MAX_NODES}"
+        )
     return entries, problems
 
 
@@ -205,6 +303,43 @@ def check_roster(
         replace(probe_link_node(url, timeout=timeout), name=name) for name, url in entries
     ]
     return results, problems
+
+
+def print_wrapped(text: str, *, file=None) -> None:
+    """Local equivalent of `netbbs.rendering.reflow.print_wrapped`
+    (AGENTS.md: CLI prose wraps, and errors measure the stream that
+    actually receives them). Reimplemented on the stdlib rather than
+    imported for the reason this whole module is standalone -- it runs
+    where `netbbs` is not installed. Long names and URLs are within the
+    roster's own limits at 64 and 256 characters, so a single result
+    line can otherwise run past 300 columns and clip the status word
+    that matters.
+
+    `break_long_words=False` keeps a URL intact rather than splitting it
+    mid-token into something uncopyable.
+    """
+    destination = file or sys.stdout
+    print(
+        textwrap.fill(text, width=_terminal_columns(destination), break_long_words=False)
+        if text
+        else "",
+        file=destination,
+    )
+
+
+def _terminal_columns(stream) -> int:
+    """Measure the stream the text will actually reach, honouring
+    COLUMNS first -- the same order `netbbs.rendering.reflow` uses."""
+    try:
+        configured = int(os.environ.get("COLUMNS", ""))
+    except ValueError:
+        configured = 0
+    if configured > 0:
+        return configured
+    try:
+        return os.get_terminal_size(stream.fileno()).columns
+    except (OSError, ValueError, AttributeError):
+        return shutil.get_terminal_size(fallback=(80, 24)).columns
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -251,21 +386,29 @@ def main(argv: list[str] | None = None) -> int:
     try:
         results, problems = check_roster(args.roster, timeout=args.timeout)
     except (OSError, ValueError, urllib.error.URLError) as exc:
-        print(f"could not read roster {args.roster}: {exc}", file=sys.stderr)
+        print_wrapped(f"could not read roster {args.roster}: {exc}", file=sys.stderr)
         return 2
 
     for problem in problems:
-        print(f"ROSTER  {problem}", file=sys.stderr)
+        print_wrapped(f"ROSTER  {problem}", file=sys.stderr)
     for result in results:
         if result.healthy and args.quiet:
             continue
         stream = sys.stdout if result.healthy else sys.stderr
-        print(f"{result.status:<8} {result.name} <{result.url}> -- {result.detail}", file=stream)
+        print_wrapped(
+            f"{result.status:<8} {result.name} <{result.url}> -- {result.detail}", file=stream
+        )
 
     unhealthy = [result for result in results if not result.healthy]
     if not args.quiet:
-        print(f"\n{len(results) - len(unhealthy)}/{len(results)} roster nodes reachable.")
-    if problems or unhealthy or not results:
+        if results:
+            print_wrapped(f"{len(results) - len(unhealthy)}/{len(results)} roster nodes reachable.")
+        else:
+            # A valid, deliberately empty roster -- see validate_roster:
+            # this is how the project retires its last reliable node, so
+            # it is a successful check, not a failed one.
+            print_wrapped("Roster is empty -- every node will retire its built-in fallback.")
+    if problems or unhealthy:
         return 1
     return 0
 
