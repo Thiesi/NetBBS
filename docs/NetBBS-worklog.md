@@ -4944,3 +4944,17 @@ are needed. Save validation checks pool ceilings against the seed's unchanged
 economies. Old price-only observations remain valid; quantity observations require
 both stock and demand with the same timestamp. A later price-only trader report
 must not relabel old quantity information as newly observed.
+
+
+Regional economy events persist explicit station IDs. Missing IDs mean the old
+economy-wide scope, not a reason to regenerate an active event. New regions use
+a bounded CRC-derived choice over the existing galaxy and day, retaining the
+original event-creation RNG draws and lifetime; an absent selected industry falls
+back without adding a draw. This does not promise an identical future encounter
+stream: existing price-reversion noise consumes draws according to materialized
+market entries, which a different event scope changes. Apply price changes only to saved affected IDs and use
+the same predicate for market tags. Legality and event tags are independent.
+Public bulletin names do not count as chart discoveries or market observations.
+Opportunity candidates must call the same read-only route quote as the detailed
+estimator, reserve fuel/wage cash before selecting quantity, and use only current
+local prices plus timestamped remote observations.

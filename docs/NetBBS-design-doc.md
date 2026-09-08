@@ -4816,6 +4816,34 @@ spot stock; unloading collected goods still uses the destination's buying demand
 Contract deliveries consume their contracted cargo independently of spot demand.
 These distinctions preserve already-signed orders and delivery commitments.
 
+New economy events affect a bounded region: an anchor station plus up to two
+same-economy stations within two jumps. A deterministic selection from the
+existing seed/day/event terms chooses the region without RNG calls or changes to
+galaxy generation. The event-creation function retains its existing draw sequence;
+later gameplay can differ because the affected market state changes. An absent
+selected industry falls back to the current station economy and its first listed
+trade commodity, retaining that event's original draw count and duration. Existing saved events without
+regional IDs retain their original economy-wide scope until they finish. Price
+levels, event frequency and duration keep their existing rules; stock/demand
+pools do not refill merely because a price event starts or is viewed.
+
+The ledger's Opportunities screen combines public regional news with up to six
+ranked outbound spot-trade candidates derived from the pilot's remembered prices.
+News gives named affected stations, coordinates, hops, remaining time and an
+explicit unknown-danger label where appropriate; this public bulletin does not
+chart stations or create market observations. A boom suggests bringing that
+commodity; a crash suggests investigating cheaper procurement. These are leads,
+not promises of available stock or profitable resale.
+
+Trade candidates use current local stock/price/hold space, remembered destination
+demand when available, fuel and wages, and a cash budget sufficient to reach the
+sale. They exclude infeasible routes and loads consumed by active deliveries,
+rank positive estimated margins per outbound jump, and open the existing route
+estimate/draft without buying or travelling. Quote age, unobserved buying capacity,
+legality and excluded return travel remain visible; no live remote prices are
+queried. The board is read-only and paginated. Human play remains necessary to
+validate whether these opportunities encourage satisfying route variety.
+
 The engineer costs 200 credits to hire and 2 per jump, reducing fuel by 25%,
 rounded up, with a minimum one-unit burn. The role is an investment for longer
 routes; one-unit jumps cannot benefit, and hiring does not refund old hire costs.
