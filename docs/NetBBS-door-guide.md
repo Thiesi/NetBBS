@@ -185,6 +185,28 @@ unrecorded service is unknown. Wages, promotion and the departure save together,
 so reconnecting cannot repay salaries or award the same service twice. Existing
 salvage recovery keeps crew and their records; retirement starts a fresh roster.
 
+### Personal crew assignments
+
+In the crew roster, **[1-3] Tasks** opens a specialist's personal assignment.
+Five paid jumps unlock it. Read the terms, then **[A] Accept**; **[R] Route**
+shows the destination and ordinary fuel/wage budget. **[B] Back** writes nothing.
+There is no deadline, deposit or ordinary contract-slot cost.
+
+- The gunner wants one new combat recording after acceptance, delivered to
+  Rivet House for 600 credits.
+- The engineer needs three Machinery delivered to Tuning Fork for 900 credits.
+  Completion consumes the goods, including any promised to other contracts,
+  after a final confirmation. Their cost is included in the delivery ledger.
+- The navigator wants three new chart entries delivered to Far Lantern for
+  700 credits. If fewer systems remain, chart those; an already complete atlas
+  can be delivered directly.
+
+At the destination, **[C] Complete** requires that specialist to be hired.
+Dismissal retains the task and its progress; work done while they are away still
+counts. Rehiring costs the usual fee. Each task pays once and adds one completed
+mission and a personal highlight. It does not grant extra standing, service or
+upgrades. The contact remembers the completed task. Retirement starts fresh.
+
 ### Specialist workshops
 
 In **[Y] Engineering Yard**, **[S] Specialists** opens the public workshop
