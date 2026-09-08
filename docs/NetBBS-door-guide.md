@@ -150,6 +150,14 @@ At the existing top rank, **[R] Retire** is available from every record view. On
 the final confirmation starts a new career with the existing retirement bonus;
 No retains the current record and displays the cancellation result.
 
+### Hall of Fame pages
+
+Station **[H] Hall of Fame** shows the existing top 20 pilots by best recorded
+credits, with labelled credits, raider defeats, missions and retirements. **[YOU]**
+identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Back**;
+all displayed fields remain available on narrow terminals. The table is a snapshot
+for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
+
 ### Engineering yard and crew pages
 
 The yard and crew roster fit the terminal height, stacking terms at narrow widths.
