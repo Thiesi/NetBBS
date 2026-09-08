@@ -111,6 +111,19 @@ Uncharted intermediate names, danger and other connections remain unknown;
 contract target names are public bearings. Map and list browsing never charts,
 tracks or travels, and Back returns to the route preview.
 
+### Engineering yard and crew pages
+
+The yard and crew roster fit the terminal height, stacking terms at narrow widths.
+Use **[>]Next** and **[<]Prev** to browse; **[Q]Back** is available on every page.
+Upgrade/refit letters work directly, and the yard keeps **[R]Fuel**, **[P]Repair**
+and **[K]Crew** available across pages. The heading shows current credits. Full
+costs, upgrade benefits, fuel/hull prices and ongoing crew wages remain readable.
+
+After an action, the refreshed first page retains the result and updated credits.
+Paging, Back and cancelled confirmation/quantity prompts do not spend or save.
+The historical **[U]** yard shortcut now returns to the upgrade list; choose the
+visible upgrade letter there.
+
 ### Station stock and buying demand
 
 Spot markets carry a limited quantity of each good and have a limited buying

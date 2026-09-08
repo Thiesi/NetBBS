@@ -5019,3 +5019,17 @@ edges only between charted endpoints, while supplied route edges may cross
 uncharted bearings. Public contract names do not expose their economy, danger or
 other connections. Keep both the plotted route and tracked objective visible when
 the general planner supplies a path.
+
+
+Service-screen action helpers return a plain retained result after their existing
+checkpoint and acknowledgement. They must not move the checkpoint after output or
+reapply the action when the page refreshes. A cancelled action returns no new
+result; the prior result remains available. Pagination uses punctuation keys so
+upgrade/refit, repair and crew action letters retain their meanings on every page.
+Keep credits in the measured heading and avoid padded fixed-width tables below
+70 columns. Real subprocess cancellation tests must include every nested Back;
+an extra station/chart hotkey can accidentally perform a different action.
+
+Service pagination treats each upgrade or crew role as a paragraph and keeps its
+label, price and benefit on one page whenever that paragraph fits a fresh page.
+Wrapping rows first and chunking blindly can orphan a price at the next page top.

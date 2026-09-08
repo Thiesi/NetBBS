@@ -4787,6 +4787,17 @@ join charted endpoints; the plotted path can cross uncharted space without revea
 other links there. Contract/general navigation opens the map with its current path.
 Map Back returns to the same route; inspecting never charts, tracks or travels.
 
+Engineering-yard and crew screens paginate by wrapped rows and negotiated height.
+Narrow screens stack upgrade/crew terms instead of wrapping padded table borders.
+Keep each label, price and benefit together when the entry fits a fresh page.
+Credits appear in the page heading; fuel, hull, hire costs, ongoing wages and refit
+terms remain available in full. Direct action letters keep their meanings across
+pages, with previous/next punctuation keys and Back always present. Completed or
+rejected actions retain their result at the start of the refreshed screen. Back,
+paging and cancelled action prompts do not checkpoint or spend. Confirmation is
+only behind a chosen purchase/dismissal action, and existing durable action
+checkpoints still precede success acknowledgement.
+
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 500-credit high-water milestone in cumulative contraband sales minus purchases
 and new futures outlay/refunds. Buying and same-station recycling do not grant
