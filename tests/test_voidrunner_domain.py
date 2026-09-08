@@ -942,6 +942,26 @@ def test_market_depth_observed_quantities_are_paired_and_bounded(quantity_fields
     with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(world.save.to_dict())
 
 
+@pytest.mark.parametrize("economy", vr.ECONOMIES)
+@pytest.mark.parametrize("quantity", ["stock", "demand"])
+def test_market_depth_remembered_quantities_respect_each_station_ceiling(tmp_path, economy, quantity):
+    import json
+    world = _world_with_seed(0)
+    sid = next(s.id for s in world.galaxy if s.economy == economy)
+    if sid not in world.save.discovered: world.save.discovered.append(sid)
+    limits = vr.market_depth_limits(economy, "food")
+    quote = {"day": 0, "buy": 12, "sell": 11, "stock": limits["stock"], "demand": limits["demand"]}
+    world.save.market_memory[sid] = {"food": quote}
+    assert not world.save.market_depth  # Price memory also validates without materialized pools.
+    accepted = vr.SaveData.from_dict(world.save.to_dict())
+    assert accepted.market_memory[sid]["food"][quantity] == limits[quantity]
+    quote[quantity] += 1
+    raw = json.dumps(world.save.to_dict()).encode(); (tmp_path / "77.json").write_bytes(raw)
+    with pytest.raises(vr.ResumeError, match="remembered " + quantity):
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert (tmp_path / "77.json").read_bytes() == raw
+
+
 # -- galaxy generation -------------------------------------------------
 
 

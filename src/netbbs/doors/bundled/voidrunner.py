@@ -1295,14 +1295,17 @@ def _validate_save_document(data: dict) -> None:
         require(sid not in memory_ids, "duplicate remembered station")
         memory_ids.add(sid)
         require(isinstance(quotes, dict) and set(quotes) <= set(COMMODITIES), "remembered commodities")
-        for quote in quotes.values():
+        for commodity, quote in quotes.items():
             require(isinstance(quote, dict), "remembered quote")
             _reject_unknown_save_fields(quote, {"day", "buy", "sell", "stock", "demand"}, "remembered quote")
             require({"day", "buy", "sell"} <= set(quote), "remembered quote")
             require(("stock" in quote) == ("demand" in quote), "remembered quantities")
-            for quantity in ("stock", "demand"):
-                if quantity in quote:
-                    integer(quote[quantity], "remembered " + quantity, maximum=96)
+            if "stock" in quote:
+                if not economies:
+                    economies = {station.id: station.economy for station in generate_galaxy(data["seed"])}
+                caps = market_depth_limits(economies[sid], commodity)
+                for quantity in ("stock", "demand"):
+                    integer(quote[quantity], "remembered " + quantity, maximum=caps[quantity])
             integer(quote["day"], "quote observation day", maximum=data["turn"])
             if quote["buy"] is not None:
                 integer(quote["buy"], "remembered buy price", minimum=1)
