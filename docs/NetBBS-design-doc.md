@@ -4647,6 +4647,16 @@ galaxy seeds and legacy careers remain compatible through additive save fields.
 Unrecognized or unreadable journey/RNG state stops play and preserves the career
 file for manual SysOp recovery; broader save validation/recovery remains in #310.
 
+Voidrunner uses one UTF-8 and terminal-key decoder for menus and text fields.
+Unsupported special keys, terminal control strings, and bracketed paste cannot
+become menu commands or confirmations. Partial sequences survive transport gaps;
+a lone Escape is harmless and does not block indefinitely. CRLF submits a field
+once. Callsign editing supports combining accents and wide characters, bounds
+both character count and display columns, and normalizes submitted text to NFC.
+Quantity fields accept ASCII decimal digits. Unsupported keys do not dismiss
+result acknowledgement pauses. Responsive layouts and broader retained-result
+presentation remain separate work in #310.
+
 Compatibility extension (issues #296/#297):
 
 - A nullable, versioned profile preserves the original JSON/stdio API for

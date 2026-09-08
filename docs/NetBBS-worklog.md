@@ -4003,6 +4003,19 @@ longer need active membership; requiring it would reject legitimate restarts.
 Broader schema validation, per-pilot concurrency, and shared score transactions
 remain separate work in issue #310.
 
+Voidrunner's standalone input decoder reads unbuffered stdin bytes. Mixing
+buffered `sys.stdin.buffer.read` with readiness checks can hide prefetched bytes
+from the OS and strand a partial key. POSIX uses `select` for partial-key waits;
+Windows inherited door pipes need `PeekNamedPipe`, since Windows `select` only
+handles sockets. No background reader thread is required. The parser retains
+partial UTF-8/CSI/SS3/control-string/paste state across timeouts, limits each call
+to 256 bytes, and stores only bounded delimiter/prefix data. After a timeout it
+waits for actual data, preventing repeated idle menu redraws. Unsupported-key
+sentinels must be nonempty and non-command strings: empty strings match Python's
+`key in LETTERS` checks. Text entry filters those sentinels before character
+validation. Test the parser with split bytes and timeout events, and exercise
+UTF-8 input, standalone Escape, and partial-key EOF through real subprocess pipes.
+
 `netbbs.net.admin_flow._door_field_specs`' `args` field is parsed with
 `shlex.split(draft["args_line"])` -- deliberately POSIX-mode (the
 default), matching the "never a shell, always an argv list" posture
