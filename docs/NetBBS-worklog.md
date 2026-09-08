@@ -4932,3 +4932,15 @@ The tagged delivery uses the ordinary completion path; acceptance/completion fla
 prevent replay, survive restart and reset with a new career. Save validation must
 reject contradictory flags or multiple tagged jobs. Omit the default false tag
 from ordinary mission serialization to preserve their existing document shape.
+
+
+Spot-market pools are per-career, keyed by existing station and commodity IDs.
+Only completed spot trades materialize a pool at the current game day. Quotes
+calculate elapsed-day replenishment without creating or updating records, so
+menus, restart, and transaction splitting cannot reset stock or buying demand.
+Persist the pool with credits, cargo basis and price drift in the same checkpoint.
+Use the existing turn after travel resumes; no new encounter or galaxy RNG calls
+are needed. Save validation checks pool ceilings against the seed's unchanged
+economies. Old price-only observations remain valid; quantity observations require
+both stock and demand with the same timestamp. A later price-only trader report
+must not relabel old quantity information as newly observed.

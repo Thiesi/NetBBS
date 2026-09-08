@@ -4790,6 +4790,32 @@ async resource editor requires Session and DatabaseLane objects unavailable in
 the subprocess. Remembered station IDs must belong to the saved chart; inconsistent
 observations are rejected at the recovery boundary before names are rendered.
 
+
+Spot-market depth (issue #310): each pilot's station markets have finite stock
+and buying demand. A station carries up to 96 units of each locally produced
+commodity and 48 of other goods; it buys up to 96 units of each locally demanded
+commodity and 48 of other goods. Each pool replenishes by 6 or 3 units per game
+day respectively, capped at its maximum. Only jumps advance that clock; browsing,
+restarting and splitting trades do not replenish either pool. Sales add goods to
+stock up to its ceiling, but buying does not restore the station's spent buying
+demand. Existing price drift, spread and economy-event rules still apply.
+
+Limits are per career, matching the single-player economy. Old careers begin
+with full pools; no historical transactions are reconstructed. State is additive,
+bounded to the existing galaxy and commodities, and computed without new RNG
+calls. Read-only quotes do not create or advance records. Spot purchases and
+sales validate limits before changing credits, cargo, accounting or prices, and
+persist pool changes with the completed trade. Local quotes show stock, demand
+and daily replenishment. Remembered quantities are timestamped observations,
+never live remote availability; a route cannot promise sale of a load exceeding
+observed demand. First Flight must quote immediately available procurement.
+
+Futures remain separately scheduled wholesale consignments with their existing
+fee, term, issuing-station pickup and hold-space requirements. They do not consume
+spot stock; unloading collected goods still uses the destination's buying demand.
+Contract deliveries consume their contracted cargo independently of spot demand.
+These distinctions preserve already-signed orders and delivery commitments.
+
 The engineer costs 200 credits to hire and 2 per jump, reducing fuel by 25%,
 rounded up, with a minimum one-unit burn. The role is an investment for longer
 routes; one-unit jumps cannot benefit, and hiring does not refund old hire costs.
