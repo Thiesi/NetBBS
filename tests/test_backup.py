@@ -558,6 +558,55 @@ def test_reserved_runtime_paths_match_the_actual_log_handler_and_token_path(db_p
         db.close()
 
 
+@pytest.mark.parametrize("banner", ["welcome", "main_menu", "logoff", "new_account_banner_before",
+                                    "new_account_banner_after", "board_list", "file_area", "chat_channel_picker"])
+def test_restore_protects_absent_banner_recovery_drafts(tmp_path, db_path, identity_dir, banner):
+    _populate_voidrunner()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    restored_db = tmp_path / "restored.db"
+    suffix = banner if banner.startswith("new_account") else banner + "_banner"
+    target = tmp_path / f"restored_{suffix}.ans.draft"
+    with pytest.raises(BackupError, match="overlaps"):
+        restore_backup(source=source, db_path=restored_db, identity_dir=tmp_path / "new-identity", voidrunner_to=target)
+    assert not target.exists() and not restored_db.exists()
+
+
+def test_maintenance_probes_historical_pilot_files_with_bounded_descriptors(tmp_path, monkeypatch):
+    import errno
+    from netbbs.doors.bundled import voidrunner as vr
+
+    game = tmp_path / "many-pilots"
+    game.mkdir()
+    for pilot in range(128):
+        (game / f".{pilot}.lock").write_bytes(b"0")
+    original = vr._file_lease
+    live = maximum = 0
+
+    @contextlib.contextmanager
+    def limited(path, **kwargs):
+        nonlocal live, maximum
+        if live >= 3:
+            raise OSError(errno.EMFILE, "descriptor ceiling")
+        with original(path, **kwargs):
+            live += 1
+            maximum = max(maximum, live)
+            try:
+                yield
+            finally:
+                live -= 1
+
+    monkeypatch.setattr(vr, "_file_lease", limited)
+    with vr.maintenance_session(game):
+        assert live == 1  # Only the gate survives into capture or restore.
+    assert maximum == 2 and live == 0
+    with original(game / ".127.lock"):
+        with pytest.raises(vr.PilotBusy):
+            with vr.maintenance_session(game):
+                pytest.fail("Active pilot was missed")
+    assert live == 0
+    assert all((game / f".{pilot}.lock").read_bytes() == b"0" for pilot in range(128))
+
+
 @pytest.mark.parametrize("failure", ["active", "unsupported", "oversized"])
 def test_failed_game_capture_cleans_only_its_destination_and_allows_same_path_retry(
     tmp_path, db_path, identity_dir, failure,

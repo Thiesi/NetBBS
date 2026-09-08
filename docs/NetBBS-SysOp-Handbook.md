@@ -662,18 +662,33 @@ confirmation, and creates a timestamped directory under
 `<db-stem>_backups/` beside the database. The screen shows the completed path.
 This is a local backup; copy or synchronize it off-node separately if it is
 meant to protect against loss of the node itself.
+The screen also shows the effective Voidrunner save directory. Close all
+Voidrunner sessions before capture; the BBS may stay running. When that directory
+exists, careers, previous checkpoints, recovery copies and scores are included.
 
 The standalone command remains available for custom destinations and cron
 scheduling, and is the only supported restore entry point:
 
 ```
-python -m netbbs.backup create --db path/to/netbbs.db --identity-dir path/to/identity --to path/to/new-backup-dir
-python -m netbbs.backup restore --from path/to/backup-dir --db path/to/netbbs.db --identity-dir path/to/identity
+python -m netbbs.backup create --db path/to/netbbs.db --identity-dir path/to/identity --to path/to/new-backup-dir --voidrunner-save-dir path/to/voidrunner
+python -m netbbs.backup restore --from path/to/backup-dir --db path/to/netbbs.db --identity-dir path/to/identity --voidrunner-to path/to/voidrunner
 ```
 
 (`--db`/`--identity-dir` default to this node's standard locations if
-omitted; `--to`/`--from` are always required.) A restore preserves the
-previous generation it replaced in a rollback directory rather than
+omitted; `--to`/`--from` are always required.) These examples include Voidrunner:
+use the service's actual game directory for capture and an explicit game directory
+for restore. `--voidrunner-save-dir` overrides the environment/default source;
+`--voidrunner-to` is required whenever the manifest contains a `voidrunner`
+component. Omit `--voidrunner-to` for older backups or archives without that
+component; they leave external careers untouched. Stop the node and all games
+before restoring.
+
+**Manual activation:** configure the restored service's `VOIDRUNNER_SAVE_DIR` to
+the chosen destination before restarting, then verify a real pilot's career and
+Hall of Fame record. This setting is not changed by the restore command. Keep the
+destination separate from the database, identity, content and other node paths.
+
+A restore preserves the previous generation it replaced in a rollback directory rather than
 deleting it — the tool tells you where and reminds you it isn't removed
 automatically, so clean it up yourself once you're satisfied the restore
 is good.
@@ -682,7 +697,8 @@ A backup captures fourteen artifact groups as one recoverable set, not just
 the database: the database itself, content blobs, node identity
 (root/operational/transport keys), the SSH host key, managed-DNS credentials
 including rename-transition state, and every customizable banner and
-masthead. A DB-only backup would silently lose the Link node identity and the
+masthead, plus the Voidrunner component when present. A DB-only backup would
+silently lose the Link node identity and the
 SSH host key — the latter means every client gets a MITM warning on the next
 connection after a restore that skipped it.
 

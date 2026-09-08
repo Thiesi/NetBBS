@@ -270,6 +270,7 @@ def _runtime_reserved_paths(db_path: Path) -> list[Path]:
         pat, *(Path(str(path) + ".tmp") for path in credentials),
         parent / "doors", parent / "door-nodes", parent / f"{db_path.name}_drafts",
         parent / f"{db_path.stem}_backups",
+        *(Path(str(path) + ".draft") for path in _extra_artifact_paths(db_path) if path.suffix == ".ans"),
     ]
 
 

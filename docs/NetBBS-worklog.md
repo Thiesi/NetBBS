@@ -4575,6 +4575,8 @@ entries while the gate excludes launches. Never rename or replace the directory:
 a waiting opener would retain an obsolete gate and could split ownership.
 Pilot startup holds the gate briefly while acquiring its lifetime pilot lease.
 Maintenance holds the gate, probes every pilot lock and refuses active sessions.
+Close each probe immediately: the gate already prevents new owners, and permanent
+lock files from past callers must not consume one descriptor each during backup.
 Existing service-owned save directories need no parent-directory write permission
 for play or capture. Restore still needs permission to stage beside its target.
 Never delete gate or pilot lock files to clear an apparent stale session.
@@ -4607,7 +4609,8 @@ journal and staging, including external staging, for manual recovery. Tests must
 inject failure after the first rename, not only before a switch starts.
 
 Reserved restore targets also include fixed runtime log/rotation files, the update
-token and its temporary path, credential temporary paths, and managed door,
+token and its temporary path, banner `.ans.draft` recovery paths, credential
+temporary paths, and managed door,
 draft and backup directories. These exclusions do not imply those resources are
 captured in an archive. A failed game capture removes only the fresh destination
 created by that call so closing sessions or repairing data permits the same CLI

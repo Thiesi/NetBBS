@@ -2606,11 +2606,12 @@ def maintenance_session(save_dir: Path):
     save_dir = save_dir.resolve()
     with _maintenance_gate(save_dir):
         # Probe every stable session lock while the gate prevents new owners.
-        # Release our probes before a Windows directory rename.
-        with contextlib.ExitStack() as probes:
-            for path in save_dir.glob(".*.lock"):
-                if re.fullmatch(r"\.[0-9]+\.lock", path.name):
-                    probes.enter_context(_file_lease(path))
+        # The gate prevents new owners, so each probe can close immediately.
+        # Permanent pilot files must not consume one descriptor per past caller.
+        for path in save_dir.glob(".*.lock"):
+            if re.fullmatch(r"\.[0-9]+\.lock", path.name):
+                with _file_lease(path):
+                    pass
         yield
 
 
