@@ -4983,3 +4983,9 @@ hop requires another command; do not restore an automatic cached path loop.
 Contract timing must account for objectives met en route rather than always adding
 a return journey after the selected destination. Bounty estimates count real target
 entries and the existing queue; label their unchanged-queue/success assumptions.
+
+Route deadline estimates allocate a copy of delivery cargo in projected arrival
+order, with active-mission order breaking ties. Insufficient or already-late jobs
+do not consume it. Missing procurement has an arrival estimate but no promised
+completion day; evaluating every contract against the original hold overstates
+what the same cargo can accomplish.

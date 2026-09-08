@@ -2876,9 +2876,34 @@ def test_general_route_deadlines_include_enroute_objectives_and_bounty_queue():
         vr.Mission(2, "bounty", "First bounty", 500, 0, first, pirate_tier=1),
         vr.Mission(3, "bounty", "Queued bounty", 500, 0, first, pirate_tier=1, deadline_turn=1)]
     lines = vr.route_mission_implications(world, path)
-    assert "objective day 1" in lines[1] and "within deadline" in lines[1] and "Missing delivery cargo" in lines[1]
-    assert "objective day 1" in lines[2]
-    assert "TRAVEL ESTIMATE LATE" in lines[3]
+    assert "arrival day 1" in lines[2] and "within deadline" in lines[2] and "Missing delivery cargo" in lines[2]
+    assert "objective day 1" in lines[3]
+    assert "TRAVEL ESTIMATE LATE" in lines[4]
+
+
+@pytest.mark.parametrize("order", ["same_arrival", "reverse_arrivals", "expired_first", "short_first"])
+def test_general_route_delivery_estimates_allocate_cargo_in_resolution_order(order):
+    import copy
+    world = _world_with_seed(42)
+    destination = max(world.galaxy, key=lambda s: len(vr.bfs_path(world.by_id,0,s.id)))
+    path = vr.bfs_path(world.by_id,0,destination.id)
+    first, second = path[0], path[1]
+    a = vr.Mission(1,"delivery","First delivery",500,0,first,commodity="food",quantity=3,deadline_turn=10)
+    b = vr.Mission(2,"delivery","Second delivery",500,0,first,commodity="food",quantity=3,deadline_turn=10)
+    if order == "reverse_arrivals": a.target_system=second
+    if order == "expired_first": a.deadline_turn=0
+    if order == "short_first": a.quantity=4
+    world.save.active_missions=[a,b]; world.save.cargo={"food":3}
+    before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
+    lines=vr.route_mission_implications(world,path)
+    rows={mission.id:next(line for line in lines if line.startswith(f"Contract #{mission.id}:")) for mission in (a,b)}
+    missing = 2 if order == "same_arrival" else 1
+    if order == "expired_first":
+        assert "TRAVEL ESTIMATE LATE" in rows[1] and "Missing delivery cargo" not in rows[2]
+    else:
+        assert "Missing delivery cargo" in rows[missing] and "completion day unknown" in rows[missing]
+        assert "Missing delivery cargo" not in rows[3-missing]
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 
 # -- landmark systems --------------------------------------------------

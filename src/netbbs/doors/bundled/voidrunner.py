@@ -5090,6 +5090,7 @@ def route_mission_implications(world: World, path: list[int]) -> list[str]:
         return ["No active contract deadlines."]
     lines.append("Contract timing assumes successful travel, unchanged bounty queues and ready delivery cargo. Earlier failures, expiry and scanner use can change it.")
     end = path[-1] if path else world.here.id
+    estimates = []
     for mission in world.save.active_missions:
         arrivals = [i for i, sid in enumerate(path, 1) if sid == mission.target_system]
         if mission.kind == "scan" and world.by_id[mission.target_system].discovered and path:
@@ -5107,11 +5108,27 @@ def route_mission_implications(world: World, path: list[int]) -> list[str]:
         else:
             jumps = len(path) + len(bfs_path(world.by_id, end, mission.target_system))
         day = world.save.turn + jumps
-        timing = "no deadline" if mission.deadline_turn is None else f"deadline {mission.deadline_turn} inclusive; " + ("within deadline" if day <= mission.deadline_turn else "TRAVEL ESTIMATE LATE")
+        estimates.append((mission, day))
+    # Allocate a copy of the hold in predicted arrival order. Jobs resolving on
+    # the same arrival follow active-mission order, just like actual completion.
+    remaining = dict(world.save.cargo)
+    ready = {}
+    for index, (mission, day) in sorted(enumerate(estimates), key=lambda item: (item[1][1], item[0])):
+        if mission.kind != "delivery":
+            continue
+        available = remaining.get(mission.commodity, 0)
+        ready[index] = available >= mission.quantity
+        if ready[index] and (mission.deadline_turn is None or day <= mission.deadline_turn):
+            remaining[mission.commodity] = available - mission.quantity
+    lines.append("Cargo is allocated by estimated arrival, then active-contract order. Late contracts consume none; missing cargo leaves completion day unknown.")
+    for index, (mission, day) in enumerate(estimates):
+        timing = "no deadline" if mission.deadline_turn is None else f"deadline {mission.deadline_turn} inclusive; " + ("travel within deadline" if day <= mission.deadline_turn else "TRAVEL ESTIMATE LATE")
         suffix = ""
-        if mission.kind == "delivery" and world.save.cargo.get(mission.commodity, 0) < mission.quantity:
-            suffix = " Missing delivery cargo; procurement is still required."
-        lines.append(f"Contract #{mission.id}: objective day {day} by this route then onward; {timing}.{suffix}")
+        label = "objective day"
+        if mission.kind == "delivery" and not ready[index]:
+            label = "arrival day"
+            suffix = " Missing delivery cargo after earlier allocations; procurement required, completion day unknown."
+        lines.append(f"Contract #{mission.id}: {label} {day} by this route then onward; {timing}.{suffix}")
     return lines
 
 
