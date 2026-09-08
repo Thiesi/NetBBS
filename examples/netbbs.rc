@@ -171,7 +171,7 @@ netbbs_running()
 	_cmd=$(ps -p "${_pid}" -o command= 2>/dev/null)
 	case "${_cmd}" in
 	"")				return 0 ;;
-	*"-m netbbs --config"*)		return 0 ;;
+	*"-m netbbs --config ${netbbs_config}"*)	return 0 ;;
 	*)				return 1 ;;
 	esac
 }
@@ -239,7 +239,12 @@ netbbs_start()
 		_readiness_observable=yes
 		# Appended to across restarts, so a readiness line from an earlier
 		# run is already there. Only look past this start's own output.
-		_log_from=$(wc -l < "${netbbs_logfile}" 2>/dev/null | tr -d ' ')
+		# Bytes, not lines: `tail -n +N` counts lines from the start, so a
+		# large capture log would be re-read in full on every iteration of
+		# the readiness loop below -- and netbbs_start_timeout would not
+		# bound that, since the counter only advances once the pipeline
+		# returns. `tail -c +N` seeks.
+		_log_from=$(wc -c < "${netbbs_logfile}" 2>/dev/null | tr -d ' ')
 		case "${_log_from}" in
 		"" | *[!0-9]*)	_log_from=0 ;;
 		esac
@@ -343,11 +348,18 @@ netbbs_start()
 	while :; do
 		if ! netbbs_running; then
 			echo "netbbs failed to start -- see ${netbbs_logfile}." >&2
-			tail -20 "${netbbs_logfile}" >&2
+			# Strip terminal control characters (keeping tab, LF and CR,
+			# and leaving UTF-8 alone). This file is deliberately owned
+			# and writable by netbbs_user, and this replay usually lands
+			# in a root terminal -- a compromised node, door, or any
+			# same-UID process could otherwise plant escape sequences
+			# that the operator's terminal executes on the next failed
+			# start.
+			tail -20 "${netbbs_logfile}" | tr -d '\000-\010\013\014\016-\037\177' >&2
 			rm -f "${pidfile}"
 			return 1
 		fi
-		if tail -n "+$((_log_from + 1))" "${netbbs_logfile}" 2>/dev/null |
+		if tail -c "+$((_log_from + 1))" "${netbbs_logfile}" 2>/dev/null |
 		   grep -q "${netbbs_ready_marker}"; then
 			echo "netbbs started as pid ${_pid}."
 			return 0

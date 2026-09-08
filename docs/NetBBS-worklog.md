@@ -3236,6 +3236,16 @@ service fails with its own state directory perfectly writable. `HOME` does not
 affect `Path` resolution; only `cd` does. systemd gets this from
 `WorkingDirectory=`.
 
+Log data a supervisor replays to an operator is untrusted too. The capture file
+is deliberately owned and writable by the run-as user, and a failed start
+replays its tail into what is usually a root terminal — so a compromised node,
+door, or any same-UID process could plant escape sequences the terminal then
+executes. Strip control characters on the way out. And scan it by *byte*
+offset: `tail -n +N` counts lines from the start, so a readiness loop polling a
+large capture log re-reads it in full every second, with the start timeout
+unable to bound that because its counter only advances once the pipeline
+returns.
+
 Publishing the pid has to gate the node continuing to run, not follow it. A
 writability check can pass and the write still fail (inodes, quota), by which
 point the node is up; reporting a failed start then leaves an untracked live
