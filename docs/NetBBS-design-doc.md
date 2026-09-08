@@ -4853,6 +4853,33 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
+Three specialist workshops give existing stations distinct outfitting roles:
+Iona Rusk's Rivet House expands cargo bays, Oren Vale's Tuning Fork tunes engines,
+and Dr. Sel Parn's Far Lantern builds scanners. A separate `workshops-v1` seed
+namespace assigns distinct non-Freeport stations, preferring their matching
+economies and a few hops from home. This does not change galaxy generation,
+ordinary station services or encounter RNG. Their public directory gives route
+bearings without charting those stations or creating market observations.
+
+Workshops install the next ordinary module tier for 65% of its normal credit
+price (rounded up) plus materials: two Refined Metals per resulting cargo tier,
+two Machinery per resulting engine tier, or one Electronics per resulting
+scanner tier. Materials and travel can outweigh the cash saving, so the quote
+shows the ordinary price, required and held materials, and reminds pilots to
+compare total costs. Inputs may include cargo promised to delivery contracts.
+The pilot must visit the workshop; maximum tiers and upgrade effects remain the
+ordinary module rules. No extra fuel, repairs, reputation or mission completion
+is granted. Installation is a deliberate, confirmed action, bounded by module
+caps; cancellation, directory browsing and route previews write nothing.
+
+Validation precedes credit/material consumption. Existing FIFO cargo accounting
+records workshop materials separately from losses, and records workshop credit
+spend separately from trading profit. Legacy ledgers default these additive
+counters to zero. The module tier, costs and named workshop career highlight
+checkpoint together before success is shown. Career retirement clears these
+ordinary module and ledger values. The work order itself adds no day or RNG draw;
+travelling to a workshop follows the usual risks, fuel and wage rules.
+
 Voidrunner's optional Archive assignment connects Freeport with the existing
 seeded landmark. Mara Venn offers the assignment through Archive Contacts. It has
 no deadline, deposit or ordinary contract-slot cost. Accepting reveals a navigable

@@ -158,6 +158,35 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### Specialist workshops
+
+In **[Y] Engineering Yard**, **[S] Specialists** opens the public workshop
+directory. Select **[1-3]** to meet Iona Rusk at Rivet House (cargo), Oren Vale at
+Tuning Fork (engines), or Dr. Sel Parn at Far Lantern (scanners). These workshops
+occupy distinct existing stations. **[R] Route** provides ordinary deliberate
+jumps; the public bearing does not chart the station or reveal market prices.
+Back lets you refuel or trade before continuing.
+
+Bring materials to the workshop to install the next ordinary module tier:
+
+| Workshop | Materials per resulting tier | Credit price |
+| --- | --- | --- |
+| Rivet House | 2 Refined Metals | 65% of ordinary cargo upgrade |
+| Tuning Fork | 2 Machinery | 65% of ordinary engine upgrade |
+| Far Lantern | 1 Electronics | 65% of ordinary scanner upgrade |
+
+For example, cargo tier 1 costs 520 credits plus two Refined Metals, versus
+800 credits at an ordinary yard. The quote shows the exact cost, held materials
+and benefit. Count material acquisition and travel before assuming a saving.
+Materials may include cargo promised to delivery contracts. **[I] Install** ends
+with a confirmation; Back or No spends nothing. Tier caps stay the same, and no
+extra fuel, repairs, mission credit or faction standing accompanies installation.
+
+Credits, FIFO material consumption and the module tier save together before the
+named mechanic acknowledges the work. The Trading Ledger separates workshop
+credit spending and material costs from cargo losses. The career record preserves
+the mechanic and installation. Standard yard services remain available everywhere.
+
 ### The Freeport archive
 
 Station **[N] Archive Contacts** introduces Mara Venn's optional assignment.
