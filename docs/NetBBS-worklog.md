@@ -5033,3 +5033,12 @@ an extra station/chart hotkey can accidentally perform a different action.
 Service pagination treats each upgrade or crew role as a paragraph and keeps its
 label, price and benefit on one page whenever that paragraph fits a fresh page.
 Wrapping rows first and chunking blindly can orphan a price at the next page top.
+
+
+The direct chart must bound both physical rows and key mappings. Wrap connection
+entries before packing pages; retain the reserved-key-safe alphabet and prevent
+its reuse within one page. Preserve standard neighbor keys for normal graphs;
+for graphs exceeding the alphabet, resolve only the current page's mapping.
+Continuation rows repeat the same key. Chart browsing never syncs discoveries or
+checkpoints; scan result retention follows the existing discovery checkpoint.
+A blocked already-charted survey must not mark a next jump as actionable progress.

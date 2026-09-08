@@ -90,6 +90,20 @@ does not have to fit in one tank. This screen's selection is temporary: choose i
 again after leaving or restarting. A saved encounter still resumes before station
 access; subsequent route legs always need a new command.
 
+### Direct jump chart
+
+The direct chart keeps current fuel in its heading and paginates full connection
+entries with **[>]Next**, **[<]Prev** and **[Q]Back**. Each entry shows its bearing,
+known sector/economy and danger, fuel cost, low-fuel warning and tracked-next marker.
+Uncharted neighbors keep unknown names and danger. The opening pages list route,
+map, scanner and tracked-contract actions when available.
+
+Ordinary connection letters remain stable. Exceptionally dense charts reuse
+letters on later pages; choose the letter on the page currently displayed.
+Rejected departures and scanner results remain on the refreshed first page.
+Browsing and rejected jumps leave the career unchanged; a deliberate scan retains
+its normal discovery and checkpoint behavior.
+
 ### Reading the spatial map
 
 The chart's **[V]iew spatial map / list** opens the current sector. **[N/P]** move
