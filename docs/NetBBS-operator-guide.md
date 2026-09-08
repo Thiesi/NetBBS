@@ -191,7 +191,21 @@ didn't use the layout above, then enable it with your platform's
 ordinary tooling (`systemctl enable --now netbbs` / NetBSD's
 `rc.conf`+`service netbbs start`). NetBBS never daemonizes itself
 (design doc §13.8) — it runs in the foreground and expects the service
-supervisor to background and restart it, which both example units do.
+supervisor to background it, which both example units do.
+
+Confirm it actually came up rather than assuming a silent exit 0 meant
+success — `systemctl status netbbs` / `service netbbs status`, then a
+real connection to one of your listeners. (Issue #312: the NetBSD
+example previously delegated backgrounding to `daemon(8)`, a FreeBSD
+program NetBSD does not ship, and `rc.subr` reports success when
+`$command` is missing. `service netbbs start` printed nothing, exited 0,
+and started no node at all. It now backgrounds the node itself.)
+
+**Automatic restart differs by platform.** The systemd unit restarts a
+node that dies (`Restart=on-failure`). NetBSD's `rc.d` has no equivalent
+in base, so the rc.d script starts, stops and reports status but will
+not bring a crashed node back — if you want that on Tier 1, pair it with
+your own periodic `service netbbs status || service netbbs start` check.
 
 Graceful shutdown: sending `SIGTERM` (what `systemctl stop`/`service
 ... stop` both do) warns any connected users, waits up to

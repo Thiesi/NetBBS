@@ -7,50 +7,191 @@
 # REQUIRE: NETWORKING SERVERS
 # KEYWORD: shutdown
 #
-# rc.conf(5) variables:
+# rc.conf(5) variables (all optional -- the defaults below match the
+# install layout in docs/NetBBS-operator-guide.md §1b/§2):
 #
-#	netbbs=YES			# enable the service
-#	netbbs_user="netbbs"		# unprivileged user to run as
+#	netbbs=YES					# enable the service
+#	netbbs_user="netbbs"				# unprivileged user to run as
+#						# (needs a real shell -- this script
+#						# starts the node through su(1), so
+#						# /sbin/nologin will not work)
+#	netbbs_statedir="/var/lib/netbbs"		# node state; must be writable by netbbs_user
 #	netbbs_config="/usr/pkg/etc/netbbs/netbbs.toml"
-#	netbbs_python="/usr/pkg/bin/python3.12"
+#	netbbs_python="/var/lib/netbbs/.venv/bin/python"
+#	netbbs_logfile="/var/lib/netbbs/netbbs.service.log"
+#	netbbs_stop_timeout="150"			# seconds to wait for a graceful stop
 #
 # Install: copy this file from the official GitHub release/source tree to
 # /etc/rc.d/netbbs, add netbbs=YES to /etc/rc.conf, then run
 # `service netbbs start`. NetBBS itself is not distributed via pkgsrc.
 #
-# Build/run-tested on real NetBSD hardware (design doc §2.1 Tier 1).
+# Tested: this script's shape (load order, self-backgrounding, pidfile,
+# graceful stop, status) is the one running the project's own ReLink node
+# on NetBSD 11.0. The defaults below are the operator guide's layout
+# rather than that node's paths, so verify yours with `service netbbs
+# status` after the first start.
 
 . /etc/rc.subr
 
 name="netbbs"
 rcvar=${name}
-: ${netbbs_user:="netbbs"}
-: ${netbbs_config:="/usr/pkg/etc/netbbs/netbbs.toml"}
-: ${netbbs_python:="/usr/pkg/bin/python3.12"}
-: ${netbbs_ld_library_path:="/usr/pkg/lib"}
 
-pidfile="/var/run/${name}.pid"
-procname="${netbbs_python}"
-
-# netbbs_ld_library_path (operator guide §1b): a `cryptography` built
-# against pkgsrc's openssl links against /usr/pkg/lib/libssl.so.3, but
-# NetBSD's runtime linker doesn't search /usr/pkg/lib by default and
-# the base system's own /usr/lib/libssl.so.16 can't satisfy that
-# SONAME -- confirmed on real hardware as an `import asyncssh` failure
-# ("Shared object libssl.so.3 not found") even though the package is
-# correctly installed. Only matters when the ssh extra is in use;
-# harmless otherwise. Set empty in rc.conf to disable.
-LD_LIBRARY_PATH="${netbbs_ld_library_path}"
-export LD_LIBRARY_PATH
-
-# NetBBS deliberately never daemonizes itself (design doc §13.8): it
-# runs in the foreground and expects a supervisor to background and
-# restart it. daemon(8) (in the NetBSD base system since 8.0) does
-# exactly that -- forks the command into the background, writes the
-# real child's pid to $pidfile, and redirects its stdio -- so rc.subr's
-# ordinary start/stop/status logic works against that pidfile as usual.
-command="/usr/bin/daemon"
-command_args="-p ${pidfile} -u ${netbbs_user} -- ${netbbs_python} -m netbbs --config ${netbbs_config}"
-
+# rc.subr(8): load_rc_config must come BEFORE the `: ${var:=default}`
+# block, or every rc.conf override above is read too late to have any
+# effect and the built-in defaults always win. (Issue #312: this script
+# previously called it last, silently ignoring all of them --
+# netbbs_ld_library_path included, which operator guide §1b tells NetBSD
+# operators to set.)
 load_rc_config $name
+
+: ${netbbs_user:="netbbs"}
+: ${netbbs_statedir:="/var/lib/netbbs"}
+: ${netbbs_config:="/usr/pkg/etc/netbbs/netbbs.toml"}
+: ${netbbs_python:="${netbbs_statedir}/.venv/bin/python"}
+: ${netbbs_ld_library_path:="/usr/pkg/lib"}
+: ${netbbs_logfile:="${netbbs_statedir}/netbbs.service.log"}
+# Graceful stop: SIGTERM makes NetBBS warn connected callers and wait up
+# to shutdown.graceful_delay_seconds (60s default), after which teardown
+# bounds itself with shutdown.background_task_drain_seconds. 150s leaves
+# real headroom above both -- the same reasoning as the example systemd
+# unit's TimeoutStopSec. Raise it if you raised graceful_delay_seconds.
+: ${netbbs_stop_timeout:="150"}
+
+# The pidfile lives in the node's own state directory rather than
+# /var/run: this script backgrounds the node as netbbs_user (see
+# netbbs_start below), and an unprivileged user cannot write /var/run.
+pidfile="${netbbs_statedir}/netbbs.pid"
+
+# NetBBS deliberately never daemonizes itself (design doc §13.8): it runs
+# in the foreground and expects a supervisor to background and restart
+# it. NetBSD has no supervisor in base that does that for us -- daemon(8)
+# is a FreeBSD program, and NetBSD ships only the libc daemon(3) function
+# (issue #312: pointing $command at a nonexistent /usr/bin/daemon made
+# rc.subr's `[ ! -x $command ] && return 0` report success and start
+# nothing at all). So this script backgrounds the node itself and keeps
+# its own pidfile, which is why start/stop/status are all custom below
+# rather than rc.subr's pidfile/procname defaults.
+start_cmd="netbbs_start"
+stop_cmd="netbbs_stop"
+status_cmd="netbbs_status"
+# NetBSD's rc.subr rejects `status` as an unknown directive unless it is
+# declared here.
+extra_commands="status"
+
+netbbs_running()
+{
+	[ -f "${pidfile}" ] || return 1
+	_pid=$(cat "${pidfile}" 2>/dev/null)
+	[ -n "${_pid}" ] || return 1
+	kill -0 "${_pid}" 2>/dev/null || return 1
+	# The pidfile lives in the state directory, so it survives a reboot
+	# -- and a recycled pid belonging to some unrelated process would
+	# otherwise read as "already running", leaving the node permanently
+	# unstarted (the same silent-failure class this script exists to
+	# fix) and making `stop` signal a stranger. Only trusted when ps
+	# actually reports something: no output means ps could not tell us,
+	# and "still running" is the safe answer there -- never start a
+	# second node against the same database on a guess.
+	_cmd=$(ps -p "${_pid}" -o command= 2>/dev/null)
+	case "${_cmd}" in
+	"")		return 0 ;;
+	*netbbs*)	return 0 ;;
+	*)		return 1 ;;
+	esac
+}
+
+netbbs_start()
+{
+	if netbbs_running; then
+		echo "netbbs already running as pid $(cat "${pidfile}")."
+		return 1
+	fi
+	if [ ! -x "${netbbs_python}" ]; then
+		echo "netbbs: ${netbbs_python} is not executable -- set netbbs_python in rc.conf." >&2
+		return 1
+	fi
+	if [ ! -d "${netbbs_statedir}" ]; then
+		echo "netbbs: state directory ${netbbs_statedir} does not exist." >&2
+		return 1
+	fi
+	# The pidfile is written by netbbs_user, inside the su below. If that
+	# write fails there is no pidfile to check afterwards, so the node
+	# would start, keep running, and still be reported as failed -- and
+	# the next start would launch a second one against the same database.
+	# Check up front instead, where it can still be a clear message.
+	if ! su -m "${netbbs_user}" -c "test -w \"${netbbs_statedir}\""; then
+		echo "netbbs: ${netbbs_statedir} is not writable by ${netbbs_user}." >&2
+		return 1
+	fi
+	rm -f "${pidfile}"
+	echo "Starting netbbs."
+	# su -m leaves the environment alone, so HOME would still be root's.
+	# Set it explicitly to the state directory: a door that keeps its own
+	# per-caller save files does so under $HOME by default (see
+	# netbbs.doors.bundled.voidrunner), and root's home is both wrong and
+	# unwritable for netbbs_user.
+	#
+	# netbbs_ld_library_path (operator guide §1b): a `cryptography` built
+	# against pkgsrc's openssl links against /usr/pkg/lib/libssl.so.3, but
+	# NetBSD's runtime linker doesn't search /usr/pkg/lib by default and
+	# the base system's own /usr/lib/libssl.so.16 can't satisfy that
+	# SONAME -- confirmed on real hardware as an `import asyncssh` failure
+	# ("Shared object libssl.so.3 not found") even though the package is
+	# correctly installed. Only matters when the ssh extra is in use;
+	# harmless otherwise. Set empty in rc.conf to disable.
+	#
+	# NetBBS logs to its own self-rotating netbbs.log beside the database
+	# as well (operator guide §4); netbbs_logfile only captures what it
+	# still writes to stdout/stderr, including a startup failure that
+	# happens before logging is configured. It does not rotate itself.
+	su -m "${netbbs_user}" -c "nohup env HOME=\"${netbbs_statedir}\" LD_LIBRARY_PATH=\"${netbbs_ld_library_path}\" \"${netbbs_python}\" -m netbbs --config \"${netbbs_config}\" >> \"${netbbs_logfile}\" 2>&1 & echo \$! > \"${pidfile}\""
+	# NetBBS binds its listeners during startup; a config or import error
+	# surfaces within a second or two. Waiting here turns "the service
+	# reported success and there is no node" into a visible failure at
+	# the point the operator ran the command.
+	sleep 3
+	if netbbs_running; then
+		echo "netbbs started as pid $(cat "${pidfile}")."
+	else
+		echo "netbbs failed to start -- see ${netbbs_logfile}." >&2
+		tail -5 "${netbbs_logfile}" >&2
+		rm -f "${pidfile}"
+		return 1
+	fi
+}
+
+netbbs_stop()
+{
+	if ! netbbs_running; then
+		echo "netbbs is not running."
+		rm -f "${pidfile}"
+		return 0
+	fi
+	_pid=$(cat "${pidfile}")
+	echo "Stopping netbbs (pid ${_pid}), up to ${netbbs_stop_timeout}s."
+	kill -TERM "${_pid}"
+	_waited=0
+	while kill -0 "${_pid}" 2>/dev/null; do
+		if [ "${_waited}" -ge "${netbbs_stop_timeout}" ]; then
+			echo "netbbs did not exit in ${netbbs_stop_timeout}s; sending SIGKILL." >&2
+			kill -KILL "${_pid}" 2>/dev/null
+			break
+		fi
+		sleep 2
+		_waited=$((_waited + 2))
+	done
+	rm -f "${pidfile}"
+	echo "netbbs stopped."
+}
+
+netbbs_status()
+{
+	if netbbs_running; then
+		echo "netbbs is running as pid $(cat "${pidfile}")."
+	else
+		echo "netbbs is not running."
+		return 1
+	fi
+}
+
 run_rc_command "$1"

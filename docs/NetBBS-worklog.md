@@ -3180,6 +3180,39 @@ must not misreport: only "asyncssh is genuinely absent" may produce the
 or the actual cause — a linker search-path gap, not a missing package — is
 undiagnosable from the log alone.
 
+### NetBSD has no supervisor: rc.subr reports success for a `$command` it cannot find (issue #312)
+
+Two independent traps, both of which produce a *silently* unstarted node, and
+both of which the shipped `examples/netbbs.rc` fell into at once.
+
+`daemon(8)` is FreeBSD, not NetBSD. NetBSD ships only the libc `daemon(3)`
+function; there is no `daemon` binary anywhere in base or pkgsrc. Nothing in
+NetBSD's base system backgrounds a foreground process and supervises it, so an
+rc.d script for something that deliberately never daemonizes (design doc §13.8)
+has to background it itself — `su`+`nohup`, its own pidfile, its own
+SIGTERM-and-wait stop. Since an unprivileged run-as user cannot write
+`/var/run`, that pidfile belongs in the node's state directory, which in turn
+means it survives a reboot: verify the pid still belongs to a NetBBS process
+(`ps -p <pid> -o command=`) before believing it, or a recycled pid reads as
+"already running" forever. Treat *empty* `ps` output as "still running" — the
+safe answer is never to start a second node against one database.
+
+`rc.subr`'s `run_rc_command` ends with `[ ! -x $command ] && return 0`. A
+`$command` that does not exist is therefore not an error: `service netbbs
+start` prints nothing, exits 0, and `service netbbs status` then reports the
+service as not running. Any rc.d failure diagnosis has to start from `sh -x`,
+because the exit code carries no information.
+
+`load_rc_config $name` must be called *before* the `: ${var:=default}` block,
+per `rc.subr(8)`. Called after, as it was, every documented `rc.conf` override
+is read too late to have any effect and the built-in defaults always win —
+including `netbbs_ld_library_path`, which is the one variable the NetBSD
+`libssl.so.3` trap above requires an operator to set. Also note NetBSD's
+`rc.subr` rejects `status` as an unknown directive unless it appears in
+`extra_commands`, and that the platform has no `Restart=on-failure` equivalent:
+Tier 1 automatic restart is an operator's own periodic check, not something the
+example script can provide.
+
 ### Platform-specific code stays in exactly three narrow places (issue #81)
 
 A full-repo audit (`grep` for `sys.platform`/`os.name` across `src/`)
