@@ -4001,7 +4001,8 @@ remaining bounty/escort snapshots must match active contracts as a multiset,
 terminal outcomes must agree with opponent HP and destruction state, and the
 saved location must match the journey phase. Completed contract snapshots no
 longer need active membership; requiring it would reject legitimate restarts.
-Broader schema validation and supported recovery remain separate work in issue #310.
+The storage boundary also validates career structure and gameplay ranges before
+loading or writing, as described below.
 
 Voidrunner's menu commands case-fold ASCII only; Unicode remains text input,
 so Unicode case aliases cannot surrender cargo or dispatch another hotkey.
@@ -4529,3 +4530,39 @@ Game+ and commits before the optional score write, so a failed projection can be
 repaired on a later checkpoint even after spending. Private temporary files need
 flush/fsync and replacement in the destination directory. Unsupported shared-host
 filesystems and full directory backup/recovery remain operational boundaries.
+
+
+Voidrunner save decoding validates before constructing dataclasses: otherwise
+`dict`/`list` coercion or ignored fields can hide malformed and future data.
+Reject unsupported schema/generator versions and unknown structural fields rather
+than loading then stripping them in the startup checkpoint. Legacy optional fields
+keep their original defaults and active mission IDs can still be normalized while
+docked. Validate RNG and pending journey consistency without normalization when
+checking a previous-copy candidate. Galaxy version 1 retains the original seeded
+call sequence; adding the field does not regenerate a different galaxy.
+
+Under the pilot lease, a changed save first replaces the previous-checkpoint file
+with the validated old bytes, then replaces the primary file. Both use private,
+flushed temporary files. Identical bytes must not age the previous copy. A failure
+before the primary replace leaves the old career available. The recovery screen
+never offers a reset and never writes on Back, EOF or declined confirmation.
+Use the same read-only preservation preflight for the recovery screen and the
+final action. Unreadable/oversized originals and full copy slots need an explicit
+manual-recovery reason before offering a doomed action. Unknown fields in nested
+journey, encounter, opponent, mission-snapshot and economy-event records receive
+the unsupported-format guard too; checking only the outer schema is insufficient.
+Restoration rechecks the exact candidate, archives the current bytes with an
+exclusive unique temporary filename and fsync, promotes only a successfully
+closed archive, then atomically replaces the primary. Failed archive writes must
+not consume retained recovery slots. Keep
+an unsupported-version career for manual repair rather than enabling a downgrade.
+A missing primary with an existing previous copy is recovery, not a new pilot.
+Tests simulating corruption must write the damaged fixture directly; the normal
+writer rejects it before touching primary or previous files. A forced kill after
+recovery acknowledgement proves preservation/replacement happened before output.
+
+
+Notoriety is an uncapped nonnegative counter; encounter probabilities may cap its
+impact, but that does not bound the saved value. Recovery Back/Q is a normal door
+exit (status 0), distinguished from failed restoration or input loss so the parent
+runtime does not announce a deliberate departure as an unexpected crash.

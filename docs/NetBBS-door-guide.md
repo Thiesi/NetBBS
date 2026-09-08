@@ -36,6 +36,38 @@ pilots outside the displayed top 20. Older `leaderboard.json` remains readable a
 is not rewritten. A pilot's next checkpoint carries their legacy high-water score
 forward. Scores are optional; a temporary score-write failure does not lose the
 career, and a later checkpoint retries publication from its saved high-water mark.
+
+### Voidrunner recovery
+
+Invalid or unreadable career files remain in place. The game shows a recovery
+screen with **[B]ack**, and never silently starts a replacement career. If
+`USER_ID.previous.json` is valid, the screen shows its callsign, day, credits and
+pending-journey status. **[R]estore** appears on the final page and requires a
+confirmation: progress after that checkpoint will be rolled back. Before
+replacement, the current bytes are retained as `USER_ID.recovery-UNIQUE.json`.
+Back, declined confirmation and disconnection leave the files unchanged.
+
+Changed checkpoints retain the preceding valid save; identical writes leave the
+previous copy alone. Validation covers file structure, schema/generator versions,
+numeric types and ranges, references, ship/cargo capacity and resume state. The
+file limit is 4 MiB; excessive or malformed data requires manual inspection.
+Legacy additive fields default normally, including pre-limit active contracts.
+An unsupported schema, generator version or structural field requires the matching
+game build or manual repair; the game does not offer a downgrade to an older copy.
+
+**Manual SysOp recovery:** stop all sessions using this pilot's save directory,
+retain a separate copy of the whole directory, and inspect the reported file.
+Fix access/storage problems first. For an unsupported version, restore the matching
+NetBBS/game installation rather than changing version numbers in the JSON. If
+restoring from an independently retained backup, replace the pilot's current JSON
+with that verified copy while sessions are stopped, then relaunch to validate it.
+Never delete the current career merely to bypass the recovery screen. Archive
+older recovery copies manually if the eight-copy limit is reached; the game never
+deletes them for you. A failed archive or replacement leaves the current save in
+place. Include previous and recovery copies when moving or backing up this folder.
+The local previous-checkpoint file does not provide off-machine backup protection;
+ordinary node backup coverage remains tracked in issue #310.
+
 Existing registrations keep their JSON metadata and UTF-8 stdio API.
 
 **MANUAL — outside NetBBS** labels below identify work the SysOp must do on
