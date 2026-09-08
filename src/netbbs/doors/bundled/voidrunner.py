@@ -5781,7 +5781,9 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     used = sum(world.save.cargo.values())
     lines = []
     if result:
-        lines += ["Last exchange:"] + result
+        lines.append("Last exchange:")
+        for message in result:
+            lines.extend(_wrap_output(_mission_plain(message), max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
     if details: lines.append("Tactical Systems:")
     lines += [
         f"{pirate.name} (tier {pirate.tier}): HP {pirate.hp}/{pirate.hp_max}.",
@@ -5795,7 +5797,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     ]
     if patrol:
         cost = notoriety_fine_cost(pilot.notoriety)
-        lines.append((f"[S] Surrender: pay {cost}cr, clear notoriety and escape. " if pilot.credits >= cost else f"Surrender requires {cost}cr. ") +
+        lines.append((f"[S] Surrender: pay {cost}cr, clear notoriety, Concord +2 and escape. " if pilot.credits >= cost else f"Surrender requires {cost}cr. ") +
                      ("Available." if pilot.credits >= cost else "UNAFFORDABLE; surrender unavailable."))
     else:
         chance = evade_chance(world, pirate, dumped_cargo=bool(used), cargo_units=max(0, used - 1))
@@ -5805,7 +5807,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         cost = bribe_cost(pirate)
         lines.append((f"[B] Bribe: " if pilot.credits >= cost else "Bribe unavailable: ") +
                      f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
-                     "refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable."))
+                     "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable."))
     if details:
         lines += [f"Shields Tier {ship.shield_tier}: reduce incoming damage by {ship.shield_tier * 3}, minimum 1.",
                   f"Weapons Tier {ship.weapon_tier}: +{ship.weapon_tier * 4} damage; gunner bonus +{3 if ship.has_gunner else 0}.",

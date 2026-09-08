@@ -8308,3 +8308,24 @@ def test_dump_preview_matches_actual_post_disposal_escape_boundary(monkeypatch):
     monkeypatch.setattr(world.event_rng, "random", lambda: 0.695)
     with contextlib.redirect_stdout(io.StringIO()): assert vr.screen_combat(vr.Palette(False), world, pirate) == "escaped"
     assert not world.save.cargo and "70%" in line
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("details", [False, True])
+def test_real_exchange_text_starts_on_first_combat_page(monkeypatch, width, height, details):
+    world = _world_with_seed(42); pirate = vr.Pirate("Rust Wraith", 1, 80, 80)
+    _, _, result = vr.fight_round(world, pirate)
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    lines = vr.combat_display_lines(world, pirate, result, patrol=False, details=details)
+    pages = vr._service_pages(lines, "Combat 1,200cr", "[F/E/D/B]Act [Q]Info [< >]Page: ")
+    assert len(pages[0]) > 1 and result[0].split()[0] in " ".join(pages[0][1:])
+    text = " ".join(" ".join(row for page in pages for row in page).split())
+    for entry in result: assert " ".join(entry.split()) in text
+
+
+@pytest.mark.parametrize("patrol", [False, True])
+def test_peaceful_combat_action_discloses_its_standing_gain(patrol):
+    world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 1, 50, 50)
+    lines = vr.combat_display_lines(world, pirate, [], patrol=patrol, details=True)
+    action = next(row for row in lines if row.startswith("[S]" if patrol else "[B]"))
+    assert ("Concord +2" if patrol else "Blackwake +2") in action
