@@ -30,6 +30,14 @@ exchange pays its earnings through the transfer and keeps the previous owner's
 fractional remainder for later income. Startup upgrades existing player records
 in place; fractions already discarded by older releases cannot be recovered.
 
+`[H]istory` is free and replays your latest 500 events with UTC timestamps and
+NEW/READ labels. Older events expire as new ones arrive, including unread events
+beyond 500; there is no age expiry. The login summary is paginated: continuing
+accepts complete receipts on that page, while Back or disconnect leaves them
+unread. In history, use Next/Prev to browse, Ack page to acknowledge, and Back to
+return. New events arriving while you read remain unread. These screens fit down
+to 20x10; smaller terminals show a size diagnostic and preserve unread state.
+
 Use separate single keys. Arrow/function keys and pasted command bursts do not
 select actions; Escape dismisses a pause but has no menu action. An incomplete
 or excessively long terminal sequence ends the door with a reconnect diagnostic.
