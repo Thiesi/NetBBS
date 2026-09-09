@@ -980,7 +980,13 @@ session needs the same treatment.
   treats a `CLIENT` packet's field 3 as a pid or hash (`string[128]`), not
   a room name, so the `CAPABILITIES` hash and the `IMALIVE` pid survive;
   `PONG` is parsed for the echoed epoch and an absurd value (negative or
-  five minutes) is ignored. Latency is reset on every connection.
+  five minutes) is ignored. Latency is reset on every connection and on
+  `reload_settings`. Facts are noted on every channel entry, bridged or
+  not, so `_reconcile_announced` (a mapping added while callers are
+  inside) announces with this session's facts. The outbound queue's bound
+  is `_outbound_cap()`: the configured 200, or eight lines per announced
+  caller when that is more, so a reconnect's announcements never evict
+  each other (review of #388).
 - Wire limits (issue #376, MRCDoc rev 1.26): `MAX_ROOM` 20, `MAX_TOPIC` 55,
   `MAX_PASSWORD` 20, `MAX_ROOM_PASSWORD` 32, `MAX_ARGUMENT` 20 live in
   `netbbs.mrc.protocol` beside `MAX_NAME` and `MAX_BODY`. `sanitize_room`

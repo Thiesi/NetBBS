@@ -5272,7 +5272,7 @@ async def _mrc_settings_screen(
             key="send_caller_ip", hotkey="u", menu_text=menu_key("U", "SERIP"), label="Send callers' IP addresses (USERIP)",
             render=lambda d: "yes" if d["send_caller_ip"] else "no",
             prompt=_toggle_draft_field("send_caller_ip"),
-            brief="Off: nothing about a caller leaves the node", section="About callers",
+            brief="Off: the connecting address stays local", section="About callers",
             help=(
                 "Off by default. On: each caller announced on the network is followed by their "
                 "connecting IP address (USERIP), which the hub uses to tell this board's callers apart "

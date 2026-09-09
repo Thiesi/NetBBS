@@ -473,7 +473,7 @@ def bbsmeta(nick: str, site: str, level: int, sysop: str) -> MrcPacket:
     """`BBSMETA: SecLevel(level) Sysop(name)` for an announced caller
     (MRCDoc rev 1.26, alphanumeric only); sent only when the SysOp
     switched it on (issue #377)."""
-    name = "".join(ch for ch in sysop if ch.isalnum())[:32]
+    name = "".join(ch for ch in sysop if ch.isascii() and ch.isalnum())[:32]
     body = f"BBSMETA: SecLevel({max(0, min(level, 999))})"
     if name:
         body += f" Sysop({name})"

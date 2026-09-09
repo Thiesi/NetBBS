@@ -85,8 +85,9 @@ class MrcSettings:
     # `USERIP` lets the hub tell this board's callers apart when it
     # bans (the spec warns a user without it "may get removed from
     # room traffic routing"); `BBSMETA` is the caller's level and the
-    # SysOp's name. Both off by default: nothing about a caller leaves
-    # the node unless the SysOp says so.
+    # SysOp's name. Both off by default: no address or level leaves the
+    # node unless the SysOp says so (the handle and terminal size do,
+    # as part of being on the network at all).
     send_caller_ip: bool = False
     send_caller_meta: bool = False
 

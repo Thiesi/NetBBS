@@ -165,6 +165,9 @@ KEEPALIVE_INTERVAL_SECONDS = 60.0
 USERLIST_REFRESH_INTERVAL_SECONDS = 300.0
 USERLIST_MIN_INTERVAL_SECONDS = 5.0
 OUTBOUND_QUEUE_SIZE = 200
+# NEWROOM, USERLIST, STATUS AFK, IAMHERE, TERMSIZE, USERIP, BBSMETA, STATUS
+# LASTSEEN: what one announcement can queue at most.
+OUTBOUND_LINES_PER_ANNOUNCEMENT = 8
 OUTBOUND_RATE_PER_SECOND = 5.0
 OUTBOUND_BURST = 10
 # Issue #375: the hub's own limit is one message per 0.5 s per user
@@ -402,7 +405,12 @@ class MrcBridge:
         self._network_stats_raw: str | None = None
         self._stats_requested: set[str] = set()
 
-        self._outbound: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=outbound_queue_size)
+        # Unbounded as a Queue; the bound is `_outbound_cap()`, enforced by
+        # `_enqueue`: the configured size, or more when this node has more
+        # announced callers than that size can announce at once (a reconnect
+        # re-announces everyone before the writer has drained anything).
+        self._outbound: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self._outbound_size = outbound_queue_size
         # Issue #375: per-nick spacing state for the writer -- when each
         # nick last had a packet written, and packets held back because
         # their nick wrote too recently (per nick, in order). Both are
@@ -504,6 +512,8 @@ class MrcBridge:
             self._network_stats_raw = None
             self._banner.clear()
             self._known_sites.clear()
+            self._hub_latency = None
+            self._hub_latency_at = None
             await self._reload_from_db()
             self._notify_on_connect = True
             if not self._stopping:
@@ -933,7 +943,7 @@ class MrcBridge:
             self._dropped_outbound += 1
             _logger.warning("Dropped outbound MRC packet: %s", exc)
             return
-        if self._outbound.qsize() + self._held_total >= self._outbound.maxsize:
+        if self._outbound.qsize() + self._held_total >= self._outbound_cap():
             # One cap for queued and held lines together (the documented
             # 200): the oldest queued line goes first, else the oldest
             # held line of the nick holding the most.
@@ -948,6 +958,16 @@ class MrcBridge:
         # not cover.
         nick = "" if packet.from_user.upper() == protocol.CLIENT else packet.from_user.lower()
         self._outbound.put_nowait((nick, line))
+
+    def _outbound_cap(self) -> int:
+        """The queue's bound (review of #388): the configured size, or
+        `OUTBOUND_LINES_PER_ANNOUNCEMENT` lines for every announced
+        caller when that is more -- a reconnect queues every caller's
+        NEWROOM, USERLIST and facts before the writer sends a line, and
+        the oldest of those must not be evicted by the newest. Announced
+        callers are live sessions, so this stays a bound."""
+        announced = sum(len(nicks) for nicks in self._announced.values())
+        return max(self._outbound_size, OUTBOUND_LINES_PER_ANNOUNCEMENT * announced)
 
     def _drain_outbound_queue(self) -> None:
         """Anything queued while disconnected refers to a session the

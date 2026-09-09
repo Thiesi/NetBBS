@@ -304,6 +304,7 @@ def test_client_context_verbs_follow_the_spec():
     assert build_line(protocol.userip("alice", "S", "203.0.113.5")) == "alice~S~~SERVER~~~USERIP:203.0.113.5~\n"
     assert build_line(protocol.termsize("alice", "S", 132, 50)) == "alice~S~~SERVER~~~TERMSIZE:132x50~\n"
     assert build_line(protocol.bbsmeta("alice", "S", 10, "Thie si!")) == "alice~S~~SERVER~~~BBSMETA: SecLevel(10) Sysop(Thiesi)~\n"
+    assert build_line(protocol.bbsmeta("alice", "S", 10, "Jos\u00e9 \u00d6")) == "alice~S~~SERVER~~~BBSMETA: SecLevel(10) Sysop(Jos)~\n"
     assert build_line(protocol.bbsmeta("alice", "S", 1000, "")) == "alice~S~~SERVER~~~BBSMETA: SecLevel(999)~\n"
     assert protocol.is_wire_address("2001:db8::1") and protocol.is_wire_address("10.0.0.7")
     assert not protocol.is_wire_address("") and not protocol.is_wire_address("unix:/tmp/sock")

@@ -1077,8 +1077,10 @@ def test_held_lines_count_against_the_outbound_cap(db, lane, lobby, alice):
                 await bridge.local_away("alice", f"away {i}")  # two unbucketed packets each
                 await asyncio.sleep(0.01)
             await asyncio.sleep(0.2)
-            assert bridge._held_total + bridge._outbound.qsize() <= 6
-            assert bridge.status().dropped_outbound - before >= 14
+            cap = bridge._outbound_cap()  # 8 per announced caller beats the tiny configured size
+            assert cap == 8
+            assert bridge._held_total + bridge._outbound.qsize() <= cap
+            assert bridge.status().dropped_outbound - before >= 20 - cap
         finally:
             await bridge.close()
             await fake.close()
@@ -1169,6 +1171,63 @@ def test_caller_facts_follow_the_sysops_switches(db, lane, lobby, alice):
             await fake.wait_for(lambda p: p.body == "TERMSIZE:80x24" and p.from_user == "alice", timeout=3.0)
             await asyncio.sleep(0.2)
             assert len(fake.packets(body_prefix="USERIP")) == count
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_a_reconnect_announces_everyone_without_evicting_anyone(db, lane, lobby, alice):
+    """Review of #388: with more callers than the configured queue can
+    announce at once, the cap grows with the announced set."""
+    from netbbs.auth.users import create_user
+
+    names = [f"user{i:02d}" for i in range(12)]
+    for name in names:
+        create_user(db, name, password="hunter2", user_level=10)
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        for i, name in enumerate(names):
+            hub.join(lobby.name, ParticipantId(name, i + 1))
+        bridge = await _connected_bridge(db, lane, hub, fake, outbound_queue_size=10, keepalive_interval_seconds=5.0)
+        try:
+            for name in names:
+                bridge.note_caller(name, address=None, width=80, height=24, level=10)
+            await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM::lobby")) == 12, timeout=8.0)
+            assert {p.from_user for p in fake.packets(body_prefix="NEWROOM::lobby")} == set(names)
+            assert bridge.status().dropped_outbound == 0
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_facts_reach_a_mapping_added_while_callers_are_inside(db, lane, lobby, alice):
+    """Review of #388: a channel mapped while a caller is in it announces
+    them with the facts noted at entry."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        hub = ChatHub()
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            hub.join(lobby.name, ParticipantId("alice", 1))
+            bridge.note_caller("alice", address=None, width=100, height=40, level=10)
+            set_mrc_room(db, lobby, "lobby")
+            await bridge.refresh_channel_mappings()
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby" and p.from_user == "alice")
+            await fake.wait_for(lambda p: p.body == "TERMSIZE:100x40" and p.from_user == "alice", timeout=3.0)
+            # And a reload forgets the old hub's round trip at once.
+            await _wait_until(lambda: bridge.status().hub_latency_seconds is not None, timeout=5.0)
+            await bridge.reload_settings()
+            assert bridge.status().hub_latency_seconds is None
+            await _wait_until(lambda: bridge.state is MrcState.CONNECTED, timeout=3.0)
         finally:
             await bridge.close()
             await fake.close()
