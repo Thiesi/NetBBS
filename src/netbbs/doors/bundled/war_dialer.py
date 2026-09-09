@@ -665,6 +665,15 @@ class GameEvent:
     seen_at: str | None = None
 
 
+@dataclass
+class DashboardState:
+    player: Player
+    holdings: list[Exchange]
+    new_events: int
+    season_ends_at: datetime
+    repeat_blocked_handle: str | None
+
+
 EVENT_HISTORY_LIMIT = 500
 
 
@@ -1118,12 +1127,32 @@ def read_player(conn: sqlite3.Connection, user_id: int) -> Player:
 def refresh_player(conn: sqlite3.Connection, user_id: int, now: datetime) -> Player:
     """Settle current resources for a screen without clearing raid protection."""
     with _write_transaction(conn):
-        _settle_world(conn, now)
-        player = read_player(conn, user_id)
-        now = settle_player_clocks(player, now)
-        player.cash += _collect_exchange_income(conn, player, now)
-        _save_player(conn, player)
+        player = _refresh_player(conn, user_id, now)
     return player
+
+
+def _refresh_player(conn: sqlite3.Connection, user_id: int, now: datetime) -> Player:
+    """Resource settlement inside an already-owned write transaction."""
+    _settle_world(conn, now)
+    player = read_player(conn, user_id)
+    now = settle_player_clocks(player, now)
+    player.cash += _collect_exchange_income(conn, player, now)
+    _save_player(conn, player)
+    return player
+
+
+def dashboard_state(conn: sqlite3.Connection, user_id: int, now: datetime) -> DashboardState:
+    """Resources, territory and notifications from one settled world snapshot."""
+    with _write_transaction(conn):
+        player = _refresh_player(conn, user_id, now)
+        holdings = [e for e in list_exchanges(conn) if e.controller_user_id == user_id]
+        new_events = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE target_user_id=? AND seen_at IS NULL", (user_id,),
+        ).fetchone()[0]
+        anchor = get_or_create_season_anchor(conn, now)
+        blocked = conn.execute("SELECT handle FROM players WHERE user_id=?", (player.last_raided_by,)).fetchone()
+        return DashboardState(player, holdings, new_events, anchor + player.season_number * SEASON,
+                              blocked[0] if blocked else None)
 
 
 def load_or_create_player(conn: sqlite3.Connection, user_id: int, handle: str, now: datetime, season_number: int) -> Player:
@@ -1463,36 +1492,71 @@ def show_event_history(
 
 
 
-def draw_status(p: Palette, player: Player, w: int) -> None:
+def countdown(delta: timedelta) -> str:
+    minutes = max(0, (delta // timedelta(seconds=1) + 59) // 60)
+    days, minutes = divmod(minutes, 1440)
+    hours, minutes = divmod(minutes, 60)
+    return (f"{days}d " if days else "") + f"{hours}h {minutes}m"
+
+
+def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
+    player = state.player
     rank = rank_score(player)
-    turns_left = TURNS_PER_DAY - player.turns_used
-    out_line()
-    out_line(f"{p.dark_border}{'─' * w}{RESET}")
-    out_line(f"  {p.muted}Cash:{RESET} {p.gold}${player.cash}{RESET}   "
-              f"{p.muted}Crew:{RESET} {p.accent}{player.crew}{RESET}   "
-              f"{p.muted}Rank:{RESET} {p.accent}{BOLD}{tier_name(rank)}{RESET} {p.muted}({rank}){RESET}   "
-              f"{p.muted}Heat:{RESET} {_heat_color(p, player.heat)}{int(player.heat)}{RESET}   "
-              f"{p.muted}Turns left:{RESET} {p.accent}{turns_left}/{TURNS_PER_DAY}{RESET}")
-    out_line(f"{p.dark_border}{'─' * w}{RESET}")
-
-
-def _heat_color(p: Palette, heat: float) -> str:
-    if heat >= HEAT_BUST_THRESHOLD:
-        return p.bad
-    if heat >= HEAT_BUST_THRESHOLD * 0.6:
-        return p.gold
-    return p.good
-
-
-def draw_menu(p: Palette, has_turns: bool) -> None:
-    out_line()
-    if has_turns:
-        out_line(f"  {p.gold}[T]{RESET}rade Warez   {p.gold}[C]{RESET}rew Recruit   {p.gold}[J]{RESET}ob   "
-                  f"{p.gold}[R]{RESET}aid   Root E{p.gold}[x]{RESET}change")
+    lines = [
+        f"Operator: {player.handle}",
+        f"Cash: ${player.cash:,}  Crew: {player.crew:,}  Heat: {player.heat:.0f}",
+        f"Turns left: {TURNS_PER_DAY - player.turns_used}/{TURNS_PER_DAY}",
+    ]
+    if player.turns_used:
+        refill = from_iso(player.turn_day_start) + timedelta(days=1)
+        lines.append(f"Turn refill in {countdown(refill - now)}")
     else:
-        out_line(f"  {p.muted}Out of turns for today.{RESET}")
-    out_line(f"  {p.gold}[B]{RESET}oard (exchanges/leaderboard)   {p.gold}[H]{RESET}istory   {p.gold}[?]{RESET}Help   {p.gold}[Q]{RESET}uit")
+        lines.append("Turn window starts with your next action.")
+    lines.append(f"Rank: {rank:,} - {tier_name(rank)}")
+    tier = tier_index(rank)
+    if tier + 1 < len(RANK_TIERS):
+        threshold, name = RANK_TIERS[tier + 1]
+        lines.append(f"Next: {name} in {threshold - rank:,} Rank")
+    else:
+        lines.append("Top tier reached; keep building your season Rank.")
+    income = sum(e.income_per_hour for e in state.holdings)
+    lines.append(f"Holdings: {len(state.holdings)}/10 exchanges - ${income:,}/hour")
+    lines.append("Owned: " + (", ".join(e.name for e in state.holdings) or "none"))
+    lines.append(f"New events: {state.new_events} - [H]istory")
+    effective_now = max(now, from_iso(player.heat_updated_at))
+    if is_in_grace(player, effective_now):
+        expires = from_iso(player.created_at) + GRACE
+        lines.append(f"Raid shield: newcomer, {countdown(expires - now)} remaining")
+    else:
+        lines.append("Raid shield: newcomer protection expired")
+    if state.repeat_blocked_handle:
+        lines.append(f"Repeat raid blocked from {state.repeat_blocked_handle} until your next login.")
+    lines.append("Exchange territory is always contestable.")
+    lines.append(f"Season {player.season_number} ends in {countdown(state.season_ends_at - now)}")
+    lines.append("Season end: " + state.season_ends_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+    return lines
+
+
+def draw_dashboard(p: Palette, state: DashboardState, now: datetime, width: int,
+                   height: int, page_index: int = 0) -> tuple[int, int]:
+    """Render one compact command-center page with the action keys always visible."""
+    width = max(1, width - 1)
+    footer_text = (["[T]rade [C]rew [J]ob [R]aid [X]Root", "[B]oard [H]istory [?]Help [Q]uit"]
+                   if width >= 39 else
+                   ["[T]rade [C]rew [J]ob", "[R]aid [X]Root", "[B]oard [H]istory", "[?]Help [Q]uit"])
+    footer = [line for text in footer_text + ["[N]ext [P]rev"] for line in _event_wrap(text, width)]
+    body_rows = max(1, height - len(footer) - 2)  # heading and prompt
+    lines = [line for text in dashboard_lines(state, now) for line in _event_wrap(text, width)]
+    page_count = max(1, (len(lines) + body_rows - 1) // body_rows)
+    page_index = max(0, min(page_index, page_count - 1))
+    out(f"{ESC}[2J{ESC}[H")
+    out_line(f"{p.accent}{BOLD}SWITCHBOARD {page_index + 1}/{page_count}{RESET}")
+    for line in lines[page_index * body_rows:(page_index + 1) * body_rows]:
+        out_line(f"{p.white}{line}{RESET}")
+    for line in footer:
+        out_line(f"{p.gold}{line}{RESET}")
     out_prompt(f"  {p.accent}>{RESET} ")
+    return page_index, page_count
 
 
 def draw_help(p: Palette, w: int) -> None:
@@ -1637,14 +1701,14 @@ def do_job(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, 
         draw_bust(p, 78)
 
 
-def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int) -> None:
+def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int) -> bool:
     previous_season = player.season_number
     targets = list_raid_targets(conn, player, now)
     if player.season_number != previous_season:
         draw_season_change(p, player.season_number)
     if not targets:
         out_line(f"  {p.muted}No eligible rivals in range right now.{RESET}")
-        return
+        return True
     out_line()
     out_line(f"  {p.accent}Eligible rivals:{RESET}")
     for letter, t in zip(LETTERS, targets):
@@ -1652,7 +1716,7 @@ def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
     out_line(f"    {p.gold}[Q]{RESET} {p.muted}cancel{RESET}")
     choice = read_menu_choice(LETTERS[: len(targets)] + "Q")
     if choice == "Q":
-        return
+        return False
     target = targets[LETTERS.index(choice)]
     success, amount, busted = resolve_raid(
         conn, player, target.user_id, now_utc(), rng, expected_target=target,
@@ -1663,9 +1727,10 @@ def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
         out_line(f"  {p.bad}The raid on {target.handle} goes bad. You lose crew and cash.{RESET}")
     if busted:
         draw_bust(p, w)
+    return True
 
 
-def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int) -> None:
+def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int) -> bool:
     previous_season = player.season_number
     refreshed = refresh_player(conn, player.user_id, now)
     player.__dict__.update(refreshed.__dict__)
@@ -1676,11 +1741,11 @@ def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: 
     out_line(f"    {p.gold}[Q]{RESET} {p.muted}cancel{RESET}")
     choice = read_menu_choice(LETTERS[: len(exchanges)] + "Q")
     if choice == "Q":
-        return
+        return False
     exchange = exchanges[LETTERS.index(choice)]
     if exchange.controller_user_id == player.user_id:
         out_line(f"  {p.muted}You already control {exchange.name}.{RESET}")
-        return
+        return True
     success, name, busted = resolve_root_exchange(
         conn, player, exchange.id, now_utc(), rng, expected_exchange=exchange,
     )
@@ -1690,6 +1755,7 @@ def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: 
         out_line(f"  {p.bad}The exchange's defenses hold. You lose a crew member.{RESET}")
     if busted:
         draw_bust(p, w)
+    return True
 
 
 def draw_exchange_list(p: Palette, exchanges: list[Exchange], w: int) -> None:
@@ -1739,6 +1805,10 @@ def main() -> int:
     except (TypeError, ValueError):
         height = 24
 
+    if _OUTPUT_WIDTH < 20 or height < 10:
+        out_line("War Dialer needs at least 20 columns by 10 rows. Resize and reconnect.")
+        return 1
+
     conn = connect(_resolve_db_path())
     rng = random.Random()
     try:
@@ -1769,27 +1839,34 @@ def main() -> int:
             press_any_key(palette)
         show_event_history(palette, conn, player.user_id, w, height, unseen_only=True)
 
+        page_index = 0
         while True:
             previous_season = player.season_number
-            player = refresh_player(conn, user_id, now_utc())
+            screen_now = now_utc()
+            state = dashboard_state(conn, user_id, screen_now)
+            player = state.player
             if player.season_number != previous_season:
                 draw_season_change(palette, player.season_number)
-            draw_status(palette, player, w)
-            has_turns = player.turns_used < TURNS_PER_DAY
-            draw_menu(palette, has_turns)
+                press_any_key(palette)
+            page_index, page_count = draw_dashboard(palette, state, screen_now, w, height, page_index)
             # Always recognize action keys: a displayed zero-turn snapshot
             # may sit idle past its refill. The transaction decides allowance.
-            valid = "BHQ?TCJRX"
+            valid = "BHQ?TCJRXNP"
             choice = read_menu_choice(valid)
             action_now = now_utc()
             try:
                 if choice == "Q":
                     break
+                elif choice == "N":
+                    page_index = min(page_index + 1, page_count - 1)
+                elif choice == "P":
+                    page_index = max(0, page_index - 1)
                 elif choice == "?":
                     draw_help(palette, w)
                     press_any_key(palette)
                 elif choice == "B":
                     draw_board(palette, conn, w)
+                    press_any_key(palette)
                 elif choice == "H":
                     show_event_history(palette, conn, player.user_id, w, height)
                 elif choice == "T":
@@ -1799,11 +1876,16 @@ def main() -> int:
                 elif choice == "J":
                     do_job(palette, conn, player, action_now, rng)
                 elif choice == "R":
-                    do_raid(palette, conn, player, action_now, rng, w)
+                    if do_raid(palette, conn, player, action_now, rng, w):
+                        press_any_key(palette)
                 elif choice == "X":
-                    do_root_exchange(palette, conn, player, action_now, rng, w)
+                    if do_root_exchange(palette, conn, player, action_now, rng, w):
+                        press_any_key(palette)
+                if choice in "TCJ":
+                    press_any_key(palette)
             except ActionRejected as exc:
                 out_line(f"  {palette.muted}{exc}{RESET}")
+                press_any_key(palette)
         draw_goodbye(palette, read_player(conn, user_id), w)
     except (EOFError, BrokenPipeError):
         # Actions are already committed. A disconnect never writes a snapshot.

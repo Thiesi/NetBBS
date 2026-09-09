@@ -639,6 +639,7 @@ def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
     monkeypatch.setattr(wd, "_resolve_db_path", lambda: path)
     monkeypatch.setattr(wd, "now_utc", lambda: clock[0])
     monkeypatch.setattr(wd, "read_menu_choice", choose)
+    monkeypatch.setattr(wd, "press_any_key", lambda palette: None)
     assert wd.main() == 0
     conn = wd.connect(path)
     player = wd.read_player(conn, 0)
@@ -736,6 +737,7 @@ def test_open_session_can_continue_after_season_refresh(tmp_path, monkeypatch):
     monkeypatch.setattr(wd, '_resolve_db_path', lambda: path)
     monkeypatch.setattr(wd, 'now_utc', lambda: clock[0])
     monkeypatch.setattr(wd, 'read_menu_choice', choose)
+    monkeypatch.setattr(wd, 'press_any_key', lambda palette: None)
     assert wd.main() == 0
     conn = wd.connect(path)
     player = wd.read_player(conn, 0)
@@ -865,3 +867,73 @@ def test_offline_summary_disconnect_only_acknowledges_completed_pages(tmp_path, 
         wd.show_event_history(wd.Palette(False), conn, 1, 40, 12, unseen_only=True)
     assert [e.id for e in wd.unseen_events(conn, 1)] == ids[3:]
     conn.close()
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_dashboard_pages_fit_with_long_names_and_large_resources(tmp_path, monkeypatch, width, height):
+    conn = wd.connect(tmp_path / "dashboard.db")
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    name = "\x1b[31m" + "界e\u0301" * 50
+    wd.load_or_create_player(conn, 1, name, now, 1)
+    conn.execute("UPDATE players SET cash=999999999999, crew=999999999, crew_recruited_total=1000000")
+    state = wd.dashboard_state(conn, 1, now)
+    written = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
+    index, count = wd.draw_dashboard(wd.Palette(False), state, now, width, height)
+    for index in range(1, count):
+        wd.draw_dashboard(wd.Palette(False), state, now, width, height, index)
+    screens = "".join(written).split("\x1b[2J\x1b[H")[1:]
+    for screen in screens:
+        lines = _ANSI_RE.sub("", screen).split("\r\n")
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    text = _ANSI_RE.sub("", "".join(written))
+    assert "999,999,999" in text
+    assert "Season end:" in text
+    assert "Next:" not in text  # Already at the highest tier.
+    conn.close()
+
+
+def test_dashboard_explains_unstarted_and_running_turn_windows(tmp_path):
+    conn = wd.connect(tmp_path / "dashboard.db")
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    player = wd.load_or_create_player(conn, 1, "Owner", now, 1)
+    state = wd.dashboard_state(conn, 1, now)
+    text = "\n".join(wd.dashboard_lines(state, now))
+    assert "Turn window starts with your next action" in text
+    assert "Next: Wannabe in 200 Rank" in text
+    assert "newcomer, 2d 0h 0m remaining" in text
+    wd.resolve_recruit(conn, player, now)
+    state = wd.dashboard_state(conn, 1, now + timedelta(hours=1))
+    text = "\n".join(wd.dashboard_lines(state, now + timedelta(hours=1)))
+    assert "Turns left: 14/15" in text
+    assert "Turn refill in 23h 0m" in text
+    assert "Next: Wannabe in 190 Rank" in text
+    conn.close()
+
+
+def test_real_process_dashboard_keeps_action_result_until_acknowledged(tmp_path):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b">\x1b[0m ")
+        assert b"SWITCHBOARD" in output and b"New events: 0" in output
+        send(b"c")
+        wait_for(b"Press any key to continue...")
+        after_result = len(output)
+        # Acknowledgement is a real input boundary: no automatic dashboard redraw.
+        assert b"SWITCHBOARD" not in output[output.index(b"A new member joins"):]
+        conn = wd.connect(path)
+        assert wd.read_player(conn, 0).turns_used == 1
+        conn.close()
+        send(b" ")
+        wait_for(b">\x1b[0m ")
+        assert b"SWITCHBOARD" in output[after_result:]
+        send(b"q")
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b""

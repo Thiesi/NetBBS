@@ -6513,6 +6513,20 @@ records; `[A]ck page` does so explicitly. Acknowledgement updates only the displ
 player/record IDs atomically, so events arriving while a page is open remain unread.
 Onboarding and summary disconnects exit cleanly.
 
+**Switchboard dashboard (issue #362, slice 3).** The main screen shows settled
+cash, crew, Heat and turns; current holdings and hourly income; monotonic Rank
+and the next tier's threshold; unread event count; newcomer and consecutive-raid
+protection; turn refill and season end time. The read obtains these from one
+world transaction and never clears login-based protection or acknowledges events.
+The countdowns are snapshots refreshed when navigating or returning from an action.
+
+Next/Prev pages keep action and free-browsing keys visible at 80x24, 40x12 and
+20x10. Smaller terminals receive an explicit minimum-size response before opening
+the world. Action outcomes, rejected actions and season-change notices wait for
+acknowledgement before the dashboard clears them. Cancelling a target selection
+returns directly. Separate standings/rival screens and detailed action previews
+remain subsequent slice 3 bullets.
+
 ### Issue #168 — real-time relay for Link direct chat
 
 **Goal:** decide between the two structurally different designs the issue
