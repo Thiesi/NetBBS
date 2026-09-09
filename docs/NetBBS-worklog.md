@@ -5255,3 +5255,25 @@ its next command-deck visit. Updating highest_rank_seen at the action boundary
 means a later rank check cannot rediscover that notice. Keep it separate from the
 saved milestone, enqueue only after checkpoint success, and clear it on career
 reset; durable highlights remain the history after a restart.
+
+User-facing retirement dispatches through finish_career, which validates the chosen
+accomplishment before calling the base retire_pilot fresh-run constructor. Dossiers
+and new career share one save payload and atomic replacement; no separate archival
+write may precede a failed reset. Copy retained highlights and dossier containers
+rather than aliasing the previous run. Reject archive-capacity overflow instead of
+evicting old records. Legacy retirement counts can exceed the number of dossiers;
+only observed conclusions create records. New Game+ equipment uses ordinary module
+tiers and must pass the normal ship/save validator without special exceptions.
+
+Dossier highlights accept the same legacy list lengths as active pilot highlights;
+the live append helper's 40-entry retention policy is not a legacy-save validation
+limit. Preserve an accepted history when archiving it. The existing 4 MiB save-file
+ceiling bounds the complete archive payload without silently truncating records.
+
+Retire preflights a separate fresh World through its initial checkpoint and the
+same byte/schema encoder as write_save before offering final confirmation. Use
+that prepared payload after confirmation, including its starting-rank notices;
+regenerating it would invalidate the size check. An accepted near-limit history
+may leave too little room for dossier metadata, so report unavailability while
+retaining the live world, RNG and files. Inspect dossier versions before v1 field
+requirements so a newer schema cannot accidentally offer checkpoint rollback.

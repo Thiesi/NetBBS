@@ -152,9 +152,37 @@ the reward. The pilot overview explains the next threshold; History retains
 promotions. Old saved promotions remain valid. Lifetime Hall of Fame wealth does
 not carry a rank into a new career.
 
-At the retained top rank, **[R] Retire** is available from every record view. Only
-the final confirmation starts a new career with the existing retirement bonus;
-No retains the current record and displays the cancellation result.
+**[R] Finale** is available to browse from every pilot record view. **[1-4]**
+selects a conclusion without writing; **[S] Retire** then asks for the final
+confirmation. Back or No keeps the current career. Four conclusions are available:
+
+| Conclusion | Requirement | Next career's equipment |
+| --- | --- | --- |
+| Frontier Legend | Retained top rank | Ordinary Shuttle modules |
+| Trade Guild Founder | 50,000cr known-cost market-sale margin | Cargo tier 1 |
+| Atlas Keeper | All 48 systems charted | Scanner tier 1 |
+| Frontier Warden | 50 recorded combat victories | Weapon tier 1 |
+
+Trading margin excludes deliveries, unknown-cost cargo receipts and non-trading
+income; it is before operating costs, not total profit. The overview shows the
+three independent paths and their intermediate thresholds. They unlock endings
+without requiring the top balance-based rank.
+
+Each ending retains its closing account and starts a fresh galaxy with the ordinary
+1,200cr plus the existing 500cr-per-retirement bonus. Current cargo, contracts,
+factions, crew, stories and rank reset. The selected specialist ending supplies its
+listed module. Display style, lifetime score, retirement count and dossiers remain.
+
+**[D] Dossiers** lists every recorded retirement, newest first, with its original
+seed/dates, ending, rank, ship, days, finances, chart count, victories, missions and
+retained highlights. Earlier unrecorded retirements stay counted without invented
+history. Up to 128 dossiers are retained; at capacity further retirement is visibly
+unavailable and the current career can continue. No dossier is silently removed.
+Retire checks the complete replacement before asking for confirmation. A legacy
+history too close to the 4 MiB save limit can leave insufficient room for dossier
+metadata; retirement then reports unavailability and retains the current career.
+Accepted legacy highlight lists are preserved in full. The dossier and new career
+save together before the restart acknowledgement.
 
 ### Hall of Fame pages
 
