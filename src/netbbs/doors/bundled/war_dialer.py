@@ -326,6 +326,13 @@ def read_input_key() -> str:
                 break
         else:
             raise InputSequenceError("Key sequence too long. Reconnect and use single keys.")
+        if prefix == "[" and sequence == "M":
+            # X10 reports have three payload bytes after the CSI final.
+            # Coordinate bytes must not escape into the next menu or pause.
+            for _ in range(3):
+                if next_byte(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS) is None:
+                    raise InputSequenceError("Incomplete mouse report. Reconnect and use single keys.")
+            return ""
         if prefix == "[" and sequence == "200~":
             ending = ""
             for _ in range(_MAX_INPUT_BYTES):
@@ -909,7 +916,14 @@ def get_or_create_season_anchor(conn: sqlite3.Connection, now: datetime) -> date
 
 
 def current_season_number(anchor: datetime, now: datetime) -> int:
-    return 1 + (now - anchor) // SEASON
+    return max(1, 1 + (now - anchor) // SEASON)
+
+
+def current_world_season(conn: sqlite3.Connection, now: datetime) -> int:
+    """The ten exchange rows retain the world's latest completed season sweep."""
+    anchor = get_or_create_season_anchor(conn, now)
+    stored = conn.execute("SELECT MAX(season_number) FROM exchanges").fetchone()[0]
+    return max(current_season_number(anchor, now), stored or 1)
 
 
 class WorldStateError(Exception):
@@ -1037,6 +1051,8 @@ def load_or_create_player(conn: sqlite3.Connection, user_id: int, handle: str, n
     # Login is a write boundary too: no stale snapshot may overwrite an
     # incoming raid while settling Heat, income, or the login protection.
     with _write_transaction(conn):
+        # The caller's earlier season snapshot can regress after clock correction.
+        season_number = current_world_season(conn, now)
         conn.execute(
             """
             INSERT OR IGNORE INTO players
@@ -1070,14 +1086,14 @@ def _action_player(conn: sqlite3.Connection, snapshot: Player, now: datetime):
     with _write_transaction(conn):
         player = read_player(conn, snapshot.user_id)
         now = settle_player_clocks(player, now)
-        season = current_season_number(get_or_create_season_anchor(conn, now), now)
+        season = current_world_season(conn, now)
         if player.season_number != season or snapshot.season_number != season:
             raise ActionRejected("Season changed. Reconnect before taking another action.")
         if player.turns_used >= TURNS_PER_DAY:
             raise ActionRejected("No turns left. No resources spent.")
         yield player, now
         if player.turns_used == 0:
-            player.turn_day_start = to_iso(now)
+            player.turn_day_start = player.heat_updated_at
         player.turns_used += 1
         _save_player(conn, player)
     snapshot.__dict__.update(player.__dict__)
@@ -1198,6 +1214,7 @@ def resolve_root_exchange(
         now = max(now, from_iso(exchange.income_collected_at))
         if exchange.controlled_since is not None:
             now = max(now, from_iso(exchange.controlled_since))
+        now = settle_player_clocks(actor, now)
         success, busted = action_root_exchange(actor, exchange, now, rng)
         conn.execute(
             "UPDATE exchanges SET controller_user_id=?, garrison=?, controlled_since=?, income_collected_at=? WHERE id=?",
@@ -1504,8 +1521,7 @@ def main() -> int:
         # without running finally. Decode paste markers if already supplied.
         ensure_schema(conn)
         now = now_utc()
-        anchor = get_or_create_season_anchor(conn, now)
-        season_number = current_season_number(anchor, now)
+        season_number = current_world_season(conn, now)
         ensure_exchanges_seeded(conn, season_number, now)
         sweep_exchange_season_reset(conn, season_number, now)
 

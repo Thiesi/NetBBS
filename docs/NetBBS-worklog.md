@@ -281,6 +281,12 @@ read_player remains an unsettled storage read for transaction/observer use.
 A menu's displayed allowance is a snapshot: still accept action keys after an
 idle zero-turn screen so the transaction can recognize a refill.
 
+An exchange can carry a later clock than the actor after a server clock correction.
+Settle the actor through that exchange time before applying capture Heat and use
+the actor's final timestamp for a new allowance anchor. Login/action season checks
+must respect the persisted exchange season, not just recompute from a regressed
+wall clock. Whole-world dormant-player rollover is still a separate boundary.
+
 Initialization counts exchanges after obtaining the write lock. The regression
 synchronizes two connections immediately before BEGIN, so moving the count
 outside the transaction deterministically reproduces double seeding. Preserve

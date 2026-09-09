@@ -940,3 +940,42 @@ def test_clock_rollback_cannot_backdate_capture_from_another_player(db_path):
     reloaded = wd.load_or_create_player(conn, b.user_id, b.handle, later, 1)
     assert reloaded.cash == b.cash
     conn.close()
+
+
+def test_capture_time_reaches_actor_clocks_and_rollback_reconnect(db_path):
+    conn, now, a, b = _rivals(db_path)
+    later = now + timedelta(hours=2)
+    earlier = now + timedelta(hours=1)
+    wd.resolve_root_exchange(conn, a, 1, later, FixedRandom())
+    wd.resolve_root_exchange(conn, b, 1, earlier, FixedRandom())
+    cash = b.cash
+    assert b.heat_updated_at == wd.to_iso(later)
+    assert b.turn_day_start == wd.to_iso(later)
+    reloaded = wd.load_or_create_player(conn, b.user_id, b.handle, earlier, 1)
+    assert reloaded.heat == pytest.approx(wd.ROOT_EXCHANGE_HEAT)
+    assert wd.list_exchanges(conn)[0].income_collected_at == wd.to_iso(later)
+    reloaded = wd.load_or_create_player(conn, b.user_id, b.handle, later, 1)
+    assert reloaded.cash == cash
+    assert reloaded.heat == pytest.approx(wd.ROOT_EXCHANGE_HEAT)
+    conn.close()
+
+
+@pytest.mark.parametrize("new_player", [True, False])
+def test_rollback_login_uses_stored_exchange_season(db_path, new_player):
+    conn, now, a, _ = _rivals(db_path)
+    boundary = now + wd.SEASON
+    wd.sweep_exchange_season_reset(conn, 2, boundary)
+    earlier = boundary - timedelta(hours=1)
+    user_id = 3 if new_player else a.user_id
+    player = wd.load_or_create_player(conn, user_id, "Caller", earlier, 1)
+    assert player.season_number == 2
+    assert player.cash == wd.STARTING_CASH
+    assert wd.resolve_root_exchange(conn, player, 1, earlier, FixedRandom())[0]
+    again = wd.load_or_create_player(conn, user_id, "Caller", earlier, 1)
+    assert again.season_number == 2
+    conn.close()
+
+
+def test_season_number_never_precedes_first_world_season():
+    anchor = wd.now_utc()
+    assert wd.current_season_number(anchor, anchor - timedelta(hours=1)) == 1

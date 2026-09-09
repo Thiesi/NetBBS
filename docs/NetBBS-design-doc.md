@@ -6458,6 +6458,11 @@ an action adds new Heat, so a reconnect cannot decay that addition over the
 earlier idle interval. A session waiting at a zero-turn menu can use an action
 key after refill; commit-time state decides whether that action is available.
 
+The exchange world's stored season also prevents season-number regression after
+a clock correction, including for new and dormant callers. A capture respects
+both the exchange's timestamps and the actor's clocks; the effective capture time
+anchors newly incurred Heat and any newly started allowance too.
+
 Fractional/transfer income and atomic season rollover for dormant players remain
 the following slice-2 bullets. Until rollover is implemented, old-season actions
 are rejected with a reconnect instruction; clock settlement does not let an

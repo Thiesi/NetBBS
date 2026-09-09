@@ -331,7 +331,7 @@ def test_menu_decoder_never_accepts_control_sequences_or_paste(monkeypatch, sequ
 
 @pytest.mark.parametrize("sequence", [
     b"\x1b[", b"\x1bO", b"\x1b[1;", b"\x1b(",
-    b"\x1b[200~CCC", b"\x1b]CCC",
+    b"\x1b[200~CCC", b"\x1b]CCC", b"\x1b[M C",
     b"\x1b[" + b"1" * 80, b"C" * 4200,
 ])
 def test_incomplete_or_excessive_input_fails_closed_in_bounded_time(monkeypatch, sequence):
@@ -618,6 +618,7 @@ def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
     wd.load_or_create_player(conn, 0, "Guest", now, 1)
     conn.execute("UPDATE players SET turns_used=15, turn_day_start=heat_updated_at")
     conn.close()
+
     clock = [now]
     choices = iter(("C", "Q"))
 
@@ -643,3 +644,36 @@ def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
     assert (player.cash, player.crew, player.turns_used) == (225, 4, 1)
     assert player.turn_day_start == wd.to_iso(now + wd.DAY)
     conn.close()
+
+
+@pytest.mark.parametrize("stage", ["onboarding", "receipt", "menu", "target"])
+def test_fragmented_x10_mouse_report_never_spends_a_turn(tmp_path, stage):
+    with _running_door(
+        tmp_path, new_player=stage == "onboarding", event=stage == "receipt",
+    ) as (process, path, wait_for, send, output):
+        if stage in ("onboarding", "receipt"):
+            wait_for(b"Press any key to continue...")
+        else:
+            wait_for(b">\x1b[0m ")
+            if stage == "target":
+                send(b"x")
+                wait_for(b"cancel")
+        send(b"\x1b[M")
+        for byte in (b" ", b"C", b"C"):
+            time.sleep(0.05)  # Beyond burst detection, within sequence lookahead.
+            send(byte)
+        if stage in ("onboarding", "receipt"):
+            wait_for(b">\x1b[0m ")
+        time.sleep(0.15)
+        conn = wd.connect(path)
+        try:
+            assert wd.read_player(conn, 0).turns_used == 0
+            assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
+        finally:
+            conn.close()
+        send(b"q")
+        if stage == "target":
+            wait_for(b">\x1b[0m ")
+            send(b"q")
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b""
