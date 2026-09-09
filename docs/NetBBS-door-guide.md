@@ -38,6 +38,13 @@ unread. In history, use Next/Prev to browse, Ack page to acknowledge, and Back t
 return. New events arriving while you read remain unread. These screens fit down
 to 20x10; smaller terminals show a size diagnostic and preserve unread state.
 
+The main switchboard shows your resources, holdings and income, Rank progress,
+new events, raid protection, turn refill and the season deadline. Next/Prev pages
+are free and refresh these snapshots; action keys stay available on each page.
+Outcomes and rejection messages wait for acknowledgement before returning to the
+switchboard. The game requires at least 20 columns by 10 rows; resize and reconnect
+if the launch reports a smaller terminal.
+
 Use separate single keys. Arrow/function keys and pasted command bursts do not
 select actions; Escape dismisses a pause but has no menu action. An incomplete
 or excessively long terminal sequence ends the door with a reconnect diagnostic.

@@ -1358,3 +1358,40 @@ def test_failed_page_ack_preserves_all_unread_receipts(db_path):
         wd.mark_events_seen(conn, 1, ids, now)
     assert [e.id for e in wd.unseen_events(conn, 1)] == ids
     conn.close()
+
+
+def test_dashboard_settles_income_and_preserves_active_raid_protection(db_path):
+    now = wd.now_utc()
+    conn, season = _setup(db_path, now)
+    wd.load_or_create_player(conn, 1, "Owner", now, season)
+    wd.load_or_create_player(conn, 2, "Rival", now, season)
+    conn.execute("UPDATE players SET last_raided_by=2, turns_used=1, turn_day_start=?, "
+                 "exchanges_taken_total=1 WHERE user_id=1", (wd.to_iso(now),))
+    conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=3 WHERE id=1")
+    wd.record_event(conn, 1, "Rival", "Incoming raid", now)
+    state = wd.dashboard_state(conn, 1, now + timedelta(hours=2))
+    assert state.player.cash == 380
+    assert state.player.turns_used == 1
+    assert state.player.last_raided_by == 2
+    assert state.repeat_blocked_handle == "Rival"
+    assert [(e.id, e.income_per_hour) for e in state.holdings] == [(1, 40)]
+    assert state.new_events == 1
+    assert state.season_ends_at == now + wd.SEASON
+    assert wd.rank_score(state.player) == 500
+    again = wd.dashboard_state(conn, 1, now + timedelta(hours=2))
+    assert again.player.cash == 380
+    assert len(wd.unseen_events(conn, 1)) == 1
+    conn.close()
+
+
+def test_dashboard_rollover_never_combines_new_crew_with_old_holdings(db_path):
+    now = wd.now_utc()
+    conn, season = _setup(db_path, now)
+    wd.load_or_create_player(conn, 1, "Owner", now, season)
+    conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=30")
+    state = wd.dashboard_state(conn, 1, now + wd.SEASON)
+    assert state.player.season_number == 2
+    assert state.player.cash == wd.STARTING_CASH
+    assert state.holdings == []
+    assert state.season_ends_at == now + 2 * wd.SEASON
+    conn.close()

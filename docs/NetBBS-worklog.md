@@ -326,6 +326,11 @@ new arrivals must remain unread. Scope acknowledgements by both player and ID,
 and commit a whole page together before advancing. Use display-column wrapping
 for event text before styling, and reserve footer rows in the terminal height.
 
+The switchboard reads player resources, owned exchanges and unread counts under
+one settlement transaction. Paging refreshes that snapshot but never performs a
+login reset or event acknowledgement. Full-screen redraws require an explicit
+result/diagnostic acknowledgement; keep that input boundary in real-process tests.
+
 ### Database execution lanes
 
 Interactive network flows use a foreground `DatabaseLane`; Phase 3 background
