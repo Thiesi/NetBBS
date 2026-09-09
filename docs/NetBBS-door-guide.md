@@ -52,7 +52,9 @@ unversioned world upgrades automatically in one transaction, preserving players,
 exchanges, clocks and the latest 500 events per player. A failed upgrade rolls
 back its schema/data changes and version marker. Newer versions, incomplete or
 unrelated schemas, and corrupt files are refused with a caller-facing error;
-startup does not replace them with an empty world.
+startup does not replace them with an empty world. Existing zero-byte files are
+also refused. First creation atomically publishes a complete database and requires
+a filesystem supporting hard links; an unsupported filesystem fails clearly.
 
 **MANUAL ? outside NetBBS, failed upgrade or unreadable world:** stop game sessions
 and preserve the original world and any WAL/SHM sidecars. Diagnose a copy. Use a

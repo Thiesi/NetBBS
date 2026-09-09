@@ -73,6 +73,7 @@ import select
 import sqlite3
 import sys
 import textwrap
+import tempfile
 import time
 import unicodedata
 from contextlib import contextmanager, nullcontext
@@ -889,8 +890,6 @@ def _world_schema_version(conn: sqlite3.Connection) -> int:
 
 def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-    if not tables and version == 0:
-        return  # A genuinely new empty database.
     if not set(_WORLD_COLUMNS_V1) <= tables:
         raise WorldStateError("Unrecognized or incomplete War Dialer database. Preserve it for SysOp recovery; no replacement was created.")
     for table, required in _WORLD_COLUMNS_V1.items():
@@ -902,6 +901,27 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    if not db_path.exists():
+        # Publish a complete new database without replacing a competing creator.
+        # An existing empty/truncated file is always recovery input, never a new
+        # world. Build next to the destination so this hard-link is atomic.
+        with tempfile.NamedTemporaryFile(dir=db_path.parent, prefix=".war-dialer-new-", delete=False) as temporary:
+            staging = Path(temporary.name)
+        try:
+            fresh = sqlite3.connect(staging, isolation_level=None)
+            fresh.row_factory = sqlite3.Row
+            try:
+                with _write_transaction(fresh):
+                    _migrate_world_v1(fresh)
+                    fresh.execute("PRAGMA user_version=1")
+            finally:
+                fresh.close()
+            try:
+                os.link(staging, db_path)
+            except FileExistsError:
+                pass  # Another initializer published its complete world first.
+        finally:
+            staging.unlink()
     conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=10)
     conn.row_factory = sqlite3.Row
     try:

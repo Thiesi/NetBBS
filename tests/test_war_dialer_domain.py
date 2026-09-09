@@ -1156,16 +1156,20 @@ def test_failed_income_upgrade_preserves_original_schema_and_data(db_path):
     conn.close()
 
 
-@pytest.mark.parametrize("kind", ["future", "unrelated", "incomplete", "corrupt"])
+@pytest.mark.parametrize("kind", ["future", "unrelated", "incomplete", "corrupt", "empty", "empty_sqlite"])
 def test_refused_world_is_unchanged_before_journal_setup(db_path, kind):
     if kind == "corrupt":
         db_path.write_bytes(b"This is not a SQLite world. Preserve these bytes.")
+    elif kind == "empty":
+        db_path.touch()
     else:
         conn = sqlite3.connect(db_path)
         if kind == "future":
             conn.execute("PRAGMA user_version=2")
         elif kind == "unrelated":
             conn.execute("CREATE TABLE other_application (value TEXT)")
+        elif kind == "empty_sqlite":
+            conn.execute("VACUUM")
         else:
             conn.execute("CREATE TABLE players (user_id INTEGER PRIMARY KEY)")
         conn.commit()
@@ -1545,3 +1549,18 @@ def test_action_delta_excludes_income_collected_before_action(db_path):
     assert player.cash == 360
     assert delta.cash == 20
     conn.close()
+
+
+def test_simultaneous_first_connect_publishes_one_complete_world(db_path):
+    barrier = threading.Barrier(2)
+    def launch():
+        barrier.wait(timeout=5)
+        conn = wd.connect(db_path)
+        try:
+            wd.ensure_schema(conn)
+            wd.ensure_exchanges_seeded(conn, 1, wd.now_utc())
+            return conn.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0]
+        finally:
+            conn.close()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert list(pool.map(lambda _: launch(), range(2))) == [10, 10]
