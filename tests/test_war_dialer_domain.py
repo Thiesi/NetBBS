@@ -1111,7 +1111,8 @@ def test_income_collection_does_not_invalidate_exchange_selection(db_path):
 
 def _legacy_income_world(db_path):
     conn, now, a, _ = _rivals(db_path)
-    # Recreate the shipped players layout, keeping a real populated row.
+    # Recreate the shipped unversioned layout, keeping a real populated row.
+    conn.execute("PRAGMA user_version=0")
     schema = conn.execute("SELECT sql FROM sqlite_master WHERE name='players'").fetchone()[0]
     addition = ", income_remainder INTEGER NOT NULL DEFAULT 0"
     assert addition in schema
@@ -1134,6 +1135,7 @@ def test_income_upgrade_preserves_existing_player_and_is_idempotent(db_path):
     assert actual.cash == a.cash
     assert actual.created_at == a.created_at
     assert actual.income_remainder == 0
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == wd.WORLD_SCHEMA_VERSION
     conn.close()
 
 
@@ -1150,7 +1152,83 @@ def test_failed_income_upgrade_preserves_original_schema_and_data(db_path):
     conn.set_authorizer(None)
     assert not conn.in_transaction
     assert list(conn.iterdump()) == before
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
     conn.close()
+
+
+@pytest.mark.parametrize("kind", ["future", "unrelated", "incomplete", "corrupt", "empty", "empty_sqlite"])
+def test_refused_world_is_unchanged_before_journal_setup(db_path, kind):
+    if kind == "corrupt":
+        db_path.write_bytes(b"This is not a SQLite world. Preserve these bytes.")
+    elif kind == "empty":
+        db_path.touch()
+    else:
+        conn = sqlite3.connect(db_path)
+        if kind == "future":
+            conn.execute("PRAGMA user_version=2")
+        elif kind == "unrelated":
+            conn.execute("CREATE TABLE other_application (value TEXT)")
+        elif kind == "empty_sqlite":
+            conn.execute("VACUUM")
+        else:
+            conn.execute("CREATE TABLE players (user_id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+    before = db_path.read_bytes()
+    with pytest.raises((wd.WorldStateError, sqlite3.DatabaseError)):
+        wd.connect(db_path)
+    assert db_path.read_bytes() == before
+    assert not db_path.with_name(db_path.name + "-wal").exists()
+
+
+def test_current_version_does_not_silently_repair_missing_columns(db_path):
+    conn, _ = _legacy_income_world(db_path)
+    conn.execute("PRAGMA user_version=1")
+    conn.close()
+    before = db_path.read_bytes()
+    with pytest.raises(wd.WorldStateError, match="players schema is incomplete"):
+        wd.connect(db_path)
+    assert db_path.read_bytes() == before
+
+
+def test_schema_marker_failure_rolls_back_migration_and_preserves_world(db_path):
+    conn, _ = _legacy_income_world(db_path)
+    before = list(conn.iterdump())
+
+    def deny_version_write(action, name, value, *args):
+        if action == sqlite3.SQLITE_PRAGMA and name == "user_version" and value is not None:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_version_write)
+    with pytest.raises(sqlite3.DatabaseError):
+        wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+    assert list(conn.iterdump()) == before
+    assert not conn.in_transaction
+    wd.ensure_schema(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    conn.close()
+
+
+def test_concurrent_legacy_upgrade_preserves_populated_world(db_path):
+    conn, player = _legacy_income_world(db_path)
+    conn.close()
+    barrier = threading.Barrier(2)
+
+    def upgrade():
+        connection = wd.connect(db_path)
+        try:
+            barrier.wait(timeout=5)
+            wd.ensure_schema(connection)
+            return asdict(wd.read_player(connection, player.user_id))
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: upgrade(), range(2)))
+    assert results == [asdict(player), asdict(player)]
 
 
 def test_refresh_rolls_dormant_players_and_exchanges_together(db_path):
@@ -1304,6 +1382,7 @@ def test_event_retention_keeps_latest_500_for_each_player(db_path):
 def test_legacy_event_retention_upgrade_is_atomic_and_idempotent(db_path):
     now = wd.now_utc()
     conn, _ = _setup(db_path, now)
+    conn.execute("PRAGMA user_version=0")
     conn.execute("DELETE FROM meta WHERE key='event_history_limit'")
     with wd._write_transaction(conn):
         conn.executemany(
@@ -1470,3 +1549,18 @@ def test_action_delta_excludes_income_collected_before_action(db_path):
     assert player.cash == 360
     assert delta.cash == 20
     conn.close()
+
+
+def test_simultaneous_first_connect_publishes_one_complete_world(db_path):
+    barrier = threading.Barrier(2)
+    def launch():
+        barrier.wait(timeout=5)
+        conn = wd.connect(db_path)
+        try:
+            wd.ensure_schema(conn)
+            wd.ensure_exchanges_seeded(conn, 1, wd.now_utc())
+            return conn.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0]
+        finally:
+            conn.close()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert list(pool.map(lambda _: launch(), range(2))) == [10, 10]

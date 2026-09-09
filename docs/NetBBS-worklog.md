@@ -358,6 +358,19 @@ not collide. Only recognized bundled entrypoints or explicit profile settings us
 this path contract. A missing new default plus an existing legacy world must fail
 with migration guidance; read-only setup checks must not create a replacement.
 
+War Dialer schema adoption uses `PRAGMA user_version` in the same immediate
+transaction as the numbered migration. Pin each shipped migration's layout;
+future model fields must not silently redefine an older version. Check the
+version, required table/column layout and SQLite integrity before switching
+journal mode. Tests that reconstruct an unversioned fixture must set version zero;
+missing columns in a versioned database are damage, not an upgrade request.
+Exercise rollback by denying the version-marker write after schema changes.
+Publish new worlds from a complete same-directory SQLite staging file using an
+atomic no-replace hard link. Existing empty files are recovery input; treating
+one as new would silently reset a truncated world. Keep a simultaneous initial
+connect regression, because a check-then-create sequence exposes an empty file.
+The world filesystem must support hard links (the normal NetBSD/NTFS paths do).
+
 ### Database execution lanes
 
 Interactive network flows use a foreground `DatabaseLane`; Phase 3 background

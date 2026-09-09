@@ -47,6 +47,21 @@ refuses to silently create a replacement. Choose an explicit override or complet
 the migration. An explicit path for a new independent node deliberately selects
 its own world; it does not adopt the old world's users or records.
 
+War Dialer records schema version 1 in SQLite `user_version`. A complete older
+unversioned world upgrades automatically in one transaction, preserving players,
+exchanges, clocks and the latest 500 events per player. A failed upgrade rolls
+back its schema/data changes and version marker. Newer versions, incomplete or
+unrelated schemas, and corrupt files are refused with a caller-facing error;
+startup does not replace them with an empty world. Existing zero-byte files are
+also refused. First creation atomically publishes a complete database and requires
+a filesystem supporting hard links; an unsupported filesystem fails clearly.
+
+**MANUAL ? outside NetBBS, failed upgrade or unreadable world:** stop game sessions
+and preserve the original world and any WAL/SHM sidecars. Diagnose a copy. Use a
+game version compatible with the recorded schema or restore a verified,
+SQLite-consistent backup belonging to this node. Do not clear `user_version`,
+delete the world, or copy only a live database file as a recovery shortcut.
+
 Several callers, including two sessions for one user, may play concurrently.
 Each action uses current stored resources and commits its turn with its result.
 Browsing, quitting and disconnecting cannot overwrite another session's changes.

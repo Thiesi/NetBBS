@@ -6597,8 +6597,17 @@ When the node default is absent and a legacy home-directory world exists, launch
 requires explicit migration or override rather than silently replacing player data.
 Migration is manual, with stopped sessions, a SQLite-consistent backup and verified
 node-local user-ID ownership. An explicit override is an operator choice and must
-not point independent nodes at the same world. Backup integration and richer
-world/schema identity validation follow in subsequent slice 4 bullets.
+not point independent nodes at the same world. Backup integration and node/world
+ownership validation follow in subsequent slice 4 bullets.
+
+**World schema compatibility.** SQLite `user_version=1` identifies the supported
+War Dialer schema. A complete original unversioned world is adopted through a
+numbered migration; its additive fields, retained history and version marker
+commit together or roll back together. New empty worlds use the same migration.
+Future schema versions, incomplete/unrelated layouts and failed SQLite integrity
+checks are refused before initialization or journal-mode changes. Startup never
+replaces an unreadable world with an empty one. Recovery preserves the original;
+use compatible game code or a verified backup, with sessions stopped.
 
 ### Issue #168 — real-time relay for Link direct chat
 
