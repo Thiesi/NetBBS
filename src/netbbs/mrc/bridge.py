@@ -372,6 +372,7 @@ class MrcBridge:
         # keyed by this node's own announced nicks, so bounded by them.
         self._last_sent: dict[str, float] = {}
         self._held: dict[str, deque[str]] = {}
+        self._held_total = 0  # held lines count against `outbound_queue_size`
         self._node_bucket = _TokenBucket(OUTBOUND_BURST, OUTBOUND_RATE_PER_SECOND, clock)
         self._user_buckets: dict[str, _TokenBucket] = {}
         self._inbound_bucket = _TokenBucket(INBOUND_BURST, INBOUND_RATE_PER_SECOND, clock)
@@ -786,10 +787,7 @@ class MrcBridge:
             for nick in list(self._held):
                 remaining = self._per_user_interval - (now - self._last_sent.get(nick, 0.0))
                 if remaining <= 0:
-                    line = self._held[nick].popleft()
-                    if not self._held[nick]:
-                        del self._held[nick]
-                    return nick, line
+                    return nick, self._pop_held(nick)
                 wait = remaining if wait is None else min(wait, remaining)
             try:
                 nick, line = await asyncio.wait_for(self._outbound.get(), timeout=wait)
@@ -799,10 +797,47 @@ class MrcBridge:
                 return "", line
             if nick in self._held:
                 self._held[nick].append(line)  # behind what that nick already has waiting
+                self._held_total += 1
                 continue
             if now - self._last_sent.get(nick, -self._per_user_interval) >= self._per_user_interval:
                 return nick, line
             self._held[nick] = deque([line])
+            self._held_total += 1
+
+    def _pop_held(self, nick: str) -> str:
+        line = self._held[nick].popleft()
+        self._held_total -= 1
+        if not self._held[nick]:
+            del self._held[nick]
+        return line
+
+    def _rename_outbound(self, old_nick: str, new_nick: str) -> None:
+        """The hub renamed a caller (`USERNICK`): packets already
+        serialized under the old nick -- held or still queued -- are
+        rewritten to the new one, and the pacing stamp follows, so the
+        rename neither sends stale identities nor resets the spacing."""
+        old_key, new_key = old_nick.lower(), new_nick.lower()
+        old_prefix = protocol.sanitize_name(old_nick) + protocol.SEPARATOR
+        new_prefix = protocol.sanitize_name(new_nick) + protocol.SEPARATOR
+
+        def rewrite(line: str) -> str:
+            return new_prefix + line[len(old_prefix):] if line.startswith(old_prefix) else line
+
+        if old_key in self._held:
+            lines = self._held.pop(old_key)
+            self._held.setdefault(new_key, deque()).extend(rewrite(line) for line in lines)
+        queued: list[tuple[str, str]] = []
+        while True:
+            try:
+                queued.append(self._outbound.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        for key, line in queued:
+            if key == old_key:
+                key, line = new_key, rewrite(line)
+            self._outbound.put_nowait((key, line))
+        if old_key in self._last_sent:
+            self._last_sent[new_key] = max(self._last_sent.pop(old_key), self._last_sent.get(new_key, 0.0))
 
     async def _keepalive_loop(self) -> None:
         last_userlist = self._clock()
@@ -845,11 +880,15 @@ class MrcBridge:
             self._dropped_outbound += 1
             _logger.warning("Dropped outbound MRC packet: %s", exc)
             return
-        if self._outbound.full():
+        if self._outbound.qsize() + self._held_total >= self._outbound.maxsize:
+            # One cap for queued and held lines together (the documented
+            # 200): the oldest queued line goes first, else the oldest
+            # held line of the nick holding the most.
             try:
                 self._outbound.get_nowait()
             except asyncio.QueueEmpty:
-                pass
+                if self._held:
+                    self._pop_held(max(self._held, key=lambda n: len(self._held[n])))
             self._dropped_outbound += 1
         # The spacing key: the sending nick, or "" for the node's own
         # control packets (`CLIENT`), which the hub's per-user rate does
@@ -863,6 +902,7 @@ class MrcBridge:
         that would arrive out of context) -- start each connection
         clean rather than replaying it."""
         self._held.clear()
+        self._held_total = 0
         self._last_sent.clear()
         while True:
             try:
@@ -1530,6 +1570,7 @@ class MrcBridge:
         nicks = self._announced.get(channel_id)
         if not new_nick or nicks is None or username not in nicks or nicks[username].lower() == new_nick.lower():
             return
+        self._rename_outbound(nicks[username], new_nick)
         nicks[username] = new_nick
         await self._deliver_to_caller(
             username, MrcNotice(f"The MRC hub now knows you as {new_nick!r}.", utc_now_iso()), priority=True,

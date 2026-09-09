@@ -17,6 +17,7 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub, ParticipantId
+from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import ChannelMessage, get_scrollback, record_message
 from netbbs.mrc.bridge import MrcBridge, MrcNotice, MrcState
 from netbbs.mrc.protocol import MrcPacket
@@ -991,19 +992,86 @@ def test_packets_from_one_nick_are_spaced_to_the_hubs_rate(db, lane, lobby, alic
             assert (await bridge.local_message(lobby, long_line))[0] is True
             short = record_message(db, lobby, kind="message", author_label="carol", author_fingerprint=None, body="quick one")
             assert (await bridge.local_message(lobby, short))[0] is True
-            def chunks_of(nick):
-                return [p for p in fake.received if p.from_user == nick and p.to_user == "" and p.body.strip()]
+            def chat_from(nick, marker):
+                return [
+                    t for (p, t) in fake.arrivals
+                    if p.from_user == nick and p.to_user == "" and marker in p.body and t >= start
+                ]
 
-            await _wait_until(lambda: len(chunks_of("alice")) >= 3 and chunks_of("carol"), timeout=4.0)
-            # Timestamps: the fake hub records arrival order; alice's
-            # three chunks are 0.5 s apart, carol's line did not wait.
-            stamps = fake.arrivals
-            alice_chunks = [t for (p, t) in stamps if p.from_user == "alice" and p.to_user == "" and "x x" in p.body]
+            await _wait_until(lambda: len(chat_from("alice", "x x")) >= 3 and chat_from("carol", "quick one"), timeout=4.0)
+            # Timestamps: alice's three chunks are 0.5 s apart; carol's
+            # line (a chat body, not her earlier NEWROOM) did not wait.
+            alice_chunks = chat_from("alice", "x x")
             assert len(alice_chunks) == 3
             assert all(b - a >= 0.45 for a, b in zip(alice_chunks, alice_chunks[1:])), alice_chunks
-            carol_line = next(t for (p, t) in stamps if p.from_user == "carol" and p.to_user == "")
+            carol_line = chat_from("carol", "quick one")[0]
             assert carol_line - start < 0.45
             assert carol_line < alice_chunks[1]
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_a_rename_retargets_held_and_queued_packets(db, lane, lobby, alice):
+    """Review of #383: a USERNICK rename rewrites what is already
+    serialized under the old nick, held or queued, and carries the
+    pacing stamp, so nothing goes out under a name the hub dropped."""
+    from netbbs.chat.scrollback import record_message
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake, per_user_interval_seconds=0.5, keepalive_interval_seconds=5.0)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await asyncio.sleep(1.2)
+            first = record_message(db, lobby, kind="message", author_label="alice", author_fingerprint=None, body="one")
+            second = record_message(db, lobby, kind="message", author_label="alice", author_fingerprint=None, body="two")
+            assert (await bridge.local_message(lobby, first))[0] is True
+            assert (await bridge.local_message(lobby, second))[0] is True
+            await fake.wait_for(lambda p: p.from_user == "alice" and p.body.endswith(" one"))
+            # "two" is held for the interval; the hub renames alice meanwhile.
+            await fake.send_line("SERVER~~~alice~~~USERNICK:alice2~")
+            renamed = await fake.wait_for(lambda p: p.body.endswith(" two"), timeout=3.0)
+            assert renamed.from_user == "alice2"
+            assert not [p for p in fake.received if p.from_user == "alice" and p.body.endswith(" two")]
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_held_lines_count_against_the_outbound_cap(db, lane, lobby, alice):
+    """Review of #383: lines held for spacing share the queue's cap, so
+    a caller flooding one nick sees drops instead of unbounded growth."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        presence = PresenceRegistry()
+        presence.enter("alice")
+        bridge = await _connected_bridge(
+            db, lane, hub, fake, presence=presence, per_user_interval_seconds=60.0,
+            keepalive_interval_seconds=60.0, outbound_queue_size=6,
+        )
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            before = bridge.status().dropped_outbound
+            for i in range(10):
+                presence.set_away("alice", f"away {i}")
+                await bridge.local_away("alice", f"away {i}")  # two unbucketed packets each
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.2)
+            assert bridge._held_total + bridge._outbound.qsize() <= 6
+            assert bridge.status().dropped_outbound - before >= 14
         finally:
             await bridge.close()
             await fake.close()
