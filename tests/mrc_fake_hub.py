@@ -38,6 +38,7 @@ class FakeMrcHub:
         # command the spec does not define (the real hub answers those
         # with an error the caller sees; a test asserts the list is empty).
         self.activity: dict[tuple[str, str], str] = {}
+        self.lastseen: dict[tuple[str, str], str] = {}  # issue #378
         # Issue #377: per-user facts (USERIP, TERMSIZE, BBSMETA) by verb.
         self.facts: dict[tuple[str, str], dict[str, str]] = {}
         self.unknown_commands: list[str] = []
@@ -162,6 +163,8 @@ class FakeMrcHub:
                 self.users[key] = new_room or "lobby"
             elif command == "LOGOFF":
                 self.users.pop(key, None)
+            elif command.startswith("STATUS LASTSEEN"):
+                self.lastseen[key] = params if ":" in packet.body else packet.body.split(" ", 2)[-1].strip().upper()
             elif command.startswith("STATUS AFK"):
                 # MRCDoc rev 1.26, STATUS: `command` is upper-cased for
                 # matching; the message keeps its case from the body.
@@ -185,7 +188,9 @@ class FakeMrcHub:
                 # Issue #304: the Mystic layout, from this hub's own view.
                 sites = {site for site, _nick in self.users}
                 rooms = {room.lower() for room in self.users.values()}
-                reply = MrcPacket("SERVER", "", "", packet.from_user, "", "", f"STATS:{len(sites)} {len(rooms)} {len(self.users)}")
+                # Four fields per the spec (issue #378): the last is the
+                # activity level 0-3; this hub calls itself "low".
+                reply = MrcPacket("SERVER", "", "", packet.from_user, "", "", f"STATS:{len(sites)} {len(rooms)} {len(self.users)} 1")
                 writer.write(build_line(reply).encode("ascii"))
                 await writer.drain()
             elif command.split(" ", 1)[0] in ("LIST", "MOTD", "CHATTERS", "CONNECTED", "INFO", "HELP", "TOPICS"):

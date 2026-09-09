@@ -181,3 +181,24 @@ def test_hub_command_arguments_keep_to_the_spec(db, lane, hub, presence, channel
         finally:
             await rig.close()
     asyncio.run(scenario())
+
+
+def test_secret_helpers_are_refused_as_chat(db, lane, hub, presence, channel, alice):
+    """Issue #378: `!identify secret` typed in a bridged channel never
+    leaves as chat and is never recorded; other `!helpers` are chat."""
+    from netbbs.chat.scrollback import get_scrollback
+
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            session, _ = await _run(
+                lane, hub, presence, channel, alice, ["!identify hunter2", "!Register hunter2", "!weather", "/quit"], mrc_bridge=rig.bridge,
+            )
+            text = _text(session)
+            assert text.count("would carry your password into the room as chat") == 2
+            await rig.fake.wait_for(lambda p: p.body.endswith(" !weather") and p.from_user == "alice")
+            assert not [p for p in rig.fake.received if "hunter2" in p.body]
+            assert not [m for m in get_scrollback(db, channel) if "hunter2" in (m.body or "")]
+        finally:
+            await rig.close()
+    asyncio.run(scenario())

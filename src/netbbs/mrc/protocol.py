@@ -540,6 +540,37 @@ ACTIVITY_AWAY = "AWAY"
 ACTIVITY_ACTIVE = "ACTIVE"
 
 
+def status_lastseen(nick: str, site: str, room: str, recorded: bool) -> MrcPacket:
+    """`STATUS LASTSEEN ON|OFF`: whether the hub may answer `LASTSEEN`
+    about this nick (MRCDoc rev 1.26). NetBBS sends only the opt-out,
+    since ON is the hub's default (issue #378)."""
+    return user_command(nick, site, room, f"STATUS LASTSEEN {'ON' if recorded else 'OFF'}")
+
+
+def display_handle(name: str) -> str:
+    """A handle as the spec says to show it: "client must replace `_`
+    by spaces when received from server" (fields 1 and 4). Display
+    only -- matching and addressing keep the wire spelling, since the
+    spec also notes the character "may be part of handle"."""
+    return name.replace("_", " ")
+
+
+ACTIVITY_LABELS = {0: "quiet", 1: "low activity", 2: "medium activity", 3: "high activity"}
+
+
+def parse_stats_activity(params: str) -> int | None:
+    """The fourth `STATS` field, the hub's activity level 0-3 (MRCDoc rev
+    1.26: 0 none, 1 low, 2 medium, 3 high), or `None` when absent."""
+    parts = strip_pipe_codes(params).split()
+    if len(parts) < 4:
+        return None
+    try:
+        level = int(parts[3])
+    except ValueError:
+        return None
+    return level if 0 <= level <= 3 else None
+
+
 def status_afk(nick: str, site: str, room: str, message: str) -> MrcPacket:
     """`STATUS AFK <message>` marks the nick away on the hub (shown by
     CHATTERS and WHOON) -- the documented form (MRCDoc rev 1.26,

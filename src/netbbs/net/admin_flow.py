@@ -5224,7 +5224,7 @@ async def _mrc_settings_screen(
             key="host", hotkey="h", menu_text=menu_key("H", "ost"), label="Hub host",
             render=lambda d: d["host"], prompt=text_field("host", required=True),
             brief="The MRC hub to connect to", section="Hub",
-            help="The public hub is mrc.bottomlessabyss.net. Change it only for a private hub.",
+            help="The public hub is mrc.bottomlessabyss.net. Change it only for a private hub. The protocol page (rev 1.26) also lists the operator's pool: na-multi, eu-multi and au-multi.relaychat.net (5000 plain, 5001 TLS) and mrcdev.relaychat.net for development.",
         ),
         FieldSpec(
             key="port", hotkey="p", menu_text=menu_key("P", "ort"), label="Hub port",
@@ -5542,7 +5542,8 @@ async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, no
         )
         if status.network_summary is not None:
             age = status.network_stats_age_seconds or 0.0
-            network_line = f"{status.network_summary}, {status.network_rooms} rooms (as of {int(age // 60)} min ago)"
+            activity = f", {status.network_activity_label}" if status.network_activity_label else ""
+            network_line = f"{status.network_summary}, {status.network_rooms} rooms{activity} (as of {int(age // 60)} min ago)"
         elif status.network_stats_raw:
             network_line = f"unknown -- the hub answered STATS with: {sanitize_text(status.network_stats_raw)}"
         else:

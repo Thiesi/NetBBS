@@ -116,7 +116,7 @@ def test_connects_handshakes_and_announces_site_info(db, lane, lobby):
             assert alive.from_room.isdigit() and float(alive.msg_ext) > 0
             caps = fake.packets(body_prefix="CAPABILITIES:")[0]
             assert caps.body == "CAPABILITIES:MCI CTCP USERROOM GOODBYE" and len(caps.from_room) == 64
-            await _wait_until(lambda: bridge.status().hub_latency_seconds is not None)
+            await _wait_until(lambda: bridge.status().hub_latency_seconds is not None, timeout=5.0)
             assert 0.0 <= bridge.status().hub_latency_seconds < 5.0
             status = bridge.status()
             assert status.connected and status.attempts == 1 and status.last_error is None

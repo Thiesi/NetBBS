@@ -726,6 +726,8 @@ def _mrc_section_description(status: MrcStatus) -> str:
         bits.append(f"{status.open_rooms} open here")
     if status.network_summary:
         bits.append(status.network_summary)
+    if status.network_activity_label:
+        bits.append(status.network_activity_label)
     return "rooms on the MRC network" + (" -- " + ", ".join(bits) if bits else "")
 
 
@@ -2657,6 +2659,15 @@ _MRC_HUB_COMMANDS: dict[str, tuple[str, str]] = {
 }
 
 
+# Issue #378: the hub's `!helper` forms of the identity verbs, whose
+# argument is a password. Refused as chat in a bridged channel.
+_MRC_SECRET_HELPERS = frozenset({"!identify", "!register", "!update", "!roompass"})
+
+
+def _mrc_helper_carries_a_secret(line: str) -> bool:
+    return line.split(" ", 1)[0].lower() in _MRC_SECRET_HELPERS
+
+
 # Issue #305: said once per session, on the first private line sent or
 # received, whichever comes first.
 _MRC_PRIVATE_NOTE = (
@@ -4388,6 +4399,17 @@ async def _chat_loop(
                             return _Quit()
 
                         if not line:
+                            continue
+                        if mrc_bridge is not None and mrc_bridge.is_bridged(channel) and _mrc_helper_carries_a_secret(line):
+                            # Issue #378: the hub is moving its identity
+                            # verbs to `!helper` chat text; typed here, the
+                            # password would go to the room as chat.
+                            await session.write_line(colored(
+                                "(not sent: that line would carry your password into the room as chat -- "
+                                "use /mrc identify, /mrc register, /mrc update password or /mrc roompass, "
+                                "which ask for it without echo)",
+                                fg_color=MUTED_COLOR,
+                            ))
                             continue
                         if line.startswith("/"):
                             ctx = ChatCommandContext(
