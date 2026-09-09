@@ -289,7 +289,7 @@ def _setup(db_path: Path, now: datetime):
     anchor = wd.get_or_create_season_anchor(conn, now)
     season_number = wd.current_season_number(anchor, now)
     wd.ensure_exchanges_seeded(conn, season_number, now)
-    wd.sweep_exchange_season_reset(conn, season_number, now)
+    wd.settle_world(conn, now)
     return conn, season_number
 
 
@@ -405,7 +405,7 @@ def test_load_or_create_player_collects_passive_exchange_income(db_path):
     assert reloaded.cash == wd.STARTING_CASH + expected_income
 
 
-def test_sweep_exchange_season_reset_clears_stale_controller(db_path):
+def test_world_season_reset_clears_stale_controller(db_path):
     now = wd.now_utc()
     conn, season_number = _setup(db_path, now)
     exchange = wd.list_exchanges(conn)[0]
@@ -415,7 +415,7 @@ def test_sweep_exchange_season_reset_clears_stale_controller(db_path):
 
     next_season = season_number + 1
     later = now + wd.SEASON + timedelta(days=1)
-    wd.sweep_exchange_season_reset(conn, next_season, later)
+    wd.settle_world(conn, later)
 
     refreshed = next(e for e in wd.list_exchanges(conn) if e.id == exchange.id)
     assert refreshed.controller_user_id is None
@@ -964,7 +964,7 @@ def test_capture_time_reaches_actor_clocks_and_rollback_reconnect(db_path):
 def test_rollback_login_uses_stored_exchange_season(db_path, new_player):
     conn, now, a, _ = _rivals(db_path)
     boundary = now + wd.SEASON
-    wd.sweep_exchange_season_reset(conn, 2, boundary)
+    wd.settle_world(conn, boundary)
     earlier = boundary - timedelta(hours=1)
     user_id = 3 if new_player else a.user_id
     player = wd.load_or_create_player(conn, user_id, "Caller", earlier, 1)
@@ -1150,4 +1150,138 @@ def test_failed_income_upgrade_preserves_original_schema_and_data(db_path):
     conn.set_authorizer(None)
     assert not conn.in_transaction
     assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_refresh_rolls_dormant_players_and_exchanges_together(db_path):
+    conn, now, a, b = _rivals(db_path)
+    b.cash = 50000
+    b.crew = 80
+    b.exchanges_taken_total = 30
+    b.heat = 70
+    b.turns_used = 15
+    b.income_remainder = 1234567
+    b.last_raided_by = a.user_id
+    _save_fixture(conn, b)
+    _give_exchange(conn, b.user_id, now)
+    later = now + wd.SEASON
+    refreshed = wd.refresh_player(conn, a.user_id, later)
+    dormant = wd.read_player(conn, b.user_id)
+    assert refreshed.season_number == dormant.season_number == 2
+    assert (dormant.cash, dormant.crew, wd.rank_score(dormant)) == (300, 3, 0)
+    assert (dormant.heat, dormant.turns_used, dormant.income_remainder) == (0, 0, 0)
+    assert dormant.turn_day_start == ''
+    assert dormant.last_raided_by is None
+    assert (dormant.user_id, dormant.handle, dormant.created_at) == (b.user_id, b.handle, b.created_at)
+    assert not wd.is_in_grace(dormant, later)
+    assert all(e.season_number == 2 and e.controller_user_id is None and e.garrison == 0 for e in wd.list_exchanges(conn))
+    conn.close()
+
+
+def test_rollover_failure_preserves_the_entire_world(db_path):
+    conn, now, a, b = _rivals(db_path)
+    _give_exchange(conn, b.user_id, now)
+    observer = wd.connect(db_path)
+    observed = []
+
+    def observe_old_world():
+        observed.append(True)
+        assert wd.read_player(observer, a.user_id).season_number == 1
+        assert wd.read_player(observer, b.user_id).cash == 1000
+        assert wd.list_exchanges(observer)[0].controller_user_id == b.user_id
+        return 1
+
+    conn.create_function('observe_old_world', 0, observe_old_world)
+    conn.execute("""
+        CREATE TRIGGER reject_rollover BEFORE UPDATE ON exchanges
+        WHEN NEW.season_number > OLD.season_number
+        BEGIN SELECT observe_old_world(); SELECT RAISE(ABORT, 'rollover failure'); END
+    """)
+    before = list(conn.iterdump())
+    with pytest.raises(sqlite3.IntegrityError, match='rollover failure'):
+        wd.refresh_player(conn, a.user_id, now + wd.SEASON)
+    assert observed == [True]
+    assert list(conn.iterdump()) == before
+    observer.close()
+    conn.close()
+
+
+def test_simultaneous_rollover_does_not_repeat_reset_or_erase_new_actions(db_path):
+    conn, now, a, b = _rivals(db_path)
+    _give_exchange(conn, b.user_id, now)
+    barrier = threading.Barrier(2)
+    later = now + wd.SEASON
+
+    def reconnect(user_id):
+        thread_conn = wd.connect(db_path)
+        try:
+            barrier.wait(timeout=5)
+            player = wd.refresh_player(thread_conn, user_id, later)
+            wd.resolve_recruit(thread_conn, player, later)
+            return player
+        finally:
+            thread_conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        players = list(pool.map(reconnect, (a.user_id, b.user_id)))
+    assert all(p.season_number == 2 and p.cash == 225 and p.turns_used == 1 for p in players)
+    for user_id in (a.user_id, b.user_id):
+        player = wd.refresh_player(conn, user_id, later)
+        assert (player.cash, player.crew, player.turns_used) == (225, 4, 1)
+    assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
+    conn.close()
+
+
+def test_stale_session_cannot_spend_or_raid_after_committed_rollover(db_path):
+    conn, now, a, b = _rivals(db_path)
+    later = now + wd.SEASON
+    wd.refresh_player(conn, b.user_id, later)
+    assert wd.read_player(conn, a.user_id).season_number == 2
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected, match='Season changed'):
+        wd.resolve_raid(conn, a, b.user_id, later, FixedRandom())
+    assert list(conn.iterdump()) == before
+    assert a.season_number == 1
+    conn.close()
+
+
+def test_rival_read_exposes_current_season_stats_for_dormant_players(db_path):
+    conn, now, a, b = _rivals(db_path)
+    b.exchanges_taken_total = 100
+    _save_fixture(conn, b)
+    targets = wd.list_raid_targets(conn, a, now + wd.SEASON)
+    assert [p.user_id for p in targets] == [b.user_id]
+    assert targets[0].cash == wd.STARTING_CASH
+    assert wd.rank_score(targets[0]) == 0
+    assert targets[0].season_number == a.season_number == 2
+    conn.close()
+
+
+def test_skipped_seasons_and_restart_do_not_restore_prior_power(db_path):
+    conn, now, a, b = _rivals(db_path)
+    _give_exchange(conn, b.user_id, now)
+    later = now + wd.SEASON * 3
+    player = wd.refresh_player(conn, a.user_id, later)
+    assert player.season_number == 4
+    wd.resolve_recruit(conn, player, later)
+    conn.close()
+    conn = wd.connect(db_path)
+    wd.ensure_schema(conn)
+    reloaded = wd.load_or_create_player(conn, a.user_id, a.handle, later - timedelta(hours=1), 3)
+    assert (reloaded.season_number, reloaded.cash, reloaded.turns_used) == (4, 225, 1)
+    assert wd.read_player(conn, b.user_id).cash == wd.STARTING_CASH
+    assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
+    conn.close()
+
+
+def test_adopt_mixed_legacy_seasons_preserves_current_season_progress(db_path):
+    conn, now, a, b = _rivals(db_path)
+    conn.execute("DELETE FROM meta WHERE key='active_season'")
+    conn.execute("UPDATE players SET season_number=2, cash=777 WHERE user_id=2")
+    conn.execute("UPDATE exchanges SET season_number=2, controller_user_id=2, garrison=5")
+    player = wd.refresh_player(conn, a.user_id, now + wd.SEASON)
+    assert (player.season_number, player.cash) == (2, wd.STARTING_CASH)
+    assert wd.read_player(conn, b.user_id).cash == 777
+    assert all(e.controller_user_id == 2 and e.garrison == 5 for e in wd.list_exchanges(conn))
+    assert conn.execute("SELECT value FROM meta WHERE key='active_season'").fetchone()[0] == '2'
     conn.close()

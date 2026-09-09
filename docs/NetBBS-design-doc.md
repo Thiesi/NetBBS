@@ -6477,10 +6477,23 @@ Existing worlds receive an additive, transactional player-column upgrade with
 zero initial remainder; fractions discarded by older versions cannot be
 reconstructed. Season resets clear the remainder with the other season resources.
 
-Atomic season rollover for dormant players remains the following slice-2 bullet.
-Until rollover is implemented, old-season actions
-are rejected with a reconnect instruction; clock settlement does not let an
-older session spend prior-season resources.
+**Atomic seasons (issue #362, slice 2).** Login, resource refresh, world/rival
+views and actions settle the shared season under the same write lock as their
+state access. All prior-season players, including dormant crews, reset together
+with exchange ownership and garrisons. Account IDs, handles and original creation
+times remain; the 48-hour newcomer grace is never renewed for a veteran.
+
+A persisted active-season marker commits with the resets and never regresses.
+Existing mixed-season worlds are adopted without erasing already-current-season
+progress. Skipped seasons advance directly to the current season; there is no
+old ownership income or competitive power carried through the reset. Failed
+rollover writes preserve the entire previous world. Future archives must capture
+the outgoing season before the resets inside this same transaction (slice 8).
+
+A selection made with an old-season snapshot is rejected without spending
+resources. The next menu refresh shows the crackdown notice and fresh resources,
+and the caller can continue in the same session. A rejected action transaction
+can roll back its attempted settlement too; the following read commits rollover.
 Offline receipts are acknowledged after the pause, and disconnect during
 onboarding or that pause exits cleanly; bounded, replayable history remains
 part of slice 2. Later gameplay decisions remain governed by the locked rules

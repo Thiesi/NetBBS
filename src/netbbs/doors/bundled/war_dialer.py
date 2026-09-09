@@ -937,7 +937,8 @@ def current_world_season(conn: sqlite3.Connection, now: datetime) -> int:
     """The ten exchange rows retain the world's latest completed season sweep."""
     anchor = get_or_create_season_anchor(conn, now)
     stored = conn.execute("SELECT MAX(season_number) FROM exchanges").fetchone()[0]
-    return max(current_season_number(anchor, now), stored or 1)
+    marker = conn.execute("SELECT value FROM meta WHERE key='active_season'").fetchone()
+    return max(current_season_number(anchor, now), stored or 1, int(marker["value"]) if marker else 1)
 
 
 class WorldStateError(Exception):
@@ -984,12 +985,29 @@ def ensure_exchanges_seeded(conn: sqlite3.Connection, season_number: int, now: d
             )
 
 
-def sweep_exchange_season_reset(conn: sqlite3.Connection, season_number: int, now: datetime) -> None:
-    """Shared world state has no "per player" privacy concern, so unlike
-    a player's own row (only reset when *they* next log in -- see
-    `load_or_create_player`), exchanges reset for everyone the moment
-    any session notices the season has turned over. Idempotent, cheap
-    (ten rows), safe to call every session start."""
+def _settle_world(conn: sqlite3.Connection, now: datetime) -> int:
+    """One season boundary for every player and exchange, inside the caller's lock.
+
+    Future season archives belong before these resets in this same transaction.
+    The marker commits last; a failed transition leaves the prior world intact.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError("World settlement requires a write transaction")
+    marker = conn.execute("SELECT value FROM meta WHERE key='active_season'").fetchone()
+    season = current_world_season(conn, now)
+    if marker is None:
+        # Adopt worlds from the old per-login reset without regressing a player.
+        latest_player = conn.execute("SELECT MAX(season_number) FROM players").fetchone()[0]
+        season = max(season, latest_player or 1)
+    elif int(marker["value"]) == season:
+        return season
+
+    rows = conn.execute("SELECT * FROM players WHERE season_number < ? ORDER BY user_id", (season,))
+    for row in rows:
+        player = _row_to_player(row)
+        effective_now = settle_player_clocks(player, now)
+        reset_player_for_season(player, season, effective_now)
+        _save_player(conn, player)
     conn.execute(
         """
         UPDATE exchanges
@@ -997,8 +1015,21 @@ def sweep_exchange_season_reset(conn: sqlite3.Connection, season_number: int, no
             income_collected_at = ?, season_number = ?
         WHERE season_number < ?
         """,
-        (to_iso(now), season_number, season_number),
+        (to_iso(now), season, season),
     )
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('active_season', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(season),),
+    )
+    return season
+
+
+def settle_world(conn: sqlite3.Connection, now: datetime) -> int:
+    """Settle the shared world before presenting a read-only world screen."""
+    with _write_transaction(conn):
+        return _settle_world(conn, now)
+
 
 
 def _row_to_player(row: sqlite3.Row) -> Player:
@@ -1070,6 +1101,7 @@ def read_player(conn: sqlite3.Connection, user_id: int) -> Player:
 def refresh_player(conn: sqlite3.Connection, user_id: int, now: datetime) -> Player:
     """Settle current resources for a screen without clearing raid protection."""
     with _write_transaction(conn):
+        _settle_world(conn, now)
         player = read_player(conn, user_id)
         now = settle_player_clocks(player, now)
         player.cash += _collect_exchange_income(conn, player, now)
@@ -1081,8 +1113,8 @@ def load_or_create_player(conn: sqlite3.Connection, user_id: int, handle: str, n
     # Login is a write boundary too: no stale snapshot may overwrite an
     # incoming raid while settling Heat, income, or the login protection.
     with _write_transaction(conn):
-        # The caller's earlier season snapshot can regress after clock correction.
-        season_number = current_world_season(conn, now)
+        # Login cannot expose prior-season rivals or collect their old income.
+        season_number = _settle_world(conn, now)
         conn.execute(
             """
             INSERT OR IGNORE INTO players
@@ -1096,8 +1128,6 @@ def load_or_create_player(conn: sqlite3.Connection, user_id: int, handle: str, n
         player = read_player(conn, user_id)
         player.handle = handle
         now = settle_player_clocks(player, now)
-        if player.season_number < season_number:
-            reset_player_for_season(player, season_number, now)
         player.last_raided_by = None
         player.cash += _collect_exchange_income(conn, player, now)
         _save_player(conn, player)
@@ -1111,14 +1141,14 @@ def _action_player(conn: sqlite3.Connection, snapshot: Player, now: datetime):
     Session objects are display snapshots only. Copy back the fresh actor only
     after COMMIT; rejected/failed writes cannot leave an apparent local reward.
     Heat/turn clocks settle before eligibility and use nondecreasing player
-    time. Until atomic world rollover, old-season actions remain rejected.
+    time. A stale-season choice is rejected; the next refresh shows the new world.
     """
     with _write_transaction(conn):
+        season = _settle_world(conn, now)
         player = read_player(conn, snapshot.user_id)
         now = settle_player_clocks(player, now)
-        season = current_world_season(conn, now)
         if player.season_number != season or snapshot.season_number != season:
-            raise ActionRejected("Season changed. Reconnect before taking another action.")
+            raise ActionRejected("Season changed. Review the refreshed resources before choosing another action.")
         player.cash += _collect_exchange_income(conn, player, now)
         if player.turns_used >= TURNS_PER_DAY:
             raise ActionRejected("No turns left. No resources spent.")
@@ -1169,11 +1199,18 @@ def list_exchanges(conn: sqlite3.Connection) -> list[Exchange]:
 
 
 def list_raid_targets(conn: sqlite3.Connection, attacker: Player, now: datetime, limit: int = 5) -> list[Player]:
-    rows = conn.execute(
-        "SELECT * FROM players WHERE user_id != ? ORDER BY RANDOM() LIMIT 50", (attacker.user_id,)
-    ).fetchall()
-    candidates = [_row_to_player(r) for r in rows]
-    return [c for c in candidates if is_eligible_raid_target(attacker, c, now)][:limit]
+    with _write_transaction(conn):
+        season = _settle_world(conn, now)
+        actor = read_player(conn, attacker.user_id)
+        rows = conn.execute(
+            "SELECT * FROM players WHERE user_id != ? AND season_number = ? ORDER BY RANDOM() LIMIT 50",
+            (actor.user_id, season),
+        ).fetchall()
+        candidates = [_row_to_player(r) for r in rows]
+        targets = [c for c in candidates if is_eligible_raid_target(actor, c, now)][:limit]
+    attacker.__dict__.update(actor.__dict__)
+    return targets
+
 
 
 def record_event(conn: sqlite3.Connection, target_user_id: int, actor_handle: str | None, summary_text: str, now: datetime) -> None:
@@ -1426,7 +1463,7 @@ def draw_help(p: Palette, w: int) -> None:
         # Codex review (PR #241): the prior trim dropped "Nothing
         # carries over" to save a row, but the shortened list it left
         # behind doesn't mention exchange control -- and
-        # sweep_exchange_season_reset() really does clear every
+        # world settlement clears every
         # exchange's controller/garrison at the season boundary too, so
         # the list needs to say so explicitly now that there's no
         # catch-all phrase covering it.
@@ -1475,7 +1512,10 @@ def do_job(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, 
 
 
 def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int) -> None:
+    previous_season = player.season_number
     targets = list_raid_targets(conn, player, now)
+    if player.season_number != previous_season:
+        draw_season_change(p, player.season_number)
     if not targets:
         out_line(f"  {p.muted}No eligible rivals in range right now.{RESET}")
         return
@@ -1500,6 +1540,11 @@ def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
 
 
 def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int) -> None:
+    previous_season = player.season_number
+    refreshed = refresh_player(conn, player.user_id, now)
+    player.__dict__.update(refreshed.__dict__)
+    if player.season_number != previous_season:
+        draw_season_change(p, player.season_number)
     exchanges = list_exchanges(conn)
     draw_exchange_list(p, exchanges, w)
     out_line(f"    {p.gold}[Q]{RESET} {p.muted}cancel{RESET}")
@@ -1535,7 +1580,13 @@ def draw_exchange_list(p: Palette, exchanges: list[Exchange], w: int) -> None:
 
 
 def draw_board(p: Palette, conn: sqlite3.Connection, w: int) -> None:
+    settle_world(conn, now_utc())
     draw_exchange_list(p, list_exchanges(conn), w)
+
+
+def draw_season_change(p: Palette, season_number: int) -> None:
+    out_line(f"  {p.accent}Fed crackdown: season {season_number} has started. "
+             f"Crews and exchanges have reset; review your fresh resources.{RESET}")
 
 
 def draw_goodbye(p: Palette, player: Player, w: int) -> None:
@@ -1567,7 +1618,6 @@ def main() -> int:
         now = now_utc()
         season_number = current_world_season(conn, now)
         ensure_exchanges_seeded(conn, season_number, now)
-        sweep_exchange_season_reset(conn, season_number, now)
 
         user_id = info.get("user_id", 0)
         handle = info.get("handle", "Guest")
@@ -1583,7 +1633,7 @@ def main() -> int:
         is_new_player = conn.execute("SELECT 1 FROM players WHERE user_id=?", (user_id,)).fetchone() is None
         player = load_or_create_player(conn, user_id, handle, now, season_number)
 
-        draw_title(palette, info, season_number, w)
+        draw_title(palette, info, player.season_number, w)
         if is_new_player:
             draw_help(palette, w)
             press_any_key(palette)
@@ -1594,7 +1644,10 @@ def main() -> int:
             mark_events_seen(conn, [e.id for e in events], now_utc())
 
         while True:
+            previous_season = player.season_number
             player = refresh_player(conn, user_id, now_utc())
+            if player.season_number != previous_season:
+                draw_season_change(palette, player.season_number)
             draw_status(palette, player, w)
             has_turns = player.turns_used < TURNS_PER_DAY
             draw_menu(palette, has_turns)
