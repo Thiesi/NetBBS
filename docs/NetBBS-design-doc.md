@@ -6555,6 +6555,19 @@ are calculated inside the committed transaction after income collection and incl
 bust losses; narration distinguishes gross payout from net cash/crew/Heat/Rank/turn
 changes. Receiving an outcome never depends on another session-snapshot save.
 
+**Compact action screens (issue #362, slice 3).** Target pickers, results,
+rejections and season notices use terminal-height pagination as well as width
+wrapping. Digits 1-9/0 choose a complete visible target entry and open its preview;
+Next/Prev traverses pages and Back returns without spending. A split entry cannot
+be selected until its final line is visible. Already-owned exchanges and ineligible
+rivals show their reason and have no active selection key.
+
+Raid selection uses the same stable, bounded directory batches as browsing, so all
+eligible crews are reachable beyond the former random fifty-row sample. Result
+pages retain every net resource change until continued or left with Back. These
+paths support 80x24, 40x12 and 20x10, including long names, wide/combining text and
+large resource values; manual terminal/transport validation remains slice 9.
+
 ### Issue #168 — real-time relay for Link direct chat
 
 **Goal:** decide between the two structurally different designs the issue

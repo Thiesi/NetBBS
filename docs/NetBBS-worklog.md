@@ -345,6 +345,12 @@ collection and publish deltas only after commit, so income is not called a payou
 and failed commits never expose an apparent result. Preview rendering must not
 consume RNG draws; jobs and all outcome rolls happen only on Act.
 
+Target selection binds digit keys only to complete visible entries. Keep those
+keys separate from Back/Next/Prev and carry database-batch direction through local
+row pagination. Regression coverage must drive the composed picker beyond fifty
+crews, not only call the page reader. Action result pagination owns its pause;
+the main loop must not append a second acknowledgement or clear it prematurely.
+
 ### Database execution lanes
 
 Interactive network flows use a foreground `DatabaseLane`; Phase 3 background

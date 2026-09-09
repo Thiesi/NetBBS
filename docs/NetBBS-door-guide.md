@@ -60,6 +60,12 @@ If another action or incoming raid changes your resources during the preview, th
 game asks you to inspect them again without spending. Outcomes distinguish gross
 payout from actual net changes, including bust losses and the one-member crew floor.
 
+Target pickers use digits 1-9/0, with Next/Prev and Back. Only fully displayed,
+eligible entries have active selection keys; protected rivals and your own exchanges
+show why they cannot be selected. Raid selection reaches every crew through batches
+of ten rather than a random sample. Results, rejection messages and season notices
+are paginated on compact terminals; continue to read the remaining rows or use Back.
+
 Use separate single keys. Arrow/function keys and pasted command bursts do not
 select actions; Escape dismisses a pause but has no menu action. An incomplete
 or excessively long terminal sequence ends the door with a reconnect diagnostic.

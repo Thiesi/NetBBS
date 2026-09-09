@@ -1775,20 +1775,97 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
     return lines
 
 
+def update_display_player(p: Palette, player: Player, refreshed: Player, width: int, height: int) -> None:
+    previous_season = player.season_number
+    player.__dict__.update(refreshed.__dict__)
+    if previous_season != player.season_number:
+        draw_season_change(p, player.season_number, width, height)
+
+
 def confirm_action(p: Palette, conn: sqlite3.Connection, player: Player, action: str,
                    width: int, height: int, target: Player | Exchange | None = None) -> bool:
     refreshed = refresh_player(conn, player.user_id, now_utc())
-    player.__dict__.update(refreshed.__dict__)
+    update_display_player(p, player, refreshed, width, height)
     available = player.turns_used < TURNS_PER_DAY and (action != "recruit" or player.cash >= RECRUIT_COST)
     return show_text_pages(p, action.upper() + " PREVIEW", action_preview_lines(action, player, target),
                            width, height, accept=available) == "A"
 
 
-def draw_action_delta(p: Palette, delta: ActionDelta, busted: bool = False) -> None:
+def show_action_result(p: Palette, headlines: list[str], delta: ActionDelta, busted: bool,
+                       width: int, height: int) -> None:
+    lines = list(headlines)
     if busted:
-        out_line(f"{p.bad}*** BUSTED *** Heat reset; losses included below.{RESET}")
-    out_line(f"{p.white}Net cash: {'+' if delta.cash >= 0 else '-'}${abs(delta.cash):,}; crew: {delta.crew:+,}{RESET}")
-    out_line(f"{p.white}Rank: {delta.rank:+,}; Heat: {delta.heat:+.1f}; turns spent: {delta.turns}{RESET}")
+        lines.append("*** BUSTED *** Heat reset; losses included below.")
+    lines += [f"Net cash: {'+' if delta.cash >= 0 else '-'}${abs(delta.cash):,}; crew: {delta.crew:+,}",
+              f"Rank: {delta.rank:+,}; Heat: {delta.heat:+.1f}; turns spent: {delta.turns}"]
+    show_text_pages(p, "ACTION RESULT", lines, width, height, onboarding=True)
+
+
+PICK_KEYS = "1234567890"
+
+
+def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool]], width: int,
+                     height: int, *, more_before: bool = False, more_after: bool = False,
+                     start_last: bool = False) -> str:
+    """Only complete visible entries accept a digit; selection opens a preview."""
+    width = max(1, width - 1)
+    heading = _event_wrap(title, width)
+    rows = max(1, height - len(heading) - 4)  # counter and three footer rows
+    lines = []
+    for key, (paragraphs, selectable) in zip(PICK_KEYS, records):
+        marker = f"[{key}]" if selectable else "[-]"
+        wrapped = [line for text in [marker + " " + paragraphs[0]] + paragraphs[1:]
+                   for line in _event_wrap(text, width)]
+        lines.extend((line, key if selectable and i == len(wrapped) - 1 else "")
+                     for i, line in enumerate(wrapped))
+    lines = lines or [("No rivals yet.", "")]
+    pages = [lines[i:i + rows] for i in range(0, len(lines), rows)]
+    index = len(pages) - 1 if start_last else 0
+    while True:
+        keys = "".join(key for _, key in pages[index])
+        out(f"{ESC}[2J{ESC}[H")
+        for line in heading:
+            out_line(f"{p.accent}{BOLD}{line}{RESET}")
+        out_line(f"Page {index + 1}/{len(pages)}")
+        for line, _ in pages[index]:
+            out_line(f"{p.white}{line}{RESET}")
+        out_line(f"[{keys}]Pick" if keys else "No choice this page")
+        out_line("[N]ext [P]rev")
+        out_prompt("[B]ack (Q cancel)")
+        key = read_menu_choice("NPBQ" + keys)
+        if key in keys or key in "BQ":
+            return key
+        if key == "N":
+            if index == len(pages) - 1 and more_after:
+                return "N"
+            index = min(index + 1, len(pages) - 1)
+        elif key == "P":
+            if index == 0 and more_before:
+                return "P"
+            index = max(0, index - 1)
+
+
+def choose_rival(p: Palette, conn: sqlite3.Connection, player: Player, width: int, height: int) -> Player | None:
+    offset = 0
+    backwards = False
+    while True:
+        now = now_utc()
+        page = read_player_page(conn, player.user_id, now, offset)
+        update_display_player(p, player, page.player, width, height)
+        effective_now = max(now, from_iso(player.heat_updated_at))
+        records = [([rival.handle, f"{tier_name(rank_score(rival))}; Rank {rank_score(rival):,}",
+                     raid_eligibility_reason(player, rival, effective_now)],
+                    is_eligible_raid_target(player, rival, effective_now)) for rival in page.entries]
+        key = pick_record_page(p, "RAID TARGETS", records, width, height,
+                               more_before=page.offset > 0,
+                               more_after=page.offset + len(page.entries) < page.total,
+                               start_last=backwards)
+        if key in "BQ":
+            return None
+        if key in PICK_KEYS:
+            return page.entries[PICK_KEYS.index(key)]
+        backwards = key == "P"
+        offset = page.offset + (-PLAYER_PAGE_SIZE if backwards else PLAYER_PAGE_SIZE)
 
 
 def do_trade_warez(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
@@ -1797,8 +1874,7 @@ def do_trade_warez(p: Palette, conn: sqlite3.Connection, player: Player, now: da
         return False
     delta = ActionDelta()
     gain, busted = resolve_trade_warez(conn, player, now_utc(), rng, require_preview=True, delta=delta)
-    out_line(f"{p.good}You move some warez on the boards. Gross payout ${gain}.{RESET}")
-    draw_action_delta(p, delta, busted)
+    show_action_result(p, [f"You move some warez on the boards. Gross payout ${gain}."], delta, busted, w, height)
     return True
 
 
@@ -1808,8 +1884,7 @@ def do_recruit(p: Palette, conn: sqlite3.Connection, player: Player, now: dateti
         return False
     delta = ActionDelta()
     resolve_recruit(conn, player, now_utc(), require_preview=True, delta=delta)
-    out_line(f"{p.good}A new member joins your crew.{RESET}")
-    draw_action_delta(p, delta)
+    show_action_result(p, ["A new member joins your crew."], delta, False, w, height)
     return True
 
 
@@ -1819,89 +1894,51 @@ def do_job(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
         return False
     delta = ActionDelta()
     name, success, payout, busted = resolve_job(conn, player, now_utc(), rng, require_preview=True, delta=delta)
-    out_line(f"{p.accent}Job:{RESET} {p.white}{_event_plain(name)}{RESET}")
-    out_line(f"{p.good}Success! Gross payout ${payout}.{RESET}" if success else f"{p.bad}Job failed.{RESET}")
-    draw_action_delta(p, delta, busted)
+    show_action_result(p, [f"Job: {name}", f"Success! Gross payout ${payout}." if success else "Job failed."],
+                       delta, busted, w, height)
     return True
 
 
 def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int, height: int = 24) -> bool:
-    previous_season = player.season_number
-    targets = list_raid_targets(conn, player, now)
-    if player.season_number != previous_season:
-        draw_season_change(p, player.season_number)
-    if not targets:
-        out_line(f"  {p.muted}No eligible rivals in range right now.{RESET}")
-        return True
-    out_line()
-    out_line(f"  {p.accent}Eligible rivals:{RESET}")
-    for letter, t in zip(LETTERS, targets):
-        out_line(f"    {p.gold}[{letter}]{RESET} {p.white}{t.handle}{RESET} {p.muted}({tier_name(rank_score(t))}){RESET}")
-    out_line(f"    {p.gold}[Q]{RESET} {p.muted}cancel{RESET}")
-    choice = read_menu_choice(LETTERS[: len(targets)] + "Q")
-    if choice == "Q":
+    target = choose_rival(p, conn, player, w, height)
+    if target is None:
         return False
-    target = targets[LETTERS.index(choice)]
     if not confirm_action(p, conn, player, "raid", w, height, target):
         return False
     delta = ActionDelta()
     success, amount, busted = resolve_raid(
         conn, player, target.user_id, now_utc(), rng, expected_target=target, require_preview=True, delta=delta,
     )
-    if success:
-        out_line(f"  {p.good}You hit {_event_plain(target.handle)}; gross take ${amount}.{RESET}")
-    else:
-        out_line(f"  {p.bad}The raid on {_event_plain(target.handle)} failed.{RESET}")
-    draw_action_delta(p, delta, busted)
+    headline = f"You hit {target.handle}; gross take ${amount}." if success else f"The raid on {target.handle} failed."
+    show_action_result(p, [headline], delta, busted, w, height)
     return True
 
 
 def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int, height: int = 24) -> bool:
-    previous_season = player.season_number
     refreshed = refresh_player(conn, player.user_id, now)
-    player.__dict__.update(refreshed.__dict__)
-    if player.season_number != previous_season:
-        draw_season_change(p, player.season_number)
+    update_display_player(p, player, refreshed, w, height)
     exchanges = list_exchanges(conn)
-    draw_exchange_list(p, exchanges, w)
-    out_line(f"    {p.gold}[Q]{RESET} {p.muted}cancel{RESET}")
-    choice = read_menu_choice(LETTERS[: len(exchanges)] + "Q")
-    if choice == "Q":
+    records = [([e.name, f"Owner: {e.controller_handle or 'unclaimed'}; garrison {e.garrison}; ${e.income_per_hour}/hour",
+                 "Already yours" if e.controller_user_id == player.user_id else "Available to contest"],
+                e.controller_user_id != player.user_id) for e in exchanges]
+    choice = pick_record_page(p, "ROOT EXCHANGE", records, w, height)
+    if choice in "BQ":
         return False
-    exchange = exchanges[LETTERS.index(choice)]
-    if exchange.controller_user_id == player.user_id:
-        out_line(f"  {p.muted}You already control {exchange.name}.{RESET}")
-        return True
+    exchange = exchanges[PICK_KEYS.index(choice)]
     if not confirm_action(p, conn, player, "root", w, height, exchange):
         return False
     delta = ActionDelta()
     success, name, busted = resolve_root_exchange(
         conn, player, exchange.id, now_utc(), rng, expected_exchange=exchange, require_preview=True, delta=delta,
     )
-    if success:
-        out_line(f"  {p.good}You root {name}. It's yours now.{RESET}")
-    else:
-        out_line(f"  {p.bad}The exchange's defenses hold.{RESET}")
-    draw_action_delta(p, delta, busted)
+    headline = f"You root {name}. It's yours now." if success else "The exchange's defenses hold."
+    show_action_result(p, [headline], delta, busted, w, height)
     return True
 
 
-def draw_exchange_list(p: Palette, exchanges: list[Exchange], w: int) -> None:
-    out_line()
-    out_line(f"  {p.accent}Exchanges:{RESET}")
-    for letter, e in zip(LETTERS, exchanges):
-        controller = e.controller_handle or f"{p.muted}unclaimed{RESET}{p.white}"
-        out_line(
-            f"    {p.gold}[{letter}]{RESET} {p.white}{e.name:<28}{RESET} "
-            f"{p.muted}ctrl:{RESET} {p.white}{controller}{RESET} "
-            f"{p.muted}garrison:{RESET} {p.white}{e.garrison}{RESET} "
-            f"{p.muted}${e.income_per_hour}/hr{RESET}"
-        )
-
-
-def draw_season_change(p: Palette, season_number: int) -> None:
-    out_line(f"  {p.accent}Fed crackdown: season {season_number} has started. "
-             f"Crews and exchanges have reset; review your fresh resources.{RESET}")
+def draw_season_change(p: Palette, season_number: int, width: int = 78, height: int = 24) -> None:
+    show_text_pages(p, "FED CRACKDOWN", [f"Fed crackdown: season {season_number} has started.",
+                    "Crews and exchanges have reset; review your fresh resources."], width, height, onboarding=True)
 
 
 def draw_goodbye(p: Palette, player: Player, w: int) -> None:
@@ -1968,8 +2005,7 @@ def main() -> int:
             state = dashboard_state(conn, user_id, screen_now)
             player = state.player
             if player.season_number != previous_season:
-                draw_season_change(palette, player.season_number)
-                press_any_key(palette)
+                draw_season_change(palette, player.season_number, w, height)
             page_index, page_count = draw_dashboard(palette, state, screen_now, w, height, page_index)
             # Always recognize action keys: a displayed zero-turn snapshot
             # may sit idle past its refill. The transaction decides allowance.
@@ -1994,23 +2030,17 @@ def main() -> int:
                 elif choice == "H":
                     show_event_history(palette, conn, player.user_id, w, height)
                 elif choice == "T":
-                    if do_trade_warez(palette, conn, player, action_now, rng, w, height):
-                        press_any_key(palette)
+                    do_trade_warez(palette, conn, player, action_now, rng, w, height)
                 elif choice == "C":
-                    if do_recruit(palette, conn, player, action_now, w, height):
-                        press_any_key(palette)
+                    do_recruit(palette, conn, player, action_now, w, height)
                 elif choice == "J":
-                    if do_job(palette, conn, player, action_now, rng, w, height):
-                        press_any_key(palette)
+                    do_job(palette, conn, player, action_now, rng, w, height)
                 elif choice == "R":
-                    if do_raid(palette, conn, player, action_now, rng, w, height):
-                        press_any_key(palette)
+                    do_raid(palette, conn, player, action_now, rng, w, height)
                 elif choice == "X":
-                    if do_root_exchange(palette, conn, player, action_now, rng, w, height):
-                        press_any_key(palette)
+                    do_root_exchange(palette, conn, player, action_now, rng, w, height)
             except ActionRejected as exc:
-                out_line(f"  {palette.muted}{exc}{RESET}")
-                press_any_key(palette)
+                show_text_pages(palette, "ACTION UNAVAILABLE", [str(exc)], w, height, onboarding=True)
         draw_goodbye(palette, read_player(conn, user_id), w)
     except (EOFError, BrokenPipeError):
         # Actions are already committed. A disconnect never writes a snapshot.
