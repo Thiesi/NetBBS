@@ -6524,8 +6524,22 @@ Next/Prev pages keep action and free-browsing keys visible at 80x24, 40x12 and
 20x10. Smaller terminals receive an explicit minimum-size response before opening
 the world. Action outcomes, rejected actions and season-change notices wait for
 acknowledgement before the dashboard clears them. Cancelling a target selection
-returns directly. Separate standings/rival screens and detailed action previews
-remain subsequent slice 3 bullets.
+returns directly. Detailed action previews remain a subsequent slice 3 bullet.
+
+**Free browsing (issue #362, slice 3).** `[B]Rank` opens current-season standings,
+ordered by descending Rank, then ascending stable account ID for ties. Your exact
+position is shown even outside the current batch. `[E]Map` shows exchange ownership,
+defenses and hourly income; `[V]Rivals` lists other crews in account-ID order with
+their Rank/tier and current raid eligibility reason. This directory exposes no
+additional crew-strength or cash intelligence; those policy choices remain slice 5.
+`[H]Log` replays events and `[?]Help` opens the rules. Every view is content-first
+with Back, and costs no turns or cash. World reads still settle elapsed resources.
+
+Standings and rivals fetch ten players per batch; Next/Prev traverses both wrapped
+terminal pages and batches, reaching crews beyond the old random fifty-row sample.
+Each batch is a fresh current-season snapshot, so standings can move during a visit.
+Help and territory use the same width/height-aware pagination, including onboarding
+help. Viewing directories does not reset raid protection or acknowledge receipts.
 
 ### Issue #168 — real-time relay for Link direct chat
 

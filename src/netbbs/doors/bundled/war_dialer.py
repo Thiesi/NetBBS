@@ -709,16 +709,20 @@ def is_in_grace(player: Player, now: datetime) -> bool:
     return now - from_iso(player.created_at) < GRACE
 
 
-def is_eligible_raid_target(attacker: Player, target: Player, now: datetime) -> bool:
+def raid_eligibility_reason(attacker: Player, target: Player, now: datetime) -> str:
     if target.user_id == attacker.user_id:
-        return False
+        return "Your own crew"
     if is_in_grace(target, now):
-        return False
+        return "Newcomer shield"
     if abs(tier_index(rank_score(target)) - tier_index(rank_score(attacker))) > 1:
-        return False
+        return "Outside your tier +/-1"
     if target.last_raided_by == attacker.user_id:
-        return False
-    return True
+        return "Repeat raid blocked until target logs in"
+    return "Eligible"
+
+
+def is_eligible_raid_target(attacker: Player, target: Player, now: datetime) -> bool:
+    return raid_eligibility_reason(attacker, target, now) == "Eligible"
 
 
 def reset_player_for_season(player: Player, season_number: int, now: datetime) -> None:
@@ -1244,6 +1248,43 @@ def list_exchanges(conn: sqlite3.Connection) -> list[Exchange]:
     ]
 
 
+# Keep the standings expression aligned with rank_score; ties use stable account IDs.
+_RANK_SQL = "(crew_recruited_total*10 + exchanges_taken_total*500 + successful_raids*25 + successful_jobs*15)"
+PLAYER_PAGE_SIZE = 10
+
+
+@dataclass
+class PlayerPage:
+    player: Player
+    entries: list[Player]
+    offset: int
+    total: int
+    position: int | None
+
+
+def read_player_page(conn: sqlite3.Connection, user_id: int, now: datetime, offset: int = 0,
+                     *, standings: bool = False) -> PlayerPage:
+    """Read a bounded current-season directory/standings page without login effects."""
+    with _write_transaction(conn):
+        player = _refresh_player(conn, user_id, now)
+        where = "season_number=?" + (" AND user_id != ?" if not standings else "")
+        parameters = [player.season_number] + ([] if standings else [user_id])
+        total = conn.execute("SELECT COUNT(*) FROM players WHERE " + where, parameters).fetchone()[0]
+        offset = max(0, min(offset, max(0, (total - 1) // PLAYER_PAGE_SIZE * PLAYER_PAGE_SIZE)))
+        order = f"{_RANK_SQL} DESC, user_id" if standings else "user_id"
+        rows = conn.execute("SELECT * FROM players WHERE " + where + " ORDER BY " + order + " LIMIT ? OFFSET ?",
+                            parameters + [PLAYER_PAGE_SIZE, offset]).fetchall()
+        position = None
+        if standings:
+            rank = rank_score(player)
+            position = 1 + conn.execute(
+                f"SELECT COUNT(*) FROM players WHERE season_number=? AND "
+                f"({_RANK_SQL}>? OR ({_RANK_SQL}=? AND user_id<?))",
+                (player.season_number, rank, rank, user_id),
+            ).fetchone()[0]
+        return PlayerPage(player, [_row_to_player(row) for row in rows], offset, total, position)
+
+
 def list_raid_targets(conn: sqlite3.Connection, attacker: Player, now: datetime, limit: int = 5) -> list[Player]:
     with _write_transaction(conn):
         season = _settle_world(conn, now)
@@ -1541,9 +1582,9 @@ def draw_dashboard(p: Palette, state: DashboardState, now: datetime, width: int,
                    height: int, page_index: int = 0) -> tuple[int, int]:
     """Render one compact command-center page with the action keys always visible."""
     width = max(1, width - 1)
-    footer_text = (["[T]rade [C]rew [J]ob [R]aid [X]Root", "[B]oard [H]istory [?]Help [Q]uit"]
+    footer_text = (["[T]rade [C]rew [J]ob [R]aid [X]Root", "[B]Rank [E]Map [V]Rivals [H]Log [?]Help [Q]uit"]
                    if width >= 39 else
-                   ["[T]rade [C]rew [J]ob", "[R]aid [X]Root", "[B]oard [H]istory", "[?]Help [Q]uit"])
+                   ["[T]rade [C]rew [J]ob", "[R]aid [X]Root", "[B]Rank [E]Map", "[V]Rivals [H]Log", "[?]Help [Q]uit"])
     footer = [line for text in footer_text + ["[N]ext [P]rev"] for line in _event_wrap(text, width)]
     body_rows = max(1, height - len(footer) - 2)  # heading and prompt
     lines = [line for text in dashboard_lines(state, now) for line in _event_wrap(text, width)]
@@ -1559,110 +1600,98 @@ def draw_dashboard(p: Palette, state: DashboardState, now: datetime, width: int,
     return page_index, page_count
 
 
-def draw_help(p: Palette, w: int) -> None:
-    # One page, at most (Thiesi's own ask) -- a returning player can
-    # call this up free from the main menu ([?], never costs a turn),
-    # and a brand-new one sees it once, automatically, before their
-    # very first menu (see `main`). RECRUIT_COST/TURNS_PER_DAY/
-    # HEAT_BUST_THRESHOLD/SEASON are interpolated from the real balance
-    # constants above rather than hand-typed, so this can never quietly
-    # drift out of sync with a future tuning pass the way a second,
-    # copy-pasted set of numbers could.
-    #
-    # Codex review (PR #239), two real inaccuracies fixed here: crossing
-    # HEAT_BUST_THRESHOLD does not bust immediately -- apply_heat() only
-    # *starts* a rising-chance roll (2%/point over the threshold, capped
-    # at 40%) -- and a season reset wipes cash/crew/Heat/turns and every
-    # lifetime counter Rank is built from, not just "the board" as the
-    # first draft implied; a player relying on this screen could
-    # reasonably expect their holdings to survive a season otherwise.
-    #
-    # Also width-aware now (`_wrap`, same review round): the first draft
-    # hand-wrapped every line assuming a fixed ~78-column terminal,
-    # overflowing into extra rows at exactly the narrow widths (`main()`
-    # supports down to 40 columns) where a one-page screen matters most.
-    #
-    # Codex review (PR #240): making the Heat/Rank paragraphs accurate
-    # (above) made them longer, and that pushed the *standard* 80-column
-    # case (w=78) from 22 rows -- fitting a real 24-row terminal with
-    # press_any_key()'s own two rows -- to 27, no longer fitting even
-    # there. Every paragraph below is deliberately terser now, chosen by
-    # re-measuring against a real render at 40/60/78 (this door's full
-    # supported width range) until w=78 -- the 80-column terminal case,
-    # by far the common one for a telnet/SSH BBS client -- was back at
-    # its original ~22-row budget, fitting a real 24-row screen exactly
-    # once more. At the narrower supported widths (60, and especially
-    # the 40-column floor) the same wrapped text still runs well past
-    # one page even after this trim; closing that gap for good would
-    # need either real pagination or a genuinely different, denser
-    # writing style, either well beyond a wording pass for a screen this
-    # door deliberately keeps to plain single-keystroke reads with no
-    # navigation model of its own. Left as a known, accepted floor-width
-    # limitation rather than chased further here.
-    inner = max(20, w - 4)  # 2-space margin each side
+def show_text_pages(p: Palette, title: str, paragraphs: list[str], width: int, height: int,
+                    *, more_before: bool = False, more_after: bool = False,
+                    start_last: bool = False, onboarding: bool = False) -> str:
+    """Content first, bounded terminal pages; return an edge key to fetch another batch."""
+    width = max(1, width - 1)
+    heading = _event_wrap(title, width)
+    footer_text = (["Press any key to continue...", "[B]ack"] if onboarding else
+                   ["[N]ext [P]rev", "[B]ack"])
+    footer = [line for text in footer_text for line in _event_wrap(text, width)]
+    body_rows = max(1, height - len(heading) - len(footer) - 1)
+    lines = [line for text in paragraphs for line in _event_wrap(text, width)] or ["Nothing to show yet."]
+    pages = [lines[i:i + body_rows] for i in range(0, len(lines), body_rows)]
+    index = len(pages) - 1 if start_last else 0
+    while True:
+        out(f"{ESC}[2J{ESC}[H")
+        for line in heading:
+            out_line(f"{p.accent}{BOLD}{line}{RESET}")
+        out_line(f"Page {index + 1}/{len(pages)}")
+        for line in pages[index]:
+            out_line(f"{p.white}{line}{RESET}")
+        for line in footer[:-1]:
+            out_line(f"{p.muted}{line}{RESET}")
+        out_prompt(f"{p.gold}{footer[-1]}{RESET}")
+        key = read_input_key().upper() if onboarding else read_menu_choice("NPBQ")
+        if key in ("B", "Q"):
+            return "B"
+        if onboarding:
+            if index == len(pages) - 1:
+                return "B"
+            index += 1
+        elif key == "N":
+            if index == len(pages) - 1 and more_after:
+                return "N"
+            index = min(index + 1, len(pages) - 1)
+        elif key == "P":
+            if index == 0 and more_before:
+                return "P"
+            index = max(0, index - 1)
 
-    def para(text: str) -> None:
-        for line in _wrap(text, inner):
-            out_line(f"  {p.white}{line}{RESET}")
 
-    out_line()
-    out_line(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}")
-    out_line(_center_line(f"{p.border}{BOLD}║{RESET}", f"{p.gold}{BOLD}HOW TO PLAY{RESET}",
-                           f"{p.border}{BOLD}║{RESET}", w))
-    out_line(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}")
-    para(
-        "You're a hacker, and with your crew you dial rival boards for cash, "
-        "respect, and control of the scene's ten exchanges -- one live world "
-        "everyone shares."
-    )
-    out_line()
-    actions_suffix = f"({TURNS_PER_DAY} turns/day, one per action):"
-    if _dlen(f"Actions {actions_suffix}") <= inner:
-        out_line(f"  {p.accent}{BOLD}Actions{RESET} {p.muted}{actions_suffix}{RESET}")
-    else:
-        # Narrow-terminal fallback (Codex review, PR #239): the header
-        # itself needs wrapping room too, not just the paragraphs below
-        # it -- this is the one heading line that isn't routed through
-        # `para()`, since "Actions" stays bold/accent-colored while the
-        # rest is muted.
-        out_line(f"  {p.accent}{BOLD}Actions{RESET}")
-        for line in _wrap(actions_suffix, inner - 2):
-            out_line(f"    {p.muted}{line}{RESET}")
-    for label_colored, label_plain, desc in (
-        (f"{p.gold}[T]{RESET}rade Warez", "[T]rade Warez", "quick, low-risk cash."),
-        (f"{p.gold}[C]{RESET}rew Recruit", "[C]rew Recruit", f"pay ${RECRUIT_COST}, +1 crew member."),
-        (f"{p.gold}[J]{RESET}ob", "[J]ob", "bigger risk, bigger payout."),
-        (f"{p.gold}[R]{RESET}aid", "[R]aid", "hit a rival crew, steal their cash."),
-        (f"Root E{p.gold}[x]{RESET}change", "Root E[x]change", "seize an exchange for hourly income."),
-    ):
-        combined = f"{label_plain}  {desc}"
-        if _dlen(combined) <= inner - 4:
-            out_line(f"    {label_colored}  {p.muted}{desc}{RESET}")
+def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False) -> None:
+    show_text_pages(p, "HOW TO PLAY", [
+        "Run a BBS-scene crew for cash, respect and control of ten shared exchanges.",
+        f"Each action costs one of {TURNS_PER_DAY} turns. The rolling 24-hour window starts with your first action.",
+        "[T]rade Warez: quick cash. [C]rew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
+        "[J]ob: risky payout. [R]aid: steal rival cash. [X]Root: take an exchange for hourly income.",
+        f"Past {HEAT_BUST_THRESHOLD:g} Heat, each extra point adds a bust chance; busts cost cash/crew and reset Heat. Heat decays over time.",
+        f"Rank only climbs during a season. Every {SEASON.days} days, cash, crew, Heat, turns, exchanges and Rank totals reset.",
+        "[B]Rank: standings. [E]Map: territory. [V]Rivals: eligibility. [H]Log: retained events. All browsing is free.",
+        "[N]ext/[P]rev page; [B]ack leaves a screen; [Q]uit leaves the game from the switchboard. Use separate single keys.",
+    ], w, height, onboarding=onboarding)
+
+
+def show_player_directory(p: Palette, conn: sqlite3.Connection, user_id: int,
+                          width: int, height: int, *, standings: bool = False) -> None:
+    offset = 0
+    backwards = False
+    while True:
+        now = now_utc()
+        page = read_player_page(conn, user_id, now, offset, standings=standings)
+        lines = [f"Season {page.player.season_number}; crews {page.offset + 1 if page.entries else 0}-{page.offset + len(page.entries)} of {page.total}"]
+        if standings:
+            lines += [f"Your position: {page.position}/{page.total}; Rank {rank_score(page.player):,}",
+                      "Ties: lower account ID first."]
         else:
-            out_line(f"    {label_colored}")
-            for line in _wrap(desc, inner - 6):
-                out_line(f"      {p.muted}{line}{RESET}")
-    out_line()
-    para(
-        f"Heat rises with risky moves; past {int(HEAT_BUST_THRESHOLD)}, each extra "
-        f"point adds a rising bust chance -- gear and crew scattered, Heat reset. It "
-        f"decays over time too."
-    )
-    out_line()
-    para(
-        # Codex review (PR #241): the prior trim dropped "Nothing
-        # carries over" to save a row, but the shortened list it left
-        # behind doesn't mention exchange control -- and
-        # world settlement clears every
-        # exchange's controller/garrison at the season boundary too, so
-        # the list needs to say so explicitly now that there's no
-        # catch-all phrase covering it.
-        f"Rank only ever climbs this season (lifetime totals, immune to busts) -- "
-        f"every {SEASON.days} days it wipes cash, crew, Heat, exchanges, and those "
-        f"totals."
-    )
-    out_line()
-    para("[B]oard and [H]istory are free. Press [?] to see this again.")
+            lines += ["Raid eligibility now; crew strength and cash are not public intelligence."]
+        for index, rival in enumerate(page.entries, page.offset + 1):
+            name = rival.handle + (" (you)" if rival.user_id == user_id else "")
+            lines.append(f"{index}. {name} - {tier_name(rank_score(rival))}; Rank {rank_score(rival):,}")
+            if not standings:
+                lines.append(raid_eligibility_reason(page.player, rival, max(now, from_iso(page.player.heat_updated_at))))
+        if not page.entries:
+            lines.append("No other crews yet. Trade, recruit or contest an exchange while the scene grows.")
+        direction = show_text_pages(p, "SEASON STANDINGS" if standings else "RIVAL DIRECTORY", lines,
+                                    width, height, more_before=page.offset > 0,
+                                    more_after=page.offset + len(page.entries) < page.total,
+                                    start_last=backwards)
+        if direction == "B":
+            return
+        backwards = direction == "P"
+        offset = page.offset + (-PLAYER_PAGE_SIZE if backwards else PLAYER_PAGE_SIZE)
+
+
+def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int) -> None:
+    with _write_transaction(conn):
+        season = _settle_world(conn, now_utc())
+        exchanges = list_exchanges(conn)
+    lines = [f"Season {season}; ten shared exchanges. Territory is always contestable."]
+    for exchange in exchanges:
+        owner = exchange.controller_handle or "unclaimed"
+        lines += [exchange.name, f"Owner: {owner}; garrison {exchange.garrison}; ${exchange.income_per_hour}/hour"]
+    show_text_pages(p, "EXCHANGE TERRITORY", lines, width, height)
 
 
 def read_menu_choice(valid: str) -> str:
@@ -1771,11 +1800,6 @@ def draw_exchange_list(p: Palette, exchanges: list[Exchange], w: int) -> None:
         )
 
 
-def draw_board(p: Palette, conn: sqlite3.Connection, w: int) -> None:
-    settle_world(conn, now_utc())
-    draw_exchange_list(p, list_exchanges(conn), w)
-
-
 def draw_season_change(p: Palette, season_number: int) -> None:
     out_line(f"  {p.accent}Fed crackdown: season {season_number} has started. "
              f"Crews and exchanges have reset; review your fresh resources.{RESET}")
@@ -1835,8 +1859,7 @@ def main() -> int:
 
         draw_title(palette, info, player.season_number, w)
         if is_new_player:
-            draw_help(palette, w)
-            press_any_key(palette)
+            draw_help(palette, w, height, onboarding=True)
         show_event_history(palette, conn, player.user_id, w, height, unseen_only=True)
 
         page_index = 0
@@ -1851,7 +1874,7 @@ def main() -> int:
             page_index, page_count = draw_dashboard(palette, state, screen_now, w, height, page_index)
             # Always recognize action keys: a displayed zero-turn snapshot
             # may sit idle past its refill. The transaction decides allowance.
-            valid = "BHQ?TCJRXNP"
+            valid = "BEVHQ?TCJRXNP"
             choice = read_menu_choice(valid)
             action_now = now_utc()
             try:
@@ -1862,11 +1885,13 @@ def main() -> int:
                 elif choice == "P":
                     page_index = max(0, page_index - 1)
                 elif choice == "?":
-                    draw_help(palette, w)
-                    press_any_key(palette)
+                    draw_help(palette, w, height)
                 elif choice == "B":
-                    draw_board(palette, conn, w)
-                    press_any_key(palette)
+                    show_player_directory(palette, conn, user_id, w, height, standings=True)
+                elif choice == "E":
+                    show_territory(palette, conn, w, height)
+                elif choice == "V":
+                    show_player_directory(palette, conn, user_id, w, height)
                 elif choice == "H":
                     show_event_history(palette, conn, player.user_id, w, height)
                 elif choice == "T":

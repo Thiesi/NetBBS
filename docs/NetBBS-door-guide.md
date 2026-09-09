@@ -45,6 +45,14 @@ Outcomes and rejection messages wait for acknowledgement before returning to the
 switchboard. The game requires at least 20 columns by 10 rows; resize and reconnect
 if the launch reports a smaller terminal.
 
+Free screens: `[B]Rank` shows season standings and your position; ties use account
+ID order. `[E]Map` shows all exchanges, owners, garrisons and hourly income.
+`[V]Rivals` shows other crews' Rank/tier and why they are eligible or protected.
+`[H]Log` replays receipts; `[?]Help` explains the rules. Next/Prev traverses terminal
+pages and batches of ten crews; Back leaves each view without an action. Standings
+refresh when loading another batch. Crew strength and cash are not exposed by the
+rival directory. The initial help is paginated too and can be left with Back.
+
 Use separate single keys. Arrow/function keys and pasted command bursts do not
 select actions; Escape dismisses a pause but has no menu action. An incomplete
 or excessively long terminal sequence ends the door with a reconnect diagnostic.

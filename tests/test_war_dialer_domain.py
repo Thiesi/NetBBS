@@ -1395,3 +1395,37 @@ def test_dashboard_rollover_never_combines_new_crew_with_old_holdings(db_path):
     assert state.holdings == []
     assert state.season_ends_at == now + 2 * wd.SEASON
     conn.close()
+
+
+def test_standings_pages_cover_every_player_and_use_deterministic_ties(db_path):
+    now = wd.now_utc()
+    conn, season = _setup(db_path, now)
+    for user in range(1, 26):
+        wd.load_or_create_player(conn, user, f"Crew {user}", now, season)
+        conn.execute("UPDATE players SET crew_recruited_total=? WHERE user_id=?", (user, user))
+    conn.execute("UPDATE players SET crew_recruited_total=24 WHERE user_id=25")
+    conn.execute("UPDATE players SET successful_jobs=100 WHERE user_id=3")
+    pages = [wd.read_player_page(conn, 1, now, offset, standings=True) for offset in (0, 10, 20)]
+    ids = [p.user_id for page in pages for p in page.entries]
+    assert ids == [3, 24, 25] + list(range(23, 3, -1)) + [2, 1]
+    assert [len(p.entries) for p in pages] == [10, 10, 5]
+    assert all(p.total == 25 and p.position == 25 for p in pages)
+    after_reset = wd.read_player_page(conn, 25, now + wd.SEASON, standings=True)
+    assert [p.user_id for p in after_reset.entries] == list(range(1, 11))
+    assert after_reset.position == 25
+    assert all(wd.rank_score(p) == 0 for p in after_reset.entries)
+    conn.close()
+
+
+def test_rival_directory_reaches_crews_beyond_old_fifty_row_sample(db_path):
+    now = wd.now_utc()
+    conn, season = _setup(db_path, now)
+    for user in range(1, 57):
+        wd.load_or_create_player(conn, user, f"Crew {user}", now, season)
+    conn.execute("UPDATE players SET created_at=? WHERE user_id=56", (wd.to_iso(now - wd.GRACE),))
+    page = wd.read_player_page(conn, 1, now, 50)
+    assert [p.user_id for p in page.entries] == [52, 53, 54, 55, 56]
+    assert wd.raid_eligibility_reason(page.player, page.entries[0], now) == "Newcomer shield"
+    assert wd.raid_eligibility_reason(page.player, page.entries[-1], now) == "Eligible"
+    assert page.player.turns_used == 0
+    conn.close()
