@@ -273,6 +273,20 @@ or from a stale attacker. Copy the committed actor back to the session only
 after commit; there is no save-on-quit/disconnect path. Login settlement and
 income timestamps must share the player-credit transaction too.
 
+A zero-turn allowance uses an empty turn_day_start until the first action commits.
+Preserve nonzero legacy anchors. heat_updated_at doubles as a per-player clock
+high-water mark; settle before applying Heat and use the effective time for
+capture/event timestamps too. Screen refresh must call refresh_player, while
+read_player remains an unsettled storage read for transaction/observer use.
+A menu's displayed allowance is a snapshot: still accept action keys after an
+idle zero-turn screen so the transaction can recognize a refill.
+
+An exchange can carry a later clock than the actor after a server clock correction.
+Settle the actor through that exchange time before applying capture Heat and use
+the actor's final timestamp for a new allowance anchor. Login/action season checks
+must respect the persisted exchange season, not just recompute from a regressed
+wall clock. Whole-world dormant-player rollover is still a separate boundary.
+
 Initialization counts exchanges after obtaining the write lock. The regression
 synchronizes two connections immediately before BEGIN, so moving the count
 outside the transaction deterministically reproduces double seeding. Preserve

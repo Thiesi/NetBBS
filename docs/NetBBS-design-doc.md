@@ -6444,9 +6444,29 @@ not macros. Incomplete or excessive sequences end the session with a diagnostic,
 rather than letting delayed suffixes select an action. A standalone Escape can
 dismiss a pause and is ignored at menus.
 
-The next slice still owns consistent read/action-time Heat and turn settlement,
-fractional/transfer income, and atomic season rollover for dormant players.
-Until then, old-season actions are rejected with a reconnect instruction.
+**Clock settlement (issue #362, slice 2).** Screen refresh and action transactions
+settle Heat and the turn allowance without clearing login-based raid protection.
+An unused allowance has no running window; the first committed action anchors
+its 24 hours. Reading, login, an unaffordable attempt and cancellation do not
+start it. Existing nonzero allowances keep their stored anchor; expiry leaves
+the new allowance unanchored until used.
+
+The player's last observed timestamp never moves backwards. A clock rollback
+freezes elapsed-time benefits until that time is reached again; it cannot replay
+Heat decay, shorten a new turn window or backdate a capture. Heat settles before
+an action adds new Heat, so a reconnect cannot decay that addition over the
+earlier idle interval. A session waiting at a zero-turn menu can use an action
+key after refill; commit-time state decides whether that action is available.
+
+The exchange world's stored season also prevents season-number regression after
+a clock correction, including for new and dormant callers. A capture respects
+both the exchange's timestamps and the actor's clocks; the effective capture time
+anchors newly incurred Heat and any newly started allowance too.
+
+Fractional/transfer income and atomic season rollover for dormant players remain
+the following slice-2 bullets. Until rollover is implemented, old-season actions
+are rejected with a reconnect instruction; clock settlement does not let an
+older session spend prior-season resources.
 Offline receipts are acknowledged after the pause, and disconnect during
 onboarding or that pause exits cleanly; bounded, replayable history remains
 part of slice 2. Later gameplay decisions remain governed by the locked rules
