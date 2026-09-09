@@ -10103,3 +10103,17 @@ def test_archive_terms_disclose_only_remaining_landmark_salvage(stage, investiga
     credits = world.save.pilot.credits
     vr.archive_action(world, "I")
     assert world.save.pilot.credits - credits == (0 if investigated else 3000)
+
+
+@pytest.mark.parametrize("paid,bonus",[(0,1),(5,2),(15,3),(30,4)])
+@pytest.mark.parametrize("hired",[True,False])
+def test_promoted_navigator_survey_terms_match_actual_range_without_writes(paid,bonus,hired):
+    import copy
+    world=_world_with_named_crew("navigator",paid); world.save.ship.scanner_tier=1; world.save.ship.has_navigator=hired
+    before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
+    terms=" ".join(vr.survey_terms(world)); actual=bonus if hired else 0
+    assert f"Navigator bonus: +{actual} connection hops." in terms
+    assert f"Range: {3+actual} connection hops" in terms
+    distances=vr.bfs_hops(world.by_id,world.here.id)
+    assert set(vr.survey_candidates(world))=={sid for sid,hops in distances.items() if hops<=3+actual and not world.by_id[sid].discovered}
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng

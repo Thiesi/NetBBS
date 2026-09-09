@@ -5640,7 +5640,7 @@ def survey_terms(world: World) -> list[str]:
     lines = [f"{label}: 2 fuel; {fuel} aboard." + (" Tank empties." if fuel == 2 else "")]
     lines += [f"Range: {radius} connection hops; {len(candidates)} new contacts.",
               "Chart all contacts in range, including station, economy and danger. No day or wages pass.",
-              "Navigator extends range by one hop. Surveying creates no remote price quotes."]
+              f"Navigator bonus: +{navigator_bonus(world.save.ship)} connection hops. Surveying creates no remote price quotes."]
     contracts = [m for m in world.save.active_missions if m.kind == "scan" and m.target_system in candidates and not mission_expired(world, m)]
     if contracts: lines.append(f"Active surveys in range: {len(contracts)}; gross payout {sum(m.reward for m in contracts):,}cr.")
     if world.save.ship.scanner_tier == 0: lines.insert(0, "Scanner required; surveying unavailable.")

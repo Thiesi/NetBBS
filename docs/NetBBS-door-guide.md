@@ -241,7 +241,8 @@ their acknowledgement; reconnecting cannot repeat a reward.
 
 With a scanner installed, use **[S] Scan** from the chart to inspect the survey
 terms. **[S] Survey** spends two fuel and charts every new contact within range:
-two connection hops plus scanner tier, plus one more with a navigator. The screen
+two connection hops plus scanner tier and the hired navigator's current bonus:
+one for Recruit, two for Seasoned, three for Veteran, four for Ace. The screen
 shows the contact count and warns if the cost empties your tank. **[B] Back**
 before surveying writes nothing. Empty areas and insufficient fuel incur no charge.
 
