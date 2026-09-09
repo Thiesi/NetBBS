@@ -11548,6 +11548,20 @@ def test_achievement_first_page_shows_ranked_pilot_before_long_counting_rules(tm
     with contextlib.redirect_stdout(output):vr.screen_hall_of_fame(vr.Palette(False),world,tmp_path,77)
 
 
+@pytest.mark.parametrize("retired", [False,True])
+def test_achievement_unchanged_checkpoint_after_restart_never_replaces_files(tmp_path,monkeypatch,retired):
+    world=_finale_world("combat")
+    if retired:world.reset(vr.finish_career(world.save,"combat"))
+    vr.persist(world,tmp_path,77)
+    paths=[tmp_path/"77.json",tmp_path/"scores"/"77.json"]
+    before={p:(p.read_bytes(),p.stat().st_mtime_ns,p.stat().st_ino) for p in paths}
+    loaded,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    def replaced(*args):pytest.fail("Unchanged checkpoint replaced a file")
+    monkeypatch.setattr(vr.os,"replace",replaced)
+    vr.persist(vr.World(loaded),tmp_path,77)
+    assert {p:(p.read_bytes(),p.stat().st_mtime_ns,p.stat().st_ino) for p in paths}==before
+
+
 @pytest.mark.parametrize("key", ["P","W"])
 @pytest.mark.parametrize("commands", [b"",b"B",b">?<B",b"JNB"])
 def test_real_faction_browsing_does_not_replace_score_after_input(tmp_path,key,commands):

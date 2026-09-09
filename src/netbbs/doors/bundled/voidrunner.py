@@ -3890,6 +3890,8 @@ def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData) -> None:
              "rank": rank_for(best), "retirements": pilot.retirements,
              "kills": pilot.kills, "missions_completed": pilot.missions_completed,
              "achievements": score_achievements(save)}
+    if raw == entry and _score_entry(raw, user_id) == entry:
+        return
     try:
         _write_json_atomic(save_dir / "scores" / f"{user_id}.json", entry)
     except OSError:
@@ -7836,8 +7838,10 @@ def main() -> int:
                     screen_travel(p, world, dest)
             elif choice == "S":
                 screen_status(p, world)
+                continue
             elif choice == "H":
                 screen_hall_of_fame(p, world, save_dir, user_id)
+                continue
             elif choice == "N":
                 screen_archive(p, world)
                 continue

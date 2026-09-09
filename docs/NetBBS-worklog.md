@@ -4404,7 +4404,12 @@ cutting to the wealth top 20 before selecting combat/trading/exploration loses
 qualifying records. Keep legacy aggregate wealth and retirement counts separate
 from versioned per-career metrics. Retry optional score projection from dossiers
 after restart, including a failure on the retirement checkpoint itself. Future
-summary versions and extra fields are preserved. Score reads share the existing
+summary versions and extra fields are preserved. An unchanged projection must skip
+replacement: identical file bytes alone do not prove a view was read-only. Validate
+its types before equality-based no-op detection because Python equates False with
+zero. Inspect
+actual replacements after input, excluding the ordinary EOF cleanup checkpoint.
+Score reads share the existing
 4 MiB career/backup per-file ceiling; the summary has at most 129 career entries.
 
 Voidrunner portraits paginate an entire authored composition as one group.
