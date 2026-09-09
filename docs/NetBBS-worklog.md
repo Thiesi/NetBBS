@@ -389,6 +389,23 @@ Destructive commands require persistent maintenance and a stopped node before th
 complete pre-action backup, and never reopen the world implicitly. Invalid supplied
 host metadata must fail before any SQLite creation; only absence selects demo mode.
 
+`python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
+against disposable SQLite worlds through the actual action resolvers. The default
+is fourteen days and seeds 362/363/364; use `--scenario NAME`, `--days 1..21`, and
+`--seeds ...` to reproduce a smaller comparison. JSON records the game source hash,
+policy, daily resources/Rank/holdings, actions and rejected attempts. Never point
+these probes at a live world. Daily observations settle a database copy: collecting
+income or logging absent players in for reporting would change the experiment.
+
+Fixed caller order deliberately exposes first-mover effects; these policies are
+neither optimal strategies nor a population model. Burst/spaced probes take the
+same first exchange and trade thereafter, isolating low-Heat collection cadence.
+Repeated-victim probes start with mature accounts and alternate attackers against
+an absent target. Bust recovery uses an explicitly depleted fixture and an actual
+forced bust; its recovery counter excludes that bust turn. Finite seeds and these
+fixtures identify incentives and recovery paths, not fairness or fun. Agree balance
+targets and retain separate human playtests before calling a tuned economy balanced.
+
 ### Database execution lanes
 
 Interactive network flows use a foreground `DatabaseLane`; Phase 3 background
