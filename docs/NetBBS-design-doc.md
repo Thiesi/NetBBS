@@ -5318,9 +5318,14 @@ readable and are carried into each pilot's new record on their next update, with
 the old file retained. Updates replace only that pilot's file using a flushed
 private temporary file. The career save also retains the credit high-water mark
 across retirement and temporary score-write failures, allowing a later checkpoint
-to repair its score. Scores remain optional presentation data, never gameplay
-authority. Historical records already discarded by older top-20 storage cannot
-be reconstructed. Node backup coverage and explicit external-directory restore
+to repair its score. The career save is authoritative for live gameplay state and
+per-career achievements. The compatibility import of validated lifetime wealth
+and retirement maxima described above is the sole exception: these retained totals
+can raise the save's historical floors, and the retirement count affects a later
+New Game+ starting bonus. Other score fields never replace current gameplay or
+invent missing dossiers. Score writes remain optional projections; failure does
+not erase totals already retained in the career save. Historical records already
+discarded by older top-20 storage cannot be reconstructed. Node backup coverage and explicit external-directory restore
 are specified in section 13.4 and the door guide.
 
 Compatibility extension (issues #296/#297):
