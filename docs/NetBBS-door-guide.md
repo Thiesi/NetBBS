@@ -146,7 +146,13 @@ Jobs show complete descriptions and deadlines; use the station Mission Board for
 tracking, navigation, acceptance and abandonment. Log includes every retained
 highlight and log entry, newest first. Paging does not alter the career.
 
-At the existing top rank, **[R] Retire** is available from every record view. Only
+Rank stays earned for this career, including after purchases, fines or salvage.
+Each completed action records a crossed balance threshold before you can spend
+the reward. The pilot overview explains the next threshold; History retains
+promotions. Old saved promotions remain valid. Lifetime Hall of Fame wealth does
+not carry a rank into a new career.
+
+At the retained top rank, **[R] Retire** is available from every record view. Only
 the final confirmation starts a new career with the existing retirement bonus;
 No retains the current record and displays the cancellation result.
 

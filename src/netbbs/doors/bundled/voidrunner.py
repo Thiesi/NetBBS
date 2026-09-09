@@ -1548,6 +1548,7 @@ class World:
         Resetting a career preserves this binding.
         """
         self.sync_discovered()
+        check_rank_up(self)
         if self.save.pending_travel is None:
             expire_missions(self)
             _normalize_mission_ids(self.save)
@@ -3268,25 +3269,34 @@ def rank_for(credits: int) -> str:
     return title
 
 
+def career_rank_index(pilot: Pilot) -> int:
+    """Current-career recognition; lifetime leaderboard wealth is not a rank."""
+    return max(pilot.highest_rank_seen, max(i for i, (threshold, _) in enumerate(RANKS) if pilot.credits >= threshold))
+
+
+def career_rank(pilot: Pilot) -> str:
+    return RANKS[career_rank_index(pilot)][1]
+
+
+def career_rank_terms(pilot: Pilot) -> list[str]:
+    index = career_rank_index(pilot)
+    lines = ["Rank is permanent for this career; spending and losses do not demote you."]
+    if index + 1 < len(RANKS):
+        threshold, title = RANKS[index + 1]
+        lines.append(f"Next rank: {title} at a {threshold:,}cr balance. Current balance: {pilot.credits:,}cr.")
+    else: lines.append("Top rank retained; retirement stays available after spending.")
+    return lines
+
+
 def check_rank_up(world: World) -> str | None:
-    """Checked once per station-menu draw (the same "catches every
-    path" reasoning `is_stranded`'s own check there already relies on)
-    rather than wrapped around every credit-earning call site
-    individually -- credits change in enough places (trading, missions,
-    bounties, landmarks, patrol fines) that hooking each one would be
-    far more invasive than noticing the promotion the next time the
-    pilot is back at a menu. Returns the new rank's title if this call
-    just crossed into it, else None -- fires at most once per rank,
-    tracked by `Pilot.highest_rank_seen`."""
+    """Capture durable action milestones before another action can spend them."""
     pilot = world.save.pilot
-    idx = 0
-    for i, (threshold, _) in enumerate(RANKS):
-        if pilot.credits >= threshold:
-            idx = i
-    if idx > pilot.highest_rank_seen:
-        pilot.highest_rank_seen = idx
-        title = RANKS[idx][1]
+    index = career_rank_index(pilot)
+    if index > pilot.highest_rank_seen:
+        pilot.highest_rank_seen = index
+        title = RANKS[index][1]
         pilot.highlight(f"Promoted to {title}.")
+        pilot.note(f"Promoted to {title}; rank retained for this career.")
         return title
     return None
 
@@ -3910,7 +3920,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
         else: row = combined
     if row: lines.append(row)
     if expanded:
-        lines.extend([f"Pilot: {pilot.handle}. Rank: {rank_for(pilot.credits)}.",
+        lines.extend([f"Pilot: {pilot.handle}. Rank: {career_rank(pilot)}.",
                       f"System: {here.name} ({here.x},{here.y}). Sector: {sector_for(here)}.",
                       f"Commitments: {len(world.save.active_missions)} contract(s); {len(world.save.active_futures)} futures order(s).",
                       f"Progress: {sum(system.discovered for system in world.galaxy)}/{len(world.galaxy)} systems charted; {pilot.kills} raiders defeated; {pilot.missions_completed} missions completed."])
@@ -3938,9 +3948,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
     promoted = check_rank_up(world)
     if promoted:
         world.checkpoint()
-        out_line()
-        out_line(f"{p.gold}{BOLD}★ ★ ★ Promoted to {promoted}! ★ ★ ★{RESET}")
-        pause(p)
+        completed.insert(0, f"Promoted to {promoted}; rank retained for this career.")
     page, expanded = 0, False
     while True:
         lines = station_deck_lines(world, expanded=expanded)
@@ -5846,8 +5854,9 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
         lines.extend(f"- {entry}" for entry in reversed(pilot.log))
         if not pilot.log: lines.append("No log entries yet.")
         return lines
-    lines.extend([f"Pilot: {pilot.handle}. Rank: {rank_for(pilot.credits)}. Credits: {pilot.credits:,} cr.",
+    lines.extend([f"Pilot: {pilot.handle}. Rank: {career_rank(pilot)}. Credits: {pilot.credits:,} cr.",
                   f"Ship: {ship.hull_class}. Hull {ship.hull_hp}/{hull_hp_max(ship)}; Fuel {ship.fuel}/{fuel_capacity(ship)}; Cargo {sum(world.save.cargo.values())}/{cargo_capacity(ship)} used."])
+    lines += career_rank_terms(pilot)
     for faction in FACTIONS:
         rep = pilot.reputation.get(faction, 0)
         label = "Allied" if rep >= 10 else ("Friendly" if rep >= 4 else ("Hostile" if rep <= -5 else "Neutral"))
@@ -5863,7 +5872,7 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
     event = world.save.active_event
     if event: lines.append(f"Economy event: {event['description']} ({event['turns_remaining']} day(s) left).")
     lines.append(f"[C] Jobs: {len(world.save.active_missions)} active. [H] Log: {len(pilot.highlights)} highlights, {len(pilot.log)} log entries.")
-    if rank_for(pilot.credits) == RANKS[-1][1]:
+    if career_rank(pilot) == RANKS[-1][1]:
         lines.append("[R] Retire ends this career and begins a new one; confirmation required.")
     return lines
 
@@ -5872,7 +5881,7 @@ def screen_status(p: Palette, world: World) -> None:
     section, page, result = "O", 0, None
     cache = {}
     while True:
-        eligible = rank_for(world.save.pilot.credits) == RANKS[-1][1]
+        eligible = career_rank(world.save.pilot) == RANKS[-1][1]
         footer = "[<>]Page [O/C/H]View " if _OUTPUT_WIDTH < 30 else "[<]Prev [>]Next [O]Pilot [C]Jobs [H]Log "
         footer += ("[R]Retire " if eligible else "") + "[B]Back: "
         title = "Pilot Record: " + {"O":"Overview", "C":"Contracts", "H":"History"}[section]
