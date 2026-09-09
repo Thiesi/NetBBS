@@ -1774,3 +1774,53 @@ def test_war_dialer_status_is_read_only_and_cli_is_bounded(tmp_path, db_path, id
     with pytest.raises(SystemExit, match="operation failed"):
         admin.main(["--db", str(db_path), "--world", str(missing), "status"])
     assert not missing.exists()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal", ".sessions"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_war_dialer_restore_rejects_cross_world_sidecar_collisions(tmp_path, db_path, identity_dir, suffix, reverse):
+    _populate_war_dialer(db_path)
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    shutil.copy2(source / "war-dialer/1.db", source / "war-dialer/2.db")
+    manifest_path = source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["war_dialer"]["worlds"].append({**manifest["war_dialer"]["worlds"][0], "key": "2"})
+    manifest["checksums"]["war-dialer/2.db"] = manifest["checksums"]["war-dialer/1.db"]
+    manifest_path.write_text(json.dumps(manifest))
+    target = tmp_path / "target.db"
+    paths = [target, Path(str(target) + suffix)]
+    if reverse:
+        paths.reverse()
+    with pytest.raises(BackupError, match="overlaps"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir,
+                       war_dialer_to={"1": paths[0], "2": paths[1]})
+    assert not target.exists()
+
+
+def test_empty_war_dialer_override_uses_normal_backup_error(tmp_path, db_path, identity_dir, monkeypatch):
+    import sys
+    from netbbs.doors import create_door
+    from netbbs.doors.bundled import war_dialer as wd
+    from netbbs.auth.users import get_user_by_username
+    _populate_war_dialer(db_path)
+    node = Database(db_path)
+    try:
+        create_door(node, "War Dialer", sys.executable, args=(wd.__file__,),
+                    creator=get_user_by_username(node, "WarPilot"))
+    finally:
+        node.close()
+    monkeypatch.setenv("WAR_DIALER_DB_PATH", "")
+    with pytest.raises(BackupError, match="WAR_DIALER_DB_PATH"):
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    with pytest.raises(SystemExit, match="backup failed"):
+        main(["create", "--db", str(db_path), "--identity-dir", str(identity_dir), "--to", str(tmp_path / "cli")])
+
+
+def test_legacy_restore_refuses_to_orphan_an_existing_world(tmp_path, db_path, identity_dir):
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "legacy")
+    world = _populate_war_dialer(db_path)
+    before = world.read_bytes()
+    with pytest.raises(BackupError, match="does not cover existing War Dialer"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir)
+    assert world.read_bytes() == before
+    assert backup_module._war_dialer_owner(db_path) == "a" * 32

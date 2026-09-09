@@ -137,7 +137,8 @@ retention remain operator/cron jobs; use the same service environment and accoun
 2. Use the world keys printed by `create` (also listed under `war_dialer.worlds`
    in `manifest.json`). Supply an explicit destination for every key, for example:
    `python -m netbbs.backup restore --from /backup/node --db /srv/bbs/netbbs.db --identity-dir /srv/bbs/netbbs_identity --war-dialer-to 1=/srv/bbs/netbbs.db.doors/war-dialer.db`.
-   Repeat `--war-dialer-to KEY=PATH` for additional worlds. Add `--voidrunner-to`
+   Repeat `--war-dialer-to KEY=PATH` for additional worlds. Destination files must
+   not collide with another world's WAL/SHM/journal or session-guard paths. Add `--voidrunner-to`
    when that component is present. Restore brings back the paired node database
    and its user-ID namespace; it does not transplant a world into another node.
 3. Restore validates checksums, schema, SQLite integrity and ownership before
