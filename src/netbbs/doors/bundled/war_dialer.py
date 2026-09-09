@@ -330,8 +330,13 @@ def read_input_key() -> str:
             # X10 reports have three payload bytes after the CSI final.
             # Coordinate bytes must not escape into the next menu or pause.
             for _ in range(3):
-                if next_byte(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS) is None:
+                byte = next_byte(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS)
+                if byte is None:
                     raise InputSequenceError("Incomplete mouse report. Reconnect and use single keys.")
+                if ord(byte) > 127:
+                    # Inherited UTF-8/legacy extended coordinate modes have
+                    # ambiguous byte counts. Stop before a suffix can be a key.
+                    raise InputSequenceError("Unsupported mouse encoding. Reconnect and use keyboard keys.")
             return ""
         if prefix == "[" and sequence == "200~":
             ending = ""
