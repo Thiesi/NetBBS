@@ -287,6 +287,15 @@ the actor's final timestamp for a new allowance anchor. Login/action season chec
 must respect the persisted exchange season, not just recompute from a regressed
 wall clock. Whole-world dormant-player rollover is still a separate boundary.
 
+Income uses integer rate-times-elapsed-microsecond units, with 3,600,000,000
+units per dollar. Persist the remainder on the player, not an exchange whose
+owner can change. On successful capture, settle the previous owner while the
+database still records their ownership, then save that player, transfer the
+exchange, and save the actor under one transaction. Collection timestamps never
+move backwards. Exchange selection compares ownership, defense and displayed
+stakes, excluding the collection timestamp so harmless collection does not
+reject a caller's choice. Additive schema initialization is transactional too.
+
 Initialization counts exchanges after obtaining the write lock. The regression
 synchronizes two connections immediately before BEGIN, so moving the count
 outside the transaction deterministically reproduces double seeding. Preserve

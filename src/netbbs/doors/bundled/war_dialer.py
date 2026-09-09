@@ -635,6 +635,7 @@ class Player:
     last_raided_by: int | None
     season_number: int
     created_at: str
+    income_remainder: int = 0
 
 
 @dataclass
@@ -708,6 +709,7 @@ def reset_player_for_season(player: Player, season_number: int, now: datetime) -
     lifetime-of-the-account thing, not something a veteran gets handed
     back every four weeks."""
     player.cash = STARTING_CASH
+    player.income_remainder = 0
     player.crew = STARTING_CREW
     player.crew_recruited_total = 0
     player.exchanges_taken_total = 0
@@ -851,54 +853,61 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS players (
-            user_id INTEGER PRIMARY KEY,
-            handle TEXT NOT NULL,
-            cash INTEGER NOT NULL,
-            crew INTEGER NOT NULL,
-            crew_recruited_total INTEGER NOT NULL,
-            exchanges_taken_total INTEGER NOT NULL,
-            successful_raids INTEGER NOT NULL,
-            successful_jobs INTEGER NOT NULL,
-            heat REAL NOT NULL,
-            heat_updated_at TEXT NOT NULL,
-            turns_used INTEGER NOT NULL,
-            turn_day_start TEXT NOT NULL,
-            last_raided_by INTEGER,
-            season_number INTEGER NOT NULL,
-            created_at TEXT NOT NULL
+    with _write_transaction(conn):
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS players (
+                user_id INTEGER PRIMARY KEY,
+                handle TEXT NOT NULL,
+                cash INTEGER NOT NULL,
+                crew INTEGER NOT NULL,
+                crew_recruited_total INTEGER NOT NULL,
+                exchanges_taken_total INTEGER NOT NULL,
+                successful_raids INTEGER NOT NULL,
+                successful_jobs INTEGER NOT NULL,
+                heat REAL NOT NULL,
+                heat_updated_at TEXT NOT NULL,
+                turns_used INTEGER NOT NULL,
+                turn_day_start TEXT NOT NULL,
+                last_raided_by INTEGER,
+                season_number INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS exchanges (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            income_per_hour INTEGER NOT NULL,
-            controller_user_id INTEGER,
-            garrison INTEGER NOT NULL DEFAULT 0,
-            controlled_since TEXT,
-            income_collected_at TEXT NOT NULL,
-            season_number INTEGER NOT NULL
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS exchanges (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                income_per_hour INTEGER NOT NULL,
+                controller_user_id INTEGER,
+                garrison INTEGER NOT NULL DEFAULT 0,
+                controlled_since TEXT,
+                income_collected_at TEXT NOT NULL,
+                season_number INTEGER NOT NULL
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            target_user_id INTEGER NOT NULL,
-            actor_handle TEXT,
-            summary_text TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            seen_at TEXT
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_user_id INTEGER NOT NULL,
+                actor_handle TEXT,
+                summary_text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                seen_at TEXT
+            )
+            """
         )
-        """
-    )
+
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(players)")}
+        if "income_remainder" not in columns:
+            conn.execute(
+                "ALTER TABLE players ADD COLUMN income_remainder INTEGER NOT NULL DEFAULT 0"
+            )
 
 
 def get_or_create_season_anchor(conn: sqlite3.Connection, now: datetime) -> datetime:
@@ -995,6 +1004,7 @@ def _row_to_player(row: sqlite3.Row) -> Player:
         heat=row["heat"], heat_updated_at=row["heat_updated_at"], turns_used=row["turns_used"],
         turn_day_start=row["turn_day_start"], last_raided_by=row["last_raided_by"],
         season_number=row["season_number"], created_at=row["created_at"],
+        income_remainder=row["income_remainder"],
     )
 
 
@@ -1006,27 +1016,41 @@ def _save_player(conn: sqlite3.Connection, player: Player) -> None:
         """
         UPDATE players SET handle=?, cash=?, crew=?, crew_recruited_total=?,
             exchanges_taken_total=?, successful_raids=?, successful_jobs=?, heat=?,
-            heat_updated_at=?, turns_used=?, turn_day_start=?, last_raided_by=?, season_number=?
+            heat_updated_at=?, turns_used=?, turn_day_start=?, last_raided_by=?, season_number=?, income_remainder=?
         WHERE user_id=?
         """,
         (
             player.handle, player.cash, player.crew, player.crew_recruited_total,
             player.exchanges_taken_total, player.successful_raids, player.successful_jobs,
             player.heat, player.heat_updated_at, player.turns_used, player.turn_day_start,
-            player.last_raided_by, player.season_number, player.user_id,
+            player.last_raided_by, player.season_number, player.income_remainder, player.user_id,
         ),
     )
 
 
-def _collect_exchange_income(conn: sqlite3.Connection, user_id: int, now: datetime) -> int:
+_INCOME_UNITS_PER_DOLLAR = 3_600_000_000  # microseconds per hour
+
+
+def _collect_exchange_income(conn: sqlite3.Connection, player: Player, now: datetime) -> int:
+    """Retain sub-dollar earnings per player, including across ownership changes.
+
+    Integer microsecond-rate units avoid per-visit truncation and float drift.
+    Cash, remainder and ownership timestamps belong to the caller's transaction.
+    """
     if not conn.in_transaction:
         raise RuntimeError("Income collection requires a write transaction")
-    rows = conn.execute("SELECT * FROM exchanges WHERE controller_user_id=?", (user_id,)).fetchall()
-    total = 0
+    rows = conn.execute("SELECT * FROM exchanges WHERE controller_user_id=?", (player.user_id,)).fetchall()
+    units = player.income_remainder
     for row in rows:
-        hrs = hours_since(from_iso(row["income_collected_at"]), now)
-        total += int(row["income_per_hour"] * hrs)
-        conn.execute("UPDATE exchanges SET income_collected_at=? WHERE id=?", (to_iso(now), row["id"]))
+        collected_at = from_iso(row["income_collected_at"])
+        earned_until = max(now, collected_at)
+        elapsed_us = (earned_until - collected_at) // timedelta(microseconds=1)
+        units += row["income_per_hour"] * elapsed_us
+        conn.execute(
+            "UPDATE exchanges SET income_collected_at=? WHERE id=?",
+            (to_iso(earned_until), row["id"]),
+        )
+    total, player.income_remainder = divmod(units, _INCOME_UNITS_PER_DOLLAR)
     return total
 
 
@@ -1042,7 +1066,8 @@ def refresh_player(conn: sqlite3.Connection, user_id: int, now: datetime) -> Pla
     """Settle current resources for a screen without clearing raid protection."""
     with _write_transaction(conn):
         player = read_player(conn, user_id)
-        settle_player_clocks(player, now)
+        now = settle_player_clocks(player, now)
+        player.cash += _collect_exchange_income(conn, player, now)
         _save_player(conn, player)
     return player
 
@@ -1069,7 +1094,7 @@ def load_or_create_player(conn: sqlite3.Connection, user_id: int, handle: str, n
         if player.season_number < season_number:
             reset_player_for_season(player, season_number, now)
         player.last_raided_by = None
-        player.cash += _collect_exchange_income(conn, player.user_id, now)
+        player.cash += _collect_exchange_income(conn, player, now)
         _save_player(conn, player)
     return player
 
@@ -1089,6 +1114,7 @@ def _action_player(conn: sqlite3.Connection, snapshot: Player, now: datetime):
         season = current_world_season(conn, now)
         if player.season_number != season or snapshot.season_number != season:
             raise ActionRejected("Season changed. Reconnect before taking another action.")
+        player.cash += _collect_exchange_income(conn, player, now)
         if player.turns_used >= TURNS_PER_DAY:
             raise ActionRejected("No turns left. No resources spent.")
         yield player, now
@@ -1195,6 +1221,15 @@ def resolve_raid(
     return success, amount, busted
 
 
+def exchange_selection_state(exchange: Exchange) -> tuple:
+    """Income collection alone does not change the selected contest."""
+    return (
+        exchange.id, exchange.name, exchange.income_per_hour,
+        exchange.controller_user_id, exchange.controller_handle, exchange.garrison,
+        exchange.controlled_since, exchange.season_number,
+    )
+
+
 def resolve_root_exchange(
     conn: sqlite3.Connection, attacker: Player, exchange_id: int,
     now: datetime, rng: random.Random, *, expected_exchange: Exchange | None = None,
@@ -1207,7 +1242,7 @@ def resolve_root_exchange(
             raise ActionRejected("Exchange season changed. Reconnect before taking another action.")
         if exchange.controller_user_id == actor.user_id:
             raise ActionRejected("You already control this exchange. No resources spent.")
-        if expected_exchange is not None and exchange != expected_exchange:
+        if expected_exchange is not None and exchange_selection_state(exchange) != exchange_selection_state(expected_exchange):
             raise ActionRejected("Exchange changed while you were choosing. Inspect the exchanges again.")
         prior_controller = exchange.controller_user_id
         # Another owner may already have observed a later server clock.
@@ -1216,6 +1251,10 @@ def resolve_root_exchange(
             now = max(now, from_iso(exchange.controlled_since))
         now = settle_player_clocks(actor, now)
         success, busted = action_root_exchange(actor, exchange, now, rng)
+        if success and prior_controller is not None:
+            prior = read_player(conn, prior_controller)
+            prior.cash += _collect_exchange_income(conn, prior, now)
+            _save_player(conn, prior)
         conn.execute(
             "UPDATE exchanges SET controller_user_id=?, garrison=?, controlled_since=?, income_collected_at=? WHERE id=?",
             (exchange.controller_user_id, exchange.garrison, exchange.controlled_since, exchange.income_collected_at, exchange.id),

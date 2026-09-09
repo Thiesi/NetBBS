@@ -6463,8 +6463,22 @@ a clock correction, including for new and dormant callers. A capture respects
 both the exchange's timestamps and the actor's clocks; the effective capture time
 anchors newly incurred Heat and any newly started allowance too.
 
-Fractional/transfer income and atomic season rollover for dormant players remain
-the following slice-2 bullets. Until rollover is implemented, old-season actions
+
+**Exchange income (issue #362, slice 2).** Login, menu refresh and committed
+actions collect elapsed income. Sub-dollar earnings are retained as integer
+units on the player, so frequent visits pay the same as one longer interval.
+A successful capture credits the previous owner's earnings through transfer
+before changing ownership, in the same transaction as the action and turn.
+The previous owner keeps fractional earnings even after losing every exchange.
+Neither collection nor transfer moves an exchange's income timestamp backwards.
+An income-only collection does not invalidate an otherwise unchanged selection.
+
+Existing worlds receive an additive, transactional player-column upgrade with
+zero initial remainder; fractions discarded by older versions cannot be
+reconstructed. Season resets clear the remainder with the other season resources.
+
+Atomic season rollover for dormant players remains the following slice-2 bullet.
+Until rollover is implemented, old-season actions
 are rejected with a reconnect instruction; clock settlement does not let an
 older session spend prior-season resources.
 Offline receipts are acknowledged after the pause, and disconnect during
