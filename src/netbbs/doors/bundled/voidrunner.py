@@ -3731,6 +3731,70 @@ def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
 
 HALL_OF_FAME_SIZE = 20
 
+SCORE_CATEGORIES = {"wealth": "Wealth", "trading": "Trading", "exploration": "Exploration",
+                    "combat": "Combat", "careers": "Completed careers"}
+SCORE_CAREER_FIELDS = ("number", "seed", "started", "ended", "finale", "days", "credits",
+                       "market_margin", "kills", "missions", "charted")
+
+
+def score_achievements(save: SaveData) -> dict:
+    """Repairable summaries; the career save and its dossiers remain authority."""
+    careers = [{key: dossier[key] for key in SCORE_CAREER_FIELDS} for dossier in save.retired_careers]
+    careers.append({"number": save.pilot.retirements + 1, "seed": save.seed,
+                    "started": save.pilot.career_started, "ended": None, "finale": None,
+                    "days": save.turn, "credits": save.pilot.credits,
+                    "market_margin": career_accomplishments(save)["trader"],
+                    "kills": save.pilot.kills, "missions": save.pilot.missions_completed,
+                    "charted": len(save.discovered)})
+    return {"version": 1, "careers": careers}
+
+
+def _score_achievements(data, retirements: int) -> dict | None:
+    if not isinstance(data, dict) or set(data) != {"version", "careers"}:
+        return None
+    if type(data["version"]) is not int or data["version"] != 1:
+        return None
+    careers = data["careers"]
+    if not isinstance(careers, list) or not 1 <= len(careers) <= MAX_RETIRED_CAREERS + 1:
+        return None
+    previous = 0
+    for index, record in enumerate(careers):
+        if not isinstance(record, dict) or set(record) != set(SCORE_CAREER_FIELDS):
+            return None
+        for key in ("number", "seed", "days", "credits", "kills", "missions", "charted"):
+            if type(record[key]) is not int or record[key] < 0:
+                return None
+        if type(record["market_margin"]) is not int or record["charted"] > GALAXY_SYSTEM_COUNT:
+            return None
+        if not previous < record["number"] <= retirements + 1:
+            return None
+        if not isinstance(record["started"], str) or len(record["started"]) > 4096:
+            return None
+        current = index == len(careers) - 1
+        if current:
+            if record["number"] != retirements + 1 or record["ended"] is not None or record["finale"] is not None:
+                return None
+        elif (not isinstance(record["ended"], str) or len(record["ended"]) > 4096
+              or not isinstance(record["finale"], str) or record["finale"] not in CAREER_FINALES):
+            return None
+        previous = record["number"]
+    return {"version": 1, "careers": [dict(record) for record in careers]}
+
+
+def _future_score_achievements(data) -> bool:
+    """Do not overwrite summaries authored by an unsupported newer format."""
+    if not isinstance(data, dict) or "achievements" not in data:
+        return False
+    summary = data["achievements"]
+    if not isinstance(summary, dict):
+        return False
+    if summary.get("version") != 1 or set(summary) - {"version", "careers"}:
+        return True
+    records = summary.get("careers")
+    return isinstance(records, list) and any(
+        isinstance(record, dict) and bool(set(record) - set(SCORE_CAREER_FIELDS)) for record in records)
+
+
 
 def _score_entry(data, user_id: int | None = None) -> dict | None:
     """Discard malformed flavor data before sorting or rendering it."""
@@ -3744,10 +3808,13 @@ def _score_entry(data, user_id: int | None = None) -> dict | None:
         return None
     entry["handle"] = data["handle"]
     entry["rank"] = rank_for(entry["best_credits"])
+    achievements = _score_achievements(data.get("achievements"), entry["retirements"])
+    if achievements is not None:
+        entry["achievements"] = achievements
     return entry
 
 
-def _read_score_json(path: Path, limit: int = 65536):
+def _read_score_json(path: Path, limit: int = MAX_SAVE_BYTES):
     try:
         with path.open("rb") as handle:
             raw = handle.read(limit + 1)
@@ -3774,8 +3841,8 @@ def _pilot_score(save_dir: Path, user_id: int) -> dict | None:
     return _score_entry(_read_score_json(save_dir / "scores" / f"{user_id}.json"), user_id)
 
 
-def load_hall_of_fame(save_dir: Path) -> list[dict]:
-    """Display the top 20 without discarding any independent pilot record."""
+def _load_score_records(save_dir: Path) -> list[dict]:
+    """Read one snapshot without a display cut-off."""
     entries = _legacy_scores(save_dir)
     try:
         for path in (save_dir / "scores").glob("*.json"):
@@ -3790,18 +3857,39 @@ def load_hall_of_fame(save_dir: Path) -> list[dict]:
                 entries[entry["user_id"]] = entry
     except OSError:
         pass
-    return sorted(entries.values(), key=lambda e: (-e["best_credits"], e["user_id"]))[:HALL_OF_FAME_SIZE]
+    return list(entries.values())
+
+
+def load_hall_of_fame(save_dir: Path) -> list[dict]:
+    """Compatibility wealth view; stored records are never trimmed."""
+    return sorted(_load_score_records(save_dir), key=lambda e: (-e["best_credits"], e["user_id"]))[:HALL_OF_FAME_SIZE]
+
+
+def achievement_ranking(entries: list[dict], category: str) -> list[dict]:
+    if category in ("wealth", "careers"):
+        metric = "best_credits" if category == "wealth" else "retirements"
+        candidates = [entry for entry in entries if category == "wealth" or entry[metric] > 0]
+        return sorted(candidates, key=lambda entry: (-entry[metric], entry["user_id"]))[:HALL_OF_FAME_SIZE]
+    metric = {"trading": "market_margin", "exploration": "charted", "combat": "kills"}[category]
+    candidates = [dict(record, user_id=entry["user_id"], handle=entry["handle"])
+                  for entry in entries for record in entry.get("achievements", {}).get("careers", [])
+                  if record[metric] > 0]
+    return sorted(candidates, key=lambda record: (-record[metric], record["user_id"], record["number"]))[:HALL_OF_FAME_SIZE]
 
 
 def update_hall_of_fame(save_dir: Path, user_id: int, save: SaveData) -> None:
     """Under the pilot session lock, replace only this pilot's optional record."""
+    raw = _read_score_json(save_dir / "scores" / f"{user_id}.json")
+    if _future_score_achievements(raw):
+        return
     legacy = _legacy_scores(save_dir).get(user_id, {})
     prior = _pilot_score(save_dir, user_id) or {}
     pilot = save.pilot
     best = max(save.best_credits, pilot.credits, prior.get("best_credits", 0), legacy.get("best_credits", 0))
     entry = {"user_id": user_id, "handle": pilot.handle, "best_credits": best,
              "rank": rank_for(best), "retirements": pilot.retirements,
-             "kills": pilot.kills, "missions_completed": pilot.missions_completed}
+             "kills": pilot.kills, "missions_completed": pilot.missions_completed,
+             "achievements": score_achievements(save)}
     try:
         _write_json_atomic(save_dir / "scores" / f"{user_id}.json", entry)
     except OSError:
@@ -6341,20 +6429,63 @@ def hall_of_fame_lines(entries: list[dict], user_id: int) -> list[str]:
     for position, entry in enumerate(entries, 1):
         marker = " [YOU]" if entry.get("user_id") == user_id else ""
         lines.append(f"#{position}{marker} {entry.get('handle', '?')}: {entry.get('rank', '?')}. "
-                     f"Best credits {entry.get('best_credits', 0):,}cr; raiders defeated {entry.get('kills', 0)}; "
+                     f"Best credits {entry.get('best_credits', 0):,}cr; latest-career combat victories {entry.get('kills', 0)}; "
                      f"missions {entry.get('missions_completed', 0)}; retirements {entry.get('retirements', 0)}.")
     return lines
 
 
+def achievement_lines(entries: list[dict], category: str, user_id: int) -> list[str]:
+    ranked = achievement_ranking(entries, category)
+    if category == "wealth":
+        return hall_of_fame_lines(ranked, user_id)
+    lines = [f"Top {len(ranked)} local {'pilots' if category == 'careers' else 'careers'} by {SCORE_CATEGORIES[category].lower()}. [YOU] marks your pilot."]
+    explanations = []
+    if category == "trading":
+        explanations.append("Known-cost market margin before operating costs; excludes delivery pay, unknown-cost receipts and other income. Not total career profit.")
+    elif category == "exploration":
+        explanations.append(f"Charted systems out of {GALAXY_SYSTEM_COUNT}; all discoveries count, including surveys and assignments.")
+    elif category == "combat":
+        explanations.append("Recorded combat victories include patrol ships and each defeated squadron member.")
+    else:
+        explanations.append("Completed career counts include earlier retirements without dossiers; missing details are not reconstructed.")
+    if not ranked:
+        lines.append("No qualifying achievements recorded yet. Older score files gain career details at the pilot's next saved action.")
+    for position, record in enumerate(ranked, 1):
+        marker = " [YOU]" if record["user_id"] == user_id else ""
+        prefix = f"#{position}{marker} {record['handle']}"
+        if category == "careers":
+            archived = record.get("achievements", {}).get("careers", [])
+            endings = [item for item in archived if item["finale"] is not None]
+            terms = [f"{prefix}: {record['retirements']} completed careers; {len(endings)} recorded conclusions."]
+            for finale, info in CAREER_FINALES.items():
+                count = sum(item["finale"] == finale for item in endings)
+                if count: terms.append(f"{info['label']}: {count}.")
+            lines.append(" ".join(terms))
+        else:
+            state = CAREER_FINALES[record["finale"]]["label"] if record["finale"] else "Current career"
+            metric = (f"{record['market_margin']:+,}cr known-cost market margin" if category == "trading" else
+                      f"{record['charted']}/{GALAXY_SYSTEM_COUNT} systems charted" if category == "exploration" else
+                      f"{record['kills']} combat victories")
+            lines.append(f"{prefix}, career {record['number']}: {metric}. {state}; seed {record['seed']}; day {record['days']}.")
+    return lines + explanations
+
+
 def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) -> None:
-    entries = load_hall_of_fame(save_dir)
-    title, footer = "Hall of Fame", "[N]Next [P]Prev [B]Back: "
-    pages = _service_pages(hall_of_fame_lines(entries, user_id), title, footer)
-    page = 0
+    entries = _load_score_records(save_dir)
+    footer = "[1-5]View [N]Next [P]Prev [B]Back: "
+    category, page, cache = "wealth", 0, {}
     while True:
-        key, page, count = _draw_service_page(p, title, [], footer, page, pages=pages)
+        title = "Hall of Fame: " + SCORE_CATEGORIES[category]
+        if category not in cache:
+            lines = achievement_lines(entries, category, user_id)
+            lines += ["Views: [1] Wealth, [2] Trading, [3] Exploration, [4] Combat, [5] Completed careers.",
+                      "Local accomplishments; starting advantages and game rules may differ. No shared-seed competition."]
+            cache[category] = _service_pages(lines, title, footer)
+        key, page, count = _draw_service_page(p, title, [], footer, page, pages=cache[category])
         if key in ("B", "Q", " "): return
-        if key in ("N", ">"): page = min(page + 1, count - 1)
+        if key in ("1", "2", "3", "4", "5"):
+            category, page = list(SCORE_CATEGORIES)[int(key) - 1], 0
+        elif key in ("N", ">"): page = min(page + 1, count - 1)
         elif key in ("P", "<"): page = max(0, page - 1)
 
 

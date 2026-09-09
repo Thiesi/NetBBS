@@ -4888,12 +4888,32 @@ its station or after investigation, not merely through an accepted bearing.
 Ship commissioning previews and landmark inspection use these same portraits;
 backing out of either view leaves gameplay unchanged.
 
-Hall of Fame renders its existing top-20 best-credit ranking as paginated labelled
-pilot entries. Full callsigns, rank titles and score fields remain available at
-narrow widths, with a textual YOU marker for the current pilot when listed. The
-loaded scoreboard and its wrapped pages remain a read-only snapshot for the visit;
-Back and paging never discard or rewrite the independently retained score records.
-Achievement categories and per-career archives remain separate roadmap work.
+Hall of Fame offers five separate local achievement views: lifetime wealth,
+known-cost market margin, exploration, combat victories and completed careers.
+Wealth and completion counts rank pilots; trading, exploration and combat rank
+individual current or archived careers. Each view shows at most 20 entries with
+stable numeric pilot/career tie-breaking. Full callsigns, values, career number,
+seed and current/completed state remain available on paginated narrow screens.
+There is no combined score. Market margin has the same exclusions as the trader
+career path; combat counts the existing generic victory counter, not raiders only.
+Legacy wealth and retirement counts remain valid, but absent career metrics are
+labelled unavailable rather than fabricated. The five views share one read-only
+snapshot per visit. Switching categories, paging and Back never write scores.
+
+Each pilot's optional score projection contains bounded versioned summaries of
+all retained retirement dossiers plus the current run. A checkpoint regenerates
+these summaries from the authoritative career save, including after an optional
+score-write failure across retirement. No top-20 filter discards stored history.
+Legacy retirement gaps remain gaps, and the existing 128-dossier capacity applies;
+no separate archive files or gameplay counters are added. Future score-summary
+versions are left untouched by older code. Dossiers retain the fuller personal
+history; shared score summaries omit their highlights.
+
+Shared-seed competition is deliberately deferred. Existing careers have different
+New Game+ advantages and rule histories, so matching seeds alone would imply an
+unsupported fairness guarantee. These are local accomplishments, not certified
+competitive runs. A future challenge would need its own versioned rules and equal
+starting conditions without changing the single-player career core.
 
 The spot-market catalog uses height-aware commodity entries with credits in the
 heading, numeric cargo usage, unit buy/sell prices, stock, station buying demand
