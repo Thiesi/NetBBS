@@ -4770,7 +4770,12 @@ def crew_roster_lines(world: World) -> list[str]:
                     if level + 1 < len(CREW_SERVICE_LEVELS) else "service mastery reached")
         lines.append(f"{CREW_SERVICE_LEVELS[level][1]}: {progress}.")
         task = crew_assignment_record(world, role)
-        state = task["state"] if task is not None else "available" if hired and level >= 1 else "unlocks after hiring and five paid jumps"
+        if task is not None:
+            state = task["state"]
+        elif level >= 1:
+            state = "available" if hired else "available after rehiring"
+        else:
+            state = "unlocks after hiring and five paid jumps"
         lines.append(f"[{index + 1}]Task: {CREW_ASSIGNMENTS[role]['title']}; {state}.")
     lines.extend([
         "Specialists earn wages on every jump, including detours.",

@@ -10434,3 +10434,18 @@ def test_promoted_navigator_survey_terms_match_actual_range_without_writes(paid,
     distances=vr.bfs_hops(world.by_id,world.here.id)
     assert set(vr.survey_candidates(world))=={sid for sid,hops in distances.items() if hops<=3+actual and not world.by_id[sid].discovered}
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+@pytest.mark.parametrize("role", list(vr.CREW_ROLES))
+@pytest.mark.parametrize("paid", [5,15,30])
+def test_personal_crew_roster_retained_experience_unlocks_on_rehire(role,paid):
+    import copy
+    world=_world_with_named_crew(role,paid)
+    vr.dismiss_crew(world,role)
+    before=copy.deepcopy(world.save.to_dict()); rng=world.event_rng.getstate()
+    assert "available after rehiring" in " ".join(vr.crew_roster_lines(world))
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+    vr.hire_crew(world,role)
+    assert vr.crew_assignment_blocker(world,role) is None
+    vr.accept_crew_assignment(world,role)
+    assert vr.crew_assignment_record(world,role)["state"]=="active"
