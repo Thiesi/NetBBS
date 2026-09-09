@@ -925,3 +925,18 @@ def test_rivals_clock_refresh_does_not_invalidate_unchanged_raid_choice(db_path)
     assert success
     assert amount == 150
     conn.close()
+
+
+def test_clock_rollback_cannot_backdate_capture_from_another_player(db_path):
+    conn, now, a, b = _rivals(db_path)
+    later = now + timedelta(hours=2)
+    wd.resolve_root_exchange(conn, a, 1, later, FixedRandom())
+    success, _, _ = wd.resolve_root_exchange(conn, b, 1, now + timedelta(hours=1), FixedRandom())
+    assert success
+    exchange = wd.list_exchanges(conn)[0]
+    assert exchange.controller_user_id == b.user_id
+    assert exchange.controlled_since == wd.to_iso(later)
+    assert exchange.income_collected_at == wd.to_iso(later)
+    reloaded = wd.load_or_create_player(conn, b.user_id, b.handle, later, 1)
+    assert reloaded.cash == b.cash
+    conn.close()

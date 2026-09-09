@@ -1194,6 +1194,10 @@ def resolve_root_exchange(
         if expected_exchange is not None and exchange != expected_exchange:
             raise ActionRejected("Exchange changed while you were choosing. Inspect the exchanges again.")
         prior_controller = exchange.controller_user_id
+        # Another owner may already have observed a later server clock.
+        now = max(now, from_iso(exchange.income_collected_at))
+        if exchange.controlled_since is not None:
+            now = max(now, from_iso(exchange.controlled_since))
         success, busted = action_root_exchange(actor, exchange, now, rng)
         conn.execute(
             "UPDATE exchanges SET controller_user_id=?, garrison=?, controlled_since=?, income_collected_at=? WHERE id=?",
