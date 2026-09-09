@@ -4398,6 +4398,20 @@ Aid after investigation). Reserve the complete wrapped action bar in page
 capacity. Full-content UI tests remove that bar as a unit before rejoining prose;
 filtering only the old Act row leaves wrapped footer fragments inside the body.
 
+Voidrunner achievement scores project current metrics and all retained dossiers
+from the saved career. Build every category from an untrimmed score snapshot;
+cutting to the wealth top 20 before selecting combat/trading/exploration loses
+qualifying records. Keep legacy aggregate wealth and retirement counts separate
+from versioned per-career metrics. Retry optional score projection from dossiers
+after restart, including a failure on the retirement checkpoint itself. Future
+summary versions and extra fields are preserved. An unchanged projection must skip
+replacement: identical file bytes alone do not prove a view was read-only. Validate
+its types before equality-based no-op detection because Python equates False with
+zero. Inspect
+actual replacements after input, excluding the ordinary EOF cleanup checkpoint.
+Score reads share the existing
+4 MiB career/backup per-file ceiling; the summary has at most 129 career entries.
+
 Voidrunner portraits paginate an entire authored composition as one group.
 Choose a complete compact version when either width or height rules out the
 large version; omit artwork only if even the compact composition cannot fit.
@@ -5285,3 +5299,12 @@ regenerating it would invalidate the size check. An accepted near-limit history
 may leave too little room for dossier metadata, so report unavailability while
 retaining the live world, RNG and files. Inspect dossier versions before v1 field
 requirements so a newer schema cannot accidentally offer checkpoint rollback.
+
+Achievement seeds use the career loader's signed 64-bit range, including archived
+negative seeds. Only newer integer summary versions or unknown extensions require
+preservation; missing, boolean, string and nonpositive version values must remain
+repairable. Import validated lifetime retirement maxima from legacy/per-pilot
+scores into the authoritative save before projecting current career numbers;
+retain unknown historical gaps without inventing dossiers or old combat totals.
+Merged read-only score snapshots retain those lifetime totals too, omitting an
+inconsistent per-career block until the next authoritative checkpoint repairs it.

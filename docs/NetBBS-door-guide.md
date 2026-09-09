@@ -186,11 +186,34 @@ save together before the restart acknowledgement.
 
 ### Hall of Fame pages
 
-Station **[H] Hall of Fame** shows the existing top 20 pilots by best recorded
-credits, with labelled credits, raider defeats, missions and retirements. **[YOU]**
-identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Back**;
-all displayed fields remain available on narrow terminals. The table is a snapshot
-for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
+Station **[H] Hall of Fame** offers **[1] Wealth**, **[2] Trading**,
+**[3] Exploration**, **[4] Combat**, and **[5] Completed careers**. Wealth
+and completion counts rank pilots; the other views rank individual current or
+archived careers. Each view displays up to 20 entries. **[YOU]** identifies your
+pilot. Use **[N] Next**, **[P] Previous** and **[B] Back**; all category keys
+work from every page, and complete entries remain available on narrow terminals.
+
+Trading uses known-cost market margin before operating costs, excluding delivery
+pay, unknown-cost receipts and other income. It is not total profit. Exploration
+counts charted systems, including surveys and assignments; Combat counts all
+recorded victories, including patrol ships and each defeated squadron member. Entries identify their career
+number, seed and current/completed state. Completed careers includes older
+retirements whose detailed dossiers are unavailable.
+
+Every retained dossier and the current run have a compact score summary. Only
+the display is limited to 20; lower-ranked records remain stored. On your next
+checkpoint, valid earlier retirement totals carry into your career count and next
+career number without creating missing dossiers or adding current credits. Old scores keep
+their wealth and retirement counts; career details appear at the next saved
+action, and missing older history is never invented. A later checkpoint repairs
+an optional score-write failure from the career save and its dossiers. A newer
+unsupported score-summary format remains untouched.
+
+All views share one snapshot per visit; reopen to refresh. Paging, changing views
+and Back leave scores and gameplay unchanged. These are local accomplishments,
+not certified competition: starting advantages and game versions can differ.
+Shared-seed challenges remain deferred until equal starts and versioned rules
+can be defined separately from normal careers.
 
 ### Faction contacts and membership
 
