@@ -158,6 +158,21 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### Area surveys
+
+With a scanner installed, use **[S] Scan** from the chart to inspect the survey
+terms. **[S] Survey** spends two fuel and charts every new contact within range:
+two connection hops plus scanner tier, plus one more with a navigator. The screen
+shows the contact count and warns if the cost empties your tank. **[B] Back**
+before surveying writes nothing. Empty areas and insufficient fuel incur no charge.
+
+Surveying advances no day or wages. Its report lists each newly charted system's
+station, economy and danger, plus completed survey contracts. Read it with **[<] /
+[>]**, then return to the chart with **[B]**. The report creates no remote market
+price quotes; visit a market to learn its prices. Fuel, discoveries and mission
+rewards save together before the result appears. Repeating a completed area scan
+cannot charge fuel or award the same contract again.
+
 ### Coordinated raiders
 
 New two-raider contacts disclose both opponents and their covering fire. **[T]

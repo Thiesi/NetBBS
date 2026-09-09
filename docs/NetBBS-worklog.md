@@ -5135,5 +5135,14 @@ and before Brace reduction. Advance the index and clear combat together before
 checkpointing; cover then disappears for the final duel. Seeded target-order
 probes demonstrate profile-dependent mechanical tradeoffs, not human engagement.
 
+Area surveys derive a stable distance/ID-ordered set from current discovery flags
+without touching encounter RNG. Validate scanner, fuel and nonempty results before
+spending; then chart contacts and resolve matching missions in one checkpoint.
+Survey report pagination and Back are read-only, and a cancelled preview must not
+clear the parent chart's retained result. Surveying cannot manufacture remote
+market observations. Real no-write tests must initialize through World.checkpoint,
+since a bare persist omits normal station preparation and initial RNG/discovery
+synchronization; those startup writes must not be misattributed to browsing.
+
 Sector danger spans 0-5; opponent tiers span 0-4. Keep their scales distinct in
 encounter labels and test the danger-5 case when deriving rewards or tier ranges.
