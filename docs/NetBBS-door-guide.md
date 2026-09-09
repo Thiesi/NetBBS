@@ -20,7 +20,8 @@ directory before launch, not the temporary door or installation directory; prefe
 absolute paths in service configuration. Only this named setting is forwarded for
 War Dialer, not the parent environment. Wrappers/custom copies must specify the
 profile override explicitly. Standalone launches retain `~/.netbbs/wardialer.db`
-unless overridden. A dedicated node-backup component remains subsequent slice 4 work.
+unless overridden. The node backup includes existing configured worlds as a
+dedicated checksummed component.
 
 **MANUAL — inside NetBBS:** open the door's Compatibility setup and use **Check
 setup** to see the effective War Dialer world path, including an unsaved profile
@@ -61,6 +62,63 @@ and preserve the original world and any WAL/SHM sidecars. Diagnose a copy. Use a
 game version compatible with the recorded schema or restore a verified,
 SQLite-consistent backup belonging to this node. Do not clear `user_version`,
 delete the world, or copy only a live database file as a recovery shortcut.
+
+### Backup, ownership and restore
+
+The first host launch binds a world to an opaque namespace stored in that node's
+database. Display-name changes do not change ownership. Another node, or a
+standalone launch without that node's metadata, cannot load the bound world.
+**MANUAL ? outside NetBBS:** before the first host launch of a legacy world,
+verify its player IDs belong to that node as described above. Backups refuse
+unbound legacy worlds until this adoption is complete. This guard prevents an
+accidental wrong-node configuration; it is not isolation from the same OS user.
+
+The normal Backup screen and `python -m netbbs.backup create` include existing
+node-default worlds and all registered profile overrides, deduplicated by resolved
+path. The CLI must run with the service's process override, if one is configured.
+Unregistered custom wrappers need an explicit supported profile override to be
+discovered. Missing never-played worlds add no component. Each captured world uses
+SQLite's backup API, followed by integrity and ownership validation and SHA-256
+coverage. Committed WAL data is included; transient sidecars are not archived.
+The component supports at most 64 worlds, each at most 512 MiB.
+
+**MANUAL ? inside NetBBS:** close War Dialer sessions before taking a node backup.
+An idle session still counts. Backup fails clearly if a world is active. The BBS
+itself may remain running. **MANUAL ? outside NetBBS:** recurring backups and
+retention remain operator/cron jobs; use the same service environment and account.
+
+**MANUAL ? outside NetBBS, verified restore:**
+
+1. Stop the source and destination node services and all game sessions, including
+   old game versions. Preserve a current node backup before replacing anything.
+2. Use the world keys printed by `create` (also listed under `war_dialer.worlds`
+   in `manifest.json`). Supply an explicit destination for every key, for example:
+   `python -m netbbs.backup restore --from /backup/node --db /srv/bbs/netbbs.db --identity-dir /srv/bbs/netbbs_identity --war-dialer-to 1=/srv/bbs/netbbs.db.doors/war-dialer.db`.
+   Repeat `--war-dialer-to KEY=PATH` for additional worlds. Destination files must
+   not collide with another world's WAL/SHM/journal or session-guard paths. Add `--voidrunner-to`
+   when that component is present. Restore brings back the paired node database
+   and its user-ID namespace; it does not transplant a world into another node.
+3. Restore validates checksums, schema, SQLite integrity and ownership before
+   switching. It stages each world on its destination filesystem, excludes game
+   sessions, removes old WAL/SHM/journal files as part of the rollback plan, and
+   retains the previous generation. If an existing destination is itself corrupt
+   or cannot be verified, preserve it and its sidecars under a recovery location
+   first, then restore to a fresh explicit destination. A failed switch rolls back; an unresolved
+   failure retains `.netbbs-restore-state.json` with explicit recovery paths.
+4. Configure each restored door/profile or service override to the chosen world
+   path before starting it. Restored profiles retain their archived configuration;
+   restore does not guess a replacement service environment. Use Check setup,
+   then verify a representative player's resources, holdings and history.
+5. Keep the source service stopped: an old and restored copy are the same node.
+   Keep the previous generation until satisfied. External world rollback locations
+   are recorded in `war-dialer-rollback.json` inside the returned rollback directory.
+
+The service account needs read/write/create access to each world and its parent
+for SQLite journals, the stable `<world>.sessions` guard and local restore staging.
+Never delete or replace the session guard while processes might hold it. SQLite
+releases its locks when a process exits or is killed. Old binaries do not know
+about this guard and must be stopped manually. Real NetBSD/filesystem and hands-on
+restore activation checks remain separate from automated Windows tests.
 
 Several callers, including two sessions for one user, may play concurrently.
 Each action uses current stored resources and commits its turn with its result.

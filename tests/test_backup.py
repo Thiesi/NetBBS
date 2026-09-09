@@ -12,6 +12,7 @@ import contextlib
 import json
 import shutil
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -1513,3 +1514,234 @@ def test_cli_create_then_restore_round_trip(tmp_path, capsys):
 def test_cli_create_exits_cleanly_on_failure(tmp_path, capsys):
     with pytest.raises(SystemExit, match="backup failed"):
         main(["create", "--db", str(tmp_path / "missing.db"), "--to", str(tmp_path / "backup1")])
+
+
+def _populate_war_dialer(db_path, *, world_path=None, owner="a" * 32):
+    from netbbs.doors.bundled import war_dialer as wd
+    from netbbs.auth.users import create_user
+    from netbbs.config import set_config
+    node = Database(db_path)
+    try:
+        user = create_user(node, "WarPilot", password="hunter2", user_level=10)
+        set_config(node, "war_dialer_owner", owner)
+    finally:
+        node.close()
+    path = world_path or db_path.parent / (db_path.name + ".doors") / "war-dialer.db"
+    conn = wd.connect(path)
+    wd.ensure_schema(conn)
+    wd.bind_world_owner(conn, owner)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, user.id, user.username, now, 1)
+    conn.execute("UPDATE players SET cash=4321, income_remainder=9876")
+    wd.record_event(conn, user.id, "Rival", "A retained receipt", now)
+    conn.close()
+    return path
+
+
+def _war_cash(path):
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        return conn.execute("SELECT cash FROM players").fetchone()[0]
+
+
+def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, identity_dir):
+    from netbbs.doors.bundled import war_dialer as wd
+    path = _populate_war_dialer(db_path)
+    held = wd.connect(path)
+    held.execute("PRAGMA wal_autocheckpoint=0")
+    held.execute("UPDATE players SET cash=98765")
+    try:
+        assert Path(str(path) + "-wal").stat().st_size > 0
+        source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    finally:
+        held.close()
+    manifest = json.loads((source / "manifest.json").read_text())
+    assert manifest["war_dialer"]["worlds"][0]["source_path"] == str(path.resolve())
+    archived = source / "war-dialer/1.db"
+    assert _war_cash(archived) == 98765
+    assert manifest["checksums"]["war-dialer/1.db"] == hashlib.sha256(archived.read_bytes()).hexdigest()
+    with pytest.raises(BackupError, match="--war-dialer-to"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir)
+    target = tmp_path / "restored-world.db"
+    restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, war_dialer_to=target)
+    assert _war_cash(target) == 98765
+    with contextlib.closing(sqlite3.connect(target)) as conn:
+        assert conn.execute("SELECT income_remainder FROM players").fetchone()[0] == 9876
+        assert conn.execute("SELECT summary_text FROM events").fetchone()[0] == "A retained receipt"
+    backup_module._validate_backup_source(source, allow_migrate=False)
+
+
+def test_war_dialer_backup_and_restore_exclude_idle_sessions(tmp_path, db_path, identity_dir):
+    from netbbs.doors.bundled import war_dialer as wd
+    path = _populate_war_dialer(db_path)
+    destination = tmp_path / "backup"
+    with wd.world_session(path):
+        with pytest.raises(BackupError, match="busy"):
+            create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+    assert not destination.exists()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+    before = path.read_bytes()
+    with wd.world_session(path):
+        with pytest.raises(BackupError, match="busy"):
+            restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, war_dialer_to=path)
+    assert path.read_bytes() == before
+    with wd.world_session(path, maintenance=True):
+        with pytest.raises(wd.WorldStateError, match="busy"):
+            with wd.world_session(path):
+                pytest.fail("play entered maintenance")
+    with wd.world_session(path), wd.world_session(path):
+        pass  # Duplicate player sessions remain supported.
+
+
+def test_war_dialer_restore_failure_rolls_back_world_and_node(tmp_path, db_path, identity_dir, monkeypatch):
+    path = _populate_war_dialer(db_path)
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        conn.execute("UPDATE players SET cash=2468")
+        conn.commit()
+    node = Database(db_path)
+    node.connection.execute("INSERT INTO node_config (key, value) VALUES ('after_backup', 'retained')")
+    node.connection.commit()
+    node.close()
+    original = backup_module._write_restore_state
+    def fail_after_world(*args, **kwargs):
+        if not kwargs["pending"]:
+            raise OSError("injected final journal failure")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(backup_module, "_write_restore_state", fail_after_world)
+    with pytest.raises(BackupError, match="automatically rolled back"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, war_dialer_to=path)
+    assert _war_cash(path) == 2468
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        assert conn.execute("SELECT value FROM node_config WHERE key='after_backup'").fetchone()[0] == "retained"
+    assert not (db_path.parent / ".netbbs-restore-state.json").exists()
+
+
+def test_war_dialer_restore_rejects_corruption_and_wrong_node(tmp_path, db_path, identity_dir):
+    path = _populate_war_dialer(db_path)
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    other = tmp_path / "other-node.db"
+    Database(other).close()
+    target = _populate_war_dialer(other, owner="b" * 32)
+    before = target.read_bytes()
+    with pytest.raises(BackupError, match="user-ID namespace"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, war_dialer_to=target)
+    assert target.read_bytes() == before
+    with (source / "war-dialer/1.db").open("ab") as handle:
+        handle.write(b"modified backup")
+    with pytest.raises(BackupError, match="checksum mismatch"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, war_dialer_to=path)
+    assert _war_cash(path) == 4321
+
+
+def test_war_dialer_profiles_capture_all_worlds_and_require_all_destinations(tmp_path, db_path, identity_dir):
+    import sys
+    from netbbs.doors import create_door
+    from netbbs.doors.profiles import DoorProfile
+    from netbbs.auth.users import get_user_by_username
+    first = _populate_war_dialer(db_path)
+    second = tmp_path / "profile-world.db"
+    shutil.copy2(first, second)
+    node = Database(db_path)
+    try:
+        create_door(node, "Alternate world", sys.executable, creator=get_user_by_username(node, "WarPilot"),
+                    profile=DoorProfile(environment={"WAR_DIALER_DB_PATH": str(second)}))
+    finally:
+        node.close()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    manifest = json.loads((source / "manifest.json").read_text())
+    assert len(manifest["war_dialer"]["worlds"]) == 2
+    with pytest.raises(BackupError, match="every archived world"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, war_dialer_to={"1": tmp_path / "one.db"})
+    targets = {str(i): tmp_path / f"restored-{i}.db" for i in (1, 2)}
+    restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, war_dialer_to=targets)
+    assert [_war_cash(target) for target in targets.values()] == [4321, 4321]
+
+
+
+@pytest.mark.parametrize("damage", ["future", "unbound", "missing_checksum"])
+def test_war_dialer_bad_archive_is_refused_before_live_changes(tmp_path, db_path, identity_dir, damage):
+    path = _populate_war_dialer(db_path)
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    archive = source / "war-dialer/1.db"
+    manifest_path = source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if damage == "missing_checksum":
+        del manifest["checksums"]["war-dialer/1.db"]
+    else:
+        with contextlib.closing(sqlite3.connect(archive)) as conn:
+            if damage == "future":
+                conn.execute("PRAGMA user_version=99")
+            else:
+                conn.execute("DELETE FROM meta WHERE key='node_owner'")
+            conn.commit()
+        manifest["checksums"]["war-dialer/1.db"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    before = path.read_bytes()
+    with pytest.raises(BackupError):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir, war_dialer_to=path)
+    assert path.read_bytes() == before
+
+
+def test_war_dialer_cli_create_and_restore_names_destinations(tmp_path, db_path, identity_dir, capsys):
+    _populate_war_dialer(db_path)
+    destination = tmp_path / "backup"
+    main(["create", "--db", str(db_path), "--identity-dir", str(identity_dir), "--to", str(destination)])
+    assert "War Dialer world 1: included" in capsys.readouterr().out
+    target = tmp_path / "restored.db"
+    main(["restore", "--db", str(db_path), "--identity-dir", str(identity_dir), "--from", str(destination),
+          "--war-dialer-to", "1=" + str(target)])
+    assert _war_cash(target) == 4321
+    assert "MANUAL" in capsys.readouterr().out
+
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal", ".sessions"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_war_dialer_restore_rejects_cross_world_sidecar_collisions(tmp_path, db_path, identity_dir, suffix, reverse):
+    _populate_war_dialer(db_path)
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    shutil.copy2(source / "war-dialer/1.db", source / "war-dialer/2.db")
+    manifest_path = source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["war_dialer"]["worlds"].append({**manifest["war_dialer"]["worlds"][0], "key": "2"})
+    manifest["checksums"]["war-dialer/2.db"] = manifest["checksums"]["war-dialer/1.db"]
+    manifest_path.write_text(json.dumps(manifest))
+    target = tmp_path / "target.db"
+    paths = [target, Path(str(target) + suffix)]
+    if reverse:
+        paths.reverse()
+    with pytest.raises(BackupError, match="overlaps"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir,
+                       war_dialer_to={"1": paths[0], "2": paths[1]})
+    assert not target.exists()
+
+
+def test_empty_war_dialer_override_uses_normal_backup_error(tmp_path, db_path, identity_dir, monkeypatch):
+    import sys
+    from netbbs.doors import create_door
+    from netbbs.doors.bundled import war_dialer as wd
+    from netbbs.auth.users import get_user_by_username
+    _populate_war_dialer(db_path)
+    node = Database(db_path)
+    try:
+        create_door(node, "War Dialer", sys.executable, args=(wd.__file__,),
+                    creator=get_user_by_username(node, "WarPilot"))
+    finally:
+        node.close()
+    monkeypatch.setenv("WAR_DIALER_DB_PATH", "")
+    with pytest.raises(BackupError, match="WAR_DIALER_DB_PATH"):
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    with pytest.raises(SystemExit, match="backup failed"):
+        main(["create", "--db", str(db_path), "--identity-dir", str(identity_dir), "--to", str(tmp_path / "cli")])
+
+
+def test_legacy_restore_refuses_to_orphan_an_existing_world(tmp_path, db_path, identity_dir):
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "legacy")
+    world = _populate_war_dialer(db_path)
+    before = world.read_bytes()
+    with pytest.raises(BackupError, match="does not cover existing War Dialer"):
+        restore_backup(source=source, db_path=db_path, identity_dir=identity_dir)
+    assert world.read_bytes() == before
+    assert backup_module._war_dialer_owner(db_path) == "a" * 32

@@ -3308,6 +3308,12 @@ introduced.
 
 ### 13.4 Backup and restore (issue #60's first operational slice)
 
+War Dialer coverage (issue #362): node backups also include existing configured
+shared worlds as checksummed SQLite snapshots paired with the node's user-ID
+namespace. Restore requires an explicit destination for every world and excludes
+active game sessions. The world ownership, limits and rollback contract is recorded
+in the War Dialer storage decision in ?16; manual activation is in the door guide.
+
 Voidrunner coverage (issue #310): ordinary CLI and SysOp node backups include the
 effective `VOIDRUNNER_SAVE_DIR` (or legacy home-directory default), when present,
 under a checksummed `voidrunner/` component. Capture preserves career, previous,
@@ -6607,8 +6613,26 @@ When the node default is absent and a legacy home-directory world exists, launch
 requires explicit migration or override rather than silently replacing player data.
 Migration is manual, with stopped sessions, a SQLite-consistent backup and verified
 node-local user-ID ownership. An explicit override is an operator choice and must
-not point independent nodes at the same world. Backup integration and node/world
-ownership validation follow in subsequent slice 4 bullets.
+not point independent nodes at the same world.
+
+**World ownership and node backup.** First host launch binds the world to an opaque
+random namespace retained in the node database and forwarded only in War Dialer
+metadata. Subsequent launches must match it; a bound world cannot be entered as a
+standalone Guest. Legacy adoption requires the documented manual user-ID check.
+Backups preserve the node namespace with all discovered existing worlds: the
+node-default companion and registered profile/process overrides, deduplicated by
+resolved path. A world component contains SQLite-consistent snapshots, supported
+schema versions and checksums, with a limit of 64 worlds and 512 MiB per world.
+
+Backup rejects active game sessions; restore requires stopped node services,
+explicit destinations for every archived world and the paired node database.
+Read-only verification checks schema, integrity and namespace ownership. World
+staging/rollback stays on each destination filesystem; old WAL/SHM/journal files
+participate in the switch and rollback. A stable SQLite session-guard sidecar
+holds shared read leases during play and an exclusive lease during maintenance;
+process exit releases it without deleting its inode. Restore retains the prior
+generation and journals unresolved failures. Service/profile path activation and
+old-binary exclusion are manual SysOp actions, as documented in the door guide.
 
 **World schema compatibility.** SQLite `user_version=1` identifies the supported
 War Dialer schema. A complete original unversioned world is adopted through a

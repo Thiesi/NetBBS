@@ -4726,6 +4726,10 @@ async def _backup_status_screen(
             "Includes saved careers and scores when this directory exists. "
             "Close Voidrunner sessions before creating a backup."
         )
+        await session.write_line(
+            "War Dialer: includes existing node-default and registered override worlds. "
+            "Close War Dialer sessions before backup; restore requires explicit world destinations."
+        )
 
         if not can_create:
             await session.write_line(

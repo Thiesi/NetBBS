@@ -371,6 +371,17 @@ one as new would silently reset a truncated world. Keep a simultaneous initial
 connect regression, because a check-then-create sequence exposes an empty file.
 The world filesystem must support hard links (the normal NetBSD/NTFS paths do).
 
+War Dialer maintenance uses a separate rollback-journal SQLite file at
+`<world>.sessions`. Play retains a read transaction for the complete process;
+maintenance retains BEGIN EXCLUSIVE. Do not use WAL for this guard: WAL readers
+do not block an exclusive writer. Never rename/delete this sidecar during world
+restore. Test an idle session and killed subprocess, not only active world writes.
+Snapshots must capture the world before the node DB and verify matching ownership
+against that node snapshot. Normalize the disposable world snapshot to DELETE
+journaling so read-only verification cannot introduce WAL sidecars into an archive.
+Restore each external world and its old WAL/SHM/journal artifacts using a local
+rollback directory; a late failure must restore both node state and world state.
+
 ### Database execution lanes
 
 Interactive network flows use a foreground `DatabaseLane`; Phase 3 background

@@ -616,6 +616,14 @@ def test_real_war_dialer_launches_keep_two_node_worlds_separate(tmp_path, monkey
             database_lane.close()
             database.close()
     assert paths[0] != paths[1]
+    owners = []
+    for path in paths:
+        world = sqlite3.connect(path)
+        try:
+            owners.append(world.execute("SELECT value FROM meta WHERE key='node_owner'").fetchone()[0])
+        finally:
+            world.close()
+    assert owners[0] != owners[1]
     for path, name in zip(paths, ("Alpha", "Beta")):
         conn = sqlite3.connect(path)
         try:

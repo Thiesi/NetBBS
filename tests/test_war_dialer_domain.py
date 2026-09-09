@@ -1564,3 +1564,39 @@ def test_simultaneous_first_connect_publishes_one_complete_world(db_path):
             conn.close()
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert list(pool.map(lambda _: launch(), range(2))) == [10, 10]
+
+
+def test_world_owner_binding_preserves_namespace_across_sessions(db_path):
+    conn, _ = _setup(db_path, wd.now_utc())
+    wd.bind_world_owner(conn, "a" * 32)
+    before = list(conn.iterdump())
+    wd.bind_world_owner(conn, "a" * 32)
+    for owner in ("b" * 32, None):
+        with pytest.raises(wd.WorldStateError, match="another node"):
+            wd.bind_world_owner(conn, owner)
+        assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_process_death_releases_world_session_guard(db_path):
+    import subprocess
+    import os
+    conn = wd.connect(db_path)
+    conn.close()
+    code = ("import importlib.util,sys; "
+            "spec=importlib.util.spec_from_file_location('game',sys.argv[1]); "
+            "game=importlib.util.module_from_spec(spec); sys.modules['game']=game; spec.loader.exec_module(game); "
+            "lease=game.world_session(game.Path(sys.argv[2])); lease.__enter__(); "
+            "print('LOCKED',flush=True); sys.stdin.buffer.read(1)")
+    child = subprocess.Popen([sys.executable, "-u", "-c", code, str(_WAR_DIALER_PATH), str(db_path)],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert child.stdout.readline().strip() == b"LOCKED"
+        with pytest.raises(wd.WorldStateError, match="busy"):
+            with wd.world_session(db_path, maintenance=True):
+                pytest.fail("maintenance entered a live session")
+    finally:
+        child.kill()
+        child.communicate(timeout=5)
+    with wd.world_session(db_path, maintenance=True):
+        pass

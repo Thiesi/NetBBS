@@ -76,7 +76,7 @@ import textwrap
 import tempfile
 import time
 import unicodedata
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -897,6 +897,45 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
         expected = required - {"income_remainder"} if version == 0 and table == "players" else required
         if not expected <= columns:
             raise WorldStateError(f"War Dialer {table} schema is incomplete. Preserve it for SysOp recovery; no replacement was created.")
+
+
+@contextmanager
+def world_session(db_path: Path, *, maintenance: bool = False):
+    """Stable SQLite lock sidecar: shared play leases, exclusive maintenance.
+
+    Keep this file in place across restore. SQLite releases its locks on process
+    death; no PID guessing or stale-lock deletion is needed. It deliberately uses
+    rollback journaling, because WAL readers would not exclude maintenance.
+    """
+    lock_path = Path(str(db_path.resolve()) + ".sessions")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lease = sqlite3.connect(lock_path, isolation_level=None, timeout=0.2)
+    try:
+        if lease.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+            raise WorldStateError("War Dialer session guard has an unsupported journal mode. Contact the SysOp.")
+        if lease.execute("SELECT 1 FROM sqlite_master WHERE name='guard'").fetchone() is None:
+            lease.execute("CREATE TABLE IF NOT EXISTS guard (id INTEGER PRIMARY KEY)")
+        lease.execute("BEGIN EXCLUSIVE" if maintenance else "BEGIN")
+        lease.execute("SELECT * FROM guard").fetchall()  # Establish the shared file lock.
+        yield
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+            raise WorldStateError("War Dialer is busy with active sessions or maintenance. Try again later.") from exc
+        raise
+    finally:
+        lease.close()
+
+
+def bind_world_owner(conn: sqlite3.Connection, owner: str | None) -> None:
+    """Bind the first host launch to its node's persistent user-ID namespace."""
+    if owner is not None and (not isinstance(owner, str) or re.fullmatch(r"[0-9a-f]{32}", owner) is None):
+        raise WorldStateError("War Dialer host ownership metadata is invalid. Contact the SysOp.")
+    with _write_transaction(conn):
+        stored = conn.execute("SELECT value FROM meta WHERE key='node_owner'").fetchone()
+        if stored is not None and stored[0] != owner:
+            raise WorldStateError("This War Dialer world belongs to another node. Contact the SysOp; no player was loaded.")
+        if stored is None and owner is not None:
+            conn.execute("INSERT INTO meta (key, value) VALUES ('node_owner', ?)", (owner,))
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -2096,12 +2135,16 @@ def main() -> int:
         return 1
 
     conn = None
+    leases = ExitStack()
     rng = random.Random()
     try:
-        conn = connect(_resolve_db_path())
+        db_path = _resolve_db_path()
+        leases.enter_context(world_session(db_path))
+        conn = connect(db_path)
         # Keep terminal modes unchanged: the supervisor may kill this process
         # without running finally. Decode paste markers if already supplied.
         ensure_schema(conn)
+        bind_world_owner(conn, info.get("war_dialer_owner"))
         now = now_utc()
         season_number = current_world_season(conn, now)
         ensure_exchanges_seeded(conn, season_number, now)
@@ -2181,6 +2224,7 @@ def main() -> int:
     finally:
         if conn is not None:
             conn.close()
+        leases.close()
         try:
             out(RESET)
         except OSError:
