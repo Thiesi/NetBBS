@@ -5200,3 +5200,12 @@ combat/chart task payouts are assignment rewards, not invented cargo receipts.
 Commit task state, consumed material, credits and mission recognition together
 before acknowledging completion. The ordinary public workshop bearings supply
 routes without creating discoveries or remote market quotes.
+
+Faction membership is a retained credential; perk eligibility is derived from its
+own current standing, never a second persisted flag. Keep the -50 boundary shared
+between reward resolution, customs risk and status labels. Evaluate the Concord
+bonus at payout and disclose that timing in estimates. A cached inspection decision
+must not be rerolled when standing changes or a journey resumes. Granting membership
+validates the threshold and existing credential before mutation, then checkpoints
+both the credential and once-only grant before acknowledgement. Old highlights are
+historical prose, not the authoritative current perk status.

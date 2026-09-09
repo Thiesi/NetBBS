@@ -158,6 +158,23 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### Faction contacts and membership
+
+Station **[P] Concord** and **[W] Blackwake** contacts are always available.
+Browse their terms and your standing, then **[B] Back** without changing anything.
+At standing 75, **[J] Join** offers a final confirmation. Each faction grants
+2,000 credits once; you may hold both memberships.
+
+- Concord's active commission adds 25% to bounty and escort payouts. The bonus
+  uses your standing when the reward is paid, which can change during the mission.
+- Blackwake's active membership halves the chance of a new customs inspection.
+  It does not reduce the fine or clear notoriety.
+
+At standing **-50 or below**, that faction's perk is suspended. Raise its standing
+above -50 to restore it; your membership remains and no second grant is paid.
+Contacts and the pilot record show the current status. These rules also apply to
+older members. The two memberships work independently, and retirement clears both.
+
 ### Named crew and service
 
 The yard's **[K] Crew** roster introduces three named specialists with distinct
