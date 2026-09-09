@@ -9570,3 +9570,21 @@ def test_general_route_map_keeps_independent_tracked_objective_and_route_end(mon
     assert "Public route destination" in " ".join(vr.map_inspection_lines(world, destination, path, destination))
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
     assert not world.by_id[target].discovered
+
+
+@pytest.mark.parametrize("stage", ["idle", "started"])
+@pytest.mark.parametrize("investigated", [False, True])
+def test_archive_terms_disclose_only_remaining_landmark_salvage(stage, investigated):
+    import copy
+    world = _archive_world(stage, investigated=investigated)
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    terms = " ".join(vr.archive_lines(world))
+    expected = "Landmark salvage already claimed; transcribing the record pays no additional salvage." if investigated else "Unclaimed landmark salvage: +3,000cr once when investigating."
+    assert expected in terms
+    assert "Unclaimed landmark salvage remains yours" not in terms
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    if stage == "idle": vr.archive_action(world, "A")
+    world.save.current_system = world.landmark["system_id"]
+    credits = world.save.pilot.credits
+    vr.archive_action(world, "I")
+    assert world.save.pilot.credits - credits == (0 if investigated else 3000)

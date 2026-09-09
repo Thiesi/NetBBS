@@ -3772,11 +3772,14 @@ def archive_lines(world: World) -> list[str]:
         return lines + ["Assignment complete. Rewards cannot be claimed again."]
     lines += ["Optional assignment: no deadline, deposit or contract-slot cost. Ordinary fuel, wages and travel risks apply.",
               f"At current standing: public preservation pays 500cr; {archive_standing_terms(world, True)}. Private sale pays 1,500cr; {archive_standing_terms(world, False)}. Standing stays within -100 to 100."]
+    if not flags.get("archive_v1_recovered"):
+        lines.append("Landmark salvage already claimed; transcribing the record pays no additional salvage." if flags.get("landmark_investigated") else
+                     f"Unclaimed landmark salvage: +{world.landmark['reward_credits']:,}cr once when investigating.")
     if not flags.get("archive_v1_started"):
         lines += [f"Site: {world.landmark['label']} near {target.name} ({target.x},{target.y}). Visiting the site is required; scanning it is not enough.",
                   "[A] Accept at Freeport." if world.here.id == 0 else "Meet Mara at Freeport to accept. [R] Route there."]
     elif not flags.get("archive_v1_recovered"):
-        lines += [f"Recover the record at {target.name} ({target.x},{target.y}). Unclaimed landmark salvage remains yours.",
+        lines += [f"Recover the record at {target.name} ({target.x},{target.y}).",
                   "[I] Recover record here." if world.here.id == target.id else "[R] Route to the site; accepting its bearing does not chart it."]
     else:
         lines += ARCHIVE_RECORDS[world.landmark["label"]]
