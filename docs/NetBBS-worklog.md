@@ -351,6 +351,13 @@ row pagination. Regression coverage must drive the composed picker beyond fifty
 crews, not only call the page reader. Action result pagination owns its pause;
 the main loop must not append a second acknowledgement or clear it prematurely.
 
+Resolve a War Dialer override before changing cwd, and reapply that resolved value
+after profile environment merging. The default companion directory includes the
+node database filename, not only its parent, so two databases in one directory do
+not collide. Only recognized bundled entrypoints or explicit profile settings use
+this path contract. A missing new default plus an existing legacy world must fail
+with migration guidance; read-only setup checks must not create a replacement.
+
 ### Database execution lanes
 
 Interactive network flows use a foreground `DatabaseLane`; Phase 3 background

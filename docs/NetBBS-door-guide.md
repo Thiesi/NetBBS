@@ -5,10 +5,47 @@ environments. The bundled games remain available without a legacy profile.
 
 ## War Dialer shared-world sessions
 
-War Dialer stores its shared world in `~/.netbbs/wardialer.db`, or
-`WAR_DIALER_DB_PATH` when supplied to a standalone launch. The normal door
-runtime does not yet forward that override; supported node-specific paths and a
-dedicated node-backup component remain issue #362 slice 4 work.
+The bundled War Dialer uses a world beside the node database: for `/srv/bbs/netbbs.db`,
+the default is `/srv/bbs/netbbs.db.doors/war-dialer.db`. Different node database
+paths have separate defaults, including two database files in the same directory.
+Node/door display names do not affect the location. Renaming or relocating the node
+database requires moving its companion world directory or retaining an explicit
+override. The world contains node-local user IDs: never point independent nodes
+at one world, even when their callers happen to have the same numeric IDs.
+
+`WAR_DIALER_DB_PATH` is supported by the normal bundled-door runtime. A door profile's
+environment entry takes precedence over the NetBBS process environment, then the
+node default applies. Relative overrides resolve against the server's working
+directory before launch, not the temporary door or installation directory; prefer
+absolute paths in service configuration. Only this named setting is forwarded for
+War Dialer, not the parent environment. Wrappers/custom copies must specify the
+profile override explicitly. Standalone launches retain `~/.netbbs/wardialer.db`
+unless overridden. A dedicated node-backup component remains subsequent slice 4 work.
+
+**MANUAL — inside NetBBS:** open the door's Compatibility setup and use **Check
+setup** to see the effective War Dialer world path, including an unsaved profile
+override. This check does not create or migrate a world. **MANUAL — outside
+NetBBS:** configure a process override in the service environment. Alternatively,
+**MANUAL — inside NetBBS:** save the specific door profile's environment JSON, for example
+`{"WAR_DIALER_DB_PATH":"/srv/bbs/worlds/wardialer.db"}`.
+
+**MANUAL — outside NetBBS, existing-world migration:**
+
+1. End all War Dialer sessions before activating the new game/runtime. Identify
+   which node's user IDs own the existing `~/.netbbs/wardialer.db` data.
+2. Preserve a SQLite-consistent backup of that world using SQLite's backup API or
+   its `.backup` command. Copying only a live `.db` can omit committed WAL data.
+3. Either set an explicit override to retain that world in place, or place a
+   verified backup copy at the effective node-specific destination. Check SQLite
+   integrity and representative player IDs/handles before activation. Keep the
+   original until the migrated world has been verified in play.
+4. Use Check setup, then allow new sessions. Ensure only the owning node uses that
+   destination; moving game data does not translate user IDs between nodes.
+
+If the node default is absent but the old home-directory world exists, startup
+refuses to silently create a replacement. Choose an explicit override or complete
+the migration. An explicit path for a new independent node deliberately selects
+its own world; it does not adopt the old world's users or records.
 
 Several callers, including two sessions for one user, may play concurrently.
 Each action uses current stored resources and commits its turn with its result.

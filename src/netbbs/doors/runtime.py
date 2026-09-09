@@ -55,7 +55,39 @@ def _write_door_info(db, workdir, session, player):
     return path
 
 
-def _door_environment(info_path):
+def war_dialer_world_path(db, door) -> Path | None:
+    """Effective world locator: explicit profile, process override, then node DB sibling."""
+    profile_override = door.profile.environment.get("WAR_DIALER_DB_PATH") if door.profile else None
+    bundled = Path(__file__).with_name("bundled") / "war_dialer.py"
+    argv = (door.executable_path, *door.args)
+    is_bundled = any(Path(arg).name == "war_dialer.py" and Path(arg).resolve() == bundled.resolve()
+                     for arg in argv if arg and not arg.startswith("-"))
+    is_module = any(argv[i:i + 2] == ("-m", "netbbs.doors.bundled.war_dialer") for i in range(len(argv) - 1))
+    if not (is_bundled or is_module or profile_override is not None):
+        return None
+    override = profile_override if profile_override is not None else os.environ.get("WAR_DIALER_DB_PATH")
+    if override is not None:
+        if not override.strip():
+            raise ValueError("WAR_DIALER_DB_PATH must name a database file")
+        return Path(override).expanduser().resolve()
+    node_path = db.path.resolve()
+    return node_path.parent / (node_path.name + ".doors") / "war-dialer.db"
+
+
+def war_dialer_path_problem(door, world_path: Path | None) -> str | None:
+    if world_path is None:
+        return None
+    explicit = (door.profile and "WAR_DIALER_DB_PATH" in door.profile.environment) or "WAR_DIALER_DB_PATH" in os.environ
+    legacy = Path.home() / ".netbbs" / "wardialer.db"
+    if not explicit and not world_path.exists() and legacy.exists():
+        return (f"Legacy War Dialer world found at {legacy}. Stop old sessions and set WAR_DIALER_DB_PATH "
+                f"explicitly, or migrate a SQLite-consistent copy to {world_path}. No new world was created.")
+    if world_path.exists() and not world_path.is_file():
+        return f"War Dialer world path is not a file: {world_path}"
+    return None
+
+
+def _door_environment(info_path, war_dialer_path=None):
     env = {"NETBBS_DOOR_INFO": str(info_path)}
     try:
         env["USERPROFILE" if os.name == "nt" else "HOME"] = str(Path.home())
@@ -65,6 +97,8 @@ def _door_environment(info_path):
     # the disposable door cwd. Never forward the complete parent environment.
     if save_dir := os.environ.get("VOIDRUNNER_SAVE_DIR"):
         env["VOIDRUNNER_SAVE_DIR"] = str(Path(save_dir).expanduser().resolve())
+    if war_dialer_path is not None:
+        env["WAR_DIALER_DB_PATH"] = str(war_dialer_path)
     return env
 
 
@@ -218,6 +252,9 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
         problems = await asyncio.to_thread(preflight, door, session)
         if problems:
             raise ValueError("\n".join(problems))
+        world_path = await lane.run(war_dialer_world_path, door)
+        if problem := war_dialer_path_problem(door, world_path):
+            raise ValueError(problem)
         if profile:
             root = await lane.run(lambda db: db.path.parent / "door-nodes")
             identity = str(Path(profile.install_dir).resolve()) if profile.install_dir else f"door-{door.id}"
@@ -228,7 +265,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
         info = json.loads(info_path.read_text(encoding="utf-8"))
         width = profile.width if profile and profile.width else session.terminal_width
         height = profile.height if profile and profile.height else session.terminal_height
-        env = _door_environment(info_path)
+        env = _door_environment(info_path, world_path)
         encoding = profile.encoding if profile else "utf-8"
         terminal = DoorTerminal(session, encoding)
         mode_entered = True
@@ -261,6 +298,10 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
                                  "door_sys": str(drops / ("door.sys" if lower else "DOOR.SYS"))}
                 argv = [argv[0], *(arg.format_map(substitutions) for arg in argv[1:])]
                 env.update(profile.environment)
+                if world_path is not None:
+                    # Keep a profile's relative path anchored to the server cwd,
+                    # never the temporary node directory or installation directory.
+                    env["WAR_DIALER_DB_PATH"] = str(world_path)
                 env.update(NETBBS_DOOR_NODE=str(lease.number), NETBBS_DOOR_NODE_DIR=str(drops))
                 env.setdefault("TERM", "ansi")
                 if profile.adapter == "dosbox":

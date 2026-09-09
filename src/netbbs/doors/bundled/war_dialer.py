@@ -861,7 +861,7 @@ def action_root_exchange(attacker: Player, exchange: Exchange, now: datetime, rn
 def _resolve_db_path() -> Path:
     override = os.environ.get("WAR_DIALER_DB_PATH")
     if override:
-        return Path(override)
+        return Path(override).expanduser().resolve()
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
