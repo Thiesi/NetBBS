@@ -1764,13 +1764,14 @@ def read_menu_choice(valid: str) -> str:
 
 
 def action_block_reason(action: str, player: Player) -> str | None:
+    reasons = []
     if player.turns_used >= TURNS_PER_DAY:
         refill = from_iso(player.turn_day_start) + DAY
-        return ("No turns. Refill at " + refill.strftime("%Y-%m-%d %H:%M UTC") +
-                ". Back to the switchboard for free Rank, Map, Rivals and Log browsing.")
+        reasons.append("No turns. Refill at " + refill.strftime("%Y-%m-%d %H:%M UTC") +
+                       ". Back to the switchboard for free Rank, Map, Rivals and Log browsing.")
     if action == "recruit" and player.cash < RECRUIT_COST:
-        return f"Need ${RECRUIT_COST - player.cash} more cash to recruit. Trade needs no cash; preview its Heat risk first."
-    return None
+        reasons.append(f"Need ${RECRUIT_COST - player.cash} more cash to recruit. Trade needs no cash; preview its Heat risk first.")
+    return " ".join(reasons) or None
 
 
 def action_preview_lines(action: str, player: Player, target: Player | Exchange | None = None) -> list[str]:

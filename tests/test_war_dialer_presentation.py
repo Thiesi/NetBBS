@@ -1173,3 +1173,19 @@ def test_new_player_gets_short_first_visit_then_switchboard(tmp_path):
         assert b"SWITCHBOARD" in output
         send(b"q")
         assert process.wait(timeout=5) == 0
+
+
+def test_recruit_preview_lists_cash_shortfall_even_when_turns_are_exhausted(tmp_path):
+    conn = wd.connect(tmp_path / "both-blockers.db")
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    player = wd.load_or_create_player(conn, 1, "Owner", now, 1)
+    player.turns_used = 15
+    player.turn_day_start = wd.to_iso(now)
+    player.cash = 25
+    text = "\n".join(wd.action_preview_lines("recruit", player))
+    assert "Refill at" in text
+    assert "Need $50 more cash" in text
+    conn.close()
