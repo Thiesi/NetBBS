@@ -194,7 +194,13 @@ def test_sweep_retires_only_idle_unoccupied_unfollowed_open_rooms(db, sysop, ali
         touch_open_room(db, channel, now=long_ago)
     follow(db, alice, "channel", followed.id)
     adopt_open_room(db, kept)
-    now = datetime.datetime(2026, 9, 5, tzinfo=datetime.timezone.utc)
+    # `recent` is deliberately never touched, so it ages from its real
+    # `created_at` (sweep_open_rooms coalesces onto it) -- whatever
+    # moment this test runs. Anchor the pinned clock to that same moment
+    # rather than a fixed calendar date: issue #323, where the second
+    # sweep below quietly stopped retiring `recent` once the wall clock
+    # passed 2026-09-06 and the test began failing every run.
+    now = datetime.datetime.now(datetime.timezone.utc)
 
     retired = sweep_open_rooms(db, retention_days=7, occupied_channel_ids={busy.id}, now=now)
     assert [m.room for m in retired] == ["idle"]
