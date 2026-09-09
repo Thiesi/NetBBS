@@ -21,6 +21,12 @@ use the refreshed allowance. Clock rollback freezes time-based benefits until th
 last observed time is reached again. If the season changes during a visit,
 reconnect before taking another action.
 
+Exchange earnings become spendable on login, menu refresh and committed actions.
+Frequent visits retain fractional dollars instead of losing them. Losing an
+exchange pays its earnings through the transfer and keeps the previous owner's
+fractional remainder for later income. Startup upgrades existing player records
+in place; fractions already discarded by older releases cannot be recovered.
+
 Use separate single keys. Arrow/function keys and pasted command bursts do not
 select actions; Escape dismisses a pause but has no menu action. An incomplete
 or excessively long terminal sequence ends the door with a reconnect diagnostic.

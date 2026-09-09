@@ -979,3 +979,175 @@ def test_rollback_login_uses_stored_exchange_season(db_path, new_player):
 def test_season_number_never_precedes_first_world_season():
     anchor = wd.now_utc()
     assert wd.current_season_number(anchor, anchor - timedelta(hours=1)) == 1
+
+
+def _give_exchange(conn, user_id, now, exchange_id=1):
+    conn.execute(
+        "UPDATE exchanges SET controller_user_id=?, garrison=1, controlled_since=?, "
+        "income_collected_at=? WHERE id=?",
+        (user_id, wd.to_iso(now), wd.to_iso(now), exchange_id),
+    )
+
+
+def test_minute_collections_preserve_the_same_income_as_one_hour(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    _give_exchange(conn, a.user_id, now)
+    for minute in range(1, 61):
+        wd.load_or_create_player(conn, a.user_id, a.handle, now + timedelta(minutes=minute), 1)
+    actual = wd.read_player(conn, a.user_id)
+    assert actual.cash == 1040
+    assert actual.income_remainder == 0
+    conn.close()
+
+
+def test_capture_pays_prior_owners_earned_income(db_path):
+    conn, now, a, b = _rivals(db_path)
+    _give_exchange(conn, b.user_id, now)
+    later = now + timedelta(hours=2)
+    wd.resolve_root_exchange(conn, a, 1, later, FixedRandom())
+    assert wd.read_player(conn, b.user_id).cash == 1080
+    wd.load_or_create_player(conn, b.user_id, b.handle, later, 1)
+    assert wd.read_player(conn, b.user_id).cash == 1080
+    wd.refresh_player(conn, a.user_id, later + timedelta(hours=1))
+    assert wd.read_player(conn, a.user_id).cash == 1040
+    conn.close()
+
+
+def test_fractional_income_stays_with_player_across_losing_and_reclaiming(db_path):
+    conn, now, a, b = _rivals(db_path)
+    _give_exchange(conn, a.user_id, now)
+    later = now + timedelta(minutes=1)
+    wd.resolve_root_exchange(conn, b, 1, later, FixedRandom())
+    assert wd.read_player(conn, a.user_id).cash == 1000
+    assert wd.read_player(conn, a.user_id).income_remainder == 2_400_000_000
+    wd.resolve_root_exchange(conn, a, 1, later, FixedRandom())
+    wd.refresh_player(conn, a.user_id, later + timedelta(seconds=30))
+    actual = wd.read_player(conn, a.user_id)
+    assert actual.cash == 1001
+    assert actual.income_remainder == 0
+    conn.close()
+
+
+def test_action_can_spend_income_earned_during_open_session(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    conn.execute("UPDATE players SET cash=0 WHERE user_id=1")
+    _give_exchange(conn, a.user_id, now)
+    wd.resolve_recruit(conn, a, now + timedelta(hours=2))
+    actual = wd.read_player(conn, a.user_id)
+    assert (actual.cash, actual.crew, actual.turns_used) == (5, 4, 1)
+    conn.close()
+
+
+def test_failed_capture_preserves_income_for_owner(db_path):
+    conn, now, a, b = _rivals(db_path)
+    _give_exchange(conn, b.user_id, now)
+    later = now + timedelta(hours=2)
+    success, _, _ = wd.resolve_root_exchange(conn, a, 1, later, FixedRandom(0.99))
+    assert not success
+    wd.refresh_player(conn, b.user_id, later)
+    assert wd.read_player(conn, b.user_id).cash == 1080
+    conn.close()
+
+
+def test_failed_actor_commit_rolls_back_prior_owner_income_and_transfer(db_path):
+    conn, now, a, b = _rivals(db_path)
+    _give_exchange(conn, b.user_id, now)
+    conn.execute("""
+        CREATE TRIGGER reject_actor_income BEFORE UPDATE ON players WHEN NEW.user_id=1
+        BEGIN SELECT RAISE(ABORT, 'injected transfer failure'); END
+    """)
+    before = list(conn.iterdump())
+    with pytest.raises(sqlite3.IntegrityError, match="injected"):
+        wd.resolve_root_exchange(conn, a, 1, now + timedelta(hours=2), FixedRandom())
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_concurrent_income_collection_cannot_double_pay(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    _give_exchange(conn, a.user_id, now)
+    conn.close()
+    barrier = threading.Barrier(2)
+
+    def collect():
+        thread_conn = wd.connect(db_path)
+        try:
+            barrier.wait(timeout=5)
+            wd.refresh_player(thread_conn, a.user_id, now + timedelta(hours=1))
+        finally:
+            thread_conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(collect) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=10)
+    conn = wd.connect(db_path)
+    actual = wd.read_player(conn, a.user_id)
+    assert (actual.cash, actual.income_remainder) == (1040, 0)
+    conn.close()
+
+
+def test_clock_rollback_does_not_double_collect_income(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    _give_exchange(conn, a.user_id, now)
+    wd.refresh_player(conn, a.user_id, now + timedelta(hours=2))
+    wd.refresh_player(conn, a.user_id, now + timedelta(hours=1))
+    wd.refresh_player(conn, a.user_id, now + timedelta(hours=2))
+    assert wd.read_player(conn, a.user_id).cash == 1080
+    assert wd.list_exchanges(conn)[0].income_collected_at == wd.to_iso(now + timedelta(hours=2))
+    conn.close()
+
+
+def test_income_collection_does_not_invalidate_exchange_selection(db_path):
+    conn, now, a, b = _rivals(db_path)
+    _give_exchange(conn, b.user_id, now)
+    selected = wd.list_exchanges(conn)[0]
+    later = now + timedelta(minutes=1)
+    wd.refresh_player(conn, b.user_id, later)
+    success, _, _ = wd.resolve_root_exchange(conn, a, 1, later, FixedRandom(), expected_exchange=selected)
+    assert success
+    conn.close()
+
+
+def _legacy_income_world(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    # Recreate the shipped players layout, keeping a real populated row.
+    schema = conn.execute("SELECT sql FROM sqlite_master WHERE name='players'").fetchone()[0]
+    addition = ", income_remainder INTEGER NOT NULL DEFAULT 0"
+    assert addition in schema
+    old_schema = schema.replace(addition, "")
+    values = asdict(a)
+    values.pop("income_remainder")
+    conn.execute("DROP TABLE players")
+    conn.execute(old_schema)
+    names = ", ".join(values)
+    placeholders = ", ".join("?" for _ in values)
+    conn.execute(f"INSERT INTO players ({names}) VALUES ({placeholders})", tuple(values.values()))
+    return conn, a
+
+
+def test_income_upgrade_preserves_existing_player_and_is_idempotent(db_path):
+    conn, a = _legacy_income_world(db_path)
+    wd.ensure_schema(conn)
+    wd.ensure_schema(conn)
+    actual = wd.read_player(conn, a.user_id)
+    assert actual.cash == a.cash
+    assert actual.created_at == a.created_at
+    assert actual.income_remainder == 0
+    conn.close()
+
+
+def test_failed_income_upgrade_preserves_original_schema_and_data(db_path):
+    conn, _ = _legacy_income_world(db_path)
+    before = list(conn.iterdump())
+
+    def deny_alter(action, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_ALTER_TABLE else sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_alter)
+    with pytest.raises(sqlite3.DatabaseError):
+        wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert not conn.in_transaction
+    assert list(conn.iterdump()) == before
+    conn.close()
