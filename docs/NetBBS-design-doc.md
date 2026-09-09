@@ -6568,6 +6568,18 @@ pages retain every net resource change until continued or left with Back. These
 paths support 80x24, 40x12 and 20x10, including long names, wide/combining text and
 large resource values; manual terminal/transport validation remains slice 9.
 
+**First visit and recovery (issue #362, slice 3).** New callers receive a short,
+content-first guide to the map, action previews, trade/recruitment and free browsing;
+the full rules stay in Help. The switchboard gives contextual next steps for no
+turns, insufficient recruit cash, one remaining crew member, missing territory
+income and high Heat. High-Heat guidance shows the cooldown until Trade adds no
+bust roll; recruitment remains a no-Heat option, not an automatic recovery action.
+
+Unavailable raid/root actions explain the refill before opening a target picker.
+Recruit previews show the actual cash shortfall; empty rival worlds explain the
+available non-PvP alternatives. Advice does not grant resources, spend turns,
+change protection, or imply a waiting caller's snapshot updates continuously.
+
 ### Issue #168 — real-time relay for Link direct chat
 
 **Goal:** decide between the two structurally different designs the issue

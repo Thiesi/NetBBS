@@ -1565,6 +1565,25 @@ def countdown(delta: timedelta) -> str:
     return (f"{days}d " if days else "") + f"{hours}h {minutes}m"
 
 
+def next_steps(state: DashboardState, now: datetime) -> list[str]:
+    player = state.player
+    if player.turns_used >= TURNS_PER_DAY:
+        return ["No turns: browse Rank, Map, Rivals and Log free; return when the refill is ready."]
+    lines = []
+    if player.heat + TRADE_WAREZ_HEAT > HEAT_BUST_THRESHOLD:
+        safe_at = from_iso(player.heat_updated_at) + timedelta(hours=(player.heat + TRADE_WAREZ_HEAT - HEAT_BUST_THRESHOLD) / HEAT_DECAY_PER_HOUR)
+        lines.append(f"Trade without a bust roll in {countdown(safe_at - now)}. Recruitment adds no Heat.")
+    if player.cash < RECRUIT_COST:
+        lines.append(f"Need ${RECRUIT_COST - player.cash} more to recruit. Trade needs no cash; inspect its Heat risk first.")
+    if player.crew == 1:
+        lines.append("Crew is at the one-member floor. Rebuild with recruits; jobs and defended contests still have low odds.")
+    if rank_score(player) == 0 and not lines:
+        lines.append("First goals: inspect Map, preview an unclaimed exchange, or Trade to fund Crew recruitment.")
+    elif not state.holdings:
+        lines.append("No territory income yet. Back on the switchboard, inspect Map and compare Root previews.")
+    return lines
+
+
 def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
     player = state.player
     rank = rank_score(player)
@@ -1578,6 +1597,7 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
         lines.append(f"Turn refill in {countdown(refill - now)}")
     else:
         lines.append("Turn window starts with your next action.")
+    lines.extend(next_steps(state, now))
     lines.append(f"Rank: {rank:,} - {tier_name(rank)}")
     tier = tier_index(rank)
     if tier + 1 < len(RANK_TIERS):
@@ -1669,14 +1689,27 @@ def show_text_pages(p: Palette, title: str, paragraphs: list[str], width: int, h
 
 
 def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False) -> None:
+    if onboarding:
+        show_text_pages(p, "FIRST VISIT", [
+            f"Welcome to the shared BBS scene. Start with ${STARTING_CASH}, {STARTING_CREW} crew and {TURNS_PER_DAY} turns.",
+            "Inspect [E]Map first. [X]Root previews unclaimed territory; [T]rade earns cash for [C]rew recruitment.",
+            "Every action shows costs and risk before Act. Back cancels for free. Jobs and defended contests are harder with a small crew.",
+            "No turns? Browse Rank, Map, Rivals and Log free. The switchboard shows your refill and season deadline.",
+            "High Heat? Wait for cooldown or recruit without a bust roll. No cash? Trade needs none; preview its Heat risk.",
+            "Use separate single keys. [?]Help has the full rules; [Q]uit leaves from the switchboard.",
+        ], w, height, onboarding=True)
+        return
     show_text_pages(p, "HOW TO PLAY", [
         "Run a BBS-scene crew for cash, respect and control of ten shared exchanges.",
+        "First visit: inspect Map, compare a Root preview for unclaimed territory, or Trade to fund Crew recruitment. Back always cancels a preview.",
         f"Each action costs one of {TURNS_PER_DAY} turns. The rolling 24-hour window starts with your first action.",
         "[T]rade Warez: quick cash. [C]rew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
         "[J]ob: risky payout. [R]aid: steal rival cash. [X]Root: take an exchange for hourly income.",
         f"Past {HEAT_BUST_THRESHOLD:g} Heat, each extra point adds a bust chance; busts cost cash/crew and reset Heat. Heat decays over time.",
         f"Rank only climbs during a season. Every {SEASON.days} days, cash, crew, Heat, turns, exchanges and Rank totals reset.",
         "[B]Rank: standings. [E]Map: territory. [V]Rivals: eligibility. [H]Log: retained events. All browsing is free.",
+        "No turns? Browse and plan until refill. No eligible rivals? Read their protection reasons, trade, recruit or inspect territory instead.",
+        "No cash? Trade has no cash cost. One crew left? Recruit to rebuild; the floor prevents elimination, not bad odds. Preview Heat risk before trading or fighting.",
         "[N]ext/[P]rev page; [B]ack leaves a screen; [Q]uit leaves the game from the switchboard. Use separate single keys.",
     ], w, height, onboarding=onboarding)
 
@@ -1730,15 +1763,22 @@ def read_menu_choice(valid: str) -> str:
             return key
 
 
+def action_block_reason(action: str, player: Player) -> str | None:
+    if player.turns_used >= TURNS_PER_DAY:
+        refill = from_iso(player.turn_day_start) + DAY
+        return ("No turns. Refill at " + refill.strftime("%Y-%m-%d %H:%M UTC") +
+                ". Back to the switchboard for free Rank, Map, Rivals and Log browsing.")
+    if action == "recruit" and player.cash < RECRUIT_COST:
+        return f"Need ${RECRUIT_COST - player.cash} more cash to recruit. Trade needs no cash; preview its Heat risk first."
+    return None
+
+
 def action_preview_lines(action: str, player: Player, target: Player | Exchange | None = None) -> list[str]:
     cost = RECRUIT_COST if action == "recruit" else 0
     lines = [f"Season {player.season_number}; turns {TURNS_PER_DAY - player.turns_used}/{TURNS_PER_DAY}; cash ${player.cash:,}",
              f"Cost: 1 turn, ${cost} cash. Back spends nothing."]
-    if player.turns_used >= TURNS_PER_DAY:
-        refill = from_iso(player.turn_day_start) + DAY
-        lines.append("Unavailable: no turns. Refill at " + refill.strftime("%Y-%m-%d %H:%M UTC"))
-    if cost > player.cash:
-        lines.append(f"Unavailable: need ${cost - player.cash} more cash.")
+    if reason := action_block_reason(action, player):
+        lines.append("Unavailable: " + reason)
     heat = {"trade": TRADE_WAREZ_HEAT, "recruit": 0, "job": JOB_HEAT,
             "raid": RAID_HEAT, "root": ROOT_EXCHANGE_HEAT}[action]
     if action == "trade":
@@ -1779,7 +1819,7 @@ def confirm_action(p: Palette, conn: sqlite3.Connection, player: Player, action:
                    width: int, height: int, target: Player | Exchange | None = None) -> bool:
     refreshed = refresh_player(conn, player.user_id, now_utc())
     player.__dict__.update(refreshed.__dict__)
-    available = player.turns_used < TURNS_PER_DAY and (action != "recruit" or player.cash >= RECRUIT_COST)
+    available = action_block_reason(action, player) is None
     return show_text_pages(p, action.upper() + " PREVIEW", action_preview_lines(action, player, target),
                            width, height, accept=available) == "A"
 
@@ -1844,6 +1884,13 @@ def choose_rival(p: Palette, conn: sqlite3.Connection, player: Player, width: in
         now = now_utc()
         page = read_player_page(conn, player.user_id, now, offset)
         player.__dict__.update(page.player.__dict__)
+        if reason := action_block_reason("raid", player):
+            show_text_pages(p, "RAID UNAVAILABLE", [reason], width, height)
+            return None
+        if not page.entries:
+            show_text_pages(p, "NO RIVAL CREWS", ["No other crews have joined yet.",
+                            "Back to the switchboard to trade, recruit or inspect exchange territory. All browsing is free."], width, height)
+            return None
         effective_now = max(now, from_iso(player.heat_updated_at))
         records = [([rival.handle, f"{tier_name(rank_score(rival))}; Rank {rank_score(rival):,}",
                      raid_eligibility_reason(player, rival, effective_now)],
@@ -1909,6 +1956,9 @@ def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
 def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int, height: int = 24) -> bool:
     refreshed = refresh_player(conn, player.user_id, now)
     player.__dict__.update(refreshed.__dict__)
+    if reason := action_block_reason("root", player):
+        show_text_pages(p, "ROOT UNAVAILABLE", [reason], w, height)
+        return False
     exchanges = list_exchanges(conn)
     records = [([e.name, f"Owner: {e.controller_handle or 'unclaimed'}; garrison {e.garrison}; ${e.income_per_hour}/hour",
                  "Already yours" if e.controller_user_id == player.user_id else "Available to contest"],

@@ -66,6 +66,12 @@ show why they cannot be selected. Raid selection reaches every crew through batc
 of ten rather than a random sample. Results, rejection messages and season notices
 are paginated on compact terminals; continue to read the remaining rows or use Back.
 
+New callers get a short first-visit guide; Help holds the full rules. The switchboard
+suggests next steps when turns, cash or crew are depleted, and shows the wait until
+Trade has no bust roll at high Heat. Recruitment adds no Heat; it still needs cash.
+Out-of-turn raid/root attempts show the refill deadline before target selection.
+Empty rival worlds point callers toward trading, recruiting and territory planning.
+
 Use separate single keys. Arrow/function keys and pasted command bursts do not
 select actions; Escape dismisses a pause but has no menu action. An incomplete
 or excessively long terminal sequence ends the door with a reconnect diagnostic.
