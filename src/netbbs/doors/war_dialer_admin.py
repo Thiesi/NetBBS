@@ -78,6 +78,8 @@ def change_competition(db_path: Path, world: Path, *, identity_dir: Path, backup
     # Maintenance is an explicit preceding operation, and remains on afterward.
     if world_status(db_path, world)["maintenance"] != "on":
         raise backup.BackupError("Enable maintenance first and close game sessions; no season was changed.")
+    if not identity_dir.is_dir():
+        raise backup.BackupError("Node identity directory is unavailable. Check --identity-dir; no season was changed.")
     backup.create_backup(db_path=db_path, identity_dir=identity_dir, destination=backup_to)
     backup._validate_backup_source(backup_to, allow_migrate=False)
     with backup._war_dialer_maintenance(world), contextlib.closing(wd.connect(world)) as conn:

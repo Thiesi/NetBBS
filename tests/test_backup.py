@@ -1761,6 +1761,24 @@ def test_war_dialer_sysop_failure_rolls_back_reset_and_audit(tmp_path, db_path, 
     assert admin.world_status(db_path, path) == before
 
 
+@pytest.mark.parametrize("kind", ["missing", "file"])
+def test_war_dialer_reset_requires_existing_identity_directory(tmp_path, db_path, kind):
+    from netbbs.doors import war_dialer_admin as admin
+    path = _populate_war_dialer(db_path)
+    admin.set_maintenance(db_path, path, True)
+    before = admin.world_status(db_path, path)
+    identity = tmp_path / "mistyped-identity"
+    if kind == "file":
+        identity.write_text("not a directory")
+    destination = tmp_path / "pre-reset"
+    with pytest.raises(BackupError, match="identity directory"):
+        admin.change_competition(db_path, path, identity_dir=identity, backup_to=destination,
+                                 confirm=path.name, reason="test", reset=True)
+    assert not destination.exists()
+    assert _war_cash(path) == 4321
+    assert admin.world_status(db_path, path) == before
+
+
 def test_war_dialer_status_is_read_only_and_cli_is_bounded(tmp_path, db_path, identity_dir, capsys):
     from netbbs.doors import war_dialer_admin as admin
     path = _populate_war_dialer(db_path)
