@@ -108,13 +108,32 @@ def _load_door_info() -> dict:
         "node_name": "NetBBS",
     }
     path = os.environ.get("NETBBS_DOOR_INFO")
-    if not path:
-        return default
+    if path is None:
+        return default  # Deliberate standalone demo only.
     try:
         with open(path, encoding="utf-8") as f:
-            info = json.load(f)
-    except (OSError, ValueError):
-        return default
+            raw = f.read(16385)
+        if len(raw) > 16384:
+            raise ValueError("metadata exceeds 16 KiB")
+        info = json.loads(raw)
+        if not isinstance(info, dict):
+            raise ValueError("metadata must be an object")
+        if type(info.get("user_id")) is not int or not 0 < info["user_id"] <= 2**63 - 1:
+            raise ValueError("a positive host user ID is required")
+        handle = info.get("handle")
+        if (not isinstance(handle, str) or not handle.strip() or len(handle) > 128
+                or any(unicodedata.category(ch).startswith("C") for ch in handle)):
+            raise ValueError("invalid host handle")
+        if "node_name" in info and (not isinstance(info["node_name"], str) or len(info["node_name"]) > 256):
+            raise ValueError("invalid node name")
+        if "node_name" in info:
+            info["node_name"] = _event_plain(info["node_name"])
+        for dimension in ("terminal_width", "terminal_height"):
+            if dimension in info and (type(info[dimension]) is not int or not 1 <= info[dimension] <= 1000):
+                raise ValueError("invalid terminal dimensions")
+    except (OSError, ValueError, TypeError) as exc:
+        raise WorldStateError("War Dialer launch metadata is invalid. Return to NetBBS and contact the SysOp. "
+                              "No Guest player was created.") from exc
     default.update(info)
     return default
 
@@ -2118,7 +2137,12 @@ def main() -> int:
     global _OUTPUT_WIDTH
 
     sys.stdout.reconfigure(encoding="utf-8")
-    info = _load_door_info()
+    try:
+        info = _load_door_info()
+    except WorldStateError as exc:
+        sys.stderr.write(f"War Dialer metadata: {_event_plain(str(exc.__cause__))[:300]}\n")
+        out_line(str(exc))
+        return 1
     palette = Palette(truecolor=info.get("color_depth") == "truecolor")
     try:
         _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
@@ -2145,6 +2169,9 @@ def main() -> int:
         # without running finally. Decode paste markers if already supplied.
         ensure_schema(conn)
         bind_world_owner(conn, info.get("war_dialer_owner"))
+        maintenance = conn.execute("SELECT value FROM meta WHERE key='maintenance'").fetchone()
+        if maintenance is not None and maintenance[0] == "on":
+            raise WorldStateError("War Dialer is closed for SysOp maintenance. Return to NetBBS and try again later.")
         now = now_utc()
         season_number = current_world_season(conn, now)
         ensure_exchanges_seeded(conn, season_number, now)

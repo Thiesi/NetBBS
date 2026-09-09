@@ -63,6 +63,49 @@ game version compatible with the recorded schema or restore a verified,
 SQLite-consistent backup belonging to this node. Do not clear `user_version`,
 delete the world, or copy only a live database file as a recovery shortcut.
 
+### SysOp status, maintenance and competition controls
+
+**MANUAL ? outside NetBBS:** use the local CLI with the owning node database and
+its configured world path, in the same service environment:
+`python -m netbbs.doors.war_dialer_admin --db /srv/bbs/netbbs.db --world /srv/bbs/netbbs.db.doors/war-dialer.db status`.
+Status is read-only: it shows the path, schema, node namespace, maintenance state,
+stored season, row counts and ten recent operations. It does not settle clocks,
+create a missing world or acquire a session guard. Errors are bounded diagnostics.
+
+Replace `status` with `maintenance on` to close the world to new callers. Active
+sessions must be closed first; an idle session also blocks the change. The flag
+persists across restart. Use `maintenance off` to reopen the world after checking
+it. A caller arriving during maintenance receives a clear return/retry message.
+No operator command starts, stops or redeploys the BBS service for you.
+
+**MANUAL ? outside NetBBS, season advance or reset:**
+
+1. Close game sessions, enable maintenance and stop the node service. Use `status`
+   to review the selected path and competition before proceeding.
+2. Run `season` or `reset` with `--identity-dir`, a fresh `--backup-to` directory,
+   a `--reason` of 1-240 characters, and `--confirm` containing the exact world
+   filename (for example `war-dialer.db`). The command refuses missing/wrong
+   confirmation, a running node, active game sessions, or failed backup validation.
+3. `season` starts the next numbered season using the normal competitive reset and
+   keeps receipts. `reset` additionally clears receipts. Both preserve player IDs,
+   handles, account age, world ownership and SysOp audit history. Neither grants
+   a fresh 48-hour newcomer grace period.
+4. A complete checksummed node backup is created and verified before changing the
+   competition. Competitive changes, receipt deletion and the audit entry commit
+   together. The world keeps the latest 100 SysOp operations, with timestamp,
+   local OS operator label, reason, before/after season, backup path and manifest
+   checksum for destructive controls. A failed mutation rolls back; the pre-action
+   backup remains available. These records are operational history, not a security
+   boundary against the service's own OS user.
+5. Review status and the backup, then explicitly use `maintenance off` and start
+   the service. Successful changes and failed backups both leave maintenance on.
+
+A supplied unreadable or malformed host metadata file is an integration error,
+not a standalone demo: the caller gets a clear failure, the SysOp receives a
+bounded stderr diagnostic in door-session history, and no Guest world is created.
+Standalone Guest play is available only when `NETBBS_DOOR_INFO` is absent and the
+world has not been bound to a node.
+
 ### Backup, ownership and restore
 
 The first host launch binds a world to an opaque namespace stored in that node's
