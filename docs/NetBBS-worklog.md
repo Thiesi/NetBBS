@@ -977,10 +977,17 @@ session needs the same treatment.
   private/broadcast sender labels only, never to anything matched or sent;
   `_mrc_helper_carries_a_secret` refuses `!identify`, `!register`,
   `!update` and `!roompass` as chat in a bridged channel before anything is
-  recorded or relayed; the LASTSEEN opt-out is a Profile preference read
-  with the nick colour and opt-in (`load_lastseen`, cached and pruned like
-  them) and sent as `STATUS LASTSEEN OFF` on every announcement. The fake
-  hub records `STATUS LASTSEEN` and answers `STATS` with four fields.
+  recorded or relayed, and `InputHistory.forget` drops the line `read_line`
+  had already recorded, so Up cannot bring the password back in another
+  channel; the LASTSEEN choice is a tri-state Profile preference (never
+  chosen / on / off) read with the nick colour and opt-in (`load_lastseen`,
+  cached and pruned like them, and part of `_ensure_nick_color`'s guard so a
+  failed read is retried) and sent as `STATUS LASTSEEN ON|OFF` on every
+  announcement when chosen -- the hub keeps an opt-out across sessions, so
+  only an explicit ON undoes one. `_network_activity` is cleared with the
+  other hub readings on `reload_settings` and shown only beside a network
+  size. The fake hub records `STATUS LASTSEEN` and answers `STATS` with
+  four fields.
 - Caller facts (issue #377): `note_caller` (chat_flow, before `local_join`)
   stores address, terminal size and level per username in `_caller_facts`.
   Unlike the other per-caller caches it is *not* pruned to the announced

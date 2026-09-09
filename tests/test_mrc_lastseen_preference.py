@@ -30,12 +30,13 @@ def alice(db):
 
 def test_on_by_default_and_round_trips(db, alice):
     assert mrc_lastseen_recorded(db, alice) is True
-    assert mrc_lastseen_for_username(db, "alice") is True
-    assert mrc_lastseen_for_username(db, "nobody") is True
+    # No explicit choice yet: the bridge sends nothing (the hub's default).
+    assert mrc_lastseen_for_username(db, "alice") is None
+    assert mrc_lastseen_for_username(db, "nobody") is None
     set_mrc_lastseen_recorded(db, alice, False)
     assert mrc_lastseen_recorded(db, alice) is False and mrc_lastseen_for_username(db, "alice") is False
     set_mrc_lastseen_recorded(db, alice, True)
-    assert mrc_lastseen_for_username(db, "alice") is True
+    assert mrc_lastseen_for_username(db, "alice") is True  # explicit ON, sent as such
 
 
 def test_profile_screen_toggles_it(db, alice):

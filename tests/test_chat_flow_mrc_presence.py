@@ -199,6 +199,16 @@ def test_secret_helpers_are_refused_as_chat(db, lane, hub, presence, channel, al
             await rig.fake.wait_for(lambda p: p.body.endswith(" !weather") and p.from_user == "alice")
             assert not [p for p in rig.fake.received if "hunter2" in p.body]
             assert not [m for m in get_scrollback(db, channel) if "hunter2" in (m.body or "")]
+            # And the refused lines are not in the input history either
+            # (review of #390): Up in another channel must not resend them.
+            from netbbs.net.char_input import InputHistory
+            history = InputHistory()
+            history.record("!identify hunter2")
+            history.forget("!identify hunter2")
+            assert len(history) == 0
+            history.record("/quit")
+            history.forget("!identify hunter2")
+            assert len(history) == 1
         finally:
             await rig.close()
     asyncio.run(scenario())

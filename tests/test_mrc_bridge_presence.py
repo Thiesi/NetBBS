@@ -367,8 +367,8 @@ def test_the_lastseen_opt_out_is_sent_on_announcement(db, lane, lobby, alice):
         _enable(db, fake.port)
         set_mrc_room(db, lobby, "lobby")
         hub = ChatHub()
-        recorded = {"alice": True}
-        bridge = await _connected_bridge(db, lane, hub, fake, load_lastseen=lambda db_, u: recorded.get(u, True))
+        recorded: dict = {"alice": None}
+        bridge = await _connected_bridge(db, lane, hub, fake, load_lastseen=lambda db_, u: recorded.get(u))
         try:
             hub.join(lobby.name, ParticipantId("alice", 1))
             await bridge.local_join(lobby, "alice")
@@ -383,6 +383,15 @@ def test_the_lastseen_opt_out_is_sent_on_announcement(db, lane, lobby, alice):
             await bridge.local_join(lobby, "alice")
             await fake.wait_for(lambda p: p.body == "STATUS LASTSEEN OFF" and p.from_user == "alice", timeout=3.0)
             await _wait_until(lambda: fake.lastseen.get(("my_board", "alice")) == "OFF")
+            # Re-enabled: an explicit ON reaches the hub (review of #390).
+            hub.leave(lobby.name, ParticipantId("alice", 2))
+            await bridge.local_leave(lobby, "alice")
+            await _wait_until(lambda: len(fake.packets(body_prefix="LOGOFF")) == 2, timeout=3.0)
+            recorded["alice"] = True
+            hub.join(lobby.name, ParticipantId("alice", 3))
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "STATUS LASTSEEN ON" and p.from_user == "alice", timeout=3.0)
+            await _wait_until(lambda: fake.lastseen.get(("my_board", "alice")) == "ON")
             assert fake.unknown_commands == []
         finally:
             await bridge.close()

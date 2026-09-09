@@ -329,7 +329,7 @@ class MrcBridge:
         load_open_settings: Callable[[Database], OpenRoomSettings] = load_open_room_settings,
         load_nick_color: Callable[[Database, str], int] = mrc_nick_color_for_username,
         load_private_optin: Callable[[Database, str], bool] = mrc_private_messages_for_username,
-        load_lastseen: Callable[[Database, str], bool] = mrc_lastseen_for_username,
+        load_lastseen: Callable[[Database, str], bool | None] = mrc_lastseen_for_username,
         open_connection: OpenConnection = asyncio.open_connection,
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -422,7 +422,9 @@ class MrcBridge:
         # last private sender per caller (for `/mrc r`), and the
         # per-remote-sender allowance.
         self._private_optin: dict[str, bool] = {}
-        self._lastseen_recorded: dict[str, bool] = {}  # issue #378, read with the others
+        # Issue #378: the caller's explicit LASTSEEN choice (None = never
+        # chosen, the hub's default applies), read with the others.
+        self._lastseen_recorded: dict[str, bool | None] = {}
         self._known_sites: dict[str, tuple[str, str, float]] = {}
         self._last_private_sender: dict[str, tuple[str, str]] = {}
         self._private_buckets: dict[tuple[str, str], _TokenBucket] = {}
@@ -541,6 +543,7 @@ class MrcBridge:
             self._network_stats_raw = None
             self._banner.clear()
             self._known_sites.clear()
+            self._network_activity = None
             self._hub_latency = None
             self._hub_latency_at = None
             await self._reload_from_db()
@@ -1214,10 +1217,13 @@ class MrcBridge:
         self._enqueue(protocol.newroom(nick, settings.site_wire_name, "", mapping.room))
         self._send_caller_facts(mapping, nick, username)
         self._request_userlist(mapping, nick)
-        if self._lastseen_recorded.get(username, True) is False:
-            # Issue #378: the caller's opt-out from the hub's LASTSEEN record,
-            # repeated on every announcement like the away state.
-            self._enqueue(protocol.status_lastseen(nick, settings.site_wire_name, mapping.room, False))
+        lastseen = self._lastseen_recorded.get(username)
+        if lastseen is not None:
+            # Issue #378: the caller's explicit LASTSEEN choice, ON or OFF,
+            # repeated on every announcement like the away state -- the hub
+            # keeps an opt-out across sessions, so only an explicit ON
+            # undoes one (review of #390).
+            self._enqueue(protocol.status_lastseen(nick, settings.site_wire_name, mapping.room, lastseen))
         away = self._away_message(username)
         if away is not None:
             # The hub is never behind on a caller's away state: told on
@@ -1266,7 +1272,7 @@ class MrcBridge:
         failed opt-in read is logged and left unread: the caller shows
         as "not read yet", inbound private lines take the opt-out path,
         and the next announcement or `send_private` tries again."""
-        if username in self._nick_colors and username in self._private_optin:
+        if username in self._nick_colors and username in self._private_optin and username in self._lastseen_recorded:
             return
         if username not in self._nick_colors:
             try:
@@ -1290,7 +1296,7 @@ class MrcBridge:
             except Exception as exc:
                 _logger.warning("Could not read the MRC last-seen choice for %r; the hub's default applies: %s", username, exc)
             else:
-                self._lastseen_recorded[username] = bool(recorded)
+                self._lastseen_recorded[username] = None if recorded is None else bool(recorded)
 
     def _note_pong(self, echoed: str) -> None:
         """`PONG` echoes the epoch an IMALIVE carried (issue #377); an

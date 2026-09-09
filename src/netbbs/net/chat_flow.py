@@ -726,8 +726,8 @@ def _mrc_section_description(status: MrcStatus) -> str:
         bits.append(f"{status.open_rooms} open here")
     if status.network_summary:
         bits.append(status.network_summary)
-    if status.network_activity_label:
-        bits.append(status.network_activity_label)
+        if status.network_activity_label:
+            bits.append(status.network_activity_label)
     return "rooms on the MRC network" + (" -- " + ", ".join(bits) if bits else "")
 
 
@@ -4401,6 +4401,7 @@ async def _chat_loop(
                         if not line:
                             continue
                         if mrc_bridge is not None and mrc_bridge.is_bridged(channel) and _mrc_helper_carries_a_secret(line):
+                            history.forget(line)  # read_line recorded it before we saw it
                             # Issue #378: the hub is moving its identity
                             # verbs to `!helper` chat text; typed here, the
                             # password would go to the room as chat.

@@ -312,6 +312,13 @@ class InputHistory:
         if len(self._entries) > self.max_entries:
             self._entries.pop(0)
 
+    def forget(self, line: str) -> None:
+        """Drop `line` if it is the most recent entry -- for a line the
+        caller refused after `read_line` had already recorded it (a
+        password typed as chat, issue #378): Up must not bring it back."""
+        if self._entries and self._entries[-1] == line:
+            self._entries.pop()
+
     def __len__(self) -> int:
         return len(self._entries)
 
