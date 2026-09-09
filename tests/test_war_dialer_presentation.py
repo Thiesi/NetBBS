@@ -1265,10 +1265,63 @@ def test_bound_world_refuses_guest_or_different_node_process(tmp_path, owner):
     result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
                             env=env, timeout=10)
     assert result.returncode == 1
-    assert b"belongs to another node" in result.stdout
+    message = b"launch metadata is invalid" if owner is None else b"belongs to another node"
+    assert message in result.stdout
     assert b"Traceback" not in result.stderr
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("SELECT COUNT(*) FROM players").fetchone()[0] == 0
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("metadata", ["missing", "", "[]", "{}", '{"user_id":0,"handle":"Guest"}',
+                                       '{"user_id":1,"handle":123}', '{"user_id":1,"handle":"ok","terminal_width":null}',
+                                       '{"user_id":9223372036854775808,"handle":"ok"}'])
+def test_bad_host_metadata_does_not_create_guest_world(tmp_path, metadata):
+    path = tmp_path / "never-created.db"
+    info = tmp_path / "info.json"
+    if metadata != "missing":
+        info.write_text(metadata, encoding="utf-8")
+    env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(info), PYTHONIOENCODING="utf-8")
+    result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
+                            env=env, timeout=10)
+    assert result.returncode == 1
+    assert b"launch metadata is invalid" in result.stdout
+    assert b"Traceback" not in result.stderr
+    assert not path.exists()
+
+
+def test_world_in_maintenance_returns_clear_message_without_player_creation(tmp_path):
+    path = tmp_path / "closed.db"
+    conn = wd.connect(path)
+    conn.execute("INSERT INTO meta (key,value) VALUES ('maintenance','on')")
+    conn.close()
+    env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), PYTHONIOENCODING="utf-8")
+    env.pop("NETBBS_DOOR_INFO", None)
+    result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
+                            env=env, timeout=10)
+    assert result.returncode == 1
+    assert b"closed for SysOp maintenance" in result.stdout
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM players").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("owner", [None, "invalid"])
+def test_incomplete_host_owner_does_not_initialize_world(tmp_path, owner):
+    import json
+    path = tmp_path / "must-not-create.db"
+    info = tmp_path / "info.json"
+    metadata = {"user_id": 1, "handle": "Caller"}
+    if owner is not None:
+        metadata["war_dialer_owner"] = owner
+    info.write_text(json.dumps(metadata), encoding="utf-8")
+    env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(info), PYTHONIOENCODING="utf-8")
+    result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
+                            env=env, timeout=10)
+    assert result.returncode == 1
+    assert b"launch metadata is invalid" in result.stdout
+    assert not path.exists()

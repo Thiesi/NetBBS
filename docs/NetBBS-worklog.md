@@ -382,6 +382,13 @@ journaling so read-only verification cannot introduce WAL sidecars into an archi
 Restore each external world and its old WAL/SHM/journal artifacts using a local
 rollback directory; a late failure must restore both node state and world state.
 
+SysOp season/reset commands use normal world rollover, preserving account age and
+advancing the season identity. Keep receipt deletion and the bounded audit update
+inside that same transaction; an audit failure must roll back the competition.
+Destructive commands require persistent maintenance and a stopped node before the
+complete pre-action backup, and never reopen the world implicitly. Invalid supplied
+host metadata must fail before any SQLite creation; only absence selects demo mode.
+
 ### Database execution lanes
 
 Interactive network flows use a foreground `DatabaseLane`; Phase 3 background

@@ -1697,6 +1697,108 @@ def test_war_dialer_cli_create_and_restore_names_destinations(tmp_path, db_path,
 
 
 
+@pytest.mark.parametrize("reset", [False, True])
+def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(tmp_path, db_path, identity_dir, reset):
+    from netbbs.doors import war_dialer_admin as admin
+    bootstrap_node_identity("test-node").save(identity_dir)
+    (identity_dir / "operator-marker").write_bytes(b"retain identity contents")
+    path = _populate_war_dialer(db_path)
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        before_identity = conn.execute("SELECT user_id,handle,created_at FROM players").fetchall()
+        conn.execute("UPDATE players SET crew=40, crew_recruited_total=40, turns_used=8")
+        conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=30")
+        conn.commit()
+    admin.set_maintenance(db_path, path, True)
+    destination = tmp_path / "before-reset"
+    result = admin.change_competition(db_path, path, identity_dir=identity_dir, backup_to=destination,
+                                     confirm=path.name, reason="operator-selected fresh competition", reset=reset)
+    assert result["maintenance"] == "on"
+    assert result["stored_season"] == "2"
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("SELECT user_id,handle,created_at FROM players").fetchall() == before_identity
+        cash, crew, turns, rank_count = conn.execute("SELECT cash,crew,turns_used,crew_recruited_total FROM players").fetchone()
+        assert (cash, crew, turns, rank_count) == (300, 3, 0, 0)
+        assert conn.execute("SELECT COUNT(*) FROM exchanges WHERE controller_user_id IS NOT NULL").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == (0 if reset else 1)
+    audit = result["recent_operations"][-1]
+    assert audit["action"] == ("reset competition" if reset else "advance season")
+    assert audit["manifest_sha256"] == hashlib.sha256((destination / "manifest.json").read_bytes()).hexdigest()
+    assert _war_cash(destination / "war-dialer/1.db") == 4321
+    assert (destination / "identity/operator-marker").read_bytes() == b"retain identity contents"
+    admin.set_maintenance(db_path, path, False)
+    assert admin.world_status(db_path, path)["maintenance"] == "off"
+
+
+@pytest.mark.parametrize("blocker", ["confirmation", "maintenance", "active", "backup", "running_node"])
+def test_war_dialer_sysop_change_rejects_before_reset(tmp_path, db_path, identity_dir, blocker):
+    from netbbs.doors import war_dialer_admin as admin
+    from netbbs.doors.bundled import war_dialer as wd
+    bootstrap_node_identity("test-node").save(identity_dir)
+    path = _populate_war_dialer(db_path)
+    if blocker != "maintenance":
+        admin.set_maintenance(db_path, path, True)
+    destination = tmp_path / "backup"
+    if blocker == "backup":
+        destination.mkdir()
+    if blocker == "running_node":
+        write_pid_file(db_path)
+    with wd.world_session(path) if blocker == "active" else contextlib.nullcontext():
+        with pytest.raises(BackupError):
+            admin.change_competition(db_path, path, identity_dir=identity_dir, backup_to=destination,
+                                     confirm="wrong" if blocker == "confirmation" else path.name, reason="test", reset=True)
+    assert _war_cash(path) == 4321
+    assert admin.world_status(db_path, path)["events"] == 1
+
+
+def test_war_dialer_sysop_failure_rolls_back_reset_and_audit(tmp_path, db_path, identity_dir, monkeypatch):
+    from netbbs.doors import war_dialer_admin as admin
+    bootstrap_node_identity("test-node").save(identity_dir)
+    path = _populate_war_dialer(db_path)
+    admin.set_maintenance(db_path, path, True)
+    before = admin.world_status(db_path, path)
+    def fail_audit(*args, **kwargs):
+        raise OSError("audit write failed")
+    monkeypatch.setattr(admin, "_audit", fail_audit)
+    with pytest.raises(BackupError, match="audit write failed"):
+        admin.change_competition(db_path, path, identity_dir=identity_dir, backup_to=tmp_path / "backup",
+                                 confirm=path.name, reason="test", reset=True)
+    assert _war_cash(path) == 4321
+    assert admin.world_status(db_path, path) == before
+
+
+@pytest.mark.parametrize("kind", ["missing", "file"])
+def test_war_dialer_reset_requires_existing_identity_directory(tmp_path, db_path, kind):
+    from netbbs.doors import war_dialer_admin as admin
+    path = _populate_war_dialer(db_path)
+    admin.set_maintenance(db_path, path, True)
+    before = admin.world_status(db_path, path)
+    identity = tmp_path / "mistyped-identity"
+    if kind == "file":
+        identity.write_text("not a directory")
+    destination = tmp_path / "pre-reset"
+    with pytest.raises(BackupError, match="identity directory"):
+        admin.change_competition(db_path, path, identity_dir=identity, backup_to=destination,
+                                 confirm=path.name, reason="test", reset=True)
+    assert not destination.exists()
+    assert _war_cash(path) == 4321
+    assert admin.world_status(db_path, path) == before
+
+
+def test_war_dialer_status_is_read_only_and_cli_is_bounded(tmp_path, db_path, identity_dir, capsys):
+    from netbbs.doors import war_dialer_admin as admin
+    path = _populate_war_dialer(db_path)
+    before = path.read_bytes()
+    assert not Path(str(path) + ".sessions").exists()
+    admin.main(["--db", str(db_path), "--world", str(path), "status"])
+    assert "maintenance: off" in capsys.readouterr().out
+    assert path.read_bytes() == before
+    assert not Path(str(path) + ".sessions").exists()
+    missing = tmp_path / "missing.db"
+    with pytest.raises(SystemExit, match="operation failed"):
+        admin.main(["--db", str(db_path), "--world", str(missing), "status"])
+    assert not missing.exists()
+
+
 @pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal", ".sessions"])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_war_dialer_restore_rejects_cross_world_sidecar_collisions(tmp_path, db_path, identity_dir, suffix, reverse):

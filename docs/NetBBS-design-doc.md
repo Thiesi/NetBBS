@@ -6634,6 +6634,22 @@ process exit releases it without deleting its inode. Restore retains the prior
 generation and journals unresolved failures. Service/profile path activation and
 old-binary exclusion are manual SysOp actions, as documented in the door guide.
 
+**SysOp competition controls.** Local commands provide read-only status, persistent
+maintenance and confirmed season/reset operations. Maintenance excludes new
+callers and cannot be changed over an active game session. Destructive controls
+require a stopped node, maintenance on, an exact-filename confirmation, a reason,
+and a freshly created and verified complete node backup. They use the normal
+atomic rollover and advance the season number. A reset additionally clears
+receipts; the maintainer selected preservation of player identities and account
+age, so reset never renews newcomer protection. Ownership and the latest 100 SysOp
+audit entries survive, with destructive changes and their audit record in the same
+transaction. Maintenance stays on until the SysOp explicitly reopens the world.
+
+Host metadata is either absent (an intentional unbound standalone demo) or valid.
+Unreadable, oversized, malformed or invalid identity/dimension metadata is refused
+before world creation; it never falls back to Guest. Caller messages remain clear
+and SysOp diagnostics are bounded. Commands do not activate or redeploy services.
+
 **World schema compatibility.** SQLite `user_version=1` identifies the supported
 War Dialer schema. A complete original unversioned world is adopted through a
 numbered migration; its additive fields, retained history and version marker
