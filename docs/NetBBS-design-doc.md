@@ -4853,6 +4853,27 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
+Faction contacts remain accessible at every station through [P] Concord and
+[W] Blackwake, before and after membership. These are read-only, paginated screens
+until a deliberate Join action and final confirmation. Each shows current standing,
+joining requirements, the once-only 2,000-credit grant and exact perk conditions.
+Joining validates eligibility before mutation and checkpoints before acknowledgement.
+
+Dual membership is explicitly permitted, including existing careers: Concord and
+Blackwake retain independent membership and standing. Neither membership is erased
+by hostile conduct, but a faction suspends its own perk at standing -50 or below;
+it resumes automatically above -50, without another joining payment. Concord's
+active commission adds 25% to bounty/escort payouts, evaluated when they pay.
+Blackwake's active membership halves the chance of a new customs inspection.
+Already resolved encounter decisions remain cached on reconnect. Membership does
+not excuse notoriety, clear fines or override the other faction's standing.
+
+These conditions apply to existing memberships as well as new ones. The pilot
+record and contacts show active versus suspended perks, and bounty/escort details
+explain that their quoted bonus follows standing at payout. Historical highlights
+are retained as records of what was said when earned. Retirement clears membership
+as before. Authored faction assignments build on these contacts in a later slice.
+
 Crew are recurring named specialists, with a concise personality and persistent
 service record per role. The `crew-v1` identity namespace chooses from fixed
 role-specific candidates without galaxy or encounter RNG. Browsing previews a
