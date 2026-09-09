@@ -4374,6 +4374,12 @@ Scripted acceptance tests must navigate the details pages before pressing A;
 otherwise they no longer exercise acceptance. Test compact screens by counting
 display columns and physical rows between successive input requests.
 
+The detail action bar labels each command and Back explicitly, including when
+its available commands vary by stage (A means Accept before a faction case and
+Aid after investigation). Reserve the complete wrapped action bar in page
+capacity. Full-content UI tests remove that bar as a unit before rejoining prose;
+filtering only the old Act row leaves wrapped footer fragments inside the body.
+
 `netbbs.net.admin_flow._door_field_specs`' `args` field is parsed with
 `shlex.split(draft["args_line"])` -- deliberately POSIX-mode (the
 default), matching the "never a shell, always an argv list" posture

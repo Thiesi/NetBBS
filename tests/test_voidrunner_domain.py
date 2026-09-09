@@ -9085,6 +9085,7 @@ def test_survey_terms_before_and_after_scanning_fit_and_browsing_is_read_only(mo
         out = io.StringIO(); frames = []
         def choose():
             frame = out.getvalue(); out.seek(0); out.truncate(0); frames.append(frame)
+            assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
             assert len(frame.splitlines()) <= height
             assert all(vr._visible_width(row) <= width for row in frame.splitlines())
             assert world.save.to_dict() == saved and world.event_rng.getstate() == rng
@@ -9314,6 +9315,7 @@ def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, st
     world._checkpoint = lambda w: pytest.fail("Browsing archive wrote a checkpoint")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -9321,9 +9323,12 @@ def test_archive_contact_pages_preserve_all_terms_without_writes(monkeypatch, st
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
     with contextlib.redirect_stdout(output): vr.screen_archive(vr.Palette(False), world)
-    rows = [vr._ANSI_RE.sub("", row).strip() for frame in frames for row in frame.splitlines()]
-    text = " ".join(row for row in rows if row and row not in (">", "<") and not re.fullmatch(r"\d+/\d+", row) and not row.startswith("Archive ") and "Act" not in row and "[<>]Page:" not in row)
-    for line in vr.archive_lines(world): assert " ".join(line.split()) in text
+    bodies=[]
+    for frame in frames:
+        plain=vr._ANSI_RE.sub("",frame)
+        body=plain[re.search(r"Archive.*?\d+/\d+",plain,re.S).end():]
+        bodies.append(re.split(r"\[[A-Z]\](?:Accept|Investigate|Publish|Sell|Route|Back)",body)[0])
+    assert " ".join(" ".join(bodies).split())==" ".join(" ".join(vr.archive_lines(world)).split())
 
 
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
@@ -10201,11 +10206,12 @@ def test_personal_crew_task_pages_keep_complete_terms_and_leave_no_writes(monkey
     world._checkpoint = lambda w: pytest.fail("Task browsing checkpointed")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
         assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         page, count = map(int, re.search(r"Crew task.*?(\d+)/(\d+)", frame, re.S).groups())
         plain = vr._ANSI_RE.sub("", frame)
-        body = re.sub(r"^[\s>]*Crew task\s+[\d,]+cr\s+\d+/\d+\s*", "", plain).split("[C/R/B]Act")[0]
+        body = re.sub(r"^[\s>]*Crew task\s+[\d,]+cr\s+\d+/\d+\s*", "", plain).split("[C]Complete")[0]
         bodies.append(body)
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -10695,11 +10701,12 @@ def test_faction_case_pages_preserve_full_terms_without_writes(monkeypatch, fact
     monkeypatch.setattr(vr, "confirm", lambda *args: pytest.fail("Browsing opened a confirmation"))
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0)
+        assert "[B]Back" in " ".join(vr._ANSI_RE.sub("",frame).split())
         assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
         plain = vr._ANSI_RE.sub("", frame)
         page, count = map(int, re.search(r"[\d,]+cr\s+(\d+)/(\d+)", plain).groups())
         body = re.sub(r"^[\s>]*Case\s+[\d,]+cr\s+\d+/\d+\s*", "", plain)
-        bodies.append(re.split(r"\[[A-Z/]+\]Act", body)[0])
+        bodies.append(re.split(r"\[[A-Z]\](?:Accept|Aid|Investigate|Hardline|Complete|Route|Back)", body)[0])
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)

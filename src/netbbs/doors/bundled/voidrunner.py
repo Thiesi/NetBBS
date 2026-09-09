@@ -3004,7 +3004,7 @@ def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
         stage = story["stage"] if story is not None else None
         actions = {None: "A/R/", "accepted": "I/R/", "evidence": "H/A/R/", "committed": "C/R/", "complete": ""}[stage]
         lines = ([result] if result else []) + faction_story_lines(world, faction)
-        key, page, count = _draw_service_page(p, f"Case {world.save.pilot.credits:,}cr", lines, f"[{actions}B]Act [<>]Page: ", page)
+        key, page, count = _draw_service_page(p, f"Case {world.save.pilot.credits:,}cr", lines, _detail_action_bar(actions, {"A": "Aid" if stage == "evidence" else "Accept", "I": "Investigate", "H": "Hardline", "C": "Complete", "R": "Route"}), page)
         if key in ("B", "Q"): return result
         if key == ">": page = min(page + 1, count - 1); continue
         if key == "<": page = max(0, page - 1); continue
@@ -4130,7 +4130,7 @@ def screen_archive(p: Palette, world: World) -> None:
             elif flags.get("archive_v1_started") and not flags.get("archive_v1_recovered") and world.here.id == world.landmark["system_id"]: actions = "I/"
             else: actions = "R/"
         action, page, count = _draw_service_page(p, f"Archive {world.save.pilot.credits:,}cr", result + archive_lines(world),
-                                                f"[{actions}B]Act [<>]Page: ", page)
+                                                _detail_action_bar(actions, {"A": "Accept", "I": "Investigate", "P": "Publish", "S": "Sell", "R": "Route"}), page)
         if action in ("B", "Q"): return
         if action == ">": page = min(page + 1, count - 1); continue
         if action == "<": page = max(0, page - 1); continue
@@ -4935,6 +4935,11 @@ def shipyard_lines(world: World) -> list[str]:
     return lines
 
 
+def _detail_action_bar(actions: str, labels: dict[str, str]) -> str:
+    """Keep every available action and the harmless exit explicit on all pages."""
+    return "".join(f"[{key}]{labels[key]} " for key in actions.split("/") if key) + "[B]Back [<>]Page: "
+
+
 def _service_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
     capacity = max(len(rows) for rows in _trade_pages(lines, title, footer))
     pages = [[]]
@@ -5111,7 +5116,7 @@ def screen_crew_assignment(p: Palette, world: World, role: str) -> str | None:
         task = crew_assignment_record(world, role)
         actions = "" if task is not None and task["state"] == "complete" else "C/R/" if task is not None else "A/R/"
         lines = ([result] if result else []) + crew_assignment_lines(world, role)
-        key, page, count = _draw_service_page(p, f"Crew task {world.save.pilot.credits:,}cr", lines, f"[{actions}B]Act [<>]Page: ", page)
+        key, page, count = _draw_service_page(p, f"Crew task {world.save.pilot.credits:,}cr", lines, _detail_action_bar(actions, {"A": "Accept", "C": "Complete", "R": "Route"}), page)
         if key in ("B", "Q"): return result
         if key == ">": page = min(page + 1, count - 1); continue
         if key == "<": page = max(0, page - 1); continue
@@ -6062,7 +6067,7 @@ def _do_scan(p: Palette, world: World) -> str | None:
         can_scan = world.save.ship.scanner_tier > 0 and world.save.ship.fuel >= 2 and bool(survey_candidates(world))
         lines = ([f"Result: {result}"] + report if result else []) + survey_terms(world)
         action, page, count = _draw_service_page(p, f"Survey {world.save.pilot.credits:,}cr", lines,
-            "[S/B]Act [<>]Page: " if can_scan else "[B]Back [<>]Page: ", page)
+            "[S]Survey [B]Back [<>]Page: " if can_scan else "[B]Back [<>]Page: ", page)
         if action in ("B", "Q"): return result
         if action == ">": page = min(page + 1, count - 1); continue
         if action == "<": page = max(0, page - 1); continue
