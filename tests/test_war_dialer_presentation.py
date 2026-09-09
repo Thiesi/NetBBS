@@ -1121,6 +1121,76 @@ def test_raid_picker_can_choose_an_eligible_crew_after_fifty_others(tmp_path, mo
     conn.close()
 
 
+def test_next_steps_explain_depleted_resources_without_spending(tmp_path):
+    conn = wd.connect(tmp_path / "guidance.db")
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 1, "Owner", now, 1)
+    conn.execute("UPDATE players SET cash=0, crew=1, heat=90")
+    state = wd.dashboard_state(conn, 1, now)
+    text = "\n".join(wd.next_steps(state, now))
+    assert "Need $75 more" in text
+    assert "Trade needs no cash" in text
+    assert "one-member floor" in text
+    assert "2h 24m" in text
+    assert "Recruitment adds no Heat" in text
+    assert wd.read_player(conn, 1).turns_used == 0
+    state.player.turns_used = 15
+    text = "\n".join(wd.next_steps(state, now))
+    assert "No turns" in text and "free" in text and "refill" in text
+    conn.close()
+
+
+@pytest.mark.parametrize("key,heading", [(b"r", b"RAID UNAVAILABLE"), (b"x", b"ROOT UNAVAILABLE")])
+def test_real_process_no_turns_explains_refill_before_target_selection(tmp_path, key, heading):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b">\x1b[0m ")
+        conn = wd.connect(path)
+        conn.execute("UPDATE players SET turns_used=15, turn_day_start=heat_updated_at")
+        conn.close()
+        send(key)
+        wait_for(b"[B]ack")
+        assert heading in output
+        assert b"No turns. Refill at" in output
+        send(b"b")
+        wait_for(b">\x1b[0m ")
+        send(b"q")
+        assert process.wait(timeout=5) == 0
+        conn = wd.connect(path)
+        assert wd.read_player(conn, 0).turns_used == 15
+        conn.close()
+
+
+def test_new_player_gets_short_first_visit_then_switchboard(tmp_path):
+    with _running_door(tmp_path, new_player=True) as (process, path, wait_for, send, output):
+        wait_for(b"Press any key to continue...")
+        assert b"FIRST VISIT" in output
+        assert b"[E]Map first" in output
+        send(b" ")
+        wait_for(b">\x1b[0m ")
+        assert b"SWITCHBOARD" in output
+        send(b"q")
+        assert process.wait(timeout=5) == 0
+
+
+def test_recruit_preview_lists_cash_shortfall_even_when_turns_are_exhausted(tmp_path):
+    conn = wd.connect(tmp_path / "both-blockers.db")
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    player = wd.load_or_create_player(conn, 1, "Owner", now, 1)
+    player.turns_used = 15
+    player.turn_day_start = wd.to_iso(now)
+    player.cash = 25
+    text = "\n".join(wd.action_preview_lines("recruit", player))
+    assert "Refill at" in text
+    assert "Need $50 more cash" in text
+    conn.close()
+
+
 @pytest.mark.parametrize("screen", ["raid", "root", "preview"])
 def test_target_refresh_announces_rollover_before_cancel(tmp_path, monkeypatch, screen):
     conn = wd.connect(tmp_path / "picker-rollover.db")
