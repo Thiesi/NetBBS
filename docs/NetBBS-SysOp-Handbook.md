@@ -482,7 +482,7 @@ codes are not relayed — NetBBS callers speak in one house style.
 
 `/mrc` also asks the hub things on the caller's behalf: `/mrc rooms`,
 `/mrc who`, `/mrc bbses [search]`, `/mrc info <bbs>`, `/mrc motd`,
-`/mrc stats`, `/mrc help`, `/mrc lastseen <nick>`, `/mrc topics`, plus
+`/mrc stats`, `/mrc help [topic]`, `/mrc lastseen <nick>`, `/mrc topics`, plus
 `/mrc send <command>` for any other server command, `/mrc ctcp <nick>
 VERSION|TIME|PING|CLIENTINFO`, and `/mrc msg <nick> <text>` / `/mrc r
 <text>` for a caller who opted in to private messages. The hub's reply

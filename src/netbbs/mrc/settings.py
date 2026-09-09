@@ -37,6 +37,7 @@ from netbbs.mrc.protocol import (
     DEFAULT_PORT_PLAIN,
     DEFAULT_PORT_TLS,
     MAX_NAME,
+    MAX_ROOM,
     room_name_error,
     sanitize_body,
     sanitize_name,
@@ -179,6 +180,11 @@ def default_port_for(tls: bool) -> int:
 
 def _mapping_from_row(row: sqlite3.Row) -> MrcChannelMapping | None:
     if row is None or row["mrc_room"] is None:
+        return None
+    if len(row["mrc_room"]) > MAX_ROOM:
+        # A room the wire cannot name (a hand edit, or a row the upgrade
+        # migration did not see) is not a mapping; the channel shows as
+        # unbridged rather than bridging into the wrong room.
         return None
     keys = row.keys()
     return MrcChannelMapping(

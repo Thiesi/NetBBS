@@ -5923,9 +5923,11 @@ commands like `IAMHERE`, `USERLIST`, `STATS`, `LOGOFF`, `INFOSYS`/`INFOWEB`/
 etc.). The only "handshake" is one unauthenticated line the client sends
 on connect — `{boardName}~{clientSoftware}/{os}/{version}` — no password,
 token, or signature ties a connection, a user name, or a claimed board
-name to anything real; any client can claim to be any board. Name fields
-are constrained to ASCII 33–125, 30 chars, with Mystic `|NN` pipe-color
-codes stripped; message bodies to ASCII 32–125. There is no history or
+name to anything real; any client can claim to be any board. User and
+site name fields are constrained to ASCII 33–125, 30 chars, room names
+to 20 (the protocol page's `string[20]`, issue #376), with Mystic `|NN`
+pipe-color codes stripped; message bodies to ASCII 32–125. There is no
+history or
 backfill concept at all — a message reaches only whatever clients happen
 to be connected at the instant it's sent.
 

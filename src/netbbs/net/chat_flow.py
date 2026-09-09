@@ -3164,7 +3164,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "revokeaccess": ("/revokeaccess <user>", "Revoke a user's access to this chat channel."),
     "members": ("/members", "List users with direct access to this chat channel."),
     "mrc": (
-        "/mrc [rooms|who|bbses [search]|info <bbs>|motd|stats|help|lastseen <nick>|topics|msg <nick> <text>|r <text>|register|identify|roompass|update password|send <command>|ctcp <nick> <VERSION|TIME|PING|CLIENTINFO>]",
+        "/mrc [rooms|who|bbses [search]|info <bbs>|motd|stats|help [topic]|lastseen <nick>|topics|msg <nick> <text>|r <text>|register|identify|roompass|update password|send <command>|ctcp <nick> <VERSION|TIME|PING|CLIENTINFO>]",
         "Show this channel's MRC bridge, ask the MRC hub something (its reply is shown to you alone), or message an MRC user privately if you opted in.",
     ),
 }

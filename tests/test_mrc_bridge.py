@@ -1086,12 +1086,34 @@ def test_platform_label_uses_the_hubs_convention(monkeypatch):
     from netbbs.mrc import bridge as bridge_module
 
     for reported, expected in (
-        (("win32", "AMD64"), "Windows.x86_64"),
-        (("linux", "x86_64"), "Linux.x86_64"),
-        (("linux", "aarch64"), "Linux.aarch64"),
-        (("darwin", "arm64"), "OSX.aarch64"),
-        (("freebsd14", "i386"), "Freebsd14.i386"),
+        (("Windows", "AMD64"), "Windows.x86_64"),
+        (("Linux", "x86_64"), "Linux.x86_64"),
+        (("Linux", "aarch64"), "Linux.aarch64"),
+        (("Darwin", "arm64"), "OSX.aarch64"),
+        (("NetBSD", "amd64"), "NetBSD.x86_64"),
+        (("FreeBSD", "i386"), "FreeBSD.i386"),
     ):
-        monkeypatch.setattr(sys_module, "platform", reported[0])
+        monkeypatch.setattr(platform_module, "system", lambda value=reported[0]: value)
         monkeypatch.setattr(platform_module, "machine", lambda value=reported[1]: value)
         assert bridge_module._platform_label() == expected
+    assert sys_module  # the label no longer reads sys.platform
+
+
+def test_an_overlength_room_name_resolves_to_no_mapping(db, lane, lobby, alice):
+    """Review of #387: `mapping_for_room` must not cut a 25-character
+    request down to the 20-character room sharing its prefix."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "a" * 20)
+        hub = ChatHub()
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            assert bridge.mapping_for_room("a" * 20) is not None
+            assert bridge.mapping_for_room("#" + "A" * 20) is not None
+            assert bridge.mapping_for_room("a" * 25) is None
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())

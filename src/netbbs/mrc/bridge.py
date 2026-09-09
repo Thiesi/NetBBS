@@ -247,7 +247,7 @@ class _Connection:
 OpenConnection = Callable[..., Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
 
 
-_OS_LABELS = {"win32": "Windows", "cygwin": "Windows", "linux": "Linux", "darwin": "OSX"}
+_OS_LABELS = {"windows": "Windows", "linux": "Linux", "darwin": "OSX"}
 _ARCH_LABELS = {
     "amd64": "x86_64", "x86_64": "x86_64", "x64": "x86_64",
     "arm64": "aarch64", "aarch64": "aarch64",
@@ -259,7 +259,8 @@ def _platform_label() -> str:
     """The handshake's `{Os}.{arch}` in the hub's own convention
     (`Linux.x86_64`, `Windows.x86_64`, `OSX.x86_64`; MRCDoc rev 1.26),
     normalised from what Python reports (issue #376)."""
-    os_name = _OS_LABELS.get(sys.platform, sys.platform.capitalize() or "Unknown")
+    system = platform.system() or "Unknown"  # "NetBSD", "FreeBSD", "Windows", "Linux", "Darwin"
+    os_name = _OS_LABELS.get(system.lower(), system)
     machine = (platform.machine() or "unknown").lower()
     return f"{os_name}.{_ARCH_LABELS.get(machine, machine)}"
 
@@ -1736,7 +1737,11 @@ class MrcBridge:
         mapped channel or an open room -- or `None`. Resolved before any
         open-room gate is applied: entering an existing channel is that
         channel's own decision, the node-wide defaults only govern
-        materializing a new row."""
+        materializing a new row. A name the wire would cut matches
+        nothing: a 25-character request must not land in the
+        20-character room that shares its prefix (review of #387)."""
+        if protocol.room_name_error(room) is not None:
+            return None
         return self._by_room.get(protocol.sanitize_room(room).lower())
 
     def note_entry(self, channel: Channel) -> None:
