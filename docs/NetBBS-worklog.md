@@ -5161,3 +5161,17 @@ the tracked contract in map/list/inspection candidates even when another public
 bearing is passed. Mark the tracked target as ! and the distinct route endpoint
 as X; reveal only their public names/coordinates until actual discovery. Reading
 those bearings must not chart them or create market observations.
+
+Specialist workshop sites use their own versioned seed namespace and sorted
+candidate IDs, separate from galaxy and encounter RNG. Public directory bearings
+authorize those route destinations without changing discovery or market memory.
+Material-backed upgrades share existing module effects/caps and validate location,
+credits, materials and pending travel before mutation. Their finite tier ladder
+bounds repeat installation; no separate repeat-reward flag is needed.
+
+Workshop materials use the same unknown-first/FIFO disposal path as other cargo,
+but their known costs and unknown units must go to additive workshop ledger fields,
+not losses or trading receipts. Installation costs are capital spending, separate
+from reported trading margins. New counters default to zero for old careers.
+Commit module tier, material lots, credit spend and recognition before narration;
+route/dialog cancellation must retain the parent yard's previous action result.
