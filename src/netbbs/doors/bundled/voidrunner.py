@@ -6358,7 +6358,7 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
     wages = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
     lines.append("Crew: " + (", ".join(crew) if crew else "none") + f"; {wages}cr/jump.")
     discovered = sum(system.discovered for system in world.galaxy)
-    lines.append(f"Systems charted: {discovered}/{len(world.galaxy)} ({round(discovered / len(world.galaxy) * 100)}%). Raiders defeated: {pilot.kills}.")
+    lines.append(f"Systems charted: {discovered}/{len(world.galaxy)} ({round(discovered / len(world.galaxy) * 100)}%). Combat victories: {pilot.kills}.")
     lines.append(f"Missions completed: {pilot.missions_completed}. Retirements: {pilot.retirements}.")
     for faction in FACTION_MEMBERSHIPS:
         lines.append(f"{FACTION_LABEL[faction]}: {faction_membership_status(world, faction)}. Perks suspend at -50 or below.")
