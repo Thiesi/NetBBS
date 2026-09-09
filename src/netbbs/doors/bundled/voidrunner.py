@@ -3004,7 +3004,7 @@ def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
     while True:
         story = world.save.faction_stories.get(faction)
         stage = story["stage"] if story is not None else None
-        actions = {None: "A/R/", "accepted": "I/R/", "evidence": "H/A/", "committed": "C/R/", "complete": ""}[stage]
+        actions = {None: "A/", "accepted": "I/R/", "evidence": "H/A/", "committed": "C/R/", "complete": ""}[stage]
         if stage == "evidence" and faction_story_target(world, faction, "hardline") is None:
             actions = "A/"
         lines = ([result] if result else []) + faction_story_lines(world, faction)

@@ -10973,3 +10973,21 @@ def test_faction_case_missing_haven_does_not_advertise_or_dispatch_hardline(monk
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):vr.screen_faction_story(vr.Palette(False),world,vr.FACTION_BLACKWAKE)
     assert seen==["aid"]
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+def test_faction_case_idle_route_is_unavailable_until_acceptance(monkeypatch,faction):
+    import copy
+    world=_faction_case_world(faction,"idle");before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
+    routes=[];checkpoints=[];world._checkpoint=lambda w:checkpoints.append(w.save.faction_stories[faction]["stage"])
+    output=io.StringIO();keys=iter("RARB")
+    def choose():
+        key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
+        if faction not in world.save.faction_stories:
+            assert "[R]Route" not in frame and world.save.to_dict()==before and world.event_rng.getstate()==rng
+        else:assert "[R]Route" in frame
+        return key
+    monkeypatch.setattr(vr,"read_key",choose)
+    monkeypatch.setattr(vr,"_screen_auto_route",lambda p,w,*,destination:routes.append(destination))
+    with contextlib.redirect_stdout(output):vr.screen_faction_story(vr.Palette(False),world,faction)
+    assert routes==[vr.faction_story_target(world,faction)] and checkpoints==["accepted"]
