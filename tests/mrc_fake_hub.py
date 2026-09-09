@@ -32,6 +32,11 @@ class FakeMrcHub:
         # Issue #304: away messages by (site, nick) (None = back), room
         # topics, and the banner line pushed after HELLO.
         self.afk: dict[tuple[str, str], str | None] = {}
+        # Issue #373: the IAMHERE extension per user, and every server
+        # command the spec does not define (the real hub answers those
+        # with an error the caller sees; a test asserts the list is empty).
+        self.activity: dict[tuple[str, str], str] = {}
+        self.unknown_commands: list[str] = []
         self.topics: dict[str, str] = {}
         self.banner: str | None = "|14Welcome to the fake hub"
         self._event = asyncio.Event()
@@ -152,11 +157,15 @@ class FakeMrcHub:
                 self.users[key] = new_room or "lobby"
             elif command == "LOGOFF":
                 self.users.pop(key, None)
-            elif command.split(" ", 1)[0] == "AFK":
-                # `command` is upper-cased for matching; the message keeps
-                # its case from the body.
-                message = packet.body[len("AFK"):].strip()
+            elif command.startswith("STATUS AFK"):
+                # MRCDoc rev 1.26, STATUS: `command` is upper-cased for
+                # matching; the message keeps its case from the body.
+                message = packet.body[len("STATUS AFK"):].strip()
                 self.afk[key] = message or None
+            elif command == "IAMHERE":
+                self.activity[key] = params
+            elif command.split(" ", 1)[0] in ("AFK", "STATUS"):
+                self.unknown_commands.append(packet.body)
             elif command == "NEWTOPIC":
                 room, _, text = params.partition(":")
                 self.topics[room.lower()] = text

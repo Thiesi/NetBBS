@@ -900,15 +900,18 @@ session needs the same treatment.
   section entry is re-decided from `open_rooms_enabled` on every return to
   the top level, and selecting an existing open room refuses while the switch
   is off.
-- Presence (issue #304): the away state lives in `PresenceRegistry` only.
-  `local_away(username, message | None)` sends `AFK <message>` / bare `AFK`
-  to every room the caller is announced in *now*, and `_announce` re-reads
-  the registry after every NEWROOM (reconnects included), so a final logout
-  -- which clears the registry -- can never leave a stale AFK behind in the
-  bridge. The message is sanitized like a body and cut to fit after `AFK `
-  in one packet (the caller is told). The bare-`AFK`-means-back reading is a
-  guess from the reference clients, not documentation; correct it when the
-  hub's protocol page is available.
+- Presence (issues #304, #373): the away state lives in `PresenceRegistry`
+  only. `local_away(username, message | None)` sends `STATUS AFK <message>`
+  plus `IAMHERE:AWAY` (away) or `IAMHERE:ACTIVE` (back) to every room the
+  caller is announced in *now*; `_announce` re-reads the registry after
+  every NEWROOM (reconnects included), so a final logout -- which clears the
+  registry -- can never leave a stale AFK behind in the bridge; and the
+  keepalive's per-user `IAMHERE` carries `AWAY`/`ACTIVE` from the registry
+  every minute. The message is sanitized like a body and cut to the spec's
+  55 characters (the caller is told). These are the documented forms
+  (MRCDoc protocol page, rev 1.26): the spec defines no `AFK` verb -- the
+  fake hub records one as unknown -- and no verb that clears AFK, so a
+  return is reported as activity and the hub decides.
 - The hub's welcome is session state, not bridge state: `browse_channels`
   owns one `mrc_session_state` dict for the whole visit and `_chat_loop`
   marks `welcomed` on the first MRC join; the bridge only remembers the

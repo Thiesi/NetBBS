@@ -383,8 +383,12 @@ def logoff(nick: str, site: str, room: str) -> MrcPacket:
     return user_command(nick, site, room, "LOGOFF")
 
 
-def iamhere(nick: str, site: str, room: str) -> MrcPacket:
-    return user_command(nick, site, room, "IAMHERE")
+def iamhere(nick: str, site: str, room: str, activity: str = "") -> MrcPacket:
+    """The per-minute presence report. `activity` is the spec's
+    extension (`AWAY`: no typing for ten minutes, `ACTIVE`: typing
+    within ten minutes, empty: unknown) -- MRCDoc rev 1.26, IAMHERE."""
+    body = f"IAMHERE:{activity}" if activity else "IAMHERE"
+    return user_command(nick, site, room, body)
 
 
 def userlist(nick: str, site: str, room: str) -> MrcPacket:
@@ -446,12 +450,18 @@ def room_body_reserve(nick: str, *, nick_color: int = DEFAULT_NICK_COLOR) -> int
 # --- presence, topics and the network's size (issue #304) --------------------
 
 
-def afk(nick: str, site: str, room: str, message: str | None) -> MrcPacket:
-    """`AFK <message>` marks the nick away (ENiGMA½ and Mystic send
-    exactly this); a bare `AFK` is the best reading of "back" any
-    reference client offers -- corrected when the hub's own
-    documentation says otherwise."""
-    body = "AFK" if not message else f"AFK {message}"
+# MRCDoc rev 1.26, STATUS: the AFK message is `string[55]`.
+MAX_AFK_MESSAGE = 55
+ACTIVITY_AWAY = "AWAY"
+ACTIVITY_ACTIVE = "ACTIVE"
+
+
+def status_afk(nick: str, site: str, room: str, message: str) -> MrcPacket:
+    """`STATUS AFK <message>` marks the nick away on the hub (shown by
+    CHATTERS and WHOON) -- the documented form (MRCDoc rev 1.26,
+    STATUS); there is no `AFK` verb. The spec documents no way to
+    clear it: a return is reported through `iamhere(..., "ACTIVE")`."""
+    body = f"STATUS AFK {message}" if message else "STATUS AFK"
     return user_command(nick, site, room, body)
 
 

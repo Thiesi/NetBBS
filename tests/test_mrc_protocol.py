@@ -157,6 +157,12 @@ def test_builders_follow_documented_field_conventions():
     assert build_line(protocol.newroom("alice", "S", "", "lobby")) == "alice~S~~SERVER~~~NEWROOM::lobby~\n"
     assert build_line(protocol.logoff("alice", "S", "lobby")) == "alice~S~lobby~SERVER~~lobby~LOGOFF~\n"
     assert build_line(protocol.iamhere("alice", "S", "lobby")) == "alice~S~lobby~SERVER~~lobby~IAMHERE~\n"
+    # Issue #373: the documented presence forms (MRCDoc rev 1.26).
+    assert build_line(protocol.iamhere("alice", "S", "lobby", "AWAY")) == "alice~S~lobby~SERVER~~lobby~IAMHERE:AWAY~\n"
+    assert build_line(protocol.status_afk("alice", "S", "lobby", "gone fishing")) == "alice~S~lobby~SERVER~~lobby~STATUS AFK gone fishing~\n"
+    assert build_line(protocol.status_afk("alice", "S", "lobby", "")) == "alice~S~lobby~SERVER~~lobby~STATUS AFK~\n"
+    assert protocol.MAX_AFK_MESSAGE == 55
+    assert not hasattr(protocol, "afk")
     assert build_line(protocol.imalive("S", "My Board")) == "CLIENT~S~~SERVER~~~IMALIVE:My Board~\n"
     assert build_line(protocol.info("S", "sys", "Thiesi")) == "CLIENT~S~~SERVER~~~INFOSYS:Thiesi~\n"
     assert build_line(protocol.chat_message("alice", "S", "lobby", "hi")) == "alice~S~lobby~~~lobby~hi~\n"
