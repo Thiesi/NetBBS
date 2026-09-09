@@ -5246,3 +5246,8 @@ rather than aliasing the previous run. Reject archive-capacity overflow instead 
 evicting old records. Legacy retirement counts can exceed the number of dossiers;
 only observed conclusions create records. New Game+ equipment uses ordinary module
 tiers and must pass the normal ship/save validator without special exceptions.
+
+Dossier highlights accept the same legacy list lengths as active pilot highlights;
+the live append helper's 40-entry retention policy is not a legacy-save validation
+limit. Preserve an accepted history when archiving it. The existing 4 MiB save-file
+ceiling bounds the complete archive payload without silently truncating records.

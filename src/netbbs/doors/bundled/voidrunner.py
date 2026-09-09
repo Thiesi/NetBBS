@@ -1475,7 +1475,7 @@ def _validate_save_document(data: dict) -> None:
         for key in ("days", "credits", "kills", "missions"): integer(dossier[key], "dossier " + key)
         for key in ("started", "ended"): text(dossier[key], "dossier " + key)
         require(dossier["ship"] in HULL_CLASSES and dossier["finale"] in CAREER_FINALES, "dossier conclusion")
-        require(isinstance(dossier["highlights"], list) and len(dossier["highlights"]) <= MAX_HIGHLIGHTS, "dossier highlights")
+        require(isinstance(dossier["highlights"], list), "dossier highlights")
         for entry in dossier["highlights"]: text(entry, "dossier highlight")
         finale = dossier["finale"]
         require((finale == "legend" and dossier["rank"] == len(RANKS)-1)

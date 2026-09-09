@@ -11359,3 +11359,25 @@ def test_career_rank_new_career_does_not_repeat_old_promotion_notice(monkeypatch
     monkeypatch.setattr(vr,"read_key",lambda:"Q")
     with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_station_menu(vr.Palette(False),world)
     assert "Promoted to" not in output.getvalue()
+
+
+@pytest.mark.parametrize("count", [41,128])
+def test_career_finale_preserves_accepted_legacy_highlight_lists(monkeypatch,tmp_path,count):
+    world=_finale_world();highlights=[f"Legacy achievement {i}" for i in range(count)]
+    world.save.pilot.highlights=list(highlights);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    old,_,_=vr.load_or_create_save(tmp_path,77,"Tester");assert old.pilot.highlights==highlights
+    keys=iter("SY");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_career_finale(vr.Palette(False),world)
+    assert "A new career begins." in output.getvalue()
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.pilot.retirements==1 and saved.retired_careers[0]["highlights"]==highlights
+    lines=vr.career_dossier_lines(saved)
+    assert [line[2:] for line in lines if line.startswith("* ")]==highlights
+
+
+def test_career_finale_legacy_highlights_survive_real_retirement_disconnect(tmp_path):
+    world=_finale_world();highlights=[f"Legacy event {i}" for i in range(41)]
+    world.save.pilot.highlights=list(highlights);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    with _door_stopped_at(tmp_path,b"SRSY",b"A new career begins."):
+        saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+        assert saved.pilot.retirements==1 and saved.retired_careers[0]["highlights"]==highlights
