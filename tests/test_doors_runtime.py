@@ -291,11 +291,23 @@ def test_web_bundled_trivia_round_restores_menu_on_same_websocket(db, lane, play
                 async with client.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws:
                     mode = await ws.receive_json(timeout=3)
                     assert mode["type"] == "door_mode" and mode["active"]
-                    await ws.send_json({"type": "door_key", "stream": mode["stream"], "data": keys})
+                    if game != "war_dialer.py":
+                        await ws.send_json({"type": "door_key", "stream": mode["stream"], "data": keys})
+                    help_acknowledged = False
+                    quit_sent = False
                     while True:
                         msg = await ws.receive_json(timeout=75)
                         if msg["type"] == "door_output":
                             output.extend(base64.b64decode(msg["data"]))
+                            if game == "war_dialer.py":
+                                # War Dialer rejects queued/pasted action bursts.
+                                # Exercise actual single keys at their screens.
+                                if not help_acknowledged and b"Press any key to continue..." in output:
+                                    await ws.send_json({"type": "door_key", "stream": mode["stream"], "data": " "})
+                                    help_acknowledged = True
+                                if not quit_sent and b">\x1b[0m " in output:
+                                    await ws.send_json({"type": "door_key", "stream": mode["stream"], "data": "Q"})
+                                    quit_sent = True
                         elif msg["type"] == "door_mode":
                             assert not msg["active"]
                         elif msg.get("data") == "MENU":
@@ -484,3 +496,16 @@ def test_voidrunner_recovery_back_is_a_normal_door_exit(db, lane, player, tmp_pa
     assert result.exit_code == 0 and result.reason == "exited"
     assert b"Career recovery" in bytes(session.written)
     assert path.read_bytes() == b"damaged career"
+
+
+def test_war_dialer_timeout_does_not_leave_bracketed_paste_enabled(db, lane, player, tmp_path, monkeypatch):
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path / "door-home"))
+    door = create_door(
+        db, "War Dialer timeout", sys.executable,
+        args=(str(_BUNDLED_DOORS_DIR / "war_dialer.py"),), creator=player,
+    )
+    session = FakeSession()
+    result = asyncio.run(_run(session, lane, door, player, wall_time_limit_seconds=3))
+    assert result.reason == "timed_out"
+    assert b"W A R" in session.written
+    assert b"\x1b[?2004h" not in session.written

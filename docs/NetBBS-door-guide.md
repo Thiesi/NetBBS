@@ -3,6 +3,35 @@
 NetBBS supplies the integration, not third-party games or their execution
 environments. The bundled games remain available without a legacy profile.
 
+## War Dialer shared-world sessions
+
+War Dialer stores its shared world in `~/.netbbs/wardialer.db`, or
+`WAR_DIALER_DB_PATH` when supplied to a standalone launch. The normal door
+runtime does not yet forward that override; supported node-specific paths and a
+dedicated node-backup component remain issue #362 slice 4 work.
+
+Several callers, including two sessions for one user, may play concurrently.
+Each action uses current stored resources and commits its turn with its result.
+Browsing, quitting and disconnecting cannot overwrite another session's changes.
+An outdated rival/exchange selection is rejected without spending resources.
+If the season changes during a visit, reconnect before taking another action.
+
+Use separate single keys. Arrow/function keys and pasted command bursts do not
+select actions; Escape dismisses a pause but has no menu action. An incomplete
+or excessively long terminal sequence ends the door with a reconnect diagnostic.
+
+**MANUAL — outside NetBBS:** end all running War Dialer sessions before activating
+this updated game file. An already-running older process retains its old saving
+behavior. Do not mix old and new sessions against the same world.
+
+If startup reports an unexpected exchange count, the world is retained unchanged.
+**MANUAL — outside NetBBS:** stop all sessions, preserve a SQLite-consistent
+backup of the world (including any outstanding WAL data), and inspect the exchange
+IDs, owners and affected player records before explicitly repairing it. The game
+does not choose which duplicate ownership/reward records to discard. Do not delete
+the database to suppress the diagnostic, and do not copy just a live `.db` file.
+There is no automated repair/reset workflow in this slice.
+
 ## Voidrunner careers and concurrent sessions
 
 Voidrunner stores careers outside its disposable session directory, under

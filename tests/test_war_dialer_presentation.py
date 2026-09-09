@@ -19,6 +19,14 @@ import io
 import os
 import re
 import sys
+import subprocess
+import threading
+import time
+from contextlib import contextmanager
+from datetime import timedelta
+from queue import Queue, Empty
+
+import pytest
 from pathlib import Path
 
 _WAR_DIALER_PATH = (
@@ -300,3 +308,301 @@ def test_press_any_key_consumes_full_csi_sequence_over_a_real_pipe():
     remaining = os.read(read_fd, 10)
     os.close(read_fd)
     assert remaining == b"b"
+
+
+@pytest.mark.parametrize("sequence", [
+    b"\x1b[C", b"\x1bOC", b"\x1b[1;5C", b"\x1b[15~",
+    b"\x1bc", b"\x1b(B", b"\x1b]0;CCC\x07",
+    b"\x1bPCCC\x1b\\", b"\x1b[200~CCCJTRXA\x1b[201~",
+    b"CCCJTRXA", b"\x1b",
+])
+def test_menu_decoder_never_accepts_control_sequences_or_paste(monkeypatch, sequence):
+    read_fd, write_fd = os.pipe()
+    stdin = _buffered_stdin(read_fd)
+    try:
+        monkeypatch.setattr(sys, "stdin", stdin)
+        os.write(write_fd, sequence)
+        assert wd.read_input_key() in ("", wd.ESC)
+    finally:
+        stdin.close()
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+@pytest.mark.parametrize("sequence", [
+    b"\x1b[", b"\x1bO", b"\x1b[1;", b"\x1b(",
+    b"\x1b[200~CCC", b"\x1b]CCC",
+    b"\x1b[" + b"1" * 80, b"C" * 4200,
+])
+def test_incomplete_or_excessive_input_fails_closed_in_bounded_time(monkeypatch, sequence):
+    read_fd, write_fd = os.pipe()
+    stdin = _buffered_stdin(read_fd)
+    try:
+        monkeypatch.setattr(sys, "stdin", stdin)
+        # Oversized input can exceed the OS pipe capacity; stream it while
+        # the decoder reads instead of blocking the test before it starts.
+        writer = threading.Thread(target=lambda: os.write(write_fd, sequence), daemon=True)
+        writer.start()
+        started = time.monotonic()
+        with pytest.raises(wd.InputSequenceError):
+            wd.read_input_key()
+        assert time.monotonic() - started < 2
+        writer.join(timeout=2)
+        assert not writer.is_alive()
+    finally:
+        stdin.close()
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+@contextmanager
+def _running_door(tmp_path, *, new_player=False, event=False):
+    """Actual standalone launch, real input pipe, continuously drained output."""
+    path = tmp_path / "process-world.db"
+    conn = wd.connect(path)
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    if not new_player:
+        wd.load_or_create_player(conn, 0, "Guest", now, 1)
+    if event:
+        wd.record_event(conn, 0, "Rival", "A retained offline receipt", now)
+    conn.close()
+    env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), PYTHONIOENCODING="utf-8")
+    env.pop("NETBBS_DOOR_INFO", None)
+    process = subprocess.Popen(
+        [sys.executable, "-u", str(_WAR_DIALER_PATH)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+    )
+    chunks = Queue()
+    output = bytearray()
+
+    def drain():
+        while chunk := os.read(process.stdout.fileno(), 4096):
+            output.extend(chunk)
+            chunks.put(chunk)
+        chunks.put(None)
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    pending = bytearray()
+
+    def wait_for(marker):
+        deadline = time.monotonic() + 8
+        while marker not in pending:
+            try:
+                chunk = chunks.get(timeout=max(0.01, deadline - time.monotonic()))
+            except Empty:
+                pytest.fail(f"Door did not display {marker!r}: {bytes(output)!r}")
+            if chunk is None:
+                pytest.fail(f"Door exited before {marker!r}: {bytes(output)!r}")
+            pending.extend(chunk)
+        end = pending.index(marker) + len(marker)
+        del pending[:end]
+
+    def send(data):
+        process.stdin.write(data)
+        process.stdin.flush()
+
+    try:
+        yield process, path, wait_for, send, output
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        reader.join(timeout=5)
+        process.stdin.close()
+        process.stdout.close()
+        process.stderr.close()
+
+
+@pytest.mark.parametrize("sequence", [
+    b"\x1b[C", b"\x1bOC", b"\x1b[1;5C",
+    b"\x1b[200~CCCJTRXA\x1b[201~", b"CCCJTRXA", b"\x1b",
+])
+def test_real_process_main_menu_input_does_not_spend_turns(tmp_path, sequence):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b">\x1b[0m ")
+        send(sequence)
+        # Deliberately separate the later real key from the input burst. This
+        # interval exercises the decoder's timeout, not a process-start guess.
+        time.sleep(0.25)
+        send(b"q")
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b""
+        conn = wd.connect(path)
+        player = wd.read_player(conn, 0)
+        assert (player.cash, player.crew, player.turns_used) == (300, 3, 0)
+        conn.close()
+
+
+@pytest.mark.parametrize("sequence", [b"\x1b[A", b"\x1bOA", b"\x1b[200~A\x1b[201~"])
+def test_real_process_target_menu_does_not_select_arrow_or_paste(tmp_path, sequence):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b">\x1b[0m ")
+        send(b"x")
+        wait_for(b"cancel")
+        send(sequence)
+        time.sleep(0.25)
+        send(b"q")
+        wait_for(b">\x1b[0m ")
+        send(b"q")
+        assert process.wait(timeout=5) == 0
+        conn = wd.connect(path)
+        assert wd.read_player(conn, 0).turns_used == 0
+        assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
+        conn.close()
+
+
+def test_real_process_incomplete_escape_exits_without_action(tmp_path):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b">\x1b[0m ")
+        send(b"\x1b[")
+        assert process.wait(timeout=5) == 1
+        assert process.stderr.read() == b""
+        conn = wd.connect(path)
+        assert wd.read_player(conn, 0).turns_used == 0
+        conn.close()
+
+
+@pytest.mark.parametrize("stage", ["onboarding", "receipt", "menu", "recruit", "root"])
+def test_real_process_disconnect_preserves_only_committed_actions(tmp_path, stage):
+    with _running_door(
+        tmp_path, new_player=stage == "onboarding", event=stage == "receipt",
+    ) as (process, path, wait_for, send, output):
+        if stage in ("onboarding", "receipt"):
+            wait_for(b"Press any key to continue...")
+        else:
+            wait_for(b">\x1b[0m ")
+            if stage == "recruit":
+                send(b"c")
+                wait_for(b"A new member joins")
+            elif stage == "root":
+                send(b"x")
+                wait_for(b"cancel")
+                send(b"a")
+                wait_for(b"It's yours now.")
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b""
+        conn = wd.connect(path)
+        player = wd.read_player(conn, 0)
+        assert player.turns_used == (1 if stage in ("recruit", "root") else 0)
+        if stage == "recruit":
+            assert (player.cash, player.crew) == (225, 4)
+        if stage == "root":
+            assert wd.list_exchanges(conn)[0].controller_user_id == 0
+        if stage == "receipt":
+            assert len(wd.unseen_events(conn, 0)) == 1
+        conn.close()
+
+
+@pytest.mark.parametrize("action", ["trade", "recruit", "job", "raid", "root"])
+def test_action_is_durable_before_success_output_fails(tmp_path, monkeypatch, action):
+    path = tmp_path / "output-world.db"
+    conn = wd.connect(path)
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    player = wd.load_or_create_player(conn, 1, "Alpha", now, 1)
+    wd.load_or_create_player(conn, 2, "Beta", now - timedelta(days=3), 1)
+    conn.execute("UPDATE players SET cash=1000 WHERE user_id=2")
+    conn.execute("UPDATE players SET turns_used=14 WHERE user_id=1")
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "A")
+    monkeypatch.setattr(wd, "now_utc", lambda: now)
+    observer = wd.connect(path)
+
+    class SuccessRandom:
+        def random(self):
+            return 0.0
+
+        def randint(self, lo, hi):
+            return lo
+
+        def choice(self, choices):
+            return choices[0]
+
+    marker = {
+        "trade": "You move some warez", "recruit": "A new member",
+        "job": "Job:", "raid": "You hit", "root": "You root",
+    }[action]
+
+    def fail_at_result(text=""):
+        if marker in text:
+            assert wd.read_player(observer, 1).turns_used == 15
+            if action == "raid":
+                assert wd.read_player(observer, 2).cash == 850
+                assert len(wd.unseen_events(observer, 2)) == 1
+            if action == "root":
+                assert wd.list_exchanges(observer)[0].controller_user_id == 1
+            raise BrokenPipeError("output disconnected after commit")
+
+    monkeypatch.setattr(wd, "out_line", fail_at_result)
+    palette = wd.Palette(False)
+    rng = SuccessRandom()
+    with pytest.raises(BrokenPipeError, match="after commit"):
+        if action == "trade":
+            wd.do_trade_warez(palette, conn, player, now, rng)
+        elif action == "recruit":
+            wd.do_recruit(palette, conn, player, now)
+        elif action == "job":
+            wd.do_job(palette, conn, player, now, rng)
+        elif action == "raid":
+            wd.do_raid(palette, conn, player, now, rng, 78)
+        else:
+            wd.do_root_exchange(palette, conn, player, now, rng, 78)
+    assert wd.read_player(observer, 1).turns_used == 15
+    observer.close()
+    conn.close()
+
+
+def test_real_process_disconnect_does_not_restore_an_incoming_raid(tmp_path):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b">\x1b[0m ")
+        conn = wd.connect(path)
+        now = wd.now_utc()
+        attacker = wd.load_or_create_player(conn, 1, "Alpha", now, 1)
+        conn.execute("UPDATE players SET created_at=? WHERE user_id=0", (wd.to_iso(now - wd.GRACE),))
+
+        class Win:
+            def random(self):
+                return 0.0
+
+        wd.resolve_raid(conn, attacker, 0, now, Win())
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0
+        assert conn.execute("SELECT cash FROM players WHERE user_id=0").fetchone()[0] == 255
+        assert len(wd.unseen_events(conn, 0)) == 1
+        conn.close()
+
+
+@pytest.mark.parametrize("stage", ["onboarding", "receipt", "menu", "target"])
+def test_linux_console_function_key_never_leaks_an_action(tmp_path, stage):
+    with _running_door(
+        tmp_path, new_player=stage == "onboarding", event=stage == "receipt",
+    ) as (process, path, wait_for, send, output):
+        if stage in ("onboarding", "receipt"):
+            wait_for(b"Press any key to continue...")
+        else:
+            wait_for(b">\x1b[0m ")
+            if stage == "target":
+                send(b"x")
+                wait_for(b"cancel")
+        send(b"\x1b[[C")  # Linux-console F3, not Crew Recruit / exchange C.
+        if stage in ("onboarding", "receipt"):
+            wait_for(b">\x1b[0m ")
+        time.sleep(0.25)
+        conn = wd.connect(path)
+        try:
+            assert wd.read_player(conn, 0).turns_used == 0
+            assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
+        finally:
+            conn.close()
+        send(b"q")
+        if stage == "target":
+            wait_for(b">\x1b[0m ")
+            send(b"q")
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b""

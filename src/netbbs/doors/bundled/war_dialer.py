@@ -30,11 +30,11 @@ can genuinely be live at once. It keeps a single shared SQLite database
 (WAL mode, `PRAGMA busy_timeout`) under `WAR_DIALER_DB_PATH` if set,
 else `~/.netbbs/wardialer.db` -- same "not relative to this installed
 script's own path" reasoning as Voidrunner's own save-dir docstring.
-Every write that touches another player's row or a shared exchange row
-(a Raid, a Root-the-Exchange attempt, exchange income collection) is
-wrapped in an explicit `BEGIN IMMEDIATE` transaction that re-reads the
-contested row fresh before mutating it, so two concurrent door
-processes can never silently lose one another's update.
+Every action and login settlement uses BEGIN IMMEDIATE and reloads
+all affected player/exchange rows under that lock. Effects, events and
+the actor's turn cost commit together before narration. Concurrent sessions
+for one player share this same serialization boundary. Session objects are
+display snapshots, never saved on refresh, quit, or disconnect.
 
 **Resolution model**: everything above resolves synchronously inside
 the acting player's own live session -- no cron, no background daemon,
@@ -75,6 +75,7 @@ import sys
 import textwrap
 import time
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -269,29 +270,98 @@ def _poll_read_key_windows(fd: int, timeout: float) -> str | None:
         os.set_blocking(fd, True)
 
 
+class InputSequenceError(Exception):
+    """Stop ambiguous input instead of interpreting its tail as action keys."""
+
+
+_MAX_INPUT_BYTES = 4096
+_MAX_ESCAPE_BYTES = 64
+_INPUT_BURST_TIMEOUT_SECONDS = 0.02
+_INPUT_SEQUENCE_TIMEOUT_SECONDS = 1.0
+
+
+def read_input_key() -> str:
+    """Decode one bounded input unit for menus and pauses alike.
+
+    Only an isolated printable ASCII byte is a hotkey. Unframed paste/bursts
+    are discarded; bracketed paste is consumed through its closing marker.
+    Incomplete control sequences end the session, so delayed suffixes cannot
+    become action keys on another screen. No user input is retained.
+    """
+    key = read_key()
+    deadline = time.monotonic() + _INPUT_SEQUENCE_TIMEOUT_SECONDS
+
+    def next_byte(timeout: float) -> str | None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise InputSequenceError("Input sequence timed out. Reconnect and use single keys.")
+        return _read_key_with_timeout(min(timeout, remaining))
+
+    if key != ESC:
+        tail = next_byte(_INPUT_BURST_TIMEOUT_SECONDS)
+        if tail is None:
+            return key if " " <= key <= "~" else ""
+        # Unframed paste has no trusted terminator. Drain through a quiet
+        # interval, bounded by both bytes and time, before accepting a key.
+        for _ in range(_MAX_INPUT_BYTES - 2):
+            if next_byte(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS) is None:
+                return ""
+        raise InputSequenceError("Input burst too long. Reconnect and use single keys.")
+
+    prefix = next_byte(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS)
+    if prefix is None:
+        return ESC
+    if prefix in ("[", "O"):
+        sequence = ""
+        for _ in range(_MAX_ESCAPE_BYTES):
+            byte = next_byte(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS)
+            if byte is None:
+                raise InputSequenceError("Incomplete key sequence. Reconnect and use single keys.")
+            sequence += byte
+            if prefix == "[" and sequence == "[":
+                # Linux-console F1-F5 use ESC [[ A-E. The second '['
+                # is a prefix here, not a final that can leave a hotkey.
+                continue
+            if "@" <= byte <= "~":
+                break
+        else:
+            raise InputSequenceError("Key sequence too long. Reconnect and use single keys.")
+        if prefix == "[" and sequence == "200~":
+            ending = ""
+            for _ in range(_MAX_INPUT_BYTES):
+                byte = next_byte(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS)
+                if byte is None:
+                    raise InputSequenceError("Incomplete paste. Reconnect and use single keys.")
+                ending = (ending + byte)[-6:]
+                if ending == ESC + "[201~":
+                    return ""
+            raise InputSequenceError("Paste too long. Reconnect and use single keys.")
+        return ""
+    # OSC/DCS/APC/PM/SOS strings are not keys. Consume through BEL or ST.
+    if prefix in ("]", "P", "_", "^", "X"):
+        previous = ""
+        for _ in range(_MAX_INPUT_BYTES):
+            byte = next_byte(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS)
+            if byte is None:
+                raise InputSequenceError("Incomplete terminal sequence. Reconnect and use single keys.")
+            if byte == "\x07" or (previous == ESC and byte == "\\"):
+                return ""
+            previous = byte
+        raise InputSequenceError("Terminal sequence too long. Reconnect and use single keys.")
+    # Other ESC sequences: zero or more intermediate bytes, then one final.
+    for _ in range(_MAX_ESCAPE_BYTES):
+        if not " " <= prefix <= "/":
+            return ""  # Includes Alt+letter: never a hotkey.
+        prefix = next_byte(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS)
+        if prefix is None:
+            raise InputSequenceError("Incomplete key sequence. Reconnect and use single keys.")
+    raise InputSequenceError("Key sequence too long. Reconnect and use single keys.")
+
+
 def press_any_key(p: Palette) -> None:
     out_line()
     out_prompt(f"  {p.muted}Press any key to continue...{RESET}")
-    key = read_key()
-    if key == ESC:
-        # Codex review (PR #239): an arrow key sends a multi-byte `ESC [
-        # <letter>` CSI sequence -- consuming only the leading ESC here
-        # left the rest sitting in the input buffer for the *next*
-        # read_menu_choice() call. That loop silently ignores an
-        # unrecognized `[`, then accepts the trailing letter as a real
-        # hotkey -- right-arrow's trailing 'C' spent cash and a turn on
-        # Crew Recruit the caller never chose. Mirrors voidrunner.py's
-        # own `read_line_raw`, this codebase's already-established
-        # pattern for swallowing a CSI sequence whole rather than
-        # leaking its tail bytes -- `nxt` is `None`, not blocking
-        # forever, when nothing else was actually coming (a standalone
-        # Escape).
-        nxt = _read_key_with_timeout(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS)
-        if nxt == "[":
-            while True:
-                b = read_key()
-                if b.isalpha() or b == "~":
-                    break
+    read_input_key()
     out_line()
 
 
@@ -819,12 +889,39 @@ def current_season_number(anchor: datetime, now: datetime) -> int:
     return 1 + (now - anchor) // SEASON
 
 
-def ensure_exchanges_seeded(conn: sqlite3.Connection, season_number: int, now: datetime) -> None:
-    count = conn.execute("SELECT COUNT(*) AS n FROM exchanges").fetchone()["n"]
-    if count:
-        return
+class WorldStateError(Exception):
+    """Preserve an inconsistent world for explicit operator repair."""
+
+
+class ActionRejected(Exception):
+    """Fresh state no longer permits the requested action; nothing is spent."""
+
+
+@contextmanager
+def _write_transaction(conn: sqlite3.Connection):
     conn.execute("BEGIN IMMEDIATE")
     try:
+        yield
+        conn.execute("COMMIT")
+    except BaseException as exc:
+        try:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+        except sqlite3.Error as rollback_error:
+            exc.add_note(f"Rollback also failed: {rollback_error}")
+        raise
+
+
+def ensure_exchanges_seeded(conn: sqlite3.Connection, season_number: int, now: datetime) -> None:
+    with _write_transaction(conn):
+        count = conn.execute("SELECT COUNT(*) AS n FROM exchanges").fetchone()["n"]
+        if count:
+            if count != len(EXCHANGE_SEEDS):
+                raise WorldStateError(
+                    f"World has {count} exchanges; expected {len(EXCHANGE_SEEDS)}. "
+                    "Data preserved. Ask the SysOp to back up and repair this world."
+                )
+            return
         for name, income in EXCHANGE_SEEDS:
             conn.execute(
                 """
@@ -834,10 +931,6 @@ def ensure_exchanges_seeded(conn: sqlite3.Connection, season_number: int, now: d
                 """,
                 (name, income, to_iso(now), season_number),
             )
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
 
 
 def sweep_exchange_season_reset(conn: sqlite3.Connection, season_number: int, now: datetime) -> None:
@@ -868,7 +961,10 @@ def _row_to_player(row: sqlite3.Row) -> Player:
     )
 
 
-def save_player(conn: sqlite3.Connection, player: Player) -> None:
+def _save_player(conn: sqlite3.Connection, player: Player) -> None:
+    """Persist only a row loaded inside the caller's current write transaction."""
+    if not conn.in_transaction:
+        raise RuntimeError("Player writes require a fresh row in a write transaction")
     conn.execute(
         """
         UPDATE players SET handle=?, cash=?, crew=?, crew_recruited_total=?,
@@ -886,73 +982,95 @@ def save_player(conn: sqlite3.Connection, player: Player) -> None:
 
 
 def _collect_exchange_income(conn: sqlite3.Connection, user_id: int, now: datetime) -> int:
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        rows = conn.execute("SELECT * FROM exchanges WHERE controller_user_id=?", (user_id,)).fetchall()
-        total = 0
-        for row in rows:
-            hrs = hours_since(from_iso(row["income_collected_at"]), now)
-            total += int(row["income_per_hour"] * hrs)
-            conn.execute("UPDATE exchanges SET income_collected_at=? WHERE id=?", (to_iso(now), row["id"]))
-        conn.execute("COMMIT")
-        return total
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
+    if not conn.in_transaction:
+        raise RuntimeError("Income collection requires a write transaction")
+    rows = conn.execute("SELECT * FROM exchanges WHERE controller_user_id=?", (user_id,)).fetchall()
+    total = 0
+    for row in rows:
+        hrs = hours_since(from_iso(row["income_collected_at"]), now)
+        total += int(row["income_per_hour"] * hrs)
+        conn.execute("UPDATE exchanges SET income_collected_at=? WHERE id=?", (to_iso(now), row["id"]))
+    return total
+
+
+def read_player(conn: sqlite3.Connection, user_id: int) -> Player:
+    """Read a display snapshot; refreshing does not reset raid protection."""
+    row = conn.execute("SELECT * FROM players WHERE user_id=?", (user_id,)).fetchone()
+    if row is None:
+        raise ActionRejected("Player no longer exists. Reconnect to the game.")
+    return _row_to_player(row)
 
 
 def load_or_create_player(conn: sqlite3.Connection, user_id: int, handle: str, now: datetime, season_number: int) -> Player:
-    row = conn.execute("SELECT * FROM players WHERE user_id=?", (user_id,)).fetchone()
-    if row is None:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO players
-                    (user_id, handle, cash, crew, crew_recruited_total, exchanges_taken_total,
-                     successful_raids, successful_jobs, heat, heat_updated_at, turns_used,
-                     turn_day_start, last_raided_by, season_number, created_at)
-                VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0.0, ?, 0, ?, NULL, ?, ?)
-                """,
-                (user_id, handle, STARTING_CASH, STARTING_CREW, to_iso(now), to_iso(now), season_number, to_iso(now)),
-            )
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        row = conn.execute("SELECT * FROM players WHERE user_id=?", (user_id,)).fetchone()
-
-    player = _row_to_player(row)
-    changed = player.handle != handle
-    player.handle = handle
-
-    if player.season_number < season_number:
-        reset_player_for_season(player, season_number, now)
-        changed = True
-
-    if now - from_iso(player.turn_day_start) >= DAY:
-        player.turns_used = 0
-        player.turn_day_start = to_iso(now)
-        changed = True
-
-    decay = HEAT_DECAY_PER_HOUR * hours_since(from_iso(player.heat_updated_at), now)
-    if decay > 0:
-        player.heat = max(0.0, player.heat - decay)
-        player.heat_updated_at = to_iso(now)
-        changed = True
-
-    if player.last_raided_by is not None:
+    # Login is a write boundary too: no stale snapshot may overwrite an
+    # incoming raid while settling Heat, income, or the login protection.
+    with _write_transaction(conn):
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO players
+                (user_id, handle, cash, crew, crew_recruited_total, exchanges_taken_total,
+                 successful_raids, successful_jobs, heat, heat_updated_at, turns_used,
+                 turn_day_start, last_raided_by, season_number, created_at)
+            VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0.0, ?, 0, ?, NULL, ?, ?)
+            """,
+            (user_id, handle, STARTING_CASH, STARTING_CREW, to_iso(now), to_iso(now), season_number, to_iso(now)),
+        )
+        player = read_player(conn, user_id)
+        player.handle = handle
+        if player.season_number < season_number:
+            reset_player_for_season(player, season_number, now)
+        if now - from_iso(player.turn_day_start) >= DAY:
+            player.turns_used = 0
+            player.turn_day_start = to_iso(now)
+        decay = HEAT_DECAY_PER_HOUR * hours_since(from_iso(player.heat_updated_at), now)
+        if decay > 0:
+            player.heat = max(0.0, player.heat - decay)
+            player.heat_updated_at = to_iso(now)
         player.last_raided_by = None
-        changed = True
-
-    income = _collect_exchange_income(conn, player.user_id, now)
-    if income:
-        player.cash += income
-        changed = True
-
-    if changed:
-        save_player(conn, player)
+        player.cash += _collect_exchange_income(conn, player.user_id, now)
+        _save_player(conn, player)
     return player
+
+
+@contextmanager
+def _action_player(conn: sqlite3.Connection, snapshot: Player, now: datetime):
+    """Serialize all sessions, including duplicate sessions for one player.
+
+    Session objects are display snapshots only. Copy back the fresh actor only
+    after COMMIT; rejected/failed writes cannot leave an apparent local reward.
+    Clock settlement/atomic world rollover are the next overhaul slice; until
+    then, reject old-season actions instead of letting them touch the new world.
+    """
+    with _write_transaction(conn):
+        player = read_player(conn, snapshot.user_id)
+        season = current_season_number(get_or_create_season_anchor(conn, now), now)
+        if player.season_number != season or snapshot.season_number != season:
+            raise ActionRejected("Season changed. Reconnect before taking another action.")
+        if player.turns_used >= TURNS_PER_DAY:
+            raise ActionRejected("No turns left. No resources spent.")
+        yield player
+        player.turns_used += 1
+        _save_player(conn, player)
+    snapshot.__dict__.update(player.__dict__)
+
+
+def resolve_trade_warez(conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random) -> tuple[int, bool]:
+    with _action_player(conn, player, now) as actor:
+        result = action_trade_warez(actor, rng)
+    return result
+
+
+def resolve_recruit(conn: sqlite3.Connection, player: Player, now: datetime) -> bool:
+    with _action_player(conn, player, now) as actor:
+        if not action_recruit(actor):
+            raise ActionRejected(f"Not enough cash (need ${RECRUIT_COST}). No resources spent.")
+    return True
+
+
+def resolve_job(conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random) -> tuple[str, bool, int, bool]:
+    with _action_player(conn, player, now) as actor:
+        result = action_job(actor, rng)
+    return result
 
 
 def list_exchanges(conn: sqlite3.Connection) -> list[Exchange]:
@@ -1002,58 +1120,52 @@ def mark_events_seen(conn: sqlite3.Connection, event_ids: list[int], now: dateti
     conn.executemany("UPDATE events SET seen_at=? WHERE id=?", [(to_iso(now), eid) for eid in event_ids])
 
 
-def resolve_raid(conn: sqlite3.Connection, attacker: Player, target_user_id: int, now: datetime, rng: random.Random) -> tuple[bool, int, bool]:
-    """Re-reads the target fresh inside one write-locked transaction, so
-    a target being simultaneously modified by their own live session (or
-    another attacker) can never be silently overwritten by a stale
-    in-memory copy -- see this module's own docstring."""
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        row = conn.execute("SELECT * FROM players WHERE user_id=?", (target_user_id,)).fetchone()
-        target = _row_to_player(row)
-        success, amount, busted = action_raid(attacker, target, rng)
-        save_player(conn, attacker)
-        save_player(conn, target)
+def resolve_raid(
+    conn: sqlite3.Connection, attacker: Player, target_user_id: int,
+    now: datetime, rng: random.Random, *, expected_target: Player | None = None,
+) -> tuple[bool, int, bool]:
+    with _action_player(conn, attacker, now) as actor:
+        target = read_player(conn, target_user_id)
+        if target.season_number != actor.season_number:
+            raise ActionRejected("Rival belongs to an earlier season. Choose another target.")
+        if not is_eligible_raid_target(actor, target, now):
+            raise ActionRejected("Rival is no longer eligible. No resources spent.")
+        if expected_target is not None and target != expected_target:
+            raise ActionRejected("Rival changed while you were choosing. Inspect the rivals again.")
+        success, amount, busted = action_raid(actor, target, rng)
+        _save_player(conn, target)
         if success:
-            record_event(conn, target.user_id, attacker.handle, f"{attacker.handle} raided you and got away with ${amount}!", now)
+            record_event(conn, target.user_id, actor.handle, f"{actor.handle} raided you and got away with ${amount}!", now)
         else:
-            record_event(conn, target.user_id, attacker.handle, f"{attacker.handle} tried to raid you and got bounced.", now)
-        conn.execute("COMMIT")
-        return success, amount, busted
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
+            record_event(conn, target.user_id, actor.handle, f"{actor.handle} tried to raid you and got bounced.", now)
+    return success, amount, busted
 
 
-def resolve_root_exchange(conn: sqlite3.Connection, attacker: Player, exchange_id: int, now: datetime, rng: random.Random) -> tuple[bool, str, bool]:
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        row = conn.execute(
-            "SELECT e.*, p.handle AS controller_handle FROM exchanges e LEFT JOIN players p ON p.user_id=e.controller_user_id WHERE e.id=?",
-            (exchange_id,),
-        ).fetchone()
-        exchange = Exchange(
-            id=row["id"], name=row["name"], income_per_hour=row["income_per_hour"],
-            controller_user_id=row["controller_user_id"], controller_handle=row["controller_handle"],
-            garrison=row["garrison"], controlled_since=row["controlled_since"],
-            income_collected_at=row["income_collected_at"], season_number=row["season_number"],
-        )
+def resolve_root_exchange(
+    conn: sqlite3.Connection, attacker: Player, exchange_id: int,
+    now: datetime, rng: random.Random, *, expected_exchange: Exchange | None = None,
+) -> tuple[bool, str, bool]:
+    with _action_player(conn, attacker, now) as actor:
+        exchange = next((e for e in list_exchanges(conn) if e.id == exchange_id), None)
+        if exchange is None:
+            raise ActionRejected("Exchange no longer exists. No resources spent.")
+        if exchange.season_number != actor.season_number:
+            raise ActionRejected("Exchange season changed. Reconnect before taking another action.")
+        if exchange.controller_user_id == actor.user_id:
+            raise ActionRejected("You already control this exchange. No resources spent.")
+        if expected_exchange is not None and exchange != expected_exchange:
+            raise ActionRejected("Exchange changed while you were choosing. Inspect the exchanges again.")
         prior_controller = exchange.controller_user_id
-        success, busted = action_root_exchange(attacker, exchange, now, rng)
-        save_player(conn, attacker)
+        success, busted = action_root_exchange(actor, exchange, now, rng)
         conn.execute(
             "UPDATE exchanges SET controller_user_id=?, garrison=?, controlled_since=?, income_collected_at=? WHERE id=?",
             (exchange.controller_user_id, exchange.garrison, exchange.controlled_since, exchange.income_collected_at, exchange.id),
         )
-        if success and prior_controller is not None and prior_controller != attacker.user_id:
-            record_event(conn, prior_controller, attacker.handle, f"{attacker.handle} rooted your exchange, {exchange.name}!", now)
+        if success and prior_controller is not None:
+            record_event(conn, prior_controller, actor.handle, f"{actor.handle} rooted your exchange, {exchange.name}!", now)
         elif not success and prior_controller is not None:
-            record_event(conn, prior_controller, attacker.handle, f"{attacker.handle} tried to root {exchange.name} and failed.", now)
-        conn.execute("COMMIT")
-        return success, exchange.name, busted
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
+            record_event(conn, prior_controller, actor.handle, f"{actor.handle} tried to root {exchange.name} and failed.", now)
+    return success, exchange.name, busted
 
 
 # ---------------------------------------------------------------------------
@@ -1225,8 +1337,8 @@ def draw_help(p: Palette, w: int) -> None:
 
 def read_menu_choice(valid: str) -> str:
     while True:
-        key = read_key().upper()
-        if key in valid:
+        key = read_input_key().upper()
+        if key and key in valid:
             out_line(key)
             return key
 
@@ -1236,25 +1348,20 @@ def draw_bust(p: Palette, w: int) -> None:
               f"crew scattered. Heat reset.{RESET}")
 
 
-def do_trade_warez(p: Palette, player: Player, rng: random.Random) -> None:
-    gain, busted = action_trade_warez(player, rng)
-    player.turns_used += 1
+def do_trade_warez(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random) -> None:
+    gain, busted = resolve_trade_warez(conn, player, now, rng)
     out_line(f"  {p.good}You move some warez on the boards. +${gain}.{RESET}")
     if busted:
         draw_bust(p, 78)
 
 
-def do_recruit(p: Palette, player: Player) -> None:
-    if action_recruit(player):
-        player.turns_used += 1
-        out_line(f"  {p.good}A new member joins your crew. Crew +1.{RESET}")
-    else:
-        out_line(f"  {p.bad}Not enough cash (need ${RECRUIT_COST}).{RESET}")
+def do_recruit(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime) -> None:
+    resolve_recruit(conn, player, now)
+    out_line(f"  {p.good}A new member joins your crew. Crew +1.{RESET}")
 
 
-def do_job(p: Palette, player: Player, rng: random.Random) -> None:
-    name, success, payout, busted = action_job(player, rng)
-    player.turns_used += 1
+def do_job(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random) -> None:
+    name, success, payout, busted = resolve_job(conn, player, now, rng)
     out_line(f"  {p.accent}Job:{RESET} {p.white}{name}{RESET}")
     if success:
         out_line(f"  {p.good}Success! +${payout}.{RESET}")
@@ -1278,8 +1385,9 @@ def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
     if choice == "Q":
         return
     target = targets[LETTERS.index(choice)]
-    success, amount, busted = resolve_raid(conn, player, target.user_id, now, rng)
-    player.turns_used += 1
+    success, amount, busted = resolve_raid(
+        conn, player, target.user_id, now_utc(), rng, expected_target=target,
+    )
     if success:
         out_line(f"  {p.good}You hit {target.handle} and get away with ${amount}.{RESET}")
     else:
@@ -1299,8 +1407,9 @@ def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: 
     if exchange.controller_user_id == player.user_id:
         out_line(f"  {p.muted}You already control {exchange.name}.{RESET}")
         return
-    success, name, busted = resolve_root_exchange(conn, player, exchange.id, now, rng)
-    player.turns_used += 1
+    success, name, busted = resolve_root_exchange(
+        conn, player, exchange.id, now_utc(), rng, expected_exchange=exchange,
+    )
     if success:
         out_line(f"  {p.good}You root {name}. It's yours now.{RESET}")
     else:
@@ -1349,6 +1458,8 @@ def main() -> int:
     conn = connect(_resolve_db_path())
     rng = random.Random()
     try:
+        # Keep terminal modes unchanged: the supervisor may kill this process
+        # without running finally. Decode paste markers if already supplied.
         ensure_schema(conn)
         now = now_utc()
         anchor = get_or_create_season_anchor(conn, now)
@@ -1377,17 +1488,18 @@ def main() -> int:
         events = unseen_events(conn, player.user_id)
         if events:
             draw_offline_summary(palette, events, w)
-            mark_events_seen(conn, [e.id for e in events], now_utc())
             press_any_key(palette)
+            mark_events_seen(conn, [e.id for e in events], now_utc())
 
-        try:
-            while True:
-                draw_status(palette, player, w)
-                has_turns = player.turns_used < TURNS_PER_DAY
-                draw_menu(palette, has_turns)
-                valid = "BQ?" + ("TCJRX" if has_turns else "")
-                choice = read_menu_choice(valid)
-                action_now = now_utc()
+        while True:
+            player = read_player(conn, user_id)
+            draw_status(palette, player, w)
+            has_turns = player.turns_used < TURNS_PER_DAY
+            draw_menu(palette, has_turns)
+            valid = "BQ?" + ("TCJRX" if has_turns else "")
+            choice = read_menu_choice(valid)
+            action_now = now_utc()
+            try:
                 if choice == "Q":
                     break
                 elif choice == "?":
@@ -1396,26 +1508,30 @@ def main() -> int:
                 elif choice == "B":
                     draw_board(palette, conn, w)
                 elif choice == "T":
-                    do_trade_warez(palette, player, rng)
-                    save_player(conn, player)
+                    do_trade_warez(palette, conn, player, action_now, rng)
                 elif choice == "C":
-                    do_recruit(palette, player)
-                    save_player(conn, player)
+                    do_recruit(palette, conn, player, action_now)
                 elif choice == "J":
-                    do_job(palette, player, rng)
-                    save_player(conn, player)
+                    do_job(palette, conn, player, action_now, rng)
                 elif choice == "R":
                     do_raid(palette, conn, player, action_now, rng, w)
-                    save_player(conn, player)
                 elif choice == "X":
                     do_root_exchange(palette, conn, player, action_now, rng, w)
-                    save_player(conn, player)
-            draw_goodbye(palette, player, w)
-        except EOFError:
-            save_player(conn, player)
+            except ActionRejected as exc:
+                out_line(f"  {palette.muted}{exc}{RESET}")
+        draw_goodbye(palette, read_player(conn, user_id), w)
+    except (EOFError, BrokenPipeError):
+        # Actions are already committed. A disconnect never writes a snapshot.
+        pass
+    except (InputSequenceError, WorldStateError) as exc:
+        out_line(f"  {palette.bad}{exc}{RESET}")
+        return 1
     finally:
-        out(RESET)
         conn.close()
+        try:
+            out(RESET)
+        except OSError:
+            pass
     return 0
 
 

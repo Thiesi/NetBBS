@@ -6417,16 +6417,40 @@ multi-resource economy, factions/alliances, and an item/weapon shop —
 plausible v2 additions once the core loop is proven, not part of this
 vertical.
 
-Implemented in full (`src/netbbs/doors/bundled/war_dialer.py`, listed
-in `BUNDLED_DOORS` alongside Retro Trivia and Voidrunner): all five
-actions with the formulas above, the offline "while you were away"
-event summary, lazy season/turn/Heat catch-up on login, the bust
-mechanic, and both new-player protections. 33 tests
-(`tests/test_war_dialer_domain.py`) cover the domain formulas plus
-real-SQLite storage-layer behavior, including a real-threads
-concurrency regression proving two simultaneous raids on the same
-target row cannot lose an update. Issue #200 is closed; all of its
-acceptance criteria are met.
+The original five-action game is implemented in
+`src/netbbs/doors/bundled/war_dialer.py`, registered in `BUNDLED_DOORS`.
+Issue #362 tracks its ordered reliability and product overhaul.
+
+**Shared-world actions (issue #362, slice 1).** Duplicate sessions for a
+player are allowed and serialize their actions against the same current
+database row. There is no per-session allowance or exclusive-session lease.
+Each action re-reads its actor and affected target/exchange under
+`BEGIN IMMEDIATE`, revalidates allowance, cash, raid protection/bracket,
+season and ownership as applicable, and commits all effects, events and its
+one-turn cost together before result output. A target changed since selection
+is rejected without cost. Login settlement also holds one write transaction.
+Refresh, quit and disconnect never save a session snapshot; ordinary refresh
+does not clear the login-based repeat-raid protection.
+
+World initialization checks for existing exchanges under the same write lock
+as seeding. An existing nonempty world with an unexpected exchange count is
+preserved and refused for explicit operator repair; automatic deletion cannot
+safely reconcile conflicting ownership or earned rewards.
+
+Every menu and pause uses one bounded input decoder. CSI/SS3 and other terminal
+sequences never supply action letters. Bracketed paste and unframed bursts are
+discarded; use separate single keys, since rapid queued commands are deliberately
+not macros. Incomplete or excessive sequences end the session with a diagnostic,
+rather than letting delayed suffixes select an action. A standalone Escape can
+dismiss a pause and is ignored at menus.
+
+The next slice still owns consistent read/action-time Heat and turn settlement,
+fractional/transfer income, and atomic season rollover for dormant players.
+Until then, old-season actions are rejected with a reconnect instruction.
+Offline receipts are acknowledged after the pause, and disconnect during
+onboarding or that pause exits cleanly; bounded, replayable history remains
+part of slice 2. Later gameplay decisions remain governed by the locked rules
+above until an explicit design pass adopts their replacements.
 
 ### Issue #168 — real-time relay for Link direct chat
 
