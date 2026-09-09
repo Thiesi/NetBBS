@@ -5299,3 +5299,12 @@ regenerating it would invalidate the size check. An accepted near-limit history
 may leave too little room for dossier metadata, so report unavailability while
 retaining the live world, RNG and files. Inspect dossier versions before v1 field
 requirements so a newer schema cannot accidentally offer checkpoint rollback.
+
+Achievement seeds use the career loader's signed 64-bit range, including archived
+negative seeds. Only newer integer summary versions or unknown extensions require
+preservation; missing, boolean, string and nonpositive version values must remain
+repairable. Import validated lifetime retirement maxima from legacy/per-pilot
+scores into the authoritative save before projecting current career numbers;
+retain unknown historical gaps without inventing dossiers or old combat totals.
+Merged read-only score snapshots retain those lifetime totals too, omitting an
+inconsistent per-career block until the next authoritative checkpoint repairs it.

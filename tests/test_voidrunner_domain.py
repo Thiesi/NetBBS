@@ -11750,3 +11750,72 @@ def test_career_finale_size_preflight_precedes_confirmation_and_keeps_legacy_car
     assert result and "Retirement unavailable" in result and "Current career retained" in result
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng and (tmp_path/"77.json").read_bytes()==raw
     saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester");assert saved.pilot.retirements==0
+
+
+@pytest.mark.parametrize("seed", [-1,-(2**63)])
+@pytest.mark.parametrize("retired", [False,True])
+def test_achievement_signed_seed_survives_ranking_restart_and_unchanged_checkpoint(tmp_path,monkeypatch,seed,retired):
+    save=_finale_world("combat").save;save.seed=seed
+    save.trading_ledger.sales_revenue=5000;save.trading_ledger.since_day=0
+    world=vr.World(save);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    if retired:world.reset(vr.finish_career(world.save,"combat"));world.checkpoint()
+    entries=vr._load_score_records(tmp_path)
+    for category in ("trading","exploration","combat"):
+        assert any(row["seed"]==seed for row in vr.achievement_ranking(entries,category))
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    restored=vr.World(saved);restored._checkpoint=lambda w:vr.persist(w,tmp_path,77)
+    monkeypatch.setattr(vr.os,"replace",lambda *args:pytest.fail("Unchanged signed-seed score rewritten"))
+    restored.checkpoint()
+
+
+@pytest.mark.parametrize("version", [None,False,True,"1",1.0,0,-1,"missing"])
+def test_achievement_malformed_version_repairs_from_authoritative_save(tmp_path,version):
+    import json
+    world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    path=tmp_path/"scores"/"77.json";data=json.loads(path.read_text(encoding="utf-8"))
+    if version=="missing":data["achievements"].pop("version")
+    else:data["achievements"]["version"]=version
+    path.write_text(json.dumps(data),encoding="utf-8")
+    assert "achievements" not in vr._load_score_records(tmp_path)[0]
+    world.checkpoint()
+    assert vr._load_score_records(tmp_path)[0]["achievements"]==vr.score_achievements(world.save)
+    assert type(json.loads(path.read_text(encoding="utf-8"))["achievements"]["version"]) is int
+
+
+@pytest.mark.parametrize("source,total,current", [("legacy",9,0),("score",9,0),("legacy",9,12)])
+def test_achievement_retirement_totals_survive_legacy_projection_restart_and_next_finale(tmp_path,source,total,current):
+    import json
+    record={"user_id":77,"handle":"Legacy","best_credits":10000,"retirements":total,"kills":80}
+    path=tmp_path/"leaderboard.json" if source=="legacy" else tmp_path/"scores"/"77.json"
+    path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps([record] if source=="legacy" else record),encoding="utf-8")
+    world=_finale_world();world.save.pilot.retirements=current;world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    expected=max(total,current);saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.pilot.retirements==expected and saved.retired_careers==[] and saved.pilot.credits==1200
+    entries=vr._load_score_records(tmp_path);assert vr.achievement_ranking(entries,"careers")[0]["retirements"]==expected
+    assert entries[0]["achievements"]["careers"][0]["number"]==expected+1
+    assert vr.achievement_ranking(entries,"combat")==[]
+    world=vr.World(saved,checkpoint=lambda w:vr.persist(w,tmp_path,77));world.reset(vr.finish_career(world.save,"legend"));world.checkpoint()
+    again,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert again.pilot.retirements==expected+1 and again.retired_careers[0]["number"]==expected+1
+    assert vr._load_score_records(tmp_path)[0]["achievements"]["careers"][-1]["number"]==expected+2
+
+
+
+def test_achievement_readonly_snapshot_preserves_legacy_total_before_projection_repair(tmp_path):
+    import json
+    world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    legacy=tmp_path/"leaderboard.json";legacy.write_text(json.dumps([{"user_id":77,"handle":"Legacy","best_credits":10000,"retirements":9}]),encoding="utf-8")
+    paths=[legacy,tmp_path/"77.json",tmp_path/"scores"/"77.json"];before={p:p.read_bytes() for p in paths}
+    entries=vr._load_score_records(tmp_path)
+    assert vr.achievement_ranking(entries,"careers")[0]["retirements"]==9 and "achievements" not in entries[0]
+    assert {p:p.read_bytes() for p in paths}==before
+    world.checkpoint();entry=vr._load_score_records(tmp_path)[0]
+    assert entry["retirements"]==9 and entry["achievements"]["careers"][-1]["number"]==10
+
+
+def test_achievement_invalid_lifetime_total_cannot_poison_the_career_save(tmp_path):
+    import json
+    path=tmp_path/"leaderboard.json";path.write_text(json.dumps([{"user_id":77,"handle":"Invalid","best_credits":10000,"retirements":2**63}]),encoding="utf-8")
+    world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77);world.checkpoint()
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.pilot.retirements==0 and vr._load_score_records(tmp_path)[0]["retirements"]==0

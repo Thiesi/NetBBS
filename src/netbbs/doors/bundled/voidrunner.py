@@ -3761,9 +3761,11 @@ def _score_achievements(data, retirements: int) -> dict | None:
     for index, record in enumerate(careers):
         if not isinstance(record, dict) or set(record) != set(SCORE_CAREER_FIELDS):
             return None
-        for key in ("number", "seed", "days", "credits", "kills", "missions", "charted"):
+        for key in ("number", "days", "credits", "kills", "missions", "charted"):
             if type(record[key]) is not int or record[key] < 0:
                 return None
+        if type(record["seed"]) is not int or not -(2**63) <= record["seed"] < 2**63:
+            return None
         if type(record["market_margin"]) is not int or record["charted"] > GALAXY_SYSTEM_COUNT:
             return None
         if not previous < record["number"] <= retirements + 1:
@@ -3788,7 +3790,8 @@ def _future_score_achievements(data) -> bool:
     summary = data["achievements"]
     if not isinstance(summary, dict):
         return False
-    if summary.get("version") != 1 or set(summary) - {"version", "careers"}:
+    version = summary.get("version")
+    if (type(version) is int and version > 1) or set(summary) - {"version", "careers"}:
         return True
     records = summary.get("careers")
     return isinstance(records, list) and any(
@@ -3802,7 +3805,7 @@ def _score_entry(data, user_id: int | None = None) -> dict | None:
         return None
     entry = {key: data.get(key, 0) for key in
              ("user_id", "best_credits", "retirements", "kills", "missions_completed")}
-    if "user_id" not in data or any(type(value) is not int or value < 0 for value in entry.values()):
+    if "user_id" not in data or any(type(value) is not int or not 0 <= value < 2**63 for value in entry.values()):
         return None
     if user_id is not None and entry["user_id"] != user_id:
         return None
@@ -3854,6 +3857,9 @@ def _load_score_records(save_dir: Path) -> list[dict]:
                 if prior:
                     entry["best_credits"] = max(entry["best_credits"], prior["best_credits"])
                     entry["rank"] = rank_for(entry["best_credits"])
+                    entry["retirements"] = max(entry["retirements"], prior["retirements"])
+                    if _score_achievements(entry.get("achievements"), entry["retirements"]) is None:
+                        entry.pop("achievements", None)
                 entries[entry["user_id"]] = entry
     except OSError:
         pass
@@ -3905,6 +3911,8 @@ def persist(world: World, save_dir: Path, user_id: int) -> None:
     legacy = _legacy_scores(save_dir).get(user_id, {})
     world.save.best_credits = max(world.save.best_credits, world.save.pilot.credits,
                                   prior.get("best_credits", 0), legacy.get("best_credits", 0))
+    world.save.pilot.retirements = max(world.save.pilot.retirements,
+                                       prior.get("retirements", 0), legacy.get("retirements", 0))
     write_save(save_dir, user_id, world.save)
     update_hall_of_fame(save_dir, user_id, world.save)
 

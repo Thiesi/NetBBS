@@ -4896,7 +4896,10 @@ stable numeric pilot/career tie-breaking. Full callsigns, values, career number,
 seed and current/completed state remain available on paginated narrow screens.
 There is no combined score. Market margin has the same exclusions as the trader
 career path; combat counts the existing generic victory counter, not raiders only.
-Legacy wealth and retirement counts remain valid, but absent career metrics are
+Valid legacy/per-pilot lifetime retirement maxima are imported into the career
+save before projection, preserving current career numbering and future retirement
+bonuses without inventing old dossiers or changing current funds. Legacy wealth
+and retirement counts remain valid, but absent career metrics are
 labelled unavailable rather than fabricated. The five views share one read-only
 snapshot per visit. Switching categories, paging and Back never write scores.
 

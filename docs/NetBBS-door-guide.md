@@ -201,7 +201,9 @@ number, seed and current/completed state. Completed careers includes older
 retirements whose detailed dossiers are unavailable.
 
 Every retained dossier and the current run have a compact score summary. Only
-the display is limited to 20; lower-ranked records remain stored. Old scores keep
+the display is limited to 20; lower-ranked records remain stored. On your next
+checkpoint, valid earlier retirement totals carry into your career count and next
+career number without creating missing dossiers or adding current credits. Old scores keep
 their wealth and retirement counts; career details appear at the next saved
 action, and missing older history is never invented. A later checkpoint repairs
 an optional score-write failure from the career save and its dossiers. A newer
