@@ -1429,3 +1429,44 @@ def test_rival_directory_reaches_crews_beyond_old_fifty_row_sample(db_path):
     assert wd.raid_eligibility_reason(page.player, page.entries[-1], now) == "Eligible"
     assert page.player.turns_used == 0
     conn.close()
+
+
+def test_preview_rejects_incoming_resource_changes_without_spending(db_path):
+    now = wd.now_utc()
+    conn, season = _setup(db_path, now)
+    player = wd.load_or_create_player(conn, 1, "Owner", now, season)
+    conn.execute("UPDATE players SET cash=255 WHERE user_id=1")
+    with pytest.raises(wd.ActionRejected, match="resources changed"):
+        wd.resolve_recruit(conn, player, now, require_preview=True)
+    stored = wd.read_player(conn, 1)
+    assert (stored.cash, stored.crew, stored.turns_used) == (255, 3, 0)
+    conn.close()
+
+
+def test_action_delta_includes_bust_and_zero_crew_loss_floor(db_path):
+    now = wd.now_utc()
+    conn, season = _setup(db_path, now)
+    wd.load_or_create_player(conn, 1, "Owner", now, season)
+    conn.execute("UPDATE players SET crew=1, heat=90 WHERE user_id=1")
+    player = wd.read_player(conn, 1)
+    delta = wd.ActionDelta()
+    gain, busted = wd.resolve_trade_warez(conn, player, now, FixedRandom(0), delta=delta)
+    assert (gain, busted) == (20, True)
+    assert (delta.cash, delta.crew, delta.heat, delta.rank, delta.turns) == (-60, 0, -90, 0, 1)
+    assert player.cash == 240
+    loss = wd.ActionDelta()
+    wd.resolve_job(conn, player, now, FixedRandom(1), delta=loss)
+    assert loss.crew == 0 and loss.cash == 0 and loss.turns == 1
+    conn.close()
+
+
+def test_action_delta_excludes_income_collected_before_action(db_path):
+    now = wd.now_utc()
+    conn, season = _setup(db_path, now)
+    player = wd.load_or_create_player(conn, 1, "Owner", now, season)
+    conn.execute("UPDATE exchanges SET controller_user_id=1 WHERE id=1")
+    delta = wd.ActionDelta()
+    wd.resolve_trade_warez(conn, player, now + timedelta(hours=1), FixedRandom(1), delta=delta)
+    assert player.cash == 360
+    assert delta.cash == 20
+    conn.close()

@@ -479,10 +479,14 @@ def test_real_process_disconnect_preserves_only_committed_actions(tmp_path, stag
             wait_for(b">\x1b[0m ")
             if stage == "recruit":
                 send(b"c")
+                wait_for(b"[A]Act [B]ack")
+                send(b"a")
                 wait_for(b"A new member joins")
             elif stage == "root":
                 send(b"x")
                 wait_for(b"cancel")
+                send(b"a")
+                wait_for(b"[A]Act [B]ack")
                 send(b"a")
                 wait_for(b"It's yours now.")
         process.stdin.close()
@@ -513,6 +517,7 @@ def test_action_is_durable_before_success_output_fails(tmp_path, monkeypatch, ac
     conn.execute("UPDATE players SET cash=1000 WHERE user_id=2")
     conn.execute("UPDATE players SET turns_used=14 WHERE user_id=1")
     monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "A")
+    monkeypatch.setattr(wd, "show_text_pages", lambda *args, **kwargs: "A")
     monkeypatch.setattr(wd, "now_utc", lambda: now)
     observer = wd.connect(path)
 
@@ -641,6 +646,7 @@ def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
     monkeypatch.setattr(wd, "now_utc", lambda: clock[0])
     monkeypatch.setattr(wd, "read_menu_choice", choose)
     monkeypatch.setattr(wd, "press_any_key", lambda palette: None)
+    monkeypatch.setattr(wd, "show_text_pages", lambda *args, **kwargs: "A")
     assert wd.main() == 0
     conn = wd.connect(path)
     player = wd.read_player(conn, 0)
@@ -723,8 +729,6 @@ def test_open_session_can_continue_after_season_refresh(tmp_path, monkeypatch):
 
     def choose(valid):
         choice = next(choices)
-        if clock[0] == now:
-            clock[0] += wd.SEASON
         assert choice in valid
         return choice
 
@@ -739,6 +743,11 @@ def test_open_session_can_continue_after_season_refresh(tmp_path, monkeypatch):
     monkeypatch.setattr(wd, 'now_utc', lambda: clock[0])
     monkeypatch.setattr(wd, 'read_menu_choice', choose)
     monkeypatch.setattr(wd, 'press_any_key', lambda palette: None)
+    def accept_preview(*args, **kwargs):
+        if clock[0] == now:
+            clock[0] += wd.SEASON
+        return "A"
+    monkeypatch.setattr(wd, 'show_text_pages', accept_preview)
     assert wd.main() == 0
     conn = wd.connect(path)
     player = wd.read_player(conn, 0)
@@ -926,6 +935,8 @@ def test_real_process_dashboard_keeps_action_result_until_acknowledged(tmp_path)
         wait_for(b">\x1b[0m ")
         assert b"SWITCHBOARD" in output and b"New events: 0" in output
         send(b"c")
+        wait_for(b"[A]Act [B]ack")
+        send(b"a")
         wait_for(b"Press any key to continue...")
         after_result = len(output)
         # Acknowledgement is a real input boundary: no automatic dashboard redraw.
@@ -982,3 +993,67 @@ def test_real_process_browsing_screens_are_free_and_do_not_ack_events(tmp_path, 
         assert (player.cash, player.crew, player.turns_used) == (300, 3, 0)
         assert len(wd.unseen_events(conn, 0)) == 1
         conn.close()
+
+
+@pytest.mark.parametrize("key", [b"t", b"c", b"j", b"x"])
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_real_process_preview_cancel_or_disconnect_spends_nothing(tmp_path, key, disconnect):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b">\x1b[0m ")
+        send(key)
+        if key == b"x":
+            wait_for(b"cancel")
+            send(b"a")
+        wait_for(b"[A]Act [B]ack")
+        assert b"Cost: 1 turn" in output
+        if disconnect:
+            process.stdin.close()
+        else:
+            send(b"b")
+            wait_for(b">\x1b[0m ")
+            send(b"q")
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b""
+        conn = wd.connect(path)
+        player = wd.read_player(conn, 0)
+        assert (player.cash, player.crew, player.turns_used) == (300, 3, 0)
+        assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
+        conn.close()
+
+
+def test_preview_uses_known_odds_and_explicit_private_uncertainty(tmp_path):
+    conn = wd.connect(tmp_path / "preview.db")
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    player = wd.load_or_create_player(conn, 1, "Owner", now, 1)
+    rival = wd.load_or_create_player(conn, 2, "Rival", now, 1)
+    rival.cash = 1234567
+    rival.crew = 23456
+    raid = "\n".join(wd.action_preview_lines("raid", player, rival))
+    assert "unknown (10%-90%)" in raid
+    assert "1234567" not in raid and "23456" not in raid
+    exchange = wd.list_exchanges(conn)[0]
+    root = "\n".join(wd.action_preview_lines("root", player, exchange))
+    assert "Success: 100%" in root
+    player.heat = 80
+    trade = "\n".join(wd.action_preview_lines("trade", player))
+    assert "bust risk 4.0%" in trade
+    recruit = "\n".join(wd.action_preview_lines("recruit", player))
+    assert "No Heat or bust roll" in recruit
+    conn.close()
+
+
+def test_preview_requires_reading_to_last_page_before_act(monkeypatch):
+    written = []
+    monkeypatch.setattr(wd, "out", written.append)
+    states = []
+    def choose(valid):
+        states.append(valid)
+        return "A" if "A" in valid else "N"
+    monkeypatch.setattr(wd, "read_menu_choice", choose)
+    result = wd.show_text_pages(wd.Palette(False), "PREVIEW", ["Risk details " * 40], 20, 10, accept=True)
+    assert result == "A" and len(states) > 1
+    assert all("A" not in state for state in states[:-1])
+    assert "A" in states[-1]

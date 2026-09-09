@@ -1184,8 +1184,22 @@ def load_or_create_player(conn: sqlite3.Connection, user_id: int, handle: str, n
     return player
 
 
+@dataclass
+class ActionDelta:
+    cash: int = 0
+    crew: int = 0
+    heat: float = 0.0
+    rank: int = 0
+    turns: int = 0
+
+
+def actor_preview_state(player: Player) -> tuple:
+    return (player.cash, player.crew, player.turns_used, player.season_number, rank_score(player))
+
+
 @contextmanager
-def _action_player(conn: sqlite3.Connection, snapshot: Player, now: datetime):
+def _action_player(conn: sqlite3.Connection, snapshot: Player, now: datetime, *,
+                   require_preview: bool = False, delta: ActionDelta | None = None):
     """Serialize all sessions, including duplicate sessions for one player.
 
     Session objects are display snapshots only. Copy back the fresh actor only
@@ -1196,35 +1210,44 @@ def _action_player(conn: sqlite3.Connection, snapshot: Player, now: datetime):
     with _write_transaction(conn):
         season = _settle_world(conn, now)
         player = read_player(conn, snapshot.user_id)
-        now = settle_player_clocks(player, now)
         if player.season_number != season or snapshot.season_number != season:
             raise ActionRejected("Season changed. Review the refreshed resources before choosing another action.")
+        if require_preview and actor_preview_state(player) != actor_preview_state(snapshot):
+            raise ActionRejected("Your resources changed during the preview. Review them again; nothing spent.")
+        now = settle_player_clocks(player, now)
         player.cash += _collect_exchange_income(conn, player, now)
         if player.turns_used >= TURNS_PER_DAY:
             raise ActionRejected("No turns left. No resources spent.")
+        before = (player.cash, player.crew, player.heat, rank_score(player), player.turns_used)
         yield player, now
         if player.turns_used == 0:
             player.turn_day_start = player.heat_updated_at
         player.turns_used += 1
         _save_player(conn, player)
     snapshot.__dict__.update(player.__dict__)
+    if delta is not None:
+        delta.cash = player.cash - before[0]
+        delta.crew = player.crew - before[1]
+        delta.heat = player.heat - before[2]
+        delta.rank = rank_score(player) - before[3]
+        delta.turns = player.turns_used - before[4]
 
 
-def resolve_trade_warez(conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random) -> tuple[int, bool]:
-    with _action_player(conn, player, now) as (actor, now):
+def resolve_trade_warez(conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, *, require_preview: bool = False, delta: ActionDelta | None = None) -> tuple[int, bool]:
+    with _action_player(conn, player, now, require_preview=require_preview, delta=delta) as (actor, now):
         result = action_trade_warez(actor, rng)
     return result
 
 
-def resolve_recruit(conn: sqlite3.Connection, player: Player, now: datetime) -> bool:
-    with _action_player(conn, player, now) as (actor, now):
+def resolve_recruit(conn: sqlite3.Connection, player: Player, now: datetime, *, require_preview: bool = False, delta: ActionDelta | None = None) -> bool:
+    with _action_player(conn, player, now, require_preview=require_preview, delta=delta) as (actor, now):
         if not action_recruit(actor):
             raise ActionRejected(f"Not enough cash (need ${RECRUIT_COST}). No resources spent.")
     return True
 
 
-def resolve_job(conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random) -> tuple[str, bool, int, bool]:
-    with _action_player(conn, player, now) as (actor, now):
+def resolve_job(conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, *, require_preview: bool = False, delta: ActionDelta | None = None) -> tuple[str, bool, int, bool]:
+    with _action_player(conn, player, now, require_preview=require_preview, delta=delta) as (actor, now):
         result = action_job(actor, rng)
     return result
 
@@ -1365,8 +1388,9 @@ def raid_selection_state(player: Player) -> tuple:
 def resolve_raid(
     conn: sqlite3.Connection, attacker: Player, target_user_id: int,
     now: datetime, rng: random.Random, *, expected_target: Player | None = None,
+    require_preview: bool = False, delta: ActionDelta | None = None,
 ) -> tuple[bool, int, bool]:
-    with _action_player(conn, attacker, now) as (actor, now):
+    with _action_player(conn, attacker, now, require_preview=require_preview, delta=delta) as (actor, now):
         target = read_player(conn, target_user_id)
         if target.season_number != actor.season_number:
             raise ActionRejected("Rival belongs to an earlier season. Choose another target.")
@@ -1395,8 +1419,9 @@ def exchange_selection_state(exchange: Exchange) -> tuple:
 def resolve_root_exchange(
     conn: sqlite3.Connection, attacker: Player, exchange_id: int,
     now: datetime, rng: random.Random, *, expected_exchange: Exchange | None = None,
+    require_preview: bool = False, delta: ActionDelta | None = None,
 ) -> tuple[bool, str, bool]:
-    with _action_player(conn, attacker, now) as (actor, now):
+    with _action_player(conn, attacker, now, require_preview=require_preview, delta=delta) as (actor, now):
         exchange = next((e for e in list_exchanges(conn) if e.id == exchange_id), None)
         if exchange is None:
             raise ActionRejected("Exchange no longer exists. No resources spent.")
@@ -1602,7 +1627,7 @@ def draw_dashboard(p: Palette, state: DashboardState, now: datetime, width: int,
 
 def show_text_pages(p: Palette, title: str, paragraphs: list[str], width: int, height: int,
                     *, more_before: bool = False, more_after: bool = False,
-                    start_last: bool = False, onboarding: bool = False) -> str:
+                    start_last: bool = False, onboarding: bool = False, accept: bool = False) -> str:
     """Content first, bounded terminal pages; return an edge key to fetch another batch."""
     width = max(1, width - 1)
     heading = _event_wrap(title, width)
@@ -1622,8 +1647,11 @@ def show_text_pages(p: Palette, title: str, paragraphs: list[str], width: int, h
             out_line(f"{p.white}{line}{RESET}")
         for line in footer[:-1]:
             out_line(f"{p.muted}{line}{RESET}")
-        out_prompt(f"{p.gold}{footer[-1]}{RESET}")
-        key = read_input_key().upper() if onboarding else read_menu_choice("NPBQ")
+        final_footer = "[A]Act [B]ack" if accept and index == len(pages) - 1 else footer[-1]
+        out_prompt(f"{p.gold}{final_footer}{RESET}")
+        key = read_input_key().upper() if onboarding else read_menu_choice("NPBQ" + ("A" if accept and index == len(pages) - 1 else ""))
+        if key == "A":
+            return "A"
         if key in ("B", "Q"):
             return "B"
         if onboarding:
@@ -1702,35 +1730,102 @@ def read_menu_choice(valid: str) -> str:
             return key
 
 
-def draw_bust(p: Palette, w: int) -> None:
-    out_line(f"  {p.bad}{BOLD}*** BUSTED ***{RESET} {p.white}The Feds kicked in your door -- gear and "
-              f"crew scattered. Heat reset.{RESET}")
+def action_preview_lines(action: str, player: Player, target: Player | Exchange | None = None) -> list[str]:
+    cost = RECRUIT_COST if action == "recruit" else 0
+    lines = [f"Season {player.season_number}; turns {TURNS_PER_DAY - player.turns_used}/{TURNS_PER_DAY}; cash ${player.cash:,}",
+             f"Cost: 1 turn, ${cost} cash. Back spends nothing."]
+    if player.turns_used >= TURNS_PER_DAY:
+        refill = from_iso(player.turn_day_start) + DAY
+        lines.append("Unavailable: no turns. Refill at " + refill.strftime("%Y-%m-%d %H:%M UTC"))
+    if cost > player.cash:
+        lines.append(f"Unavailable: need ${cost - player.cash} more cash.")
+    heat = {"trade": TRADE_WAREZ_HEAT, "recruit": 0, "job": JOB_HEAT,
+            "raid": RAID_HEAT, "root": ROOT_EXCHANGE_HEAT}[action]
+    if action == "trade":
+        lines.append(f"Gross payout: ${TRADE_WAREZ_RANGE[0]}-${TRADE_WAREZ_RANGE[1]}, before any bust loss.")
+    elif action == "recruit":
+        lines.append("Guaranteed +1 crew and +10 Rank. No Heat or bust roll.")
+    elif action == "job":
+        odds = [success_chance(player.crew, difficulty) for _, difficulty, _ in JOBS]
+        lines += ["A job is assigned when you act; browsing does not draw or reroll one.",
+                  f"Success: {min(odds):.0%}-{max(odds):.0%}, depending on the assigned job.",
+                  f"Success pays ${min(j[2][0] for j in JOBS)}-${max(j[2][1] for j in JOBS)} and +15 Rank.",
+                  f"Failure loses {min(1, player.crew - 1)} crew before any bust."]
+    elif action == "raid":
+        lines += [f"Rival: {target.handle}", "Success odds unknown (10%-90%): rival crew strength is private.",
+                  f"Success steals {RAID_STEAL_FRACTION:.0%} of their unknown cash and earns +25 Rank.",
+                  f"Failure loses {min(RAID_FAIL_CREW_LOSS, player.crew - 1)} crew and "
+                  f"{RAID_FAIL_CASH_LOSS_FRACTION:.0%} cash before any bust.",
+                  "Win or lose, another consecutive raid is blocked until the rival logs in."]
+    elif action == "root":
+        chance = 1.0 if target.controller_user_id is None else success_chance(player.crew, target.garrison)
+        lines += [f"Exchange: {target.name}", f"Success: {chance:.0%}; garrison {target.garrison}.",
+                  f"Success earns +500 Rank and ${target.income_per_hour}/hour until lost or season reset.",
+                  f"Your crew stays available; the exchange gets a garrison of {player.crew}.",
+                  f"Failure loses {min(1, player.crew - 1)} crew before any bust."]
+    if heat:
+        projected = player.heat + heat
+        chance = min(HEAT_BUST_CHANCE_CAP, max(0, projected - HEAT_BUST_THRESHOLD) * HEAT_BUST_CHANCE_PER_POINT)
+        risk = "under 0.1%" if 0 < chance < 0.001 else f"{chance:.1%}"
+        lines.append(f"Heat: {player.heat:.1f} + {heat} = {projected:.1f}; bust risk {risk} now.")
+        lines.append("Heat decays while you wait; the committed risk may be lower.")
+        if chance:
+            lines.append(f"A bust then keeps {1 - BUST_CASH_LOSS_FRACTION:.0%} cash and "
+                         f"{1 - BUST_CREW_LOSS_FRACTION:.0%} crew, rounded down (crew floor 1); Heat resets.")
+    return lines
 
 
-def do_trade_warez(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random) -> None:
-    gain, busted = resolve_trade_warez(conn, player, now, rng)
-    out_line(f"  {p.good}You move some warez on the boards. +${gain}.{RESET}")
+def confirm_action(p: Palette, conn: sqlite3.Connection, player: Player, action: str,
+                   width: int, height: int, target: Player | Exchange | None = None) -> bool:
+    refreshed = refresh_player(conn, player.user_id, now_utc())
+    player.__dict__.update(refreshed.__dict__)
+    available = player.turns_used < TURNS_PER_DAY and (action != "recruit" or player.cash >= RECRUIT_COST)
+    return show_text_pages(p, action.upper() + " PREVIEW", action_preview_lines(action, player, target),
+                           width, height, accept=available) == "A"
+
+
+def draw_action_delta(p: Palette, delta: ActionDelta, busted: bool = False) -> None:
     if busted:
-        draw_bust(p, 78)
+        out_line(f"{p.bad}*** BUSTED *** Heat reset; losses included below.{RESET}")
+    out_line(f"{p.white}Net cash: {'+' if delta.cash >= 0 else '-'}${abs(delta.cash):,}; crew: {delta.crew:+,}{RESET}")
+    out_line(f"{p.white}Rank: {delta.rank:+,}; Heat: {delta.heat:+.1f}; turns spent: {delta.turns}{RESET}")
 
 
-def do_recruit(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime) -> None:
-    resolve_recruit(conn, player, now)
-    out_line(f"  {p.good}A new member joins your crew. Crew +1.{RESET}")
+def do_trade_warez(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
+                   rng: random.Random, w: int = 78, height: int = 24) -> bool:
+    if not confirm_action(p, conn, player, "trade", w, height):
+        return False
+    delta = ActionDelta()
+    gain, busted = resolve_trade_warez(conn, player, now_utc(), rng, require_preview=True, delta=delta)
+    out_line(f"{p.good}You move some warez on the boards. Gross payout ${gain}.{RESET}")
+    draw_action_delta(p, delta, busted)
+    return True
 
 
-def do_job(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random) -> None:
-    name, success, payout, busted = resolve_job(conn, player, now, rng)
-    out_line(f"  {p.accent}Job:{RESET} {p.white}{name}{RESET}")
-    if success:
-        out_line(f"  {p.good}Success! +${payout}.{RESET}")
-    else:
-        out_line(f"  {p.bad}Blown. You lose a crew member covering your tracks.{RESET}")
-    if busted:
-        draw_bust(p, 78)
+def do_recruit(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
+               w: int = 78, height: int = 24) -> bool:
+    if not confirm_action(p, conn, player, "recruit", w, height):
+        return False
+    delta = ActionDelta()
+    resolve_recruit(conn, player, now_utc(), require_preview=True, delta=delta)
+    out_line(f"{p.good}A new member joins your crew.{RESET}")
+    draw_action_delta(p, delta)
+    return True
 
 
-def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int) -> bool:
+def do_job(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
+           rng: random.Random, w: int = 78, height: int = 24) -> bool:
+    if not confirm_action(p, conn, player, "job", w, height):
+        return False
+    delta = ActionDelta()
+    name, success, payout, busted = resolve_job(conn, player, now_utc(), rng, require_preview=True, delta=delta)
+    out_line(f"{p.accent}Job:{RESET} {p.white}{_event_plain(name)}{RESET}")
+    out_line(f"{p.good}Success! Gross payout ${payout}.{RESET}" if success else f"{p.bad}Job failed.{RESET}")
+    draw_action_delta(p, delta, busted)
+    return True
+
+
+def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int, height: int = 24) -> bool:
     previous_season = player.season_number
     targets = list_raid_targets(conn, player, now)
     if player.season_number != previous_season:
@@ -1747,19 +1842,21 @@ def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
     if choice == "Q":
         return False
     target = targets[LETTERS.index(choice)]
+    if not confirm_action(p, conn, player, "raid", w, height, target):
+        return False
+    delta = ActionDelta()
     success, amount, busted = resolve_raid(
-        conn, player, target.user_id, now_utc(), rng, expected_target=target,
+        conn, player, target.user_id, now_utc(), rng, expected_target=target, require_preview=True, delta=delta,
     )
     if success:
-        out_line(f"  {p.good}You hit {target.handle} and get away with ${amount}.{RESET}")
+        out_line(f"  {p.good}You hit {_event_plain(target.handle)}; gross take ${amount}.{RESET}")
     else:
-        out_line(f"  {p.bad}The raid on {target.handle} goes bad. You lose crew and cash.{RESET}")
-    if busted:
-        draw_bust(p, w)
+        out_line(f"  {p.bad}The raid on {_event_plain(target.handle)} failed.{RESET}")
+    draw_action_delta(p, delta, busted)
     return True
 
 
-def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int) -> bool:
+def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int, height: int = 24) -> bool:
     previous_season = player.season_number
     refreshed = refresh_player(conn, player.user_id, now)
     player.__dict__.update(refreshed.__dict__)
@@ -1775,15 +1872,17 @@ def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: 
     if exchange.controller_user_id == player.user_id:
         out_line(f"  {p.muted}You already control {exchange.name}.{RESET}")
         return True
+    if not confirm_action(p, conn, player, "root", w, height, exchange):
+        return False
+    delta = ActionDelta()
     success, name, busted = resolve_root_exchange(
-        conn, player, exchange.id, now_utc(), rng, expected_exchange=exchange,
+        conn, player, exchange.id, now_utc(), rng, expected_exchange=exchange, require_preview=True, delta=delta,
     )
     if success:
         out_line(f"  {p.good}You root {name}. It's yours now.{RESET}")
     else:
-        out_line(f"  {p.bad}The exchange's defenses hold. You lose a crew member.{RESET}")
-    if busted:
-        draw_bust(p, w)
+        out_line(f"  {p.bad}The exchange's defenses hold.{RESET}")
+    draw_action_delta(p, delta, busted)
     return True
 
 
@@ -1895,19 +1994,20 @@ def main() -> int:
                 elif choice == "H":
                     show_event_history(palette, conn, player.user_id, w, height)
                 elif choice == "T":
-                    do_trade_warez(palette, conn, player, action_now, rng)
+                    if do_trade_warez(palette, conn, player, action_now, rng, w, height):
+                        press_any_key(palette)
                 elif choice == "C":
-                    do_recruit(palette, conn, player, action_now)
+                    if do_recruit(palette, conn, player, action_now, w, height):
+                        press_any_key(palette)
                 elif choice == "J":
-                    do_job(palette, conn, player, action_now, rng)
+                    if do_job(palette, conn, player, action_now, rng, w, height):
+                        press_any_key(palette)
                 elif choice == "R":
-                    if do_raid(palette, conn, player, action_now, rng, w):
+                    if do_raid(palette, conn, player, action_now, rng, w, height):
                         press_any_key(palette)
                 elif choice == "X":
-                    if do_root_exchange(palette, conn, player, action_now, rng, w):
+                    if do_root_exchange(palette, conn, player, action_now, rng, w, height):
                         press_any_key(palette)
-                if choice in "TCJ":
-                    press_any_key(palette)
             except ActionRejected as exc:
                 out_line(f"  {palette.muted}{exc}{RESET}")
                 press_any_key(palette)
