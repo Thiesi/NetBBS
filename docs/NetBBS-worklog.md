@@ -3519,6 +3519,24 @@ Thread-pool lane round trips add real latency. Tests coordinating chat
 participants or recipient rendering must wait for the relevant state/output,
 not one arbitrary event-loop turn.
 
+A bounded *yield count* is the same mistake as a fixed sleep, and hides better.
+Pumping `await asyncio.sleep(0)` a fixed number of times does not advance work
+dispatched to a thread — `asyncio.to_thread` completes when the OS schedules
+that worker, not after N event-loop turns — so such a test passes in isolation
+and fails intermittently only under a loaded full-suite run, where it reads as
+flakiness rather than as the unsound synchronisation it is. Wait for the
+observable end state instead: where an injected fake ends the loop itself, the
+task completing *is* the signal, and a timeout around it is a deadlock guard
+rather than a pacing device.
+
+A test that pins a clock has to pin every timestamp that clock is compared
+against. Where the code under test falls back to a row's real creation time
+(`COALESCE(mrc_last_active_at, created_at)`), a hardcoded `now` is a date-bomb:
+it passes until the wall clock overtakes it and then fails on every run
+thereafter, with nothing about the failure pointing at the calendar. Anchor the
+pinned clock to the same real moment the rows were created, or inject the
+creation time too.
+
 ### Use real boundaries where possible
 
 Use:

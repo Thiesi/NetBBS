@@ -235,9 +235,24 @@ def test_fetch_wraps_read_phase_failures_too(exc):
 # -- run_scheduled_reliable_nodes_refresh (sleep injected) ------------------
 
 
-def _run_refresh_until(db, fetch, *, predicate, passes=3):
-    """Drive the refresh loop with an injected sleep until `predicate`
-    holds or `passes` sleeps have elapsed, then cancel it."""
+def _run_refresh_passes(db, fetch, *, passes=3):
+    """Run exactly `passes` passes of the refresh loop, then stop.
+
+    The injected sleep ends the task on its `passes`-th call, and every
+    pass reaches that sleep, so *the task finishing* is the signal this
+    waits on. Issue #330: it previously pumped the event loop a fixed
+    50 times and stopped when a predicate held — but
+    `fetch_reliable_nodes` dispatches the injected `fetch` through
+    `asyncio.to_thread`, so whether that worker had run within N yields
+    depended on how loaded the machine was. Under a full-suite run the
+    task could be cancelled before the first pass had cached anything,
+    failing intermittently while passing in isolation. A yield count is
+    not a synchronisation primitive.
+
+    The timeout is a deadlock guard, not a pacing device: nothing here
+    waits on wall-clock time, so reaching it means the loop stopped
+    reaching its sleep and the test should fail loudly rather than hang.
+    """
     sleeps = 0
 
     async def fake_sleep(_seconds: float) -> None:
@@ -251,15 +266,16 @@ def _run_refresh_until(db, fetch, *, predicate, passes=3):
         task = asyncio.create_task(
             run_scheduled_reliable_nodes_refresh(db, fetch=fetch, sleep=fake_sleep, interval_seconds=86400.0)
         )
-        for _ in range(50):
-            await asyncio.sleep(0)
-            if predicate() or task.done():
-                break
-        task.cancel()
         try:
-            await task
+            await asyncio.wait_for(task, timeout=30)
         except asyncio.CancelledError:
-            pass
+            pass  # fake_sleep ending the loop, which is the expected exit
+        except asyncio.TimeoutError:  # pragma: no cover - deadlock guard
+            task.cancel()
+            raise AssertionError(
+                f"refresh loop did not complete {passes} passes within 30s"
+            ) from None
+        assert sleeps == passes, f"expected {passes} passes, the loop took {sleeps}"
 
     asyncio.run(scenario())
 
@@ -267,7 +283,7 @@ def _run_refresh_until(db, fetch, *, predicate, passes=3):
 def test_scheduled_refresh_runs_immediately_and_caches_the_result(tmp_path):
     db = Database(tmp_path / "node.db")
     fetch = lambda url: _doc([{"name": "Live", "url": "http://live.example:7862"}])
-    _run_refresh_until(db, fetch, predicate=lambda: bool(get_cached_reliable_nodes(db)))
+    _run_refresh_passes(db, fetch)
     assert get_cached_reliable_nodes(db) == [ReliableNode(name="Live", url="http://live.example:7862")]
 
 
@@ -281,7 +297,7 @@ def test_scheduled_refresh_skips_a_pass_when_update_checks_are_disabled(tmp_path
         calls += 1
         return _doc([{"name": "Live", "url": "http://live.example:7862"}])
 
-    _run_refresh_until(db, fetch, predicate=lambda: False, passes=2)
+    _run_refresh_passes(db, fetch, passes=2)
     assert calls == 0
     assert get_cached_reliable_nodes(db) is None
 
@@ -299,7 +315,7 @@ def test_scheduled_refresh_survives_an_unexpected_exception_and_keeps_going(tmp_
             raise RuntimeError("something nobody anticipated")
         return _doc([{"name": "Live", "url": "http://live.example:7862"}])
 
-    _run_refresh_until(db, fetch, predicate=lambda: bool(get_cached_reliable_nodes(db)), passes=3)
+    _run_refresh_passes(db, fetch, passes=3)
     assert calls >= 2
     assert get_cached_reliable_nodes(db) == [ReliableNode(name="Live", url="http://live.example:7862")]
 
@@ -312,7 +328,7 @@ def test_scheduled_refresh_keeps_the_previous_cache_on_a_failed_fetch(tmp_path):
     def fetch(url: str) -> bytes:
         return b"{not json"
 
-    _run_refresh_until(db, fetch, predicate=lambda: False, passes=2)
+    _run_refresh_passes(db, fetch, passes=2)
     assert get_cached_reliable_nodes(db) == earlier
 
 
