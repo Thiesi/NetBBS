@@ -4875,6 +4875,19 @@ the live append helper's retention limit. Version checks precede v1 field valida
 with unsupported/new fields preserved for the appropriate build.
 The lifetime score remains separate from current-run rank and achievements.
 
+Station Viewport and yard ship portraits expose distinct native terminal artwork
+for each of the four hull classes, five station economies and four discovered
+landmarks. Damage changes the hull's visual shading while explicit hull/fuel/cargo
+figures remain authoritative. Portraits use full and compact authored compositions,
+retaining an entire silhouette on one page at supported terminal dimensions; text
+and navigation paginate normally. Existing full/basic/mono/plain modes apply.
+The plain mode uses ASCII art without color. Artwork is static, with no animation,
+random draws, market observations or career writes. Station captions use actual
+places, sectors and specialist contacts. A landmark portrait is available only at
+its station or after investigation, not merely through an accepted bearing.
+Ship commissioning previews and landmark inspection use these same portraits;
+backing out of either view leaves gameplay unchanged.
+
 Hall of Fame renders its existing top-20 best-credit ranking as paginated labelled
 pilot entries. Full callsigns, rank titles and score fields remain available at
 narrow widths, with a textual YOU marker for the current pilot when listed. The
