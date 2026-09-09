@@ -5237,3 +5237,12 @@ its next command-deck visit. Updating highest_rank_seen at the action boundary
 means a later rank check cannot rediscover that notice. Keep it separate from the
 saved milestone, enqueue only after checkpoint success, and clear it on career
 reset; durable highlights remain the history after a restart.
+
+User-facing retirement dispatches through finish_career, which validates the chosen
+accomplishment before calling the base retire_pilot fresh-run constructor. Dossiers
+and new career share one save payload and atomic replacement; no separate archival
+write may precede a failed reset. Copy retained highlights and dossier containers
+rather than aliasing the previous run. Reject archive-capacity overflow instead of
+evicting old records. Legacy retirement counts can exceed the number of dossiers;
+only observed conclusions create records. New Game+ equipment uses ordinary module
+tiers and must pass the normal ship/save validator without special exceptions.

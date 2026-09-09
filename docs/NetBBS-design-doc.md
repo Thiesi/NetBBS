@@ -4825,7 +4825,7 @@ the place for contract actions. History exposes every already-retained highlight
 and log entry newest first, without extending storage retention or silently hiding
 earlier entries behind a display limit. Read-only pages are cached per view for
 the visit so large legacy records are not reformatted on every key. Retirement
-keeps its existing top-rank eligibility, final chosen-action confirmation, new-career
+uses the Finale screen, final chosen-action confirmation, new-career
 bonus and durable checkpoint. Cancelling retains the record with a visible result.
 
 Pilot rank is lasting recognition within the current career. Each completed-action
@@ -4840,6 +4840,36 @@ resets rank as before; subsequent starting-credit bonuses are ordinary current
 funds. Old careers without a recorded promotion can establish only what their
 current balance proves. Read-only rank views do not write or fabricate history.
 Promotion notices do not introduce a separate acknowledgement dialog.
+
+The pilot record exposes three independent accomplishment paths as well as the
+balance-based rank. Trader stages use recorded known-cost market-sale margin at
+5,000/20,000/50,000 credits; delivery pay, unknown-cost receipts and non-trading
+income do not count. This is cargo margin, not total career profit. Explorer
+stages require 12/30/all 48 charted systems. Combat stages require 5/20/50 recorded
+victories. Progress is factual and may fall where its underlying measure falls;
+current-career rank remains permanent. These paths unlock different career
+conclusions without requiring the 250,000-credit top rank.
+
+The always-available record Finale screen shows all four conclusions and their
+requirements before choosing: Frontier Legend at retained top rank, Trade Guild
+Founder at 50,000 recorded market margin, Atlas Keeper with a complete atlas, or
+Frontier Warden after 50 victories. Selection is a read-only draft. Only the
+chosen Retire action followed by final confirmation ends the career. It records
+a distinct closing account and begins a fresh galaxy, retaining the existing
+500-credit-per-retirement bonus. The specialist conclusions also start the next
+Shuttle with one ordinary cargo/scanner/weapon tier respectively; the Legend
+conclusion keeps the ordinary starting ship. No other gameplay progress carries
+over. Thus the chosen conclusion determines a concrete starting advantage.
+
+Retirement retains a compact dossier in the same atomic career checkpoint as the
+new run: sequence number, original seed/dates, conclusion, rank, ship, days,
+credits, chart count, victories, missions, known market margin and retained
+highlights. The record's Dossiers view includes every retained dossier. Old
+retirement counts do not fabricate missing dossiers. Storage permits 128 dossiers
+and refuses further retirement visibly at capacity; it never evicts an older
+record. Existing careers remain playable at the cap. Versioned records validate
+before loading, with unsupported/new fields preserved for the appropriate build.
+The lifetime score remains separate from current-run rank and achievements.
 
 Hall of Fame renders its existing top-20 best-credit ranking as paginated labelled
 pilot entries. Full callsigns, rank titles and score fields remain available at
