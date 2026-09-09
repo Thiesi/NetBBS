@@ -302,3 +302,20 @@ def test_existing_rows_survive_the_migration_with_no_origin(db, sysop):
     assert not mapping.is_open_room
     columns = {row["name"] for row in db.connection.execute("PRAGMA table_info(channels)").fetchall()}
     assert {"mrc_origin", "mrc_last_active_at"} <= columns
+
+
+def test_a_room_name_longer_than_the_wire_allows_is_refused_not_cut(db, sysop):
+    """Issue #376: the spec's `string[20]`; a caller or SysOp typing a
+    longer name is told, never landed in a differently named room."""
+    import pytest
+
+    from netbbs.chat.channels import create_channel
+    from netbbs.mrc.settings import MrcSettingsError, OpenRoomSettings, materialize_open_room, set_mrc_room
+
+    channel = create_channel(db, "mapped", creator=sysop)
+    with pytest.raises(MrcSettingsError, match="at most 20 characters"):
+        set_mrc_room(db, channel, "a" * 21)
+    assert set_mrc_room(db, channel, "#" + "a" * 20).room == "a" * 20
+    with pytest.raises(MrcSettingsError, match="at most 20 characters"):
+        materialize_open_room(db, "b" * 21, open_settings=OpenRoomSettings(enabled=True))
+    assert materialize_open_room(db, "b" * 20, open_settings=OpenRoomSettings(enabled=True)).room == "b" * 20

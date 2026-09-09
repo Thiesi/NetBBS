@@ -6064,7 +6064,11 @@ page is not publicly reachable:
   caller (the sender is told quietly when a line was not relayed), and
   on the way out packets from one nick are spaced at least 0.5 s apart
   -- the hub's own per-user limit (MRCDoc rev 1.26; issue #375) -- with
-  held-back lines counted under the same 200-line cap;
+  held-back lines counted under the same 200-line cap; the spec's field
+  limits are enforced where a caller or SysOp types (room names 20,
+  refused rather than cut; topics 55; passwords 20, room passwords 32;
+  LASTSEEN and HELP arguments 20), and the handshake names the client
+  as `NETBBS/<Os.arch>/<NetBBS version>` (issue #376);
   inbound 40-line burst / 20 lines/s ahead of any database write, 4 KiB
   line cap; a local line is split into at most three 140-character
   wire chunks. An `OLDVERSION` rejection from the hub is fatal until a

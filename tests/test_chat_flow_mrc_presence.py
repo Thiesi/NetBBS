@@ -160,3 +160,22 @@ def test_mrc_stats_shows_the_reply_and_the_section_carries_the_size(db, lane, hu
         finally:
             await rig.close()
     asyncio.run(scenario())
+
+
+def test_hub_command_arguments_keep_to_the_spec(db, lane, hub, presence, channel, alice):
+    """Issue #376: LASTSEEN and HELP take a `string[20]`; `/mrc help
+    <topic>` is allowed (the spec's optional topic)."""
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            session, _ = await _run(
+                lane, hub, presence, channel, alice,
+                ["/mrc lastseen " + "n" * 21, "/mrc help topics", "/quit"], mrc_bridge=rig.bridge,
+            )
+            text = _text(session)
+            assert "names and help topics are at most 20 characters there" in text
+            await rig.fake.wait_for(lambda p: p.body == "HELP topics" and p.from_user == "alice")
+            assert not [p for p in rig.fake.received if p.body.startswith("LASTSEEN")]
+        finally:
+            await rig.close()
+    asyncio.run(scenario())

@@ -37,6 +37,7 @@ from netbbs.mrc.protocol import (
     DEFAULT_PORT_PLAIN,
     DEFAULT_PORT_TLS,
     MAX_NAME,
+    room_name_error,
     sanitize_body,
     sanitize_name,
     sanitize_room,
@@ -204,9 +205,10 @@ def set_mrc_room(db: Database, channel: Channel, room: str) -> MrcChannelMapping
     rules; a leading `#` is fine). One room maps to at most one local
     channel -- otherwise one inbound line would be recorded twice and
     every local participant would appear twice on the hub."""
+    error = room_name_error(room)
+    if error is not None:
+        raise MrcSettingsError(error)
     normalized = sanitize_room(room)
-    if not normalized:
-        raise MrcSettingsError("Room name must contain at least one printable ASCII character.")
     holder = db.connection.execute(
         "SELECT name FROM channels WHERE lower(mrc_room) = lower(?) AND id != ?",
         (normalized, channel.id),
@@ -415,9 +417,10 @@ def materialize_open_room(db: Database, room: str, *, open_settings: OpenRoomSet
     the cap refuses, it never evicts a room someone may be in."""
     if not open_settings.enabled:
         raise MrcSettingsError("Opening MRC rooms is switched off on this node.")
+    error = room_name_error(room)
+    if error is not None:
+        raise MrcSettingsError(error)
     normalized = sanitize_room(room)
-    if not normalized:
-        raise MrcSettingsError("Room name must contain at least one printable ASCII character.")
     if open_settings.blocks(normalized):
         raise MrcSettingsError(f"The SysOp has blocked MRC room #{normalized} on this node.")
     existing = db.connection.execute(

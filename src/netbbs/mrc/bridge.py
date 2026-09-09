@@ -247,9 +247,21 @@ class _Connection:
 OpenConnection = Callable[..., Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
 
 
+_OS_LABELS = {"win32": "Windows", "cygwin": "Windows", "linux": "Linux", "darwin": "OSX"}
+_ARCH_LABELS = {
+    "amd64": "x86_64", "x86_64": "x86_64", "x64": "x86_64",
+    "arm64": "aarch64", "aarch64": "aarch64",
+    "x86": "i386", "i386": "i386", "i686": "i386",
+}
+
+
 def _platform_label() -> str:
-    machine = platform.machine() or "unknown"
-    return f"{sys.platform}.{machine}"
+    """The handshake's `{Os}.{arch}` in the hub's own convention
+    (`Linux.x86_64`, `Windows.x86_64`, `OSX.x86_64`; MRCDoc rev 1.26),
+    normalised from what Python reports (issue #376)."""
+    os_name = _OS_LABELS.get(sys.platform, sys.platform.capitalize() or "Unknown")
+    machine = (platform.machine() or "unknown").lower()
+    return f"{os_name}.{_ARCH_LABELS.get(machine, machine)}"
 
 
 class MrcBridge:
@@ -637,7 +649,7 @@ class MrcBridge:
         connection = _Connection(reader=reader, writer=writer)
         self._connection = connection
         handshake = protocol.build_handshake(
-            settings.site_name, software=f"NetBBS_{self._version}", platform=_platform_label()
+            settings.site_name, platform=_platform_label(), client_version=self._version,
         )
         writer.write(handshake.encode("ascii", errors="replace"))
         await writer.drain()
@@ -1226,8 +1238,8 @@ class MrcBridge:
         body = protocol.sanitize_body(text)
         if not body:
             return "nothing to send"
-        if len(f"NEWTOPIC:{mapping.room}:{body}") > protocol.MAX_BODY:
-            return f"that topic is longer than MRC allows ({protocol.MAX_BODY} characters with the room name)"
+        if len(body) > protocol.MAX_TOPIC:
+            return f"that topic is longer than MRC allows ({protocol.MAX_TOPIC} characters)"
         bucket = self._user_bucket(username)
         if not bucket.has_token():
             self._dropped_outbound += 1
@@ -1907,9 +1919,10 @@ class MrcBridge:
             return "you aren't announced to the hub yet"
         if not secret or any(ch in "~ " or not 33 <= ord(ch) <= 125 for ch in secret):
             return "MRC passwords are printable ASCII without spaces or tildes; that one cannot be sent as typed"
+        limit = protocol.MAX_ROOM_PASSWORD if command == "ROOMPASS" else protocol.MAX_PASSWORD
+        if len(secret) > limit:
+            return f"that password is longer than MRC allows ({limit} characters)"
         body = f"{command} {secret}"
-        if len(body) > protocol.MAX_BODY:
-            return f"that password is longer than MRC allows ({protocol.MAX_BODY - len(command) - 1} characters)"
         bucket = self._user_bucket(username)
         if not bucket.has_token():
             self._dropped_outbound += 1

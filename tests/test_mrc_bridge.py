@@ -104,8 +104,8 @@ def test_connects_handshakes_and_announces_site_info(db, lane, lobby):
         bridge = await _connected_bridge(db, lane, hub, fake)
         try:
             await fake.wait_for(lambda p: p.body.startswith("CAPABILITIES:"))
-            assert fake.handshakes == ["My Board~NetBBS_5.7.0/" + fake.handshakes[0].split("/", 1)[1]]
-            assert fake.handshakes[0].endswith("/1.3.5")
+            assert fake.handshakes == ["My Board~NETBBS/" + fake.handshakes[0].split("/", 1)[1]]
+            assert fake.handshakes[0].endswith("/5.7.0")  # the client's version, not the protocol's
             info = fake.packets(body_prefix="INFOSYS:")[0]
             assert (info.from_user, info.from_site, info.to_user) == ("CLIENT", "My_Board", "SERVER")
             assert info.body == "INFOSYS:Thiesi"
@@ -1076,3 +1076,22 @@ def test_held_lines_count_against_the_outbound_cap(db, lane, lobby, alice):
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_platform_label_uses_the_hubs_convention(monkeypatch):
+    """Issue #376: `{Os}.{arch}` as the spec's table spells it."""
+    import platform as platform_module
+    import sys as sys_module
+
+    from netbbs.mrc import bridge as bridge_module
+
+    for reported, expected in (
+        (("win32", "AMD64"), "Windows.x86_64"),
+        (("linux", "x86_64"), "Linux.x86_64"),
+        (("linux", "aarch64"), "Linux.aarch64"),
+        (("darwin", "arm64"), "OSX.aarch64"),
+        (("freebsd14", "i386"), "Freebsd14.i386"),
+    ):
+        monkeypatch.setattr(sys_module, "platform", reported[0])
+        monkeypatch.setattr(platform_module, "machine", lambda value=reported[1]: value)
+        assert bridge_module._platform_label() == expected

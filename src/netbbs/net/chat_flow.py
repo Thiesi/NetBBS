@@ -146,6 +146,7 @@ from netbbs.link.node_profiles import (
     latest_identity_observation,
 )
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX
+from netbbs.mrc.protocol import MAX_ARGUMENT
 from netbbs.mrc.bridge import MrcBridge, MrcNotice, MrcStatus
 from netbbs.mrc.settings import (
     MrcChannelMapping,
@@ -2650,7 +2651,7 @@ _MRC_HUB_COMMANDS: dict[str, tuple[str, str]] = {
     "info": ("INFO", "required"),
     "motd": ("MOTD", "none"),
     "stats": ("STATS", "none"),
-    "help": ("HELP", "none"),
+    "help": ("HELP", "optional"),
     "lastseen": ("LASTSEEN", "required"),
     "topics": ("TOPICS", "none"),
 }
@@ -2771,6 +2772,12 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
             failure = ctx.mrc_bridge.send_ctcp(ctx.channel, ctx.user.username, target, command.strip())
         elif subcommand in _MRC_HUB_COMMANDS:
             hub_command, argument = _MRC_HUB_COMMANDS[subcommand]
+            if hub_command in ("LASTSEEN", "HELP") and len(rest) > MAX_ARGUMENT:
+                await ctx.session.write_line(colored(
+                    f"(not sent to MRC: names and help topics are at most {MAX_ARGUMENT} characters there)",
+                    fg_color=MUTED_COLOR,
+                ))
+                return
             if (rest and argument == "none") or (not rest and argument == "required"):
                 await _show_usage(ctx.session, "mrc")
                 return

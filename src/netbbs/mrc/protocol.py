@@ -47,6 +47,15 @@ SEPARATOR = "~"
 MAX_LINE = 512
 MAX_BODY = 140
 MAX_NAME = 30
+# Field limits from the protocol specification (MRCDoc rev 1.26; issue
+# #376): room names are `string[20]`, topics `string[55]`, IDENTIFY /
+# REGISTER / UPDATE passwords `string[20]`, ROOMPASS `string[32]`, and
+# the argument of LASTSEEN and HELP `string[20]`.
+MAX_ROOM = 20
+MAX_TOPIC = 55
+MAX_PASSWORD = 20
+MAX_ROOM_PASSWORD = 32
+MAX_ARGUMENT = 20
 # How many `MAX_BODY` chunks one local chat line may be split into
 # before the rest is dropped -- bounds the outbound burst one caller
 # can produce with a single (long) line.
@@ -185,26 +194,51 @@ def _clean(text: str) -> str:
     return sanitize_text(strip_ansi(text)).replace(SEPARATOR, " ")
 
 
-def sanitize_name(name: str) -> str:
-    """A user or site name as it may appear on the wire: pipe codes
+def _name_chars(name: str) -> str:
+    """A name's wire characters before any length cut: pipe codes
     stripped, whitespace collapsed to single underscores, printable
-    ASCII 33-125 only, at most `MAX_NAME` characters. Non-ASCII
-    characters are dropped rather than replaced -- a `?` inside a
-    *name* would read as a different identity, whereas inside a body
-    it reads as an unrenderable character."""
+    ASCII 33-125 only. Non-ASCII characters are dropped rather than
+    replaced -- a `?` inside a *name* would read as a different
+    identity, whereas inside a body it reads as an unrenderable
+    character."""
     cleaned = strip_pipe_codes(_clean(name)).strip()
     cleaned = _WHITESPACE_RE.sub("_", cleaned)
-    cleaned = "".join(ch for ch in cleaned if 33 <= ord(ch) <= 125)
-    return cleaned[:MAX_NAME]
+    return "".join(ch for ch in cleaned if 33 <= ord(ch) <= 125)
 
 
-def sanitize_room(room: str) -> str:
-    """Room names follow the same rules as user names; a leading `#`
-    (IRC habit several clients accept) is dropped."""
-    cleaned = sanitize_name(room)
+def sanitize_name(name: str) -> str:
+    """A user or site name as it may appear on the wire (`_name_chars`),
+    at most `MAX_NAME` characters."""
+    return _name_chars(name)[:MAX_NAME]
+
+
+def _room_chars(room: str) -> str:
+    cleaned = _name_chars(room)
     if cleaned.startswith("#"):
         cleaned = cleaned[1:]
     return cleaned
+
+
+def sanitize_room(room: str) -> str:
+    """Room names follow the same rules as user names, at most
+    `MAX_ROOM` characters (the spec's `string[20]`); a leading `#` (IRC
+    habit several clients accept) is dropped. For a name a caller or
+    SysOp typed, check `room_name_error` first: this cuts, it does not
+    refuse."""
+    return _room_chars(room)[:MAX_ROOM]
+
+
+def room_name_error(room: str) -> str | None:
+    """Why `room`, as typed, cannot name an MRC room -- `None` when it
+    can. A name the wire would cut silently is refused instead: a
+    caller who asked for a 25-character room must not land in a
+    20-character one the hub knows under a different name."""
+    chars = _room_chars(room)
+    if not chars:
+        return "Room name must contain at least one printable ASCII character."
+    if len(chars) > MAX_ROOM:
+        return f"MRC room names are at most {MAX_ROOM} characters; {chars!r} has {len(chars)}."
+    return None
 
 
 def sanitize_body(body: str) -> str:
@@ -350,15 +384,21 @@ def looks_like_presence_chatter(body: str) -> bool:
 # `CLIENT~site~~SERVER~~~CMD~`; a room message leaves `to_user` empty.
 
 
-def build_handshake(site_name: str, *, software: str, platform: str, protocol_version: str = PROTOCOL_VERSION) -> str:
+BBS_TYPE = "NETBBS"
+
+
+def build_handshake(site_name: str, *, platform: str, client_version: str, bbs_type: str = BBS_TYPE) -> str:
     """The one unauthenticated line sent on connect:
-    `{site}~{software}/{platform}/{protocol_version}`. The site half
-    keeps spaces (uMRC and ANetBBS send the display name here; the
-    underscored form only appears in `from_site` fields); the software
-    half has none."""
+    `{site}~{BBSTYPE}/{Os.arch}/{client version}` -- the spec's
+    `{BBSType}/{Arch}/{AgentVersion}` (MRCDoc rev 1.26): the type in
+    upper case like `MYSTIC` and `SYNCHRONET`, the platform in the
+    `Linux.x86_64` convention, and the *client's* version in
+    three-part notation (issue #376). The site half keeps spaces (uMRC
+    and ANetBBS send the display name here; the underscored form only
+    appears in `from_site` fields); the client half has none."""
     site = _printable(_clean(site_name), low=32).strip()[:MAX_NAME] or "NetBBS"
     client = "/".join(
-        sanitize_name(part) or "unknown" for part in (software, platform, protocol_version)
+        sanitize_name(part) or "unknown" for part in (bbs_type.upper(), platform, client_version)
     )
     return f"{site}{SEPARATOR}{client}\n"
 

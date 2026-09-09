@@ -37,3 +37,14 @@ once, so the tail of such a line could be dropped by the hub without anyone
 here noticing. Packets from one caller now leave at least half a second
 apart, while other callers' packets and the node's own housekeeping go out
 in between.
+
+## Field limits and the handshake follow the specification
+
+Room names are at most 20 characters on the network, topics 55, passwords
+20 and room passwords 32. A room name a caller opens or a SysOp maps that
+is longer than 20 characters is now refused with a message rather than
+quietly shortened into a room the hub would know by another name. Topics
+and passwords are refused at their limits instead of at the packet's. The
+connect handshake now names the client the way the specification asks,
+`NETBBS/<Os.arch>/<NetBBS version>`, so `/mrc bbses` on other boards shows
+this software and its version correctly.
