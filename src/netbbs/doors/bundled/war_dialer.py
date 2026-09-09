@@ -865,84 +865,139 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
+WORLD_SCHEMA_VERSION = 1
+
+# Versioned schema contract: future additions need a new numbered migration.
+_WORLD_COLUMNS_V1 = {
+    "meta": {"key", "value"},
+    "players": {"user_id", "handle", "cash", "crew", "crew_recruited_total", "exchanges_taken_total",
+                "successful_raids", "successful_jobs", "heat", "heat_updated_at", "turns_used",
+                "turn_day_start", "last_raided_by", "season_number", "created_at", "income_remainder"},
+    "exchanges": {"id", "name", "income_per_hour", "controller_user_id", "garrison", "controlled_since",
+                  "income_collected_at", "season_number"},
+    "events": {"id", "target_user_id", "actor_handle", "summary_text", "created_at", "seen_at"},
+}
+
+
+def _world_schema_version(conn: sqlite3.Connection) -> int:
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > WORLD_SCHEMA_VERSION or version < 0:
+        raise WorldStateError(f"World schema {version} is not supported by this game (maximum {WORLD_SCHEMA_VERSION}). "
+                              "Use a compatible game version; the world was not changed.")
+    return version
+
+
+def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+    if not tables and version == 0:
+        return  # A genuinely new empty database.
+    if not set(_WORLD_COLUMNS_V1) <= tables:
+        raise WorldStateError("Unrecognized or incomplete War Dialer database. Preserve it for SysOp recovery; no replacement was created.")
+    for table, required in _WORLD_COLUMNS_V1.items():
+        columns = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        expected = required - {"income_remainder"} if version == 0 and table == "players" else required
+        if not expected <= columns:
+            raise WorldStateError(f"War Dialer {table} schema is incomplete. Preserve it for SysOp recovery; no replacement was created.")
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    try:
+        # Refuse unsupported/unrelated/corrupt data before changing journal mode.
+        version = _world_schema_version(conn)
+        _validate_world_layout(conn, version)
+        check = conn.execute("PRAGMA quick_check(1)").fetchone()[0]
+        if check != "ok":
+            raise WorldStateError("War Dialer database integrity check failed. Preserve the original for SysOp recovery.")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     with _write_transaction(conn):
-        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS players (
-                user_id INTEGER PRIMARY KEY,
-                handle TEXT NOT NULL,
-                cash INTEGER NOT NULL,
-                crew INTEGER NOT NULL,
-                crew_recruited_total INTEGER NOT NULL,
-                exchanges_taken_total INTEGER NOT NULL,
-                successful_raids INTEGER NOT NULL,
-                successful_jobs INTEGER NOT NULL,
-                heat REAL NOT NULL,
-                heat_updated_at TEXT NOT NULL,
-                turns_used INTEGER NOT NULL,
-                turn_day_start TEXT NOT NULL,
-                last_raided_by INTEGER,
-                season_number INTEGER NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
+        version = _world_schema_version(conn)
+        _validate_world_layout(conn, version)
+        if version == 0:
+            _migrate_world_v1(conn)
+            conn.execute("PRAGMA user_version=1")
+        _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
+
+
+def _migrate_world_v1(conn: sqlite3.Connection) -> None:
+    """Adopt the original unversioned world, atomically with its schema marker."""
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS players (
+            user_id INTEGER PRIMARY KEY,
+            handle TEXT NOT NULL,
+            cash INTEGER NOT NULL,
+            crew INTEGER NOT NULL,
+            crew_recruited_total INTEGER NOT NULL,
+            exchanges_taken_total INTEGER NOT NULL,
+            successful_raids INTEGER NOT NULL,
+            successful_jobs INTEGER NOT NULL,
+            heat REAL NOT NULL,
+            heat_updated_at TEXT NOT NULL,
+            turns_used INTEGER NOT NULL,
+            turn_day_start TEXT NOT NULL,
+            last_raided_by INTEGER,
+            season_number INTEGER NOT NULL,
+            created_at TEXT NOT NULL
         )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS exchanges (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                income_per_hour INTEGER NOT NULL,
-                controller_user_id INTEGER,
-                garrison INTEGER NOT NULL DEFAULT 0,
-                controlled_since TEXT,
-                income_collected_at TEXT NOT NULL,
-                season_number INTEGER NOT NULL
-            )
-            """
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS exchanges (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            income_per_hour INTEGER NOT NULL,
+            controller_user_id INTEGER,
+            garrison INTEGER NOT NULL DEFAULT 0,
+            controlled_since TEXT,
+            income_collected_at TEXT NOT NULL,
+            season_number INTEGER NOT NULL
         )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_user_id INTEGER NOT NULL,
+            actor_handle TEXT,
+            summary_text TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            seen_at TEXT
+        )
+        """
+    )
+
+    conn.execute("CREATE INDEX IF NOT EXISTS events_target_id ON events(target_user_id, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS events_target_unseen_id ON events(target_user_id, seen_at, id)")
+    retention = conn.execute("SELECT value FROM meta WHERE key='event_history_limit'").fetchone()
+    if retention is None or int(retention["value"]) != EVENT_HISTORY_LIMIT:
+        # One-time adoption of legacy unbounded history, in this schema transaction.
+        for row in conn.execute("SELECT DISTINCT target_user_id FROM events"):
+            _prune_events(conn, row["target_user_id"])
         conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target_user_id INTEGER NOT NULL,
-                actor_handle TEXT,
-                summary_text TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                seen_at TEXT
-            )
-            """
+            "INSERT INTO meta (key, value) VALUES ('event_history_limit', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(EVENT_HISTORY_LIMIT),),
         )
 
-        conn.execute("CREATE INDEX IF NOT EXISTS events_target_id ON events(target_user_id, id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS events_target_unseen_id ON events(target_user_id, seen_at, id)")
-        retention = conn.execute("SELECT value FROM meta WHERE key='event_history_limit'").fetchone()
-        if retention is None or int(retention["value"]) != EVENT_HISTORY_LIMIT:
-            # One-time adoption of legacy unbounded history, in this schema transaction.
-            for row in conn.execute("SELECT DISTINCT target_user_id FROM events"):
-                _prune_events(conn, row["target_user_id"])
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES ('event_history_limit', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(EVENT_HISTORY_LIMIT),),
-            )
-
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(players)")}
-        if "income_remainder" not in columns:
-            conn.execute(
-                "ALTER TABLE players ADD COLUMN income_remainder INTEGER NOT NULL DEFAULT 0"
-            )
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(players)")}
+    if "income_remainder" not in columns:
+        conn.execute(
+            "ALTER TABLE players ADD COLUMN income_remainder INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def get_or_create_season_anchor(conn: sqlite3.Connection, now: datetime) -> datetime:
@@ -2020,9 +2075,10 @@ def main() -> int:
         out_line("War Dialer needs at least 20 columns by 10 rows. Resize and reconnect.")
         return 1
 
-    conn = connect(_resolve_db_path())
+    conn = None
     rng = random.Random()
     try:
+        conn = connect(_resolve_db_path())
         # Keep terminal modes unchanged: the supervisor may kill this process
         # without running finally. Decode paste markers if already supplied.
         ensure_schema(conn)
@@ -2099,8 +2155,12 @@ def main() -> int:
     except (InputSequenceError, WorldStateError) as exc:
         out_line(f"  {palette.bad}{exc}{RESET}")
         return 1
+    except (sqlite3.DatabaseError, OSError) as exc:
+        out_line(f"War Dialer storage is unavailable: {_event_plain(str(exc))[:200]}. Contact the SysOp; no replacement world was created.")
+        return 1
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
         try:
             out(RESET)
         except OSError:

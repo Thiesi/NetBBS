@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import subprocess
+import sqlite3
 import threading
 import time
 from contextlib import contextmanager
@@ -354,6 +355,30 @@ def test_incomplete_or_excessive_input_fails_closed_in_bounded_time(monkeypatch,
         stdin.close()
         os.close(read_fd)
         os.close(write_fd)
+
+
+@pytest.mark.parametrize("future_schema", [False, True])
+def test_unusable_world_has_readable_exit_without_replacement(tmp_path, future_schema):
+    path = tmp_path / "unusable.db"
+    if future_schema:
+        conn = sqlite3.connect(path)
+        conn.execute("PRAGMA user_version=2")
+        conn.close()
+    else:
+        path.write_bytes(b"Damaged world data; must not be replaced.")
+    before = path.read_bytes()
+    env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), PYTHONIOENCODING="utf-8")
+    env.pop("NETBBS_DOOR_INFO", None)
+    result = subprocess.run(
+        [sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"",
+        capture_output=True, env=env, timeout=10,
+    )
+    assert result.returncode == 1
+    message = b"not supported" if future_schema else b"storage is unavailable"
+    assert message in result.stdout
+    assert b"Traceback" not in result.stderr
+    assert b"FIRST VISIT" not in result.stdout
+    assert path.read_bytes() == before
 
 
 @contextmanager
