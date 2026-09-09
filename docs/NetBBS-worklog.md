@@ -331,6 +331,13 @@ one settlement transaction. Paging refreshes that snapshot but never performs a
 login reset or event acknowledgement. Full-screen redraws require an explicit
 result/diagnostic acknowledgement; keep that input boundary in real-process tests.
 
+Standings use the same lifetime-counter formula as rank_score, with stable account
+IDs breaking ties; keep the SQL expression and domain formula aligned. Directory
+reads settle the whole season before sorting/filtering, bound the fetched batch,
+and expose the caller's global position independently of that batch. Two levels
+of pagination (wrapped rows and database batches) must allow both directions
+without skipping the preceding batch's last page.
+
 ### Database execution lanes
 
 Interactive network flows use a foreground `DatabaseLane`; Phase 3 background

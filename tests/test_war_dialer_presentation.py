@@ -61,7 +61,8 @@ def _buffered_stdin(read_fd: int) -> io.TextIOWrapper:
     return io.TextIOWrapper(io.BufferedReader(io.FileIO(read_fd, closefd=False)))
 
 
-def test_draw_help_never_overflows_its_own_declared_width():
+def test_draw_help_never_overflows_its_own_declared_width(monkeypatch):
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
     # Codex review (PR #239): draw_help's body text used to be hand-
     # wrapped assuming a fixed ~78-column terminal, overflowing into
     # extra rows exactly at the narrow widths main() explicitly
@@ -76,7 +77,7 @@ def test_draw_help_never_overflows_its_own_declared_width():
         try:
             wd._OUTPUT_WIDTH = width
             wd.out = written.append
-            wd.draw_help(wd.Palette(truecolor=False), width)
+            wd.draw_help(wd.Palette(truecolor=False), width, height=200)
         finally:
             wd.out = original_out
             wd._OUTPUT_WIDTH = original_width
@@ -759,7 +760,8 @@ def test_board_read_rolls_world_before_displaying_ownership(tmp_path, monkeypatc
     lines = []
     monkeypatch.setattr(wd, 'out_line', lambda text='': lines.append(text))
     monkeypatch.setattr(wd, 'now_utc', lambda: now + wd.SEASON)
-    wd.draw_board(wd.Palette(False), conn, 78)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    wd.show_territory(wd.Palette(False), conn, 78, 24)
     assert wd.read_player(conn, 1).season_number == 2
     assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
     assert 'OldBoss' not in ''.join(lines)
@@ -937,3 +939,46 @@ def test_real_process_dashboard_keeps_action_result_until_acknowledged(tmp_path)
         send(b"q")
         assert process.wait(timeout=5) == 0
         assert process.stderr.read() == b""
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_text_screen_pages_preserve_content_with_clear_back_path(monkeypatch, width, height):
+    written = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
+    def choose(valid):
+        assert "B" in valid
+        screen = "".join(written).split("\x1b[2J\x1b[H")[-1]
+        return "B" if "LAST RECORD" in screen else "N"
+    monkeypatch.setattr(wd, "read_menu_choice", choose)
+    wd.show_text_pages(wd.Palette(False), "RIVAL DIRECTORY", ["界e\u0301" * 200, "LAST RECORD"], width, height)
+    screens = "".join(written).split("\x1b[2J\x1b[H")[1:]
+    for screen in screens:
+        lines = _ANSI_RE.sub("", screen).split("\r\n")
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+        assert lines[-1] == "[B]ack"
+    assert "".join(written).count("界") == 200
+
+
+@pytest.mark.parametrize("key,heading", [(b"b", b"SEASON STANDINGS"), (b"e", b"EXCHANGE TERRITORY"),
+                                         (b"v", b"RIVAL DIRECTORY"), (b"?", b"HOW TO PLAY")])
+def test_real_process_browsing_screens_are_free_and_do_not_ack_events(tmp_path, key, heading):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b">\x1b[0m ")
+        conn = wd.connect(path)
+        wd.record_event(conn, 0, "Rival", "Arrived in session", wd.now_utc())
+        conn.close()
+        send(key)
+        wait_for(b"[B]ack")
+        assert heading in output
+        send(b"b")
+        wait_for(b">\x1b[0m ")
+        send(b"q")
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b""
+        conn = wd.connect(path)
+        player = wd.read_player(conn, 0)
+        assert (player.cash, player.crew, player.turns_used) == (300, 3, 0)
+        assert len(wd.unseen_events(conn, 0)) == 1
+        conn.close()
