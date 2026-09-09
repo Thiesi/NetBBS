@@ -24,6 +24,7 @@ reconnect before taking another action.
 Use separate single keys. Arrow/function keys and pasted command bursts do not
 select actions; Escape dismisses a pause but has no menu action. An incomplete
 or excessively long terminal sequence ends the door with a reconnect diagnostic.
+Extended mouse encodings also end the door safely; reconnect and use keyboard keys.
 
 **MANUAL — outside NetBBS:** end all running War Dialer sessions before activating
 this updated game file. An already-running older process retains its old saving

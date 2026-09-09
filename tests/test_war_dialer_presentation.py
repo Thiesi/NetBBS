@@ -431,6 +431,7 @@ def test_real_process_main_menu_input_does_not_spend_turns(tmp_path, sequence):
         send(b"q")
         assert process.wait(timeout=5) == 0
         assert process.stderr.read() == b""
+
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
         assert (player.cash, player.crew, player.turns_used) == (300, 3, 0)
@@ -676,4 +677,29 @@ def test_fragmented_x10_mouse_report_never_spends_a_turn(tmp_path, stage):
             wait_for(b">\x1b[0m ")
             send(b"q")
         assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b""
+
+
+@pytest.mark.parametrize("stage", ["onboarding", "receipt", "menu", "target"])
+def test_extended_x10_mouse_encoding_stops_without_spending_a_turn(tmp_path, stage):
+    with _running_door(
+        tmp_path, new_player=stage == "onboarding", event=stage == "receipt",
+    ) as (process, path, wait_for, send, output):
+        if stage in ("onboarding", "receipt"):
+            wait_for(b"Press any key to continue...")
+        else:
+            wait_for(b">\x1b[0m ")
+            if stage == "target":
+                send(b"x")
+                wait_for(b"cancel")
+        send(b"\x1b[M \xc4\x80C")  # UTF-8 coordinate, then an ASCII coordinate.
+        time.sleep(0.25)
+        conn = wd.connect(path)
+        try:
+            assert wd.read_player(conn, 0).turns_used == 0
+            assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
+        finally:
+            conn.close()
+        assert process.wait(timeout=5) == 1
+        assert b"Unsupported mouse encoding" in output
         assert process.stderr.read() == b""
