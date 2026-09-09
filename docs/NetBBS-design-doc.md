@@ -4853,6 +4853,28 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
+Voidrunner's optional Archive assignment connects Freeport with the existing
+seeded landmark. Mara Venn offers the assignment through Archive Contacts. It has
+no deadline, deposit or ordinary contract-slot cost. Accepting reveals a navigable
+bearing without charting the destination; recovering the record requires visiting
+the site, not merely scanning it. Each of the four existing landmarks has its own
+record and interpretation. Previously investigated sites can supply a transcript
+without paying their salvage twice.
+
+On returning to Freeport, the pilot chooses public preservation (500 credits,
+Concord +5) or a private sale (1,500 credits, Blackwake +5, Concord -2). Standing
+is capped within -100 to 100; previews use current standing and results report
+the effective change. Each ending awards one completed assignment and a career highlight, once. The contact's closing
+response reflects that choice. Optional versioned flags record acceptance, recovery
+and mutually exclusive endings; recovery requires an investigated landmark. Every
+action validates before mutation and checkpoints before acknowledgement. Browsing,
+routing and Back do not accept or finish the assignment. Ordinary travel rules
+remain in force and the story consumes no encounter or galaxy-generation RNG.
+
+Landmark inspection itself is screen-first: show its story and unclaimed reward,
+then let the pilot Investigate or Back. Existing salvage amounts and seeded sites
+remain unchanged; a direct repeated or remote claim is rejected.
+
 Long-range scanning is a deliberate area survey. With a scanner installed, the
 chart's Scan action opens read-only terms showing two fuel required, remaining
 fuel, range and the number of uncharted contacts. Survey charts every new system

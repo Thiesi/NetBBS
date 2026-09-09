@@ -158,6 +158,29 @@ identifies your pilot if listed. Use **[N] Next**, **[P] Previous** and **[B] Ba
 all displayed fields remain available on narrow terminals. The table is a snapshot
 for that visit; reopen it to refresh. Paging leaves stored scores unchanged.
 
+### The Freeport archive
+
+Station **[N] Archive Contacts** introduces Mara Venn's optional assignment.
+Accept at Freeport with **[A]**, then **[R] Route** to the existing landmark.
+Accepting provides a bearing without charting the site. Each deliberate route
+jump uses ordinary fuel, wages and encounter rules; Back lets you visit the yard.
+There is no deadline, deposit or active-contract slot requirement.
+
+Visit the site and use **[I] Recover record** in Archive Contacts, or **[L]** from
+the station and **[I] Investigate**. Reading either screen and choosing Back costs
+nothing. Investigation still pays the landmark's existing 3,000-credit salvage
+once; previously investigated sites provide a transcript without a second payment.
+The four landmark types hold different records and interpretations.
+
+Return to Freeport. **[P] Publish** preserves the record for the public archive,
+paying 500 credits and Concord +5. **[S] Sell privately** gives it to broker Kest
+Rel for 1,500 credits, Blackwake +5 and Concord -2. Standing stays within -100 to
+100; the screen shows the effective changes at your current standing. The choice
+closes the assignment,
+adds one completed mission and records a career highlight. Revisit the contact to
+read the response to your choice. Acceptance, recovery and the ending save before
+their acknowledgement; reconnecting cannot repeat a reward.
+
 ### Area surveys
 
 With a scanner installed, use **[S] Scan** from the chart to inspect the survey
