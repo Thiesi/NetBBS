@@ -1700,6 +1700,8 @@ def test_war_dialer_cli_create_and_restore_names_destinations(tmp_path, db_path,
 @pytest.mark.parametrize("reset", [False, True])
 def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(tmp_path, db_path, identity_dir, reset):
     from netbbs.doors import war_dialer_admin as admin
+    bootstrap_node_identity("test-node").save(identity_dir)
+    (identity_dir / "operator-marker").write_bytes(b"retain identity contents")
     path = _populate_war_dialer(db_path)
     with contextlib.closing(sqlite3.connect(path)) as conn:
         before_identity = conn.execute("SELECT user_id,handle,created_at FROM players").fetchall()
@@ -1722,6 +1724,7 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
     assert audit["action"] == ("reset competition" if reset else "advance season")
     assert audit["manifest_sha256"] == hashlib.sha256((destination / "manifest.json").read_bytes()).hexdigest()
     assert _war_cash(destination / "war-dialer/1.db") == 4321
+    assert (destination / "identity/operator-marker").read_bytes() == b"retain identity contents"
     admin.set_maintenance(db_path, path, False)
     assert admin.world_status(db_path, path)["maintenance"] == "off"
 
@@ -1730,6 +1733,7 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
 def test_war_dialer_sysop_change_rejects_before_reset(tmp_path, db_path, identity_dir, blocker):
     from netbbs.doors import war_dialer_admin as admin
     from netbbs.doors.bundled import war_dialer as wd
+    bootstrap_node_identity("test-node").save(identity_dir)
     path = _populate_war_dialer(db_path)
     if blocker != "maintenance":
         admin.set_maintenance(db_path, path, True)
@@ -1748,6 +1752,7 @@ def test_war_dialer_sysop_change_rejects_before_reset(tmp_path, db_path, identit
 
 def test_war_dialer_sysop_failure_rolls_back_reset_and_audit(tmp_path, db_path, identity_dir, monkeypatch):
     from netbbs.doors import war_dialer_admin as admin
+    bootstrap_node_identity("test-node").save(identity_dir)
     path = _populate_war_dialer(db_path)
     admin.set_maintenance(db_path, path, True)
     before = admin.world_status(db_path, path)
