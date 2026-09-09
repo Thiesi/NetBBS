@@ -488,6 +488,8 @@ def _war_dialer_sources(db_path: Path) -> list[Path]:
                 paths.add(path)
         if override := os.environ.get("WAR_DIALER_DB_PATH"):
             paths.add(Path(override).expanduser().resolve())
+    except (ValueError, OSError, RuntimeError, sqlite3.Error) as exc:
+        raise BackupError(f"Cannot discover War Dialer worlds: {exc}") from exc
     finally:
         connection.close()
     if len(paths) > _WAR_DIALER_MAX_WORLDS:
@@ -1090,12 +1092,16 @@ def _war_dialer_restore_targets(source: Path, manifest: dict, destinations, prot
     if not isinstance(destinations, dict) or set(destinations) != keys:
         raise BackupError("Specify --war-dialer-to KEY=PATH for every archived world: " + ", ".join(sorted(keys)))
     result = {}
+    claimed_paths = []
     for key in sorted(keys):
         target = Path(destinations[key]).expanduser().resolve()
-        for protected in [*protected_paths, *result.values()]:
+        footprint = [Path(str(target) + suffix) for suffix in ("", "-wal", "-shm", "-journal", ".sessions")]
+        for protected in [*protected_paths, *claimed_paths]:
             protected = protected.resolve()
-            if target.is_relative_to(protected) or protected.is_relative_to(target):
-                raise BackupError("War Dialer restore destination overlaps another component or backup path.")
+            for candidate in footprint:
+                if candidate.is_relative_to(protected) or protected.is_relative_to(candidate):
+                    raise BackupError("War Dialer restore destination overlaps another world, sidecar, component or backup path.")
+        claimed_paths.extend(footprint)
         if target.exists():
             _inspect_war_dialer(target, metadata["owner"])
         result[key] = target
@@ -1141,6 +1147,14 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
     operator responsibility no PID file on this machine can catch.
     """
     manifest = _validate_backup_source(source, allow_migrate=False)
+    if manifest.get("war_dialer") is None:
+        node = db_path.resolve()
+        existing_worlds = (_war_dialer_sources(node) if node.exists() else
+                           [path for path in [node.parent / (node.name + ".doors") / "war-dialer.db"] if path.exists()])
+        if existing_worlds:
+            raise BackupError("This archive does not cover existing War Dialer worlds. Preserve the current node and worlds, "
+                              "then move uncovered worlds and their sidecars aside before restoring this legacy archive. "
+                              "Do not reattach them without verifying the restored user-ID namespace.")
     has_game = manifest.get("voidrunner") is not None
     target = None
     if has_game:
