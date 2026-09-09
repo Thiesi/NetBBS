@@ -3341,6 +3341,7 @@ def test_screen_status_shows_career_highlights(monkeypatch):
 def test_station_menu_announces_a_promotion(monkeypatch):
     world = _world_with_seed(123)
     world.save.pilot.credits = vr.RANKS[1][0]
+    world.checkpoint()
     keys = iter([" ", "Q"])
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
 
@@ -11089,3 +11090,39 @@ def test_faction_case_idle_route_is_unavailable_until_acceptance(monkeypatch,fac
     monkeypatch.setattr(vr,"_screen_auto_route",lambda p,w,*,destination:routes.append(destination))
     with contextlib.redirect_stdout(output):vr.screen_faction_story(vr.Palette(False),world,faction)
     assert routes==[vr.faction_story_target(world,faction)] and checkpoints==["accepted"]
+
+
+@pytest.mark.parametrize("width,height", [(20,10),(40,12),(80,24)])
+def test_career_rank_checkpoint_notice_survives_spending_until_deck(monkeypatch,tmp_path,width,height):
+    import re
+    world=_world_with_seed(42);world._checkpoint=lambda w:vr.persist(w,tmp_path,77)
+    world.save.pilot.credits=4999;world.save.cargo={"food":1};world.checkpoint()
+    keys=iter("ASQ");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    monkeypatch.setattr(vr,"read_line_raw",lambda **kw:"1")
+    with contextlib.redirect_stdout(io.StringIO()):vr.screen_market(vr.Palette(False),world)
+    world.save.pilot.credits=100;world.checkpoint();world.checkpoint()
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
+    assert saved.pilot.highest_rank_seen==1 and saved.pilot.credits==100
+    monkeypatch.setattr(vr,"_OUTPUT_WIDTH",width);monkeypatch.setattr(vr,"_OUTPUT_HEIGHT",height)
+    output=io.StringIO();bodies=[]
+    def choose():
+        frame=output.getvalue();output.seek(0);output.truncate(0)
+        assert len(frame.splitlines())<=height and all(vr._visible_width(line)<=width for line in frame.splitlines())
+        plain=vr._ANSI_RE.sub("",frame);match=re.search(r"Command Deck:.*?(\d+)/(\d+)",plain,re.S);assert match
+        page,count=map(int,match.groups());bodies.append(plain[match.end():].split("[<]Prev")[0])
+        return "Q" if page==count else ">"
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_station_menu(vr.Palette(False),world)
+    text=" ".join(" ".join(bodies).split())
+    assert text.count("Promoted to Independent Trader; rank retained for this career.")==1
+    monkeypatch.setattr(vr,"read_key",lambda:"Q")
+    with contextlib.redirect_stdout(output):vr.screen_station_menu(vr.Palette(False),world)
+    assert "Promoted to" not in output.getvalue()
+
+
+def test_career_rank_new_career_does_not_repeat_old_promotion_notice(monkeypatch):
+    world=_world_with_seed(42);world.save.pilot.credits=5000;world.checkpoint()
+    world.reset(vr.retire_pilot(world.save));world.checkpoint()
+    monkeypatch.setattr(vr,"read_key",lambda:"Q")
+    with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_station_menu(vr.Palette(False),world)
+    assert "Promoted to" not in output.getvalue()

@@ -5231,3 +5231,9 @@ checkpoint, including nested menus and in-flight rewards, so later spending cann
 erase a promotion before the station loop observes it. Repeated checkpoints do
 not repeat highlights. Rank projections remain pure; reset keeps the lifetime
 score high-water mark while discarding current-career recognition.
+
+A successfully checkpointed promotion also retains a session-local notice until
+its next command-deck visit. Updating highest_rank_seen at the action boundary
+means a later rank check cannot rediscover that notice. Keep it separate from the
+saved milestone, enqueue only after checkpoint success, and clear it on career
+reset; durable highlights remain the history after a restart.

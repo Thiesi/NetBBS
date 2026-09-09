@@ -1548,7 +1548,7 @@ class World:
         Resetting a career preserves this binding.
         """
         self.sync_discovered()
-        check_rank_up(self)
+        promoted = check_rank_up(self)
         if self.save.pending_travel is None:
             expire_missions(self)
             _normalize_mission_ids(self.save)
@@ -1564,6 +1564,8 @@ class World:
                 self._checkpoint(self)
             except OSError as exc:
                 raise SaveError("The completed action could not be saved.") from exc
+        if promoted:
+            self.pending_promotions.append(promoted)
 
     def reset(self, save: SaveData) -> None:
         """Re-derives every galaxy-shaped attribute from `save` in
@@ -1576,6 +1578,7 @@ class World:
         pointed at a fresh galaxy/save underneath."""
         _validate_pending_travel_consistency(save)
         self.save = save
+        self.pending_promotions: list[str] = []
         if save.pending_travel is None:
             _normalize_mission_ids(save)
         self.galaxy: list[GalaxySystem] = generate_galaxy(save.seed)
@@ -3945,10 +3948,10 @@ def screen_station_menu(p: Palette, world: World) -> str:
         world.checkpoint()
         out_line(f"{p.wrong}{rescued}{RESET}")
         pause(p)
-    promoted = check_rank_up(world)
-    if promoted:
+    if career_rank_index(world.save.pilot) > world.save.pilot.highest_rank_seen:
         world.checkpoint()
-        completed.insert(0, f"Promoted to {promoted}; rank retained for this career.")
+    completed[0:0] = [f"Promoted to {title}; rank retained for this career." for title in world.pending_promotions]
+    world.pending_promotions.clear()
     page, expanded = 0, False
     while True:
         lines = station_deck_lines(world, expanded=expanded)
