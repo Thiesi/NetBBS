@@ -5155,3 +5155,9 @@ Keep direct landmark investigation and archive recovery on one salvage function.
 Contact and landmark Back paths bypass the station loop's action checkpoint;
 chosen actions checkpoint before results. Route bearings authorize only the
 accepted landmark, leave discovery unchanged and retain ordinary hop validation.
+
+Map goal identity is separate from an explicitly supplied route endpoint. Preserve
+the tracked contract in map/list/inspection candidates even when another public
+bearing is passed. Mark the tracked target as ! and the distinct route endpoint
+as X; reveal only their public names/coordinates until actual discovery. Reading
+those bearings must not chart them or create market observations.

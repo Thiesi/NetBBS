@@ -9540,3 +9540,33 @@ def test_archive_preview_and_result_report_effective_standing(ending, concord, b
     assert world.save.pilot.reputation[vr.FACTION_CONCORD] - concord == concord_gain
     assert world.save.pilot.reputation[vr.FACTION_BLACKWAKE] - blackwake == (0 if ending == "P" else blackwake_gain)
     assert world.event_rng.getstate() == rng
+
+
+@pytest.mark.parametrize("route_kind", ["general", "archive"])
+def test_general_route_map_keeps_independent_tracked_objective_and_route_end(monkeypatch, route_kind):
+    import copy
+    world = _archive_world("started")
+    destination = world.landmark["system_id"] if route_kind == "archive" else world.here.connections[0]
+    path = vr.bfs_path(world.by_id, world.here.id, destination)
+    target = next(system.id for system in world.galaxy if not system.discovered and system.id not in path)
+    mission = vr.Mission(100, "scan", "Tracked survey", 1000, 0, target)
+    world.save.active_missions = [mission]; world.save.tracked_mission_id = mission.id
+    world.by_id[target].x = 99; world.by_id[target].y = 49
+    world.by_id[destination].x = 0; world.by_id[destination].y = 49
+    before, rng = copy.deepcopy(world.save.to_dict()), world.event_rng.getstate()
+    lists = []; original = vr.map_list_lines
+    def capture(current, supplied, public):
+        lines = original(current, supplied, public); lists.extend(lines); return lines
+    monkeypatch.setattr(vr, "map_list_lines", capture)
+    keys = iter("VOBB"); monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+    with contextlib.redirect_stdout(io.StringIO()): vr._screen_auto_route(vr.Palette(False), world, destination=destination)
+    objective = [line for line in lists if world.by_id[target].name in line]
+    endpoint = [line for line in lists if world.by_id[destination].name in line]
+    assert len(objective) == 1 and objective[0].startswith("! ")
+    assert len(endpoint) == 1 and "X" in endpoint[0].split()[0] and "!" not in endpoint[0].split()[0]
+    grid = "".join(vr.spatial_map_grid(world, path, public_target=destination, sector=None, columns=119, rows=36))
+    assert "!" in grid and "X" in grid
+    assert "Tracked contract objective" in " ".join(vr.map_inspection_lines(world, target, path, destination))
+    assert "Public route destination" in " ".join(vr.map_inspection_lines(world, destination, path, destination))
+    assert world.save.to_dict() == before and world.event_rng.getstate() == rng
+    assert not world.by_id[target].discovered

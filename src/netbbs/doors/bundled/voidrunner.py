@@ -5470,16 +5470,20 @@ def map_bounds(sector: int | None) -> tuple[int, int, int, int]:
             ((row + 1) * 50 + SECTOR_ROWS - 1) // SECTOR_ROWS - 1)
 
 
+def map_goal(world: World, public_target: int | None) -> int | None:
+    mission = tracked_mission(world)
+    return mission.target_system if mission is not None else public_target
+
+
 def map_label(world: World, sid: int, public_target: int | None) -> str:
     station = world.by_id[sid]
-    name = station.name if station.discovered or sid == public_target else "Uncharted"
+    name = station.name if station.discovered or sid in (public_target, map_goal(world, public_target)) else "Uncharted"
     return f"{name} ({station.x},{station.y})"
 
 
 def map_system_ids(world: World, path: list[int], public_target: int | None) -> set[int]:
     ids = {s.id for s in world.galaxy if s.discovered} | set(path) | {world.here.id}
-    if public_target is not None:
-        ids.add(public_target)
+    ids.update(target for target in (public_target, map_goal(world, public_target)) if target is not None)
     return ids
 
 
@@ -5516,7 +5520,7 @@ def spatial_map_grid(world: World, path: list[int], *, public_target: int | None
     for sid, position in positions.items(): cells.setdefault(position, []).append(sid)
     for (x, y), occupants in cells.items():
         if world.here.id in occupants: marker = "@"
-        elif public_target in occupants: marker = "!"
+        elif map_goal(world, public_target) in occupants: marker = "!"
         elif path and path[-1] in occupants: marker = "X"
         elif len(occupants) > 1: marker = "+"
         elif occupants[0] in path: marker = "*"
@@ -5537,7 +5541,7 @@ def map_list_lines(world: World, path: list[int], public_target: int | None) -> 
         if not stations: continue
         lines.append("Sector: " + sector)
         for station in stations:
-            markers = ("@" if station.id == world.here.id else "") + ("!" if station.id == public_target else "") + ("*" if station.id in path else "") + ("X" if path and station.id == path[-1] else "")
+            markers = ("@" if station.id == world.here.id else "") + ("!" if station.id == map_goal(world, public_target) else "") + ("*" if station.id in path else "") + ("X" if path and station.id == path[-1] else "")
             details = f"{station.economy}, danger {station.danger}" if station.discovered else "uncharted; danger unknown"
             distance = "here" if station.id == world.here.id else f"{hops[station.id]} jumps"
             lines.append(f"{markers or 'o'} {map_label(world, station.id, public_target)}: {details}; {distance}.")
@@ -5548,7 +5552,10 @@ def map_inspection_lines(world: World, sid: int, path: list[int], public_target:
     station = world.by_id[sid]
     lines = [map_label(world, sid, public_target), "Sector: " + sector_for(station)]
     if sid == world.here.id: lines.append("Current position.")
-    if sid == public_target: lines.append("Contract objective; public bearing does not chart it.")
+    if tracked_mission(world) is not None and sid == map_goal(world, public_target):
+        lines.append("Tracked contract objective; public bearing does not chart it.")
+    elif sid == public_target:
+        lines.append("Public route destination; this bearing does not chart it.")
     if sid in path:
         legs = [str(i) for i, target in enumerate(path, 1) if target == sid]
         lines.append("Plotted arrival leg(s): " + ", ".join(legs))
