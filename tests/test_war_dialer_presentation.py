@@ -1189,3 +1189,38 @@ def test_recruit_preview_lists_cash_shortfall_even_when_turns_are_exhausted(tmp_
     assert "Refill at" in text
     assert "Need $50 more cash" in text
     conn.close()
+
+
+@pytest.mark.parametrize("screen", ["raid", "root", "preview"])
+def test_target_refresh_announces_rollover_before_cancel(tmp_path, monkeypatch, screen):
+    conn = wd.connect(tmp_path / "picker-rollover.db")
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    player = wd.load_or_create_player(conn, 1, "Owner", now, 1)
+    monkeypatch.setattr(wd, "now_utc", lambda: now + wd.SEASON)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    monkeypatch.setattr(wd, "read_input_key", lambda: " ")
+    written = []
+    monkeypatch.setattr(wd, "out", written.append)
+    if screen == "raid":
+        assert wd.choose_rival(wd.Palette(False), conn, player, 40, 12) is None
+    elif screen == "root":
+        assert wd.do_root_exchange(wd.Palette(False), conn, player, now + wd.SEASON, None, 40, 12) is False
+    else:
+        assert wd.confirm_action(wd.Palette(False), conn, player, "recruit", 40, 12) is False
+    output = " ".join(_ANSI_RE.sub("", "".join(written)).split())
+    assert "season 2 has started" in output
+    assert (player.season_number, player.turns_used) == (2, 0)
+    conn.close()
+
+
+def test_disabled_picker_entry_has_no_apparent_digit_hotkey(monkeypatch):
+    written = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    wd.pick_record_page(wd.Palette(False), "RAID TARGETS", [(["Protected", "Newcomer shield"], False)], 40, 12)
+    output = "".join(written)
+    assert "Newcomer shield" in output
+    assert "[1]" not in output
