@@ -576,3 +576,33 @@ def test_real_process_disconnect_does_not_restore_an_incoming_raid(tmp_path):
         assert conn.execute("SELECT cash FROM players WHERE user_id=0").fetchone()[0] == 255
         assert len(wd.unseen_events(conn, 0)) == 1
         conn.close()
+
+
+@pytest.mark.parametrize("stage", ["onboarding", "receipt", "menu", "target"])
+def test_linux_console_function_key_never_leaks_an_action(tmp_path, stage):
+    with _running_door(
+        tmp_path, new_player=stage == "onboarding", event=stage == "receipt",
+    ) as (process, path, wait_for, send, output):
+        if stage in ("onboarding", "receipt"):
+            wait_for(b"Press any key to continue...")
+        else:
+            wait_for(b">\x1b[0m ")
+            if stage == "target":
+                send(b"x")
+                wait_for(b"cancel")
+        send(b"\x1b[[C")  # Linux-console F3, not Crew Recruit / exchange C.
+        if stage in ("onboarding", "receipt"):
+            wait_for(b">\x1b[0m ")
+        time.sleep(0.25)
+        conn = wd.connect(path)
+        try:
+            assert wd.read_player(conn, 0).turns_used == 0
+            assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
+        finally:
+            conn.close()
+        send(b"q")
+        if stage == "target":
+            wait_for(b">\x1b[0m ")
+            send(b"q")
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b""

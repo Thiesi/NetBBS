@@ -318,6 +318,10 @@ def read_input_key() -> str:
             if byte is None:
                 raise InputSequenceError("Incomplete key sequence. Reconnect and use single keys.")
             sequence += byte
+            if prefix == "[" and sequence == "[":
+                # Linux-console F1-F5 use ESC [[ A-E. The second '['
+                # is a prefix here, not a final that can leave a hotkey.
+                continue
             if "@" <= byte <= "~":
                 break
         else:
