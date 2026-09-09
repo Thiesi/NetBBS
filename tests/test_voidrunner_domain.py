@@ -10443,10 +10443,12 @@ def test_faction_contact_pages_preserve_all_terms_without_writes(monkeypatch, fa
         frame = output.getvalue(); output.seek(0); output.truncate(0)
         assert len(frame.splitlines()) <= height and all(vr._visible_width(row) <= width for row in frame.splitlines())
         plain = vr._ANSI_RE.sub("", frame)
+        assert "[B]Back" in " ".join(plain.split())
+        if state=="eligible":assert "[J]Join" in " ".join(plain.split())
         match = re.search(r"[\d,]+cr\s+(\d+)/(\d+)", plain); assert match
         page, count = map(int, match.groups())
         body = re.sub(r"^[\s>]*\w+\s+[\d,]+cr\s+\d+/\d+\s*", "", plain)
-        bodies.append(re.split(r"\[(?:J/B|B)\](?:Act|Back)", body)[0])
+        bodies.append(re.split(r"\[(?:J|B)\](?:Join|Back)", body)[0])
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng
         return "B" if page == count else ">"
     monkeypatch.setattr(vr, "read_key", choose)

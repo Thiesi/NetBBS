@@ -2888,7 +2888,7 @@ def _screen_faction_contact(p: Palette, world: World, faction: str) -> None:
         available = faction_join_blocker(world, faction) is None
         lines = ([result] if result else []) + faction_contact_lines(world, faction)
         action, page, count = _draw_service_page(p, f"{FACTION_LABEL[faction].split()[0]} {world.save.pilot.credits:,}cr", lines,
-                                                "[J/B]Act [<>]Page: " if available else "[B]Back [<>]Page: ", page)
+                                                "[J]Join [B]Back [<>]Page: " if available else "[B]Back [<>]Page: ", page)
         if action in ("B", "Q"): return
         if action == ">": page = min(page + 1, count - 1); continue
         if action == "<": page = max(0, page - 1); continue
