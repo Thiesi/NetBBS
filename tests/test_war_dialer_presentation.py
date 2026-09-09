@@ -606,3 +606,40 @@ def test_linux_console_function_key_never_leaks_an_action(tmp_path, stage):
             send(b"q")
         assert process.wait(timeout=5) == 0
         assert process.stderr.read() == b""
+
+
+def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
+    path = tmp_path / "idle-world.db"
+    now = wd.now_utc()
+    conn = wd.connect(path)
+    wd.ensure_schema(conn)
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 0, "Guest", now, 1)
+    conn.execute("UPDATE players SET turns_used=15, turn_day_start=heat_updated_at")
+    conn.close()
+    clock = [now]
+    choices = iter(("C", "Q"))
+
+    def choose(valid):
+        choice = next(choices)
+        if choice == "C":
+            clock[0] += wd.DAY
+        assert choice in valid
+        return choice
+
+    class Output(io.StringIO):
+        def reconfigure(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(wd.sys, "stdout", Output())
+    monkeypatch.setattr(wd, "_load_door_info", lambda: {"user_id": 0, "handle": "Guest"})
+    monkeypatch.setattr(wd, "_resolve_db_path", lambda: path)
+    monkeypatch.setattr(wd, "now_utc", lambda: clock[0])
+    monkeypatch.setattr(wd, "read_menu_choice", choose)
+    assert wd.main() == 0
+    conn = wd.connect(path)
+    player = wd.read_player(conn, 0)
+    assert (player.cash, player.crew, player.turns_used) == (225, 4, 1)
+    assert player.turn_day_start == wd.to_iso(now + wd.DAY)
+    conn.close()

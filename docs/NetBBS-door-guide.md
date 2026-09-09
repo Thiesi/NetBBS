@@ -14,7 +14,12 @@ Several callers, including two sessions for one user, may play concurrently.
 Each action uses current stored resources and commits its turn with its result.
 Browsing, quitting and disconnecting cannot overwrite another session's changes.
 An outdated rival/exchange selection is rejected without spending resources.
-If the season changes during a visit, reconnect before taking another action.
+The 24-hour turn window starts when its first turn is spent. Login and browsing
+do not start it; Heat and turns refresh when the menu redraws or an action is
+attempted. If you waited at a zero-turn screen until refill, an action key can
+use the refreshed allowance. Clock rollback freezes time-based benefits until the
+last observed time is reached again. If the season changes during a visit,
+reconnect before taking another action.
 
 Use separate single keys. Arrow/function keys and pasted command bursts do not
 select actions; Escape dismisses a pause but has no menu action. An incomplete

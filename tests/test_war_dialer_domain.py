@@ -48,6 +48,8 @@ wd = _load_war_dialer()
 
 def _save_fixture(conn, player):
     """Arrange database state directly; production has no session-save API."""
+    if player.turns_used and not player.turn_day_start:
+        player.turn_day_start = player.heat_updated_at
     values = asdict(player)
     assignments = ", ".join(f"{key}=?" for key in values if key != "user_id")
     conn.execute(
@@ -590,7 +592,7 @@ def test_raid_revalidates_fresh_eligibility_without_effects(db_path, reason):
     elif reason == "missing":
         target_id = 999
     elif reason == "turns":
-        conn.execute("UPDATE players SET turns_used=15 WHERE user_id=1")
+        conn.execute("UPDATE players SET turns_used=15, turn_day_start=heat_updated_at WHERE user_id=1")
     elif reason == "season":
         conn.execute("UPDATE players SET season_number=2 WHERE user_id=2")
     before = list(conn.iterdump())
@@ -604,7 +606,7 @@ def test_raid_revalidates_fresh_eligibility_without_effects(db_path, reason):
 @pytest.mark.parametrize("action", ["trade", "recruit", "job", "raid", "root"])
 def test_all_actions_recheck_shared_turn_allowance(db_path, action):
     conn, now, a, b = _rivals(db_path)
-    conn.execute("UPDATE players SET turns_used=15 WHERE user_id=1")
+    conn.execute("UPDATE players SET turns_used=15, turn_day_start=heat_updated_at WHERE user_id=1")
     before = list(conn.iterdump())
     with pytest.raises(wd.ActionRejected, match="No turns"):
         if action == "trade":
@@ -705,7 +707,7 @@ def test_duplicate_sessions_commit_both_recruits(db_path):
 
 def test_duplicate_sessions_cannot_spend_the_last_turn_twice(db_path):
     conn, now, a, _ = _rivals(db_path)
-    conn.execute("UPDATE players SET turns_used=14 WHERE user_id=1")
+    conn.execute("UPDATE players SET turns_used=14, turn_day_start=heat_updated_at WHERE user_id=1")
     conn.close()
     barrier = threading.Barrier(2)
 
@@ -809,4 +811,117 @@ def test_login_income_timestamp_and_credit_rollback_together(db_path):
     with pytest.raises(sqlite3.IntegrityError, match="injected"):
         wd.load_or_create_player(conn, a.user_id, a.handle, now + timedelta(hours=2), 1)
     assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_unused_turn_window_starts_with_first_committed_action(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    assert a.turn_day_start == ""
+    later = now + timedelta(hours=12)
+    refreshed = wd.refresh_player(conn, a.user_id, later)
+    assert refreshed.turn_day_start == ""
+    wd.resolve_recruit(conn, a, later)
+    actual = wd.read_player(conn, a.user_id)
+    assert actual.turn_day_start == wd.to_iso(later)
+    assert actual.turns_used == 1
+    wd.refresh_player(conn, a.user_id, now + timedelta(hours=25))
+    assert wd.read_player(conn, a.user_id).turns_used == 1
+    conn.close()
+
+
+def test_open_session_can_spend_after_rolling_refill(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    a.turns_used = wd.TURNS_PER_DAY
+    _save_fixture(conn, a)
+    later = now + wd.DAY
+    wd.resolve_recruit(conn, a, later)
+    actual = wd.read_player(conn, a.user_id)
+    assert actual.turns_used == 1
+    assert actual.turn_day_start == wd.to_iso(later)
+    conn.close()
+
+
+def test_heat_decays_before_idle_sessions_next_action(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    a.heat = 80
+    _save_fixture(conn, a)
+    gain, busted = wd.resolve_trade_warez(conn, a, now + timedelta(hours=2), FixedRandom())
+    assert not busted
+    assert a.heat == pytest.approx(72)
+    assert a.cash == 1000 + gain
+    conn.close()
+
+
+def test_new_heat_is_not_decayed_over_time_before_the_action(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    later = now + timedelta(hours=3)
+    wd.resolve_trade_warez(conn, a, later, FixedRandom())
+    reloaded = wd.load_or_create_player(conn, a.user_id, a.handle, later, a.season_number)
+    assert reloaded.heat == pytest.approx(wd.TRADE_WAREZ_HEAT)
+    assert reloaded.heat_updated_at == wd.to_iso(later)
+    conn.close()
+
+
+def test_clock_rollback_does_not_repeat_decay_or_refill(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    wd.resolve_recruit(conn, a, now)
+    later = now + timedelta(hours=25)
+    wd.resolve_trade_warez(conn, a, later, FixedRandom())
+    wd.resolve_trade_warez(conn, a, now + timedelta(hours=1), FixedRandom())
+    actual = wd.read_player(conn, a.user_id)
+    assert actual.turns_used == 2
+    assert actual.turn_day_start == wd.to_iso(later)
+    assert actual.heat == pytest.approx(4)
+    assert actual.heat_updated_at == wd.to_iso(later)
+    refreshed = wd.refresh_player(conn, a.user_id, later)
+    assert refreshed.heat == pytest.approx(4)
+    assert refreshed.turns_used == 2
+    conn.close()
+
+
+def test_refresh_keeps_login_protection_and_legacy_active_anchor(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    a.turns_used = 4
+    a.turn_day_start = wd.to_iso(now - timedelta(hours=2))
+    a.last_raided_by = 99
+    a.heat = 50
+    _save_fixture(conn, a)
+    refreshed = wd.refresh_player(conn, a.user_id, now + timedelta(hours=1))
+    assert refreshed.turns_used == 4
+    assert refreshed.turn_day_start == a.turn_day_start
+    assert refreshed.last_raided_by == 99
+    assert refreshed.created_at == a.created_at
+    assert refreshed.heat == pytest.approx(45)
+    conn.close()
+
+
+def test_failed_action_does_not_anchor_an_unused_allowance(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    conn.execute("UPDATE players SET cash=0 WHERE user_id=1")
+    with pytest.raises(wd.ActionRejected, match="Not enough cash"):
+        wd.resolve_recruit(conn, a, now + timedelta(hours=1))
+    actual = wd.read_player(conn, a.user_id)
+    assert actual.turn_day_start == ""
+    assert actual.turns_used == 0
+    conn.close()
+
+
+def test_rollback_during_capture_keeps_ownership_time_monotonic(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    later = now + timedelta(hours=2)
+    wd.refresh_player(conn, a.user_id, later)
+    wd.resolve_root_exchange(conn, a, 1, now, FixedRandom())
+    exchange = wd.list_exchanges(conn)[0]
+    assert exchange.controlled_since == wd.to_iso(later)
+    assert exchange.income_collected_at == wd.to_iso(later)
+    conn.close()
+
+
+def test_rivals_clock_refresh_does_not_invalidate_unchanged_raid_choice(db_path):
+    conn, now, a, b = _rivals(db_path)
+    later = now + timedelta(minutes=1)
+    wd.refresh_player(conn, b.user_id, later)
+    success, amount, _ = wd.resolve_raid(conn, a, b.user_id, later, FixedRandom(), expected_target=b)
+    assert success
+    assert amount == 150
     conn.close()

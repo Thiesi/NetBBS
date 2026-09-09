@@ -709,9 +709,32 @@ def reset_player_for_season(player: Player, season_number: int, now: datetime) -
     player.heat = 0.0
     player.heat_updated_at = to_iso(now)
     player.turns_used = 0
-    player.turn_day_start = to_iso(now)
+    player.turn_day_start = ""
     player.last_raided_by = None
     player.season_number = season_number
+
+
+def settle_player_clocks(player: Player, now: datetime) -> datetime:
+    """Settle Heat and turns without treating a refresh as a login.
+
+    heat_updated_at also records the player's last observed time. A clock
+    rollback freezes elapsed-time benefits until that high-water mark is
+    reached again. A zero-turn allowance has no anchor until its first action.
+    Existing nonzero allowances retain their stored anchor.
+    """
+    last_seen = from_iso(player.heat_updated_at)
+    anchor = from_iso(player.turn_day_start) if player.turn_day_start else None
+    effective_now = max(now, last_seen, anchor or from_iso(player.created_at))
+    decay = HEAT_DECAY_PER_HOUR * hours_since(last_seen, effective_now)
+    player.heat = max(0.0, player.heat - decay)
+    player.heat_updated_at = to_iso(effective_now)
+    if player.turns_used == 0 or (anchor is not None and effective_now - anchor >= DAY):
+        player.turns_used = 0
+        player.turn_day_start = ""
+    elif anchor is None:
+        # A manually inconsistent allowance must not become free extra turns.
+        player.turn_day_start = to_iso(effective_now)
+    return effective_now
 
 
 def apply_heat(player: Player, amount: float, rng: random.Random) -> bool:
@@ -1001,6 +1024,15 @@ def read_player(conn: sqlite3.Connection, user_id: int) -> Player:
     return _row_to_player(row)
 
 
+def refresh_player(conn: sqlite3.Connection, user_id: int, now: datetime) -> Player:
+    """Settle current resources for a screen without clearing raid protection."""
+    with _write_transaction(conn):
+        player = read_player(conn, user_id)
+        settle_player_clocks(player, now)
+        _save_player(conn, player)
+    return player
+
+
 def load_or_create_player(conn: sqlite3.Connection, user_id: int, handle: str, now: datetime, season_number: int) -> Player:
     # Login is a write boundary too: no stale snapshot may overwrite an
     # incoming raid while settling Heat, income, or the login protection.
@@ -1013,19 +1045,13 @@ def load_or_create_player(conn: sqlite3.Connection, user_id: int, handle: str, n
                  turn_day_start, last_raided_by, season_number, created_at)
             VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0.0, ?, 0, ?, NULL, ?, ?)
             """,
-            (user_id, handle, STARTING_CASH, STARTING_CREW, to_iso(now), to_iso(now), season_number, to_iso(now)),
+            (user_id, handle, STARTING_CASH, STARTING_CREW, to_iso(now), "", season_number, to_iso(now)),
         )
         player = read_player(conn, user_id)
         player.handle = handle
+        now = settle_player_clocks(player, now)
         if player.season_number < season_number:
             reset_player_for_season(player, season_number, now)
-        if now - from_iso(player.turn_day_start) >= DAY:
-            player.turns_used = 0
-            player.turn_day_start = to_iso(now)
-        decay = HEAT_DECAY_PER_HOUR * hours_since(from_iso(player.heat_updated_at), now)
-        if decay > 0:
-            player.heat = max(0.0, player.heat - decay)
-            player.heat_updated_at = to_iso(now)
         player.last_raided_by = None
         player.cash += _collect_exchange_income(conn, player.user_id, now)
         _save_player(conn, player)
@@ -1038,37 +1064,40 @@ def _action_player(conn: sqlite3.Connection, snapshot: Player, now: datetime):
 
     Session objects are display snapshots only. Copy back the fresh actor only
     after COMMIT; rejected/failed writes cannot leave an apparent local reward.
-    Clock settlement/atomic world rollover are the next overhaul slice; until
-    then, reject old-season actions instead of letting them touch the new world.
+    Heat/turn clocks settle before eligibility and use nondecreasing player
+    time. Until atomic world rollover, old-season actions remain rejected.
     """
     with _write_transaction(conn):
         player = read_player(conn, snapshot.user_id)
+        now = settle_player_clocks(player, now)
         season = current_season_number(get_or_create_season_anchor(conn, now), now)
         if player.season_number != season or snapshot.season_number != season:
             raise ActionRejected("Season changed. Reconnect before taking another action.")
         if player.turns_used >= TURNS_PER_DAY:
             raise ActionRejected("No turns left. No resources spent.")
-        yield player
+        yield player, now
+        if player.turns_used == 0:
+            player.turn_day_start = to_iso(now)
         player.turns_used += 1
         _save_player(conn, player)
     snapshot.__dict__.update(player.__dict__)
 
 
 def resolve_trade_warez(conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random) -> tuple[int, bool]:
-    with _action_player(conn, player, now) as actor:
+    with _action_player(conn, player, now) as (actor, now):
         result = action_trade_warez(actor, rng)
     return result
 
 
 def resolve_recruit(conn: sqlite3.Connection, player: Player, now: datetime) -> bool:
-    with _action_player(conn, player, now) as actor:
+    with _action_player(conn, player, now) as (actor, now):
         if not action_recruit(actor):
             raise ActionRejected(f"Not enough cash (need ${RECRUIT_COST}). No resources spent.")
     return True
 
 
 def resolve_job(conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random) -> tuple[str, bool, int, bool]:
-    with _action_player(conn, player, now) as actor:
+    with _action_player(conn, player, now) as (actor, now):
         result = action_job(actor, rng)
     return result
 
@@ -1120,17 +1149,26 @@ def mark_events_seen(conn: sqlite3.Connection, event_ids: list[int], now: dateti
     conn.executemany("UPDATE events SET seen_at=? WHERE id=?", [(to_iso(now), eid) for eid in event_ids])
 
 
+
+def raid_selection_state(player: Player) -> tuple:
+    """Only changes to the displayed rival, combat stakes or eligibility stale a choice."""
+    return (
+        player.user_id, player.handle, player.cash, player.crew, rank_score(player),
+        player.last_raided_by, player.season_number, player.created_at,
+    )
+
+
 def resolve_raid(
     conn: sqlite3.Connection, attacker: Player, target_user_id: int,
     now: datetime, rng: random.Random, *, expected_target: Player | None = None,
 ) -> tuple[bool, int, bool]:
-    with _action_player(conn, attacker, now) as actor:
+    with _action_player(conn, attacker, now) as (actor, now):
         target = read_player(conn, target_user_id)
         if target.season_number != actor.season_number:
             raise ActionRejected("Rival belongs to an earlier season. Choose another target.")
         if not is_eligible_raid_target(actor, target, now):
             raise ActionRejected("Rival is no longer eligible. No resources spent.")
-        if expected_target is not None and target != expected_target:
+        if expected_target is not None and raid_selection_state(target) != raid_selection_state(expected_target):
             raise ActionRejected("Rival changed while you were choosing. Inspect the rivals again.")
         success, amount, busted = action_raid(actor, target, rng)
         _save_player(conn, target)
@@ -1145,7 +1183,7 @@ def resolve_root_exchange(
     conn: sqlite3.Connection, attacker: Player, exchange_id: int,
     now: datetime, rng: random.Random, *, expected_exchange: Exchange | None = None,
 ) -> tuple[bool, str, bool]:
-    with _action_player(conn, attacker, now) as actor:
+    with _action_player(conn, attacker, now) as (actor, now):
         exchange = next((e for e in list_exchanges(conn) if e.id == exchange_id), None)
         if exchange is None:
             raise ActionRejected("Exchange no longer exists. No resources spent.")
@@ -1492,11 +1530,13 @@ def main() -> int:
             mark_events_seen(conn, [e.id for e in events], now_utc())
 
         while True:
-            player = read_player(conn, user_id)
+            player = refresh_player(conn, user_id, now_utc())
             draw_status(palette, player, w)
             has_turns = player.turns_used < TURNS_PER_DAY
             draw_menu(palette, has_turns)
-            valid = "BQ?" + ("TCJRX" if has_turns else "")
+            # Always recognize action keys: a displayed zero-turn snapshot
+            # may sit idle past its refill. The transaction decides allowance.
+            valid = "BQ?TCJRX"
             choice = read_menu_choice(valid)
             action_now = now_utc()
             try:
