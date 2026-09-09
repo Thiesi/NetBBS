@@ -131,6 +131,9 @@ def _load_door_info() -> dict:
         for dimension in ("terminal_width", "terminal_height"):
             if dimension in info and (type(info[dimension]) is not int or not 1 <= info[dimension] <= 1000):
                 raise ValueError("invalid terminal dimensions")
+        owner = info.get("war_dialer_owner")
+        if not isinstance(owner, str) or re.fullmatch(r"[0-9a-f]{32}", owner) is None:
+            raise ValueError("missing or invalid host world owner")
     except (OSError, ValueError, TypeError) as exc:
         raise WorldStateError("War Dialer launch metadata is invalid. Return to NetBBS and contact the SysOp. "
                               "No Guest player was created.") from exc

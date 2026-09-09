@@ -103,7 +103,8 @@ No operator command starts, stops or redeploys the BBS service for you.
 A supplied unreadable or malformed host metadata file is an integration error,
 not a standalone demo: the caller gets a clear failure, the SysOp receives a
 bounded stderr diagnostic in door-session history, and no Guest world is created.
-Standalone Guest play is available only when `NETBBS_DOOR_INFO` is absent and the
+Host metadata must include the owning node's namespace; deploy the game and its
+runtime together. Standalone Guest play is available only when `NETBBS_DOOR_INFO` is absent and the
 world has not been bound to a node.
 
 ### Backup, ownership and restore
@@ -141,6 +142,11 @@ retention remain operator/cron jobs; use the same service environment and accoun
    not collide with another world's WAL/SHM/journal or session-guard paths. Add `--voidrunner-to`
    when that component is present. Restore brings back the paired node database
    and its user-ID namespace; it does not transplant a world into another node.
+   An old archive without world coverage refuses to replace a node that has
+   existing worlds. Preserve a current node/world backup, then move uncovered
+   worlds and their sidecars aside before that legacy restore. Do not reattach
+   them until the restored user-ID namespace has been verified; changing the
+   owner token alone cannot make an old node snapshot compatible with newer players.
 3. Restore validates checksums, schema, SQLite integrity and ownership before
    switching. It stages each world on its destination filesystem, excludes game
    sessions, removes old WAL/SHM/journal files as part of the rollback plan, and
