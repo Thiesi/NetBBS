@@ -4129,7 +4129,7 @@ def station_deck_lines(world: World, *, expanded: bool = False) -> list[str]:
         lines.extend([f"Pilot: {pilot.handle}. Rank: {career_rank(pilot)}.",
                       f"System: {here.name} ({here.x},{here.y}). Sector: {sector_for(here)}.",
                       f"Commitments: {len(world.save.active_missions)} contract(s); {len(world.save.active_futures)} futures order(s).",
-                      f"Progress: {sum(system.discovered for system in world.galaxy)}/{len(world.galaxy)} systems charted; {pilot.kills} raiders defeated; {pilot.missions_completed} missions completed."])
+                      f"Progress: {sum(system.discovered for system in world.galaxy)}/{len(world.galaxy)} systems charted; {pilot.kills} combat victories; {pilot.missions_completed} missions completed."])
         crew = [f"{crew_name(world, role)} ({info['label']}, {CREW_SERVICE_LEVELS[crew_level(ship, role)][1]})" for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
         lines.append("Crew: " + (", ".join(crew) if crew else "none") + ".")
     return lines
