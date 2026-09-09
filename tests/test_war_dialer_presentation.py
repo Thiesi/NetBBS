@@ -762,3 +762,106 @@ def test_board_read_rolls_world_before_displaying_ownership(tmp_path, monkeypatc
     assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
     assert 'OldBoss' not in ''.join(lines)
     conn.close()
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("unseen_only", [False, True])
+def test_history_pages_fit_terminal_and_preserve_long_unicode_records(tmp_path, monkeypatch, width, height, unseen_only):
+    conn = wd.connect(tmp_path / "history.db")
+    wd.ensure_schema(conn)
+    summary = "\x1b[31m" + "界e\u0301" * 600 + "\x1b[0m END"
+    wd.record_event(conn, 1, None, summary, wd.now_utc())
+    written = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
+    if unseen_only:
+        monkeypatch.setattr(wd, "read_input_key", lambda: " ")
+    else:
+        def choose(valid):
+            if "END" in _ANSI_RE.sub("", "".join(written).split("\x1b[2J\x1b[H")[-1]):
+                return "B"
+            return "N"
+        monkeypatch.setattr(wd, "read_menu_choice", choose)
+    wd.show_event_history(wd.Palette(False), conn, 1, width, height, unseen_only=unseen_only)
+    screens = "".join(written).split("\x1b[2J\x1b[H")[1:-1]
+    assert len(screens) > 1
+    body = []
+    for screen in screens:
+        lines = _ANSI_RE.sub("", screen).rstrip("\r\n").split("\r\n")
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+        body.extend(line for line in lines if "界" in line or "END" in line)
+    assert "".join(body).replace(" ", "") == "界e\u0301" * 600 + "END"
+    assert len(wd.unseen_events(conn, 1)) == (0 if unseen_only else 1)
+    conn.close()
+
+
+def test_history_ack_skips_partial_records_and_new_arrivals(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / "history.db")
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.record_event(conn, 1, None, "Long receipt " * 100, now)
+    original_id = wd.unseen_events(conn, 1)[0].id
+    monkeypatch.setattr(wd, "out", lambda text: None)
+    choices = iter(["A", "B"])
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: next(choices))
+    wd.show_event_history(wd.Palette(False), conn, 1, 20, 10)
+    assert [e.id for e in wd.unseen_events(conn, 1)] == [original_id]
+    conn.execute("DELETE FROM events")
+    for index in range(10):
+        wd.record_event(conn, 1, None, f"Receipt {index}", now)
+    ids = [e.id for e in wd.history_events(conn, 1)]
+    choices = iter(["A", "B"])
+    def choose(valid):
+        key = next(choices)
+        if key == "A":
+            wd.record_event(conn, 1, None, "Arrived while reading", now)
+        return key
+    monkeypatch.setattr(wd, "read_menu_choice", choose)
+    wd.show_event_history(wd.Palette(False), conn, 1, 40, 12)
+    read_ids = [e.id for e in wd.history_events(conn, 1) if e.seen_at]
+    assert read_ids == ids[:3]
+    assert wd.history_events(conn, 1)[0].seen_at is None
+    conn.close()
+
+
+def test_real_process_history_is_replayable_and_free(tmp_path):
+    with _running_door(tmp_path, event=True) as (process, path, wait_for, send, output):
+        wait_for(b"Press any key to continue")
+        send(b" ")
+        wait_for(b">\x1b[0m ")
+        send(b"h")
+        wait_for(b"[A]ck page [B]ack")
+        assert b"EVENT HISTORY" in output and b"[READ]" in output
+        send(b"b")
+        wait_for(b">\x1b[0m ")
+        send(b"q")
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b""
+        conn = wd.connect(path)
+        player = wd.read_player(conn, 0)
+        assert (player.cash, player.crew, player.turns_used) == (300, 3, 0)
+        assert len(wd.history_events(conn, 0)) == 1
+        assert wd.unseen_events(conn, 0) == []
+        conn.close()
+
+
+def test_offline_summary_disconnect_only_acknowledges_completed_pages(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / "history.db")
+    wd.ensure_schema(conn)
+    for index in range(10):
+        wd.record_event(conn, 1, None, f"Receipt {index}", wd.now_utc())
+    ids = [e.id for e in wd.unseen_events(conn, 1)]
+    monkeypatch.setattr(wd, "out", lambda text: None)
+    calls = 0
+    def read():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return " "
+        raise EOFError
+    monkeypatch.setattr(wd, "read_input_key", read)
+    with pytest.raises(EOFError):
+        wd.show_event_history(wd.Palette(False), conn, 1, 40, 12, unseen_only=True)
+    assert [e.id for e in wd.unseen_events(conn, 1)] == ids[3:]
+    conn.close()

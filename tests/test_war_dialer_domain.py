@@ -449,7 +449,7 @@ def test_unseen_events_are_empty_after_mark_seen(db_path):
     wd.record_event(conn, 5, "someone", "did a thing to you", now)
     events = wd.unseen_events(conn, 5)
     assert len(events) == 1
-    wd.mark_events_seen(conn, [e.id for e in events], now)
+    wd.mark_events_seen(conn, 5, [e.id for e in events], now)
     assert wd.unseen_events(conn, 5) == []
 
 
@@ -1284,4 +1284,77 @@ def test_adopt_mixed_legacy_seasons_preserves_current_season_progress(db_path):
     assert wd.read_player(conn, b.user_id).cash == 777
     assert all(e.controller_user_id == 2 and e.garrison == 5 for e in wd.list_exchanges(conn))
     assert conn.execute("SELECT value FROM meta WHERE key='active_season'").fetchone()[0] == '2'
+    conn.close()
+
+
+def test_event_retention_keeps_latest_500_for_each_player(db_path):
+    now = wd.now_utc()
+    conn, _ = _setup(db_path, now)
+    wd.record_event(conn, 2, None, "Other player's receipt", now)
+    with wd._write_transaction(conn):
+        for index in range(507):
+            wd.record_event(conn, 1, "Rival", f"Receipt {index}", now)
+    retained = wd.unseen_events(conn, 1)
+    assert len(retained) == 500
+    assert [e.summary_text for e in retained] == [f"Receipt {i}" for i in range(7, 507)]
+    assert len(wd.unseen_events(conn, 2)) == 1
+    conn.close()
+
+
+def test_legacy_event_retention_upgrade_is_atomic_and_idempotent(db_path):
+    now = wd.now_utc()
+    conn, _ = _setup(db_path, now)
+    conn.execute("DELETE FROM meta WHERE key='event_history_limit'")
+    with wd._write_transaction(conn):
+        conn.executemany(
+            "INSERT INTO events (target_user_id, summary_text, created_at) VALUES (?, ?, ?)",
+            [(user, str(i), wd.to_iso(now)) for user in (1, 2) for i in range(510)],
+        )
+    conn.execute("CREATE TRIGGER fail_prune BEFORE DELETE ON events WHEN OLD.target_user_id=2 "
+                 "BEGIN SELECT RAISE(ABORT, 'prune failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="prune failed"):
+        wd.ensure_schema(conn)
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1020
+    assert conn.execute("SELECT value FROM meta WHERE key='event_history_limit'").fetchone() is None
+    conn.execute("DROP TRIGGER fail_prune")
+    wd.ensure_schema(conn)
+    wd.ensure_schema(conn)
+    for user in (1, 2):
+        rows = wd.history_events(conn, user)
+        assert [e.summary_text for e in rows] == [str(i) for i in range(509, 9, -1)]
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1000
+    conn.close()
+
+
+def test_history_cursor_and_ack_do_not_swallow_new_or_other_player_events(db_path):
+    now = wd.now_utc()
+    conn, _ = _setup(db_path, now)
+    for index in range(5):
+        wd.record_event(conn, 1, None, str(index), now)
+    first_page = wd.history_events(conn, 1, limit=2)
+    wd.record_event(conn, 1, None, "new arrival", now)
+    wd.record_event(conn, 2, None, "other player", now)
+    other_id = wd.history_events(conn, 2)[0].id
+    next_page = wd.history_events(conn, 1, before_id=first_page[-1].id, limit=2)
+    assert [e.summary_text for e in next_page] == ["2", "1"]
+    accepted = [e.id for e in first_page] + [other_id]
+    wd.mark_events_seen(conn, 1, accepted, now)
+    wd.mark_events_seen(conn, 1, accepted, now + timedelta(hours=1))
+    assert [e.summary_text for e in wd.unseen_events(conn, 1)] == ["0", "1", "2", "new arrival"]
+    assert len(wd.unseen_events(conn, 2)) == 1
+    assert all(e.seen_at == wd.to_iso(now) for e in wd.history_events(conn, 1) if e.id in accepted)
+    conn.close()
+
+
+def test_failed_page_ack_preserves_all_unread_receipts(db_path):
+    now = wd.now_utc()
+    conn, _ = _setup(db_path, now)
+    for text in ("first", "second"):
+        wd.record_event(conn, 1, None, text, now)
+    ids = [e.id for e in wd.unseen_events(conn, 1)]
+    conn.execute(f"CREATE TRIGGER fail_ack BEFORE UPDATE ON events WHEN OLD.id={ids[1]} "
+                 "BEGIN SELECT RAISE(ABORT, 'ack failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="ack failed"):
+        wd.mark_events_seen(conn, 1, ids, now)
+    assert [e.id for e in wd.unseen_events(conn, 1)] == ids
     conn.close()

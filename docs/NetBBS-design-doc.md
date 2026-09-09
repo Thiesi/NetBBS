@@ -6494,10 +6494,24 @@ A selection made with an old-season snapshot is rejected without spending
 resources. The next menu refresh shows the crackdown notice and fresh resources,
 and the caller can continue in the same session. A rejected action transaction
 can roll back its attempted settlement too; the following read commits rollover.
-Offline receipts are acknowledged after the pause, and disconnect during
-onboarding or that pause exits cleanly; bounded, replayable history remains
-part of slice 2. Later gameplay decisions remain governed by the locked rules
-above until an explicit design pass adopts their replacements.
+Later gameplay decisions remain governed by the locked rules above until an
+explicit design pass adopts their replacements.
+
+**Event history (issue #362, slice 2).** Keep the latest 500 events per player,
+ordered by their committed IDs, with no age expiry. New receipts remove the
+oldest, including unread receipts beyond that limit. Existing unbounded history
+is trimmed transactionally on upgrade. Reads use target/history and target/unseen
+indexes and fetch at most 500 records.
+
+The login summary shows unread events oldest first; free `[H]istory` replays
+retained events newest first with UTC timestamps and NEW/READ labels. Both views
+paginate for terminal width and height down to 20x10 and show the retention limit.
+Smaller terminals receive a size diagnostic without acknowledging anything.
+Continuing a summary page accepts only records whose final line was displayed;
+Back and disconnect leave that page unread. History navigation does not acknowledge
+records; `[A]ck page` does so explicitly. Acknowledgement updates only the displayed
+player/record IDs atomically, so events arriving while a page is open remain unread.
+Onboarding and summary disconnects exit cleanly.
 
 ### Issue #168 — real-time relay for Link direct chat
 

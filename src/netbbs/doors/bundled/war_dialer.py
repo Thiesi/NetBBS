@@ -43,10 +43,10 @@ logged in. Things that should accrue "while you were away" (exchange
 income, Heat cooldown, the daily turn allowance, the four-week season)
 are never ticked by a clock; they're computed lazily, purely from
 elapsed wall-clock time, the moment a row is next read -- the standard
-idle-game pattern. `load_or_create_player` is where all of that lazy
-catch-up happens for the player currently logging in; the ten shared
-exchange rows get an equivalent lazy season sweep at the top of every
-session, since nothing about them is private to one player.
+idle-game pattern. Login, screen refresh and actions settle the relevant
+clocks under their write transaction. Season rollover resets the entire
+shared world atomically, including dormant players. Target receipts are
+retained as the latest 500 per player and replayable through History.
 
 **Rank is deliberately not `crew * 10 + exchanges_controlled * 500 +
 ...` computed from *current* holdings** -- an earlier draft of this
@@ -75,7 +75,7 @@ import sys
 import textwrap
 import time
 import unicodedata
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -662,6 +662,10 @@ class GameEvent:
     actor_handle: str | None
     summary_text: str
     created_at: str
+    seen_at: str | None = None
+
+
+EVENT_HISTORY_LIMIT = 500
 
 
 def rank_score(player: Player) -> int:
@@ -907,6 +911,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             )
             """
         )
+
+        conn.execute("CREATE INDEX IF NOT EXISTS events_target_id ON events(target_user_id, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS events_target_unseen_id ON events(target_user_id, seen_at, id)")
+        retention = conn.execute("SELECT value FROM meta WHERE key='event_history_limit'").fetchone()
+        if retention is None or int(retention["value"]) != EVENT_HISTORY_LIMIT:
+            # One-time adoption of legacy unbounded history, in this schema transaction.
+            for row in conn.execute("SELECT DISTINCT target_user_id FROM events"):
+                _prune_events(conn, row["target_user_id"])
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('event_history_limit', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(EVENT_HISTORY_LIMIT),),
+            )
 
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(players)")}
         if "income_remainder" not in columns:
@@ -1213,24 +1230,57 @@ def list_raid_targets(conn: sqlite3.Connection, attacker: Player, now: datetime,
 
 
 
-def record_event(conn: sqlite3.Connection, target_user_id: int, actor_handle: str | None, summary_text: str, now: datetime) -> None:
+def _prune_events(conn: sqlite3.Connection, user_id: int) -> None:
     conn.execute(
-        "INSERT INTO events (target_user_id, actor_handle, summary_text, created_at, seen_at) VALUES (?, ?, ?, ?, NULL)",
-        (target_user_id, actor_handle, summary_text, to_iso(now)),
+        "DELETE FROM events WHERE target_user_id=? AND id NOT IN "
+        "(SELECT id FROM events WHERE target_user_id=? ORDER BY id DESC LIMIT ?)",
+        (user_id, user_id, EVENT_HISTORY_LIMIT),
     )
 
 
-def unseen_events(conn: sqlite3.Connection, user_id: int) -> list[GameEvent]:
+def record_event(conn: sqlite3.Connection, target_user_id: int, actor_handle: str | None, summary_text: str, now: datetime) -> None:
+    with nullcontext() if conn.in_transaction else _write_transaction(conn):
+        conn.execute(
+            "INSERT INTO events (target_user_id, actor_handle, summary_text, created_at, seen_at) VALUES (?, ?, ?, ?, NULL)",
+            (target_user_id, actor_handle, summary_text, to_iso(now)),
+        )
+        _prune_events(conn, target_user_id)
+
+
+def history_events(
+    conn: sqlite3.Connection, user_id: int, *, before_id: int | None = None,
+    unseen_only: bool = False, limit: int = EVENT_HISTORY_LIMIT,
+) -> list[GameEvent]:
+    """Bounded newest-first history; ID cursors remain stable when new events arrive."""
+    clauses = ["target_user_id=?"]
+    parameters = [user_id]
+    if before_id is not None:
+        clauses.append("id < ?")
+        parameters.append(before_id)
+    if unseen_only:
+        clauses.append("seen_at IS NULL")
+    parameters.append(max(1, min(limit, EVENT_HISTORY_LIMIT)))
     rows = conn.execute(
-        "SELECT * FROM events WHERE target_user_id=? AND seen_at IS NULL ORDER BY created_at ASC", (user_id,)
+        "SELECT * FROM events WHERE " + " AND ".join(clauses) + " ORDER BY id DESC LIMIT ?",
+        parameters,
     ).fetchall()
-    return [GameEvent(id=r["id"], actor_handle=r["actor_handle"], summary_text=r["summary_text"], created_at=r["created_at"]) for r in rows]
+    return [GameEvent(id=r["id"], actor_handle=r["actor_handle"], summary_text=r["summary_text"],
+                      created_at=r["created_at"], seen_at=r["seen_at"]) for r in rows]
 
 
-def mark_events_seen(conn: sqlite3.Connection, event_ids: list[int], now: datetime) -> None:
+def unseen_events(conn: sqlite3.Connection, user_id: int) -> list[GameEvent]:
+    return list(reversed(history_events(conn, user_id, unseen_only=True)))
+
+
+def mark_events_seen(conn: sqlite3.Connection, user_id: int, event_ids: list[int], now: datetime) -> None:
+    """Acknowledge only this player's displayed IDs; new arrivals remain unread."""
     if not event_ids:
         return
-    conn.executemany("UPDATE events SET seen_at=? WHERE id=?", [(to_iso(now), eid) for eid in event_ids])
+    with nullcontext() if conn.in_transaction else _write_transaction(conn):
+        conn.executemany(
+            "UPDATE events SET seen_at=? WHERE target_user_id=? AND id=? AND seen_at IS NULL",
+            [(to_iso(now), user_id, event_id) for event_id in event_ids],
+        )
 
 
 
@@ -1326,15 +1376,91 @@ def draw_title(p: Palette, info: dict, season_number: int, w: int) -> None:
               f"{p.muted}Season:{RESET} {p.accent}{BOLD}{season_number}{RESET}")
 
 
-def draw_offline_summary(p: Palette, events: list[GameEvent], w: int) -> None:
-    if not events:
+def _event_plain(text: str) -> str:
+    # Treat stored/user-derived segments as plain text before styling them.
+    text = ANSI_ESCAPE_RE.sub("", text)
+    return "".join(" " if ch in "\r\n\t" else ch for ch in text
+                   if ch in "\r\n\t" or not unicodedata.category(ch).startswith("C"))
+
+
+def _event_wrap(text: str, width: int) -> list[str]:
+    return _wrap_output(_event_plain(text), width).split("\r\n")
+
+
+def event_pages(events: list[GameEvent], width: int, body_rows: int) -> list[list[tuple[str, int | None]]]:
+    """Only the final displayed line of an event makes it eligible for acknowledgement."""
+    lines: list[tuple[str, int | None]] = []
+    for event in events:
+        stamp = from_iso(event.created_at).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        status = "[ NEW]" if event.seen_at is None else "[READ]"
+        record_lines = _event_wrap(f"{stamp} {status}", width) + _event_wrap(event.summary_text, width)
+        lines.extend((line, event.id if index == len(record_lines) - 1 else None)
+                     for index, line in enumerate(record_lines))
+    if not lines:
+        lines = [("No recorded events.", None)]
+    body_rows = max(1, body_rows)
+    return [lines[index:index + body_rows] for index in range(0, len(lines), body_rows)]
+
+
+def show_event_history(
+    p: Palette, conn: sqlite3.Connection, user_id: int, width: int, height: int,
+    *, unseen_only: bool = False,
+) -> None:
+    events = unseen_events(conn, user_id) if unseen_only else history_events(conn, user_id)
+    if unseen_only and not events:
         return
-    out_line()
-    out_line(f"{p.dark_border}╭{'─' * (w - 2)}╮{RESET}")
-    out_line(_box_line(f"{p.dark_border}│{RESET}", f"  {p.gold}{BOLD}WHILE YOU WERE AWAY{RESET}", f"{p.dark_border}│{RESET}", w))
-    for ev in events:
-        out_line(_box_line(f"{p.dark_border}│{RESET}", f"  {p.white}- {ev.summary_text}{RESET}", f"{p.dark_border}│{RESET}", w))
-    out_line(f"{p.dark_border}╰{'─' * (w - 2)}╯{RESET}")
+    if width < 20 or height < 10:
+        out_line("History needs a terminal of at least 20 columns by 10 rows. Events remain unread.")
+        press_any_key(p)
+        return
+    width -= 1  # Leave room for the prompt cursor at the right edge.
+    title = "WHILE YOU WERE AWAY" if unseen_only else "EVENT HISTORY"
+    heading = _event_wrap(title, width) + _event_wrap(f"Latest {EVENT_HISTORY_LIMIT} events", width)
+    footer_text = ("Press any key to continue...", "[B]ack to game") if unseen_only else ("[N]ext [P]rev", "[A]ck page [B]ack")
+    footer = [line for text in footer_text for line in _event_wrap(text, width)]
+    # A short page counter and blank line take two more rows.
+    body_rows = max(1, height - len(heading) - len(footer) - 2)
+    pages = event_pages(events, width, body_rows)
+    page_index = 0
+    while True:
+        page = pages[page_index]
+        complete_ids = [event_id for _, event_id in page if event_id is not None]
+        out(f"{ESC}[2J{ESC}[H")
+        for line in heading:
+            out_line(f"{p.accent}{line}{RESET}")
+        out_line(f"Page {page_index + 1}/{len(pages)}")
+        out_line()
+        for line, _ in page:
+            out_line(f"{p.white}{line}{RESET}")
+        for line in footer[:-1]:
+            out_line(f"{p.muted}{line}{RESET}")
+        out_prompt(f"{p.gold}{footer[-1]}{RESET}")
+        if unseen_only:
+            key = read_input_key().upper()
+            out_line()
+            if key in ("B", "Q"):
+                break
+            mark_events_seen(conn, user_id, complete_ids, now_utc())
+            if page_index == len(pages) - 1:
+                break
+            page_index += 1
+        else:
+            key = read_menu_choice("NPABQ")
+            if key in ("B", "Q"):
+                break
+            if key == "N":
+                page_index = min(page_index + 1, len(pages) - 1)
+            elif key == "P":
+                page_index = max(0, page_index - 1)
+            elif key == "A" and complete_ids:
+                acknowledged_at = now_utc()
+                mark_events_seen(conn, user_id, complete_ids, acknowledged_at)
+                for event in events:
+                    if event.id in complete_ids and event.seen_at is None:
+                        event.seen_at = to_iso(acknowledged_at)
+                pages = event_pages(events, width, body_rows)
+    out(f"{ESC}[2J{ESC}[H")
+
 
 
 def draw_status(p: Palette, player: Player, w: int) -> None:
@@ -1365,7 +1491,7 @@ def draw_menu(p: Palette, has_turns: bool) -> None:
                   f"{p.gold}[R]{RESET}aid   Root E{p.gold}[x]{RESET}change")
     else:
         out_line(f"  {p.muted}Out of turns for today.{RESET}")
-    out_line(f"  {p.gold}[B]{RESET}oard (exchanges/leaderboard)   {p.gold}[?]{RESET}Help   {p.gold}[Q]{RESET}uit")
+    out_line(f"  {p.gold}[B]{RESET}oard (exchanges/leaderboard)   {p.gold}[H]{RESET}istory   {p.gold}[?]{RESET}Help   {p.gold}[Q]{RESET}uit")
     out_prompt(f"  {p.accent}>{RESET} ")
 
 
@@ -1472,7 +1598,7 @@ def draw_help(p: Palette, w: int) -> None:
         f"totals."
     )
     out_line()
-    para("[B]oard is always free. Press [?] any time to see this again.")
+    para("[B]oard and [H]istory are free. Press [?] to see this again.")
 
 
 def read_menu_choice(valid: str) -> str:
@@ -1608,6 +1734,10 @@ def main() -> int:
     except (TypeError, ValueError):
         _OUTPUT_WIDTH = 80
     w = min(78, _OUTPUT_WIDTH)
+    try:
+        height = max(1, min(200, int(info.get("terminal_height", 24))))
+    except (TypeError, ValueError):
+        height = 24
 
     conn = connect(_resolve_db_path())
     rng = random.Random()
@@ -1637,11 +1767,7 @@ def main() -> int:
         if is_new_player:
             draw_help(palette, w)
             press_any_key(palette)
-        events = unseen_events(conn, player.user_id)
-        if events:
-            draw_offline_summary(palette, events, w)
-            press_any_key(palette)
-            mark_events_seen(conn, [e.id for e in events], now_utc())
+        show_event_history(palette, conn, player.user_id, w, height, unseen_only=True)
 
         while True:
             previous_season = player.season_number
@@ -1653,7 +1779,7 @@ def main() -> int:
             draw_menu(palette, has_turns)
             # Always recognize action keys: a displayed zero-turn snapshot
             # may sit idle past its refill. The transaction decides allowance.
-            valid = "BQ?TCJRX"
+            valid = "BHQ?TCJRX"
             choice = read_menu_choice(valid)
             action_now = now_utc()
             try:
@@ -1664,6 +1790,8 @@ def main() -> int:
                     press_any_key(palette)
                 elif choice == "B":
                     draw_board(palette, conn, w)
+                elif choice == "H":
+                    show_event_history(palette, conn, player.user_id, w, height)
                 elif choice == "T":
                     do_trade_warez(palette, conn, player, action_now, rng)
                 elif choice == "C":

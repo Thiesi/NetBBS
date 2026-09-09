@@ -318,6 +318,14 @@ concurrently with its reader. Web scripted tests must send each War Dialer key
 at its displayed screen; prequeuing a command string now exercises paste rejection
 instead of normal navigation.
 
+Event retention is per target, latest 500 committed IDs, including unread rows.
+Insert and pruning share the action transaction; legacy pruning shares schema
+initialization. History uses an ID cursor rather than offsets. A page carries an
+acknowledgement ID only on an event's final wrapped line: partial records and
+new arrivals must remain unread. Scope acknowledgements by both player and ID,
+and commit a whole page together before advancing. Use display-column wrapping
+for event text before styling, and reserve footer rows in the terminal height.
+
 ### Database execution lanes
 
 Interactive network flows use a foreground `DatabaseLane`; Phase 3 background
