@@ -341,10 +341,19 @@ def test_an_overlength_name_matches_no_mapping_and_legacy_rows_are_upgraded(db, 
     # Legacy rows, as the previous setter allowed them, then the migration.
     legacy = create_channel(db, "legacy-mapped", creator=sysop)
     opened = create_channel(db, "opened-room", creator=sysop)  # the name is not what the migration reads
+    twin_a = create_channel(db, "twin-a", creator=sysop)
+    twin_b = create_channel(db, "twin-b", creator=sysop)
     db.connection.execute("UPDATE channels SET mrc_room = ? WHERE id = ?", ("c" * 25, legacy.id))
     db.connection.execute(
         "UPDATE channels SET mrc_room = ?, mrc_origin = 'caller' WHERE id = ?", ("b" * 25, opened.id),
     )
+    # Two caller rooms that differ only after character 20 (review of #387,
+    # round 2): neither may be shortened onto the other.
+    for row, tail in ((twin_a, "x"), (twin_b, "y")):
+        db.connection.execute(
+            "UPDATE channels SET mrc_room = ?, mrc_origin = 'caller', mrc_last_active_at = 'x' WHERE id = ?",
+            ("t" * 20 + tail * 5, row.id),
+        )
     db.connection.commit()
     sql = MIGRATIONS[-1].sql
     assert "length(mrc_room) > 20" in sql
@@ -352,7 +361,25 @@ def test_an_overlength_name_matches_no_mapping_and_legacy_rows_are_upgraded(db, 
     db.connection.commit()
     assert get_mrc_mapping(db, legacy) is None
     assert get_mrc_mapping(db, opened).room == "b" * 20
+    for row in (twin_a, twin_b):
+        assert get_mrc_mapping(db, row) is None
+        stored = db.connection.execute(
+            "SELECT mrc_room, mrc_origin, mrc_last_active_at FROM channels WHERE id = ?", (row.id,)
+        ).fetchone()
+        assert tuple(stored) == (None, None, None)  # no longer an open room at all
     # A stray overlength value that slipped past the migration is not a mapping.
     db.connection.execute("UPDATE channels SET mrc_room = ? WHERE id = ?", ("d" * 25, legacy.id))
     db.connection.commit()
     assert get_mrc_mapping(db, legacy) is None
+
+
+def test_blocklist_entries_are_refused_past_the_wire_limit(db):
+    """Review of #387 (round 2): a 21-character blocklist entry must not
+    silently block the 20-character room sharing its prefix."""
+    import pytest
+
+    from netbbs.mrc.settings import MrcSettingsError, OpenRoomSettings, validate_open_room_settings
+
+    validate_open_room_settings(OpenRoomSettings(blocklist=["#" + "a" * 20]))
+    with pytest.raises(MrcSettingsError, match="at most 20 characters"):
+        validate_open_room_settings(OpenRoomSettings(blocklist=["a" * 21]))

@@ -2629,17 +2629,19 @@ MIGRATIONS = [
             "MRC room names longer than the protocol's 20 characters (issue #376): a channel a "
             "SysOp mapped to such a room is unmapped (the hub never knew the room by that name; "
             "the SysOp remaps it), and a room a caller opened is renamed to its first 20 "
-            "characters when no other row holds them, else unmapped too. Rows unmapped this way "
-            "keep their name and scrollback."
+            "characters when no other row's first 20 characters match, else unmapped too -- and "
+            "an unmapped caller row also loses its open-room origin, so it neither counts against "
+            "the cap nor waits for a sweeper that cannot see it. Rows unmapped this way keep their "
+            "name and scrollback."
         ),
         sql="""
         UPDATE channels SET mrc_room = substr(mrc_room, 1, 20)
         WHERE mrc_room IS NOT NULL AND length(mrc_room) > 20 AND mrc_origin = 'caller'
           AND NOT EXISTS (
-            SELECT 1 FROM channels o WHERE o.id != channels.id
-              AND o.mrc_room IS NOT NULL AND lower(o.mrc_room) = lower(substr(channels.mrc_room, 1, 20))
+            SELECT 1 FROM channels o WHERE o.id != channels.id AND o.mrc_room IS NOT NULL
+              AND lower(substr(o.mrc_room, 1, 20)) = lower(substr(channels.mrc_room, 1, 20))
           );
-        UPDATE channels SET mrc_room = NULL, mrc_paused = 0
+        UPDATE channels SET mrc_room = NULL, mrc_paused = 0, mrc_origin = NULL, mrc_last_active_at = NULL
         WHERE mrc_room IS NOT NULL AND length(mrc_room) > 20;
         """,
     ),

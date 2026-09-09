@@ -347,6 +347,9 @@ def validate_open_room_settings(settings: OpenRoomSettings) -> OpenRoomSettings:
         raise MrcSettingsError(f"Retention must be between 1 and {MAX_OPEN_ROOM_RETENTION_DAYS} days.")
     seen: dict[str, str] = {}
     for entry in settings.blocklist:
+        error = room_name_error(entry)
+        if error is not None:
+            raise MrcSettingsError(f"Blocklist entry {entry!r}: {error}")
         room = sanitize_room(entry)
         if room and room.lower() not in seen:
             seen[room.lower()] = room
