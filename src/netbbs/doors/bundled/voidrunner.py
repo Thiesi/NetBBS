@@ -7071,8 +7071,10 @@ def main() -> int:
                 screen_dump_contraband(p, world)
             elif choice == "P":
                 screen_concord_commission(p, world)
+                continue
             elif choice == "W":
                 screen_blackwake_made(p, world)
+                continue
             elif choice == "Q":
                 world.checkpoint()
                 out_line(f"{p.muted}Docking clamps engaged. Fly safe, {world.save.pilot.handle}.{RESET}")

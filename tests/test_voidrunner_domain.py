@@ -10622,3 +10622,36 @@ def test_personal_crew_roster_retained_experience_unlocks_on_rehire(role,paid):
     assert vr.crew_assignment_blocker(world,role) is None
     vr.accept_crew_assignment(world,role)
     assert vr.crew_assignment_record(world,role)["state"]=="active"
+
+
+@pytest.mark.parametrize("key", ["P","W"])
+@pytest.mark.parametrize("commands", [b"",b"B",b">?<B",b"JNB"])
+def test_real_faction_browsing_does_not_replace_score_after_input(tmp_path,key,commands):
+    import json,os,subprocess
+    world=_world_with_seed(42);world.save.pilot.reputation={f:75 for f in vr.FACTIONS}
+    vr.persist(world,tmp_path,77)
+    info=tmp_path/"door_info.json";info.write_text(json.dumps({"user_id":77,"handle":"Tester","terminal_width":40,"terminal_height":12}),encoding="utf-8")
+    script="""
+import runpy,sys,os
+v=runpy.run_path(sys.argv[1]);g=v['main'].__globals__
+original_key=g['read_key'];original_replace=os.replace
+entered=False;replaced=[]
+def read_key():
+    global entered
+    try:key=original_key()
+    except EOFError:
+        entered=False;raise
+    entered=True;return key
+def replace(source,target):
+    result=original_replace(source,target)
+    if entered and target.parent.name=='scores':replaced.append(target.name)
+    return result
+g['read_key']=read_key;os.replace=replace
+code=g['main']()
+print('REPLACED:'+str(len(replaced)),file=sys.stderr)
+raise SystemExit(code)
+"""
+    result=subprocess.run([sys.executable,"-c",script,str(_VOIDRUNNER_PATH)],input=key.encode()+commands,capture_output=True,timeout=10,
+        env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
+    assert result.returncode==0 and result.stderr.strip()==b"REPLACED:0"
+    assert (b"Edda Ro" if key=="P" else b"Rook Talan") in result.stdout
