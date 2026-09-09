@@ -9911,6 +9911,7 @@ def test_named_crew_roster_keeps_personality_progress_and_costs_without_writes(m
     world._checkpoint = lambda w: pytest.fail("Crew browsing checkpointed")
     def choose():
         frame = output.getvalue(); output.seek(0); output.truncate(0); frames.append(frame)
+        assert "[1-3]Task" in " ".join(vr._ANSI_RE.sub("",frame).split())
         assert len(frame.splitlines()) <= height
         assert all(vr._visible_width(row) <= width for row in frame.splitlines())
         assert world.save.to_dict() == before and world.event_rng.getstate() == rng

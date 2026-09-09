@@ -4899,7 +4899,7 @@ def screen_crew_assignment(p: Palette, world: World, role: str) -> str | None:
 
 def screen_crew(p: Palette, world: World) -> None:
     page, result = 0, None
-    footer = f"[<>]Page [A-{LETTERS[len(CREW_ROLES)-1]}]Crew [Q]Back: "
+    footer = f"[<>]Page [A-{LETTERS[len(CREW_ROLES)-1]}]Crew [1-3]Task [Q]Back: "
     while True:
         lines = crew_roster_lines(world)
         if result: lines.insert(0, "Result: " + result)
