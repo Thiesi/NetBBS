@@ -2664,9 +2664,10 @@ _MRC_PRIVATE_NOTE = (
 
 
 async def _handle_mrc_private(ctx: ChatCommandContext, target: str | None, text: str) -> None:
-    """`/mrc msg <nick> <text>` and `/mrc r <text>` (issue #305). A reply
-    goes to the identity (nick *and* site) that wrote, not to wherever
-    that nick was seen last: the same nick can exist on two boards."""
+    """`/mrc msg <nick> <text>` and `/mrc r <text>` (issue #305). The
+    hub routes on the nick alone, which it keeps unique (issue #374);
+    the site is only what the echo shows -- the recorded sender's for
+    a reply, the last sighting's otherwise."""
     assert ctx.mrc_bridge is not None
     site: str | None = None
     if target is None:
@@ -2678,7 +2679,7 @@ async def _handle_mrc_private(ctx: ChatCommandContext, target: str | None, text:
     if not text.strip():
         await _show_usage(ctx.session, "mrc")
         return
-    reason, truncated = await ctx.mrc_bridge.send_private(ctx.channel, ctx.user.username, target, text, site=site)
+    reason, truncated = await ctx.mrc_bridge.send_private(ctx.channel, ctx.user.username, target, text)
     if reason is not None:
         await ctx.session.write_line(colored(f"(not sent to MRC: {sanitize_text(reason)})", fg_color=MUTED_COLOR))
         return

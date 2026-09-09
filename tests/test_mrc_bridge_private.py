@@ -127,12 +127,13 @@ def test_send_private_wears_the_house_style_and_the_last_seen_site(db, lane, lob
             assert (sent.from_user, sent.from_site, sent.from_room) == ("alice", "My_Board", "lobby")
             assert (sent.to_user, sent.msg_ext, sent.to_room) == ("bob", "", "")
             assert sent.body == "|08<|12alice|08>|16|07 hi there"
-            # Site learned from any packet bob sent since.
+            # The site bob was last seen at is learned for the echo only:
+            # field 5 stays empty on the wire (issue #374, MsgExt).
             await fake.send_line("bob~Other~garden~~~garden~|03<|11bob|03>|16|07 room chatter~")
             await _wait_until(lambda: bridge.site_for_nick("bob") == "Other")
             assert await bridge.send_private(lobby, "alice", "Bob", "again") == (None, False)
             sent = await fake.wait_for(lambda p: p.to_user == "Bob")
-            assert sent.msg_ext == "Other"
+            assert sent.msg_ext == ""
             # Bounded like a room line: chunked under the caller's own
             # allowance (PER_USER_BURST tokens, one per chunk), and the
             # tail reported cut.
@@ -214,10 +215,10 @@ def test_the_optin_is_reread_after_the_caller_leaves(db, lane, lobby, alice):
     asyncio.run(scenario())
 
 
-def test_a_reply_keeps_the_site_it_came_from(db, lane, lobby, alice):
-    """Review of #307: the same nick can exist on two boards; `/mrc r`
-    answers the identity that wrote, not wherever that nick was last
-    seen."""
+def test_a_reply_target_remembers_the_site_for_display_only(db, lane, lobby, alice):
+    """Review of #307, revised by #374: the recorded sender's site is
+    what `/mrc r` shows; the wire carries the nick alone, since the
+    hub keeps nicks unique (USERNICK)."""
     async def scenario():
         fake = FakeMrcHub()
         await fake.start()
@@ -233,13 +234,13 @@ def test_a_reply_keeps_the_site_it_came_from(db, lane, lobby, alice):
             await fake.send_line("bob~SiteB~garden~~~garden~room chatter~")
             await _wait_until(lambda: bridge.site_for_nick("bob") == "SiteB")
             assert bridge.reply_target("alice") == ("bob", "SiteA")
-            assert await bridge.send_private(lobby, "alice", "bob", "back", site="SiteA") == (None, False)
+            assert await bridge.send_private(lobby, "alice", "bob", "back") == (None, False)
             sent = await fake.wait_for(lambda p: p.to_user == "bob" and p.body.endswith(" back"))
-            assert sent.msg_ext == "SiteA"
-            # And a fresh `/mrc msg bob` goes by the last sighting.
-            assert await bridge.send_private(lobby, "alice", "bob", "new") == (None, False)
-            sent = await fake.wait_for(lambda p: p.to_user == "bob" and p.body.endswith(" new"))
-            assert sent.msg_ext == "SiteB"
+            assert (sent.msg_ext, sent.to_room) == ("", "")
+            # A private line whose field 5 carries an extension (the
+            # D-Dial uplink marker) is delivered like any other.
+            await fake.send_line("bob~SiteA~garden~alice~DDIAL:T1~~uplinked~")
+            assert (await _next_notice(queue)).text == "bob@SiteA: uplinked"
             # A reconnect starts a new conversation state.
             await fake.drop_clients()
             await _wait_until(lambda: bridge.state is not MrcState.CONNECTED)

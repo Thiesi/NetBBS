@@ -987,13 +987,15 @@ session needs the same treatment.
   the wire would spell differently (never silently address somebody else),
   builds the body with `format_room_body` (the recipient's client shows the
   handle), and
-  sets `msg_ext` from the `site` the caller is answering (`/mrc r` passes
-  the recorded sender's site, never a fresh lookup: the same nick can exist
-  on two boards) or else from `_known_sites` (nick -> site, learned from
-  every non-own inbound packet, `MAX_KNOWN_SITES`, least recently seen
-  evicted); a nick never seen sends an empty `msg_ext` and the hub routes
-  on the nick alone; `_known_sites` is cleared by `reload_settings` (a
-  different hub knows different boards). `/mrc r` answers
+  always sends field 5 (`MsgExt`) empty: the spec reserves it for
+  extensions ("remove any reference to ToBBS"), D-Dial uplink traffic
+  carries `DDIAL:T1` there, and the hub routes on the nick alone, which
+  `USERNICK` keeps unique (issue #374) -- so no site ever goes on the wire
+  for a private line, and inbound handling ignores field 5. `_known_sites`
+  (nick -> site, learned from every non-own inbound packet,
+  `MAX_KNOWN_SITES`, least recently seen evicted, cleared by
+  `reload_settings`) exists only for the `nick@site` in the sender's own
+  echo; `/mrc r` shows the recorded sender's site there. `/mrc r` answers
   `_last_private_sender`, pruned with the other per-caller caches to the
   announced set and cleared with the sender buckets when a connection
   reaches CONNECTED. The once-per-session

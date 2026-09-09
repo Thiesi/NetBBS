@@ -6244,14 +6244,17 @@ planning pass intended:
   no search index, no log body.
 - **Sent as the caller's nick, in the house style.** `/mrc msg <nick>
   <text>` and `/mrc r <text>` (to whoever last messaged them this
-  connection) send a packet with `to_user` set, `to_room` empty and
-  `msg_ext` the site the target was last seen at -- learned from every
-  inbound packet, bounded, so the hub can route to the right board when
-  the same nick exists on two; unknown stays empty and the hub routes
-  on the nick. The body wears the house style so the recipient's client
-  shows who wrote it; chunking and the caller's own send allowance
-  apply as for a room line. The sender sees a local echo, never a
-  channel line.
+  connection) send a packet with `to_user` set and fields 5 and 6
+  empty, the spec's private-message transaction (MRCDoc protocol page,
+  rev 1.26; issue #374). Field 5 is `MsgExt`, reserved for extensions
+  such as encryption, never routing -- "remove any reference to
+  ToBBS" -- and the hub routes on the nick, which `USERNICK` keeps
+  unique across boards. The site a nick was last seen at is still
+  learned from inbound traffic, bounded, but only for the `nick@site`
+  the sender's own echo shows. The body wears the house style so the
+  recipient's client shows who wrote it; chunking and the caller's own
+  send allowance apply as for a room line. The sender sees a local
+  echo, never a channel line.
 - **What "private" means, said once.** The first private line a
   session sends or receives comes with one note: private MRC messages
   are not private on that network; the hub and any client can read or

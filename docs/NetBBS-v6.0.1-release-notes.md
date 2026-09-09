@@ -19,3 +19,12 @@ happens.
 
 The specification names no command that clears the away flag, so the hub's
 own activity tracking decides when a returned caller stops showing as away.
+
+## Private messages carry no site on the wire
+
+The specification reserves packet field 5 for future extensions such as
+encryption and says to drop every use of it as a destination board. Private
+messages from NetBBS put the recipient's last-seen board there as a routing
+hint; they now leave the field empty, as every other client does. Nothing is
+lost: the hub keeps nicks unique across boards, so the nick alone is the
+address. The `nick@board` a sender sees in their own echo is unchanged.
