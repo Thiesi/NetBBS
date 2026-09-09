@@ -462,8 +462,9 @@ them on under `[P]rofile` → `[P]rivate MRC messages`; the switch applies
 the next time they enter an MRC room and covers both directions. From
 then on a private line from an MRC user rings the bell and shows as
 `[MRC private] bob@Other: text` to that caller alone; `/mrc msg <nick>
-<text>` answers anyone on the network and `/mrc r <text>` answers
-whoever wrote last. The first private line in a session, either way,
+<text>` answers anyone on the network (the hub keeps nicks unique, so
+the nick alone is the address) and `/mrc r <text>` answers whoever
+wrote last. The first private line in a session, either way,
 comes with a note that these messages are not private on that network:
 the hub and any client can read or spoof them. Private lines are never
 stored -- not in scrollback, not in search, not in any log. There is

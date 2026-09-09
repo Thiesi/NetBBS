@@ -1959,8 +1959,10 @@ class MrcBridge:
         self._known_sites[key] = (nick, site, self._clock())
 
     def site_for_nick(self, nick: str) -> str:
-        """The site `nick` was last seen at, or "" when unknown (the hub
-        routes on the nick alone then)."""
+        """The site `nick` was last seen at, or "" when unknown -- for
+        the `nick@site` a caller sees in their own echo, never for the
+        wire: the hub routes a private line on the nick alone, which
+        `USERNICK` keeps unique (issue #374)."""
         entry = self._known_sites.get(protocol.sanitize_name(nick).lower())
         return entry[1] if entry is not None else ""
 
@@ -1974,18 +1976,17 @@ class MrcBridge:
         privately this connection, for `/mrc r`."""
         return self._last_private_sender.get(username)
 
-    async def send_private(
-        self, channel: Channel, username: str, target: str, text: str, *, site: str | None = None,
-    ) -> tuple[str | None, bool]:
+    async def send_private(self, channel: Channel, username: str, target: str, text: str) -> tuple[str | None, bool]:
         """Send `text` privately to MRC user `target` as the caller's
         nick (issue #305). Requires the caller's own opt-in -- refusing
         replies while starting conversations is not offered -- and their
         announcement; the body wears the house style so the recipient's
-        client shows who wrote it, `to_site` is `site` when the caller
-        is answering a particular identity (`/mrc r`), else the site the
-        target was last seen at, and the caller's per-user bucket and
-        the room line's chunking apply. Returns `(reason, truncated)`:
-        `reason` is `None` when queued."""
+        client shows who wrote it; field 5 (`MsgExt`) stays empty, as
+        the spec's private-message transaction has it -- it is reserved
+        for extensions, never routing, and the hub routes on the nick,
+        which `USERNICK` keeps unique (MRCDoc rev 1.26; issue #374). The
+        caller's per-user bucket and the room line's chunking apply.
+        Returns `(reason, truncated)`: `reason` is `None` when queued."""
         mapping = self._by_channel.get(channel.id)
         settings = self._settings
         if mapping is None or not mapping.active or settings is None or not settings.enabled:
@@ -2017,11 +2018,10 @@ class MrcBridge:
         if not bucket.has_tokens(len(chunks)):
             self._dropped_outbound += 1
             return "you're sending faster than MRC allows", truncated
-        target_site = protocol.sanitize_name(site) if site is not None else self.site_for_nick(target_nick)
         for chunk in chunks:
             bucket.consume()
             self._enqueue(MrcPacket(
-                nick, settings.site_wire_name, mapping.room, target_nick, target_site, "", template(nick, chunk),
+                nick, settings.site_wire_name, mapping.room, target_nick, "", "", template(nick, chunk),
             ))
         return None, truncated
 

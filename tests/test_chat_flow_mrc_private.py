@@ -118,8 +118,9 @@ def test_inbound_private_line_rings_the_bell_and_r_answers_it(db, lane, hub, pre
             async def push_private():
                 await rig.fake.wait_for(lambda p: p.body == "NEWROOM::lobby" and p.from_user == "alice")
                 await rig.fake.send_line("bob~Other~garden~alice~My_Board~~|03<|11bob|03>|16|07 psst~")
-                # Review of #307: the same nick seen elsewhere since does
-                # not redirect the reply.
+                # Review of #307, revised by #374: the same nick seen
+                # elsewhere since changes neither the echo (the recorded
+                # sender's site) nor the wire (nick alone).
                 await rig.fake.send_line("bob~Elsewhere~garden~~~garden~|03<|11bob|03>|16|07 room chatter~")
                 await asyncio.sleep(0.2)
 
@@ -134,7 +135,7 @@ def test_inbound_private_line_rings_the_bell_and_r_answers_it(db, lane, hub, pre
             assert text.count(NOTE) == 1
             assert "[MRC private] -> bob@Other: right back" in text
             sent = await rig.fake.wait_for(lambda p: p.to_user == "bob")
-            assert (sent.msg_ext, sent.body) == ("Other", "|08<|14alice|08>|16|07 right back")
+            assert (sent.msg_ext, sent.body) == ("", "|08<|14alice|08>|16|07 right back")
         finally:
             await rig.close()
     asyncio.run(scenario())
