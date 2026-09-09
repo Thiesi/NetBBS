@@ -5190,3 +5190,13 @@ Use the same crew helpers in resolution and telemetry. Legacy absent records
 mean base bonuses, not inferred veteran grades. Serialize/restart every departure
 phase to prove neither salary nor service is replayed. Salvage recovery retains
 crew as before; retirement clears the ship's records.
+
+Personal crew tasks store acceptance baselines alongside the versioned crew record.
+Validate those baselines against monotonic kill/chart totals and retain them on
+rehire; never recapture them from a read-only task screen or restart. Navigator
+requirements cap at the number of uncharted systems at acceptance, including zero
+for a complete atlas. Only material handovers enter delivery FIFO accounting;
+combat/chart task payouts are assignment rewards, not invented cargo receipts.
+Commit task state, consumed material, credits and mission recognition together
+before acknowledging completion. The ordinary public workshop bearings supply
+routes without creating discoveries or remote market quotes.

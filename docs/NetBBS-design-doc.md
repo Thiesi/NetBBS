@@ -4880,6 +4880,28 @@ or unsupported records enter preserving recovery. Existing destruction/stranding
 fresh or retired career has no crew records. Existing interrupted travel never repays wages or grants service
 again; cached combat with absent records retains its prior crew bonus.
 
+Each Seasoned-or-better specialist offers one optional personal assignment per
+career, reached from the crew roster's numbered task entries. Acceptance is free,
+uses no ordinary contract slot and has no deadline. Completing it requires that
+specialist to be hired and the pilot to visit the named existing workshop. The
+gunner brings one new combat recording to Rivet House for 600 credits; the
+engineer delivers three Machinery to Tuning Fork for 900 credits; the navigator
+brings up to three newly charted systems to Far Lantern for 700 credits. If fewer
+than three systems remain, all remaining systems suffice; a complete atlas can
+be delivered directly. Combat and chart progress use acceptance-time baselines,
+so earlier accomplishments are not counted as new work. Progress can be gathered
+while a specialist is off the roster, but handover requires rehiring them.
+
+Every assignment awards one completed mission and a personal career highlight,
+once. It grants no extra faction standing, crew service or module tier. Material
+handover uses ordinary delivery FIFO accounting and warns about shared contract
+cargo before its final confirmation. Task state survives dismissal and salvage
+recovery, and clears on retirement. Optional versioned task records are bounded
+and validated with the crew record; no new galaxy/event randomness is consumed.
+The detail page shows the complete objective, progress, reward, crew obligation
+and public route before any action. Browsing and Back write nothing. Acceptance
+and completion checkpoint before their retained result appears.
+
 Three specialist workshops give existing stations distinct outfitting roles:
 Iona Rusk's Rivet House expands cargo bays, Oren Vale's Tuning Fork tunes engines,
 and Dr. Sel Parn's Far Lantern builds scanners. A separate `workshops-v1` seed
