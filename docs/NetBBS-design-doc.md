@@ -4853,6 +4853,33 @@ rejected input. Draft edits write nothing; signing and cancellation retain their
 existing final confirmations, fees, pickup behavior and legacy-order terms. Their
 durable results remain visible in the futures catalog and on return to the market.
 
+Crew are recurring named specialists, with a concise personality and persistent
+service record per role. The `crew-v1` identity namespace chooses from fixed
+role-specific candidates without galaxy or encounter RNG. Browsing previews a
+candidate without creating a record; hiring records that identity. Existing hired
+crew without records retain their base bonuses and begin recorded service at the
+next paid jump. Earlier service is unknown, never guessed. Wages and hire prices
+remain unchanged.
+
+Five, fifteen and thirty paid jumps promote a specialist from Recruit through
+Seasoned, Veteran and Ace. Recorded service caps at thirty. A gunner adds one
+extra damage per promotion above the base three; an engineer saves 25%, 30%, 35%
+or 40% of base jump fuel (savings rounded up, minimum one fuel burned); a navigator
+adds one to four survey hops. Unhired crew provide no bonus. Promotions commit
+with the departure that pays wages and are acknowledged afterward; engine fuel
+is already spent for that departure, so its improved efficiency starts on the
+following jump. Route budgets use current efficiency and can conservatively
+overestimate later fuel when a promotion occurs en route.
+
+Dismissal or unpaid resignation preserves the named record and service; rehiring
+costs the ordinary hire fee and restores the same specialist. Hiring, dismissal
+and salary progression validate or resolve synchronously, with UI/travel owners
+checkpointing before acknowledgement. Only three optional versioned records are
+stored on the ship, with bounded candidate identity and service count. Malformed
+or unsupported records enter preserving recovery. Existing destruction/stranding recovery keeps hired crew and their records. A
+fresh or retired career has no crew records. Existing interrupted travel never repays wages or grants service
+again; cached combat with absent records retains its prior crew bonus.
+
 Three specialist workshops give existing stations distinct outfitting roles:
 Iona Rusk's Rivet House expands cargo bays, Oren Vale's Tuning Fork tunes engines,
 and Dr. Sel Parn's Far Lantern builds scanners. A separate `workshops-v1` seed
@@ -5103,8 +5130,8 @@ legality and excluded return travel remain visible; no live remote prices are
 queried. The board is read-only and paginated. Human play remains necessary to
 validate whether these opportunities encourage satisfying route variety.
 
-The engineer costs 200 credits to hire and 2 per jump, reducing fuel by 25%,
-rounded up, with a minimum one-unit burn. The role is an investment for longer
+The engineer costs 200 credits to hire and 2 per jump. Fuel savings follow the
+paid-service progression defined above. The role is an investment for longer
 routes; one-unit jumps cannot benefit, and hiring does not refund old hire costs.
 
 New futures orders lock goods for pickup at their issuing station after maturity.

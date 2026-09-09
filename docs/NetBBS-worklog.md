@@ -5175,3 +5175,18 @@ not losses or trading receipts. Installation costs are capital spending, separat
 from reported trading margins. New counters default to zero for old careers.
 Commit module tier, material lots, credit spend and recognition before narration;
 route/dialog cancellation must retain the parent yard's previous action result.
+
+Crew identity indices belong to the stable crew-v1 candidate lists: preserve
+existing indices/names when extending the cast. Read-only candidate previews
+use the independent seed/role namespace; only hiring or a paid legacy salary
+creates a stored record. Service caps at thirty and advances only with an actual
+salary payment, in existing role order. Unpaid resignation retains service but
+removes all active bonuses; rehire keeps the same identity/experience.
+
+Departure fuel precedes salary/promotion. Keep that ordering on resume and in
+budget explanations: a new engineer grade applies to following departure fuel costs,
+while its departure's combat/survey bonuses can use the newly committed grade.
+Use the same crew helpers in resolution and telemetry. Legacy absent records
+mean base bonuses, not inferred veteran grades. Serialize/restart every departure
+phase to prove neither salary nor service is replayed. Salvage recovery retains
+crew as before; retirement clears the ship's records.
