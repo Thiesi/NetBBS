@@ -87,11 +87,13 @@ class DoorProfile:
         if not isinstance(self.environment, dict) or len(self.environment) > 32:
             raise ProfileError("environment must be a map of at most 32 entries")
         for key, value in self.environment.items():
-            if not isinstance(key, str) or not (key in ("TERM", "LANG", "LC_ALL", "TZ", "PATH") or
+            if not isinstance(key, str) or not (key in ("TERM", "LANG", "LC_ALL", "TZ", "PATH", "WAR_DIALER_DB_PATH") or
                                                re.fullmatch(r"DOOR_[A-Z0-9_]{1,48}", key)):
-                raise ProfileError("environment permits TERM, LANG, LC_ALL, TZ, PATH and DOOR_* only")
+                raise ProfileError("environment permits TERM, LANG, LC_ALL, TZ, PATH, WAR_DIALER_DB_PATH and DOOR_* only")
             if not isinstance(value, str) or len(value) > 2048 or "\x00" in value:
                 raise ProfileError("invalid environment value")
+            if key == "WAR_DIALER_DB_PATH" and not value.strip():
+                raise ProfileError("WAR_DIALER_DB_PATH must name a database file")
         if not isinstance(self.runner, (tuple, list)) or any(not isinstance(x, str) or "\x00" in x for x in self.runner):
             raise ProfileError("runner must be an argv array")
         if self.runner and not Path(self.runner[0]).is_absolute():

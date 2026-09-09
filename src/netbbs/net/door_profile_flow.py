@@ -9,7 +9,7 @@ from pathlib import Path
 
 from netbbs.doors.profiles import DoorProfile, ProfileError, preflight, read_profile_file
 from netbbs.doors.registry import DoorError, update_door
-from netbbs.doors.runtime import run_door
+from netbbs.doors.runtime import run_door, war_dialer_world_path, war_dialer_path_problem
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.picker import pick_item
 from netbbs.net.resource_editor import FieldSpec, bool_field, choice_field, edit_resource_draft, text_field
@@ -92,9 +92,14 @@ async def edit_door_profile(session, lane, actor, door):
         try:
             candidate = _candidate(door, draft)
             problems = await asyncio.to_thread(preflight, candidate, session)
+            world_path = await lane.run(war_dialer_world_path, candidate)
+            if world_path is not None:
+                await session.write_line(sanitize_text(f"War Dialer world: {world_path}"))
+                if problem := await asyncio.to_thread(war_dialer_path_problem, candidate, world_path):
+                    problems.append(problem)
             for line in problems or ["Static checks passed. Use Test to verify the actual runtime and game."]:
                 await session.write_line(sanitize_text(line))
-        except ProfileError as exc:
+        except (ProfileError, ValueError, OSError) as exc:
             await session.write_line(sanitize_text(str(exc)))
         await session.write_line("Press any key to return to the draft.")
         await session.read_any_key()

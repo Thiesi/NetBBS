@@ -509,3 +509,144 @@ def test_war_dialer_timeout_does_not_leave_bracketed_paste_enabled(db, lane, pla
     assert result.reason == "timed_out"
     assert b"W A R" in session.written
     assert b"\x1b[?2004h" not in session.written
+
+
+def test_war_dialer_default_paths_separate_nodes_without_using_display_names(db, player, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from netbbs.doors.runtime import war_dialer_world_path
+    monkeypatch.delenv("WAR_DIALER_DB_PATH", raising=False)
+    door = create_door(db, "First title", sys.executable, args=(str(_BUNDLED_DOORS_DIR / "war_dialer.py"),), creator=player)
+    first = war_dialer_world_path(db, door)
+    assert first == db.path.resolve().parent / "node.db.doors" / "war-dialer.db"
+    assert war_dialer_world_path(db, replace(door, name="Renamed game")) == first
+    other = Database(tmp_path / "other.db")
+    try:
+        assert war_dialer_world_path(other, door) != first
+    finally:
+        other.close()
+    assert not first.exists()
+
+
+def test_war_dialer_override_is_absolute_and_does_not_forward_parent_secrets(db, lane, player, tmp_path, monkeypatch):
+    from netbbs.doors.profiles import DoorProfile
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("WAR_DIALER_DB_PATH", "global/world.db")
+    monkeypatch.setenv("NETBBS_TEST_SECRET", "not-a-door-setting")
+    script = _write_script(tmp_path, "wardialer_wrapper.py", "import os,json; print(json.dumps(dict(os.environ)))")
+    profile = DoorProfile(environment={"WAR_DIALER_DB_PATH": "per-profile/world.db"})
+    door = create_door(db, "Wrapper", sys.executable, args=(str(script),), creator=player, profile=profile)
+    session = FakeSession()
+    result = asyncio.run(_run(session, lane, door, player))
+    assert result.exit_code == 0
+    env = json.loads(bytes(session.written))
+    assert env["WAR_DIALER_DB_PATH"] == str(tmp_path / "per-profile" / "world.db")
+    assert "NETBBS_TEST_SECRET" not in env
+
+
+def test_war_dialer_legacy_world_requires_an_explicit_migration_choice(db, lane, player, tmp_path, monkeypatch):
+    from netbbs.doors.runtime import war_dialer_world_path
+    monkeypatch.delenv("WAR_DIALER_DB_PATH", raising=False)
+    home = tmp_path / "legacy-home"
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(home))
+    legacy = home / ".netbbs" / "wardialer.db"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"original world is preserved")
+    door = create_door(db, "War Dialer", sys.executable, args=(str(_BUNDLED_DOORS_DIR / "war_dialer.py"),), creator=player)
+    target = war_dialer_world_path(db, door)
+    session = FakeSession()
+    result = asyncio.run(_run(session, lane, door, player))
+    assert result.reason == "failed_to_start"
+    assert "Legacy War Dialer world found" in result.diagnostic
+    assert str(target) in result.diagnostic
+    assert not target.exists()
+    assert legacy.read_bytes() == b"original world is preserved"
+
+
+def test_war_dialer_global_override_and_unrelated_doors(db, player, tmp_path, monkeypatch):
+    from netbbs.doors.runtime import war_dialer_world_path, war_dialer_path_problem
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("WAR_DIALER_DB_PATH", "selected/world.db")
+    door = create_door(db, "War Dialer", sys.executable, args=(str(_BUNDLED_DOORS_DIR / "war_dialer.py"),), creator=player)
+    target = war_dialer_world_path(db, door)
+    assert target == tmp_path / "selected" / "world.db"
+    assert war_dialer_path_problem(door, target) is None
+    unrelated = create_door(db, "Other", sys.executable, args=("-c", "print('not this game')"), creator=player)
+    assert war_dialer_world_path(db, unrelated) is None
+
+
+@pytest.mark.parametrize("entrypoint", ["absolute", "relative", "substitution"])
+def test_real_war_dialer_launches_keep_two_node_worlds_separate(tmp_path, monkeypatch, entrypoint):
+    import sqlite3
+    from netbbs.doors.runtime import war_dialer_world_path
+    monkeypatch.delenv("WAR_DIALER_DB_PATH", raising=False)
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path / "shared-home"))
+    from netbbs.doors.profiles import DoorProfile
+    args = {"absolute": str(_BUNDLED_DOORS_DIR / "war_dialer.py"), "relative": "war_dialer.py",
+            "substitution": "{install_dir}/war_dialer.py"}
+    paths = []
+    for name in ("Alpha", "Beta"):
+        database = Database(tmp_path / (name + ".db"))
+        database_lane = DatabaseLane(database.path)
+        try:
+            actor = create_user(database, name, password="hunter2", user_level=10)
+            door = create_door(database, "Same display title", sys.executable,
+                               args=(args[entrypoint],), creator=actor,
+                               profile=DoorProfile(install_dir=str(_BUNDLED_DOORS_DIR)))
+            paths.append(war_dialer_world_path(database, door))
+            async def scenario():
+                session = FakeSession()
+                task = asyncio.create_task(_run(session, database_lane, door, actor))
+                async def wait_for(marker):
+                    while marker not in session.written:
+                        if task.done():
+                            pytest.fail(f"Door exited early: {task.result()}")
+                        await asyncio.sleep(0.01)
+                try:
+                    await asyncio.wait_for(wait_for(b"Press any key to continue..."), 8)
+                    session.type_in(" ")
+                    await asyncio.wait_for(wait_for(b">\x1b[0m "), 8)
+                    session.type_in("q")
+                    assert (await asyncio.wait_for(task, 8)).exit_code == 0
+                finally:
+                    if not task.done():
+                        task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            asyncio.run(scenario())
+        finally:
+            database_lane.close()
+            database.close()
+    assert paths[0] != paths[1]
+    for path, name in zip(paths, ("Alpha", "Beta")):
+        conn = sqlite3.connect(path)
+        try:
+            assert conn.execute("SELECT user_id, handle FROM players").fetchall() == [(1, name)]
+        finally:
+            conn.close()
+
+
+def test_explicit_war_dialer_path_works_without_home(db, lane, player, tmp_path, monkeypatch):
+    from netbbs.doors.profiles import DoorProfile
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: (_ for _ in ()).throw(RuntimeError("no home"))))
+    script = _write_script(tmp_path, "wrapper.py", "print('launched')")
+    door = create_door(db, "Wrapper", sys.executable, args=(str(script),), creator=player,
+                       profile=DoorProfile(environment={"WAR_DIALER_DB_PATH": str(tmp_path / "world.db")}))
+    session = FakeSession()
+    result = asyncio.run(_run(session, lane, door, player))
+    assert result.exit_code == 0
+    assert b"launched" in session.written
+
+
+def test_war_dialer_path_probes_run_outside_event_loop(db, lane, player, tmp_path, monkeypatch):
+    import threading
+    import netbbs.doors.runtime as runtime
+    main_thread = threading.get_ident()
+    probes = []
+    def probe(door, path):
+        probes.append(threading.get_ident())
+        assert probes[-1] != main_thread
+        return None
+    monkeypatch.setattr(runtime, "war_dialer_path_problem", probe)
+    script = _write_script(tmp_path, "probe.py", "print('ready')")
+    door = create_door(db, "Probe", sys.executable, args=(str(script),), creator=player)
+    assert asyncio.run(_run(FakeSession(), lane, door, player)).exit_code == 0
+    assert len(probes) == 1

@@ -121,3 +121,28 @@ def test_invalid_import_preserves_existing_draft(db, lane, player, tmp_path, val
     assert asyncio.run(edit_door_profile(session,lane,player,door)) is None
     assert get_door_by_name(db,door.name) == door
     assert message in "".join(session.written)
+
+
+def test_setup_check_shows_war_dialer_world_path_without_creating_world(db, lane, player, monkeypatch):
+    from netbbs.doors.runtime import war_dialer_world_path
+    monkeypatch.delenv("WAR_DIALER_DB_PATH", raising=False)
+    script = Path(__file__).resolve().parent.parent / "src/netbbs/doors/bundled/war_dialer.py"
+    door = create_door(db, "War Dialer", sys.executable, args=(str(script),), creator=player)
+    target = war_dialer_world_path(db, door)
+    import threading
+    import netbbs.net.door_profile_flow as flow
+    original_probe = flow.war_dialer_path_problem
+    main_thread = threading.get_ident()
+    probes = []
+    def probe(candidate, world_path):
+        probes.append(threading.get_ident())
+        assert probes[-1] != main_thread
+        return original_probe(candidate, world_path)
+    monkeypatch.setattr(flow, "war_dialer_path_problem", probe)
+    session = FakeSession(["k", " ", "b"])
+    assert asyncio.run(edit_door_profile(session, lane, player, door)) is None
+    output = "".join(session.written)
+    assert "War Dialer world:" in output
+    assert str(target) in output.replace("\r\n", "")
+    assert not target.exists()
+    assert len(probes) == 1

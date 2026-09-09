@@ -6580,6 +6580,26 @@ Recruit previews show the actual cash shortfall; empty rival worlds explain the
 available non-PvP alternatives. Advice does not grant resources, spend turns,
 change protection, or imply a waiting caller's snapshot updates continuously.
 
+**World paths (issue #362, slice 4).** The native runtime supplies the bundled
+War Dialer with `<resolved-node-db-filename>.doors/war-dialer.db` beside that node
+database. This derives from the persistent database locator, never mutable node
+or door display names. Distinct database paths get distinct defaults; renaming or
+relocating the node database requires moving its companion world or an explicit
+override. Standalone execution keeps the legacy home-directory default.
+
+A profile's `WAR_DIALER_DB_PATH` overrides the process setting, which overrides
+the node default. Overrides expand to absolute paths before entering the door's
+temporary/installation cwd. Only the bundled entrypoint/module or an explicit
+profile override receives this setting; the full parent environment stays private.
+SysOps can inspect the effective path through Compatibility setup / Check setup.
+
+When the node default is absent and a legacy home-directory world exists, launch
+requires explicit migration or override rather than silently replacing player data.
+Migration is manual, with stopped sessions, a SQLite-consistent backup and verified
+node-local user-ID ownership. An explicit override is an operator choice and must
+not point independent nodes at the same world. Backup integration and richer
+world/schema identity validation follow in subsequent slice 4 bullets.
+
 ### Issue #168 — real-time relay for Link direct chat
 
 **Goal:** decide between the two structurally different designs the issue
