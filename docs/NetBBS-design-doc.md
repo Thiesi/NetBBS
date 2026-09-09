@@ -5130,8 +5130,8 @@ legality and excluded return travel remain visible; no live remote prices are
 queried. The board is read-only and paginated. Human play remains necessary to
 validate whether these opportunities encourage satisfying route variety.
 
-The engineer costs 200 credits to hire and 2 per jump, reducing fuel by 25%,
-rounded up, with a minimum one-unit burn. The role is an investment for longer
+The engineer costs 200 credits to hire and 2 per jump. Fuel savings follow the
+paid-service progression defined above. The role is an investment for longer
 routes; one-unit jumps cannot benefit, and hiring does not refund old hire costs.
 
 New futures orders lock goods for pickup at their issuing station after maturity.
