@@ -485,7 +485,7 @@ def test_real_process_disconnect_preserves_only_committed_actions(tmp_path, stag
             elif stage == "root":
                 send(b"x")
                 wait_for(b"cancel")
-                send(b"a")
+                send(b"1")
                 wait_for(b"[A]Act [B]ack")
                 send(b"a")
                 wait_for(b"It's yours now.")
@@ -516,8 +516,9 @@ def test_action_is_durable_before_success_output_fails(tmp_path, monkeypatch, ac
     wd.load_or_create_player(conn, 2, "Beta", now - timedelta(days=3), 1)
     conn.execute("UPDATE players SET cash=1000 WHERE user_id=2")
     conn.execute("UPDATE players SET turns_used=14 WHERE user_id=1")
-    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "A")
-    monkeypatch.setattr(wd, "show_text_pages", lambda *args, **kwargs: "A")
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: next(key for key in "1A" if key in valid))
+    original_pages = wd.show_text_pages
+    monkeypatch.setattr(wd, "show_text_pages", lambda *args, **kwargs: "A" if kwargs.get("accept") else original_pages(*args, **kwargs))
     monkeypatch.setattr(wd, "now_utc", lambda: now)
     observer = wd.connect(path)
 
@@ -744,6 +745,8 @@ def test_open_session_can_continue_after_season_refresh(tmp_path, monkeypatch):
     monkeypatch.setattr(wd, 'read_menu_choice', choose)
     monkeypatch.setattr(wd, 'press_any_key', lambda palette: None)
     def accept_preview(*args, **kwargs):
+        for text in args[2]:
+            wd.out_line(text)
         if clock[0] == now:
             clock[0] += wd.SEASON
         return "A"
@@ -1003,7 +1006,7 @@ def test_real_process_preview_cancel_or_disconnect_spends_nothing(tmp_path, key,
         send(key)
         if key == b"x":
             wait_for(b"cancel")
-            send(b"a")
+            send(b"1")
         wait_for(b"[A]Act [B]ack")
         assert b"Cost: 1 turn" in output
         if disconnect:
@@ -1057,3 +1060,62 @@ def test_preview_requires_reading_to_last_page_before_act(monkeypatch):
     assert result == "A" and len(states) > 1
     assert all("A" not in state for state in states[:-1])
     assert "A" in states[-1]
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_picker_pages_fit_and_only_select_complete_visible_records(monkeypatch, width, height):
+    written = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
+    states = []
+    def choose(valid):
+        states.append(valid)
+        return "2" if "2" in valid else "N"
+    monkeypatch.setattr(wd, "read_menu_choice", choose)
+    records = [(["Protected crew", "Newcomer shield"], False), (["界e\u0301" * 150, "Eligible"], True)]
+    assert wd.pick_record_page(wd.Palette(False), "RAID TARGETS", records, width, height) == "2"
+    assert all("1" not in state for state in states)
+    assert all("2" not in state for state in states[:-1])
+    screens = "".join(written).split("\x1b[2J\x1b[H")[1:]
+    for screen in screens:
+        lines = _ANSI_RE.sub("", screen).split("\r\n")
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    assert "".join(written).count("界") == 150
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_result_pages_keep_all_net_changes_readable(monkeypatch, width, height):
+    written = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(wd, "read_input_key", lambda: " ")
+    delta = wd.ActionDelta(cash=-1234567890123, crew=0, heat=-90, rank=500, turns=1)
+    wd.show_action_result(wd.Palette(False), ["You root " + "界e\u0301" * 150], delta, True, width, height)
+    screens = "".join(written).split("\x1b[2J\x1b[H")[1:]
+    for screen in screens:
+        lines = _ANSI_RE.sub("", screen).split("\r\n")
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    text = _ANSI_RE.sub("", "".join(written))
+    assert text.count("界") == 150
+    assert "crew: +0" in text
+    assert "turns spent: 1" in " ".join(text.split())
+
+
+def test_raid_picker_can_choose_an_eligible_crew_after_fifty_others(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / "rivals.db")
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    for user in range(1, 57):
+        wd.load_or_create_player(conn, user, f"Crew {user}", now, 1)
+    conn.execute("UPDATE players SET created_at=? WHERE user_id=56", (wd.to_iso(now - wd.GRACE),))
+    player = wd.read_player(conn, 1)
+    monkeypatch.setattr(wd, "out", lambda text: None)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "5" if "5" in valid else "N")
+    target = wd.choose_rival(wd.Palette(False), conn, player, 40, 12)
+    assert target.user_id == 56
+    assert wd.read_player(conn, 1).turns_used == 0
+    conn.close()
