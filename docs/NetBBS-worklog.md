@@ -5224,3 +5224,16 @@ results, evaluated before applying the changes. Cargo endings use delivery costs
 evidence-only rewards are not cargo revenue. Current accepted case bearings are
 added to deliberate route validation without marking destinations discovered.
 A no-Haven galaxy must reject the armed branch before recording its choice.
+
+Career rank uses Pilot.highest_rank_seen and current credits, never the lifetime
+SaveData.best_credits or external score record. Capture the rank at every action
+checkpoint, including nested menus and in-flight rewards, so later spending cannot
+erase a promotion before the station loop observes it. Repeated checkpoints do
+not repeat highlights. Rank projections remain pure; reset keeps the lifetime
+score high-water mark while discarding current-career recognition.
+
+A successfully checkpointed promotion also retains a session-local notice until
+its next command-deck visit. Updating highest_rank_seen at the action boundary
+means a later rank check cannot rediscover that notice. Keep it separate from the
+saved milestone, enqueue only after checkpoint success, and clear it on career
+reset; durable highlights remain the history after a restart.

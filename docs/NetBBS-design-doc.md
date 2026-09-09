@@ -4828,6 +4828,19 @@ the visit so large legacy records are not reformatted on every key. Retirement
 keeps its existing top-rank eligibility, final chosen-action confirmation, new-career
 bonus and durable checkpoint. Cancelling retains the record with a visible result.
 
+Pilot rank is lasting recognition within the current career. Each completed-action
+checkpoint records any crossed balance threshold in the existing highest-rank
+field, with a promotion highlight and log entry, before another menu action can
+spend that balance. Displays and retirement eligibility use the greater of this
+retained rank and the current balance rank. Purchases, fines and salvage cannot
+demote the pilot. Rank terms show the next balance threshold and distinguish it
+from current funds; a legacy promotion is retained even when credits are lower.
+A lifetime leaderboard high-water mark must never promote a new career. Retirement
+resets rank as before; subsequent starting-credit bonuses are ordinary current
+funds. Old careers without a recorded promotion can establish only what their
+current balance proves. Read-only rank views do not write or fabricate history.
+Promotion notices do not introduce a separate acknowledgement dialog.
+
 Hall of Fame renders its existing top-20 best-credit ranking as paginated labelled
 pilot entries. Full callsigns, rank titles and score fields remain available at
 narrow widths, with a textual YOU marker for the current pilot when listed. The
