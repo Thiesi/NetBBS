@@ -10926,3 +10926,50 @@ raise SystemExit(code)
         env=dict(os.environ,VOIDRUNNER_SAVE_DIR=str(tmp_path),NETBBS_DOOR_INFO=str(info)))
     assert result.returncode==0 and result.stderr.strip()==b"REPLACED:0"
     assert (b"Edda Ro" if key=="P" else b"Rook Talan") in result.stdout
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+@pytest.mark.parametrize("stage", ["idle","accepted","evidence"])
+def test_faction_case_ending_selectors_only_appear_when_choice_is_available(faction,stage):
+    import copy
+    world=_faction_case_world(faction,stage);before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
+    lines=vr.faction_story_lines(world,faction)
+    for choice,key in [("hardline","H"),("aid","A")]:
+        label=vr.FACTION_STORIES[faction][choice]["label"]
+        row=next(line for line in lines if label+":" in line)
+        assert row.startswith(f"[{key}] ")==(stage=="evidence")
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng
+
+
+@pytest.mark.parametrize("faction", vr.FACTIONS)
+def test_faction_case_route_becomes_available_only_after_committing_ending(monkeypatch,faction):
+    import copy
+    world=_faction_case_world(faction,"evidence");before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
+    routes=[];checkpoints=[];world._checkpoint=lambda w:checkpoints.append(w.save.faction_stories[faction]["stage"])
+    output=io.StringIO();keys=iter("RARB")
+    def choose():
+        key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
+        if world.save.faction_stories[faction]["stage"]=="evidence":
+            assert "[R]Route" not in frame and world.save.to_dict()==before and world.event_rng.getstate()==rng
+        else:assert "[R]Route" in frame
+        return key
+    monkeypatch.setattr(vr,"read_key",choose)
+    monkeypatch.setattr(vr,"_screen_auto_route",lambda p,w,*,destination:routes.append(destination))
+    with contextlib.redirect_stdout(output):vr.screen_faction_story(vr.Palette(False),world,faction)
+    assert routes==[vr.faction_story_target(world,faction,"aid")] and checkpoints==["committed"]
+
+
+def test_faction_case_missing_haven_does_not_advertise_or_dispatch_hardline(monkeypatch):
+    world=_faction_case_world(vr.FACTION_BLACKWAKE,"evidence")
+    for system in world.galaxy:
+        if system.economy=="Haven":system.economy="Industrial"
+    keys=iter("HAB");output=io.StringIO();seen=[]
+    def choose():
+        key=next(keys);frame=output.getvalue();output.seek(0);output.truncate(0)
+        assert "[H]Hardline" not in frame
+        if key=="A":assert world.save.faction_stories[vr.FACTION_BLACKWAKE]["stage"]=="evidence"
+        return key
+    world._checkpoint=lambda w:seen.append(w.save.faction_stories[vr.FACTION_BLACKWAKE]["choice"])
+    monkeypatch.setattr(vr,"read_key",choose)
+    with contextlib.redirect_stdout(output):vr.screen_faction_story(vr.Palette(False),world,vr.FACTION_BLACKWAKE)
+    assert seen==["aid"]

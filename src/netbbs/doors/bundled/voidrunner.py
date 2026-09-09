@@ -2984,10 +2984,12 @@ def faction_story_lines(world: World, faction: str) -> list[str]:
         if blocker := faction_story_completion_blocker(world, faction): lines.append(blocker)
     else:
         lines.append("After investigating, choose one ending; the choice is final.")
-        for choice in ("hardline", "aid"): lines += faction_story_ending_lines(world, faction, choice)
+        for choice in ("hardline", "aid"):
+            lines += faction_story_ending_lines(world, faction, choice,
+                                                selectable=story is not None and story["stage"] == "evidence")
         target = world.by_id[faction_story_target(world, faction)]
         lines.append(f"Evidence: {WORKSHOPS[info['workshop']]['name']} at {target.name} ({target.x},{target.y}).")
-        lines.append("[A] Accept the case." if story is None else "[I] Investigate at the workshop." if story["stage"] == "accepted" else "[H] Hardline / [A] Aid.")
+        lines.append("[A] Accept the case." if story is None else "[I] Investigate at the workshop." if story["stage"] == "accepted" else "Choose an available ending with the action bar.")
     lines.append("Case rewards pay once, without a commission bonus; one completed mission and a career highlight. Subtract procurement and travel from gross pay.")
     return lines
 
@@ -3002,7 +3004,9 @@ def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
     while True:
         story = world.save.faction_stories.get(faction)
         stage = story["stage"] if story is not None else None
-        actions = {None: "A/R/", "accepted": "I/R/", "evidence": "H/A/R/", "committed": "C/R/", "complete": ""}[stage]
+        actions = {None: "A/R/", "accepted": "I/R/", "evidence": "H/A/", "committed": "C/R/", "complete": ""}[stage]
+        if stage == "evidence" and faction_story_target(world, faction, "hardline") is None:
+            actions = "A/"
         lines = ([result] if result else []) + faction_story_lines(world, faction)
         key, page, count = _draw_service_page(p, f"Case {world.save.pilot.credits:,}cr", lines, _detail_action_bar(actions, {"A": "Aid" if stage == "evidence" else "Accept", "I": "Investigate", "H": "Hardline", "C": "Complete", "R": "Route"}), page)
         if key in ("B", "Q"): return result

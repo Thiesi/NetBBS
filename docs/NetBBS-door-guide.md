@@ -182,6 +182,9 @@ then **[R] Route** to its workshop and **[I] Investigate** there. Read the evide
 and both outcomes before choosing **[H] Hardline** or **[A] Aid**. This choice is
 final. Travel to the stated destination and use **[C] Complete**. Cases have no
 membership requirement, deadline, entry fee or ordinary contract-slot cost.
+Ending previews are plain information until evidence unlocks the choice. The
+ending route appears after commitment; unavailable Hardline handovers are not
+advertised as actions.
 
 | Case | Hardline ending | Aid ending |
 | --- | --- | --- |
