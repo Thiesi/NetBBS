@@ -457,6 +457,28 @@ change. **[B] Back**, paging, and selecting the current preset make no change.
 The preference applies from the first title on the next visit and survives
 retirement. Existing careers default to Full palette. No animation is added.
 
+### Ship and place portraits
+
+Station **[V] Viewport** opens **[1] Ship**, **[2] Station**, and
+**[3] Discovery** views. The yard's **[V] Ship** opens the same viewer.
+Use **[<] / [>]** to page and **[B] Back** to leave. Browsing does not
+advance time, chart systems, or save anything.
+
+Each hull has its own silhouette. Damage adds `x` shading alongside the
+actual hull values and an Intact, Scuffed, Damaged, or Critical label; fuel
+and cargo remain separate capacity figures. Station portraits reflect the
+current economy, with the real station name, sector, coordinates, danger,
+and specialist contact where present. A landmark portrait becomes viewable
+at its location and remains in the discovery view after investigation.
+
+Portraits use complete large or compact compositions according to terminal
+dimensions, with paginated details and the selected display preset. There is
+no animation. Landmark inspection keeps salvage status and action results
+before the artwork. A hull refit opens an illustrated preview: **[C] Commission**
+then final confirmation purchases it, while **[B] Back** leaves the ship alone.
+Commissioning restores hull health and keeps cargo and modules; it does not
+fill the larger fuel tank.
+
 ### Commodity market pages
 
 Station **[M] Commodity Market** pages with **[<] Previous / [>] Next**; each

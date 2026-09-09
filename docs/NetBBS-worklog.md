@@ -4398,6 +4398,14 @@ Aid after investigation). Reserve the complete wrapped action bar in page
 capacity. Full-content UI tests remove that bar as a unit before rejoining prose;
 filtering only the old Act row leaves wrapped footer fragments inside the body.
 
+Voidrunner portraits paginate an entire authored composition as one group.
+Choose a complete compact version when either width or height rules out the
+large version; omit artwork only if even the compact composition cannot fit.
+Sanitize and wrap dynamic details before styling the trusted art. Keep action
+results and landmark salvage status ahead of portraits so small terminals do
+not displace the outcome. Commissioning tests must select the preview's C action
+before answering its final confirmation; a lone Y no longer purchases a hull.
+
 `netbbs.net.admin_flow._door_field_specs`' `args` field is parsed with
 `shlex.split(draft["args_line"])` -- deliberately POSIX-mode (the
 default), matching the "never a shell, always an argv list" posture
