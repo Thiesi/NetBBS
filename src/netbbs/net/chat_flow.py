@@ -2489,7 +2489,7 @@ async def _handle_away(ctx: ChatCommandContext, args: str) -> None:
         # one the network sees (AFK), for every room they are announced in.
         if await ctx.mrc_bridge.local_away(ctx.user.username, args):
             await ctx.session.write_line(
-                colored("(MRC sees a shortened version of that message; its limit is 136 characters)", fg_color=MUTED_COLOR)
+                colored("(MRC sees a shortened version of that message; its limit is 55 characters)", fg_color=MUTED_COLOR)
             )
 
 

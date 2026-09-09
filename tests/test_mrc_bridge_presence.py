@@ -1,9 +1,10 @@
 """
 Issue #304 at the bridge: away state mirrored to the hub (and repeated
-on reconnect), the periodic STATS reading, the hub's banner, an open
-room's topic stored from ROOMTOPIC and asked for with NEWTOPIC, and the
-caller's own nick colour in the house-style body -- against the
-loopback fake hub, reusing `tests/test_mrc_bridge.py`'s fixtures.
+on reconnect) in the documented `STATUS AFK` / `IAMHERE:AWAY|ACTIVE`
+forms (issue #373), the periodic STATS reading, the hub's banner, an
+open room's topic stored from ROOMTOPIC and asked for with NEWTOPIC,
+and the caller's own nick colour in the house-style body -- against
+the loopback fake hub, reusing `tests/test_mrc_bridge.py`'s fixtures.
 """
 
 from __future__ import annotations
@@ -41,15 +42,19 @@ def test_away_state_is_mirrored_and_repeated_on_reconnect(db, lane, lobby, alice
         hub.join(lobby.name, ParticipantId("alice", 1))
         presence = PresenceRegistry()
         presence.enter("alice")
-        bridge = await _connected_bridge(db, lane, hub, fake, presence=presence)
+        # A slow keepalive: at the fixtures' 0.2 s it alone fills the
+        # node-wide send allowance, and this test is about the away
+        # packets, not the heartbeat.
+        bridge = await _connected_bridge(db, lane, hub, fake, presence=presence, keepalive_interval_seconds=2.0)
         try:
             await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
             # Not announced: nothing goes out for bob.
             assert await bridge.local_away("bob", "away") is False
             presence.set_away("alice", "gone fishing")
             assert await bridge.local_away("alice", "gone fishing") is False
-            afk = await fake.wait_for(lambda p: p.body == "AFK gone fishing")
+            afk = await fake.wait_for(lambda p: p.body == "STATUS AFK gone fishing")
             assert (afk.from_user, afk.to_user, afk.to_room) == ("alice", "SERVER", "lobby")
+            await fake.wait_for(lambda p: p.body == "IAMHERE:AWAY" and p.from_user == "alice")
             await _wait_until(lambda: fake.afk.get(("my_board", "alice")) == "gone fishing")
             assert ("my_board", "bob") not in fake.afk
             # A reconnect re-announces and repeats the away state -- read
@@ -57,19 +62,20 @@ def test_away_state_is_mirrored_and_repeated_on_reconnect(db, lane, lobby, alice
             await fake.drop_clients()
             await _wait_until(lambda: bridge.state is not MrcState.CONNECTED)
             await _wait_until(lambda: bridge.state is MrcState.CONNECTED, timeout=3.0)
-            await _wait_until(lambda: len(fake.packets(body_prefix="AFK gone fishing")) >= 2, timeout=3.0)
-            # Back: the bare form.
+            await _wait_until(lambda: len(fake.packets(body_prefix="STATUS AFK gone fishing")) >= 2, timeout=3.0)
+            # Back: reported as activity (the spec names no verb that
+            # clears AFK; the hub decides).
             presence.clear_away("alice")
             await bridge.local_away("alice", None)
-            await fake.wait_for(lambda p: p.body == "AFK")
-            await _wait_until(lambda: fake.afk.get(("my_board", "alice")) is None)
-            # Too long or decorated: bounded and sanitized, and the caller
-            # is told it was cut.
+            await fake.wait_for(lambda p: p.body == "IAMHERE:ACTIVE" and p.from_user == "alice")
+            await _wait_until(lambda: fake.activity.get(("my_board", "alice")) == "ACTIVE")
+            # Too long or decorated: bounded to the spec's 55 characters
+            # and sanitized, and the caller is told it was cut.
             long_message = "|12busy " + "x" * 200
             presence.set_away("alice", long_message)
             assert await bridge.local_away("alice", long_message) is True
-            sent = await fake.wait_for(lambda p: p.body.startswith("AFK busy"))
-            assert len(sent.body) <= 140 and "|12" not in sent.body
+            sent = await fake.wait_for(lambda p: p.body.startswith("STATUS AFK busy"))
+            assert len(sent.body) == len("STATUS AFK ") + 55 and "|12" not in sent.body
             # The account's final session leaving clears the registry's
             # away state; a later announcement sends no stale AFK.
             presence.leave("alice")
@@ -77,13 +83,15 @@ def test_away_state_is_mirrored_and_repeated_on_reconnect(db, lane, lobby, alice
             hub.leave(lobby.name, ParticipantId("alice", 1))
             await bridge.local_leave(lobby, "alice")
             await fake.wait_for(lambda p: p.body == "LOGOFF")
-            count_before = len(fake.packets(body_prefix="AFK"))
+            count_before = len(fake.packets(body_prefix="STATUS AFK"))
             presence.enter("alice")
             hub.join(lobby.name, ParticipantId("alice", 2))
             await bridge.local_join(lobby, "alice")
             await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM::lobby")) >= 3, timeout=3.0)
             await asyncio.sleep(0.2)
-            assert len(fake.packets(body_prefix="AFK")) == count_before
+            assert len(fake.packets(body_prefix="STATUS AFK")) == count_before
+            # Nothing the spec does not define ever went out.
+            assert fake.unknown_commands == []
         finally:
             await bridge.close()
             await fake.close()
@@ -285,3 +293,30 @@ def test_who_online_masthead_reads_the_network_size():
     assert _mrc_network_masthead(_Controls(_Bridge(MrcStatus(**base)))) == ""
     assert _mrc_network_masthead(_Controls(_Bridge(MrcStatus(**{**base, "enabled": False}, network_users=3, network_bbses=1)))) == ""
     assert _mrc_network_masthead(_Controls(None)) == ""
+
+
+def test_the_keepalive_carries_the_activity_extension(db, lane, lobby, alice):
+    """Issue #373: the per-minute IAMHERE reports AWAY or ACTIVE from the
+    presence registry, the documented form (MRCDoc rev 1.26)."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        presence = PresenceRegistry()
+        presence.enter("alice")
+        bridge = await _connected_bridge(db, lane, hub, fake, presence=presence, keepalive_interval_seconds=0.3)
+        try:
+            await fake.wait_for(lambda p: p.body == "IAMHERE:ACTIVE" and p.from_user == "alice")
+            presence.set_away("alice", "tea")
+            await fake.wait_for(lambda p: p.body == "IAMHERE:AWAY" and p.from_user == "alice")
+            await _wait_until(lambda: fake.activity.get(("my_board", "alice")) == "AWAY")
+            presence.clear_away("alice")
+            await _wait_until(lambda: fake.activity.get(("my_board", "alice")) == "ACTIVE", timeout=3.0)
+            assert not [p for p in fake.received if p.body == "IAMHERE"] and fake.unknown_commands == []
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())

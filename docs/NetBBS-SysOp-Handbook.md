@@ -441,7 +441,9 @@ room it already holds.
 
 **Presence and welcome.** A caller's `/away` is mirrored to the network
 (and repeated on every reconnect), so MRC users see the same away state
-callers here see. The first MRC room a caller enters in a session shows
+callers here see; the away message is cut to the network's 55
+characters, and a return is reported as activity, after which the hub
+decides when the caller stops showing as away. The first MRC room a caller enters in a session shows
 the hub's banner and its message of the day; `/mrc motd` asks again. The
 network's size -- "MRC: 41 users on 12 boards" -- appears above Who's
 online, in the picker's Multi Relay Chat section and on Node > Chat

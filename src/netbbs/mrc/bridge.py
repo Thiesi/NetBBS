@@ -769,8 +769,8 @@ class MrcBridge:
                 mapping = self._by_channel.get(channel_id)
                 if mapping is None:
                     continue
-                for nick in nicks.values():
-                    self._enqueue(protocol.iamhere(nick, settings.site_wire_name, mapping.room))
+                for username, nick in nicks.items():
+                    self._enqueue(protocol.iamhere(nick, settings.site_wire_name, mapping.room, self._activity(username)))
                 if refresh_rosters and nicks:
                     self._request_userlist(mapping, next(iter(nicks.values())), force=True)
             if refresh_rosters:
@@ -1002,8 +1002,10 @@ class MrcBridge:
         away = self._away_message(username)
         if away is not None:
             # The hub is never behind on a caller's away state: told on
-            # every announcement, reconnects included.
-            self._enqueue(protocol.afk(nick, settings.site_wire_name, mapping.room, away))
+            # every announcement, reconnects included -- the documented
+            # `STATUS AFK` plus the activity extension (issue #373).
+            self._enqueue(protocol.status_afk(nick, settings.site_wire_name, mapping.room, away))
+            self._enqueue(protocol.iamhere(nick, settings.site_wire_name, mapping.room, protocol.ACTIVITY_AWAY))
         return True
 
     def _away_message(self, username: str) -> str | None:
@@ -1014,15 +1016,26 @@ class MrcBridge:
             return None
         return self._wire_away_text(self._presence.get_away_message(username) or "")[0]
 
+    def _activity(self, username: str) -> str:
+        """The IAMHERE extension for a caller: `AWAY` while the presence
+        registry marks them away, else `ACTIVE` -- NetBBS's away state is
+        the one the network sees (issue #304), so the hub's own "no typing
+        for ten minutes" reading is not second-guessed here. Empty (the
+        spec's "unknown") when no registry was given."""
+        if self._presence is None:
+            return ""
+        if self._presence.is_away(username):
+            return protocol.ACTIVITY_AWAY
+        return protocol.ACTIVITY_ACTIVE
+
     @staticmethod
     def _wire_away_text(message: str) -> tuple[str, bool]:
         """An away message as it may travel: sanitized like any body and
-        cut to what fits after `AFK ` in one packet. Returns the text and
-        whether it was cut."""
+        cut to the spec's `string[55]` (MRCDoc rev 1.26, STATUS AFK).
+        Returns the text and whether it was cut."""
         text = protocol.sanitize_body(message)
-        limit = protocol.MAX_BODY - len("AFK ")
-        if len(text) > limit:
-            return text[:limit].rstrip(), True
+        if len(text) > protocol.MAX_AFK_MESSAGE:
+            return text[:protocol.MAX_AFK_MESSAGE].rstrip(), True
         return text, False
 
     async def _ensure_nick_color(self, username: str) -> None:
@@ -1069,10 +1082,13 @@ class MrcBridge:
 
     async def local_away(self, username: str, message: str | None) -> bool:
         """Mirror the caller's away state to the hub now: `message` marks
-        them away (`AFK <message>`), `None` brings them back. Sent from
-        every room they are announced in; the presence registry keeps
-        the state, so a reconnect or a later announcement repeats it
-        (`_announce`). Returns whether the message was cut to fit."""
+        them away (`STATUS AFK <message>` and `IAMHERE:AWAY`), `None`
+        brings them back (`IAMHERE:ACTIVE`; the spec documents no verb
+        that clears AFK, so the hub's own activity tracking decides).
+        Sent from every room they are announced in; the presence
+        registry keeps the state, so a reconnect or a later announcement
+        repeats it (`_announce`). Returns whether the message was cut to
+        fit."""
         settings = self._settings
         text, truncated = ("", False) if message is None else self._wire_away_text(message)
         if settings is None or self._state is not MrcState.CONNECTED:
@@ -1082,7 +1098,11 @@ class MrcBridge:
             nick = nicks.get(username)
             if mapping is None or nick is None:
                 continue
-            self._enqueue(protocol.afk(nick, settings.site_wire_name, mapping.room, None if message is None else text))
+            if message is None:
+                self._enqueue(protocol.iamhere(nick, settings.site_wire_name, mapping.room, protocol.ACTIVITY_ACTIVE))
+            else:
+                self._enqueue(protocol.status_afk(nick, settings.site_wire_name, mapping.room, text))
+                self._enqueue(protocol.iamhere(nick, settings.site_wire_name, mapping.room, protocol.ACTIVITY_AWAY))
         return truncated
 
     def banner_lines(self) -> list[str]:

@@ -6187,11 +6187,15 @@ already has here onto the network and lets the network's own life show
 through, without teaching native chat anything about MRC:
 
 - **Away state is mirrored, never separate.** NetBBS's `/away` is the
-  one away state; the bridge sends the hub `AFK <message>` for every
-  room the caller is announced in, repeats it on every announcement
-  (reconnects included) so the hub is never behind, and sends a bare
-  `AFK` on return -- the best reading of "back" any reference client
-  offers, to be corrected when the hub's documentation says otherwise.
+  one away state; the bridge sends the hub `STATUS AFK <message>` and
+  `IAMHERE:AWAY` for every room the caller is announced in, repeats
+  them on every announcement (reconnects included) so the hub is never
+  behind, and reports `IAMHERE:ACTIVE` on return. Those are the
+  documented forms (MRCDoc protocol page, rev 1.26, read 2026-09-09;
+  issue #373): there is no `AFK` verb, the away message is 55
+  characters, and the spec names no verb that clears AFK -- the hub's
+  own activity tracking decides when a returned caller stops showing
+  as away.
 - **The hub's welcome, once per session.** On a caller's first MRC room
   in a session the bridge shows the hub's `BANNER:` lines as remembered
   from connect and asks for `MOTD` as that caller; the reply reaches

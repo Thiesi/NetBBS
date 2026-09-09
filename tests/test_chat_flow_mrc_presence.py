@@ -38,8 +38,10 @@ def test_away_is_mirrored_to_the_hub(db, lane, hub, presence, channel, alice):
             )
             text = _text(session)
             assert "You are now marked away: making tea" in text and "You are no longer marked away." in text
-            await rig.fake.wait_for(lambda p: p.body == "AFK making tea" and p.from_user == "alice")
-            await rig.fake.wait_for(lambda p: p.body == "AFK" and p.from_user == "alice")
+            await rig.fake.wait_for(lambda p: p.body == "STATUS AFK making tea" and p.from_user == "alice")
+            await rig.fake.wait_for(lambda p: p.body == "IAMHERE:AWAY" and p.from_user == "alice")
+            await rig.fake.wait_for(lambda p: p.body == "IAMHERE:ACTIVE" and p.from_user == "alice")
+            assert rig.fake.unknown_commands == []
         finally:
             await rig.close()
     asyncio.run(scenario())
