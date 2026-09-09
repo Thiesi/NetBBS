@@ -95,7 +95,7 @@ async def edit_door_profile(session, lane, actor, door):
             world_path = await lane.run(war_dialer_world_path, candidate)
             if world_path is not None:
                 await session.write_line(sanitize_text(f"War Dialer world: {world_path}"))
-                if problem := war_dialer_path_problem(candidate, world_path):
+                if problem := await asyncio.to_thread(war_dialer_path_problem, candidate, world_path):
                     problems.append(problem)
             for line in problems or ["Static checks passed. Use Test to verify the actual runtime and game."]:
                 await session.write_line(sanitize_text(line))

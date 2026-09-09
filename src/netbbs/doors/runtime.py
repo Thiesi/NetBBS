@@ -60,8 +60,24 @@ def war_dialer_world_path(db, door) -> Path | None:
     profile_override = door.profile.environment.get("WAR_DIALER_DB_PATH") if door.profile else None
     bundled = Path(__file__).with_name("bundled") / "war_dialer.py"
     argv = (door.executable_path, *door.args)
-    is_bundled = any(Path(arg).name == "war_dialer.py" and Path(arg).resolve() == bundled.resolve()
-                     for arg in argv if arg and not arg.startswith("-"))
+    # Match the script the profile actually launches, including relative argv
+    # and the supported installation-directory substitution. An unprofiled
+    # relative script runs in an empty temporary directory, not the server cwd.
+    install = Path(door.profile.install_dir).resolve() if door.profile and door.profile.install_dir else None
+    is_bundled = False
+    for index, arg in enumerate(argv):
+        if index and install is not None:
+            arg = arg.replace("{install_dir}", str(install))
+        candidate = Path(arg)
+        if candidate.name != "war_dialer.py":
+            continue
+        if not candidate.is_absolute():
+            if install is None:
+                continue
+            candidate = install / candidate
+        if candidate.resolve() == bundled.resolve():
+            is_bundled = True
+            break
     is_module = any(argv[i:i + 2] == ("-m", "netbbs.doors.bundled.war_dialer") for i in range(len(argv) - 1))
     if not (is_bundled or is_module or profile_override is not None):
         return None
@@ -78,10 +94,14 @@ def war_dialer_path_problem(door, world_path: Path | None) -> str | None:
     if world_path is None:
         return None
     explicit = (door.profile and "WAR_DIALER_DB_PATH" in door.profile.environment) or "WAR_DIALER_DB_PATH" in os.environ
-    legacy = Path.home() / ".netbbs" / "wardialer.db"
-    if not explicit and not world_path.exists() and legacy.exists():
-        return (f"Legacy War Dialer world found at {legacy}. Stop old sessions and set WAR_DIALER_DB_PATH "
-                f"explicitly, or migrate a SQLite-consistent copy to {world_path}. No new world was created.")
+    if not explicit and not world_path.exists():
+        try:
+            legacy = Path.home() / ".netbbs" / "wardialer.db"
+        except RuntimeError:
+            return "Cannot check the legacy War Dialer home path. Set WAR_DIALER_DB_PATH explicitly."
+        if legacy.exists():
+            return (f"Legacy War Dialer world found at {legacy}. Stop old sessions and set WAR_DIALER_DB_PATH "
+                    f"explicitly, or migrate a SQLite-consistent copy to {world_path}. No new world was created.")
     if world_path.exists() and not world_path.is_file():
         return f"War Dialer world path is not a file: {world_path}"
     return None
@@ -253,7 +273,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
         if problems:
             raise ValueError("\n".join(problems))
         world_path = await lane.run(war_dialer_world_path, door)
-        if problem := war_dialer_path_problem(door, world_path):
+        if problem := await asyncio.to_thread(war_dialer_path_problem, door, world_path):
             raise ValueError(problem)
         if profile:
             root = await lane.run(lambda db: db.path.parent / "door-nodes")
