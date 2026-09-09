@@ -6541,6 +6541,20 @@ Each batch is a fresh current-season snapshot, so standings can move during a vi
 Help and territory use the same width/height-aware pagination, including onboarding
 help. Viewing directories does not reset raid protection or acknowledge receipts.
 
+**Action previews (issue #362, slice 3).** Every action opens a free preview before
+spending a turn. The final page offers `[A]Act`; Back and disconnect commit no action.
+Previews show turn/cash cost, success stakes, Heat and bust probability. Exchange
+odds use public garrisons; raids explicitly retain uncertainty about private crew
+strength and cash. A job is drawn only on commitment, so browsing cannot reroll it.
+Recruitment has no Heat/bust roll. Failed actions show the actual crew-loss floor.
+
+Commit revalidates the actor's previewed cash, crew, turns, season and Rank as well
+as the target selection. A conflicting action or incoming loss requires a fresh
+preview. Ordinary elapsed Heat decay can lower the advertised risk. Action deltas
+are calculated inside the committed transaction after income collection and include
+bust losses; narration distinguishes gross payout from net cash/crew/Heat/Rank/turn
+changes. Receiving an outcome never depends on another session-snapshot save.
+
 ### Issue #168 — real-time relay for Link direct chat
 
 **Goal:** decide between the two structurally different designs the issue

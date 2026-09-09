@@ -53,6 +53,13 @@ pages and batches of ten crews; Back leaves each view without an action. Standin
 refresh when loading another batch. Crew strength and cash are not exposed by the
 rival directory. The initial help is paginated too and can be left with Back.
 
+Action keys open a preview with costs, stakes and Heat/bust risk. Use Next to read
+all pages, then Act on the final page or Back to cancel. Recruitment is guaranteed;
+jobs are assigned only when committed, and rival cash/strength remain uncertain.
+If another action or incoming raid changes your resources during the preview, the
+game asks you to inspect them again without spending. Outcomes distinguish gross
+payout from actual net changes, including bust losses and the one-member crew floor.
+
 Use separate single keys. Arrow/function keys and pasted command bursts do not
 select actions; Escape dismisses a pause but has no menu action. An incomplete
 or excessively long terminal sequence ends the door with a reconnect diagnostic.

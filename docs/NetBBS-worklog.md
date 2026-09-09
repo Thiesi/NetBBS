@@ -338,6 +338,13 @@ and expose the caller's global position independently of that batch. Two levels
 of pagination (wrapped rows and database batches) must allow both directions
 without skipping the preceding batch's last page.
 
+Preview conflict checks compare the stored actor before elapsed settlement;
+ordinary Heat decay must not invalidate every confirmation. Target checks remain
+inside the same action transaction. Capture action-resource baselines after income
+collection and publish deltas only after commit, so income is not called a payout
+and failed commits never expose an apparent result. Preview rendering must not
+consume RNG draws; jobs and all outcome rolls happen only on Act.
+
 ### Database execution lanes
 
 Interactive network flows use a foreground `DatabaseLane`; Phase 3 background
