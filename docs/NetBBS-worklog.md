@@ -4374,6 +4374,12 @@ Scripted acceptance tests must navigate the details pages before pressing A;
 otherwise they no longer exercise acceptance. Test compact screens by counting
 display columns and physical rows between successive input requests.
 
+The detail action bar labels each command and Back explicitly, including when
+its available commands vary by stage (A means Accept before a faction case and
+Aid after investigation). Reserve the complete wrapped action bar in page
+capacity. Full-content UI tests remove that bar as a unit before rejoining prose;
+filtering only the old Act row leaves wrapped footer fragments inside the body.
+
 `netbbs.net.admin_flow._door_field_specs`' `args` field is parsed with
 `shlex.split(draft["args_line"])` -- deliberately POSIX-mode (the
 default), matching the "never a shell, always an argv list" posture
@@ -5209,3 +5215,12 @@ must not be rerolled when standing changes or a journey resumes. Granting member
 validates the threshold and existing credential before mutation, then checkpoints
 both the credential and once-only grant before acknowledgement. Old highlights are
 historical prose, not the authoritative current perk status.
+
+Faction case stages and choices are a bounded, separately versioned save field;
+unknown fields/versions and contradictory stages must enter preserving recovery.
+The choice is recorded before material collection or travel, and cannot be switched
+on return. Use the same capped-standing calculation for previews and acknowledged
+results, evaluated before applying the changes. Cargo endings use delivery costs;
+evidence-only rewards are not cargo revenue. Current accepted case bearings are
+added to deliberate route validation without marking destinations discovered.
+A no-Haven galaxy must reject the armed branch before recording its choice.

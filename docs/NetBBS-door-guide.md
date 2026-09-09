@@ -175,6 +175,34 @@ above -50 to restore it; your membership remains and no second grant is paid.
 Contacts and the pilot record show the current status. These rules also apply to
 older members. The two memberships work independently, and retirement clears both.
 
+### Faction stories
+
+In either faction contact, **[S] Story** opens an optional case. **[A] Accept**,
+then **[R] Route** to its workshop and **[I] Investigate** there. Read the evidence
+and both outcomes before choosing **[H] Hardline** or **[A] Aid**. This choice is
+final. Travel to the stated destination and use **[C] Complete**. Cases have no
+membership requirement, deadline, entry fee or ordinary contract-slot cost.
+Ending previews are plain information until evidence unlocks the choice. The
+ending route appears after commitment; unavailable Hardline handovers are not
+advertised as actions.
+
+| Case | Hardline ending | Aid ending |
+| --- | --- | --- |
+| Concord: The Missing Dispatch | File at Freeport: 1,800cr; Concord +18, Blackwake -12 | Two Medicine to Far Lantern: 1,500cr; Concord +12, Blackwake +6 |
+| Blackwake: The Broken Toll | One Weapons to a Haven: 2,100cr; Blackwake +18, Concord -12 | Three Electronics to Far Lantern: 1,500cr; Blackwake +12, Concord +6 |
+
+The screen shows effective standing changes, capped within -100..100. Payments
+are gross: allow for cargo, fuel and wages. Weapons are contraband, so intermediate
+non-Haven arrivals can trigger customs. Material handovers consume goods after a
+final confirmation, including cargo promised to other contracts. The delivery ledger
+records material costs. Cases pay once, without commission bonuses, and record
+one completed mission and a personal closing response. If a galaxy has no Haven,
+armed enforcement is unavailable; the beacon route remains open.
+
+Public case bearings do not chart systems or create market quotes. Back, paging
+and refusal write nothing. Every completed story step saves before its result.
+Retirement starts new cases.
+
 ### Named crew and service
 
 The yard's **[K] Crew** roster introduces three named specialists with distinct
