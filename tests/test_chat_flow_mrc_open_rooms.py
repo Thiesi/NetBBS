@@ -40,7 +40,7 @@ async def _bridge_on(db, lane, hub, *, open_rooms: bool = True, **open_overrides
     save_open_room_settings(db, OpenRoomSettings(enabled=open_rooms, **open_overrides))
     bridge = MrcBridge(
         hub=hub, lane=lane, version="5.8.0", rng=random.Random(1),
-        min_backoff_seconds=0.05, max_backoff_seconds=0.2, stable_after_seconds=0.0,
+        min_backoff_seconds=0.05, max_backoff_seconds=0.2, stable_after_seconds=0.0, per_user_interval_seconds=0.0,
     )
     await bridge.start()
     deadline = asyncio.get_running_loop().time() + 2

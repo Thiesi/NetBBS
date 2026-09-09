@@ -6061,7 +6061,10 @@ page is not publicly reachable:
 - **Bounds as shipped:** reconnect backoff 1–60 s with jitter, reset
   after 30 s stable; outbound queue of 200 lines (oldest dropped) behind
   a node-wide 5 lines/s bucket and a 3-line burst / 1 line/s bucket per
-  caller (the sender is told quietly when a line was not relayed);
+  caller (the sender is told quietly when a line was not relayed), and
+  on the way out packets from one nick are spaced at least 0.5 s apart
+  -- the hub's own per-user limit (MRCDoc rev 1.26; issue #375) -- with
+  held-back lines counted under the same 200-line cap;
   inbound 40-line burst / 20 lines/s ahead of any database write, 4 KiB
   line cap; a local line is split into at most three 140-character
   wire chunks. An `OLDVERSION` rejection from the hub is fatal until a

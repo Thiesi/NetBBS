@@ -920,6 +920,19 @@ session needs the same treatment.
   section entry is re-decided from `open_rooms_enabled` on every return to
   the top level, and selecting an existing open room refuses while the switch
   is off.
+- Outbound pacing (issue #375): the hub enforces one message per 0.5 s per
+  user (MRCDoc rev 1.26), so the admission buckets (node-wide 5/s burst 10,
+  per caller 1/s burst 3, which bound *intake*) are not enough: a
+  three-chunk line admitted at once would lose its tail on the hub. The
+  writer spaces packets per sending nick (`_next_outbound`,
+  `PER_USER_MIN_INTERVAL_SECONDS`): a packet whose nick wrote too recently
+  is held aside per nick, in order, while other nicks' packets and the
+  node's own `CLIENT` control packets go out; `_last_sent` is stamped after
+  the write. Both tables are keyed by this node's announced nicks and are
+  cleared with the queue on every new connection. Tests construct the
+  bridge with `per_user_interval_seconds=0.0` (scripted sessions end within
+  milliseconds, so even a short hold outlives them) unless they measure the
+  spacing itself.
 - Presence (issues #304, #373): the away state lives in `PresenceRegistry`
   only. `local_away(username, message | None)` sends `STATUS AFK <message>`
   plus `IAMHERE:AWAY` (away) or `IAMHERE:ACTIVE` (back) to every room the

@@ -90,7 +90,7 @@ async def _rig(db, lane, hub, channel, *, room: str = "lobby") -> _Rig:
     set_mrc_room(db, channel, room)
     bridge = MrcBridge(
         hub=hub, lane=lane, version="5.7.0", rng=random.Random(1),
-        min_backoff_seconds=0.05, max_backoff_seconds=0.2, stable_after_seconds=0.0,
+        min_backoff_seconds=0.05, max_backoff_seconds=0.2, stable_after_seconds=0.0, per_user_interval_seconds=0.0,
     )
     await bridge.start()
     deadline = asyncio.get_running_loop().time() + 2

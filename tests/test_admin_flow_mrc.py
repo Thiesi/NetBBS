@@ -66,7 +66,7 @@ def _controls(mrc_bridge=None) -> NodeControls:
 def _bridge(lane, hub=None) -> MrcBridge:
     return MrcBridge(
         hub=hub or ChatHub(), lane=lane, version="5.7.0", rng=random.Random(1),
-        min_backoff_seconds=0.05, max_backoff_seconds=0.2, stable_after_seconds=0.0,
+        min_backoff_seconds=0.05, max_backoff_seconds=0.2, stable_after_seconds=0.0, per_user_interval_seconds=0.0,
     )
 
 
