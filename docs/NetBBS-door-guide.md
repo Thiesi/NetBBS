@@ -178,7 +178,11 @@ seed/dates, ending, rank, ship, days, finances, chart count, victories, missions
 retained highlights. Earlier unrecorded retirements stay counted without invented
 history. Up to 128 dossiers are retained; at capacity further retirement is visibly
 unavailable and the current career can continue. No dossier is silently removed.
-The dossier and new career save together before the restart acknowledgement.
+Retire checks the complete replacement before asking for confirmation. A legacy
+history too close to the 4 MiB save limit can leave insufficient room for dossier
+metadata; retirement then reports unavailability and retains the current career.
+Accepted legacy highlight lists are preserved in full. The dossier and new career
+save together before the restart acknowledgement.
 
 ### Hall of Fame pages
 

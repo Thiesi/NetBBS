@@ -1461,10 +1461,10 @@ def _validate_save_document(data: dict) -> None:
     dossier_fields = {"version", "number", "seed", "started", "ended", "finale", "rank", "ship", "days", "credits", "kills", "missions", "charted", "market_margin", "highlights"}
     for dossier in dossiers:
         require(isinstance(dossier, dict), "career dossier")
+        if type(dossier.get("version")) is int and dossier["version"] != 1:
+            raise UnsupportedSave("The retired career uses an unsupported dossier version.")
         _reject_unknown_save_fields(dossier, dossier_fields, "career dossier")
         require(set(dossier) == dossier_fields, "career dossier fields")
-        if type(dossier["version"]) is int and dossier["version"] != 1:
-            raise UnsupportedSave("The retired career uses an unsupported dossier version.")
         integer(dossier["version"], "dossier version", minimum=1, maximum=1)
         integer(dossier["number"], "dossier sequence", minimum=previous_number+1, maximum=pilot.get("retirements", 0))
         previous_number = dossier["number"]
@@ -3698,9 +3698,8 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     _write_bytes_atomic(path, json.dumps(data).encode("utf-8"))
 
 
-def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
-    """Retain the preceding readable checkpoint under the pilot session lease."""
-    path = _save_path(save_dir, user_id)
+def _encode_career_checkpoint(save: SaveData) -> bytes:
+    """Use the same byte/schema envelope for preflight and actual persistence."""
     new = json.dumps(save.to_dict()).encode("utf-8")
     try:
         if len(new) > MAX_SAVE_BYTES:
@@ -3708,6 +3707,13 @@ def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
         _decode_career(new)
     except ResumeError as exc:
         raise SaveError("Refusing to write an invalid career checkpoint.") from exc
+    return new
+
+
+def write_save(save_dir: Path, user_id: int, save: SaveData) -> None:
+    """Retain the preceding readable checkpoint under the pilot session lease."""
+    path = _save_path(save_dir, user_id)
+    new = _encode_career_checkpoint(save)
     try:
         old = _read_save_bytes(path)
     except FileNotFoundError:
@@ -6000,9 +6006,18 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         if key in ("1", "2", "3", "4"): selected, page = list(CAREER_FINALES)[int(key)-1], 0; continue
         if key != "S": continue
         if blocker := career_finale_blocker(world.save, selected): result, page = blocker, 0; continue
+        try:
+            fresh = World(finish_career(world.save, selected))
+            fresh.checkpoint()
+            fresh.save.best_credits = max(fresh.save.best_credits, fresh.save.pilot.credits)
+            _encode_career_checkpoint(fresh.save)
+        except SaveError:
+            result, page = "Retirement unavailable: the archived career cannot fit a valid save. Current career retained.", 0
+            continue
         if not confirm(f"End this career as {CAREER_FINALES[selected]['label']} and begin New Game+?", p):
             result, page = "Retirement cancelled; current career retained.", 0; continue
-        world.reset(finish_career(world.save, selected))
+        world.reset(fresh.save)
+        world.pending_promotions.extend(fresh.pending_promotions)
         world.checkpoint()
         out_line(); out_line("A new career begins.")
         return "A new career begins."

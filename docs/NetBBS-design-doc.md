@@ -4867,8 +4867,12 @@ credits, chart count, victories, missions, known market margin and retained
 highlights. The record's Dossiers view includes every retained dossier. Old
 retirement counts do not fabricate missing dossiers. Storage permits 128 dossiers
 and refuses further retirement visibly at capacity; it never evicts an older
-record. Existing careers remain playable at the cap. Versioned records validate
-before loading, with unsupported/new fields preserved for the appropriate build.
+record. Existing careers remain playable at the cap. The Retire action preflights
+the normalized replacement against the existing save-size/schema envelope before
+final confirmation; insufficient space retains the current career with an explicit
+unavailability result. Accepted legacy highlights are preserved, not clipped to
+the live append helper's retention limit. Version checks precede v1 field validation,
+with unsupported/new fields preserved for the appropriate build.
 The lifetime score remains separate from current-run rank and achievements.
 
 Hall of Fame renders its existing top-20 best-credit ranking as paginated labelled

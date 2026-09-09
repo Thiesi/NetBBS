@@ -5251,3 +5251,11 @@ Dossier highlights accept the same legacy list lengths as active pilot highlight
 the live append helper's 40-entry retention policy is not a legacy-save validation
 limit. Preserve an accepted history when archiving it. The existing 4 MiB save-file
 ceiling bounds the complete archive payload without silently truncating records.
+
+Retire preflights a separate fresh World through its initial checkpoint and the
+same byte/schema encoder as write_save before offering final confirmation. Use
+that prepared payload after confirmation, including its starting-rank notices;
+regenerating it would invalidate the size check. An accepted near-limit history
+may leave too little room for dossier metadata, so report unavailability while
+retaining the live world, RNG and files. Inspect dossier versions before v1 field
+requirements so a newer schema cannot accidentally offer checkpoint rollback.

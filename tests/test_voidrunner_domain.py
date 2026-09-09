@@ -11381,3 +11381,37 @@ def test_career_finale_legacy_highlights_survive_real_retirement_disconnect(tmp_
     with _door_stopped_at(tmp_path,b"SRSY",b"A new career begins."):
         saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester")
         assert saved.pilot.retirements==1 and saved.retired_careers[0]["highlights"]==highlights
+
+
+@pytest.mark.parametrize("version", [2,99])
+def test_career_finale_future_incomplete_dossier_disables_recovery(tmp_path,monkeypatch,version):
+    import json
+    fresh=vr.finish_career(_finale_world().save,"legend");vr.write_save(tmp_path,77,fresh)
+    previous=(tmp_path/"77.json").read_bytes();(tmp_path/"77.previous.json").write_bytes(previous)
+    data=fresh.to_dict();data["retired_careers"]=[{"version":version}]
+    raw=json.dumps(data).encode();(tmp_path/"77.json").write_bytes(raw)
+    with pytest.raises(vr.UnsupportedSave) as error:vr.load_or_create_save(tmp_path,77,"Tester")
+    monkeypatch.setattr(vr,"read_key",lambda:"Q")
+    with contextlib.redirect_stdout(io.StringIO()) as output:vr.screen_save_recovery(vr.Palette(False),tmp_path,77,error.value)
+    assert "[R]" not in output.getvalue() and (tmp_path/"77.json").read_bytes()==raw
+    assert (tmp_path/"77.previous.json").read_bytes()==previous
+
+
+def test_career_finale_size_preflight_precedes_confirmation_and_keeps_legacy_career(tmp_path,monkeypatch):
+    import copy,json
+    world=_finale_world();world.checkpoint();vr.persist(world,tmp_path,77)
+    highlights=["x"*4096 for _ in range(1010)]+[""]
+    world.save.pilot.highlights=highlights
+    remaining=vr.MAX_SAVE_BYTES-len(json.dumps(world.save.to_dict()).encode())
+    while remaining>4096:
+        highlights.insert(-1,"x"*4096);remaining=vr.MAX_SAVE_BYTES-len(json.dumps(world.save.to_dict()).encode())
+    assert 0<=remaining<=4096
+    highlights[-1]="x"*remaining;vr.persist(world,tmp_path,77)
+    raw=(tmp_path/"77.json").read_bytes();assert len(raw)==vr.MAX_SAVE_BYTES
+    before=copy.deepcopy(world.save.to_dict());rng=world.event_rng.getstate()
+    monkeypatch.setattr(vr,"confirm",lambda *args:pytest.fail("Oversized retirement offered confirmation"))
+    keys=iter("SB");monkeypatch.setattr(vr,"read_key",lambda:next(keys))
+    with contextlib.redirect_stdout(io.StringIO()) as output:result=vr.screen_career_finale(vr.Palette(False),world)
+    assert result and "Retirement unavailable" in result and "Current career retained" in result
+    assert world.save.to_dict()==before and world.event_rng.getstate()==rng and (tmp_path/"77.json").read_bytes()==raw
+    saved,_,_=vr.load_or_create_save(tmp_path,77,"Tester");assert saved.pilot.retirements==0
