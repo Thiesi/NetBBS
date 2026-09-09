@@ -1775,10 +1775,17 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
     return lines
 
 
+def update_display_player(p: Palette, player: Player, refreshed: Player, width: int, height: int) -> None:
+    previous_season = player.season_number
+    player.__dict__.update(refreshed.__dict__)
+    if previous_season != player.season_number:
+        draw_season_change(p, player.season_number, width, height)
+
+
 def confirm_action(p: Palette, conn: sqlite3.Connection, player: Player, action: str,
                    width: int, height: int, target: Player | Exchange | None = None) -> bool:
     refreshed = refresh_player(conn, player.user_id, now_utc())
-    player.__dict__.update(refreshed.__dict__)
+    update_display_player(p, player, refreshed, width, height)
     available = player.turns_used < TURNS_PER_DAY and (action != "recruit" or player.cash >= RECRUIT_COST)
     return show_text_pages(p, action.upper() + " PREVIEW", action_preview_lines(action, player, target),
                            width, height, accept=available) == "A"
@@ -1806,7 +1813,8 @@ def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool
     rows = max(1, height - len(heading) - 4)  # counter and three footer rows
     lines = []
     for key, (paragraphs, selectable) in zip(PICK_KEYS, records):
-        wrapped = [line for text in [f"[{key}] " + paragraphs[0]] + paragraphs[1:]
+        marker = f"[{key}]" if selectable else "[-]"
+        wrapped = [line for text in [marker + " " + paragraphs[0]] + paragraphs[1:]
                    for line in _event_wrap(text, width)]
         lines.extend((line, key if selectable and i == len(wrapped) - 1 else "")
                      for i, line in enumerate(wrapped))
@@ -1843,7 +1851,7 @@ def choose_rival(p: Palette, conn: sqlite3.Connection, player: Player, width: in
     while True:
         now = now_utc()
         page = read_player_page(conn, player.user_id, now, offset)
-        player.__dict__.update(page.player.__dict__)
+        update_display_player(p, player, page.player, width, height)
         effective_now = max(now, from_iso(player.heat_updated_at))
         records = [([rival.handle, f"{tier_name(rank_score(rival))}; Rank {rank_score(rival):,}",
                      raid_eligibility_reason(player, rival, effective_now)],
@@ -1908,7 +1916,7 @@ def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
 
 def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, w: int, height: int = 24) -> bool:
     refreshed = refresh_player(conn, player.user_id, now)
-    player.__dict__.update(refreshed.__dict__)
+    update_display_player(p, player, refreshed, w, height)
     exchanges = list_exchanges(conn)
     records = [([e.name, f"Owner: {e.controller_handle or 'unclaimed'}; garrison {e.garrison}; ${e.income_per_hour}/hour",
                  "Already yours" if e.controller_user_id == player.user_id else "Available to contest"],
