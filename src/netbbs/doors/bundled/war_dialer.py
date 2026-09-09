@@ -1458,7 +1458,8 @@ def main() -> int:
     conn = connect(_resolve_db_path())
     rng = random.Random()
     try:
-        out(f"{ESC}[?2004h")  # Ask supporting terminals to delimit pasted input.
+        # Keep terminal modes unchanged: the supervisor may kill this process
+        # without running finally. Decode paste markers if already supplied.
         ensure_schema(conn)
         now = now_utc()
         anchor = get_or_create_season_anchor(conn, now)
@@ -1528,7 +1529,7 @@ def main() -> int:
     finally:
         conn.close()
         try:
-            out(f"{ESC}[?2004l{RESET}")
+            out(RESET)
         except OSError:
             pass
     return 0

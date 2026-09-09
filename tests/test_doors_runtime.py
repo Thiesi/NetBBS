@@ -496,3 +496,16 @@ def test_voidrunner_recovery_back_is_a_normal_door_exit(db, lane, player, tmp_pa
     assert result.exit_code == 0 and result.reason == "exited"
     assert b"Career recovery" in bytes(session.written)
     assert path.read_bytes() == b"damaged career"
+
+
+def test_war_dialer_timeout_does_not_leave_bracketed_paste_enabled(db, lane, player, tmp_path, monkeypatch):
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path / "door-home"))
+    door = create_door(
+        db, "War Dialer timeout", sys.executable,
+        args=(str(_BUNDLED_DOORS_DIR / "war_dialer.py"),), creator=player,
+    )
+    session = FakeSession()
+    result = asyncio.run(_run(session, lane, door, player, wall_time_limit_seconds=3))
+    assert result.reason == "timed_out"
+    assert b"W A R" in session.written
+    assert b"\x1b[?2004h" not in session.written
