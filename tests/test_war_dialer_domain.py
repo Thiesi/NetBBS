@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +44,16 @@ def _load_war_dialer():
 
 
 wd = _load_war_dialer()
+
+
+def _save_fixture(conn, player):
+    """Arrange database state directly; production has no session-save API."""
+    values = asdict(player)
+    assignments = ", ".join(f"{key}=?" for key in values if key != "user_id")
+    conn.execute(
+        f"UPDATE players SET {assignments} WHERE user_id=?",
+        [value for key, value in values.items() if key != "user_id"] + [player.user_id],
+    )
 
 
 class FixedRandom:
@@ -310,7 +323,7 @@ def test_load_or_create_player_resets_turns_after_24_hours(db_path):
     conn, season_number = _setup(db_path, now)
     player = wd.load_or_create_player(conn, 1, "handle", now, season_number)
     player.turns_used = wd.TURNS_PER_DAY
-    wd.save_player(conn, player)
+    _save_fixture(conn, player)
 
     later = now + timedelta(hours=25)
     reloaded = wd.load_or_create_player(conn, 1, "handle", later, season_number)
@@ -322,7 +335,7 @@ def test_load_or_create_player_does_not_reset_turns_before_24_hours(db_path):
     conn, season_number = _setup(db_path, now)
     player = wd.load_or_create_player(conn, 1, "handle", now, season_number)
     player.turns_used = 5
-    wd.save_player(conn, player)
+    _save_fixture(conn, player)
 
     soon = now + timedelta(hours=2)
     reloaded = wd.load_or_create_player(conn, 1, "handle", soon, season_number)
@@ -334,7 +347,7 @@ def test_load_or_create_player_decays_heat_lazily_from_elapsed_time(db_path):
     conn, season_number = _setup(db_path, now)
     player = wd.load_or_create_player(conn, 1, "handle", now, season_number)
     player.heat = 50.0
-    wd.save_player(conn, player)
+    _save_fixture(conn, player)
 
     later = now + timedelta(hours=3)  # 3 * HEAT_DECAY_PER_HOUR (5) = 15
     reloaded = wd.load_or_create_player(conn, 1, "handle", later, season_number)
@@ -349,7 +362,7 @@ def test_load_or_create_player_resets_last_raided_by_on_its_own_next_login(db_pa
     conn, season_number = _setup(db_path, now)
     victim = wd.load_or_create_player(conn, 2, "victim", now, season_number)
     victim.last_raided_by = 1
-    wd.save_player(conn, victim)
+    _save_fixture(conn, victim)
 
     reloaded = wd.load_or_create_player(conn, 2, "victim", now + timedelta(minutes=1), season_number)
     assert reloaded.last_raided_by is None
@@ -362,7 +375,7 @@ def test_load_or_create_player_resets_stats_on_new_season_but_keeps_created_at(d
     player.cash = 9999
     player.successful_raids = 7
     original_created_at = player.created_at
-    wd.save_player(conn, player)
+    _save_fixture(conn, player)
 
     next_season = season_number + 1
     later = now + wd.SEASON + timedelta(days=1)
@@ -412,10 +425,11 @@ def test_resolve_raid_records_an_offline_event_for_the_target(db_path):
     conn, season_number = _setup(db_path, now)
     attacker = wd.load_or_create_player(conn, 1, "attacker", now, season_number)
     attacker.crew = 100
-    wd.save_player(conn, attacker)
+    _save_fixture(conn, attacker)
     target = wd.load_or_create_player(conn, 2, "target", now, season_number)
     target.cash = 1000
-    wd.save_player(conn, target)
+    target.created_at = wd.to_iso(now - wd.GRACE)
+    _save_fixture(conn, target)
 
     success, amount, _busted = wd.resolve_raid(conn, attacker, target.user_id, now, FixedRandom(0.0))
     assert success is True
@@ -442,13 +456,13 @@ def test_resolve_root_exchange_notifies_the_prior_controller(db_path):
     conn, season_number = _setup(db_path, now)
     old_controller = wd.load_or_create_player(conn, 1, "old_boss", now, season_number)
     old_controller.crew = 1
-    wd.save_player(conn, old_controller)
+    _save_fixture(conn, old_controller)
     exchange = wd.list_exchanges(conn)[0]
     wd.resolve_root_exchange(conn, old_controller, exchange.id, now, FixedRandom(0.99))  # unclaimed => auto-success
 
     challenger = wd.load_or_create_player(conn, 2, "challenger", now, season_number)
     challenger.crew = 1000
-    wd.save_player(conn, challenger)
+    _save_fixture(conn, challenger)
     success, name, _busted = wd.resolve_root_exchange(conn, challenger, exchange.id, now, FixedRandom(0.0))
     assert success is True
 
@@ -471,14 +485,15 @@ def test_concurrent_raids_on_the_same_target_conserve_total_cash(db_path):
     conn, season_number = _setup(db_path, now)
     a = wd.load_or_create_player(conn, 1, "attacker_a", now, season_number)
     a.crew = 50
-    wd.save_player(conn, a)
+    _save_fixture(conn, a)
     b = wd.load_or_create_player(conn, 2, "attacker_b", now, season_number)
     b.crew = 50
-    wd.save_player(conn, b)
+    _save_fixture(conn, b)
     target = wd.load_or_create_player(conn, 3, "target", now, season_number)
     target.cash = 1000
+    target.created_at = wd.to_iso(now - wd.GRACE)
     target.crew = 1
-    wd.save_player(conn, target)
+    _save_fixture(conn, target)
     conn.close()
 
     total_before = a.cash + b.cash + target.cash
@@ -511,3 +526,287 @@ def test_concurrent_raids_on_the_same_target_conserve_total_cash(db_path):
     assert final_a.successful_raids == 1
     assert final_b.successful_raids == 1
     assert final_a.cash + final_b.cash + final_target.cash == total_before
+
+
+def _rivals(db_path):
+    now = wd.now_utc()
+    conn, season = _setup(db_path, now)
+    a = wd.load_or_create_player(conn, 1, "Alpha", now, season)
+    b = wd.load_or_create_player(conn, 2, "Beta", now, season)
+    for player in (a, b):
+        player.cash = 1000
+        player.created_at = wd.to_iso(now - wd.GRACE)
+        _save_fixture(conn, player)
+    return conn, now, a, b
+
+
+def test_open_victim_recruit_does_not_restore_raided_cash(db_path):
+    conn, now, a, b = _rivals(db_path)
+    wd.resolve_raid(conn, a, b.user_id, now, FixedRandom())
+    wd.resolve_recruit(conn, b, now)  # still the pre-raid session snapshot
+    actual = wd.read_player(conn, b.user_id)
+    assert actual.cash == 775  # 1000 - 150 stolen - 75 recruit; never 925
+    assert actual.crew == 4
+    assert actual.turns_used == 1
+    assert actual.last_raided_by == a.user_id
+    conn.close()
+
+
+def test_mutually_interacting_attackers_preserve_incoming_losses(db_path):
+    conn, now, a, b = _rivals(db_path)
+    wd.resolve_raid(conn, a, b.user_id, now, FixedRandom())
+    wd.resolve_raid(conn, b, a.user_id, now, FixedRandom())
+    rows = conn.execute("SELECT cash, turns_used, successful_raids FROM players").fetchall()
+    assert sum(row["cash"] for row in rows) == 2000
+    assert all(row["turns_used"] == row["successful_raids"] == 1 for row in rows)
+    conn.close()
+
+
+def test_raid_commits_turn_with_transfer_and_event(db_path):
+    conn, now, a, b = _rivals(db_path)
+    a.turns_used = 14
+    _save_fixture(conn, a)
+    wd.resolve_raid(conn, a, b.user_id, now, FixedRandom())
+    observer = wd.connect(db_path)
+    assert observer.execute("SELECT turns_used FROM players WHERE user_id=1").fetchone()[0] == 15
+    assert observer.execute("SELECT cash FROM players WHERE user_id=2").fetchone()[0] == 850
+    assert len(wd.unseen_events(observer, b.user_id)) == 1
+    observer.close()
+    conn.close()
+
+
+@pytest.mark.parametrize("reason", ["grace", "repeat", "bracket", "self", "missing", "turns", "season"])
+def test_raid_revalidates_fresh_eligibility_without_effects(db_path, reason):
+    conn, now, a, b = _rivals(db_path)
+    target_id = b.user_id
+    if reason == "grace":
+        conn.execute("UPDATE players SET created_at=? WHERE user_id=2", (wd.to_iso(now),))
+    elif reason == "repeat":
+        conn.execute("UPDATE players SET last_raided_by=1 WHERE user_id=2")
+    elif reason == "bracket":
+        conn.execute("UPDATE players SET exchanges_taken_total=100 WHERE user_id=1")
+    elif reason == "self":
+        target_id = a.user_id
+    elif reason == "missing":
+        target_id = 999
+    elif reason == "turns":
+        conn.execute("UPDATE players SET turns_used=15 WHERE user_id=1")
+    elif reason == "season":
+        conn.execute("UPDATE players SET season_number=2 WHERE user_id=2")
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected):
+        wd.resolve_raid(conn, a, target_id, now, FixedRandom())
+    assert list(conn.iterdump()) == before
+    assert not conn.in_transaction
+    conn.close()
+
+
+@pytest.mark.parametrize("action", ["trade", "recruit", "job", "raid", "root"])
+def test_all_actions_recheck_shared_turn_allowance(db_path, action):
+    conn, now, a, b = _rivals(db_path)
+    conn.execute("UPDATE players SET turns_used=15 WHERE user_id=1")
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected, match="No turns"):
+        if action == "trade":
+            wd.resolve_trade_warez(conn, a, now, FixedRandom())
+        elif action == "recruit":
+            wd.resolve_recruit(conn, a, now)
+        elif action == "job":
+            wd.resolve_job(conn, a, now, FixedRandom())
+        elif action == "raid":
+            wd.resolve_raid(conn, a, b.user_id, now, FixedRandom())
+        else:
+            wd.resolve_root_exchange(conn, a, 1, now, FixedRandom())
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_stale_recruit_cash_is_not_spendable(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    conn.execute("UPDATE players SET cash=0 WHERE user_id=1")
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected, match="Not enough cash"):
+        wd.resolve_recruit(conn, a, now)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+@pytest.mark.parametrize("target_kind", ["rival", "exchange"])
+def test_changed_selection_is_rejected_without_cost(db_path, target_kind):
+    conn, now, a, b = _rivals(db_path)
+    exchange = wd.list_exchanges(conn)[0]
+    if target_kind == "rival":
+        conn.execute("UPDATE players SET crew=crew+1 WHERE user_id=2")
+    else:
+        conn.execute("UPDATE exchanges SET controller_user_id=2, garrison=5 WHERE id=?", (exchange.id,))
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected, match="changed while"):
+        if target_kind == "rival":
+            wd.resolve_raid(conn, a, b.user_id, now, FixedRandom(), expected_target=b)
+        else:
+            wd.resolve_root_exchange(conn, a, exchange.id, now, FixedRandom(), expected_exchange=exchange)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_self_owned_exchange_cannot_be_farmed_through_resolver(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, a, 1, now, FixedRandom())
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected, match="already control"):
+        wd.resolve_root_exchange(conn, a, 1, now, FixedRandom())
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+@pytest.mark.parametrize("kind", ["raid", "root"])
+def test_actor_write_failure_rolls_back_every_effect_and_snapshot(db_path, kind):
+    conn, now, a, b = _rivals(db_path)
+    if kind == "root":
+        conn.execute("UPDATE exchanges SET controller_user_id=2, garrison=1 WHERE id=1")
+    conn.execute("""
+        CREATE TRIGGER reject_actor BEFORE UPDATE ON players WHEN NEW.user_id=1
+        BEGIN SELECT RAISE(ABORT, 'injected actor write failure'); END
+    """)
+    before = list(conn.iterdump())
+    snapshot = asdict(a)
+    with pytest.raises(sqlite3.IntegrityError, match="injected"):
+        if kind == "raid":
+            wd.resolve_raid(conn, a, b.user_id, now, FixedRandom())
+        else:
+            wd.resolve_root_exchange(conn, a, 1, now, FixedRandom())
+    assert list(conn.iterdump()) == before
+    assert asdict(a) == snapshot
+    assert not conn.in_transaction
+    conn.close()
+
+
+def test_duplicate_sessions_commit_both_recruits(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    conn.close()
+    barrier = threading.Barrier(2)
+
+    def recruit():
+        with wd.connect(db_path) as thread_conn:
+            snapshot = wd.read_player(thread_conn, a.user_id)
+            barrier.wait(timeout=5)
+            wd.resolve_recruit(thread_conn, snapshot, now)
+        thread_conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(recruit) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=10)
+    conn = wd.connect(db_path)
+    actual = wd.read_player(conn, a.user_id)
+    assert (actual.cash, actual.crew, actual.turns_used) == (850, 5, 2)
+    conn.close()
+
+
+def test_duplicate_sessions_cannot_spend_the_last_turn_twice(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    conn.execute("UPDATE players SET turns_used=14 WHERE user_id=1")
+    conn.close()
+    barrier = threading.Barrier(2)
+
+    def recruit():
+        thread_conn = wd.connect(db_path)
+        try:
+            snapshot = wd.read_player(thread_conn, a.user_id)
+            barrier.wait(timeout=5)
+            try:
+                wd.resolve_recruit(thread_conn, snapshot, now)
+                return "committed"
+            except wd.ActionRejected:
+                return "rejected"
+        finally:
+            thread_conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(recruit) for _ in range(2)]
+        assert sorted(f.result(timeout=10) for f in futures) == ["committed", "rejected"]
+    conn = wd.connect(db_path)
+    actual = wd.read_player(conn, a.user_id)
+    assert (actual.cash, actual.crew, actual.turns_used) == (925, 4, 15)
+    conn.close()
+
+
+def test_simultaneous_first_launch_seeds_only_ten_exchanges(db_path):
+    conn = wd.connect(db_path)
+    wd.ensure_schema(conn)
+    conn.close()
+    barrier = threading.Barrier(2)
+
+    class SynchronizedBegin:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+        def execute(self, sql, *args):
+            if sql == "BEGIN IMMEDIATE":
+                # Old code counted before BEGIN: both saw zero here.
+                # Fixed code counts only after obtaining the write lock.
+                barrier.wait(timeout=5)
+            return self.conn.execute(sql, *args)
+
+    def launch():
+        thread_conn = wd.connect(db_path)
+        try:
+            wd.ensure_exchanges_seeded(SynchronizedBegin(thread_conn), 1, wd.now_utc())
+        finally:
+            thread_conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(launch) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=10)
+    conn = wd.connect(db_path)
+    assert len(wd.list_exchanges(conn)) == 10
+    conn.close()
+
+
+def test_existing_duplicate_exchanges_are_preserved_for_explicit_repair(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    conn.execute("""
+        INSERT INTO exchanges (name, income_per_hour, controller_user_id, garrison,
+                               controlled_since, income_collected_at, season_number)
+        SELECT name, income_per_hour, 1, 7, controlled_since, income_collected_at, season_number
+        FROM exchanges
+    """)
+    before = list(conn.iterdump())
+    with pytest.raises(wd.WorldStateError, match="20 exchanges"):
+        wd.ensure_exchanges_seeded(conn, 1, now)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_refresh_does_not_clear_raid_protection(db_path):
+    conn, now, a, b = _rivals(db_path)
+    wd.resolve_raid(conn, a, b.user_id, now, FixedRandom())
+    assert wd.read_player(conn, b.user_id).last_raided_by == a.user_id
+    conn.close()
+
+
+def test_old_session_cannot_act_after_season_boundary(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected, match="Season changed"):
+        wd.resolve_trade_warez(conn, a, now + wd.SEASON, FixedRandom())
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_login_income_timestamp_and_credit_rollback_together(db_path):
+    conn, now, a, _ = _rivals(db_path)
+    conn.execute("UPDATE exchanges SET controller_user_id=1 WHERE id=1")
+    conn.execute("""
+        CREATE TRIGGER reject_login BEFORE UPDATE ON players WHEN NEW.user_id=1
+        BEGIN SELECT RAISE(ABORT, 'injected login write failure'); END
+    """)
+    before = list(conn.iterdump())
+    with pytest.raises(sqlite3.IntegrityError, match="injected"):
+        wd.load_or_create_player(conn, a.user_id, a.handle, now + timedelta(hours=2), 1)
+    assert list(conn.iterdump()) == before
+    conn.close()

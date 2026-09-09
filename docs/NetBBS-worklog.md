@@ -264,6 +264,28 @@ A released outermost SQLite savepoint is already committed. Do not append an
 unconditional `commit()` to a savepoint-based helper: when nested, that would
 commit the caller's transaction prematurely.
 
+### War Dialer shared-world writes
+
+War Dialer session players are display snapshots. The action transaction must
+load the actor as well as the victim/exchange, and include the turn cost before
+commit. Reloading only the victim does not protect it from its own stale session
+or from a stale attacker. Copy the committed actor back to the session only
+after commit; there is no save-on-quit/disconnect path. Login settlement and
+income timestamps must share the player-credit transaction too.
+
+Initialization counts exchanges after obtaining the write lock. The regression
+synchronizes two connections immediately before BEGIN, so moving the count
+outside the transaction deterministically reproduces double seeding. Preserve
+unexpected existing counts for manual repair instead of deleting duplicate
+rows with potentially independent owners.
+
+Input tests must include real standalone processes and real buffered stdin
+wrappers: readiness checks cannot see bytes prefetched into Python's buffer.
+Use bounded unbuffered reads. Stream test input larger than the OS pipe capacity
+concurrently with its reader. Web scripted tests must send each War Dialer key
+at its displayed screen; prequeuing a command string now exercises paste rejection
+instead of normal navigation.
+
 ### Database execution lanes
 
 Interactive network flows use a foreground `DatabaseLane`; Phase 3 background

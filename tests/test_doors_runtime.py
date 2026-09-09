@@ -291,11 +291,23 @@ def test_web_bundled_trivia_round_restores_menu_on_same_websocket(db, lane, play
                 async with client.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws:
                     mode = await ws.receive_json(timeout=3)
                     assert mode["type"] == "door_mode" and mode["active"]
-                    await ws.send_json({"type": "door_key", "stream": mode["stream"], "data": keys})
+                    if game != "war_dialer.py":
+                        await ws.send_json({"type": "door_key", "stream": mode["stream"], "data": keys})
+                    help_acknowledged = False
+                    quit_sent = False
                     while True:
                         msg = await ws.receive_json(timeout=75)
                         if msg["type"] == "door_output":
                             output.extend(base64.b64decode(msg["data"]))
+                            if game == "war_dialer.py":
+                                # War Dialer rejects queued/pasted action bursts.
+                                # Exercise actual single keys at their screens.
+                                if not help_acknowledged and b"Press any key to continue..." in output:
+                                    await ws.send_json({"type": "door_key", "stream": mode["stream"], "data": " "})
+                                    help_acknowledged = True
+                                if not quit_sent and b">\x1b[0m " in output:
+                                    await ws.send_json({"type": "door_key", "stream": mode["stream"], "data": "Q"})
+                                    quit_sent = True
                         elif msg["type"] == "door_mode":
                             assert not msg["active"]
                         elif msg.get("data") == "MENU":
