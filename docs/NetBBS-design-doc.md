@@ -4874,6 +4874,33 @@ explain that their quoted bonus follows standing at payout. Historical highlight
 are retained as records of what was said when earned. Retirement clears membership
 as before. Authored faction assignments build on these contacts in a later slice.
 
+Each faction contact offers one optional authored case per career through [S]
+Story. Cases require no membership, entry fee, ordinary contract slot or deadline.
+After acceptance the pilot visits an existing workshop for evidence, chooses an
+irreversible course of action, then visits the stated destination to complete it.
+All choices show destination, material requirements, gross payout and current
+capped standing effects before commitment. Cargo handovers receive a final
+confirmation and use ordinary delivery FIFO accounting.
+
+Concord's Missing Dispatch begins at Rivet House. Filing for prosecution returns
+the evidence to Freeport for 1,800 credits, Concord +18 and Blackwake -12. Patient
+relief instead delivers two Medicine to Far Lantern for 1,500 credits, Concord +12
+and Blackwake +6. Blackwake's Broken Toll begins at Tuning Fork. Armed enforcement
+delivers one Weapons to an existing Haven for 2,100 credits, Blackwake +18 and
+Concord -12. A public beacon instead delivers three Electronics to Far Lantern
+for 1,500 credits, Blackwake +12 and Concord +6. Standing remains within -100..100.
+These fixed case rewards do not receive commission bonuses. Each ending records
+one completed mission, a named career highlight and a distinct closing response.
+
+A separate faction-stories-v1 namespace selects the Haven without changing galaxy
+or encounter randomness; if no Haven exists, armed enforcement is unavailable and
+the beacon alternative remains available. Only an accepted case's current bearing
+permits travel to an otherwise uncharted case destination. It reveals no market
+quotes. Two optional versioned case records retain accepted/evidence/committed/
+complete stages and the chosen ending; incompatible or invalid state is preserved
+for recovery. Acceptance, evidence, choice and completion checkpoint before their
+results. Browsing, refusal and Back write nothing; retirement clears both cases.
+
 Crew are recurring named specialists, with a concise personality and persistent
 service record per role. The `crew-v1` identity namespace chooses from fixed
 role-specific candidates without galaxy or encounter RNG. Browsing previews a

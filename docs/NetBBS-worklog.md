@@ -5209,3 +5209,12 @@ must not be rerolled when standing changes or a journey resumes. Granting member
 validates the threshold and existing credential before mutation, then checkpoints
 both the credential and once-only grant before acknowledgement. Old highlights are
 historical prose, not the authoritative current perk status.
+
+Faction case stages and choices are a bounded, separately versioned save field;
+unknown fields/versions and contradictory stages must enter preserving recovery.
+The choice is recorded before material collection or travel, and cannot be switched
+on return. Use the same capped-standing calculation for previews and acknowledged
+results, evaluated before applying the changes. Cargo endings use delivery costs;
+evidence-only rewards are not cargo revenue. Current accepted case bearings are
+added to deliberate route validation without marking destinations discovered.
+A no-Haven galaxy must reject the armed branch before recording its choice.
