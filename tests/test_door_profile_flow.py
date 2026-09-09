@@ -129,9 +129,20 @@ def test_setup_check_shows_war_dialer_world_path_without_creating_world(db, lane
     script = Path(__file__).resolve().parent.parent / "src/netbbs/doors/bundled/war_dialer.py"
     door = create_door(db, "War Dialer", sys.executable, args=(str(script),), creator=player)
     target = war_dialer_world_path(db, door)
+    import threading
+    import netbbs.net.door_profile_flow as flow
+    original_probe = flow.war_dialer_path_problem
+    main_thread = threading.get_ident()
+    probes = []
+    def probe(candidate, world_path):
+        probes.append(threading.get_ident())
+        assert probes[-1] != main_thread
+        return original_probe(candidate, world_path)
+    monkeypatch.setattr(flow, "war_dialer_path_problem", probe)
     session = FakeSession(["k", " ", "b"])
     assert asyncio.run(edit_door_profile(session, lane, player, door)) is None
     output = "".join(session.written)
     assert "War Dialer world:" in output
     assert str(target) in output.replace("\r\n", "")
     assert not target.exists()
+    assert len(probes) == 1
