@@ -4191,6 +4191,13 @@ async def _chat_loop(
         # so once, in the join banner, before announcing them to the hub.
         if mrc_bridge is not None and mrc_bridge.is_bridged(channel):
             await _announce_mrc_bridge(session, mrc_bridge, channel, user)
+            # Issue #377: what the hub may be told about this caller
+            # (the bridge and the SysOp's switches decide what leaves).
+            mrc_bridge.note_caller(
+                user.username, address=getattr(session, "peer_address", None),
+                width=int(getattr(session, "terminal_width", 80) or 80),
+                height=int(getattr(session, "terminal_height", 24) or 24), level=int(user.user_level),
+            )
             await mrc_bridge.local_join(channel, user.username)
             if mrc_session_state is not None and not mrc_session_state.get("welcomed"):
                 # Issue #304: the hub's welcome, once per session -- its

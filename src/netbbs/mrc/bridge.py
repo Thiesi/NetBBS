@@ -65,7 +65,10 @@ on every exit path.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import os
 from collections import deque
+from pathlib import Path
 import logging
 import platform
 import random
@@ -222,6 +225,10 @@ class MrcStatus:
     network_users: int | None = None
     network_stats_age_seconds: float | None = None
     network_stats_raw: str | None = None
+    # Issue #377: the round trip measured from the hub's PONG to the
+    # last IMALIVE that carried a timestamp, and how old that reading is.
+    hub_latency_seconds: float | None = None
+    hub_latency_age_seconds: float | None = None
 
     @property
     def network_summary(self) -> str | None:
@@ -245,6 +252,23 @@ class _Connection:
 
 
 OpenConnection = Callable[..., Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
+
+
+def _script_hash() -> str:
+    """SHA256 of this module's source, the spec's `hash` field of
+    `CAPABILITIES` (MRCDoc rev 1.26: "SHA256 hex digest of the
+    Multiplexer script"); empty if the source cannot be read."""
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+_SCRIPT_HASH = _script_hash()
+# The capabilities this bridge really has (issue #377): pipe-code colour,
+# CTCP replies, hub-directed room moves, and the graceful GOODBYE.
+CAPABILITIES = ("MCI", "CTCP", "USERROOM", "GOODBYE")
+MAX_CALLER_FACTS = 500
 
 
 _OS_LABELS = {"windows": "Windows", "linux": "Linux", "darwin": "OSX"}
@@ -386,6 +410,12 @@ class MrcBridge:
         self._last_sent: dict[str, float] = {}
         self._held: dict[str, deque[str]] = {}
         self._held_total = 0  # held lines count against `outbound_queue_size`
+        # Issue #377: what chat_flow told the bridge about each caller
+        # (address, terminal size, level) for the announcement verbs,
+        # pruned with the other per-caller caches; and the hub's latency.
+        self._caller_facts: dict[str, tuple[str | None, int, int, int]] = {}
+        self._hub_latency: float | None = None
+        self._hub_latency_at: float | None = None
         self._node_bucket = _TokenBucket(OUTBOUND_BURST, OUTBOUND_RATE_PER_SECOND, clock)
         self._user_buckets: dict[str, _TokenBucket] = {}
         self._inbound_bucket = _TokenBucket(INBOUND_BURST, INBOUND_RATE_PER_SECOND, clock)
@@ -662,6 +692,8 @@ class MrcBridge:
         self._nick_colors.clear()
         self._private_optin.clear()
         self._last_private_sender.clear()
+        self._hub_latency = None
+        self._hub_latency_at = None
         self._private_buckets.clear()
         self._private_drop_noted.clear()
         self._connected_at_monotonic = self._clock()
@@ -721,8 +753,16 @@ class MrcBridge:
         for key, value in infos:
             if value:
                 self._enqueue(protocol.info(site, key, value))
-        self._enqueue(protocol.imalive(site, settings.site_name))
-        self._enqueue(protocol.capabilities(site, ["MCI"] + (["SSL"] if settings.tls else [])))
+        self._enqueue(self._imalive(settings))
+        caps = list(CAPABILITIES) + (["SSL"] if settings.tls else [])
+        self._enqueue(protocol.capabilities(site, caps, script_hash=_SCRIPT_HASH))
+
+    def _imalive(self, settings: MrcSettings) -> MrcPacket:
+        """IMALIVE with the process id and a timestamp the hub echoes in
+        PONG (issue #377), so the status screen can show the round trip."""
+        return protocol.imalive(
+            settings.site_wire_name, settings.site_name, pid=str(os.getpid()), sent_at=f"{time.time():.6f}",
+        )
 
     async def _reader_loop(self, reader: asyncio.StreamReader) -> None:
         buffer = b""
@@ -1110,6 +1150,7 @@ class MrcBridge:
         nicks[username] = nick
         self._announced_rooms[mapping.channel.id] = mapping.room
         self._enqueue(protocol.newroom(nick, settings.site_wire_name, "", mapping.room))
+        self._send_caller_facts(mapping, nick, username)
         self._request_userlist(mapping, nick)
         away = self._away_message(username)
         if away is not None:
@@ -1177,6 +1218,53 @@ class MrcBridge:
                 )
             else:
                 self._private_optin[username] = bool(optin)
+
+    def _note_pong(self, echoed: str) -> None:
+        """`PONG` echoes the epoch an IMALIVE carried (issue #377); an
+        unparseable or absurd value is ignored, never shown."""
+        try:
+            sent_at = float(echoed)
+        except (TypeError, ValueError):
+            return
+        latency = time.time() - sent_at
+        if not 0.0 <= latency < 300.0:
+            return
+        self._hub_latency = latency
+        self._hub_latency_at = self._clock()
+
+    def note_caller(self, username: str, *, address: str | None, width: int, height: int, level: int) -> None:
+        """What chat_flow knows about a caller entering a bridged
+        channel, for the announcement verbs (issue #377): remembered
+        per username so a reconnect or a later announcement can repeat
+        them. Noted *before* the announcement, so unlike the other
+        per-caller caches it is not pruned to the announced set (a
+        keepalive tick between the note and the NEWROOM would lose it);
+        it is bounded instead: at the cap, entries of callers announced
+        nowhere are dropped, and if none can be, the new note is not
+        kept."""
+        if username not in self._caller_facts and len(self._caller_facts) >= MAX_CALLER_FACTS:
+            announced = {name for nicks in self._announced.values() for name in nicks}
+            for stale in [name for name in self._caller_facts if name not in announced]:
+                del self._caller_facts[stale]
+            if len(self._caller_facts) >= MAX_CALLER_FACTS:
+                return
+        self._caller_facts[username] = (address, int(width), int(height), int(level))
+
+    def _send_caller_facts(self, mapping: MrcChannelMapping, nick: str, username: str) -> None:
+        """After NEWROOM: `TERMSIZE` always (harmless, lets the hub
+        format wide replies), `USERIP` and `BBSMETA` only when the
+        SysOp switched them on (MrcSettings; issue #377)."""
+        settings = self._settings
+        facts = self._caller_facts.get(username)
+        if settings is None or facts is None:
+            return
+        address, width, height, level = facts
+        site = settings.site_wire_name
+        self._enqueue(protocol.termsize(nick, site, width, height))
+        if settings.send_caller_ip and address and protocol.is_wire_address(address):
+            self._enqueue(protocol.userip(nick, site, address))
+        if settings.send_caller_meta:
+            self._enqueue(protocol.bbsmeta(nick, site, level, settings.info_sysop))
 
     def _prune_caller_caches(self) -> None:
         """Drop the per-caller Profile caches of everyone announced
@@ -1452,7 +1540,7 @@ class MrcBridge:
             return
         command, params = protocol.parse_server_command(packet.body)
         if command == "PING":
-            self._enqueue(protocol.imalive(settings.site_wire_name, settings.site_name))
+            self._enqueue(self._imalive(settings))
             return
         if command == "HELLO":
             self._send_site_info(settings)
@@ -1503,7 +1591,10 @@ class MrcBridge:
                 self._banner.append(text)
                 del self._banner[:-10]
             return
-        if command in ("PROTOCOLVERSION", "PONG"):
+        if command == "PONG":
+            self._note_pong(packet.msg_ext)
+            return
+        if command == "PROTOCOLVERSION":
             return
         addressed = self._caller_for_nick(packet.to_user)
         if addressed is not None:
@@ -2177,6 +2268,10 @@ class MrcBridge:
                 self._clock() - self._network_stats_at if self._network_stats_at is not None else None
             ),
             network_stats_raw=self._network_stats_raw,
+            hub_latency_seconds=self._hub_latency,
+            hub_latency_age_seconds=(
+                self._clock() - self._hub_latency_at if self._hub_latency_at is not None else None
+            ),
         )
 
     @property

@@ -967,6 +967,20 @@ session needs the same treatment.
   section entry is re-decided from `open_rooms_enabled` on every return to
   the top level, and selecting an existing open room refuses while the switch
   is off.
+- Caller facts (issue #377): `note_caller` (chat_flow, before `local_join`)
+  stores address, terminal size and level per username in `_caller_facts`.
+  Unlike the other per-caller caches it is *not* pruned to the announced
+  set -- it is written before the announcement, and a keepalive tick in the
+  gap would erase it -- but capped, dropping unannounced callers' entries
+  at the cap and refusing a note when none can go; `_announce` sends
+  `TERMSIZE` always and `USERIP`/`BBSMETA` only when `MrcSettings.
+  send_caller_ip`/`send_caller_meta` say so, so a reconnect repeats them
+  like the away state. `USERIP` travels only for an address made of
+  digits, hex digits, colons and dots (`is_wire_address`). `build_line`
+  treats a `CLIENT` packet's field 3 as a pid or hash (`string[128]`), not
+  a room name, so the `CAPABILITIES` hash and the `IMALIVE` pid survive;
+  `PONG` is parsed for the echoed epoch and an absurd value (negative or
+  five minutes) is ignored. Latency is reset on every connection.
 - Wire limits (issue #376, MRCDoc rev 1.26): `MAX_ROOM` 20, `MAX_TOPIC` 55,
   `MAX_PASSWORD` 20, `MAX_ROOM_PASSWORD` 32, `MAX_ARGUMENT` 20 live in
   `netbbs.mrc.protocol` beside `MAX_NAME` and `MAX_BODY`. `sanitize_room`

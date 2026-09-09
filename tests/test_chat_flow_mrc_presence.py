@@ -42,6 +42,8 @@ def test_away_is_mirrored_to_the_hub(db, lane, hub, presence, channel, alice):
             await rig.fake.wait_for(lambda p: p.body == "IAMHERE:AWAY" and p.from_user == "alice")
             await rig.fake.wait_for(lambda p: p.body == "IAMHERE:ACTIVE" and p.from_user == "alice")
             assert rig.fake.unknown_commands == []
+            # Issue #377: the caller's terminal size goes with the announcement.
+            await rig.fake.wait_for(lambda p: p.body.startswith("TERMSIZE:") and p.from_user == "alice")
         finally:
             await rig.close()
     asyncio.run(scenario())

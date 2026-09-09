@@ -56,6 +56,9 @@ INFO_DESCRIPTION_CONFIG_KEY = "mrc_info_description"
 INFO_TELNET_CONFIG_KEY = "mrc_info_telnet"
 INFO_SSH_CONFIG_KEY = "mrc_info_ssh"
 INFO_WEB_CONFIG_KEY = "mrc_info_web"
+# Issue #377: what the node tells the hub about each caller it announces.
+SEND_CALLER_IP_CONFIG_KEY = "mrc_send_caller_ip"
+SEND_CALLER_META_CONFIG_KEY = "mrc_send_caller_meta"
 
 # The hub's INFO* fields are free text shown to other MRC users via
 # `/info`; bounded so a mistyped paste can't produce an oversized line.
@@ -78,6 +81,14 @@ class MrcSettings:
     info_telnet: str = ""
     info_ssh: str = ""
     info_web: str = ""
+    # Issue #377: per-caller facts sent to the hub on announcement.
+    # `USERIP` lets the hub tell this board's callers apart when it
+    # bans (the spec warns a user without it "may get removed from
+    # room traffic routing"); `BBSMETA` is the caller's level and the
+    # SysOp's name. Both off by default: nothing about a caller leaves
+    # the node unless the SysOp says so.
+    send_caller_ip: bool = False
+    send_caller_meta: bool = False
 
     @property
     def site_wire_name(self) -> str:
@@ -131,6 +142,8 @@ def load_mrc_settings(db: Database) -> MrcSettings:
         info_telnet=get_config(db, INFO_TELNET_CONFIG_KEY) or "",
         info_ssh=get_config(db, INFO_SSH_CONFIG_KEY) or "",
         info_web=get_config(db, INFO_WEB_CONFIG_KEY) or "",
+        send_caller_ip=get_config(db, SEND_CALLER_IP_CONFIG_KEY) == "1",
+        send_caller_meta=get_config(db, SEND_CALLER_META_CONFIG_KEY) == "1",
     )
 
 
@@ -152,7 +165,8 @@ def validate_mrc_settings(settings: MrcSettings) -> MrcSettings:
         infos[field] = sanitize_body(getattr(settings, field))[:MAX_INFO_LENGTH]
     return MrcSettings(
         enabled=settings.enabled, host=host, port=settings.port, tls=settings.tls,
-        site_name=site_name, **infos,
+        site_name=site_name, send_caller_ip=bool(settings.send_caller_ip),
+        send_caller_meta=bool(settings.send_caller_meta), **infos,
     )
 
 
@@ -168,6 +182,8 @@ def save_mrc_settings(db: Database, settings: MrcSettings) -> MrcSettings:
     set_config(db, INFO_TELNET_CONFIG_KEY, validated.info_telnet)
     set_config(db, INFO_SSH_CONFIG_KEY, validated.info_ssh)
     set_config(db, INFO_WEB_CONFIG_KEY, validated.info_web)
+    set_config(db, SEND_CALLER_IP_CONFIG_KEY, "1" if validated.send_caller_ip else "0")
+    set_config(db, SEND_CALLER_META_CONFIG_KEY, "1" if validated.send_caller_meta else "0")
     return validated
 
 

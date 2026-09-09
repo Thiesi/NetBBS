@@ -5178,6 +5178,7 @@ async def _mrc_settings_screen(
         "site_name": current.site_name, "info_sysop": current.info_sysop,
         "info_description": current.info_description, "info_telnet": current.info_telnet,
         "info_ssh": current.info_ssh, "info_web": current.info_web,
+        "send_caller_ip": current.send_caller_ip, "send_caller_meta": current.send_caller_meta,
         # Issue #300: the open-room half -- whether callers may open any
         # room, the gates a room opened that way starts with, and the
         # lifecycle bounds.
@@ -5268,6 +5269,29 @@ async def _mrc_settings_screen(
             brief="URL of the web/xterm.js front door", section="Advertised addresses",
         ),
         FieldSpec(
+            key="send_caller_ip", hotkey="u", menu_text=menu_key("U", "SERIP"), label="Send callers' IP addresses (USERIP)",
+            render=lambda d: "yes" if d["send_caller_ip"] else "no",
+            prompt=_toggle_draft_field("send_caller_ip"),
+            brief="Off: nothing about a caller leaves the node", section="About callers",
+            help=(
+                "Off by default. On: each caller announced on the network is followed by their "
+                "connecting IP address (USERIP), which the hub uses to tell this board's callers apart "
+                "when it bans one for abuse. The hub's documentation warns that a caller without it "
+                "may be removed from room traffic routing; with it off, that risk is yours to take."
+            ),
+        ),
+        FieldSpec(
+            key="send_caller_meta", hotkey="m", menu_text=menu_key("M", "etadata"), label="Send caller level and SysOp name (BBSMETA)",
+            render=lambda d: "yes" if d["send_caller_meta"] else "no",
+            prompt=_toggle_draft_field("send_caller_meta"),
+            brief="Off: the hub learns no caller levels", section="About callers",
+            help=(
+                "Off by default. On: each announced caller is followed by their security level and "
+                "this node's SysOp name (BBSMETA), which the hub's operator uses to judge a caller's "
+                "standing on their home board. The SysOp name is the INFO field above."
+            ),
+        ),
+        FieldSpec(
             key="open_rooms", hotkey="o", menu_text=menu_key("O", "pen rooms"), label="Callers may open any room",
             render=lambda d: "yes" if d["open_rooms"] else "no",
             prompt=_toggle_draft_field("open_rooms"),
@@ -5327,6 +5351,7 @@ async def _mrc_settings_screen(
             site_name=str(draft["site_name"]), info_sysop=str(draft["info_sysop"]),
             info_description=str(draft["info_description"]), info_telnet=str(draft["info_telnet"]),
             info_ssh=str(draft["info_ssh"]), info_web=str(draft["info_web"]),
+            send_caller_ip=bool(draft["send_caller_ip"]), send_caller_meta=bool(draft["send_caller_meta"]),
         )
 
         open_candidate = OpenRoomSettings(
@@ -5523,6 +5548,14 @@ async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, no
             network_line = "unknown yet (asked once a caller is announced)"
         await session.write_line(
             colored("Network size: ", fg_color=LABEL_COLOR) + colored(network_line, fg_color=METADATA_COLOR)
+        )
+        if status.hub_latency_seconds is not None:
+            latency_age = int(status.hub_latency_age_seconds or 0.0)
+            latency_line = f"{status.hub_latency_seconds * 1000:.0f} ms (as of {latency_age} s ago)"
+        else:
+            latency_line = "not measured yet (the hub answers the next keepalive)"
+        await session.write_line(
+            colored("Hub round trip: ", fg_color=LABEL_COLOR) + colored(latency_line, fg_color=METADATA_COLOR)
         )
     if status.enabled or status.open_rooms or status.retired_rooms:
         # Shown whenever there is open-room state to report -- with MRC

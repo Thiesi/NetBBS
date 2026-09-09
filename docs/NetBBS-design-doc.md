@@ -6278,6 +6278,24 @@ planning pass intended:
   the node-wide MRC switch and the channel mappings already decide
   whether they are on the network at all.
 
+**Issue #377 (what the hub is told)** follows the protocol page's
+control-context verbs, read on 2026-09-09:
+
+- **Per caller, on announcement:** `TERMSIZE` always (the hub formats
+  wide replies with it; it says nothing about the person); `USERIP` and
+  `BBSMETA` only behind two SysOp switches under Inter-BBS chat (MRC),
+  both off. The infrastructure principle applies: the node provides
+  the interface, the SysOp owns the decision to hand a third party a
+  caller's address or level. The spec's warning that a caller without
+  `USERIP` "may get removed from room traffic routing" is stated on the
+  switch and in the Handbook rather than used to justify a default.
+- **Per connection:** `CAPABILITIES` lists what the bridge really
+  handles (`MCI`, `CTCP`, `USERROOM`, `GOODBYE`, `SSL` when on) and
+  carries the bridge module's SHA256 in the spec's hash field;
+  `IMALIVE` carries the process id and a timestamp the hub echoes in
+  `PONG`, from which the status screen shows the round trip.
+- The `INFO*` fields the issue asked for already existed (issue #275).
+
 ### Issue #194 — trusted scrollback-on-join — closed
 
 **Goal:** decide whether/how a node gets recent scrollback the instant it

@@ -38,6 +38,8 @@ class FakeMrcHub:
         # command the spec does not define (the real hub answers those
         # with an error the caller sees; a test asserts the list is empty).
         self.activity: dict[tuple[str, str], str] = {}
+        # Issue #377: per-user facts (USERIP, TERMSIZE, BBSMETA) by verb.
+        self.facts: dict[tuple[str, str], dict[str, str]] = {}
         self.unknown_commands: list[str] = []
         self.topics: dict[str, str] = {}
         self.banner: str | None = "|14Welcome to the fake hub"
@@ -167,6 +169,12 @@ class FakeMrcHub:
                 self.afk[key] = message or None
             elif command == "IAMHERE":
                 self.activity[key] = params
+            elif command == "IMALIVE" and packet.msg_ext:
+                # Issue #377: the epoch comes back in PONG for latency.
+                await self.send_packet(MrcPacket("SERVER", "", "", "CLIENT", packet.msg_ext, "", "PONG"))
+            elif command in ("USERIP", "TERMSIZE") or command.startswith("BBSMETA"):
+                verb = command.split(":", 1)[0].split(" ", 1)[0]
+                self.facts.setdefault(key, {})[verb] = packet.body.split(":", 1)[1].strip() if ":" in packet.body else ""
             elif command.split(" ", 1)[0] in ("AFK", "STATUS"):
                 self.unknown_commands.append(packet.body)
             elif command == "NEWTOPIC":

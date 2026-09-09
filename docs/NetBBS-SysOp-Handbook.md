@@ -395,7 +395,14 @@ unless you say so, twice:
    the site name this node presents as (default: the node's display
    name). The public hub, TLS and its port are pre-filled; the INFO
    fields (SysOp, description, telnet/SSH/web addresses) are what other
-   MRC users see with `/info`. Saving applies immediately — no restart.
+   MRC users see with `/info`. Two switches under *About callers*, both
+   off, decide what the hub learns about each caller you announce:
+   `[U]SERIP` sends their connecting IP address (the hub uses it to ban
+   one caller rather than your whole board, and its documentation warns
+   that a caller without it may be dropped from room traffic routing),
+   `[M]etadata` sends their security level and your SysOp name. Their
+   terminal size is always sent, so the hub can format wide replies.
+   Saving applies immediately — no restart.
 2. On each channel you want on the network: `[C]ontent` → Cha`[N]`nels →
    the channel → `[M]RC room`. Type the room name (`lobby` is the hub's
    default room). One room maps to at most one channel.
@@ -497,7 +504,8 @@ at most once per minute; if the hub renames them they are told the new
 name; if the hub terminates the site's session the link stops until you
 change and save the MRC settings, like an `OLDVERSION` rejection.
 
-`[N]ode` → `[C]hat bridge (MRC)` shows the link state (connected,
+`[N]ode` → `[C]hat bridge (MRC)` shows the hub round trip, measured from
+the hub's answer to each keepalive, and the link state (connected,
 reconnecting, error, off), hub, last error, drop counters and every
 bridged channel with the hub's roster, plus `[R]econnect now`. To take a
 single channel off the network without touching the others, use its

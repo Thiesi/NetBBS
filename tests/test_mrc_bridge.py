@@ -111,6 +111,13 @@ def test_connects_handshakes_and_announces_site_info(db, lane, lobby):
             assert info.body == "INFOSYS:Thiesi"
             alive = fake.packets(body_prefix="IMALIVE:")[0]
             assert alive.body == "IMALIVE:My Board"
+            # Issue #377: pid and a timestamp the hub echoes; the real
+            # capability list with the module's hash in the spec's field.
+            assert alive.from_room.isdigit() and float(alive.msg_ext) > 0
+            caps = fake.packets(body_prefix="CAPABILITIES:")[0]
+            assert caps.body == "CAPABILITIES:MCI CTCP USERROOM GOODBYE" and len(caps.from_room) == 64
+            await _wait_until(lambda: bridge.status().hub_latency_seconds is not None)
+            assert 0.0 <= bridge.status().hub_latency_seconds < 5.0
             status = bridge.status()
             assert status.connected and status.attempts == 1 and status.last_error is None
             assert status.bridged_channels == 1 and status.site_name == "My Board"
@@ -1113,6 +1120,55 @@ def test_an_overlength_room_name_resolves_to_no_mapping(db, lane, lobby, alice):
             assert bridge.mapping_for_room("a" * 20) is not None
             assert bridge.mapping_for_room("#" + "A" * 20) is not None
             assert bridge.mapping_for_room("a" * 25) is None
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+
+def test_caller_facts_follow_the_sysops_switches(db, lane, lobby, alice):
+    """Issue #377: TERMSIZE always; USERIP and BBSMETA only when switched
+    on; repeated on reconnect; an address the wire cannot carry stays."""
+    from netbbs.mrc.settings import MrcSettings, load_mrc_settings, save_mrc_settings
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            # As chat_flow does: the facts first, then the announcement.
+            hub.join(lobby.name, ParticipantId("alice", 1))
+            bridge.note_caller("alice", address="203.0.113.5", width=132, height=50, level=10)
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "TERMSIZE:132x50" and p.from_user == "alice")
+            await asyncio.sleep(0.2)
+            assert not fake.packets(body_prefix="USERIP") and not fake.packets(body_prefix="BBSMETA")
+            # Both switches on: the next connection announces with them.
+            current = load_mrc_settings(db)
+            save_mrc_settings(db, MrcSettings(
+                enabled=True, host=current.host, port=current.port, tls=False, site_name=current.site_name,
+                info_sysop="Thiesi", send_caller_ip=True, send_caller_meta=True,
+            ))
+            await bridge.reload_settings()
+            await _wait_until(lambda: bridge.state is MrcState.CONNECTED, timeout=3.0)
+            await fake.wait_for(lambda p: p.body == "USERIP:203.0.113.5" and p.from_user == "alice", timeout=3.0)
+            await fake.wait_for(lambda p: p.body == "BBSMETA: SecLevel(10) Sysop(Thiesi)" and p.from_user == "alice", timeout=3.0)
+            await _wait_until(lambda: fake.facts.get(("my_board", "alice"), {}).get("USERIP") == "203.0.113.5")
+            # An address the wire cannot carry is simply not sent.
+            hub.leave(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_leave(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "LOGOFF")
+            count = len(fake.packets(body_prefix="USERIP"))
+            bridge.note_caller("alice", address="unix:/run/netbbs.sock", width=80, height=24, level=10)
+            hub.join(lobby.name, ParticipantId("alice", 2))
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "TERMSIZE:80x24" and p.from_user == "alice", timeout=3.0)
+            await asyncio.sleep(0.2)
+            assert len(fake.packets(body_prefix="USERIP")) == count
         finally:
             await bridge.close()
             await fake.close()
