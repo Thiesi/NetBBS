@@ -26,6 +26,8 @@ class FakeMrcHub:
         self.port = 0
         self.handshakes: list[str] = []
         self.received: list[MrcPacket] = []
+        # Issue #375: (packet, loop time) per arrival, for spacing tests.
+        self.arrivals: list[tuple[MrcPacket, float]] = []
         self.connections = 0
         # (site lower, nick lower) -> room
         self.users: dict[tuple[str, str], str] = {}
@@ -136,6 +138,7 @@ class FakeMrcHub:
                 if packet is None:
                     continue
                 self.received.append(packet)
+                self.arrivals.append((packet, asyncio.get_running_loop().time()))
                 self._event.set()
                 await self._handle(packet, writer)
         except (ConnectionError, asyncio.IncompleteReadError):

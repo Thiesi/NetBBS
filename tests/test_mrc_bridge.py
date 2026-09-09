@@ -72,7 +72,7 @@ def _bridge(hub: ChatHub, lane: DatabaseLane, **overrides) -> MrcBridge:
     kwargs = dict(
         hub=hub, lane=lane, version="5.7.0", rng=random.Random(1),
         min_backoff_seconds=0.05, max_backoff_seconds=0.2, stable_after_seconds=0.0,
-        connect_timeout_seconds=2.0, keepalive_interval_seconds=0.2,
+        connect_timeout_seconds=2.0, keepalive_interval_seconds=0.2, per_user_interval_seconds=0.0,
     )
     kwargs.update(overrides)
     return MrcBridge(**kwargs)
@@ -959,6 +959,51 @@ def test_private_message_notices_are_per_sender_site(db, lane, lobby, alice):
             assert "bob@Third tried to message you" in second
             await asyncio.sleep(0.1)
             assert queue.empty()
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_packets_from_one_nick_are_spaced_to_the_hubs_rate(db, lane, lobby, alice):
+    """Issue #375: the hub allows one message per 0.5 s per user, so a
+    three-chunk line from one nick leaves spaced, while another nick's
+    line and the node's own CLIENT packets go out in between."""
+    from netbbs.chat.scrollback import record_message
+    from netbbs.auth.users import create_user
+
+    create_user(db, "carol", password="hunter2", user_level=10)
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        hub.join(lobby.name, ParticipantId("carol", 2))
+        bridge = await _connected_bridge(db, lane, hub, fake, per_user_interval_seconds=0.5, keepalive_interval_seconds=5.0)
+        try:
+            await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM::lobby")) == 2)
+            await asyncio.sleep(1.2)  # the announcement traffic has left
+            start = asyncio.get_running_loop().time()
+            long_line = record_message(db, lobby, kind="message", author_label="alice", author_fingerprint=None, body="x " * 150)
+            assert (await bridge.local_message(lobby, long_line))[0] is True
+            short = record_message(db, lobby, kind="message", author_label="carol", author_fingerprint=None, body="quick one")
+            assert (await bridge.local_message(lobby, short))[0] is True
+            def chunks_of(nick):
+                return [p for p in fake.received if p.from_user == nick and p.to_user == "" and p.body.strip()]
+
+            await _wait_until(lambda: len(chunks_of("alice")) >= 3 and chunks_of("carol"), timeout=4.0)
+            # Timestamps: the fake hub records arrival order; alice's
+            # three chunks are 0.5 s apart, carol's line did not wait.
+            stamps = fake.arrivals
+            alice_chunks = [t for (p, t) in stamps if p.from_user == "alice" and p.to_user == "" and "x x" in p.body]
+            assert len(alice_chunks) == 3
+            assert all(b - a >= 0.45 for a, b in zip(alice_chunks, alice_chunks[1:])), alice_chunks
+            carol_line = next(t for (p, t) in stamps if p.from_user == "carol" and p.to_user == "")
+            assert carol_line - start < 0.45
+            assert carol_line < alice_chunks[1]
         finally:
             await bridge.close()
             await fake.close()

@@ -65,6 +65,7 @@ on every exit path.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import logging
 import platform
 import random
@@ -163,6 +164,12 @@ USERLIST_MIN_INTERVAL_SECONDS = 5.0
 OUTBOUND_QUEUE_SIZE = 200
 OUTBOUND_RATE_PER_SECOND = 5.0
 OUTBOUND_BURST = 10
+# Issue #375: the hub's own limit is one message per 0.5 s per user
+# (MRCDoc rev 1.26, "Message rate limit: 0.5s/msg/user"); packets from
+# one nick are spaced at least this far apart on the way out, whatever
+# the node-wide allowance admits. Node-level `CLIENT` packets are exempt.
+PER_USER_MIN_INTERVAL_SECONDS = 0.5
+MAX_TRACKED_SENDERS = 200
 PER_USER_RATE_PER_SECOND = 1.0
 PER_USER_BURST = 3
 INBOUND_RATE_PER_SECOND = 20.0
@@ -269,6 +276,7 @@ class MrcBridge:
         userlist_refresh_seconds: float = USERLIST_REFRESH_INTERVAL_SECONDS,
         outbound_queue_size: int = OUTBOUND_QUEUE_SIZE,
         reply_burst: int = REPLY_BURST,
+        per_user_interval_seconds: float = PER_USER_MIN_INTERVAL_SECONDS,
     ) -> None:
         self._hub = hub
         self._lane = lane
@@ -292,6 +300,7 @@ class MrcBridge:
         self._keepalive_interval = keepalive_interval_seconds
         self._userlist_refresh = userlist_refresh_seconds
         self._reply_burst = reply_burst
+        self._per_user_interval = per_user_interval_seconds
 
         self._settings: MrcSettings | None = None
         # room (lower-cased) -> mapping; channel id -> mapping
@@ -356,7 +365,13 @@ class MrcBridge:
         self._network_stats_raw: str | None = None
         self._stats_requested: set[str] = set()
 
-        self._outbound: asyncio.Queue[str] = asyncio.Queue(maxsize=outbound_queue_size)
+        self._outbound: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=outbound_queue_size)
+        # Issue #375: per-nick spacing state for the writer -- when each
+        # nick last had a packet written, and packets held back because
+        # their nick wrote too recently (per nick, in order). Both are
+        # keyed by this node's own announced nicks, so bounded by them.
+        self._last_sent: dict[str, float] = {}
+        self._held: dict[str, deque[str]] = {}
         self._node_bucket = _TokenBucket(OUTBOUND_BURST, OUTBOUND_RATE_PER_SECOND, clock)
         self._user_buckets: dict[str, _TokenBucket] = {}
         self._inbound_bucket = _TokenBucket(INBOUND_BURST, INBOUND_RATE_PER_SECOND, clock)
@@ -744,12 +759,50 @@ class MrcBridge:
 
     async def _writer_loop(self, writer: asyncio.StreamWriter) -> None:
         while True:
-            line = await self._outbound.get()
+            nick, line = await self._next_outbound()
             while not self._node_bucket.has_token():
                 await asyncio.sleep(1.0 / OUTBOUND_RATE_PER_SECOND)
             self._node_bucket.consume()
             writer.write(line.encode("ascii", errors="replace"))
             await writer.drain()
+            if nick:
+                now = self._clock()
+                self._last_sent[nick] = now
+                if len(self._last_sent) > MAX_TRACKED_SENDERS:
+                    # Only a stamp younger than the interval still matters.
+                    for stale in [n for n, at in self._last_sent.items() if now - at >= self._per_user_interval]:
+                        del self._last_sent[stale]
+
+    async def _next_outbound(self) -> tuple[str, str]:
+        """The next line to write, honouring the hub's per-user rate
+        (issue #375): a packet whose nick wrote less than
+        `_per_user_interval` ago is held aside, per nick and in order,
+        so packets from other nicks (and the node's own `CLIENT`
+        packets, which return an empty nick) go out meanwhile. Returns
+        `(nick, line)`; the caller stamps `_last_sent` after the write."""
+        while True:
+            now = self._clock()
+            wait: float | None = None
+            for nick in list(self._held):
+                remaining = self._per_user_interval - (now - self._last_sent.get(nick, 0.0))
+                if remaining <= 0:
+                    line = self._held[nick].popleft()
+                    if not self._held[nick]:
+                        del self._held[nick]
+                    return nick, line
+                wait = remaining if wait is None else min(wait, remaining)
+            try:
+                nick, line = await asyncio.wait_for(self._outbound.get(), timeout=wait)
+            except asyncio.TimeoutError:
+                continue
+            if not nick:
+                return "", line
+            if nick in self._held:
+                self._held[nick].append(line)  # behind what that nick already has waiting
+                continue
+            if now - self._last_sent.get(nick, -self._per_user_interval) >= self._per_user_interval:
+                return nick, line
+            self._held[nick] = deque([line])
 
     async def _keepalive_loop(self) -> None:
         last_userlist = self._clock()
@@ -798,13 +851,19 @@ class MrcBridge:
             except asyncio.QueueEmpty:
                 pass
             self._dropped_outbound += 1
-        self._outbound.put_nowait(line)
+        # The spacing key: the sending nick, or "" for the node's own
+        # control packets (`CLIENT`), which the hub's per-user rate does
+        # not cover.
+        nick = "" if packet.from_user.upper() == protocol.CLIENT else packet.from_user.lower()
+        self._outbound.put_nowait((nick, line))
 
     def _drain_outbound_queue(self) -> None:
         """Anything queued while disconnected refers to a session the
         hub no longer knows about (LOGOFFs for callers who left, chat
         that would arrive out of context) -- start each connection
         clean rather than replaying it."""
+        self._held.clear()
+        self._last_sent.clear()
         while True:
             try:
                 self._outbound.get_nowait()

@@ -28,3 +28,12 @@ messages from NetBBS put the recipient's last-seen board there as a routing
 hint; they now leave the field empty, as every other client does. Nothing is
 lost: the hub keeps nicks unique across boards, so the nick alone is the
 address. The `nick@board` a sender sees in their own echo is unchanged.
+
+## Outbound lines keep to the hub's rate
+
+The hub accepts one message per half second from each user. NetBBS paced
+its sending per node and admitted a long line's two or three chunks at
+once, so the tail of such a line could be dropped by the hub without anyone
+here noticing. Packets from one caller now leave at least half a second
+apart, while other callers' packets and the node's own housekeeping go out
+in between.
