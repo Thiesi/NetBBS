@@ -1249,3 +1249,26 @@ def test_disabled_picker_entry_has_no_apparent_digit_hotkey(monkeypatch):
     output = "".join(written)
     assert "Newcomer shield" in output
     assert "[1]" not in output
+
+
+@pytest.mark.parametrize("owner", [None, "b" * 32])
+def test_bound_world_refuses_guest_or_different_node_process(tmp_path, owner):
+    path = tmp_path / "bound.db"
+    conn = wd.connect(path)
+    wd.ensure_schema(conn)
+    wd.bind_world_owner(conn, "a" * 32)
+    conn.close()
+    info = tmp_path / "info.json"
+    import json
+    info.write_text(json.dumps({"user_id": 1, "handle": "Other", "war_dialer_owner": owner}), encoding="utf-8")
+    env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(info), PYTHONIOENCODING="utf-8")
+    result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
+                            env=env, timeout=10)
+    assert result.returncode == 1
+    assert b"belongs to another node" in result.stdout
+    assert b"Traceback" not in result.stderr
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM players").fetchone()[0] == 0
+    finally:
+        conn.close()

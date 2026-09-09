@@ -92,6 +92,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from netbbs import __version__
 from netbbs.config import get_config
@@ -114,6 +115,9 @@ _LEGACY_DB_FILENAME = "netbbs.db"
 _FILES_DIRNAME = "files"
 _IDENTITY_DIRNAME = "identity"
 _VOIDRUNNER_DIRNAME = "voidrunner"
+_WAR_DIALER_DIRNAME = "war-dialer"
+_WAR_DIALER_MAX_WORLDS = 64
+_WAR_DIALER_MAX_BYTES = 512 * 1024 * 1024
 _VOIDRUNNER_MAX_FILES = 10_000
 _VOIDRUNNER_MAX_FILE_BYTES = 4 * 1024 * 1024
 _VOIDRUNNER_MAX_TOTAL_BYTES = 512 * 1024 * 1024
@@ -466,6 +470,118 @@ def _validate_voidrunner_component(source: Path, manifest: dict) -> bool:
     return True
 
 
+def _war_dialer_sources(db_path: Path) -> list[Path]:
+    """Discover registered overrides plus a retained node-default world, read-only."""
+    from netbbs.doors.registry import list_doors
+    from netbbs.doors.runtime import war_dialer_world_path, war_dialer_path_problem
+    node = db_path.resolve()
+    paths = {node.parent / (node.name + ".doors") / "war-dialer.db"}
+    connection = sqlite3.connect(node.as_uri() + "?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        db = SimpleNamespace(path=node, connection=connection)
+        for door in list_doors(db):
+            path = war_dialer_world_path(db, door)
+            if path is not None:
+                if problem := war_dialer_path_problem(door, path):
+                    raise BackupError(problem)
+                paths.add(path)
+        if override := os.environ.get("WAR_DIALER_DB_PATH"):
+            paths.add(Path(override).expanduser().resolve())
+    finally:
+        connection.close()
+    if len(paths) > _WAR_DIALER_MAX_WORLDS:
+        raise BackupError("War Dialer backup exceeds 64 configured worlds.")
+    return sorted((path for path in paths if path.exists()), key=str)
+
+
+def _war_dialer_owner(node: Path) -> str | None:
+    with contextlib.closing(sqlite3.connect(node.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        row = conn.execute("SELECT value FROM node_config WHERE key='war_dialer_owner'").fetchone()
+        return row[0] if row else None
+
+
+def _inspect_war_dialer(path: Path, owner: str | None) -> int:
+    from netbbs.doors.bundled import war_dialer as wd
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > _WAR_DIALER_MAX_BYTES:
+        raise BackupError(f"War Dialer world is not a regular database within the 512 MiB limit: {path}")
+    try:
+        with contextlib.closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            version = wd._world_schema_version(conn)
+            wd._validate_world_layout(conn, version)
+            if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise BackupError("War Dialer world failed SQLite integrity validation.")
+            bound = conn.execute("SELECT value FROM meta WHERE key='node_owner'").fetchone()
+            if owner is None or bound is None or bound[0] != owner:
+                raise BackupError("War Dialer world does not belong to this node's user-ID namespace. "
+                                  "For an unbound legacy world, verify user ownership and launch it once through its owning node.")
+            return version
+    except (sqlite3.Error, wd.WorldStateError) as exc:
+        raise BackupError(f"War Dialer world cannot be read: {exc}") from exc
+
+
+@contextlib.contextmanager
+def _war_dialer_maintenance(path: Path):
+    from netbbs.doors.bundled import war_dialer as wd
+    try:
+        with wd.world_session(path, maintenance=True):
+            yield
+    except (wd.WorldStateError, sqlite3.Error, OSError) as exc:
+        raise BackupError(f"War Dialer maintenance unavailable at {path}: {exc}") from exc
+
+
+def _capture_war_dialer(db_path: Path, destination: Path, checksums: dict) -> dict | None:
+    paths = _war_dialer_sources(db_path)
+    if not paths:
+        return None
+    owner = _war_dialer_owner(db_path)
+    output = destination / _WAR_DIALER_DIRNAME
+    output.mkdir()
+    worlds = []
+    for index, path in enumerate(paths, 1):
+        key = str(index)
+        with _war_dialer_maintenance(path):
+            _inspect_war_dialer(path, owner)
+            snapshot = output / (key + ".db")
+            snapshot_database(path, snapshot)
+            with contextlib.closing(sqlite3.connect(snapshot)) as saved:
+                saved.execute("PRAGMA journal_mode=DELETE")
+            version = _inspect_war_dialer(snapshot, owner)
+        checksums[f"{_WAR_DIALER_DIRNAME}/{key}.db"] = _sha256_of_file(snapshot)
+        worlds.append({"key": key, "source_path": str(path), "schema_version": version})
+    return {"version": 1, "owner": owner, "worlds": worlds}
+
+
+def _validate_war_dialer_component(source: Path, manifest: dict) -> None:
+    metadata = manifest.get("war_dialer")
+    root = source / _WAR_DIALER_DIRNAME
+    if metadata is None:
+        if root.exists() and _database_filename_from_manifest(manifest) != _WAR_DIALER_DIRNAME:
+            raise BackupError("War Dialer component has no coverage manifest.")
+        return
+    if (not isinstance(metadata, dict) or metadata.get("version") != 1
+            or not isinstance(metadata.get("worlds"), list) or not 1 <= len(metadata["worlds"]) <= _WAR_DIALER_MAX_WORLDS
+            or not root.is_dir() or root.is_symlink()):
+        raise BackupError("Invalid War Dialer coverage manifest.")
+    owner = _war_dialer_owner(source / _database_filename_from_manifest(manifest))
+    if metadata.get("owner") != owner or owner is None:
+        raise BackupError("War Dialer component owner does not match the node database snapshot.")
+    expected = set()
+    for index, world in enumerate(metadata["worlds"], 1):
+        if not isinstance(world, dict) or world.get("key") != str(index):
+            raise BackupError("Invalid War Dialer world key in manifest.")
+        name = str(index) + ".db"
+        expected.add(name)
+        relative = f"{_WAR_DIALER_DIRNAME}/{name}"
+        if relative not in manifest.get("checksums", {}):
+            raise BackupError("War Dialer snapshot has no checksum.")
+        if _inspect_war_dialer(root / name, owner) != world.get("schema_version"):
+            raise BackupError("War Dialer schema does not match its manifest.")
+    if {path.name for path in root.iterdir()} != expected:
+        raise BackupError("War Dialer files do not match their coverage manifest.")
+
+
 def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
                   voidrunner_save_dir: Path | None = None) -> Path:
     """
@@ -514,6 +630,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
     checksums = {}
     try:
         game_metadata = _capture_voidrunner(game_source, destination, checksums)
+        war_metadata = _capture_war_dialer(db_path, destination, checksums)
     except BaseException as exc:
         # This call created the fresh destination; no prior backup is removed.
         # A rejected active session or bad file must allow retry at the same path.
@@ -523,7 +640,8 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
             raise BackupError(f"{exc} Incomplete backup at {destination} could not be removed: {cleanup}. "
                               "Remove it manually before retrying.") from exc
         raise
-    if game_metadata is not None and database_filename.casefold() == _VOIDRUNNER_DIRNAME:
+    if ((game_metadata is not None and database_filename.casefold() == _VOIDRUNNER_DIRNAME)
+            or (war_metadata is not None and database_filename.casefold() == _WAR_DIALER_DIRNAME)):
         # The live custom filename remains valid. Only its archive name changes;
         # the manifest and explicit restore --db already separate those paths.
         database_filename = _LEGACY_DB_FILENAME
@@ -564,7 +682,9 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         "source_identity_dir": str(identity_dir),
         "checksums": checksums,
         "voidrunner": game_metadata,
+        "war_dialer": war_metadata,
     }
+    _validate_war_dialer_component(destination, manifest)
     (destination / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2))
 
     _record_backup_state(db_path, destination)
@@ -646,6 +766,7 @@ def _validate_backup_source(source: Path, *, allow_migrate: bool) -> dict:
     db_snapshot = source / database_filename
     if not db_snapshot.exists():
         raise BackupError(f"backup is missing its database snapshot: {db_snapshot}")
+    _validate_war_dialer_component(source, manifest)
 
     for relative_name, expected_hash in manifest.get("checksums", {}).items():
         candidate = source / relative_name
@@ -847,7 +968,7 @@ def _restore_switch_plan(
         plan.append(("identity", staged_identity, identity_dir))
 
     for entry in sorted(staging_dir.iterdir()):
-        if entry.name in (*_RESERVED_BACKUP_ENTRIES, _VOIDRUNNER_DIRNAME, database_filename):
+        if entry.name in (*_RESERVED_BACKUP_ENTRIES, _VOIDRUNNER_DIRNAME, _WAR_DIALER_DIRNAME, database_filename):
             continue
         if entry.is_file():
             live_path = db_path.parent / entry.name
@@ -945,8 +1066,45 @@ def _rollback_switched(switched: list[tuple[str, Path | None, Path]], rollback_d
             rolled_back.rename(live_path)
 
 
+def _parse_war_dialer_destinations(values: list[str] | None) -> dict[str, Path] | None:
+    if values is None:
+        return None
+    result = {}
+    for value in values:
+        key, separator, path = value.partition("=")
+        if not separator or not key.isdigit() or not path.strip() or key in result:
+            raise BackupError("War Dialer destinations must be unique KEY=PATH entries.")
+        result[key] = Path(path)
+    return result
+
+
+def _war_dialer_restore_targets(source: Path, manifest: dict, destinations, protected_paths: list[Path]) -> dict[str, Path]:
+    metadata = manifest.get("war_dialer")
+    if metadata is None:
+        if destinations is not None:
+            raise BackupError("This backup has no War Dialer component; no world will be changed.")
+        return {}
+    keys = {world["key"] for world in metadata["worlds"]}
+    if isinstance(destinations, Path) and len(keys) == 1:
+        destinations = {next(iter(keys)): destinations}
+    if not isinstance(destinations, dict) or set(destinations) != keys:
+        raise BackupError("Specify --war-dialer-to KEY=PATH for every archived world: " + ", ".join(sorted(keys)))
+    result = {}
+    for key in sorted(keys):
+        target = Path(destinations[key]).expanduser().resolve()
+        for protected in [*protected_paths, *result.values()]:
+            protected = protected.resolve()
+            if target.is_relative_to(protected) or protected.is_relative_to(target):
+                raise BackupError("War Dialer restore destination overlaps another component or backup path.")
+        if target.exists():
+            _inspect_war_dialer(target, metadata["owner"])
+        result[key] = target
+    return result
+
+
 def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
-                   voidrunner_to: Path | None = None) -> Path | None:
+                   voidrunner_to: Path | None = None,
+                   war_dialer_to: Path | dict[str, Path] | None = None) -> Path | None:
     """
     Restore a backup created by `create_backup` into `db_path`/
     `identity_dir` (and their derived sibling paths) -- staged and
@@ -1006,6 +1164,15 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
             _voidrunner_files(target)  # Refuse unrelated data before any live switch.
     elif voidrunner_to is not None:
         raise BackupError("This backup has no Voidrunner component; its save directory will not be changed.")
+    war_protected = [source, db_path, identity_dir, _storage_root_for(db_path),
+                     _restore_state_path_for(db_path), _pid_file_path_for(db_path),
+                     *_extra_artifact_paths(db_path), *_runtime_reserved_paths(db_path)]
+    war_protected.extend(Path(str(db_path) + suffix) for suffix in ("-wal", "-shm", "-journal"))
+    war_protected.extend(live for _, _, live in _restore_switch_plan(
+        source, db_path, identity_dir, _database_filename_from_manifest(manifest)))
+    if target:
+        war_protected.append(target)
+    war_targets = _war_dialer_restore_targets(source, manifest, war_dialer_to, war_protected)
     if db_path.exists():
         _require_not_in_use(db_path)
     _require_node_not_running(db_path)
@@ -1020,7 +1187,22 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
     external = ({"voidrunner": {"target": str(target), "staging": str(game_stage),
                                   "rollback": str(game_rollback)}} if target else {})
 
+    war_stages = {key: path.parent / f".{path.name}.netbbs-stage-{token}" for key, path in war_targets.items()}
+    war_rollbacks = {key: path.parent / f".{path.name}.netbbs-rollback-{token}" for key, path in war_targets.items()}
+    external.update({"war-dialer-" + key: {"target": str(path), "staging": str(war_stages[key]),
+                                          "rollback": str(war_rollbacks[key])}
+                     for key, path in war_targets.items()})
+
+    def component_rollback(name):
+        if name.startswith("war-dialer-"):
+            return war_rollbacks[name.split("-")[2]]
+        return game_rollback if name == "voidrunner" else rollback_dir
+
     with contextlib.ExitStack() as leases:
+        for path in war_targets.values():
+            leases.enter_context(_war_dialer_maintenance(path))
+            if path.exists():
+                _require_not_in_use(path)
         if target:
             leases.enter_context(_voidrunner_maintenance(target))
         staging_dir.mkdir(parents=True)
@@ -1036,13 +1218,24 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
                     if _sha256_of_file(game_stage / relative) != staged_manifest["checksums"][f"voidrunner/{relative}"]:
                         raise BackupError("Voidrunner local staging checksum mismatch.")
                 plan.append(("voidrunner", game_stage, target))
+            for key, path in war_targets.items():
+                staged = war_stages[key]
+                shutil.copy2(staging_dir / _WAR_DIALER_DIRNAME / (key + ".db"), staged)
+                expected_hash = staged_manifest["checksums"][f"{_WAR_DIALER_DIRNAME}/{key}.db"]
+                if _sha256_of_file(staged) != expected_hash:
+                    raise BackupError("War Dialer local staging checksum mismatch.")
+                _inspect_war_dialer(staged, staged_manifest["war_dialer"]["owner"])
+                # Preserve a live world's WAL generation in the rollback set;
+                # it must never be replayed against the restored snapshot.
+                for suffix in ("-wal", "-shm", "-journal"):
+                    plan.append(("war-dialer-" + key + suffix, None, Path(str(path) + suffix)))
+                plan.append(("war-dialer-" + key, staged, path))
             _write_restore_state(state_path, staging_dir=staging_dir, rollback_dir=rollback_dir,
                                  pending=[name for name, _, _ in plan], external=external)
             switched = []
             for name, staged_path, live_path in plan:
-                component_rollback = game_rollback if name == "voidrunner" else rollback_dir
                 try:
-                    _switch_one(name, staged_path, live_path, component_rollback)
+                    _switch_one(name, staged_path, live_path, component_rollback(name))
                     switched.append((name, staged_path, live_path))
                     remaining = [n for n, _, _ in plan if n not in {item[0] for item in switched}]
                     _write_restore_state(state_path, staging_dir=staging_dir, rollback_dir=rollback_dir,
@@ -1052,13 +1245,21 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
                 except Exception as exc:
                     try:
                         for entry in reversed(switched):
-                            root = game_rollback if entry[0] == "voidrunner" else rollback_dir
+                            root = component_rollback(entry[0])
                             _rollback_switched([entry], root)
                     except Exception:
                         raise BackupError(f"Restore and automatic rollback failed; see {state_path} for manual recovery.") from exc
                     state_path.unlink(missing_ok=True)
                     raise BackupError(f"restore failed while switching {name!r}, automatically rolled back to "
                                       f"the previous generation: {exc}") from exc
+            if war_targets:
+                try:
+                    rollback_dir.mkdir(parents=True, exist_ok=True)
+                    (rollback_dir / "war-dialer-rollback.json").write_text(json.dumps(
+                        {name: value for name, value in external.items() if name.startswith("war-dialer-")}, indent=2))
+                except OSError as exc:
+                    raise BackupError(f"Restored data is in place, but rollback metadata could not be written; "
+                                      f"see {state_path} before restarting.") from exc
             if game_rollback and game_rollback.exists():
                 try:
                     rollback_dir.mkdir(parents=True, exist_ok=True)
@@ -1069,10 +1270,14 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
         finally:
             if not state_path.exists():
                 # On unresolved failure, retain staging named by the journal.
+                for path in war_stages.values():
+                    path.unlink(missing_ok=True)
                 for path in (staging_dir, game_stage):
                     if path is not None and path.exists():
                         shutil.rmtree(path, ignore_errors=True)
         state_path.unlink(missing_ok=True)
+        for path in war_stages.values():
+            path.unlink(missing_ok=True)
         for path in (staging_dir, game_stage):
             if path is not None and path.exists():
                 shutil.rmtree(path, ignore_errors=True)
@@ -1115,6 +1320,8 @@ def main(argv: list[str] | None = None) -> None:
                                help="Voidrunner source directory (default: service environment or home default)")
     restore_parser.add_argument("--voidrunner-to", type=Path,
                                 help="explicit destination for backed-up Voidrunner careers")
+    restore_parser.add_argument("--war-dialer-to", action="append", metavar="KEY=PATH",
+                                help="explicit destination for each War Dialer world key shown by create")
     args = parser.parse_args(argv)
 
     if args.command == "create":
@@ -1124,6 +1331,9 @@ def main(argv: list[str] | None = None) -> None:
         except BackupError as exc:
             raise SystemExit(terminal_wrapped(f"backup failed: {exc}", stream=sys.stderr)) from exc
         print_wrapped(f"Backup created at {destination}")
+        war = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("war_dialer")
+        for world in war["worlds"] if war else []:
+            print_wrapped(f"War Dialer world {world['key']}: included {world['source_path']}.")
         coverage = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("voidrunner")
         source_directory = args.voidrunner_save_dir or voidrunner_save_directory()
         if coverage is None:
@@ -1133,10 +1343,14 @@ def main(argv: list[str] | None = None) -> None:
     else:
         try:
             rollback_dir = restore_backup(source=args.source, db_path=args.db, identity_dir=args.identity_dir,
-                                          voidrunner_to=args.voidrunner_to)
+                                          voidrunner_to=args.voidrunner_to,
+                                          war_dialer_to=_parse_war_dialer_destinations(args.war_dialer_to))
         except BackupError as exc:
             raise SystemExit(terminal_wrapped(f"restore failed: {exc}", stream=sys.stderr)) from exc
         print_wrapped(f"Restored {args.source} into {args.db} / {args.identity_dir}")
+        if args.war_dialer_to:
+            print_wrapped("War Dialer restored. MANUAL: configure each restored door's world path before restarting; "
+                          "the source service must remain stopped. The archived node owns these user IDs.")
         if args.voidrunner_to is not None:
             print_wrapped(f"Voidrunner restored to {args.voidrunner_to.resolve()}. MANUAL: configure the restored service's "
                           "VOIDRUNNER_SAVE_DIR to this directory before restarting.")

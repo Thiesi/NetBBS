@@ -11,6 +11,7 @@ import codecs
 import json
 import logging
 import os
+import secrets
 import shutil
 import signal
 import sys
@@ -45,11 +46,19 @@ class DoorRunResult:
     diagnostic: str = ""
 
 
-def _write_door_info(db, workdir, session, player):
+def _write_door_info(db, workdir, session, player, war_dialer=False):
     info = {"handle": player.username, "user_id": player.id,
             "terminal_width": session.terminal_width, "terminal_height": session.terminal_height,
             "color_depth": "truecolor" if effective_truecolor(session, db, player) else "256",
             "node_name": session.node_display_name}
+    if war_dialer:
+        # An opaque namespace belongs to the node database and survives its backup.
+        # It is not a credential and does not depend on a mutable display name.
+        db.connection.execute("INSERT OR IGNORE INTO node_config (key, value) VALUES (?, ?)",
+                              ("war_dialer_owner", secrets.token_hex(16)))
+        db.connection.commit()
+        info["war_dialer_owner"] = db.connection.execute(
+            "SELECT value FROM node_config WHERE key='war_dialer_owner'").fetchone()[0]
     path = workdir / "door_info.json"
     path.write_text(json.dumps(info), encoding="utf-8")
     return path
@@ -281,7 +290,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
             # Small local lock operation; no await that could lose an acquired lease on cancellation.
             lease = NodeLease(root, identity, profile.max_sessions)
         workdir = Path(tempfile.mkdtemp(prefix="netbbs-door-"))
-        info_path = await lane.run(_write_door_info, workdir, session, player)
+        info_path = await lane.run(_write_door_info, workdir, session, player, world_path is not None)
         info = json.loads(info_path.read_text(encoding="utf-8"))
         width = profile.width if profile and profile.width else session.terminal_width
         height = profile.height if profile and profile.height else session.terminal_height
