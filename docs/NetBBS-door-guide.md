@@ -18,8 +18,11 @@ The 24-hour turn window starts when its first turn is spent. Login and browsing
 do not start it; Heat and turns refresh when the menu redraws or an action is
 attempted. If you waited at a zero-turn screen until refill, an action key can
 use the refreshed allowance. Clock rollback freezes time-based benefits until the
-last observed time is reached again. If the season changes during a visit,
-reconnect before taking another action.
+last observed time is reached again. At a season change, every crew and exchange
+resets together, including dormant players. An old selection costs nothing and
+the refreshed menu announces the new season; review your resources and continue
+without reconnecting. Original account age is retained, so veterans do not receive
+another newcomer grace period. Skipped seasons do not carry old wealth forward.
 
 Exchange earnings become spendable on login, menu refresh and committed actions.
 Frequent visits retain fractional dollars instead of losing them. Losing an

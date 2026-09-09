@@ -284,8 +284,17 @@ idle zero-turn screen so the transaction can recognize a refill.
 An exchange can carry a later clock than the actor after a server clock correction.
 Settle the actor through that exchange time before applying capture Heat and use
 the actor's final timestamp for a new allowance anchor. Login/action season checks
-must respect the persisted exchange season, not just recompute from a regressed
-wall clock. Whole-world dormant-player rollover is still a separate boundary.
+must respect the persisted world season, not just recompute from a regressed
+wall clock.
+
+World rollover uses the action/read transaction's write lock. Reset all older
+players and exchanges before writing active_season in meta; archive snapshots
+must eventually precede those resets under the same lock. Preserve existing
+current-season rows when adopting a mixed legacy world. Resource/board/rival
+reads trigger settlement, while read_player and list_exchanges stay raw storage
+reads for transaction orchestration and independent observers. An old snapshot
+cannot authorize a new-season action. If that action rejects, its rollover is
+rolled back with it; the next ordinary refresh commits and announces the reset.
 
 Income uses integer rate-times-elapsed-microsecond units, with 3,600,000,000
 units per dollar. Persist the remainder on the player, not an exchange whose

@@ -703,3 +703,62 @@ def test_extended_x10_mouse_encoding_stops_without_spending_a_turn(tmp_path, sta
         assert process.wait(timeout=5) == 1
         assert b"Unsupported mouse encoding" in output
         assert process.stderr.read() == b""
+
+
+def test_open_session_can_continue_after_season_refresh(tmp_path, monkeypatch):
+    path = tmp_path / 'season-world.db'
+    now = wd.now_utc()
+    conn = wd.connect(path)
+    wd.ensure_schema(conn)
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 0, 'Guest', now, 1)
+    wd.load_or_create_player(conn, 1, 'Dormant', now, 1)
+    conn.execute('UPDATE players SET cash=50000 WHERE user_id=1')
+    conn.close()
+    clock = [now]
+    choices = iter(('C', 'C', 'Q'))
+
+    def choose(valid):
+        choice = next(choices)
+        if clock[0] == now:
+            clock[0] += wd.SEASON
+        assert choice in valid
+        return choice
+
+    class Output(io.StringIO):
+        def reconfigure(self, **kwargs):
+            pass
+
+    output = Output()
+    monkeypatch.setattr(wd.sys, 'stdout', output)
+    monkeypatch.setattr(wd, '_load_door_info', lambda: {'user_id': 0, 'handle': 'Guest'})
+    monkeypatch.setattr(wd, '_resolve_db_path', lambda: path)
+    monkeypatch.setattr(wd, 'now_utc', lambda: clock[0])
+    monkeypatch.setattr(wd, 'read_menu_choice', choose)
+    assert wd.main() == 0
+    conn = wd.connect(path)
+    player = wd.read_player(conn, 0)
+    assert (player.season_number, player.cash, player.crew, player.turns_used) == (2, 225, 4, 1)
+    assert wd.read_player(conn, 1).cash == wd.STARTING_CASH
+    assert 'Season changed.' in output.getvalue()
+    assert 'season 2 has started' in output.getvalue()
+    conn.close()
+
+
+def test_board_read_rolls_world_before_displaying_ownership(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / 'board-season.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 1, 'OldBoss', now, 1)
+    conn.execute('UPDATE exchanges SET controller_user_id=1, garrison=30')
+    lines = []
+    monkeypatch.setattr(wd, 'out_line', lambda text='': lines.append(text))
+    monkeypatch.setattr(wd, 'now_utc', lambda: now + wd.SEASON)
+    wd.draw_board(wd.Palette(False), conn, 78)
+    assert wd.read_player(conn, 1).season_number == 2
+    assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
+    assert 'OldBoss' not in ''.join(lines)
+    conn.close()
