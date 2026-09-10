@@ -4782,11 +4782,19 @@ best remembered lead when one exists. Counts in prose are pluralised.
 
 Contract details state only the notes that apply (issue #412): the cargo-basis
 note when cargo of that commodity is already aboard, the crew-wage note when crew
-is aboard, the survey note for survey contracts, and the unknown-danger note when
-a leg is uncharted; the general reminders live in the Pilot Guide. An offer's
-earlier pages say where Accept is instead of hiding it. One-page screens drop
-Prev/Next from their action bar but keep the page counter. Market rows carry no
-filler status word, and the exchange reminder appears once in the catalog.
+is aboard, the survey note for survey contracts whose target is still uncharted,
+and the unknown-danger note when a leg is uncharted; the general reminders live
+in the Pilot Guide. A blocked survey says only that revisiting cannot complete
+it, because scanning cannot complete it either. Every offer's earlier pages say
+where Accept is instead of hiding it, First Flight included. One-page screens
+drop Prev/Next from their action bar but keep the page counter, and a screen is
+paginated against the bar it will actually show, so dropping the tokens can be
+what makes it a single page. Market rows carry no filler status word, the
+exchange reminder appears once in the catalog, and a row that would overflow the
+terminal gives up its depth figures first and its hold count only as a last
+resort -- never a truncated word -- so a tagged contraband row still reads as
+one row, and a terminal too narrow for even the shortest form keeps the whole
+row and wraps it.
 
 A hop's narration is retained for the next deck page (issue #410): departure
 costs and events, discoveries, encounter and combat outcomes, customs results,
