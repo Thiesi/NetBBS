@@ -1028,8 +1028,11 @@ fee and limit notices, page with **[N] Next / [P] Previous**, and select a numbe
 entry for details. Complete labels stay together or use a read-through view;
 inspection returns to the same list page. **[B] Back** leaves the exchange.
 
-Order drafts and existing orders use **[<] Previous / [>] Next**. Quantity and term
-edits remain unsaved until **[S] Sign** and its final confirmation. Invalid quantity
+Order drafts and existing orders use **[<] Previous / [>] Next**. The draft shows
+the station's stock and what remains after the order; an order larger than the
+stock cannot be signed, and signing reserves those units from spot stock until
+pickup or cancellation. Quantity and term edits remain unsaved until **[S] Sign**
+and its final confirmation. Invalid quantity
 input retains the draft; Back discards it. Modern-order cancellation remains an
 explicit **[X] Cancel** with a final refund/fee confirmation. Existing legacy terms
 remain visible. Signed/cancelled results are saved before display and retained when

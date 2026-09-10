@@ -4730,6 +4730,14 @@ before rescue decides whether the pilot is stranded. Missing legacy pickup keys
 stay absent on serialization; explicit nulls are malformed new metadata.
 Do not settle by the old origin merely because departure increments the day.
 Per-unit integer fee rounding prevents split orders from avoiding the fee.
+New orders reserve their quantity from the origin's stock pool through the same
+`_consume_market_depth` call the spot path uses and record it in the additive
+`reserved` field; cancellation releases it at the origin (not the current
+station) through `_release_market_depth`, bounded by the pool ceiling, and
+settlement must not touch the pool. Absent `reserved` means an order signed
+before reservation existed; the validator rejects `reserved` on legacy orders
+and outside `0..quantity`. Any future purchase path that bypasses
+`market_depth` reopens the volume exploit that depth was added to close.
 
 Voidrunner contract views must remain read-only, including pagination and Back.
 Keep estimates in pure domain helpers; do not query hidden remote market prices
