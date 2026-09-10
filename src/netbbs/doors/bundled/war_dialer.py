@@ -2334,6 +2334,7 @@ def resolve_garrison(conn: sqlite3.Connection, player: Player, exchange_id: int,
 def draw_title(p: Palette, info: dict, season_number: int, w: int) -> None:
     if p.fast:
         out_line(f"WAR DIALER - Season {season_number}")
+        out_line(f"Node: {info.get('node_name', 'NetBBS')}; Handle: {info.get('handle', 'Guest')}")
         return
     out_line()
     out_line(decor(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}"))
@@ -2829,7 +2830,7 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
              "Owning either linked neighbor discounts a capture attempt by $10. All sites remain attackable. [G]arrison opens owner services."]
     for exchange in exchanges:
         if not p.fast:
-            lines.append(ROLE_ART[exchange.role])
+            lines.append(f"#{exchange.id} " + ROLE_ART[exchange.role])
         owner = exchange_owner(exchange)
         lines += [f"#{exchange.id} {exchange.name} - {exchange_terms(exchange)[0]}",
                   f"Owner: {owner}; garrison {exchange.garrison}; security +{exchange_defense(exchange)-exchange.garrison}; total defense {exchange_defense(exchange)}; ${exchange.income_per_hour}/hour",

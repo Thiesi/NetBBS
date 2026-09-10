@@ -2340,10 +2340,11 @@ def test_fast_mode_skips_only_optional_flavor_and_art(tmp_path, monkeypatch):
     wd.load_or_create_player(conn, 1, 'Caller', now, 1)
     palette.fast = False
     wd.show_territory(palette, conn, 40, 12, viewer_id=1)
-    assert all(art in rendered[-1][1] for art in wd.ROLE_ART.values())
+    for exchange in wd.list_exchanges(conn):
+        assert f'#{exchange.id} ' + wd.ROLE_ART[exchange.role] in rendered[-1][1]
     palette.fast = True
     wd.show_territory(palette, conn, 40, 12, viewer_id=1)
-    assert not any(art in rendered[-1][1] for art in wd.ROLE_ART.values())
+    assert not any(line.endswith(art) for line in rendered[-1][1] for art in wd.ROLE_ART.values())
     assert any('Owner:' in line for line in rendered[-1][1])
     conn.close()
 
@@ -2384,4 +2385,7 @@ def test_fast_goodbye_retains_rank_without_a_decorative_frame(tmp_path, monkeypa
     monkeypatch.setattr(wd, 'out_line', lines.append)
     wd.draw_goodbye(palette, actor, 20)
     assert lines == ['Carrier lost. Rank 0 - Newbie']
+    lines.clear()
+    wd.draw_title(palette, {'node_name': 'TestNode', 'handle': 'Caller'}, 2, 20)
+    assert lines == ['WAR DIALER - Season 2', 'Node: TestNode; Handle: Caller']
     conn.close()
