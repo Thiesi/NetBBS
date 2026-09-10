@@ -5191,6 +5191,24 @@ refusal retaliation, random one-unit cargo sacrifice and patrol surrender terms
 are visible before choosing an action. Existing action hotkeys work across pages;
 browsing preserves encounter RNG and resumable state.
 
+Destruction charges a salvage fee of 200 credits plus four per point of maximum
+hull, capped at credits on hand so it never creates debt; it loses all cargo and
+tows the ship to Freeport (issue #402). A fee paid in full restores full hull; a
+pilot who cannot pay it all gets a quarter of maximum hull plus the paid fraction
+of the rest, which stays below full hull until the whole fee is paid, so an
+empty account buys a flyable ship rather than a repair. That floor never rises
+above the hull the ship carried into the fight: the tug patches, it never
+upgrades, so a wreck cannot hand a broke pilot hull the yard would have charged
+for. The fee is always dearer than repairing before the fight, so losing is
+never the cheapest repair at any balance.
+A Concord patrol collects the outstanding notoriety fine on top of the salvage
+fee and closes the file only when both are paid; an unpaid fine leaves the
+wanted status standing, and a raider kill never touches notoriety. Surrender
+therefore remains the cheaper way out of a wanted status at every notoriety
+level, because it costs the fine alone and keeps the cargo. The combat page
+names the fee beside its low-hull warning, the Info view states both rules and
+the fine a patrol will collect, and the deck's critical-hull line names the fee.
+
 Voidrunner offers saved display presets from station Display Options: full palette
 using the existing terminal color depth, basic 16-color, monochrome Unicode, and
 plain text with ASCII artwork. Monochrome/plain suppress ANSI styling; plain maps
