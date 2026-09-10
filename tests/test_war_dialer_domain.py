@@ -1975,3 +1975,18 @@ def test_newcomer_can_capture_defended_territory_at_ten_percent_floor(db_path):
     assert 'Success: 10%' in '\n'.join(preview)
     assert wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom(.099))[0]
     conn.close()
+
+
+@pytest.mark.parametrize('count', [9, 20])
+def test_economy_upgrade_preserves_worlds_requiring_exchange_count_repair(db_path, count):
+    conn, now, _, _ = _rivals(db_path)
+    _downgrade_economy_fixture(conn)
+    if count == 9:
+        conn.execute('DELETE FROM exchanges WHERE id=10')
+    else:
+        conn.execute('INSERT INTO exchanges (name, income_per_hour, controller_user_id, garrison, controlled_since, income_collected_at, season_number) SELECT name, income_per_hour, controller_user_id, garrison, controlled_since, income_collected_at, season_number FROM exchanges')
+    before = list(conn.iterdump())
+    with pytest.raises(wd.WorldStateError, match='exchange count'):
+        wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
+    conn.close()
