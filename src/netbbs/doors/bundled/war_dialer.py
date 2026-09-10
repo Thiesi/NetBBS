@@ -692,6 +692,10 @@ class Player:
     raid_shield_until: str = ""
     specialty: str = ""
     support: str = ""
+    operation_contract: int = -1
+    operation_approach: int = 1
+    operation_stage: int = 0
+    successful_operations: int = 0
 
 
 @dataclass
@@ -747,6 +751,7 @@ def rank_score(player: Player) -> int:
         + player.legacy_rank + player.control_rank
         + player.successful_raids * 25
         + player.successful_jobs * 15
+        + player.successful_operations * 30
     )
 
 
@@ -813,6 +818,8 @@ def reset_player_for_season(player: Player, season_number: int, now: datetime) -
     player.raid_shield_until = ""
     player.specialty = ""
     player.support = ""
+    clear_operation(player)
+    player.successful_operations = 0
     player.season_number = season_number
 
 
@@ -894,13 +901,16 @@ def job_terms(choice: JobChoice) -> tuple[str, int, tuple[int, int], str, int, i
     return name, difficulty, (payout[0] * percent // 100, payout[1] * percent // 100), approach, heat, loss
 
 
-def action_job(player: Player, rng: random.Random, choice: JobChoice = JobChoice()) -> tuple[str, bool, int, bool]:
+def action_job(player: Player, rng: random.Random, choice: JobChoice = JobChoice(), *, operation: bool = False) -> tuple[str, bool, int, bool]:
     name, difficulty, (lo, hi), _, heat, loss = job_terms(choice)
-    success = rng.random() < success_chance(player.crew, difficulty)
+    success = rng.random() < min(.9, success_chance(player.crew, difficulty) + (.15 if operation else 0))
     if success:
-        payout = rng.randint(lo, hi)
+        payout = rng.randint(lo * (2 if operation else 1), hi * (2 if operation else 1))
         player.cash += payout
-        player.successful_jobs += 1
+        if operation:
+            player.successful_operations += 1
+        else:
+            player.successful_jobs += 1
     else:
         payout = 20 if player.specialty == "fixers" else 0
         player.cash += payout
@@ -974,7 +984,8 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
-WORLD_SCHEMA_VERSION = 5
+WORLD_SCHEMA_VERSION = 6
+_OPERATION_COLUMNS = {"operation_contract", "operation_approach", "operation_stage", "successful_operations"}
 
 # Versioned schema contract: future additions need a new numbered migration.
 _WORLD_COLUMNS_V1 = {
@@ -999,9 +1010,12 @@ def _world_schema_version(conn: sqlite3.Connection) -> int:
 
 def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-    if not set(_WORLD_COLUMNS_V1) <= tables:
+    required_tables = dict(_WORLD_COLUMNS_V1)
+    if version >= 6:
+        required_tables["recon"] = {"viewer", "target", "handle", "cash", "crew", "observed_at", "expires_at", "season"}
+    if not set(required_tables) <= tables:
         raise WorldStateError("Unrecognized or incomplete War Dialer database. Preserve it for SysOp recovery; no replacement was created.")
-    for table, required in _WORLD_COLUMNS_V1.items():
+    for table, required in required_tables.items():
         columns = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         expected = required - {"income_remainder"} if version == 0 and table == "players" else required
         if version >= 3 and table == "players":
@@ -1010,6 +1024,8 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
             expected = expected | {"raid_shield_until"}
         if version >= 5 and table == "players":
             expected = expected | {"specialty", "support"}
+        if version >= 6 and table == "players":
+            expected = expected | _OPERATION_COLUMNS
         if not expected <= columns:
             raise WorldStateError(f"War Dialer {table} schema is incomplete. Preserve it for SysOp recovery; no replacement was created.")
 
@@ -1073,6 +1089,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     fresh.execute("PRAGMA user_version=4")
                     _migrate_world_v5(fresh)
                     fresh.execute("PRAGMA user_version=5")
+                    _migrate_world_v6(fresh)
+                    fresh.execute("PRAGMA user_version=6")
             finally:
                 fresh.close()
             try:
@@ -1128,6 +1146,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if version < 5:
             _migrate_world_v5(conn)
             conn.execute("PRAGMA user_version=5")
+        if version < 6:
+            _migrate_world_v6(conn)
+            conn.execute("PRAGMA user_version=6")
         _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
 
 
@@ -1269,6 +1290,15 @@ def _migrate_world_v3(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE exchanges SET income_per_hour=? WHERE id=?", (rate, row[0]))
 
 
+def _migrate_world_v6(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE players ADD COLUMN operation_contract INTEGER NOT NULL DEFAULT -1 CHECK (operation_contract BETWEEN -1 AND 4)")
+    conn.execute("ALTER TABLE players ADD COLUMN operation_approach INTEGER NOT NULL DEFAULT 1 CHECK (operation_approach BETWEEN 0 AND 2)")
+    conn.execute("ALTER TABLE players ADD COLUMN operation_stage INTEGER NOT NULL DEFAULT 0 CHECK (operation_stage BETWEEN 0 AND 2)")
+    conn.execute("ALTER TABLE players ADD COLUMN successful_operations INTEGER NOT NULL DEFAULT 0 CHECK (successful_operations >= 0)")
+    conn.execute("CREATE TABLE recon (viewer INTEGER NOT NULL, target INTEGER NOT NULL, handle TEXT NOT NULL, cash INTEGER NOT NULL, crew INTEGER NOT NULL, observed_at TEXT NOT NULL, expires_at TEXT NOT NULL, season INTEGER NOT NULL, PRIMARY KEY (viewer, target))")
+    conn.execute("CREATE INDEX recon_recent ON recon(viewer, observed_at DESC, target)")
+
+
 def _migrate_world_v5(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE players ADD COLUMN specialty TEXT NOT NULL DEFAULT '' CHECK (specialty IN ('', 'phreakers', 'fixers', 'lookouts'))")
     conn.execute("ALTER TABLE players ADD COLUMN support TEXT NOT NULL DEFAULT '' CHECK (support IN ('', 'burner', 'stash'))")
@@ -1395,6 +1425,8 @@ def _settle_world(conn: sqlite3.Connection, now: datetime) -> int:
         (str(season),),
     )
     conn.execute("DELETE FROM meta WHERE key LIKE 'exchange_withdrawal:%'")
+    if _world_schema_version(conn) >= 6:
+        conn.execute("DELETE FROM recon WHERE season < ?", (season,))
     return season
 
 
@@ -1421,6 +1453,10 @@ def _row_to_player(row: sqlite3.Row) -> Player:
         raid_shield_until=row["raid_shield_until"] if "raid_shield_until" in row.keys() else "",
         specialty=row["specialty"] if "specialty" in row.keys() else "",
         support=row["support"] if "support" in row.keys() else "",
+        operation_contract=row["operation_contract"] if "operation_contract" in row.keys() else -1,
+        operation_approach=row["operation_approach"] if "operation_approach" in row.keys() else 1,
+        operation_stage=row["operation_stage"] if "operation_stage" in row.keys() else 0,
+        successful_operations=row["successful_operations"] if "successful_operations" in row.keys() else 0,
     )
 
 
@@ -1453,6 +1489,10 @@ def _save_player(conn: sqlite3.Connection, player: Player) -> None:
     if _world_schema_version(conn) >= 5:
         conn.execute("UPDATE players SET specialty=?, support=? WHERE user_id=?",
                      (player.specialty, player.support, player.user_id))
+
+    if _world_schema_version(conn) >= 6:
+        conn.execute("UPDATE players SET operation_contract=?, operation_approach=?, operation_stage=?, successful_operations=? WHERE user_id=?",
+                     (player.operation_contract, player.operation_approach, player.operation_stage, player.successful_operations, player.user_id))
 
 
 _INCOME_UNITS_PER_DOLLAR = 3_600_000_000  # microseconds per hour
@@ -1567,7 +1607,7 @@ def assigned_crew(conn: sqlite3.Connection, user_id: int) -> int:
 
 
 def actor_preview_state(player: Player) -> tuple:
-    return (player.cash, player.crew, player.turns_used, player.season_number, rank_score(player), player.specialty, player.support)
+    return (player.cash, player.crew, player.turns_used, player.season_number, rank_score(player), player.specialty, player.support, operation_state(player))
 
 
 @contextmanager
@@ -1620,6 +1660,94 @@ def resolve_recruit(conn: sqlite3.Connection, player: Player, now: datetime, *, 
         if not action_recruit(actor):
             raise ActionRejected(f"Not enough cash (need ${RECRUIT_COST}). No resources spent.")
     return True
+
+
+def operation_state(player: Player) -> tuple[int, int, int]:
+    return player.operation_contract, player.operation_approach, player.operation_stage
+
+
+def clear_operation(player: Player) -> None:
+    player.operation_contract, player.operation_approach, player.operation_stage = -1, 1, 0
+
+
+def operation_block_reason(player: Player, step: str) -> str | None:
+    expected = {"case": 0, "prepare": 1, "execute": 2}
+    if step not in expected or player.operation_stage != expected[step]:
+        return "Operation progress changed. Review your operation; nothing spent."
+    if step == "prepare" and player.cash < 50:
+        return f"Preparation needs ${50 - player.cash} more cash. Your casing is retained."
+    return action_block_reason("operation", player)
+
+
+def resolve_operation(conn: sqlite3.Connection, player: Player, now: datetime, step: str,
+                      rng: random.Random, *, choice: JobChoice | None = None,
+                      require_preview: bool = False, delta: ActionDelta | None = None):
+    result = None
+    with _action_player(conn, player, now, require_preview=require_preview, delta=delta) as (actor, _):
+        if reason := operation_block_reason(actor, step):
+            raise ActionRejected(reason)
+        if step == "case":
+            if choice is None:
+                raise ActionRejected("Select a contract and approach first; nothing spent.")
+            job_terms(choice)
+            actor.operation_contract, actor.operation_approach = choice.contract, choice.approach
+            actor.operation_stage = 1
+        elif step == "prepare":
+            actor.cash -= 50
+            actor.operation_stage = 2
+        else:
+            result = action_job(actor, rng, JobChoice(actor.operation_contract, actor.operation_approach), operation=True)
+            if result[1]:
+                clear_operation(actor)
+            else:
+                actor.operation_stage = 1
+    return result
+
+
+def abandon_operation(conn: sqlite3.Connection, player: Player, now: datetime) -> None:
+    with _write_transaction(conn):
+        _settle_world(conn, now)
+        actor = read_player(conn, player.user_id)
+        if actor.season_number != player.season_number or operation_state(actor) != operation_state(player):
+            raise ActionRejected("Operation changed. Review it before abandoning.")
+        clear_operation(actor)
+        _save_player(conn, actor)
+    player.__dict__.update(actor.__dict__)
+
+
+def resolve_recon(conn: sqlite3.Connection, player: Player, target_id: int, now: datetime,
+                  *, require_preview: bool = False, delta: ActionDelta | None = None) -> dict:
+    with _action_player(conn, player, now, require_preview=require_preview, delta=delta) as (actor, at):
+        if target_id == actor.user_id:
+            raise ActionRejected("Choose a rival for recon; nothing spent.")
+        row = conn.execute("SELECT * FROM players WHERE user_id=?", (target_id,)).fetchone()
+        if row is None:
+            raise ActionRejected("Rival is no longer available; nothing spent.")
+        target = _row_to_player(row)
+        if target.season_number != actor.season_number:
+            raise ActionRejected("Rival belongs to another season; nothing spent.")
+        settled = settle_player_clocks(target, at)
+        target.cash += _collect_exchange_income(conn, target, settled)
+        _save_player(conn, target)
+        values = (actor.user_id, target.user_id, target.handle, target.cash, target.crew, to_iso(at), to_iso(at + DAY), actor.season_number)
+        conn.execute("DELETE FROM recon WHERE viewer=? AND target=?", (actor.user_id, target.user_id))
+        conn.execute("INSERT INTO recon VALUES (?,?,?,?,?,?,?,?)", values)
+        conn.execute("DELETE FROM recon WHERE viewer=? AND target NOT IN (SELECT target FROM recon WHERE viewer=? ORDER BY observed_at DESC, rowid DESC LIMIT 10)", (actor.user_id, actor.user_id))
+        dossier = dict(zip(("viewer", "target", "handle", "cash", "crew", "observed_at", "expires_at", "season"), values))
+    return dossier
+
+
+def read_dossiers(conn: sqlite3.Connection, user_id: int, now: datetime) -> list[dict]:
+    with _write_transaction(conn):
+        season = _settle_world(conn, now)
+        return [dict(row) for row in conn.execute("SELECT * FROM recon WHERE viewer=? AND season=? AND expires_at>? ORDER BY observed_at DESC, rowid DESC LIMIT 10", (user_id, season, to_iso(now)))]
+
+
+def dossier_lines(dossier: dict) -> list[str]:
+    return [f"Last-known intelligence: {dossier['handle']}",
+            f"Cash ${dossier['cash']:,}; available crew {dossier['crew']:,} when observed.",
+            "Observed " + from_iso(dossier['observed_at']).strftime("%Y-%m-%d %H:%M UTC") + "; expires " + from_iso(dossier['expires_at']).strftime("%Y-%m-%d %H:%M UTC"),
+            "A snapshot, not live resources. The rival may have acted or suffered losses since."]
 
 
 def crew_item(choice: CrewChoice) -> tuple[str, str, int, str]:
@@ -1682,7 +1810,7 @@ def list_exchanges(conn: sqlite3.Connection) -> list[Exchange]:
 
 
 # Keep the standings expression aligned with rank_score; ties use stable account IDs.
-_RANK_SQL = f"(crew_recruited_total*10 + exchanges_taken_total*{CAPTURE_RANK} + legacy_rank + control_rank + successful_raids*25 + successful_jobs*15)"
+_RANK_SQL = f"(crew_recruited_total*10 + exchanges_taken_total*{CAPTURE_RANK} + legacy_rank + control_rank + successful_raids*25 + successful_jobs*15 + successful_operations*30)"
 PLAYER_PAGE_SIZE = 10
 
 
@@ -2088,6 +2216,7 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
         lines.append("Raid shield ends: " + expires.strftime("%Y-%m-%d %H:%M UTC"))
     lines.append("Exchange territory is always contestable.")
     lines.append(f"Season {player.season_number} ends in {countdown(state.season_ends_at - now)}")
+    lines.append(f"[O]Operations/recon: {'none active' if not player.operation_stage else JOBS[player.operation_contract][0] + (' - cased' if player.operation_stage == 1 else ' - prepared')}")
     lines.append(f"[S]Skills/support: {player.specialty or 'untrained'}; {player.support or 'empty slot'}")
     lines.append("Season end: " + state.season_ends_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
     return lines
@@ -2097,9 +2226,9 @@ def draw_dashboard(p: Palette, state: DashboardState, now: datetime, width: int,
                    height: int, page_index: int = 0) -> tuple[int, int]:
     """Render one compact command-center page with the action keys always visible."""
     width = max(1, width - 1)
-    footer_text = (["[T]rade [C]rew [J]ob [R]aid [X]Root [G]arrison [S]Kit", "[B]Rank [E]Map [V]Rivals [H]Log [?]Help [Q]uit"]
+    footer_text = (["[T]rade [C]rew [J]ob [R]aid [X]Root [G]arrison [S]Kit [O]Ops", "[B]Rank [E]Map [V]Rivals [H]Log [?]Help [Q]uit"]
                    if width >= 39 else
-                   ["[T]rade [C]rew", "[J]ob [R]aid [S]Kit", "[X]Root [G]Defense", "[B]Rank [E]Map", "[V]Rivals [H]Log", "[?]Help [Q]uit"])
+                   ["[T]rade [C]rew", "[J]ob [R]aid [S]Kit", "[X]Root [G]Defense", "[B]Rank [E]Map", "[V]Rivals [H]Log", "[O]Ops [?] [Q]uit"])
     footer = [line for text in footer_text + ["[N]ext [P]rev"] for line in _event_wrap(text, width)]
     body_rows = max(1, height - len(footer) - 2)  # heading and prompt
     lines = [line for text in dashboard_lines(state, now) for line in _event_wrap(text, width)]
@@ -2175,6 +2304,7 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "First visit: inspect Map, compare a Root preview for unclaimed territory, or Trade to fund Crew recruitment. Back always cancels a preview.",
         f"Each action costs one of {TURNS_PER_DAY} turns. The rolling 24-hour window starts with your first action.",
         "[T]rade Warez: quick cash. [C]rew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
+        "[O]Ops: resume one three-step operation, buy rival recon, or read your latest ten 24-hour dossiers. Steps cost turns; browsing and reconnecting never reroll outcomes.",
         "[S]Kit: train one crew specialty or buy one consumable support item. Each costs cash and one turn; preview before Act. Both reset each season.",
         "[J]obs: choose one of five repeatable contracts, then Cautious, Standard or Bold. Exact odds and stakes appear before Act. Offers stay fixed; browsing and reconnecting do not reroll them.",
         "Cautious pays less with lower Heat and no ordinary failure crew loss. Bold pays more with higher Heat. A bust can still cost cash and available crew with any approach. Harder contracts pay more as your crew grows.",
@@ -2259,7 +2389,7 @@ def action_block_reason(action: str, player: Player) -> str | None:
     return " ".join(reasons) or None
 
 
-def action_preview_lines(action: str, player: Player, target: Player | Exchange | JobChoice | CrewChoice | None = None) -> list[str]:
+def action_preview_lines(action: str, player: Player, target: Player | Exchange | JobChoice | CrewChoice | None = None, *, operation: bool = False) -> list[str]:
     cost = crew_item(target)[2] if action == "crew" else RECRUIT_COST if action == "recruit" else ROOT_EXCHANGE_COST if action == "root" else 0
     lines = [f"Season {player.season_number}; turns {TURNS_PER_DAY - player.turns_used}/{TURNS_PER_DAY}; cash ${player.cash:,}",
              f"Cost: 1 turn, ${cost} cash. Back spends nothing."]
@@ -2281,10 +2411,15 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
         lines.append("Guaranteed +1 crew and +10 Rank. No Heat or bust roll.")
     elif action == "job":
         name, difficulty, (lo, hi), approach, _, loss = job
+        odds = min(.9, success_chance(player.crew, difficulty) + (.15 if operation else 0))
+        if operation:
+            lo, hi = lo * 2, hi * 2
+        award = 30 if operation else 15
         lines += [f"Contract: {name}; approach: {approach}.",
-                  f"Success: {success_chance(player.crew, difficulty):.1%}; difficulty {difficulty}, available crew {player.crew}.",
-                  f"Success pays ${lo}-${hi} and +15 Rank before any bust.",
+                  f"Success: {odds:.1%}; difficulty {difficulty}, available crew {player.crew}.",
+                  f"Success pays ${lo}-${hi} and +{award} Rank before any bust.",
                   f"Failure loses {min(loss, player.crew - 1)} available crew before any bust; no cash penalty.",
+                  "Operation failure retains casing; pay to Prepare again before another Execute." if operation else
                   "Repeatable fixed contract: inspecting or reconnecting cannot reroll offers."]
     elif action == "raid":
         lines += [f"Rival: {target.handle}", "Success odds unknown (10%-90%): rival crew strength is private.",
@@ -2330,7 +2465,12 @@ def confirm_action(p: Palette, conn: sqlite3.Connection, player: Player, action:
     refreshed = refresh_player(conn, player.user_id, now_utc())
     update_display_player(p, player, refreshed, width, height)
     available = (crew_block_reason(player, target) if action == "crew" else action_block_reason(action, player)) is None
-    return show_text_pages(p, action.upper() + " PREVIEW", action_preview_lines(action, player, target),
+    lines = action_preview_lines(action, player, target)
+    if action == "raid":
+        for dossier in read_dossiers(conn, player.user_id, now_utc()):
+            if dossier["target"] == target.user_id:
+                lines += dossier_lines(dossier)
+    return show_text_pages(p, action.upper() + " PREVIEW", lines,
                            width, height, accept=available) == "A"
 
 
@@ -2427,6 +2567,117 @@ def do_trade_warez(p: Palette, conn: sqlite3.Connection, player: Player, now: da
     gain, busted = resolve_trade_warez(conn, player, now_utc(), rng, require_preview=True, delta=delta)
     show_action_result(p, [f"You move some warez on the boards. Gross payout ${gain}."], delta, busted, w, height)
     return True
+
+
+def operation_preview_lines(player: Player, step: str, choice: JobChoice) -> list[str]:
+    name, _, _, approach, _, _ = job_terms(choice)
+    lines = [f"Operation: {name} ({approach}).",
+             "Case: 1 turn. Prepare: 1 turn and $50. Execute: 1 turn; +15 percentage points odds (90% cap), double payout, +30 Rank on success.",
+             "Progress survives visits. Failure keeps casing; Prepare and Execute are needed to retry. Free abandon forfeits progress and refunds nothing."]
+    if step == "execute":
+        lines += action_preview_lines("job", player, choice, operation=True)
+    else:
+        lines += [f"This step: {step.title()}, 1 turn and ${50 if step == 'prepare' else 0}.",
+                  "No Heat, bust roll or support consumption. Execution stakes:"]
+        lines += action_preview_lines("job", player, choice, operation=True)[2:]
+    if reason := operation_block_reason(player, step):
+        lines.append("Unavailable: " + reason)
+    return lines
+
+
+def do_operation(p: Palette, conn: sqlite3.Connection, player: Player, rng: random.Random,
+                 width: int, height: int) -> bool:
+    update_display_player(p, player, refresh_player(conn, player.user_id, now_utc()), width, height)
+    if not player.operation_stage:
+        records = [([name, f"Difficulty {difficulty}; Standard payout ${lo*2}-${hi*2} on operation success.",
+                     "Case then Prepare ($50), then Execute: 3 turns total. Preview follows."], True)
+                   for name, difficulty, (lo, hi) in JOBS]
+        key = pick_record_page(p, "CASE AN OPERATION", records, width, height)
+        if key in "BQ": return False
+        contract = PICK_KEYS.index(key)
+        records = []
+        for index in range(len(JOB_APPROACHES)):
+            _, _, (lo, hi), approach, heat, loss = job_terms(JobChoice(contract, index))
+            records.append(([approach, f"Execution payout ${lo*2}-${hi*2}; base Heat +{heat}; ordinary failure loses {min(loss, player.crew-1)} crew.",
+                             "Specialty/support effects appear in the preview."], True))
+        key = pick_record_page(p, "OPERATION APPROACH", records, width, height)
+        if key in "BQ": return False
+        choice, step = JobChoice(contract, PICK_KEYS.index(key)), "case"
+    else:
+        choice = JobChoice(player.operation_contract, player.operation_approach)
+        step = "prepare" if player.operation_stage == 1 else "execute"
+        name, _, _, approach, _, _ = job_terms(choice)
+        key = pick_record_page(p, "ACTIVE OPERATION", [
+            ([f"Continue: {step.title()}", f"{name} ({approach}); {'cased' if player.operation_stage == 1 else 'prepared'}.",
+              "Progress is saved. Preview the next step before Act."], True),
+            (["Abandon", "Free; forfeits all progress with no refund. Preview before Act."], True)], width, height)
+        if key in "BQ": return False
+        if key == "2":
+            if show_text_pages(p, "ABANDON PREVIEW", [name, "Forfeit this operation and its paid preparation. No turn cost or refund. Back keeps it."], width, height, accept=True) != "A":
+                return False
+            abandon_operation(conn, player, now_utc())
+            show_text_pages(p, "OPERATION ABANDONED", ["Slot clear. No turn spent."], width, height, onboarding=True)
+            return True
+    # Do not silently switch a selected step/contract when another session acts.
+    if show_text_pages(p, step.upper() + " PREVIEW", operation_preview_lines(player, step, choice),
+                       width, height, accept=operation_block_reason(player, step) is None) != "A":
+        return False
+    delta = ActionDelta()
+    result = resolve_operation(conn, player, now_utc(), step, rng, choice=choice, require_preview=True, delta=delta)
+    if result is None:
+        lines = ["Casing saved. Next: Prepare for $50 and one turn." if step == "case" else "Preparation saved. Next: Execute for one turn."]
+        busted = False
+    else:
+        name, success, payout, busted = result
+        lines = [name, f"Operation succeeded! Gross payout ${payout}; slot clear." if success else
+                 f"Execution failed. Recovery payout ${payout}; casing retained. Prepare again before retrying."]
+    show_action_result(p, lines, delta, busted, width, height)
+    return True
+
+
+def do_recon(p: Palette, conn: sqlite3.Connection, player: Player, width: int, height: int) -> bool:
+    offset, backwards = 0, False
+    while True:
+        page = read_player_page(conn, player.user_id, now_utc(), offset)
+        update_display_player(p, player, page.player, width, height)
+        records = [([rival.handle, f"Rank {rank_score(rival)}; {raid_eligibility_reason(player, rival, now_utc())}",
+                     "Recon: 1 turn, $0, no Heat. Last-known cash/available crew for 24h; raid protection is unaffected."], True)
+                   for rival in page.entries]
+        key = pick_record_page(p, "RIVAL RECON", records, width, height,
+                               more_before=offset > 0, more_after=offset+len(page.entries) < page.total, start_last=backwards)
+        if key in "BQ": return False
+        if key in "NP":
+            backwards = key == "P"
+            offset = page.offset + (-PLAYER_PAGE_SIZE if backwards else PLAYER_PAGE_SIZE)
+            continue
+        target = page.entries[PICK_KEYS.index(key)]
+        break
+    lines = [target.handle, "Cost: 1 turn, $0. No Heat or bust roll; support is preserved.",
+             "Learn cash and available crew at commitment. The snapshot expires after 24 hours; only your latest ten rival dossiers remain. This does not remove raid protection."]
+    if reason := action_block_reason("recon", player): lines.append("Unavailable: " + reason)
+    if show_text_pages(p, "RECON PREVIEW", lines, width, height, accept=action_block_reason("recon", player) is None) != "A":
+        return False
+    delta = ActionDelta()
+    dossier = resolve_recon(conn, player, target.user_id, now_utc(), require_preview=True, delta=delta)
+    show_action_result(p, dossier_lines(dossier), delta, False, width, height)
+    return True
+
+
+def do_operations_hub(p: Palette, conn: sqlite3.Connection, player: Player, rng: random.Random,
+                      width: int, height: int) -> bool:
+    update_display_player(p, player, refresh_player(conn, player.user_id, now_utc()), width, height)
+    key = pick_record_page(p, "OPERATIONS / RECON", [
+        (["PvE operation", "One saved slot. Case, Prepare, Execute; inspect saved progress for free.",
+          "Active: " + (JOBS[player.operation_contract][0] if player.operation_stage else "none")], True),
+        (["Rival recon", "One turn buys a private 24-hour cash/available-crew snapshot."], True),
+        (["Your dossiers", "Free inspection of your latest ten unexpired rival snapshots."], True)], width, height)
+    if key in "BQ": return False
+    if key == "1": return do_operation(p, conn, player, rng, width, height)
+    if key == "2": return do_recon(p, conn, player, width, height)
+    dossiers = read_dossiers(conn, player.user_id, now_utc())
+    lines = [line for dossier in dossiers for line in dossier_lines(dossier)]
+    show_text_pages(p, "YOUR DOSSIERS", lines or ["No current intelligence. Buy recon to learn a rival's resources."], width, height)
+    return False
 
 
 def do_crew(p: Palette, conn: sqlite3.Connection, player: Player, width: int, height: int) -> bool:
@@ -2668,7 +2919,7 @@ def main() -> int:
             page_index, page_count = draw_dashboard(palette, state, screen_now, w, height, page_index)
             # Always recognize action keys: a displayed zero-turn snapshot
             # may sit idle past its refill. The transaction decides allowance.
-            valid = "BEVHQ?TCJRXGSNP"
+            valid = "BEVHQ?TCJRXGSONP"
             choice = read_menu_choice(valid)
             action_now = now_utc()
             try:
@@ -2698,6 +2949,8 @@ def main() -> int:
                     do_raid(palette, conn, player, action_now, rng, w, height)
                 elif choice == "X":
                     do_root_exchange(palette, conn, player, action_now, rng, w, height)
+                elif choice == "O":
+                    do_operations_hub(palette, conn, player, rng, w, height)
                 elif choice == "S":
                     do_crew(palette, conn, player, w, height)
                 elif choice == "G":

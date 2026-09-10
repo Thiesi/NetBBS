@@ -1612,3 +1612,142 @@ def test_real_process_crew_disconnect_boundaries(tmp_path, stage):
         player = wd.read_player(conn, 0)
         assert (player.cash, player.turns_used, player.specialty) == ((150, 1, 'phreakers') if stage == 'committed' else (300, 0, ''))
         conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+def test_operations_hub_completes_three_previewed_steps_at_compact_sizes(tmp_path, monkeypatch, width, height):
+    conn = wd.connect(tmp_path / 'operations.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    monkeypatch.setattr(wd, 'read_input_key', lambda: ' ')
+    class Success:
+        def random(self): return 0
+        def randint(self, lo, hi): return lo
+    for phase in range(3):
+        calls = 0
+        def select(valid):
+            nonlocal calls
+            calls += 1
+            assert calls < 150 and wd.read_player(conn, 1).turns_used == phase
+            screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+            if 'PREVIEW' in screen: return 'A' if 'A' in valid else 'N'
+            return '1' if '1' in valid else 'N'
+        monkeypatch.setattr(wd, 'read_menu_choice', select)
+        assert wd.do_operations_hub(wd.Palette(False), conn, actor, Success(), width, height)
+    assert (actor.operation_stage, actor.successful_operations, actor.cash, actor.turns_used) == (0, 1, 334, 3)
+    text = _ANSI_RE.sub('', ''.join(written))
+    assert all(title in text for title in ('CASE PREVIEW', 'PREPARE PREVIEW', 'EXECUTE PREVIEW'))
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+def test_recon_reaches_rival_beyond_fifty_without_disclosing_resources_before_act(tmp_path, monkeypatch, width, height):
+    conn = wd.connect(tmp_path / 'recon.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    for uid in range(2, 63): wd.load_or_create_player(conn, uid, 'Rival' + str(uid), now, 1)
+    conn.execute('UPDATE players SET cash=87654321, crew=7654321 WHERE user_id=62')
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    monkeypatch.setattr(wd, 'read_input_key', lambda: ' ')
+    calls = 0
+    def select(valid):
+        nonlocal calls
+        calls += 1
+        assert calls < 1000 and wd.read_player(conn, 1).turns_used == 0
+        assert conn.execute('SELECT COUNT(*) FROM recon').fetchone()[0] == 0
+        text = ''.join(written)
+        assert '87,654,321' not in text and '7,654,321' not in text
+        screen = text.split('\x1b[2J\x1b[H')[-1]
+        if 'RECON PREVIEW' in screen: return 'A' if 'A' in valid else 'N'
+        return '1' if 'Rival62' in text and '1' in valid else 'N'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
+    assert wd.do_recon(wd.Palette(False), conn, actor, width, height)
+    dossiers = wd.read_dossiers(conn, 1, now)
+    assert len(dossiers) == 1 and dossiers[0]['target'] == 62
+    assert 'Last-known' in ''.join(written)
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()
+
+
+@pytest.mark.parametrize('keys,marker,stage,turns', [
+    ([b'o'], b'OPERATIONS / RECON', 0, 0),
+    ([b'o', b'1', b'1', b'1'], b'CASE PREVIEW', 0, 0),
+    ([b'o', b'1', b'1', b'1', b'a'], b'Casing saved.', 1, 1),
+    ([b'o', b'2', b'1'], b'RECON PREVIEW', 0, 0),
+])
+def test_real_process_recon_operation_disconnect_boundaries(tmp_path, keys, marker, stage, turns):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b'>\x1b[0m ')
+        conn = wd.connect(path)
+        now = wd.now_utc()
+        wd.load_or_create_player(conn, 2, 'Rival', now, 1)
+        conn.close()
+        for index, key in enumerate(keys):
+            send(key)
+            if index == len(keys) - 1:
+                wait_for(marker)
+            elif keys[index + 1] == b'a':
+                wait_for(b'[A]Act')
+            else:
+                wait_for(b'cancel')
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b''
+        conn = wd.connect(path)
+        player = wd.read_player(conn, 0)
+        assert (player.operation_stage, player.turns_used, player.cash) == (stage, turns, 300)
+        assert conn.execute('SELECT COUNT(*) FROM recon').fetchone()[0] == 0
+        conn.close()
+
+
+def test_operation_inspection_and_abandon_are_free_with_no_turns(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / 'free-operation.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    conn.execute('UPDATE players SET operation_contract=4, operation_approach=2, operation_stage=2, turns_used=15, turn_day_start=?', (wd.to_iso(now),))
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    def cancel(valid):
+        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        if 'ACTIVE OPERATION' in screen: return '1' if '1' in valid else 'N'
+        assert 'EXECUTE PREVIEW' in screen and 'A' not in valid
+        return 'B'
+    monkeypatch.setattr(wd, 'read_menu_choice', cancel)
+    class NoDraws:
+        def __getattr__(self, name): raise AssertionError(name)
+    before = list(conn.iterdump())
+    assert not wd.do_operation(wd.Palette(False), conn, actor, NoDraws(), 80, 24)
+    assert list(conn.iterdump()) == before
+    def abandon(valid):
+        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        if 'ACTIVE OPERATION' in screen: return '2' if '2' in valid else 'N'
+        return 'A' if 'A' in valid else 'N'
+    monkeypatch.setattr(wd, 'read_menu_choice', abandon)
+    monkeypatch.setattr(wd, 'read_input_key', lambda: ' ')
+    assert wd.do_operation(wd.Palette(False), conn, actor, NoDraws(), 80, 24)
+    assert actor.operation_stage == 0 and actor.turns_used == 15 and actor.cash == 300
+    conn.close()

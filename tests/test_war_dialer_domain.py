@@ -1351,7 +1351,7 @@ def _legacy_income_world(db_path):
     old_schema = schema.replace(addition, "")
     values = asdict(a)
     values.pop("income_remainder")
-    for column in wd._ECONOMY_COLUMNS | {"raid_shield_until", "specialty", "support"}:
+    for column in wd._ECONOMY_COLUMNS | wd._OPERATION_COLUMNS | {"raid_shield_until", "specialty", "support"}:
         values.pop(column)
     conn.execute("DROP TABLE players")
     conn.execute(old_schema)
@@ -1416,8 +1416,8 @@ def test_refused_world_is_unchanged_before_journal_setup(db_path, kind):
 
 
 def test_current_version_does_not_silently_repair_missing_columns(db_path):
-    conn, _ = _legacy_income_world(db_path)
-    conn.execute(f"PRAGMA user_version={wd.WORLD_SCHEMA_VERSION}")
+    conn, _, _, _ = _rivals(db_path)
+    conn.execute("ALTER TABLE players DROP COLUMN income_remainder")
     conn.close()
     before = db_path.read_bytes()
     with pytest.raises(wd.WorldStateError, match="players schema is incomplete"):
@@ -1838,6 +1838,7 @@ def test_process_death_releases_world_session_guard(db_path):
 
 
 def _downgrade_economy_fixture(conn):
+    _downgrade_operations_fixture(conn)
     for column in wd._ECONOMY_COLUMNS | {"raid_shield_until", "specialty", "support"}:
         conn.execute(f'ALTER TABLE players DROP COLUMN {column}')
     conn.execute('PRAGMA user_version=2')
@@ -2032,6 +2033,7 @@ def test_failed_raid_commit_rolls_back_target_shield_with_cash_event_and_turn(db
 def test_legacy_raid_protection_upgrades_once_to_one_day(db_path, monkeypatch):
     conn, now, actor, victim = _rivals(db_path)
     conn.execute('UPDATE players SET last_raided_by=1 WHERE user_id=2')
+    _downgrade_operations_fixture(conn)
     conn.execute('ALTER TABLE players DROP COLUMN specialty')
     conn.execute('ALTER TABLE players DROP COLUMN support')
     conn.execute('ALTER TABLE players DROP COLUMN raid_shield_until')
@@ -2051,6 +2053,7 @@ def test_legacy_raid_protection_upgrades_once_to_one_day(db_path, monkeypatch):
 def test_raid_upgrade_failure_preserves_original_world(db_path, monkeypatch):
     conn, now, _, _ = _rivals(db_path)
     conn.execute('UPDATE players SET last_raided_by=1 WHERE user_id=2')
+    _downgrade_operations_fixture(conn)
     conn.execute('ALTER TABLE players DROP COLUMN specialty')
     conn.execute('ALTER TABLE players DROP COLUMN support')
     conn.execute('ALTER TABLE players DROP COLUMN raid_shield_until')
@@ -2262,6 +2265,7 @@ def test_competing_support_purchases_have_one_slot_and_one_paid_turn(db_path):
 
 def test_crew_schema_upgrade_rollback_idempotence_and_season_reset(db_path):
     conn, now, actor, _ = _rivals(db_path)
+    _downgrade_operations_fixture(conn)
     conn.execute('ALTER TABLE players DROP COLUMN specialty')
     conn.execute('ALTER TABLE players DROP COLUMN support')
     conn.execute('PRAGMA user_version=4')
@@ -2307,4 +2311,174 @@ def test_specialty_switch_replaces_training_and_purchase_failure_rolls_back(db_p
     assert list(conn.iterdump()) == before and actor.specialty == 'phreakers'
     wd.resolve_crew_purchase(conn, actor, now, wd.CrewChoice('lookouts'))
     assert actor.specialty == 'lookouts' and actor.turns_used == 2 and actor.cash == 700
+    conn.close()
+
+
+
+def _downgrade_operations_fixture(conn):
+    for column in wd._OPERATION_COLUMNS:
+        conn.execute(f'ALTER TABLE players DROP COLUMN {column}')
+    conn.execute('DROP TABLE recon')
+    conn.execute('PRAGMA user_version=5')
+
+
+class NoOperationRolls:
+    def __getattr__(self, name): raise AssertionError('A planning step drew randomness: ' + name)
+
+
+@pytest.mark.parametrize('contract', range(5))
+@pytest.mark.parametrize('approach', range(3))
+def test_operation_three_steps_persist_and_award_double_contract_success(db_path, contract, approach):
+    conn, now, actor, _ = _rivals(db_path)
+    choice = wd.JobChoice(contract, approach)
+    wd.resolve_operation(conn, actor, now, 'case', NoOperationRolls(), choice=choice)
+    conn.close()
+    conn = wd.connect(db_path)
+    actor = wd.read_player(conn, 1)
+    assert wd.operation_state(actor) == (contract, approach, 1)
+    wd.resolve_operation(conn, actor, now, 'prepare', NoOperationRolls())
+    assert actor.cash == 950 and actor.operation_stage == 2
+    conn.close()
+    conn = wd.connect(db_path)
+    actor = wd.read_player(conn, 1)
+    preview = '\n'.join(wd.operation_preview_lines(actor, 'execute', choice))
+    assert '+30 Rank' in preview
+    result = wd.resolve_operation(conn, actor, now, 'execute', FixedRandom())
+    terms = wd.job_terms(choice)
+    assert result[1] and result[2] == terms[2][0] * 2
+    assert (actor.cash, actor.turns_used, actor.heat) == (950 + result[2], 3, terms[4])
+    assert actor.successful_jobs == 0 and actor.successful_operations == 1 and wd.rank_score(actor) == 30
+    assert wd.operation_state(actor) == (-1, 1, 0)
+    assert wd.read_player_page(conn, 1, now, standings=True).position == 1
+    conn.close()
+
+
+def test_operation_failure_requires_paid_preparation_and_can_abandon_without_turn(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    choice = wd.JobChoice(0, 0)
+    wd.resolve_operation(conn, actor, now, 'case', NoOperationRolls(), choice=choice)
+    wd.resolve_operation(conn, actor, now, 'prepare', NoOperationRolls())
+    assert not wd.resolve_operation(conn, actor, now, 'execute', FixedRandom(.99))[1]
+    assert wd.operation_state(actor) == (0, 0, 1) and actor.crew == 3
+    before = list(conn.iterdump())
+    for step in ('case', 'execute'):
+        with pytest.raises(wd.ActionRejected): wd.resolve_operation(conn, actor, now, step, FixedRandom(), choice=choice)
+        assert list(conn.iterdump()) == before
+    wd.resolve_operation(conn, actor, now, 'prepare', NoOperationRolls())
+    # 60% ordinary chance becomes 75%; no boost above 90%.
+    assert wd.resolve_operation(conn, actor, now, 'execute', FixedRandom(.74))[1]
+    assert actor.turns_used == 5 and actor.cash == 984
+    wd.resolve_operation(conn, actor, now, 'case', NoOperationRolls(), choice=choice)
+    before = (actor.cash, actor.turns_used, wd.rank_score(actor))
+    wd.abandon_operation(conn, actor, now)
+    assert (actor.cash, actor.turns_used, wd.rank_score(actor)) == before
+    assert actor.operation_stage == 0
+    strong = _make_player(crew=10000)
+    assert 'Success: 90.0%' in '\n'.join(wd.action_preview_lines('job', strong, choice, operation=True))
+    conn.close()
+
+
+@pytest.mark.parametrize('step', ['case', 'prepare', 'execute'])
+def test_operation_step_rollback_preserves_progress_cost_and_support(db_path, step):
+    conn, now, actor, _ = _rivals(db_path)
+    if step != 'case': wd.resolve_operation(conn, actor, now, 'case', NoOperationRolls(), choice=wd.JobChoice())
+    if step == 'execute': wd.resolve_operation(conn, actor, now, 'prepare', NoOperationRolls())
+    conn.execute("UPDATE players SET support='burner', specialty='fixers' WHERE user_id=1")
+    actor = wd.read_player(conn, 1)
+    before = list(conn.iterdump())
+    conn.execute("CREATE TRIGGER reject_operation BEFORE UPDATE ON players BEGIN SELECT RAISE(ABORT, 'step failed'); END")
+    with pytest.raises(sqlite3.IntegrityError): wd.resolve_operation(conn, actor, now, step, FixedRandom(), choice=wd.JobChoice())
+    conn.execute('DROP TRIGGER reject_operation')
+    assert list(conn.iterdump()) == before and actor.support == 'burner'
+    conn.close()
+
+
+def test_two_sessions_cannot_execute_one_preparation_twice(db_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_operation(conn, actor, now, 'case', NoOperationRolls(), choice=wd.JobChoice())
+    wd.resolve_operation(conn, actor, now, 'prepare', NoOperationRolls())
+    barrier = threading.Barrier(2)
+    def execute(_):
+        connection = wd.connect(db_path)
+        try:
+            snapshot = wd.read_player(connection, 1)
+            barrier.wait(timeout=5)
+            try:
+                wd.resolve_operation(connection, snapshot, now, 'execute', FixedRandom(), require_preview=True)
+                return True
+            except wd.ActionRejected: return False
+        finally: connection.close()
+    with ThreadPoolExecutor(2) as pool: assert sorted(pool.map(execute, range(2))) == [False, True]
+    actor = wd.read_player(conn, 1)
+    assert actor.turns_used == 3 and actor.successful_operations == 1 and actor.cash == 1070
+    conn.close()
+
+
+def test_recon_is_private_last_known_expires_and_keeps_latest_ten(db_path):
+    conn, now, actor, victim = _rivals(db_path)
+    wd.resolve_recon(conn, actor, 2, now)
+    for uid in range(3, 14):
+        wd.load_or_create_player(conn, uid, 'Rival' + str(uid), now, 1)
+        wd.resolve_recon(conn, actor, uid, now)
+    dossiers = wd.read_dossiers(conn, 1, now)
+    assert len(dossiers) == 10 and [d['target'] for d in dossiers] == list(range(13, 3, -1))
+    assert conn.execute('SELECT COUNT(*) FROM recon').fetchone()[0] == 10
+    assert wd.read_dossiers(conn, 2, now) == []
+    old = next(d for d in dossiers if d['target'] == 5)
+    conn.execute('UPDATE players SET cash=987654, crew=77 WHERE user_id=5')
+    assert next(d for d in wd.read_dossiers(conn, 1, now) if d['target'] == 5) == old
+    refreshed = wd.resolve_recon(conn, actor, 5, now)
+    assert (refreshed['cash'], refreshed['crew']) == (987654, 77)
+    assert wd.read_dossiers(conn, 1, now)[0]['target'] == 5
+    assert actor.heat == 0 and actor.turns_used == 13
+    conn.close()
+    conn = wd.connect(db_path)
+    assert len(wd.read_dossiers(conn, 1, now + wd.DAY - timedelta(microseconds=1))) == 10
+    assert wd.read_dossiers(conn, 1, now + wd.DAY) == []
+    conn.close()
+
+
+def test_recon_snapshot_settles_income_and_rolls_back_with_turn(db_path):
+    conn, now, actor, victim = _rivals(db_path)
+    _give_exchange(conn, 2, now)
+    later = now + timedelta(hours=2)
+    before = list(conn.iterdump())
+    conn.execute("CREATE TRIGGER deny_dossier BEFORE INSERT ON recon BEGIN SELECT RAISE(ABORT, 'recon failed'); END")
+    with pytest.raises(sqlite3.IntegrityError): wd.resolve_recon(conn, actor, 2, later)
+    conn.execute('DROP TRIGGER deny_dossier')
+    assert list(conn.iterdump()) == before
+    data = wd.resolve_recon(conn, actor, 2, later)
+    assert data['cash'] == wd.read_player(conn, 2).cash
+    assert data['cash'] > victim.cash
+    assert actor.turns_used == 1 and actor.successful_raids == 0
+    before = list(conn.iterdump())
+    for target in (1, 999):
+        with pytest.raises(wd.ActionRejected): wd.resolve_recon(conn, actor, target, later)
+        assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_operations_upgrade_and_season_reset_preserve_identity_not_competitive_intel(db_path):
+    conn, now, actor, victim = _rivals(db_path)
+    _downgrade_operations_fixture(conn)
+    before = list(conn.iterdump())
+    def deny_version(action, name, value, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == 'user_version' and value == '6' else sqlite3.SQLITE_OK
+    conn.set_authorizer(deny_version)
+    with pytest.raises(sqlite3.DatabaseError): wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert list(conn.iterdump()) == before
+    wd.ensure_schema(conn)
+    assert wd.read_player(conn, 1) == actor
+    wd.resolve_operation(conn, actor, now, 'case', NoOperationRolls(), choice=wd.JobChoice(4, 2))
+    wd.resolve_recon(conn, actor, 2, now)
+    before = list(conn.iterdump())
+    wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
+    reset = wd.refresh_player(conn, 1, now + wd.SEASON)
+    assert wd.operation_state(reset) == (-1, 1, 0) and reset.successful_operations == 0
+    assert reset.created_at == actor.created_at
+    assert conn.execute('SELECT COUNT(*) FROM recon').fetchone()[0] == 0
     conn.close()

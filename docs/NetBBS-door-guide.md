@@ -302,6 +302,30 @@ empty and preserves existing resources and identity. **Manual SysOp upgrade:**
 stop active War Dialer sessions and make a verified backup before activating this
 version, using the maintenance procedure above; old binaries refuse schema 5.
 
+`[O]Ops` opens saved operations, rival recon and your private dossiers. Recon
+costs one turn and no cash or Heat, revealing a rival's cash and available crew
+as they were at commitment. Only your latest ten distinct rival snapshots remain;
+each expires after 24 hours. Times and last-known labels are shown in dossiers
+and eligible raid previews. A snapshot does not guarantee current odds or remove
+raid protection. Browsing cannot refresh the intelligence without another paid
+recon action.
+
+An operation uses one saved slot: choose a contract and approach, then Case
+(one turn), Prepare (one turn and $50), and Execute (one turn). Execution adds
+15 percentage points to ordinary success odds, capped at 90%, doubles the payout
+range and awards 30 Rank on success. Its approach, specialty/support effects,
+failure losses and bust risk appear in the preview. Case and Prepare add no Heat
+and consume no support. Failure keeps the casing, but you must pay to Prepare
+again before retrying. Success clears the slot; free Abandon forfeits progress
+without refund. Progress survives leaving and reconnecting; no forced wait is
+required. Each paid step and Abandon have a final Act. Ordinary jobs remain
+available. Season reset clears operation progress, its Rank and all dossiers.
+
+Schema 6 preserves existing resources and identity while adding these records.
+**Manual SysOp upgrade:** stop active game sessions and make a verified backup
+before activating this version. Restore carries saved progress and intelligence;
+competition reset or season advance clears them. Old binaries refuse schema 6.
+
 Target pickers use digits 1-9/0, with Next/Prev and Back. Only fully displayed,
 eligible entries have active selection keys; protected rivals and your own exchanges
 show why they cannot be selected. Raid selection reaches every crew through batches
