@@ -923,7 +923,7 @@ can appear together; prohibited purchases are identified before a trade.
 
 Buying or selling retains the result in the refreshed catalog after saving it.
 Cancel a quantity with Enter to leave the career unchanged and keep the prior
-result. **[X] Futures** opens wholesale orders; **[Q] Back** returns to the station.
+result. **[X] Futures** opens wholesale orders; **[B] Back** returns to the station.
 
 ### Futures exchange pages
 
