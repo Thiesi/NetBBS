@@ -11,6 +11,7 @@ tests/test_chat_presence.py.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -21,6 +22,7 @@ from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.throttle import LoginThrottle
+from netbbs.session_history import record_session_end, record_session_start
 from netbbs.storage.database import Database
 
 
@@ -72,6 +74,9 @@ class FakeSession:
     async def read_key(self, echo: bool = True) -> str:
         return next(self._keys)
 
+    async def read_any_key(self, echo: bool = True) -> str:
+        return await self.read_key(echo=echo)
+
     @property
     def output(self) -> str:
         return "".join(self.written)
@@ -118,6 +123,42 @@ def test_handle_session_enters_and_leaves_presence_around_the_main_menu(db, monk
         assert presence.entered == ["alice"]
         assert presence.left == ["alice"]
         assert presence.is_online("alice") is False
+
+    asyncio.run(scenario())
+
+
+def test_previous_callers_screen_appears_after_login_and_before_main_menu(db, monkeypatch):
+    bob = create_user(db, "bob", password="hunter2", user_level=0)
+    prior_id = record_session_start(db, bob)
+    record_session_end(db, prior_id)
+    alice = create_user(db, "alice", password="hunter2", user_level=0)
+
+    async def fake_auth(db, username, password):
+        return alice
+
+    monkeypatch.setattr(login_flow, "authenticate_password_async", fake_auth)
+    monkeypatch.setattr(login_flow, "is_blocked", lambda db, authenticated_user: False)
+
+    async def scenario() -> None:
+        session = FakeSession(
+            ["alice", "correct-password", "n", "y"],
+            keys=[" ", "l"],
+        )
+        config = _throttle_config()
+        await login_flow.handle_session(
+            session,
+            db,
+            ChatHub(),
+            PresenceRegistry(),
+            MessageMailbox(),
+            _throttle(config),
+            config,
+            ActiveSessionRegistry(),
+            MaintenanceMode(),
+        )
+        output = re.sub(r"\x1b\[[0-9;]*m", "", session.output)
+        assert output.index("P R E V I O U S") < output.index("Main menu")
+        assert "bob" in output
 
     asyncio.run(scenario())
 

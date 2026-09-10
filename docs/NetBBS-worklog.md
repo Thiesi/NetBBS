@@ -4288,6 +4288,16 @@ live preference before accounts can be deleted, so databases created before
 the fallback migration do not preserve a stale default merely because no later
 preference edit happened.
 
+The post-login previous-callers splash is a second presentation of this same
+session-history data, not a separate caller log. `run_authenticated_session`
+records the current row first so its existing `finally` block still owns
+cleanup, then passes that row id to the splash so it can be excluded. The
+splash must reuse `_session_history_display_name` and therefore preserve live
+opt-outs and deletion-time fallbacks exactly like `[H]istory`; it may reduce
+its 10-row display limit to fit `Session.terminal_height`, but must never query
+or retain an unbounded history slice. An empty history and a disabled
+node-wide setting are non-events and consume no input.
+
 **A live operations dashboard must not insert slow refresh work into a
 shutdown/drain return path.** The SysOp console snapshot is loaded through the
 `DatabaseLane` on entry and on explicit refresh. Ordinary user/content/outbox

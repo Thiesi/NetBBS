@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from netbbs.auth.users import User
+from netbbs.config import get_config, set_config
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 from netbbs.user_preferences import get_user_preference
@@ -33,6 +34,7 @@ from netbbs.user_preferences import get_user_preference
 _MAX_SESSION_HISTORY_ROWS = 500
 
 _NAME_VISIBLE_KEY = "session_history_name_visible"
+_PREVIOUS_CALLERS_ENABLED_KEY = "previous_callers_enabled"
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,16 @@ def list_recent_sessions(db: Database, *, limit: int = 20) -> list[SessionHistor
         )
         for row in rows
     ]
+
+
+def previous_callers_enabled(db: Database) -> bool:
+    """Whether the post-login previous-callers splash is shown node-wide."""
+    return get_config(db, _PREVIOUS_CALLERS_ENABLED_KEY, default="1") == "1"
+
+
+def set_previous_callers_enabled(db: Database, enabled: bool) -> None:
+    """Enable or disable the post-login previous-callers splash node-wide."""
+    set_config(db, _PREVIOUS_CALLERS_ENABLED_KEY, "1" if enabled else "0")
 
 
 def _backfill_name_visibility_fallbacks(db: Database) -> None:

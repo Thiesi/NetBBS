@@ -15,6 +15,7 @@ from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.net.char_input import InputHistory
 from netbbs.net.main_menu import _main_menu
+from netbbs.net.profile_flow import _show_previous_callers_screen
 from netbbs.rendering import (
     ACCENT_COLOR,
     LABEL_COLOR,
@@ -22,10 +23,13 @@ from netbbs.rendering import (
     MUTED_COLOR,
     SUCCESS_COLOR,
     colored,
+    display_width,
 )
 from netbbs.session_history import (
     reconcile_interrupted_sessions,
+    set_previous_callers_enabled,
     record_session_start,
+    record_session_end,
     session_history_name_visible,
     set_session_history_name_visible,
 )
@@ -93,6 +97,102 @@ def test_history_screen_reports_no_sessions_yet(tmp_path):
     asyncio.run(_run_main_menu(session, database, alice))
 
     assert "No session history yet." in _written_text(session)
+    database.close()
+
+
+def test_previous_callers_screen_is_truecolor_fancy_and_excludes_current_session(tmp_path):
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    bob = create_user(database, "bob", password="hunter2", user_level=10)
+    prior_id = record_session_start(database, bob)
+    record_session_end(database, prior_id)
+    current_id = record_session_start(database, alice)
+    session = FakeSession([" "])
+    session.supports_truecolor = True
+
+    shown = asyncio.run(
+        _show_previous_callers_screen(
+            session, database, alice, current_history_id=current_id
+        )
+    )
+
+    output = _written_text(session)
+    assert shown is True
+    assert "P R E V I O U S" in _visible(session)
+    assert "bob" in _visible(session)
+    assert "alice" not in _visible(session)
+    truecolor_sequences = set(re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", output))
+    assert len(truecolor_sequences) >= 10
+    assert "Press any key to continue..." in output
+    database.close()
+
+
+def test_previous_callers_screen_shrinks_to_the_available_terminal_rows(tmp_path):
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    bob = create_user(database, "bob", password="hunter2", user_level=10)
+    for _ in range(12):
+        history_id = record_session_start(database, bob)
+        record_session_end(database, history_id)
+    current_id = record_session_start(database, alice)
+    session = FakeSession([" "])
+    session.terminal_height = 12
+    session.terminal_width = 40
+
+    asyncio.run(
+        _show_previous_callers_screen(
+            session, database, alice, current_history_id=current_id
+        )
+    )
+
+    visible_lines = _visible(session).splitlines()
+    caller_rows = [line for line in visible_lines if re.search(r"\b0[1-4]\b", line)]
+    assert len(caller_rows) == 4
+    assert not any("05" in line for line in visible_lines)
+    assert len(visible_lines) <= session.terminal_height
+    assert all(display_width(line) <= session.terminal_width for line in visible_lines)
+    database.close()
+
+
+def test_previous_callers_screen_honors_name_privacy_and_256_color_fallback(tmp_path):
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    bob = create_user(database, "bob", password="hunter2", user_level=10)
+    set_session_history_name_visible(database, bob, False)
+    prior_id = record_session_start(database, bob)
+    record_session_end(database, prior_id)
+    current_id = record_session_start(database, alice)
+    session = FakeSession([" "])
+
+    asyncio.run(
+        _show_previous_callers_screen(
+            session, database, alice, current_history_id=current_id
+        )
+    )
+
+    assert "(name hidden)" in _visible(session)
+    assert "bob" not in _visible(session)
+    assert "\x1b[38;2;" not in _written_text(session)
+    database.close()
+
+
+def test_previous_callers_screen_is_a_no_op_when_node_setting_is_off(tmp_path):
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    bob = create_user(database, "bob", password="hunter2", user_level=10)
+    record_session_start(database, bob)
+    current_id = record_session_start(database, alice)
+    set_previous_callers_enabled(database, False)
+    session = FakeSession([])
+
+    shown = asyncio.run(
+        _show_previous_callers_screen(
+            session, database, alice, current_history_id=current_id
+        )
+    )
+
+    assert shown is False
+    assert session.written == []
     database.close()
 
 

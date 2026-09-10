@@ -6423,6 +6423,25 @@ def test_settings_shows_a_current_values_panel(db, lane, sysop):
     assert "clear" in text  # no sole-authority exceptions on a fresh node
 
 
+def test_settings_previous_callers_toggle_is_node_wide_and_audited(db, lane, sysop):
+    from netbbs.session_history import previous_callers_enabled
+
+    assert previous_callers_enabled(db) is True
+    session = FakeSession(["s", "v", "b", "b"])
+    _run(session, lane, sysop)
+
+    assert previous_callers_enabled(db) is False
+    text = _visible(_written_text(session))
+    assert "Previous callers: hidden" in text
+    assert "vious callers" in text
+    row = db.connection.execute(
+        "SELECT actor_user_id, detail FROM moderation_log "
+        "WHERE action = 'set_previous_callers_enabled'"
+    ).fetchone()
+    assert row["actor_user_id"] == sysop.id
+    assert row["detail"] == "enabled=false"
+
+
 def test_settings_panel_reflects_a_changed_node_name(db, lane, sysop):
     # Confirms the panel is actually live data (reloaded after each
     # action, same discipline Users/Content/Operations already use), not

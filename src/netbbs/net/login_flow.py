@@ -47,8 +47,9 @@ from netbbs.net.char_input import InputHistory
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.logoff_banner import load_logoff_banner
 from netbbs.net.main_menu import _main_menu
-from netbbs.net.onboarding_flow import offer_onboarding
 from netbbs.net.maintenance import LOCKDOWN_MESSAGE, LOCKDOWN_NOTICE, MAINTENANCE_MESSAGE, MaintenanceMode
+from netbbs.net.onboarding_flow import offer_onboarding
+from netbbs.net.profile_flow import _show_previous_callers_screen
 from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.node_theme import effective_accent_color, effective_header_color_256, effective_node_name_gradient
@@ -687,6 +688,9 @@ async def run_authenticated_session(
         # leave a revoked account's session completely unprotected for
         # as long as it sat here (GitHub issue #29's whole point).
         await _confirm_unicode_style(session, db, user)
+        await _show_previous_callers_screen(
+            session, db, user, current_history_id=history_id
+        )
         await _main_menu(
             session, db, hub, presence, mailbox, history, user,
             node_controls=node_controls, lane=lane, link_context=link_context, direct_invites=direct_invites,

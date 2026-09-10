@@ -438,6 +438,17 @@ the same vocabulary to Communities/boards, mail/files/search/directory, chat,
 and the SysOp operations console. Every increment covers narrow, ordinary, and
 wide terminals plus empty, populated, warning, and error states.
 
+After authentication and before the home menu, an enabled node shows a
+previous-callers splash drawn from persisted session history. It lists at most
+10 connections which preceded the newly opened session, preserves the existing
+per-account name-visibility policy, and waits for one keystroke before
+continuing. The list shortens when the negotiated terminal height cannot hold
+all 10 rows together with its title, frame, and pause; an empty history skips
+the splash rather than stopping the first caller at an empty screen. Confirmed
+truecolor is a progressive visual enhancement with a deliberately polished
+256-color fallback. The SysOp can toggle the splash node-wide from Settings;
+new and upgraded nodes default to showing it.
+
 ### 3.4 SysOp operations console
 
 The SysOp entry point is an operational control center, not a flat catalogue

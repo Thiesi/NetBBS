@@ -9,10 +9,12 @@ from netbbs.auth.users import create_user, delete_user
 from netbbs.session_history import (
     _MAX_SESSION_HISTORY_ROWS,
     list_recent_sessions,
+    previous_callers_enabled,
     reconcile_interrupted_sessions,
     record_session_end,
     record_session_start,
     session_history_name_visible,
+    set_previous_callers_enabled,
     set_session_history_name_visible,
 )
 from netbbs.storage.database import Database
@@ -70,6 +72,14 @@ def test_list_recent_sessions_respects_limit(db, alice):
     for _ in range(5):
         record_session_start(db, alice)
     assert len(list_recent_sessions(db, limit=2)) == 2
+
+
+def test_previous_callers_splash_defaults_on_and_can_be_disabled(db):
+    assert previous_callers_enabled(db) is True
+    set_previous_callers_enabled(db, False)
+    assert previous_callers_enabled(db) is False
+    set_previous_callers_enabled(db, True)
+    assert previous_callers_enabled(db) is True
 
 
 def test_row_count_pruning_keeps_only_the_most_recent_rows(db, alice):

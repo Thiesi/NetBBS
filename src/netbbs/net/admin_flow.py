@@ -460,6 +460,7 @@ from netbbs.rendering import (
     visible_width,
     wrap_to_width,
 )
+from netbbs.session_history import previous_callers_enabled, set_previous_callers_enabled
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import (
@@ -1501,6 +1502,7 @@ async def _system_menu(
             "timestamp_example": format_for_display(
                 utc_now_iso(), override_format=display_format, override_timezone=display_timezone
             ),
+            "previous_callers_enabled": previous_callers_enabled(db),
             "trust_exceptions": len(list_sole_authorities(db)),
             "description_level": menu_description_level(db, actor),
             "unicode_style": unicode_style_enabled(db, actor),
@@ -1545,6 +1547,20 @@ async def _system_menu(
         elif choice == "t":
             await session.write_line("")
             await _timestamp_settings_screen(session, lane, actor)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == "v":
+            def _toggle_previous_callers(db: Database) -> None:
+                enabled = not previous_callers_enabled(db)
+                set_previous_callers_enabled(db, enabled)
+                record_action(
+                    db,
+                    actor=actor,
+                    action="set_previous_callers_enabled",
+                    detail=f"enabled={str(enabled).lower()}",
+                )
+
+            await lane.run(_toggle_previous_callers)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "i":
@@ -1649,8 +1665,9 @@ async def _draw_system_menu(
             f"{stats['trust_exceptions']} exception(s) active"
             if stats["trust_exceptions"] else "clear"
         )
-        node_name_label, update_label, timestamp_label, trust_label = (
-            "Node name: ", "Update checks: ", "Timestamps shown as: ", "Trust policy: "
+        node_name_label, update_label, timestamp_label, callers_label, trust_label = (
+            "Node name: ", "Update checks: ", "Timestamps shown as: ",
+            "Previous callers: ", "Trust policy: "
         )
         update_value = f"{update_state} -- {update_summary}"
         # Code review follow-up (PR #215): unlike every other value in
@@ -1671,6 +1688,11 @@ async def _draw_system_menu(
             + sanitize_text(_fit(update_value, 2 + len(update_label))),
             "  " + colored(timestamp_label, fg_color=METADATA_COLOR)
             + sanitize_text(_fit(timestamp_value, 2 + len(timestamp_label))),
+            "  " + colored(callers_label, fg_color=METADATA_COLOR)
+            + colored(
+                "shown after login" if stats["previous_callers_enabled"] else "hidden",
+                fg_color=SUCCESS_COLOR if stats["previous_callers_enabled"] else MUTED_COLOR,
+            ),
             "  " + colored(trust_label, fg_color=METADATA_COLOR)
             + colored(_fit(trust_summary, 2 + len(trust_label)), fg_color=ERROR_COLOR if stats["trust_exceptions"] else SUCCESS_COLOR),
         ]
@@ -1683,6 +1705,14 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable-node seeds and relays, on or off"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
+        MenuEntry(
+            label=menu_key("V", "ious callers", prefix="Pre"),
+            brief=(
+                "Shown after login; press to disable"
+                if stats["previous_callers_enabled"]
+                else "Hidden after login; press to enable"
+            ),
+        ),
         MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Bridge chat channels to the Multi Relay Chat network"),
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
     ]

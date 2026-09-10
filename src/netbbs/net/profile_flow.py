@@ -1,12 +1,13 @@
 """
 Profile editing, identity/attestation, and session-history screens:
 `[E]dit profile` (bio/signature/display prefs/SSH keys), `[I]dentity
-details` (age/name attestation, verification), and `[L]ast sessions`.
+details` (age/name attestation, verification), `[L]ast sessions`, and
+the previous-callers screen shown between authentication and the main menu.
 
 Split out of `netbbs.net.login_flow` (that module's own maintenance
 split -- see its module docstring), the last and second-largest of the
-extracted screen groups. Reached only from the main menu; calls
-nothing else in `login_flow`.
+extracted screen groups. Most screens are reached from the main menu;
+calls nothing else in `login_flow`.
 """
 
 from __future__ import annotations
@@ -55,7 +56,11 @@ from netbbs.files.categories import get_category_by_id as get_file_area_category
 from netbbs.messaging_preferences import accepts_direct_messages, set_accepts_direct_messages
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled, set_breadcrumb_collapsed_enabled
-from netbbs.net.color_depth_preference import color_depth_override, set_color_depth_override
+from netbbs.net.color_depth_preference import (
+    color_depth_override,
+    effective_truecolor,
+    set_color_depth_override,
+)
 from netbbs.net.composition import edit_line_body
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.draft_storage import drafts_directory
@@ -91,14 +96,20 @@ from netbbs.rendering import (
     action_bar,
     colored,
     colored_truncate,
+    cut_to_width,
+    display_width,
+    gradient_color,
+    gradient_text,
     menu_key,
     reflow,
     sanitize_text,
     screen_title,
+    visible_width,
 )
 from netbbs.session_history import (
     SessionHistoryEntry,
     list_recent_sessions,
+    previous_callers_enabled,
     session_history_name_visible,
     set_session_history_name_visible,
 )
@@ -115,6 +126,15 @@ from netbbs.timeutil import format_for_display
 # plain listing: there's no per-entry detail beyond what's already on
 # its one line, so there's nothing a selection would actually do).
 _SESSION_HISTORY_DISPLAY_LIMIT = 20
+_PREVIOUS_CALLERS_DISPLAY_LIMIT = 10
+_PREVIOUS_CALLERS_FIXED_ROWS = 8
+_PREVIOUS_CALLERS_GRADIENT = [
+    (0, 245, 255),
+    (120, 80, 255),
+    (255, 70, 210),
+    (255, 205, 70),
+    (0, 245, 255),
+]
 
 
 def _session_history_display_name(
@@ -150,6 +170,153 @@ def _session_history_display_name(
     if target is None or session_history_name_visible(db, target):
         return entry.username_label
     return "(name hidden)"
+
+
+async def _show_previous_callers_screen(
+    session: Session,
+    db: Database,
+    user: User,
+    *,
+    current_history_id: int,
+) -> bool:
+    """Show the adaptive post-login caller roll and wait for dismissal.
+
+    The current session has already been recorded so it can be finalized
+    reliably on every exit path.  It is excluded by id here, leaving only
+    connections which genuinely preceded this one.  An empty history is a
+    complete non-event so the first caller on a new node is not paused at an
+    empty screen.
+    """
+    if not previous_callers_enabled(db):
+        return False
+
+    entry_limit = min(
+        _PREVIOUS_CALLERS_DISPLAY_LIMIT,
+        max(0, session.terminal_height - _PREVIOUS_CALLERS_FIXED_ROWS),
+    )
+    frame_width = min(session.terminal_width, 78)
+    if entry_limit == 0 or frame_width < 4:
+        return False
+
+    entries = [
+        entry
+        for entry in list_recent_sessions(db, limit=_PREVIOUS_CALLERS_DISPLAY_LIMIT + 1)
+        if entry.id != current_history_id
+    ][:_PREVIOUS_CALLERS_DISPLAY_LIMIT]
+    entries = entries[:entry_limit]
+    if not entries:
+        return False
+
+    use_truecolor = effective_truecolor(session, db, user)
+    unicode_style = unicode_style_enabled(db, user)
+    viewer_is_sysop = meets_level(user, SYSOP_LEVEL)
+    header_color = effective_header_color(session, db)
+    accent_color = effective_accent_color(session, db)
+    body_width = frame_width - 4
+    left, right = ("║", "║") if unicode_style else ("|", "|")
+    horizontal = "═" if unicode_style else "="
+    top_left, top_right = ("╔", "╗") if unicode_style else ("+", "+")
+    middle_left, middle_right = ("╠", "╣") if unicode_style else ("+", "+")
+    bottom_left, bottom_right = ("╚", "╝") if unicode_style else ("+", "+")
+    marker = "◆" if unicode_style else "*"
+    dot = " • " if unicode_style else "  /  "
+
+    def _gradient(text: str, *, bold: bool = False) -> str:
+        return gradient_text(
+            text,
+            _PREVIOUS_CALLERS_GRADIENT,
+            bold=bold,
+            truecolor=use_truecolor,
+        )
+
+    def _rule(left_char: str, right_char: str) -> str:
+        plain = left_char + horizontal * (frame_width - 2) + right_char
+        return _gradient(plain, bold=True) if use_truecolor else colored(
+            plain, fg_color=header_color, bold=True
+        )
+
+    def _centered(text: str, *, gradient: bool = False, bold: bool = False) -> str:
+        text = cut_to_width(text, body_width)
+        spare = body_width - display_width(text)
+        left_pad = spare // 2
+        right_pad = spare - left_pad
+        rendered = _gradient(text, bold=bold) if gradient else colored(
+            text, fg_color=METADATA_COLOR, bold=bold
+        )
+        return " " * left_pad + rendered + " " * right_pad
+
+    def _framed(content: str, border_color: int | tuple[int, int, int]) -> str:
+        padding = max(0, body_width - visible_width(content))
+        return (
+            colored(f"{left} ", fg_color=border_color, bold=True)
+            + content
+            + " " * padding
+            + colored(f" {right}", fg_color=border_color, bold=True)
+        )
+
+    title = f"{marker}  P R E V I O U S   C A L L E R S  {marker}"
+    subtitle = "SIGNALS RECENTLY RECEIVED BY THIS NODE"
+    rendered: list[str] = [
+        _rule(top_left, top_right),
+        _framed(_centered(title, gradient=True, bold=True), header_color),
+        _framed(_centered(subtitle, gradient=use_truecolor), header_color),
+        _rule(middle_left, middle_right),
+    ]
+
+    for index, entry in enumerate(entries, start=1):
+        name = sanitize_text(
+            _session_history_display_name(db, entry, viewer_is_sysop=viewer_is_sysop)
+        )
+        connected = sanitize_text(format_for_display(entry.connected_at, db))
+        if entry.disconnected_at is not None:
+            status, status_color = "SIGNED OFF", METADATA_COLOR
+        elif entry.interrupted_at is not None:
+            status, status_color = "SIGNAL LOST", ERROR_COLOR
+        else:
+            status, status_color = "ONLINE NOW", SUCCESS_COLOR
+
+        fraction = (index - 1) / max(1, len(entries) - 1)
+        rail_color = (
+            gradient_color(_PREVIOUS_CALLERS_GRADIENT, fraction)
+            if use_truecolor
+            else header_color
+        )
+        name_color = (
+            (lambda text: _gradient(text, bold=True))
+            if use_truecolor and name != "(name hidden)"
+            else MUTED_COLOR if name == "(name hidden)" else accent_color
+        )
+        if frame_width >= 62:
+            segments = [
+                (f" {index:02d} ", METADATA_COLOR),
+                (marker, rail_color),
+                (" ", None),
+                (name, name_color),
+                (dot, METADATA_COLOR),
+                (connected, METADATA_COLOR),
+                (dot, METADATA_COLOR),
+                (status, status_color),
+            ]
+        else:
+            segments = [
+                (f" {index:02d} ", METADATA_COLOR),
+                (marker, rail_color),
+                (" ", None),
+                (name, name_color),
+                (dot, METADATA_COLOR),
+                (connected, METADATA_COLOR),
+            ]
+        rendered.append(
+            _framed(colored_truncate(segments, body_width), rail_color)
+        )
+
+    rendered.append(_rule(bottom_left, bottom_right))
+    await session.write_line("\r\n" + "\r\n".join(rendered))
+    await session.write_line(
+        colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
+    )
+    await session.read_any_key()
+    return True
 
 
 async def _last_sessions_screen(session: Session, db: Database, user: User) -> None:
