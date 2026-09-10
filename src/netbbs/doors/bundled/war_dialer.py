@@ -638,6 +638,14 @@ NEUTRAL_OPERATORS = {
     6: ("spool", "Spool Archive Collective", 6),
 }
 NPC_NAMES = {key: name for key, name, _ in NEUTRAL_OPERATORS.values()}
+NPC_STORIES = {
+    "patch": "Patch Panel Society keeps the neighborhood PBX alive with salvaged relays. Its operators prize a quiet line and know when to disappear.",
+    "relay": "Night Relay Union staffs the carrier's forgotten overnight shift. They treat every assigned guard as a promise to keep the switch running.",
+    "spool": "Spool Archive Collective catalogs lost releases on stacks of aging disks. Its hub is a noisy meeting place for crews with something to trade.",
+}
+INSIGNIA = {"modem": ("[::]", "Modem"), "relay": ("<-->", "Relay"),
+            "signal": ("=||=", "Signal"), "archive": ("{##}", "Archive")}
+SCENE_LIMIT = 500
 
 # (name, income per real hour controlled)
 EXCHANGE_SEEDS: tuple[tuple[str, int], ...] = (
@@ -711,6 +719,7 @@ class Player:
     operation_approach: int = 1
     operation_stage: int = 0
     successful_operations: int = 0
+    insignia: str = "modem"
 
 
 @dataclass
@@ -1027,7 +1036,7 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
-WORLD_SCHEMA_VERSION = 8
+WORLD_SCHEMA_VERSION = 9
 _OPERATION_COLUMNS = {"operation_contract", "operation_approach", "operation_stage", "successful_operations"}
 
 # Versioned schema contract: future additions need a new numbered migration.
@@ -1056,6 +1065,8 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
     required_tables = dict(_WORLD_COLUMNS_V1)
     if version >= 6:
         required_tables["recon"] = {"viewer", "target", "handle", "cash", "crew", "observed_at", "expires_at", "season"}
+    if version >= 9:
+        required_tables["scene"] = {"id", "created_at", "season", "kind", "summary"}
     if not set(required_tables) <= tables:
         raise WorldStateError("Unrecognized or incomplete War Dialer database. Preserve it for SysOp recovery; no replacement was created.")
     for table, required in required_tables.items():
@@ -1073,6 +1084,8 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
             expected = expected | {"role"}
         if version >= 8 and table == "exchanges":
             expected = expected | {"npc_key", "npc_return_at"}
+        if version >= 9 and table == "players":
+            expected = expected | {"insignia"}
         if not expected <= columns:
             raise WorldStateError(f"War Dialer {table} schema is incomplete. Preserve it for SysOp recovery; no replacement was created.")
 
@@ -1142,6 +1155,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     fresh.execute("PRAGMA user_version=7")
                     _migrate_world_v8(fresh)
                     fresh.execute("PRAGMA user_version=8")
+                    _migrate_world_v9(fresh)
+                    fresh.execute("PRAGMA user_version=9")
             finally:
                 fresh.close()
             try:
@@ -1206,6 +1221,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if version < 8:
             _migrate_world_v8(conn)
             conn.execute("PRAGMA user_version=8")
+        if version < 9:
+            _migrate_world_v9(conn)
+            conn.execute("PRAGMA user_version=9")
         _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
 
 
@@ -1347,6 +1365,46 @@ def _migrate_world_v3(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE exchanges SET income_per_hour=? WHERE id=?", (rate, row[0]))
 
 
+def _migrate_world_v9(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE players ADD COLUMN insignia TEXT NOT NULL DEFAULT 'modem' CHECK (insignia IN ('modem', 'relay', 'signal', 'archive'))")
+    conn.execute("CREATE TABLE scene (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, season INTEGER NOT NULL, "
+                 "kind TEXT NOT NULL CHECK (kind IN ('capture', 'abandon', 'neutral')), "
+                 "summary TEXT NOT NULL CHECK (length(summary) <= 400))")
+
+
+def record_scene(conn: sqlite3.Connection, kind: str, exchange_id: int, now: datetime, *, actor_handle: str = "") -> None:
+    """Publish only territory activity, inside the mutation's transaction."""
+    if _world_schema_version(conn) < 9:
+        return
+    if not conn.in_transaction:
+        raise RuntimeError("Scene bulletins require an action transaction")
+    exchange = conn.execute("SELECT name,season_number,npc_key FROM exchanges WHERE id=?", (exchange_id,)).fetchone()
+    name = _event_plain(exchange["name"])[:120]
+    if kind == "neutral":
+        summary = "NPC: " + NPC_NAMES[exchange["npc_key"]] + " stationed at " + name + "."
+    elif kind in {"capture", "abandon"}:
+        summary = _event_plain(actor_handle)[:80] + (" captured " if kind == "capture" else " abandoned ") + name + "."
+    else:
+        raise ValueError("Unknown public scene event")
+    conn.execute("INSERT INTO scene(created_at,season,kind,summary) VALUES (?,?,?,?)",
+                 (to_iso(now), exchange["season_number"], kind, summary))
+    conn.execute("DELETE FROM scene WHERE id NOT IN (SELECT id FROM scene ORDER BY id DESC LIMIT ?)", (SCENE_LIMIT,))
+
+
+def read_scene(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM scene ORDER BY id DESC LIMIT ?", (SCENE_LIMIT,)).fetchall()
+
+
+def set_insignia(conn: sqlite3.Connection, player: Player, key: str, now: datetime) -> None:
+    if key not in INSIGNIA:
+        raise ActionRejected("Choose one of the four crew insignia; nothing changed.")
+    with _write_transaction(conn):
+        actor = _refresh_player(conn, player.user_id, now)
+        actor.insignia = key
+        _save_player(conn, actor)
+    player.__dict__.update(actor.__dict__)
+
+
 def _migrate_world_v8(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE exchanges ADD COLUMN npc_key TEXT NOT NULL DEFAULT '' CHECK (npc_key IN ('', 'patch', 'relay', 'spool'))")
     conn.execute("ALTER TABLE exchanges ADD COLUMN npc_return_at TEXT NOT NULL DEFAULT ''")
@@ -1367,6 +1425,7 @@ def _settle_neutral_operators(conn: sqlite3.Connection, now: datetime) -> None:
             continue
         conn.execute("UPDATE exchanges SET npc_key=?, npc_return_at='', garrison=?, controlled_since=?, income_collected_at=? WHERE id=?",
                      (key, defenders, to_iso(now), to_iso(now), exchange["id"]))
+        record_scene(conn, "neutral", exchange["id"], now)
 
 
 def _migrate_world_v7(conn: sqlite3.Connection) -> None:
@@ -1555,6 +1614,7 @@ def _row_to_player(row: sqlite3.Row) -> Player:
         operation_approach=row["operation_approach"] if "operation_approach" in row.keys() else 1,
         operation_stage=row["operation_stage"] if "operation_stage" in row.keys() else 0,
         successful_operations=row["successful_operations"] if "successful_operations" in row.keys() else 0,
+        insignia=row["insignia"] if "insignia" in row.keys() else "modem",
     )
 
 
@@ -1591,6 +1651,8 @@ def _save_player(conn: sqlite3.Connection, player: Player) -> None:
     if _world_schema_version(conn) >= 6:
         conn.execute("UPDATE players SET operation_contract=?, operation_approach=?, operation_stage=?, successful_operations=? WHERE user_id=?",
                      (player.operation_contract, player.operation_approach, player.operation_stage, player.successful_operations, player.user_id))
+    if _world_schema_version(conn) >= 9:
+        conn.execute("UPDATE players SET insignia=? WHERE user_id=?", (player.insignia, player.user_id))
 
 
 _INCOME_UNITS_PER_DOLLAR = 3_600_000_000  # microseconds per hour
@@ -2117,6 +2179,8 @@ def resolve_root_exchange(
             "UPDATE exchanges SET controller_user_id=?, garrison=?, controlled_since=?, income_collected_at=? WHERE id=?",
             (exchange.controller_user_id, exchange.garrison, exchange.controlled_since, exchange.income_collected_at, exchange.id),
         )
+        if success:
+            record_scene(conn, "capture", exchange.id, now, actor_handle=actor.handle)
         if success and prior_controller is not None:
             record_event(conn, prior_controller, actor.handle,
                          f"{actor.handle} rooted your exchange, {exchange.name}! {prior_garrison} defenders returned to your available crew.", now)
@@ -2188,6 +2252,8 @@ def resolve_garrison(conn: sqlite3.Connection, player: Player, exchange_id: int,
             if exchange.npc_home:
                 conn.execute("UPDATE exchanges SET npc_key='', npc_return_at=? WHERE id=?",
                              (to_iso(now + DAY), exchange.id))
+        if not remaining:
+            record_scene(conn, "abandon", exchange.id, now, actor_handle=actor.handle)
         verb = f"Reinforced {exchange.name} with {change}" if change > 0 else f"Withdrew {-change} from {exchange.name}"
         record_event(conn, actor.user_id, actor.handle,
                      verb + (f"; garrison now {remaining}." if remaining else "; exchange abandoned and income stopped. Reclaiming it earns no capture Rank."), now, seen=True)
@@ -2343,7 +2409,7 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
     player = state.player
     rank = rank_score(player)
     lines = [
-        f"Operator: {player.handle}",
+        f"Operator: {player.handle} {INSIGNIA[player.insignia][0]}",
         f"Cash: ${player.cash:,}  Heat: {player.heat:.0f}",
         f"Crew: {player.crew:,} available; {sum(e.garrison for e in state.holdings):,} assigned",
         f"Turns left: {TURNS_PER_DAY - player.turns_used}/{TURNS_PER_DAY}",
@@ -2378,6 +2444,7 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
     lines.append("Exchange territory is always contestable.")
     lines.append(f"Season {player.season_number} ends in {countdown(state.season_ends_at - now)}")
     lines.append(f"[O]Operations/recon: {'none active' if not player.operation_stage else JOBS[player.operation_contract][0] + (' - cased' if player.operation_stage == 1 else ' - prepared')}")
+    lines.append("[I]Scene: crew insignia, NPC dossiers and public bulletins.")
     lines.append(f"[S]Skills/support: {player.specialty or 'untrained'}; {player.support or 'empty slot'}")
     lines.append("Season end: " + state.season_ends_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
     return lines
@@ -2387,9 +2454,9 @@ def draw_dashboard(p: Palette, state: DashboardState, now: datetime, width: int,
                    height: int, page_index: int = 0) -> tuple[int, int]:
     """Render one compact command-center page with the action keys always visible."""
     width = max(1, width - 1)
-    footer_text = (["[T]rade [C]rew [J]ob [R]aid [X]Root [G]arrison [S]Kit [O]Ops", "[B]Rank [E]Map [V]Rivals [H]Log [?]Help [Q]uit"]
+    footer_text = (["[T]rade [C]rew [J]ob [R]aid [X]Root [G]arrison [S]Kit [O]Ops", "[B]Rank [E]Map [V]Rivals [H]Log [I]Scene [?]Help [Q]uit"]
                    if width >= 39 else
-                   ["[T]rade [C]rew", "[J]ob [R]aid [S]Kit", "[X]Root [G]Defense", "[B]Rank [E]Map", "[V]Rivals [H]Log", "[O]Ops [?] [Q]uit"])
+                   ["[T]rade [C]rew [Q]", "[J]ob [R]aid [S]Kit", "[X]Root [G]Defense", "[B]Rank [E]Map", "[V]Rivals [H]Log", "[I]Scene [O]Ops [?]"])
     footer = [line for text in footer_text + ["[N]ext [P]rev"] for line in _event_wrap(text, width)]
     body_rows = max(1, height - len(footer) - 2)  # heading and prompt
     lines = [line for text in dashboard_lines(state, now) for line in _event_wrap(text, width)]
@@ -2465,6 +2532,7 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "First visit: inspect Map, compare a Root preview for unclaimed territory, or Trade to fund Crew recruitment. Back always cancels a preview.",
         f"Each action costs one of {TURNS_PER_DAY} turns. The rolling 24-hour window starts with your first action.",
         "[T]rade Warez: quick cash. [C]rew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
+        "[I]Scene is free: choose a cosmetic crew insignia, read NPC biographies/current homes, and browse the latest 500 public territory bulletins. Insignia survive season resets. Q leaves any screen or quits from the switchboard.",
         "[O]Ops: resume one three-step operation, buy rival recon, or read your latest ten 24-hour dossiers. Steps cost turns; browsing and reconnecting never reroll outcomes.",
         "[S]Kit: train one crew specialty or buy one consumable support item. Each costs cash and one turn; preview before Act. Both reset each season.",
         "[J]obs: choose one of five repeatable contracts, then Cautious, Standard or Bold. Exact odds and stakes appear before Act. Offers stay fixed; browsing and reconnecting do not reroll them.",
@@ -2516,6 +2584,53 @@ def show_player_directory(p: Palette, conn: sqlite3.Connection, user_id: int,
             return
         backwards = direction == "P"
         offset = page.offset + (-PLAYER_PAGE_SIZE if backwards else PLAYER_PAGE_SIZE)
+
+
+def do_scene(p: Palette, conn: sqlite3.Connection, player: Player, width: int, height: int) -> None:
+    state = dashboard_state(conn, player.user_id, now_utc())
+    update_display_player(p, player, state.player, width, height)
+    symbol, name = INSIGNIA[player.insignia]
+    key = pick_record_page(p, "BBS SCENE", [
+        ([f"Your crew: {symbol} {player.handle}", f"{tier_name(rank_score(player))}; Rank {rank_score(player)}; {player.specialty or 'untrained'}.",
+          f"{name} insignia. Choose a free cosmetic design; retained across seasons."], True),
+        (["Neutral operator dossiers", "Three labeled NPC crews: biographies and current home status."], True),
+        (["Public scene bulletins", "Latest 500 captures, abandonments and NPC arrivals. Timestamped actual activity; no private resources."], True),
+    ], width, height)
+    if key in "BQ":
+        return
+    if key == "1":
+        keys = list(INSIGNIA)
+        records = [([f"{symbol} {name}", "Current insignia" if choice == player.insignia else "Free cosmetic choice; no turn or resource cost."], True)
+                   for choice, (symbol, name) in INSIGNIA.items()]
+        key = pick_record_page(p, "CREW INSIGNIA", records, width, height)
+        if key in "BQ": return
+        choice = keys[PICK_KEYS.index(key)]
+        symbol, name = INSIGNIA[choice]
+        if show_text_pages(p, "INSIGNIA PREVIEW", [f"Wear {symbol} {name}.", "Free: no turns, cash, Heat or Rank change. Persists across seasons and competition reset. Back keeps your current insignia."], width, height, accept=True) != "A":
+            return
+        set_insignia(conn, player, choice, now_utc())
+        show_text_pages(p, "CREW IDENTITY", [f"{symbol} {name} insignia selected. No resources spent."], width, height, onboarding=True)
+    elif key == "2":
+        with _write_transaction(conn):
+            _settle_world(conn, now_utc())
+            homes = [e for e in list_exchanges(conn) if e.npc_home]
+        lines = []
+        for exchange in homes:
+            lines += ["NPC: " + NPC_NAMES[exchange.npc_home], NPC_STORIES[exchange.npc_home],
+                      f"Home: #{exchange.id} {exchange.name}; {exchange_terms(exchange)[0]}.",
+                      f"Current owner: {exchange_owner(exchange)}; defense {exchange_defense(exchange)}."]
+            if exchange.npc_return_at and exchange.controller_user_id is None:
+                lines.append("Returns if unclaimed: " + from_iso(exchange.npc_return_at).strftime("%Y-%m-%d %H:%M UTC"))
+            elif exchange.controller_user_id is not None:
+                lines.append("Displaced from home. The NPC cannot take a human holding.")
+            else:
+                lines.append("Defending home. Capture previews show the actual stakes.")
+        show_text_pages(p, "NEUTRAL DOSSIERS", lines, width, height)
+    elif key == "3":
+        lines = []
+        for bulletin in read_scene(conn):
+            lines += [from_iso(bulletin["created_at"]).strftime("%Y-%m-%d %H:%M UTC") + f"; season {bulletin['season']}", bulletin["summary"]]
+        show_text_pages(p, "SCENE BULLETINS", lines or ["No public territory activity recorded yet."], width, height)
 
 
 def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int, *, viewer_id: int | None = None) -> None:
@@ -3126,7 +3241,7 @@ def main() -> int:
             page_index, page_count = draw_dashboard(palette, state, screen_now, w, height, page_index)
             # Always recognize action keys: a displayed zero-turn snapshot
             # may sit idle past its refill. The transaction decides allowance.
-            valid = "BEVHQ?TCJRXGSONP"
+            valid = "BEVHQ?TCJRXGSONPI"
             choice = read_menu_choice(valid)
             action_now = now_utc()
             try:
@@ -3140,6 +3255,8 @@ def main() -> int:
                     draw_help(palette, w, height)
                 elif choice == "B":
                     show_player_directory(palette, conn, user_id, w, height, standings=True)
+                elif choice == "I":
+                    do_scene(palette, conn, player, w, height)
                 elif choice == "E":
                     show_territory(palette, conn, w, height, viewer_id=user_id)
                 elif choice == "V":

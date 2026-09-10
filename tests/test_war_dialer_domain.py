@@ -1351,7 +1351,7 @@ def _legacy_income_world(db_path):
     old_schema = schema.replace(addition, "")
     values = asdict(a)
     values.pop("income_remainder")
-    for column in wd._ECONOMY_COLUMNS | wd._OPERATION_COLUMNS | {"raid_shield_until", "specialty", "support"}:
+    for column in wd._ECONOMY_COLUMNS | wd._OPERATION_COLUMNS | {"raid_shield_until", "specialty", "support", "insignia"}:
         values.pop(column)
     conn.execute("DROP TABLE players")
     conn.execute(old_schema)
@@ -2317,6 +2317,8 @@ def test_specialty_switch_replaces_training_and_purchase_failure_rolls_back(db_p
 
 def _downgrade_operations_fixture(conn):
     conn.execute("UPDATE exchanges SET garrison=0, controlled_since=NULL WHERE controller_user_id IS NULL")
+    conn.execute("ALTER TABLE players DROP COLUMN insignia")
+    conn.execute("DROP TABLE scene")
     conn.execute("ALTER TABLE exchanges DROP COLUMN npc_key")
     conn.execute("ALTER TABLE exchanges DROP COLUMN npc_return_at")
     conn.execute("ALTER TABLE exchanges DROP COLUMN role")
@@ -2591,6 +2593,8 @@ def test_service_rejection_and_rollback_spend_nothing(db_path, problem):
 def test_exchange_role_upgrade_preserves_world_and_rolls_back_version_failure(db_path, monkeypatch):
     conn, now, actor, _ = _rivals(db_path)
     _give_exchange(conn, 2, now)
+    conn.execute('ALTER TABLE players DROP COLUMN insignia')
+    conn.execute('DROP TABLE scene')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_key')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_return_at')
     conn.execute('ALTER TABLE exchanges DROP COLUMN role')
@@ -2618,6 +2622,8 @@ def test_exchange_role_upgrade_preserves_world_and_rolls_back_version_failure(db
 @pytest.mark.parametrize('count', [9, 20])
 def test_exchange_role_upgrade_rejects_unexpected_map_without_mutation(db_path, count):
     conn, now, actor, _ = _rivals(db_path)
+    conn.execute('ALTER TABLE players DROP COLUMN insignia')
+    conn.execute('DROP TABLE scene')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_key')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_return_at')
     conn.execute('ALTER TABLE exchanges DROP COLUMN role')
@@ -2703,6 +2709,8 @@ def test_neutral_upgrade_preserves_human_ownership_and_rolls_back_marker_failure
     conn, now, actor, _ = _rivals(db_path)
     wd.resolve_root_exchange(conn, actor, 5, now, FixedRandom())
     conn.execute("UPDATE exchanges SET garrison=0, controlled_since=NULL WHERE npc_key != ''")
+    conn.execute('ALTER TABLE players DROP COLUMN insignia')
+    conn.execute('DROP TABLE scene')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_key')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_return_at')
     conn.execute('PRAGMA user_version=7')
@@ -2737,4 +2745,98 @@ def test_racing_neutral_returns_do_not_duplicate_defenders(db_path):
     with ThreadPoolExecutor(2) as pool: list(pool.map(settle, range(2)))
     assert wd.list_exchanges(conn)[4].garrison == 2
     assert wd.read_player(conn, 1).crew == 3
+    conn.close()
+
+
+
+def test_scene_bulletins_follow_real_territory_changes_without_private_resources(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    assert len(wd.read_scene(conn)) == 3 and all(r['kind'] == 'neutral' for r in wd.read_scene(conn))
+    conn.execute('UPDATE players SET cash=87654321, crew=7654321 WHERE user_id=1')
+    actor = wd.read_player(conn, 1)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    wd.resolve_garrison(conn, actor, 1, -1, now)
+    rows = wd.read_scene(conn)
+    assert [r['kind'] for r in rows[:2]] == ['abandon', 'capture']
+    assert all(r['season'] == 1 for r in rows)
+    text = ' '.join(r['summary'] for r in rows)
+    assert 'Alpha captured 212-555 Uptown Exchange.' in text
+    assert '87654321' not in text and '7654321' not in text
+    before = [tuple(r) for r in rows]
+    wd.resolve_job(conn, actor, now, FixedRandom())
+    wd.resolve_recon(conn, actor, 2, now)
+    wd.resolve_crew_purchase(conn, actor, now, wd.CrewChoice('fixers'))
+    assert [tuple(r) for r in wd.read_scene(conn)] == before
+    conn.close()
+
+
+@pytest.mark.parametrize('kind', ['capture', 'abandon', 'neutral'])
+def test_scene_write_failure_rolls_back_the_underlying_territory_change(db_path, kind):
+    conn, now, actor, _ = _rivals(db_path)
+    if kind != 'capture': wd.resolve_root_exchange(conn, actor, 5, now, FixedRandom())
+    if kind == 'neutral': wd.resolve_garrison(conn, actor, 5, -1, now)
+    before = list(conn.iterdump())
+    conn.execute("CREATE TRIGGER reject_bulletin BEFORE INSERT ON scene BEGIN SELECT RAISE(ABORT, 'scene failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='scene failed'):
+        if kind == 'capture': wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+        elif kind == 'abandon': wd.resolve_garrison(conn, actor, 5, -1, now)
+        else: wd.settle_world(conn, now + wd.DAY)
+    conn.execute('DROP TRIGGER reject_bulletin')
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_scene_retains_exactly_latest_500_and_sanitizes_bounded_labels(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    with wd._write_transaction(conn):
+        for number in range(510):
+            wd.record_scene(conn, 'capture', 1, now, actor_handle=str(number))
+        wd.record_scene(conn, 'capture', 1, now, actor_handle='\x1b[2J' + 'Z' * 2000 + '\n')
+    rows = wd.read_scene(conn)
+    assert len(rows) == 500 and rows[-1]['summary'].startswith('11 captured')
+    assert rows[0]['summary'].startswith('Z' * 80 + ' captured')
+    assert all(len(r['summary']) <= 400 and '\x1b' not in r['summary'] and '\n' not in r['summary'] for r in rows)
+    assert conn.execute('SELECT COUNT(*) FROM scene').fetchone()[0] == 500
+    before = list(conn.iterdump())
+    wd.settle_world(conn, now + wd.DAY)
+    assert list(conn.iterdump()) == before  # already stationed NPCs do not generate fake activity
+    conn.close()
+
+
+def test_insignia_is_free_persistent_and_does_not_overwrite_new_competitive_state(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    stale = wd.read_player(conn, 1)
+    wd.resolve_recruit(conn, actor, now)
+    before = wd.read_player(conn, 1)
+    wd.set_insignia(conn, stale, 'archive', now)
+    assert (stale.cash, stale.crew, stale.turns_used, wd.rank_score(stale)) == (before.cash, before.crew, before.turns_used, wd.rank_score(before))
+    assert stale.insignia == 'archive'
+    wd.resolve_recruit(conn, actor, now)
+    assert actor.insignia == 'archive'
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected): wd.set_insignia(conn, actor, 'custom text', now)
+    assert list(conn.iterdump()) == before
+    conn.close()
+    conn = wd.connect(db_path)
+    assert wd.refresh_player(conn, 1, now + wd.SEASON).insignia == 'archive'
+    conn.close()
+
+
+def test_scene_upgrade_is_atomic_and_does_not_invent_old_bulletins(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    conn.execute('ALTER TABLE players DROP COLUMN insignia')
+    conn.execute('DROP TABLE scene')
+    conn.execute('PRAGMA user_version=8')
+    before = list(conn.iterdump())
+    def deny_version(action, name, value, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == 'user_version' and value == '9' else sqlite3.SQLITE_OK
+    conn.set_authorizer(deny_version)
+    with pytest.raises(sqlite3.DatabaseError): wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert list(conn.iterdump()) == before
+    wd.ensure_schema(conn)
+    assert wd.read_player(conn, 1) == actor and wd.read_scene(conn) == []
+    before = list(conn.iterdump())
+    wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
     conn.close()
