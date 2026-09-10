@@ -4866,7 +4866,13 @@ income do not count. This is cargo margin, not total career profit. Explorer
 stages require 12/30/all 48 charted systems. Combat stages require 5/20/50 recorded
 victories. Progress is factual and may fall where its underlying measure falls;
 current-career rank remains permanent. These paths unlock different career
-conclusions without requiring the 250,000-credit top rank.
+conclusions without requiring the 150,000-credit top rank. That threshold is set
+so the last rank does not become an empty stretch: a greedy trading career
+finishes every ship purchase and the trader finale by roughly day 45 and reaches
+Void Baron near day 84, and the remaining climb to Legend must not be scores of
+identical jumps with nothing left to buy. A wealth-scaled sink or goal for the
+late game remains open work, and human playtesting decides whether one is
+needed. Earned ranks are retained, so lowering the bar only ever promotes.
 
 The always-available record Finale screen shows all four conclusions and their
 requirements before choosing: Frontier Legend at retained top rank, Trade Guild
