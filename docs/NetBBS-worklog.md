@@ -389,6 +389,18 @@ Destructive commands require persistent maintenance and a stopped node before th
 complete pre-action backup, and never reopen the world implicitly. Invalid supplied
 host metadata must fail before any SQLite creation; only absence selects demo mode.
 
+Shared-crew worlds use schema 2 even though the physical columns are unchanged:
+version 1 `players.crew` was the whole real crew, whereas version 2 stores available
+members and adds assigned garrisons to obtain the total. Keep v1 migration code
+immutable. Conversion, income settlement, released holdings, receipts and version
+marker must roll back together. Validate host ownership before this conversion.
+Capture must return the previous garrison exactly once under the same action lock;
+otherwise a stale session can lose or duplicate defenders. Action deltas report
+available and assigned changes separately so reinforcement is not narrated as death.
+An abandonment marker per exchange survives reconnects and is included in preview
+validation, preventing withdrawal/reclaim loops from awarding solo capture Rank.
+Clear it only on capture or season change, atomically with the relevant action.
+
 `python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
 against disposable SQLite worlds through the actual action resolvers. The default
 is fourteen days and seeds 362/363/364; use `--scenario NAME`, `--days 1..21`, and

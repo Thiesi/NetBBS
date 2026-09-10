@@ -257,12 +257,12 @@ def test_failed_raid_costs_the_attacker_crew_and_a_little_cash():
 
 
 def test_rooting_an_unclaimed_exchange_always_succeeds():
-    attacker = _make_player(crew=1)
+    attacker = _make_player(crew=2)
     exchange = _make_exchange(controller_user_id=None, garrison=0)
     success, _busted = wd.action_root_exchange(attacker, exchange, wd.now_utc(), FixedRandom(0.99))
     assert success is True
     assert exchange.controller_user_id == attacker.user_id
-    assert exchange.garrison == attacker.crew
+    assert (exchange.garrison, attacker.crew) == (1, 1)
     assert attacker.exchanges_taken_total == 1
 
 
@@ -457,7 +457,7 @@ def test_resolve_root_exchange_notifies_the_prior_controller(db_path):
     now = wd.now_utc()
     conn, season_number = _setup(db_path, now)
     old_controller = wd.load_or_create_player(conn, 1, "old_boss", now, season_number)
-    old_controller.crew = 1
+    old_controller.crew = 2
     _save_fixture(conn, old_controller)
     exchange = wd.list_exchanges(conn)[0]
     wd.resolve_root_exchange(conn, old_controller, exchange.id, now, FixedRandom(0.99))  # unclaimed => auto-success
@@ -540,6 +540,226 @@ def _rivals(db_path):
         player.created_at = wd.to_iso(now - wd.GRACE)
         _save_fixture(conn, player)
     return conn, now, a, b
+
+
+def test_captures_commit_real_crew_and_keep_a_recovery_member(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    delta = wd.ActionDelta()
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom(), delta=delta)
+    assert (actor.crew, wd.assigned_crew(conn, actor.user_id)) == (2, 1)
+    assert (delta.crew, delta.assigned, delta.turns) == (-1, 1, 1)
+    wd.resolve_root_exchange(conn, actor, 2, now, FixedRandom())
+    with pytest.raises(wd.ActionRejected, match="2 available crew"):
+        wd.resolve_root_exchange(conn, actor, 3, now, FixedRandom())
+    assert (actor.crew, wd.assigned_crew(conn, actor.user_id), actor.turns_used) == (1, 2, 2)
+    conn.close()
+
+
+def test_connect_waits_for_a_transient_journal_mode_lock(db_path, monkeypatch):
+    conn = wd.connect(db_path)
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("BEGIN")
+    conn.execute("SELECT * FROM meta").fetchall()
+    busy = threading.Event()
+    real_connect = sqlite3.connect
+    class ObservedConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql == "PRAGMA busy_timeout=5000":
+                sql = "PRAGMA busy_timeout=0"  # Exercise the immediate-BUSY path deterministically.
+            try:
+                return super().execute(sql, *args)
+            except sqlite3.OperationalError:
+                if sql == "PRAGMA journal_mode=WAL":
+                    busy.set()
+                raise
+    def immediate_connection(*args, **kwargs):
+        kwargs.update(timeout=0, factory=ObservedConnection)
+        return real_connect(*args, **kwargs)
+    monkeypatch.setattr(wd.sqlite3, "connect", immediate_connection)
+    def launch():
+        other = wd.connect(db_path)
+        try:
+            return other.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            other.close()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(launch)
+        try:
+            assert busy.wait(timeout=5)
+        finally:
+            conn.execute("ROLLBACK")
+            conn.close()
+        assert future.result(timeout=10) == "wal"
+
+
+def test_garrison_transfers_conserve_crew_and_abandon_after_income_settlement(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    delta = wd.ActionDelta()
+    rank = wd.rank_score(actor)
+    wd.resolve_garrison(conn, actor, 1, 1, now, delta=delta)
+    assert (actor.crew, wd.assigned_crew(conn, actor.user_id)) == (1, 2)
+    assert (delta.crew, delta.assigned, delta.rank, delta.heat, delta.turns) == (-1, 1, 0, 0, 1)
+    wd.resolve_garrison(conn, actor, 1, -1, now)
+    assert (actor.crew, wd.assigned_crew(conn, actor.user_id)) == (2, 1)
+    assert wd.resolve_garrison(conn, actor, 1, -1, now + timedelta(hours=2)) is True
+    assert (actor.crew, wd.assigned_crew(conn, actor.user_id), actor.cash) == (3, 0, 1080)
+    assert wd.rank_score(actor) == rank
+    assert wd.list_exchanges(conn)[0].controller_user_id is None
+    assert wd.refresh_player(conn, actor.user_id, now + timedelta(hours=3)).cash == 1080
+    assert "abandoned" in wd.history_events(conn, actor.user_id)[0].summary_text
+    conn.close()
+
+
+def test_garrison_history_receipt_is_read_without_acknowledging_incoming_events(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    wd.record_event(conn, actor.user_id, "Rival", "Incoming event", now)
+    wd.resolve_garrison(conn, actor, 1, 1, now)
+    assert wd.dashboard_state(conn, actor.user_id, now).new_events == 1
+    receipts = wd.history_events(conn, actor.user_id)
+    assert "Reinforced" in receipts[0].summary_text and receipts[0].seen_at is not None
+    assert receipts[1].summary_text == "Incoming event" and receipts[1].seen_at is None
+    conn.close()
+
+
+def test_captured_defenders_return_once_even_with_an_old_owner_session(db_path):
+    conn, now, attacker, owner = _rivals(db_path)
+    wd.resolve_root_exchange(conn, owner, 1, now, FixedRandom())
+    wd.resolve_garrison(conn, owner, 1, 1, now)
+    selected = wd.list_exchanges(conn)[0]
+    wd.resolve_root_exchange(conn, attacker, 1, now, FixedRandom())
+    assert wd.read_player(conn, owner.user_id).crew == 3
+    with pytest.raises(wd.ActionRejected, match="no longer control"):
+        wd.resolve_garrison(conn, owner, 1, -2, now, expected_exchange=selected)
+    wd.resolve_recruit(conn, owner, now)
+    assert owner.crew == 4
+    assert attacker.crew + owner.crew + wd.assigned_crew(conn, attacker.user_id) == 7
+    assert "2 defenders returned" in wd.history_events(conn, owner.user_id)[0].summary_text
+    conn.close()
+
+
+def test_abandon_and_reclaim_cannot_farm_capture_rank_even_after_restart(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    rank = wd.rank_score(actor)
+    for _ in range(2):
+        wd.resolve_garrison(conn, actor, 1, -1, now)
+        assert "+0 Rank" in "\n".join(wd.action_preview_lines("root", actor, wd.list_exchanges(conn)[0]))
+        conn.close()
+        conn = wd.connect(db_path)
+        actor = wd.read_player(conn, actor.user_id)
+        wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+        assert wd.rank_score(actor) == rank
+    conn.close()
+
+
+def test_abandonment_rank_guard_ends_with_another_owner_or_new_season(db_path):
+    conn, now, actor, rival = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    wd.resolve_garrison(conn, actor, 1, -1, now)
+    wd.resolve_root_exchange(conn, rival, 1, now, FixedRandom())
+    assert wd.rank_score(rival) == 500
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    assert wd.rank_score(actor) == 1000
+    wd.resolve_garrison(conn, actor, 1, -1, now)
+    later = now + wd.SEASON
+    actor = wd.refresh_player(conn, actor.user_id, later)
+    assert wd.list_exchanges(conn)[0].withdrawn_by is None
+    wd.resolve_root_exchange(conn, actor, 1, later, FixedRandom())
+    assert wd.rank_score(actor) == 500
+    conn.close()
+
+
+@pytest.mark.parametrize("change", [0, 2, -2, True])
+def test_invalid_garrison_transfer_has_no_effect_or_turn_cost(db_path, change):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected):
+        wd.resolve_garrison(conn, actor, 1, change, now)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_concurrent_garrison_transfers_cannot_assign_the_same_member_twice(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    conn.close()
+    barrier = threading.Barrier(2)
+    def transfer():
+        connection = wd.connect(db_path)
+        try:
+            snapshot = wd.read_player(connection, actor.user_id)
+            barrier.wait(timeout=5)
+            try:
+                wd.resolve_garrison(connection, snapshot, 1, 1, now)
+                return True
+            except wd.ActionRejected:
+                return False
+        finally:
+            connection.close()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(transfer) for _ in range(2)]
+        assert sorted(f.result(timeout=10) for f in futures) == [False, True]
+    conn = wd.connect(db_path)
+    actor = wd.read_player(conn, actor.user_id)
+    assert (actor.crew, wd.assigned_crew(conn, actor.user_id), actor.turns_used) == (1, 2, 2)
+    conn.close()
+
+
+def test_garrison_receipt_failure_rolls_back_both_crew_pools_and_turn(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    before = list(conn.iterdump())
+    def deny_receipt(action, table, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_INSERT and table == "events" else sqlite3.SQLITE_OK
+    conn.set_authorizer(deny_receipt)
+    with pytest.raises(sqlite3.DatabaseError):
+        wd.resolve_garrison(conn, actor, 1, 1, now)
+    conn.set_authorizer(None)
+    assert list(conn.iterdump()) == before
+    assert actor.crew == 2
+    conn.close()
+
+
+@pytest.mark.parametrize("crew", [1, 3, 24])
+def test_shared_crew_upgrade_preserves_real_total_and_pays_released_holdings(db_path, monkeypatch, crew):
+    conn, now, actor, _ = _rivals(db_path)
+    conn.execute("UPDATE players SET crew=? WHERE user_id=1", (crew,))
+    conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=24, controlled_since=?", (wd.to_iso(now),))
+    conn.execute("PRAGMA user_version=1")
+    before_identity = tuple(conn.execute("SELECT user_id, handle, created_at, crew_recruited_total FROM players WHERE user_id=1").fetchone())
+    priority = [r[0] for r in conn.execute("SELECT id FROM exchanges ORDER BY income_per_hour DESC, id")]
+    monkeypatch.setattr(wd, "now_utc", lambda: now + timedelta(hours=1))
+    wd.ensure_schema(conn)
+    actor = wd.read_player(conn, actor.user_id)
+    holdings = [e for e in wd.list_exchanges(conn) if e.controller_user_id == actor.user_id]
+    assert actor.crew + sum(e.garrison for e in holdings) == crew
+    assert actor.crew == 1
+    assert {e.id for e in holdings} == set(priority[:min(crew - 1, 10)])
+    assert actor.cash == 1411
+    assert tuple(conn.execute("SELECT user_id, handle, created_at, crew_recruited_total FROM players WHERE user_id=1").fetchone()) == before_identity
+    assert len(wd.history_events(conn, actor.user_id)) == 1
+    before = list(conn.iterdump())
+    wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_shared_crew_version_failure_preserves_legacy_allocations_and_income(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=3, controlled_since=?", (wd.to_iso(now),))
+    conn.execute("PRAGMA user_version=1")
+    before = list(conn.iterdump())
+    def deny_version(action, name, value, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == "user_version" and value == "2" else sqlite3.SQLITE_OK
+    conn.set_authorizer(deny_version)
+    with pytest.raises(sqlite3.DatabaseError):
+        wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert list(conn.iterdump()) == before
+    conn.close()
 
 
 def test_open_victim_recruit_does_not_restore_raided_cash(db_path):
@@ -1165,7 +1385,7 @@ def test_refused_world_is_unchanged_before_journal_setup(db_path, kind):
     else:
         conn = sqlite3.connect(db_path)
         if kind == "future":
-            conn.execute("PRAGMA user_version=2")
+            conn.execute(f"PRAGMA user_version={wd.WORLD_SCHEMA_VERSION + 1}")
         elif kind == "unrelated":
             conn.execute("CREATE TABLE other_application (value TEXT)")
         elif kind == "empty_sqlite":
@@ -1208,7 +1428,7 @@ def test_schema_marker_failure_rolls_back_migration_and_preserves_world(db_path)
     assert list(conn.iterdump()) == before
     assert not conn.in_transaction
     wd.ensure_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == wd.WORLD_SCHEMA_VERSION
     conn.close()
 
 

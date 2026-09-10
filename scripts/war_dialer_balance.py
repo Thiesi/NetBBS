@@ -58,6 +58,8 @@ def observe(conn, joined, totals, at):
             holdings = [e for e in wd.list_exchanges(snapshot) if e.controller_user_id == uid]
             frame[str(uid)] = {
                 "cash": player.cash, "crew": player.crew, "rank": wd.rank_score(player),
+                "assigned_crew": sum(e.garrison for e in holdings),
+                "total_crew": player.crew + sum(e.garrison for e in holdings),
                 "holdings": len(holdings), "income_per_hour": sum(e.income_per_hour for e in holdings),
                 "turns_spent": totals[uid]["turns"], "newcomer_protected": wd.is_in_grace(player, at),
             }
@@ -134,7 +136,7 @@ def run_scenario(name: str, *, days: int = 14, seed: int = 362) -> dict:
                     if name == "repeated_victim":
                         action, target = "raid", 3
                     elif name == "capture_trading":
-                        if exchanges[0].controller_user_id != uid:
+                        if exchanges[0].controller_user_id != uid and player.crew >= 2:
                             action, target = "root", exchanges[0].id
                         elif player.cash >= wd.RECRUIT_COST:
                             action = "recruit"
@@ -147,7 +149,7 @@ def run_scenario(name: str, *, days: int = 14, seed: int = 362) -> dict:
                             action, target = "root", exchanges[0].id
                     elif name != "trade_only":
                         available = [e for e in exchanges if e.controller_user_id != uid]
-                        if available:
+                        if available and player.crew >= 2:
                             chosen = min(available, key=lambda e: (e.controller_user_id is not None, e.garrison,
                                                                   -e.income_per_hour, e.id))
                             action, target = "root", chosen.id
@@ -180,6 +182,7 @@ def run_scenario(name: str, *, days: int = 14, seed: int = 362) -> dict:
                 frame = observe(conn, joined, totals, at)
                 daily.append({"day": day, "players": frame})
             return {"scenario": name, "policy": SCENARIOS[name], "days": days, "seed": seed,
+                    "crew_policy": "Territory policies recruit when fewer than two members are available; trade if recruitment is unaffordable.",
                     "daily": daily, "actions": {str(uid): dict(sorted(total.items())) for uid, total in totals.items()},
                     "rejections": dict(sorted(rejections.items())), "recovery_turns_after_bust": recovery_turn, "fixture": fixture}
         finally:

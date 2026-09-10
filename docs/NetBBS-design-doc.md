@@ -6596,6 +6596,43 @@ Recruit previews show the actual cash shortfall; empty rival worlds explain the
 available non-PvP alternatives. Advice does not grant resources, spend turns,
 change protection, or imply a waiting caller's snapshot updates continuously.
 
+**Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
+living crew is the available crew plus the members assigned across their owned
+exchanges. Capture requires at least two available members and commits one to the
+new garrison. Available crew alone determine job, raid and territory-attack
+strength, and take failed-action/bust losses. Assigned crew defend only their own
+exchange. Defenders displaced by capture return to their owner's available pool
+in the same transaction as ownership transfer and earned income. This gives an
+offline loser a recovery resource without duplicating members or raising Rank.
+
+`[G]arrison` is a content-first owned-exchange picker followed by bounded crew
+transfer choices and an explicit action preview. Reinforcement/withdrawal costs
+one ordinary turn, no cash or Heat, and earns no Rank. One member must remain
+available. Withdrawing the last defender abandons ownership after paying earned
+income; it cannot leave a free, unstaffed income source. Reclaiming one's own
+abandoned exchange earns no capture Rank until another crew controls it or the
+season changes. A persisted marker per exchange prevents reconnect farming;
+the capture counter records rewarded captures. Migration-released holdings use
+the same guard. Previews show the actual Rank award, both pools,
+the resulting defense and abandonment. Commit rechecks resources, season and
+ownership. Back/disconnect spends nothing. The dashboard shows available and
+assigned crew separately; action results distinguish transfers from losses.
+Voluntary transfer receipts are retained as read history, avoiding an unread
+self-notification; incoming rival and upgrade receipts remain unread.
+
+Version 2 converts legacy copied garrisons atomically, after any normal overdue
+season reset. For each remaining owner, preserve the real crew total, reserve one
+available member, and retain as many holdings as can receive at least one defender.
+Priority is descending hourly income then exchange ID. Divide the remaining crew
+budget evenly among retained holdings, giving remainder members in that order.
+Pay earned income before releasing unstaffable holdings and leave a history
+receipt with assigned/available and released counts. Cash, monotonic Rank, IDs,
+handles and account age survive conversion; no copied garrison becomes a recruit.
+The version marker and all conversion changes share one transaction. Old processes
+must be stopped and a verified backup taken before activation. Host ownership and
+maintenance checks precede conversion. Economy and raid-rule tuning remain later
+slice 5 bullets; this defense change does not claim the existing payouts balanced.
+
 **World paths (issue #362, slice 4).** The native runtime supplies the bundled
 War Dialer with `<resolved-node-db-filename>.doors/war-dialer.db` beside that node
 database. This derives from the persistent database locator, never mutable node
@@ -6650,8 +6687,9 @@ Unreadable, oversized, malformed or invalid identity/dimension metadata is refus
 before world creation; it never falls back to Guest. Caller messages remain clear
 and SysOp diagnostics are bounded. Commands do not activate or redeploy services.
 
-**World schema compatibility.** SQLite `user_version=1` identifies the supported
-War Dialer schema. A complete original unversioned world is adopted through a
+**World schema compatibility.** SQLite `user_version=1` identifies the original
+War Dialer schema; `user_version=2` adds shared-crew resource semantics without
+changing its column layout. A complete unversioned world is adopted through a
 numbered migration; its additive fields, retained history and version marker
 commit together or roll back together. New empty worlds use the same migration.
 Future schema versions, incomplete/unrelated layouts and failed SQLite integrity
