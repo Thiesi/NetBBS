@@ -2469,10 +2469,10 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
         lines.append("Turn window starts with your next action.")
     lines.extend(next_steps(state, now))
     if state.season_ends_at - now <= DAY * 2:
-        lines += [f"Season closes in {countdown(state.season_ends_at - now)}: "
-                  + state.season_ends_at.strftime("%Y-%m-%d %H:%M UTC"),
+        lines = [f"Reset in {countdown(state.season_ends_at - now)}",
+                  "Season end: " + state.season_ends_at.strftime("%Y-%m-%d %H:%M UTC"),
                   "Joining late? Try a [J]Job with Cautious approach and inspect its odds/stakes before Act. No rival or territory is required.",
-                  "Your final Rank is recorded even without a medal. Cash, crew, training, support and all saved operation progress (cased or prepared) reset at the deadline; spend only what you want to use this season."]
+                  "Your final Rank is recorded even without a medal. All competitive progress and resources reset, including cash, available/assigned crew, exchanges, Rank, training, support and all saved operation progress (cased or prepared); spend only what you want to use this season."] + lines
     elif player.season_number > 1 and rank == 0 and player.turns_used == 0:
         lines += [f"Ready to play: ${player.cash}, {player.crew} available crew and {TURNS_PER_DAY - player.turns_used} turns. "
                   "Start with [J]Job, or [T]rade to fund recruitment; previews show exact stakes.",

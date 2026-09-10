@@ -2230,7 +2230,8 @@ def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, mo
     state = wd.dashboard_state(conn, 1, late)
     text = ' '.join(wd.dashboard_lines(state, late))
     assert 'Joining late?' in text and 'Cautious' in text
-    assert 'even without a medal' in text and 'all saved operation progress (cased or prepared) reset' in text
+    assert 'even without a medal' in text and 'all saved operation progress (cased or prepared)' in text
+    assert 'All competitive progress and resources reset' in text and 'assigned crew, exchanges, Rank' in text
     wd.resolve_recruit(conn, actor, late)
     after = start + wd.SEASON
     state = wd.dashboard_state(conn, 1, after)
@@ -2263,7 +2264,10 @@ def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, mo
     for stamp in (late, after):
         # Refresh only forward; the saved late state is used for its own display.
         shown = state if stamp == after else wd.DashboardState(actor, [], 0, after, None)
+        page_start = len(written)
         _, count = wd.draw_dashboard(wd.Palette(False), shown, stamp, width, height)
+        if stamp == late:
+            assert 'Reset in' in ''.join(written[page_start:])
         for page in range(1, count): wd.draw_dashboard(wd.Palette(False), shown, stamp, width, height, page)
     assert list(conn.iterdump()) == before
     for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
