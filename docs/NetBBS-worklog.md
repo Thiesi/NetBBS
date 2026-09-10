@@ -4658,6 +4658,14 @@ recognizes both CSI encodings of its terminator.
 (`hull_hp_max * 4` plus a base); `destroy_ship` takes `patrol=` from the combat
 session and only that path clears notoriety. Any new destruction path must pass
 the flag explicitly rather than clearing notoriety itself.
+Two bounds keep destruction from beating the alternatives at a low balance.
+`destroy_ship` also takes `hull_before=`, the hull the fight started with (the
+combat checkpoint carries it), and `salvage_hull` caps its free floor at that
+value; without it a wreck is a free repair for any ship whose hull sits below a
+quarter of maximum. On a patrol kill the charge is the salvage fee plus
+`notoriety_fine_cost`, and notoriety clears only when credits cover both; the
+fee alone is bounded by hull while the fine grows without limit, so a bare
+patrol amnesty is cheaper than surrendering as soon as notoriety climbs.
 
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen
