@@ -2308,8 +2308,8 @@ def test_display_toggles_are_free_paginated_and_survive_seasons(tmp_path, monkey
 def test_ascii_monochrome_output_preserves_controls_names_and_noncolor_results(monkeypatch, capsys):
     monkeypatch.setattr(wd, '_ASCII_DECOR', True)
     monkeypatch.setattr(wd, '_MONOCHROME', True)
-    wd.out('\x1b[2J\x1b[38;5;51m\u2554\u2550\u2551\u2557\x1b[0m Caller Jos\u00e9: +10 Rank')
-    assert capsys.readouterr().out == '\x1b[2J+-|+ Caller Jos\u00e9: +10 Rank'
+    wd.out(wd.decor('\x1b[2J\x1b[38;5;51m\u2554\u2550\u2551\u2557\x1b[0m') + ' Caller Jos\u00e9 A\u2502B: +10 Rank')
+    assert capsys.readouterr().out == '\x1b[2J+-|+ Caller Jos\u00e9 A\u2502B: +10 Rank'
 
 
 def test_fast_mode_skips_only_optional_flavor_and_art(tmp_path, monkeypatch):
