@@ -4815,6 +4815,24 @@ destination's danger (or unknown) and that a day passes; No retains the chart
 with a cancelled-departure result and writes nothing. Contract and route jumps
 keep their existing preview screens and deliberate Jump actions.
 
+Every hotkey the game prints is written `[K] Label` -- one style, everywhere
+(issue #400). The game used to mix three: `[B]ack`, `[B]Back` and `[B] Back`,
+sometimes two of them in one action bar. Of the two styles the report named,
+`[B]ack` is the one that cannot be carried through, because a hotkey is not
+always the label's first letter and is not always one letter: `[1-9] Details`,
+`[<>] Page`, `[M] Commodity Market` and `[X] Expand` have no inline spelling.
+So `[K] Label` it is, and it was already what every dynamic list row and every
+combat detail line used. The bar's label is the word the detail line leads with,
+so no action is named twice; that is what renamed the combat verbs Brace to
+Guard and Bribe to Pay bribe, and it is why Guard rather than Brace, since `B`
+is Back everywhere and a stray Back must never spend a combat turn. The saved
+field stays `brace_ready`. The style costs the narrowest terminals one row: at
+20 columns a bar of four hotkeys wraps to three rows where the glued spelling
+took two, so a page holds one row less and the wrap can fall between a key and
+its label. That is paid for by the paginator, which measures the bar it will
+actually show, and it is worth one row not to make the player learn two
+spellings of the same thing.
+
 At every action bar -- service pages, the chart, the mission board, the star
 map, the route planner and the draft editors alike -- whitespace and unsupported
 terminal keys are absorbed at the prompt rather than reprinting the page; an
@@ -5308,8 +5326,8 @@ New two-raider encounters use a versioned coordinated formation. Before the firs
 combat decision, Target switches which raider to engage first without spending a
 turn. Both opponents and the covering-fire contribution are disclosed. While both
 remain, the other raider adds 2 + twice its tier to a surviving target's return
-fire, after shields and before Brace reduction. Killing the target prevents that
-exchange's return fire and ends covering fire for the remaining duel. Brace
+fire, after shields and before Guard reduction. Killing the target prevents that
+exchange's return fire and ends covering fire for the remaining duel. Guard
 therefore protects against the pair, while target selection can remove a fragile
 or dangerous partner first. No healing occurs between foes; successful evasion or
 bribery breaks contact with the whole squadron, as before.
@@ -5322,7 +5340,7 @@ decision. Formation creation and target changes consume no encounter RNG.
 New Voidrunner fights use a versioned tactical ruleset with three deterministic
 opponent patterns: Raider (attack, volley, recover), Bulwark (cover, volley,
 recover), and Skirmisher (harry, attack, volley). The current intent and incoming
-damage range are visible. Fire deals full damage and recharges Brace; Brace fires
+damage range are visible. Fire deals full damage and recharges Guard; Guard fires
 a reduced shot and cuts incoming damage to a quarter, then requires Fire before
 reuse. Cover/harry reduce outgoing damage, recovery exposes the enemy, and harry
 reduces escape chance. Failed evasion/bribery receives and advances the same intent.
@@ -5331,7 +5349,7 @@ for heavy hulls; enemy HP is not inflated to lengthen fights. Ruleset version 2
 (issue #406) changes the per-tier threat bonus from 0/3/6/20/55 to 0/3/6/8/34:
 version 1 dropped a bracing starter Shuttle from a 99% win at tier 2 to none at
 tier 3 between adjacent danger ratings; under version 2 that Shuttle wins about
-half its tier-3 fights with Brace (and almost none without), a Cutter braces
+half its tier-3 fights with Guard (and almost none without), a Cutter guards
 through tier 4 about half the time, and a maxed Carrier still loses about 40%
 of its hull to a tier-4 squadron, so heavy hulls keep paying for fights. A fight
 keeps the ruleset it started with; both versions load, others are unsupported.
@@ -5340,7 +5358,7 @@ ship upgrades, faction consequences and squadron sequencing remain in force. New
 generated raiders use destination danger for both squadron chance and tier; stored
 opponents retain their stats, and tier/name RNG draw ordering stays unchanged.
 
-The tactical pattern step and Brace readiness checkpoint with opponent HP and the
+The tactical pattern step and Guard readiness checkpoint with opponent HP and the
 last exchange. Pattern selection consumes no extra RNG. Every fight uses the tactical
 rules and every saved fight carries its tactical state. Reject malformed or
 unknown tactical versions through preserving recovery. Automated probes establish bounded fight lengths and
@@ -5362,8 +5380,8 @@ combat turn or encounter randomness. Escape odds, conditional bribe payment and
 refusal retaliation, random one-unit cargo sacrifice and patrol surrender terms
 are visible before choosing an action. Existing action hotkeys work across pages;
 browsing preserves encounter RNG and resumable state. The combat action bar
-labels every verb like the other detail screens (`[F]Fire [G]Brace [E]Evade
-[D]Dump [P]Bribe ... [I]Info`) instead of a bare letter list, and Dump appears
+labels every verb like the other detail screens (`[F] Fire [G] Guard [E] Evade
+[D] Dump [P] Pay bribe ... [I] Info`) instead of a bare letter list, and Dump appears
 only with cargo aboard; with an empty hold `D` is not a displayed action and
 does nothing (issue #414). Below 40 columns the bar keeps the compact letter
 list, as the pilot record already does for its view keys: the labels wrap to

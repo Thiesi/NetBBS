@@ -544,13 +544,13 @@ career, and a later checkpoint retries publication from its saved high-water mar
 
 Choose **[G] Pilot Guide** on the station deck for flight instructions and a recap
 of contracts, tracked plans and futures orders. Pages fit the negotiated terminal
-size; **[B]ack** leaves without changing the career or advancing the day. **[B]**
+size; **[B] Back** leaves without changing the career or advancing the day. **[B]**
 is Back on every screen below the deck and never does anything else; **[Q]** on
 the deck saves and leaves, and is also accepted as Back elsewhere.
 
-On day zero at Freeport, **[O]ffer** shows an optional First Flight delivery to a
+On day zero at Freeport, **[O] Offer** shows an optional First Flight delivery to a
 real adjacent station. The terms show the legal cargo to buy, payment, danger,
-fuel reserve and crew costs before **[A]ccept** appears on the final page. It uses
+fuel reserve and crew costs before **[A] Accept** appears on the final page. It uses
 one normal contract slot and automatically tracks the destination. Buy the cargo
 at the market, refuel at the yard if necessary, and select the station on the
 chart. Docking with the full load delivers it automatically. Jumps advance the
@@ -564,16 +564,16 @@ trading or contracts. The normal risks of travel still apply.
 ### Navigating contracts
 
 Contract details show only the notes that apply to that job; on a multi-page
-offer, the first page says which page holds **[A]ccept**. Screens that fit one
+offer, the first page says which page holds **[A] Accept**. Screens that fit one
 page show no Prev/Next keys.
 
-Open a contract's details and choose **[R]oute** to inspect every leg to its named
+Open a contract's details and choose **[R] Route** to inspect every leg to its named
 target, even when the target is uncharted. Names of uncharted intermediate
 stations and their danger remain hidden. The preview shows fuel, wages, manual
 refuelling stops, arrival day and deadline warnings, including queued bounty
 leave/re-enter legs. Browsing a posted job does not accept or track it.
 
-For an active contract, **[J]ump next** tracks that contract and flies exactly one
+For an active contract, **[J] Jump next** tracks that contract and flies exactly one
 leg using normal encounters, customs and mission resolution. Fuel must cover that
 leg. Review the refreshed route after arriving or being diverted, then choose
 another jump or Back. Completion, failure and expiry stop contract navigation.
@@ -581,18 +581,18 @@ Refuelling is manual at the yard, and delivery cargo must still be procured.
 If a destroyed journey charted a survey target without completing the contract,
 it is shown as blocked: revisiting cannot discover it again. Abandon that contract
 from its details to free the active slot.
-The chart's **[R]oute for tracked contract** reopens this view. After a disconnect,
+The chart's **[R] Route for tracked contract** reopens this view. After a disconnect,
 any saved encounter resumes first; the rest of a route never runs unattended.
 
 ### Planning other journeys
 
-Choose **[G]eneral route planner** on the chart. It opens the destination picker
+Choose **[G] General route planner** on the chart. It opens the destination picker
 straight away, because a planner with no destination has nothing to show; the
 picker paginates all known destinations, and Back from it leaves the planner
-without planning anything. Inside the planner, **[D]estination** reopens the
+without planning anything. Inside the planner, **[D] Destination** reopens the
 picker to change the route, and Back from *that* keeps the previous selection.
 Inspect each leg, fuel and wage cash, manual refuelling stops, and active-contract
-deadline estimates before choosing **[J]ump next**. Unknown intermediate stations
+deadline estimates before choosing **[J] Jump next**. Unknown intermediate stations
 retain unknown names and danger. Contract destinations can be previewed through
 their details even when uncharted.
 
@@ -605,7 +605,7 @@ access; subsequent route legs always need a new command.
 ### Direct jump chart
 
 The direct chart keeps current fuel in its heading and paginates full connection
-entries with **[>]Next**, **[<]Prev** and **[B]Back**. Each entry shows its bearing,
+entries with **[>] Next**, **[<] Prev** and **[B] Back**. Each entry shows its bearing,
 known sector/economy and danger, fuel cost, low-fuel warning and tracked-next marker.
 Uncharted neighbors keep unknown names and danger. The opening pages list route,
 map, scanner and tracked-contract actions when available.
@@ -620,12 +620,12 @@ its normal discovery and checkpoint behavior.
 
 ### Reading the spatial map
 
-The chart's **[V]iew spatial map / list** opens the current sector. **[N/P]** move
-between the six named sectors, **[O]verview** shows the galaxy, and **[L]ist** opens
-a paginated list with exact positions. **[I]nfo** selects a station for its known
-connections and details. **[B]ack** returns without changing the career. Terminals
+The chart's **[V] View spatial map / list** opens the current sector. **[N/P]** move
+between the six named sectors, **[O] Overview** shows the galaxy, and **[L] List** opens
+a paginated list with exact positions. **[I] Info** selects a station for its known
+connections and details. **[B] Back** returns without changing the career. Terminals
 below 40 columns or 12 rows start in the list; larger terminals can return to the
-map with **[M]ap**.
+map with **[M] Map**.
 
 Markers distinguish **@** current position, **!** contract objective, **X** route
 end, **\*** plotted stops, **o** charted stations and **+** clustered cells. Dots
@@ -634,7 +634,7 @@ Info provides exact links and the list preserves every station. Important positi
 markers take precedence in overlapping cells. Sector views show links between
 visible points; use Overview to see the full plotted route.
 
-Contract and general route previews offer **[V]Map** with their actual path.
+Contract and general route previews offer **[V] Map** with their actual path.
 Uncharted intermediate names, danger and other connections remain unknown;
 contract target names are public bearings. Map and list browsing never charts,
 tracks or travels, and Back returns to the route preview.
@@ -901,7 +901,7 @@ cannot charge fuel or award the same contract again.
 New two-raider contacts disclose both opponents and their covering fire. **[T]
 Target** switches who you fight first before engagement, without spending fuel or
 a combat turn. The partner adds two damage plus twice its tier to return fire
-while both ships remain. **[G] Brace** reduces the combined incoming damage.
+while both ships remain. **[G] Guard** reduces the combined incoming damage.
 Destroying the target prevents that return volley and ends the covering bonus.
 
 The best order depends on the opponents' tiers, hull and patterns. There is no
@@ -966,8 +966,8 @@ notoriety and faction consequences. These keys spend no turn; the last saved
 exchange stays available at the front of the pages, including after reconnecting.
 
 New fights show an enemy pattern and its current intent, including the incoming
-damage range. **[G] Brace** fires at reduced strength and cuts incoming damage to
-a quarter; **[F] Fight** recharges it. Brace a dangerous volley when you cannot
+damage range. **[G] Guard** fires at reduced strength and cuts incoming damage to
+a quarter; **[F] Fire** recharges it. Guard a dangerous volley when you cannot
 finish the opponent first. Cover/harry reduce your shot, while recovery exposes
 the enemy; harry also lowers your escape chance. The Info view shows the pattern.
 
@@ -975,13 +975,13 @@ Raider, Bulwark and Skirmisher patterns reward different timing. Ship upgrades
 still matter, and high-tier fire can seriously damage even heavy hulls. New raiders
 use destination danger; already stored opponents retain their stats. A fight saved
 under the original rules keeps those rules until resolved, then new fights use
-intents and Brace. Invalid repeat-Brace input spends no turn or randomness.
+intents and Guard. Invalid repeat-Guard input spends no turn or randomness.
 
-**[F] Fight** exchanges one round, **[E] Evade** attempts escape, and pirates also
-allow **[D] Dump & evade** (one random cargo unit; shown only with cargo aboard) and
+**[F] Fire** exchanges one round, **[E] Evade** attempts escape, and pirates also
+allow **[D] Dump** (one random cargo unit; shown only with cargo aboard) and
 an affordable **[P] Pay bribe**. The action bar names every verb at 40 columns or wider, and keeps the compact
 letter list below that so the page still shows the fight.
-While escorting, the Evade, Dump and Pay-bribe lines say that leaving fails the
+While escorting, the Evade, Dump and Pay bribe lines say that leaving fails the
 convoy. Failed, abandoned and expired contracts are counted on the Pilot Status
 page and in retirement dossiers, and the log names the forfeited reward.
 Losing the fight costs a salvage fee of 200 credits plus four per point of maximum
@@ -1063,9 +1063,9 @@ returning to the futures list and market.
 ### Engineering yard and crew pages
 
 The yard and crew roster fit the terminal height, stacking terms at narrow widths.
-Use **[>]Next** and **[<]Prev** to browse; **[B]Back** is available on every page.
-Upgrade/refit letters work directly, and the yard keeps **[R]Fuel**, **[P]Repair**
-and **[K]Crew** available across pages. The heading shows current credits. Full
+Use **[>] Next** and **[<] Prev** to browse; **[B] Back** is available on every page.
+Upgrade/refit letters work directly, and the yard keeps **[R] Refuel**, **[P] Repair**
+and **[K] Crew** available across pages. The heading shows current credits. Full
 costs, upgrade benefits, fuel/hull prices and ongoing crew wages remain readable.
 
 After an action, the refreshed first page retains the result and updated credits.
@@ -1100,7 +1100,7 @@ observation. Check a current market before relying on a complete sale.
 Choose **[T] Trading Ledger** on the station deck to inspect cargo costs, sale
 and delivery margins, losses, fuel purchases and crew wages. It also shows the
 current station's production and demand and your present per-jump wage budget.
-Pages fit the terminal; **[B]ack** leaves without changing anything.
+Pages fit the terminal; **[B] Back** leaves without changing anything.
 
 Costs are recorded for new purchases and futures pickups, including brokerage.
 Older cargo remains labelled **unknown cost**. Disposals use older unknown cargo
@@ -1110,16 +1110,16 @@ travel and other career spending. The ledger reports actual fuel purchases,
 paid wages, cancelled-order fees and lost cargo cost separately; it cannot
 reconstruct activity before recording began. A new career starts a fresh ledger.
 
-Within the ledger, **[M]arkets** shows remembered buy/sell quotes and their
+Within the ledger, **[M] Markets** shows remembered buy/sell quotes and their
 observation day. Docking updates local quotes; trader data bursts also record
 the quote they reveal. Remote quotes stay stale until updated, and older chart
 discoveries do not invent price history. Open purchase of contraband remains
 labelled prohibited outside Havens.
 
-**[R]oute** estimates a trade using a remembered destination sale price. Open
-**[E]dit draft**, change **[D]estination**, **[C]argo** and **[Q]uantity**, then
-**[S]Apply** to update the estimate. Back discards edits; rejected combinations
-retain the draft for correction. **[H]old** toggles between buying
+**[R] Route** estimates a trade using a remembered destination sale price. Open
+**[E] Edit draft**, change **[D] Destination**, **[C] Cargo** and **[Q] Quantity**, then
+**[S] Apply** to update the estimate. Back discards edits; rejected combinations
+retain the draft for correction. **[H] Hold** toggles between buying
 new goods here and using cargo already aboard. The view shows procurement and
 remaining credits, fuel and refuelling stops, wages, quote age, cash shortfall,
 route danger where known and expected margin. Unknown acquisition cost or a
@@ -1131,7 +1131,7 @@ and never purchase cargo or engage travel. Use the market and chart to act.
 
 ### Regional opportunities
 
-Within the Trading Ledger, **[O]pportunities** shows active economy news and up to
+Within the Trading Ledger, **[O] Opportunities** shows active economy news and up to
 six trade candidates. New events affect at most three nearby stations. A boom
 suggests bringing the named commodity; a crash suggests checking for cheaper
 supplies. The bulletin names affected stations, coordinates, hops and remaining
@@ -1143,16 +1143,16 @@ Candidates use current local stock, cash and hold space plus remembered sale
 prices and buying demand. They reserve cash for fuel and wages, exclude delivery
 conflicts and rank estimated margin per outbound jump. Return travel, encounters,
 repairs and market changes are excluded; unobserved demand and contraband risks
-are labelled. **[1-6] Route** opens the selected estimate, where **[E]dit draft**
+are labelled. **[1-6] Route** opens the selected estimate, where **[E] Edit draft**
 can adjust it. Back or disconnect changes nothing; the board never buys cargo or
 starts travel. Visit markets and compare alternatives when a pool is exhausted.
 
 ### Voidrunner recovery
 
 Invalid or unreadable career files remain in place. The game shows a recovery
-screen with **[B]ack**, and never silently starts a replacement career. If
+screen with **[B] Back**, and never silently starts a replacement career. If
 `USER_ID.previous.json` is valid, the screen shows its callsign, day, credits and
-pending-journey status. **[R]estore** appears on the final page and requires a
+pending-journey status. **[R] Restore** appears on the final page and requires a
 confirmation: progress after that checkpoint will be rolled back. Before
 replacement, the current bytes are retained as `USER_ID.recovery-UNIQUE.json`.
 Back, declined confirmation and disconnection leave the files unchanged.
