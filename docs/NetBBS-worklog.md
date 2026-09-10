@@ -4654,6 +4654,12 @@ before that timeout, then retain their payload across subsequent delays.
 OSC accepts BEL or ST; other control strings require ST, and bracketed paste
 recognizes both CSI encodings of its terminator.
 
+Removing an active Voidrunner contract without paying it must go through
+`record_mission_loss` (failed / expired / abandoned) in the same checkpoint as
+the removal; a resumed hop must not record it twice, which the escort index and
+cached bounty outcome already guarantee. Dossiers carry `failed` and `expired`
+as a pair or not at all; the validator rejects one without the other.
+
 `salvage_fee` must exceed a full repair from zero for every hull class and tier
 (`hull_hp_max * 4` plus a base); `destroy_ship` takes `patrol=` from the combat
 session and only that path clears notoriety. Any new destruction path must pass

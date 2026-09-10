@@ -967,6 +967,9 @@ intents and Brace. Invalid repeat-Brace input spends no turn or randomness.
 
 **[F] Fight** exchanges one round, **[E] Evade** attempts escape, and pirates also
 allow **[D] Dump & evade** (one random cargo unit) and an affordable **[P] Pay bribe**.
+While escorting, the Evade, Dump and Pay-bribe lines say that leaving fails the
+convoy. Failed, abandoned and expired contracts are counted on the Pilot Status
+page and in retirement dossiers, and the log names the forfeited reward.
 Losing the fight costs a salvage fee of 200 credits plus four per point of maximum
 hull (never more than you have), all cargo, and a tow to Freeport; the tug restores
 full hull only when the fee is paid in full, otherwise a quarter of maximum plus the

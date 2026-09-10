@@ -5191,6 +5191,15 @@ refusal retaliation, random one-unit cargo sacrifice and patrol surrender terms
 are visible before choosing an action. Existing action hotkeys work across pages;
 browsing preserves encounter RNG and resumable state.
 
+Every path that ends an active contract without payment records it (issue #403):
+failed escort or bounty fights and abandonment count as failed, deadline expiry
+as expired, each once and in the same checkpoint that removes the contract, with
+a log line naming the forfeited reward. Closing a verified-mismatch warrant is
+neither. The pilot record shows completed, failed and expired; dossiers written
+from this version carry both counts (older dossiers carry neither and still
+load). During an escort fight the Evade, Dump and Bribe lines say the contract
+fails.
+
 Destruction charges a salvage fee of 200 credits plus four per point of maximum
 hull, capped at credits on hand so it never creates debt; it loses all cargo and
 tows the ship to Freeport (issue #402). A fee paid in full restores full hull; a
