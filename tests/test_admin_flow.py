@@ -4856,31 +4856,32 @@ def test_door_gallery_description_is_word_wrapped_to_terminal_width(db, lane, sy
     assert all(len(line) <= 80 for line in lines)
 
 
-def test_door_gallery_selecting_and_saving_registers_it(db, lane, sysop):
+@pytest.mark.parametrize('catalog_index', [0, 2])
+def test_door_gallery_selecting_and_saving_registers_it(db, lane, sysop, catalog_index):
     import sys
 
     from netbbs.doors import list_doors
     from netbbs.doors.bundled import BUNDLED_DOORS, resolve_bundled_door_path
 
-    retro_trivia = BUNDLED_DOORS[0]
-    resolved_path = resolve_bundled_door_path(retro_trivia)
+    bundled_door = BUNDLED_DOORS[catalog_index]
+    resolved_path = resolve_bundled_door_path(bundled_door)
     assert resolved_path is not None  # sanity: this really is installed
 
     # A bare "s" saves immediately -- every required field (name,
     # executable path) already arrived non-blank via the gallery's own
     # prefill, so no further field edits are needed.
-    session = FakeSession(["c", "d", "g", "0", "1", "s", "b", "b", "b", "b"])
+    session = FakeSession(["c", "d", "g", "0", str(catalog_index + 1), "s", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert f"Registered door {retro_trivia.name!r}." in text
+    assert f"Registered door {bundled_door.name!r}." in text
 
     doors = list_doors(db)
     assert len(doors) == 1
-    assert doors[0].name == retro_trivia.name
-    assert doors[0].description == retro_trivia.description
+    assert doors[0].name == bundled_door.name
+    assert doors[0].description == bundled_door.description
     assert doors[0].executable_path == sys.executable
     assert doors[0].args == (resolved_path.as_posix(),)
-    assert doors[0].min_play_level == retro_trivia.suggested_min_play_level
+    assert doors[0].min_play_level == bundled_door.suggested_min_play_level
 
 
 def test_door_gallery_reports_no_bundled_doors_when_none_are_found_on_disk(db, lane, sysop, monkeypatch):

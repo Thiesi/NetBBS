@@ -3,6 +3,26 @@
 NetBBS supplies the integration, not third-party games or their execution
 environments. The bundled games remain available without a legacy profile.
 
+## War Dialer installed-package rehearsal
+
+**MANUAL - outside NetBBS:** in the development Python environment, install the
+wheel frontend with `python -m pip install build` if it is not already available
+(the `dev` extra alone does not include it). Build with `python -m build --wheel`, then
+install that local wheel into a fresh disposable directory with
+`python -m pip install --no-deps --target <installed-root> <wheel-path>`.
+Use a Python environment with the project's existing dependencies available.
+From the checkout, run
+`python scripts/war_dialer_release_check.py --installed-root <installed-root>`.
+The script verifies that imports and the gallery's game path come from that
+installation, registers the catalog entry in a temporary node, and exercises
+supervised quit, timeout and caller disconnect against the installed game.
+Temporary state is removed; no BBS service is started or reconfigured.
+
+The repository gallery tests also drive the SysOp's real gallery selection/save
+flow for War Dialer. Process tests cover paid actions, acknowledgement, output
+loss and the season boundaries; none of these establish live-transport usability,
+target-host compatibility, multi-day balance or hands-on restore success.
+
 ## War Dialer shared-world sessions
 
 The bundled War Dialer uses a world beside the node database: for `/srv/bbs/netbbs.db`,
