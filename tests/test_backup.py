@@ -1550,8 +1550,12 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
     path = _populate_war_dialer(db_path)
     held = wd.connect(path)
     held.execute("PRAGMA wal_autocheckpoint=0")
+    stamp = wd.now_utc()
+    wd.resolve_recruit(held, wd.read_player(held, 1), stamp)
+    held.execute("UPDATE meta SET value=? WHERE key='season_anchor'", (wd.to_iso(stamp - wd.SEASON),))
+    wd.settle_world(held, stamp)
     held.execute("UPDATE exchanges SET npc_key='', npc_return_at='2026-09-11T08:00:00+00:00', garrison=0 WHERE id=5")
-    held.execute("UPDATE players SET cash=98765, insignia='archive', specialty='fixers', support='stash', operation_contract=4, operation_approach=2, operation_stage=2, successful_operations=3")
+    held.execute("UPDATE players SET cash=98765, income_remainder=9876, insignia='archive', specialty='fixers', support='stash', operation_contract=4, operation_approach=2, operation_stage=2, successful_operations=3")
     held.execute("INSERT INTO recon VALUES (1,2,'Historical Rival',1234,7,'2026-09-10T00:00:00+00:00','2026-09-11T00:00:00+00:00',1)")
     try:
         assert Path(str(path) + "-wal").stat().st_size > 0
@@ -1572,7 +1576,9 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
         assert conn.execute("SELECT income_remainder FROM players").fetchone()[0] == 9876
         assert conn.execute("SELECT specialty,support FROM players").fetchone() == ("fixers", "stash")
         assert conn.execute("SELECT insignia FROM players").fetchone() == ("archive",)
-        assert conn.execute("SELECT COUNT(*) FROM scene").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM scene").fetchone()[0] == 6
+        assert conn.execute("SELECT handle,rank,medal FROM season_results").fetchone() == ("WarPilot", 10, "Gold")
+        assert conn.execute("SELECT number FROM seasons").fetchone() == (1,)
         assert conn.execute("SELECT role FROM exchanges ORDER BY id LIMIT 1").fetchone() == ("carrier",)
         assert conn.execute("SELECT npc_key,garrison FROM exchanges WHERE id=6").fetchone() == ("relay", 4)
         assert conn.execute("SELECT operation_contract,operation_approach,operation_stage,successful_operations FROM players").fetchone() == (4, 2, 2, 3)
@@ -1720,6 +1726,8 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
         conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=30")
         conn.execute("INSERT INTO recon VALUES (1,2,'Historical Rival',1234,7,'2026-09-10T00:00:00+00:00','2026-09-11T00:00:00+00:00',1)")
         if legacy:
+            conn.execute("DROP TABLE season_results")
+            conn.execute("DROP TABLE seasons")
             conn.execute("ALTER TABLE players DROP COLUMN insignia")
             conn.execute("DROP TABLE scene")
             conn.execute("PRAGMA user_version=8")
@@ -1738,6 +1746,8 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
         if not legacy:
             assert conn.execute("SELECT insignia FROM players").fetchone() == ("signal",)
             assert conn.execute("SELECT COUNT(*) FROM scene").fetchone()[0] == (0 if reset else 6)
+            assert conn.execute("SELECT COUNT(*) FROM seasons").fetchone()[0] == 1
+            assert conn.execute("SELECT insignia,medal FROM season_results").fetchone() == ("signal", "Gold")
         else:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
         assert conn.execute("SELECT operation_stage,successful_operations FROM players").fetchone() == (0, 0)

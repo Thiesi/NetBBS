@@ -2077,6 +2077,8 @@ def test_complete_visit_stays_productive_without_pvp_at_every_world_size(tmp_pat
             scoped.setattr(wd, 'show_text_pages', lambda p, title, content, *args, **kw: lines.extend(content))
             assert wd.choose_rival(wd.Palette(False), conn, actor, width, height) is None
         assert '[J]Jobs and [O]Operations need no rival' in ' '.join(lines)
+        guidance = ' '.join(lines)
+        assert guidance.index('[B]ack to the switchboard') < guidance.index('[J]Jobs')
     class Success:
         def random(self): return .01
         def randint(self, low, high): return low
@@ -2110,4 +2112,51 @@ def test_complete_visit_stays_productive_without_pvp_at_every_world_size(tmp_pat
         lines = _ANSI_RE.sub('', screen).split('\r\n')
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+def test_season_rules_and_archived_results_are_readable_and_free(tmp_path, monkeypatch, width, height):
+    conn = wd.connect(tmp_path / 'season-view.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'HistoricalCaller', now, 1)
+    wd.resolve_recruit(conn, actor, now)
+    state = wd.dashboard_state(conn, 1, now)
+    assert wd.SEASON_AWARDS in wd.dashboard_lines(state, now)
+    assert any('Season end:' in line for line in wd.dashboard_lines(state, now))
+    later = now + wd.SEASON * 3
+    actor = wd.load_or_create_player(conn, 1, 'RenamedCaller', later, 4)
+    monkeypatch.setattr(wd, 'now_utc', lambda: later)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    selected, calls = False, 0
+    def select(valid):
+        nonlocal selected, calls
+        calls += 1
+        assert calls < 150
+        if not selected:
+            if '4' in valid:
+                selected = True
+                return '4'
+            return 'N'
+        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        page = re.search(r'Page (\d+)/(\d+)', screen)
+        return 'B' if page.group(1) == page.group(2) else 'N'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
+    before = list(conn.iterdump())
+    wd.do_scene(wd.Palette(False), conn, actor, width, height)
+    assert list(conn.iterdump()) == before
+    body = []
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+        if 'SEASON RESULTS' in lines[0]: body.extend(lines[2:-2])
+    normalized = ' '.join(' '.join(body).split())
+    assert 'Gold: HistoricalCaller, Rank 10' in normalized
+    assert 'inactive' in normalized and 'Your result: #1, Rank 10.' in normalized
     conn.close()
