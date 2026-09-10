@@ -4808,6 +4808,16 @@ maintenance reporting busy without creating a career.
 `departed` is not a travel phase. It appears in fixtures as an *invalid* phase for
 fault injection; the real phases are `primary`, `escorts`, `arrival` and `customs`.
 
+The Voidrunner suite lives in `tests/voidrunner/`, split by subsystem (issue
+#422). `support.py` loads the door once, by path, and owns the worlds and the
+subprocess helpers more than one slice needs -- the split is by subject, so a
+helper that crosses subjects is by definition shared. `conftest.py` owns the
+fixtures, which is why they are not imported. `test_backup.py` reaches the same
+file again through the package: a second load under a second name, deliberately,
+because that test is about the installed package and this suite is about the
+shipped script. A split like this is a move, and the proof is that the set of
+collected test ids does not change; check that before the suite, not after.
+
 Voidrunner saves are schema 2 and there is no migration (issue #421). A schema-1
 document raises `OutdatedSave`, which is a refusal rather than a recovery case:
 `screen_save_recovery` would only offer a `.previous` copy of the same retired
