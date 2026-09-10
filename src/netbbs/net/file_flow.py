@@ -50,6 +50,7 @@ for, not a structural requirement the way the picker case was.
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 from netbbs.activity import record_file_area_seen
 from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
@@ -773,14 +774,21 @@ async def _show_area(
                 elif choice.lower() == "/upload" and can_write:
                     await _handle_upload(session, lane, area, user)
                     return
-                elif (
-                    choice.lower() in ("e", "/describe")
-                    or choice.lower().startswith("/describe ")
-                ) and _can_describe(page):
+                elif choice.lower().startswith("/describe ") or (
+                    choice.lower() in ("e", "/describe") and _can_describe(page)
+                ):
                     # The read_line() path (a transport without
                     # editor-key support) and an explicit
                     # "/describe <file>" both land here; the immediate
                     # `e` keystroke is handled as its own kind above.
+                    #
+                    # Only the no-argument forms are gated on the page
+                    # (Codex review): `_can_describe` answers "is this
+                    # hotkey worth offering for what is on screen",
+                    # which is the wrong question for a filename the
+                    # caller typed -- that file may be their own
+                    # upload on some other page, and its real answer
+                    # comes from the domain either way.
                     argument = choice.split(maxsplit=1)[1].strip() if " " in choice else None
                     page = await _handle_describe(
                         session, lane, area, user, page,
@@ -1193,6 +1201,17 @@ async def _render_file_page(
             await session.write_line(f"      {colored(sanitize_text(line), fg_color=MUTED_COLOR)}")
 
 
+def _description_draft_path(db: Database, entry: FileEntry, user: User) -> Path:
+    """One stable per-(file, caller) draft slot, colocated with every
+    other in-progress composition (`netbbs.net.draft_storage`) — the
+    file-description counterpart of `netbbs.net.board_flow.
+    _post_draft_path`. Keyed on the row id rather than the
+    content-addressed `file_id` only to keep the filename short; a
+    draft is per-session scratch, not something that has to survive a
+    file being deleted and its id reused."""
+    return drafts_directory(db) / f"filedesc_{entry.area_id}_{entry.id}_{user.id}.draft"
+
+
 async def _compose_description(
     session: Session, lane: DatabaseLane, user: User, entry: FileEntry, *, initial_text: str | None
 ) -> str | None:
@@ -1215,9 +1234,7 @@ async def _compose_description(
     (save an empty buffer). Replacing a wrong description with a right
     one works in both, which is the case that actually comes up.
     """
-    draft_path = await lane.run(
-        lambda db: drafts_directory(db) / f"filedesc_{entry.area_id}_{entry.id}_{user.id}.draft"
-    )
+    draft_path = await lane.run(_description_draft_path, entry, user)
     if await lane.run(fullscreen_editor_enabled, user):
         return await edit_prose(
             session, initial_text=initial_text, draft_path=draft_path,
@@ -1251,22 +1268,40 @@ async def _handle_describe(
     Which file: whatever `target` names (a number on this page or a
     filename anywhere in the area, matching `/download`'s own
     resolution), else the cursor-highlighted entry, else the only entry
-    on the page, else asked for. The permission answer comes from the
-    domain (`set_file_description`); the check here only decides whether
-    to open an editor at all, so nobody types out a description that
-    was never going to be saved.
+    on the page, else whichever one `pick_item` returns. The permission
+    answer comes from the domain (`set_file_description`); the check
+    here only decides whether to open an editor at all, so nobody types
+    out a description that was never going to be saved.
     """
     entry: FileEntry | None = None
     if target is None and highlighted is not None and 0 <= highlighted < len(page.entries):
         entry = page.entries[highlighted]
     elif target is None and len(page.entries) == 1:
         entry = page.entries[0]
+    elif target is None:
+        # A picker, not a "which one?" prompt in front of the editor
+        # (design doc §3.5, Codex review): `[E]` with nothing under the
+        # cursor still has to find out which file it means, and the way
+        # this codebase asks that question is `pick_item` -- backing out
+        # of it changes nothing, exactly like backing out of the editor
+        # behind it.
+        entry = await pick_item(
+            session, page.entries,
+            name_of=lambda file_entry: sanitize_text(file_entry.filename),
+            stable_id_of=lambda file_entry: file_entry.id,
+            description_of=lambda file_entry: (file_entry.description or "").splitlines()[0]
+            if file_entry.description else "(no description yet)",
+            title=f"Describe a file in {sanitize_text(area.name)}",
+            empty_message="No files to describe.",
+            redraw_in_place=await lane.run(redraw_in_place_enabled, user),
+            unicode_style=await lane.run(unicode_style_enabled, user),
+            collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=await lane.run(effective_header_color_256),
+        )
+        if entry is None:
+            return page
     else:
-        if target is None:
-            await session.write("File number or name to describe: ")
-            target = (await session.read_line()).strip()
-            if not target:
-                return page
         if target.isdigit() and 1 <= int(target) <= len(page.entries):
             exact = next((e for e in page.entries if e.filename == target), None)
             entry = exact if exact is not None else page.entries[int(target) - 1]
@@ -1278,6 +1313,8 @@ async def _handle_describe(
         )
         return page
 
+    # A typed filename bypasses the on-screen gate above, so this is
+    # where a caller who named someone else's file is told so.
     if not can_edit_any_file and entry.uploader_user_id != user.id:
         await session.write_line(
             colored(
@@ -1311,7 +1348,22 @@ async def _handle_describe(
     while True:
         text = await _compose_description(session, lane, user, entry, initial_text=initial_text)
         if text is None:
-            await session.write_line(colored("\r\nDescription unchanged.", fg_color=MUTED_COLOR))
+            # Both editors return `None` for "cancelled" and for
+            # "leaving, keep what I typed", and only the draft file on
+            # disk tells them apart (issue #149's own contract) -- so
+            # say which one happened rather than reporting a cancel
+            # over a draft the caller expects to find again (Codex
+            # review).
+            kept = await lane.run(_description_draft_path, entry, user)
+            if kept.exists():
+                await session.write_line(
+                    colored(
+                        "\r\nDraft kept — press [E] on this file again to pick it up.",
+                        fg_color=MUTED_COLOR,
+                    )
+                )
+            else:
+                await session.write_line(colored("\r\nDescription unchanged.", fg_color=MUTED_COLOR))
             return page
         try:
             updated = await lane.run(set_file_description, entry, text, changed_by=user)
@@ -1371,7 +1423,18 @@ async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, u
         # storage under a name with no extension, and the extension is
         # what picks an unpacker. Never fails an upload -- see
         # `read_archive_description`.
-        description = await read_archive_description(temp_path, received.filename)
+        #
+        # Its own cleanup, though: between a finished transfer and the
+        # move into storage, this is the only code that owns the
+        # staging file, and a caller who drops the line mid-extraction
+        # would otherwise leave it for the next startup sweep to find
+        # (Codex review). `receive_file`'s cleanup covers only failures
+        # of its own.
+        try:
+            description = await read_archive_description(temp_path, received.filename)
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
         entry = await lane.run(
             upload_file_from_temp, area, user, received.filename,
             temp_path=temp_path, sha256=received.sha256, size_bytes=received.size_bytes,
@@ -1398,8 +1461,16 @@ async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, u
         for line in entry.description.splitlines():
             await session.write_line(f"  {colored(sanitize_text(line), fg_color=MUTED_COLOR)}")
     else:
+        # Deliberately not "there is no FILE_ID.DIZ in it" (Codex
+        # review): the same `None` covers an archive whose format has
+        # no unpacker installed here, one this node couldn't read, and
+        # a plain file that was never an archive. Say what is true --
+        # nothing was read — and offer the way to fix it.
         await session.write_line(
-            colored("No FILE_ID.DIZ inside — press [E] on the listing to describe it.", fg_color=MUTED_COLOR)
+            colored(
+                "No description was read from it — press [E] on the listing to write one.",
+                fg_color=MUTED_COLOR,
+            )
         )
 
 

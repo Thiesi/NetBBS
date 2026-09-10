@@ -268,3 +268,96 @@ def test_a_peers_description_cannot_decide_how_tall_the_listing_is(db, lane, ali
     assert "shouty line 0" in output
     assert "shouty line 9" in output
     assert "shouty line 10" not in output
+
+
+# -- review follow-ups --------------------------------------------------
+
+
+def test_e_with_no_cursor_and_several_files_opens_a_picker(db, lane, alice, monkeypatch):
+    """Design doc §3.5 (Codex review): `[E]` on a page with nothing
+    highlighted has to find out which file it means, and a picker is
+    how this codebase asks — never a typed prompt in front of the
+    editor."""
+    from netbbs.files import entries as entries_module
+
+    timestamps = iter(f"2026-01-01T00:00:0{i}.000000Z" for i in range(3))
+    monkeypatch.setattr(entries_module, "utc_now_iso", lambda: next(timestamps))
+    area = create_file_area(db, "downloads", creator=alice)
+    first = upload_file(db, area, alice, "first.zip", b"one")
+    upload_file(db, area, alice, "second.zip", b"two")
+
+    # [E], then the picker's own two-digit row selection.
+    session = FakeSession(
+        editor_keys=[_key("e"), _key("0"), _key("1")],
+        lines=["picked from the list", ""],
+    )
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert "Describe a file in downloads" in session.visible_output
+    assert get_file(db, first.file_id).description == "picked from the list"
+
+
+def test_backing_out_of_the_picker_changes_nothing(db, lane, alice, monkeypatch):
+    from netbbs.files import entries as entries_module
+
+    timestamps = iter(f"2026-01-01T00:00:0{i}.000000Z" for i in range(3))
+    monkeypatch.setattr(entries_module, "utc_now_iso", lambda: next(timestamps))
+    area = create_file_area(db, "downloads", creator=alice)
+    first = upload_file(db, area, alice, "first.zip", b"one")
+    second = upload_file(db, area, alice, "second.zip", b"two")
+
+    session = FakeSession(editor_keys=[_key("e"), _key("b")])
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert get_file(db, first.file_id).description is None
+    assert get_file(db, second.file_id).description is None
+
+
+def test_describe_by_name_reaches_a_file_the_page_gate_would_have_refused(db, lane, alice, bob):
+    """Codex review: `_can_describe` answers "is this hotkey worth
+    offering for what is on screen", which is the wrong question for a
+    filename the caller typed — the real answer comes from the domain,
+    and a caller who names someone else's file deserves to be told
+    that rather than have the command silently rejected."""
+    area = create_file_area(db, "downloads", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+    session = FakeLineSession(lines=["/describe game.zip", "b"])
+
+    asyncio.run(_show_area(session, lane, area, bob))
+
+    assert "was uploaded by someone else" in session.visible_output
+    assert get_file(db, entry.file_id).description is None
+
+
+def test_leaving_the_editor_with_a_kept_draft_says_so(db, lane, alice):
+    """`/exit` keeps the draft on disk (issue #149) — reporting that as
+    "unchanged" would hide work the caller expects to find again
+    (Codex review)."""
+    area = create_file_area(db, "downloads", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+    session = FakeSession(editor_keys=[_key("e")], lines=["half a description", "/exit"])
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert "Draft kept" in session.visible_output
+    assert get_file(db, entry.file_id).description is None
+
+
+def test_describing_a_file_deleted_meanwhile_fails_instead_of_claiming_success(db, lane, alice):
+    """Codex review: the entry on screen can be stale by the time the
+    editor closes. Re-resolving by `file_id` is what turns "saved!"
+    over an UPDATE that matched nothing into an honest refusal."""
+    from netbbs.files.entries import delete_file, set_file_description
+
+    area = create_file_area(db, "downloads", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+    grant_permissions(
+        db, alice, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.DELETE, granted_by=alice,
+    )
+    delete_file(db, entry, deleted_by=alice)
+
+    with pytest.raises(FileEntryError):
+        set_file_description(db, entry, "into the void", changed_by=alice)

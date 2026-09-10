@@ -284,3 +284,47 @@ def test_zip_member_stored_with_a_dos_backslash_path_is_found(tmp_path):
     with zipfile.ZipFile(archive, "w") as handle:
         handle.writestr("DOCS\\FILE_ID.DIZ", b"stored the DOS way")
     assert _read(archive, "game.zip") == "stored the DOS way"
+
+
+# -- review follow-ups --------------------------------------------------------
+
+
+def test_entry_count_is_read_without_parsing_the_central_directory(tmp_path):
+    archive = _zip(tmp_path / "many.zip", {f"file{i}.txt": b"x" for i in range(25)})
+    assert diz._zip_entry_count(archive) == 25
+
+
+def test_entry_count_of_a_non_zip_is_none(tmp_path):
+    plain = tmp_path / "notes.txt"
+    plain.write_bytes(b"not a zip at all")
+    assert diz._zip_entry_count(plain) is None
+
+
+def test_an_archive_with_too_many_entries_is_left_unparsed(tmp_path, monkeypatch):
+    """Codex review: `ZipFile()` builds a `ZipInfo` for every member
+    before anything can look for a DIZ, so the cost of reading one is
+    set by the entry count, not by the upload's size."""
+    monkeypatch.setattr(diz, "MAX_ZIP_ENTRIES", 4)
+    members = {f"pad{i}.txt": b"x" for i in range(10)}
+    members["FILE_ID.DIZ"] = b"never read"
+    archive = _zip(tmp_path / "many.zip", members)
+
+    assert _read(archive, "many.zip") is None
+
+    # ... and the same archive is read fine once it fits the cap.
+    monkeypatch.setattr(diz, "MAX_ZIP_ENTRIES", 50)
+    assert _read(archive, "many.zip") == "never read"
+
+
+def test_unicode_line_separators_are_normalized_to_newlines():
+    """`str.splitlines()` breaks on U+2028/U+2029 and `split("\n")`
+    does not, so leaving them in place let a DIZ be fitted to ten
+    "lines" here and then rejected as more than ten by
+    `validate_description` -- failing an upload (Codex review)."""
+    from netbbs.files.entries import validate_description
+
+    raw = "\u2028".join(f"line {i}" for i in range(40)).encode("utf-8")
+    fitted = diz.decode_diz(raw)
+
+    assert len(fitted.splitlines()) == diz.MAX_DESCRIPTION_LINES
+    assert validate_description(fitted) == fitted  # never raises

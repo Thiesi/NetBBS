@@ -84,6 +84,13 @@ MAX_DIZ_BYTES = 8192
 characters; this leaves generous room for the CP437 art people actually
 put in them while staying far below anything worth calling a bomb."""
 
+MAX_ZIP_ENTRIES = 50_000
+"""How many members a ZIP may claim before this node declines to parse
+its central directory at all (Codex review) -- `zipfile` builds every
+`ZipInfo` up front, so the cost is set by the entry count rather than
+by the upload's size. Far above any real release archive, far below
+what a hostile one can pack into a few megabytes."""
+
 MAX_DESCRIPTION_LINES = 10
 """The DIZ spec's own line limit, applied to every description
 regardless of where it came from -- the area listing renders each line,
@@ -164,7 +171,15 @@ def normalize_description(raw: str) -> str | None:
     version that holds everywhere. Rendering still sanitizes -- that
     boundary doesn't get to trust its input either.
     """
-    text = raw.replace("\r\n", "\n").replace("\r", "\n").expandtabs(8)
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    # Unicode's own line/paragraph separators become ordinary newlines
+    # rather than surviving as content (Codex review): `str.splitlines`
+    # -- which `netbbs.files.entries.validate_description` counts lines
+    # with -- treats them as breaks, while splitting on "\n" does not,
+    # and a DIZ full of them would otherwise be fitted to ten "lines"
+    # here and then rejected as more than ten there, failing an upload
+    # this module promises never to fail.
+    text = text.replace(" ", "\n").replace(" ", "\n").expandtabs(8)
     lines = []
     for line in text.split("\n"):
         kept = "".join(
@@ -264,8 +279,23 @@ def _read_zip_diz(archive_path: Path) -> bytes | None:
     `ZipInfo.file_size` is the archive's own claim about the member and
     is never trusted: the read itself is capped one byte past
     `MAX_DIZ_BYTES`, so a member which lies about its size (or inflates
-    from nothing at all) costs one bounded read rather than memory."""
-    if not zipfile.is_zipfile(archive_path):
+    from nothing at all) costs one bounded read rather than memory.
+
+    Neither is the *number* of members (Codex review): `ZipFile()`
+    parses the whole central directory eagerly and builds a `ZipInfo`
+    per entry before any of this can look for a DIZ, so an archive of
+    nothing but empty entries turns a modest upload into hundreds of
+    megabytes of objects. The entry count is read out of the end-of-
+    central-directory record first, and anything past
+    `MAX_ZIP_ENTRIES` is left unread -- an archive with that many
+    members is not one somebody wrote a `FILE_ID.DIZ` for."""
+    entries = _zip_entry_count(archive_path)
+    if entries is None or entries > MAX_ZIP_ENTRIES:
+        if entries is not None:
+            _logger.info(
+                "FILE_ID.DIZ: %s has %d entries, more than the %d this node will parse",
+                archive_path.name, entries, MAX_ZIP_ENTRIES,
+            )
         return None
     try:
         with zipfile.ZipFile(archive_path) as archive:
@@ -286,6 +316,35 @@ def _read_zip_diz(archive_path: Path) -> bytes | None:
         # anything about the upload itself, which is already stored.
         _logger.info("FILE_ID.DIZ: %s is not readable as a ZIP: %s", archive_path.name, exc)
     return None
+
+
+def _zip_entry_count(archive_path: Path) -> int | None:
+    """How many members this file's end-of-central-directory record
+    claims, or `None` if it is not a readable ZIP at all -- read
+    directly rather than through `zipfile`, whose only way to answer
+    the question is to parse every entry first, which is precisely
+    what this exists to avoid.
+
+    The EOCD is the last 22 bytes plus an optional trailing comment of
+    up to 64 KiB, so a bounded tail read finds it. A ZIP64 archive
+    stores `0xFFFF` here and keeps the real count elsewhere; that is
+    reported as "too many" rather than chased, since a genuine ZIP64
+    entry count is far past anything worth scanning for a DIZ.
+    """
+    try:
+        with archive_path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            tail_length = min(size, 22 + 0xFFFF)
+            handle.seek(size - tail_length)
+            tail = handle.read(tail_length)
+    except OSError as exc:
+        _logger.info("FILE_ID.DIZ: could not read %s: %s", archive_path.name, exc)
+        return None
+    marker = tail.rfind(b"PK\x05\x06")
+    if marker < 0 or len(tail) - marker < 22:
+        return None
+    return int.from_bytes(tail[marker + 10:marker + 12], "little")
 
 
 async def _run_extractor(argv: list[str], *, deadline: float) -> bytes | None:

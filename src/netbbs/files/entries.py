@@ -543,24 +543,34 @@ def set_file_description(
     `file_descriptor_edit` event type, which is a protocol change and a
     separate decision. A description edited *before* the descriptor is
     built is simply the one that propagates.
+
+    `entry` is only as fresh as the screen it came from, so the row is
+    re-read by `file_id` before anything is decided (Codex review). Two
+    things follow: a file deleted while its editor sat open fails
+    honestly here instead of reporting a save that updated nothing, and
+    the ownership question can never be answered from a stale row while
+    the `UPDATE` lands on a different one -- `files.id` is a plain
+    SQLite rowid, which a later upload may reuse after a delete, while
+    `file_id` is content-addressed and never is.
     """
-    if entry.uploader_user_id != changed_by.id:
-        _require_area_permission(db, entry, changed_by, BoardPermission.EDIT)
+    current = get_file(db, entry.file_id)
+    if current.uploader_user_id != changed_by.id:
+        _require_area_permission(db, current, changed_by, BoardPermission.EDIT)
 
     normalized = validate_description(description)
-    db.connection.execute("UPDATE files SET description = ? WHERE id = ?", (normalized, entry.id))
+    db.connection.execute("UPDATE files SET description = ? WHERE id = ?", (normalized, current.id))
     db.connection.commit()
     record_action(
         db,
         actor=changed_by,
         action="describe",
         object_type="file_area",
-        object_id=entry.area_id,
-        target_user_id=entry.uploader_user_id,
-        detail=entry.file_id,
+        object_id=current.area_id,
+        target_user_id=current.uploader_user_id,
+        detail=current.file_id,
     )
-    reindex_file(db, entry.area_id, entry.file_id)
-    return get_file(db, entry.file_id)
+    reindex_file(db, current.area_id, current.file_id)
+    return get_file(db, current.file_id)
 
 
 def set_file_pinned(db: Database, entry: FileEntry, pinned: bool, *, changed_by: User) -> FileEntry:

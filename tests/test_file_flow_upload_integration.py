@@ -283,4 +283,4 @@ def test_uploading_a_file_with_no_diz_says_so_and_points_at_the_editor(db, lane,
     asyncio.run(scenario())
 
     assert list_files_page(db, area, alice).entries[0].description is None
-    assert "No FILE_ID.DIZ inside" in _visible_text(server_session)
+    assert "No description was read from it" in _visible_text(server_session)
