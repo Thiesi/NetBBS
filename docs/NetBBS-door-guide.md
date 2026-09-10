@@ -359,6 +359,14 @@ At the next season, start again with $300, three available crew and fifteen turn
 identity, account age and insignia survive. Newcomer protection expires by account
 age and is not renewed by the season change.
 
+Open `[I]Scene`, then Display for free ASCII-decoration, monochrome and Fast-mode
+toggles. Choices apply immediately and survive seasons and competition reset.
+Back leaves without changing anything. ASCII mode keeps authored decorations
+simple and preserves names; monochrome retains explicit labels and numbers.
+Fast skips optional static art and action flavor, keeping every stake and net
+result. There are no animation delays in either mode. The map and NPC dossiers
+show compact role/operator diagrams beside actual ownership and defense.
+
 **MANUAL ? outside NetBBS, before activating season results:** stop old game
 sessions and create/verify the node backup with its world component as above.
 Schema 10 starts the archive without fabricating missing historical seasons.

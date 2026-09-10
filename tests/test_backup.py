@@ -1556,6 +1556,7 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
     wd.settle_world(held, stamp)
     held.execute("UPDATE exchanges SET npc_key='', npc_return_at='2026-09-11T08:00:00+00:00', garrison=0 WHERE id=5")
     held.execute("UPDATE players SET cash=98765, income_remainder=9876, insignia='archive', specialty='fixers', support='stash', operation_contract=4, operation_approach=2, operation_stage=2, successful_operations=3")
+    held.execute("INSERT INTO meta(key,value) VALUES ('display:1',?)", (json.dumps({'ascii_art': True, 'monochrome': True, 'fast': True}),))
     held.execute("INSERT INTO recon VALUES (1,2,'Historical Rival',1234,7,'2026-09-10T00:00:00+00:00','2026-09-11T00:00:00+00:00',1)")
     try:
         assert Path(str(path) + "-wal").stat().st_size > 0
@@ -1576,6 +1577,7 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
         assert conn.execute("SELECT income_remainder FROM players").fetchone()[0] == 9876
         assert conn.execute("SELECT specialty,support FROM players").fetchone() == ("fixers", "stash")
         assert conn.execute("SELECT insignia FROM players").fetchone() == ("archive",)
+        assert json.loads(conn.execute("SELECT value FROM meta WHERE key='display:1'").fetchone()[0]) == {'ascii_art': True, 'monochrome': True, 'fast': True}
         assert conn.execute("SELECT COUNT(*) FROM scene").fetchone()[0] == 6
         assert conn.execute("SELECT handle,rank,medal FROM season_results").fetchone() == ("WarPilot", 10, "Gold")
         assert conn.execute("SELECT number FROM seasons").fetchone() == (1,)
@@ -1723,6 +1725,7 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
     path = _populate_war_dialer(db_path)
     with contextlib.closing(sqlite3.connect(path)) as conn:
         before_identity = conn.execute("SELECT user_id,handle,created_at FROM players").fetchall()
+        conn.execute("INSERT INTO meta(key,value) VALUES ('display:1',?)", (json.dumps({'fast': True}),))
         conn.execute("UPDATE players SET crew=40, insignia='signal', crew_recruited_total=40, turns_used=8, specialty='lookouts', support='burner', operation_contract=3, operation_approach=1, operation_stage=2, successful_operations=4")
         conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=30")
         conn.execute("INSERT INTO recon VALUES (1,2,'Historical Rival',1234,7,'2026-09-10T00:00:00+00:00','2026-09-11T00:00:00+00:00',1)")
@@ -1741,6 +1744,7 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
     assert result["stored_season"] == "2"
     with contextlib.closing(sqlite3.connect(path)) as conn:
         assert conn.execute("SELECT user_id,handle,created_at FROM players").fetchall() == before_identity
+        assert json.loads(conn.execute("SELECT value FROM meta WHERE key='display:1'").fetchone()[0]) == {'fast': True}
         cash, crew, turns, rank_count = conn.execute("SELECT cash,crew,turns_used,crew_recruited_total FROM players").fetchone()
         assert (cash, crew, turns, rank_count) == (300, 3, 0, 0)
         assert conn.execute("SELECT specialty,support FROM players").fetchone() == ("", "")

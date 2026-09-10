@@ -2275,3 +2275,131 @@ def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, mo
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('setting', ['1', '2', '3'])
+def test_display_toggles_are_free_paginated_and_survive_seasons(tmp_path, monkeypatch, width, height, setting):
+    conn = wd.connect(tmp_path / 'display.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    actor = wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    monkeypatch.setattr(wd, '_ASCII_DECOR', False)
+    monkeypatch.setattr(wd, '_MONOCHROME', False)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    selected, calls = False, 0
+    def select(valid):
+        nonlocal selected, calls
+        calls += 1
+        assert calls < 60
+        screen = ' '.join(_ANSI_RE.sub('', ''.join(written).split('\x1b[2J\x1b[H')[-1]).split())
+        for digit, label in zip('123', ('ASCII decorations', 'Monochrome', 'Fast mode')):
+            if digit in valid:
+                assert label in screen
+        if selected: return 'B'
+        if setting in valid:
+            selected = True
+            return setting
+        return 'N'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
+    palette = wd.Palette(False)
+    wd.do_display(palette, conn, 1, width, height)
+    key = wd.DISPLAY_KEYS[int(setting) - 1]
+    assert wd.read_display(conn, 1) == {key: True}
+    assert wd.read_display(conn, 2) == {}
+    assert wd.read_player(conn, 1) == actor
+    assert conn.execute('SELECT COUNT(*) FROM events').fetchone()[0] == 0
+    before = list(conn.iterdump())
+    wd.do_display(palette, conn, 1, width, height)
+    assert list(conn.iterdump()) == before
+    wd.settle_world(conn, now + wd.SEASON)
+    assert wd.read_display(conn, 1) == {key: True}
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()
+
+
+def test_ascii_monochrome_output_preserves_controls_names_and_noncolor_results(monkeypatch, capsys):
+    monkeypatch.setattr(wd, '_ASCII_DECOR', True)
+    monkeypatch.setattr(wd, '_MONOCHROME', True)
+    wd.out(wd.decor('\x1b[2J\x1b[38;5;51m\u2554\u2550\u2551\u2557\x1b[0m') + ' Caller Jos\u00e9 A\u2502B: +10 Rank')
+    assert capsys.readouterr().out == '\x1b[2J+-|+ Caller Jos\u00e9 A\u2502B: +10 Rank'
+
+
+def test_fast_mode_skips_only_optional_flavor_and_art(tmp_path, monkeypatch):
+    monkeypatch.setattr(wd, '_ASCII_DECOR', False)
+    monkeypatch.setattr(wd, '_MONOCHROME', False)
+    rendered = []
+    monkeypatch.setattr(wd, 'show_text_pages', lambda p, title, lines, *a, **k: rendered.append((title, lines)))
+    palette = wd.Palette(False)
+    delta = wd.ActionDelta(cash=-25, crew=-1, heat=4, rank=0, turns=1)
+    wd.show_action_result(palette, ['Attempt failed.'], delta, True, 40, 12)
+    normal = rendered[-1][1]
+    palette.fast = True
+    wd.show_action_result(palette, ['Attempt failed.'], delta, True, 40, 12)
+    fast = rendered[-1][1]
+    assert len(normal) == len(fast) + 1
+    assert all(line in normal for line in fast)
+    assert any('BUSTED' in line for line in fast)
+    assert any('turns spent: 1' in line for line in fast)
+    conn = wd.connect(tmp_path / 'art.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    palette.fast = False
+    wd.show_territory(palette, conn, 40, 12, viewer_id=1)
+    for exchange in wd.list_exchanges(conn):
+        assert f'#{exchange.id} ' + wd.ROLE_ART[exchange.role] in rendered[-1][1]
+    palette.fast = True
+    wd.show_territory(palette, conn, 40, 12, viewer_id=1)
+    assert not any(line.endswith(art) for line in rendered[-1][1] for art in wd.ROLE_ART.values())
+    assert any('Owner:' in line for line in rendered[-1][1])
+    conn.close()
+
+
+@pytest.mark.parametrize('toggle', [False, True])
+def test_real_process_display_disconnect_preserves_only_chosen_toggle(tmp_path, toggle):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b'>\x1b[0m ')
+        send(b'i')
+        for _ in range(10):
+            wait_for(b'cancel')
+            screen = bytes(output).split(b'\x1b[2J\x1b[H')[-1]
+            if b'[7]Pick' in screen: break
+            send(b'n')
+        else: pytest.fail('Display entry was not reachable')
+        send(b'7')
+        wait_for(b'cancel')
+        assert b'DISPLAY' in output
+        if toggle:
+            send(b'1')
+            wait_for(b'ASCII decorations: ON')
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        conn = wd.connect(path)
+        assert wd.read_display(conn, 0) == ({'ascii_art': True} if toggle else {})
+        assert wd.read_player(conn, 0).turns_used == 0
+        conn.close()
+
+
+
+def test_fast_goodbye_retains_rank_without_a_decorative_frame(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / 'fast-goodbye.db')
+    wd.ensure_schema(conn)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', wd.now_utc(), 1)
+    palette = wd.Palette(False)
+    palette.fast = True
+    lines = []
+    monkeypatch.setattr(wd, 'out_line', lines.append)
+    wd.draw_goodbye(palette, actor, 20)
+    assert lines == ['Carrier lost. Rank 0 - Newbie']
+    lines.clear()
+    wd.draw_title(palette, {'node_name': 'TestNode', 'handle': 'Caller'}, 2, 20)
+    assert lines == ['WAR DIALER - Season 2', 'Node: TestNode; Handle: Caller']
+    conn.close()
