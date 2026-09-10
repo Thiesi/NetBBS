@@ -1909,3 +1909,74 @@ def test_small_cash_balance_can_reach_affordable_pbx_capture(tmp_path, monkeypat
     assert wd.do_root_exchange(wd.Palette(False), conn, actor, now, __import__('random').Random(1), 80, 24)
     assert (actor.cash, actor.turns_used, actor.crew, actor.heat) == (0, 1, 2, 4)
     conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+def test_neutral_map_paginates_names_defense_and_return_deadline(tmp_path, monkeypatch, width, height):
+    conn = wd.connect(tmp_path / 'npc-map.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    deadline = wd.to_iso(now + wd.DAY)
+    conn.execute("UPDATE exchanges SET npc_key='', garrison=0, controlled_since=NULL, npc_return_at=? WHERE id=5", (deadline,))
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    calls = 0
+    def select(valid):
+        nonlocal calls
+        calls += 1
+        assert calls < 200 and 'B' in valid
+        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        page = re.search(r'Page (\d+)/(\d+)', screen)
+        return 'B' if page.group(1) == page.group(2) else 'N'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
+    wd.show_territory(wd.Palette(False), conn, width, height, viewer_id=1)
+    body = []
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        body.extend(_ANSI_RE.sub('', screen).split('\r\n')[2:-2])
+    normalized = ' '.join(' '.join(body).split())
+    assert 'NPC returns at' in normalized and 'if still unclaimed.' in normalized
+    assert 'NPC: Night Relay' in normalized and 'NPC: Spool Archive' in normalized
+    assert wd.read_player(conn, 1).turns_used == 0
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()
+
+
+@pytest.mark.parametrize('stage', ['cancel', 'disconnect', 'committed'])
+def test_real_process_neutral_capture_preview_boundaries(tmp_path, stage):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b'>\x1b[0m ')
+        send(b'x')
+        for _ in range(10):
+            wait_for(b'cancel')
+            screen = bytes(output).split(b'\x1b[2J\x1b[H')[-1].decode('utf-8', errors='replace')
+            match = re.search(r'\[([0-9]+)\]Pick', screen)
+            if match and '5' in match.group(1): break
+            send(b'n')
+        else: pytest.fail('NPC home never became selectable')
+        send(b'5')
+        wait_for(b'[A]Act')
+        assert b'NPC: Patch Panel Society' in output and b'Success: 60%' in output
+        if stage == 'cancel':
+            send(b'b')
+            wait_for(b'>\x1b[0m ')
+            send(b'q')
+        else:
+            if stage == 'committed':
+                send(b'a')
+                wait_for(b'RESULT')
+            process.stdin.close()
+        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        conn = wd.connect(path)
+        actor, exchange = wd.read_player(conn, 0), wd.list_exchanges(conn)[4]
+        assert (actor.cash, actor.turns_used) == ((275, 1) if stage == 'committed' else (300, 0))
+        assert (exchange.controller_user_id == 0) != bool(exchange.npc_key)
+        assert conn.execute('SELECT COUNT(*) FROM players').fetchone()[0] == 1
+        conn.close()

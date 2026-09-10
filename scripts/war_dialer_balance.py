@@ -165,7 +165,7 @@ def run_scenario(name: str, *, days: int = 14, seed: int = 362) -> dict:
                     elif name != "trade_only":
                         available = [e for e in exchanges if e.controller_user_id != uid]
                         if available and player.crew >= 2:
-                            chosen = min(available, key=lambda e: (e.controller_user_id is not None, wd.exchange_defense(e),
+                            chosen = min(available, key=lambda e: (wd.exchange_occupied(e), wd.exchange_defense(e),
                                                                   -e.income_per_hour, e.id))
                             if player.cash >= wd.capture_cost(chosen):
                                 action, target = "root", chosen.id

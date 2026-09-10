@@ -48,12 +48,12 @@ refuses to silently create a replacement. Choose an explicit override or complet
 the migration. An explicit path for a new independent node deliberately selects
 its own world; it does not adopt the old world's users or records.
 
-War Dialer records schema version 7 in SQLite `user_version`. A complete older
+War Dialer records schema version 8 in SQLite `user_version`. A complete older
 world upgrades automatically in one transaction: version 1 adopts the original
 layout and latest 500 events per player; version 2 converts copied garrisons to
 shared crew assignments; version 3 adds the capture/control economy described
 below; version 4 adds raid recovery; version 5 adds crew/support; version 6 adds
-recon/operations; version 7 adds exchange roles. A failed upgrade rolls
+recon/operations; version 7 adds exchange roles; version 8 adds neutral operators. A failed upgrade rolls
 back its schema/data changes and version marker. Newer versions, incomplete or
 unrelated schemas, and corrupt files are refused with a caller-facing error;
 startup does not replace them with an empty world. Existing zero-byte files are
@@ -225,7 +225,7 @@ their exchange. The switchboard and results show the two pools separately.
 
 **MANUAL — outside NetBBS, before activating shared-crew rules:** stop all old
 War Dialer processes and create/verify a node backup with its world component.
-The first permitted launch upgrades the world to schema 7 transactionally.
+The first permitted launch upgrades the world to schema 8 transactionally.
 When upgrading from copied defenses, schema 2 conversion runs first.
 After normal overdue season settlement, it reserves one available member per
 owner, keeps holdings by descending hourly income then ID within the real crew
@@ -233,7 +233,7 @@ budget, and distributes the remaining members evenly across those holdings.
 Unstaffable holdings become unclaimed after paying income; a receipt explains
 the conversion. IDs, handles, account age, cash and Rank are retained. Review
 the receipt and use Garrison to adjust assignments. Never mix old and new game
-processes; older versions refuse schema 7. Restore the verified backup with a
+processes; older versions refuse schema 8. Restore the verified backup with a
 matching game version if the operator chooses to undo the upgrade.
 
 Schema 3 pays already-earned income at the previous rates before applying the
@@ -281,6 +281,26 @@ IDs, owners, garrisons, income and resources while assigning roles in map order.
 Inspect the map after upgrade. Do not mix old and new game processes; old binaries
 refuse schema 7. A world with an unexpected exchange count remains unchanged for
 SysOp diagnosis. Reset clears ownership but retains the map and its roles.
+
+Three fixed crews are explicitly labeled **NPC** on the map and capture preview:
+Patch Panel Society holds home #5 (PBX, 2 defenders), Night Relay Union #6
+(Carrier, 4 defenders plus 2 security), and Spool Archive Collective #7 (Hub,
+6 defenders). They earn no cash or Rank, do not appear in human standings, never
+raid you, and cannot take your holdings. Capture their homes with the ordinary
+previewed stakes. NPC guards never join your available crew.
+
+After capture, a home earns income and grants its owner service normally. If you
+withdraw its last defender, the NPC returns after 24 hours while it remains
+unclaimed; the map shows when. Recapture cancels that return, and recaptures earn
+no extra capture Rank. Season reset restores the three home crews. Settlement is
+lazy and deterministic; reconnecting neither rerolls guards nor accelerates their
+return. Contracts and operations remain repeatable even on a one-caller node.
+
+**MANUAL ? outside NetBBS, before activating neutral operators:** stop old game
+sessions and create/verify the node backup with its world component as above.
+Schema 8 preserves human holdings and resources and populates only unclaimed NPC
+homes. Inspect the map, labels and return deadlines after upgrade/restore. Old
+binaries refuse schema 8; do not mix game versions. No background service is needed.
 
 Free screens: `[B]Rank` shows season standings and your position; ties use account
 ID order. `[E]Map` shows the fixed ring, exchange roles, owners, garrisons, security,
