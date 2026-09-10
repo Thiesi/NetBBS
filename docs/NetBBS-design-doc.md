@@ -4723,6 +4723,18 @@ Quantity fields accept ASCII decimal digits. Unsupported keys do not dismiss
 result acknowledgement pauses. Responsive layouts and broader retained-result
 presentation remain separate work in #310.
 
+Voidrunner's Back key is `B` on every screen below the station deck, and `B` is
+never a live action anywhere (issue #400). List screens allocate their selection
+letters from `choice_letters`, which skips `B` and the screen's own hotkeys;
+bribes are `P`, the combat information toggle is `I`, and derelict boarding is
+`S`. `Q` stays accepted as a quiet alias for Back where no action uses it; on
+the deck `Q` saves and disembarks, and the deck's `B` opens the read-only Mission
+Board. Choosing a connection on the direct chart is the one irreversible chart
+action, so it ends with a yes/no confirmation that states the fuel cost, the
+destination's danger (or unknown) and that a day passes; No retains the chart
+with a cancelled-departure result and writes nothing. Contract and route jumps
+keep their existing preview screens and deliberate Jump actions.
+
 Contract boards retain up to four posted offers per station for three game days
 from generation. Station checkpoints prepare offers and expire old jobs before
 the caller opens the board; browsing and backing out write nothing. Viewing or
