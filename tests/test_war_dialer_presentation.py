@@ -2215,3 +2215,45 @@ def test_season_recognition_from_scene_is_historical_free_and_bounded(tmp_path, 
     else:
         assert ('No completed-season result' if choice == '5' else 'No medals awarded') in normalized
     conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, monkeypatch, width, height):
+    conn = wd.connect(tmp_path / 'late-join.db')
+    wd.ensure_schema(conn)
+    start = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, start)
+    wd.ensure_exchanges_seeded(conn, 1, start)
+    late = start + wd.SEASON - wd.DAY
+    actor = wd.load_or_create_player(conn, 1, 'LateCaller', late, 1)
+    identity_age = actor.created_at
+    state = wd.dashboard_state(conn, 1, late)
+    text = ' '.join(wd.dashboard_lines(state, late))
+    assert 'Joining late?' in text and 'Cautious' in text
+    assert 'even without a medal' in text and 'prepared operations reset' in text
+    wd.resolve_recruit(conn, actor, late)
+    after = start + wd.SEASON
+    state = wd.dashboard_state(conn, 1, after)
+    assert (state.player.cash, state.player.crew, state.player.turns_used) == (300, 3, 0)
+    assert state.player.created_at == identity_age
+    assert wd.is_in_grace(state.player, after)
+    assert not wd.is_in_grace(state.player, after + wd.DAY)
+    assert conn.execute('SELECT rank,medal FROM season_results WHERE user_id=1').fetchone()['rank'] == 10
+    text = ' '.join(wd.dashboard_lines(state, after))
+    assert 'Fresh competition: $300, 3 available crew and 15 turns' in text
+    assert 'medals give no resource or protection bonus' in text
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    before = list(conn.iterdump())
+    for stamp in (late, after):
+        # Refresh only forward; the saved late state is used for its own display.
+        shown = state if stamp == after else wd.DashboardState(actor, [], 0, after, None)
+        _, count = wd.draw_dashboard(wd.Palette(False), shown, stamp, width, height)
+        for page in range(1, count): wd.draw_dashboard(wd.Palette(False), shown, stamp, width, height, page)
+    assert list(conn.iterdump()) == before
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()

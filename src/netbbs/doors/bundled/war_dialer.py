@@ -2468,6 +2468,15 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
     else:
         lines.append("Turn window starts with your next action.")
     lines.extend(next_steps(state, now))
+    if state.season_ends_at - now <= DAY * 2:
+        lines += [f"Season closes in {countdown(state.season_ends_at - now)}: "
+                  + state.season_ends_at.strftime("%Y-%m-%d %H:%M UTC"),
+                  "Joining late? Try a [J]Job with Cautious approach and inspect its odds/stakes before Act. No rival or territory is required.",
+                  "Your final Rank is recorded even without a medal. Cash, crew, training, support and prepared operations reset at the deadline; spend only what you want to use this season."]
+    elif player.season_number > 1 and rank == 0 and player.turns_used == 0:
+        lines += [f"Fresh competition: ${STARTING_CASH}, {STARTING_CREW} available crew and {TURNS_PER_DAY} turns. "
+                  "Start with [J]Job, or [T]rade to fund recruitment; previews show exact stakes.",
+                  "Your identity, account age and insignia survive. Past results remain in [I]Scene; medals give no resource or protection bonus."]
     lines.append(f"Rank: {rank:,} - {tier_name(rank)}")
     tier = tier_index(rank)
     if tier + 1 < len(RANK_TIERS):
@@ -2601,6 +2610,8 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "Displaced defenders return to their owner's available crew after capture. Busts and failed attacks affect available crew, not stationed defenders.",
         f"Past {HEAT_BUST_THRESHOLD:g} Heat, each extra point adds a bust chance; busts cost cash/crew and reset Heat. Heat decays over time.",
         f"Rank only climbs during a season. Every {SEASON.days} days, cash, crew, Heat, turns, exchanges and Rank totals reset.",
+        "Joining near the deadline? Cautious jobs let you try the contract board without a rival or an exchange. Your final Rank is archived even without a medal. Training, support and prepared operations also reset; nothing purchased carries competitive power into the next season.",
+        f"The next season starts everyone with ${STARTING_CASH}, {STARTING_CREW} available crew and {TURNS_PER_DAY} turns. Identity, account age, insignia and retained results survive. The newcomer shield follows account age and does not restart at rollover.",
         "[B]Rank: standings. [E]Map: territory. [V]Rivals: eligibility. [H]Log: retained events. All browsing is free.",
         "No turns? Browse and plan until refill. No eligible rivals? Read their protection reasons, trade, recruit or inspect territory instead.",
         "No cash? Trade has no cash cost. One available crew left? Recruit or withdraw defenders before capturing again. Preview Heat risk before trading or fighting.",
