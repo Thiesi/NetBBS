@@ -4660,6 +4660,11 @@ the removal; a resumed hop must not record it twice, which the escort index and
 cached bounty outcome already guarantee. Dossiers carry `failed` and `expired`
 as a pair or not at all; the validator rejects one without the other.
 
+Tactical damage reads its threat curve from the fight's own `tactics["version"]`
+through `tactical_threat_bonus`; changing a curve means a new version in
+`TACTICAL_THREAT_BONUS_BY_VERSION` and a `TACTICAL_RULESET_VERSION` bump, never
+editing an existing tuple, so cached fights resume with the damage they showed.
+
 `salvage_fee` must exceed a full repair from zero for every hull class and tier
 (`hull_hp_max * 4` plus a base); `destroy_ship` takes `patrol=` from the combat
 session and only that path clears notoriety. Any new destruction path must pass
@@ -4672,6 +4677,13 @@ quarter of maximum. On a patrol kill the charge is the salvage fee plus
 `notoriety_fine_cost`, and notoriety clears only when credits cover both; the
 fee alone is bounded by hull while the fine grows without limit, so a bare
 patrol amnesty is cheaper than surrendering as soon as notoriety climbs.
+
+A fight keeps the tactical ruleset it began under. `new_tactics` takes the
+version as a parameter and defaults to `TACTICAL_RULESET_VERSION`; every
+reconstruction of an existing fight's opening state -- the pending-travel
+consistency check and squadron target switching -- must pass the saved version.
+Comparing a saved v1 checkpoint against a freshly built v2 one makes the career
+unresumable after the ruleset changes.
 
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen

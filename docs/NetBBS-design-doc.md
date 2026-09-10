@@ -5167,7 +5167,15 @@ a reduced shot and cuts incoming damage to a quarter, then requires Fire before
 reuse. Cover/harry reduce outgoing damage, recovery exposes the enemy, and harry
 reduces escape chance. Failed evasion/bribery receives and advances the same intent.
 New damage curves smooth starter tier-2 fights and make high-tier fire consequential
-for heavy hulls; enemy HP is not inflated to lengthen fights. Existing rewards,
+for heavy hulls; enemy HP is not inflated to lengthen fights. Ruleset version 2
+(issue #406) changes the per-tier threat bonus from 0/3/6/20/55 to 0/3/6/8/34:
+version 1 dropped a bracing starter Shuttle from a 99% win at tier 2 to none at
+tier 3 between adjacent danger ratings; under version 2 that Shuttle wins about
+half its tier-3 fights with Brace (and almost none without), a Cutter braces
+through tier 4 about half the time, and a maxed Carrier still loses about 40%
+of its hull to a tier-4 squadron, so heavy hulls keep paying for fights. A fight
+keeps the ruleset it started with; both versions load, others are unsupported.
+Automated trials establish the curve; human playtesting still decides its feel. Existing rewards,
 ship upgrades, faction consequences and squadron sequencing remain in force. Newly
 generated raiders use destination danger for both squadron chance and tier; stored
 opponents retain their stats, and tier/name RNG draw ordering stays unchanged.
