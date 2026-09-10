@@ -4735,6 +4735,15 @@ destination's danger (or unknown) and that a day passes; No retains the chart
 with a cancelled-departure result and writes nothing. Contract and route jumps
 keep their existing preview screens and deliberate Jump actions.
 
+Completed legal contracts (deliveries, surveys and escorts) earn one point of
+Concord standing each (issue #407), so a contract-running career reaches the
+commission without combat; lost or expired contracts earn nothing. Combat and
+story rewards are unchanged. A bounty pays its Concord standing through the
+kill, not the contract. The award is stated where the player meets it: contract
+terms name it before acceptance, the completion message and pilot log name it
+when it is paid, and each faction contact screen names how its own standing is
+earned.
+
 Contract boards retain up to four posted offers per station for three game days
 from generation. Station checkpoints prepare offers and expire old jobs before
 the caller opens the board; browsing and backing out write nothing. Viewing or
@@ -5252,11 +5261,18 @@ loading a valid career and before its normal title/welcome output; recovery uses
 the default presentation until a valid career is available. No animation is added.
 
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
-500-credit high-water milestone in cumulative contraband sales minus purchases
-and new futures outlay/refunds. Buying and same-station recycling do not grant
-standing; splitting transactions cannot reset milestones. Existing standing is
-retained and the new ledger starts at zero for old careers (old cargo has no
-recorded acquisition cost). Combat/faction rewards remain separate.
+250-credit high-water milestone in cumulative contraband sales minus purchases
+and new futures outlay/refunds. The step is 250 because the non-Haven demand
+pool is capped at 48 units, so a wider step made trade alone need about a
+hundred round trips to reach the Cartel. Buying and same-station recycling do
+not grant standing; splitting transactions cannot reset milestones. Existing
+standing is retained and the new ledger starts at zero for old careers (old
+cargo has no recorded acquisition cost). Because the saved counter is standing
+already granted rather than progress, each career records the step it was
+awarded under and loading re-expresses the count in the current step; a career
+that earned two points per 500 credits loads as four points per 250, so
+changing the step never mints retroactive standing. Combat/faction rewards
+remain separate.
 
 The trading ledger records cargo acquisition costs from this version onward.
 Market purchases and collected futures carry their actual paid cost, including

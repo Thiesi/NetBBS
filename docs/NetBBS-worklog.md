@@ -4685,6 +4685,13 @@ consistency check and squadron target switching -- must pass the saved version.
 Comparing a saved v1 checkpoint against a freshly built v2 one makes the career
 unresumable after the ruleset changes.
 
+`contraband_trade_milestones` counts standing already granted, not progress, so
+it is only meaningful together with the step it was measured against. The save
+carries `contraband_standing_step` and `_load_contraband_milestones` rescales
+the count on load. Any future change to `CONTRABAND_STANDING_STEP` is therefore
+safe; dropping the recorded step is not, because a smaller step would re-award
+gains that were already paid for.
+
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen
 reserves its own hotkeys in its letter map (`MARKET_LETTERS`, `YARD_LETTERS`,
