@@ -208,8 +208,20 @@ def decor(text: str) -> str:
 def out(text: str = "") -> None:
     if _MONOCHROME:
         text = re.sub(r"\x1b\[[0-9;:]*m", "", text)
-    sys.stdout.write(text)
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except OSError as exc:
+        # Windows can report EINVAL when the supervisor's output pipe closes.
+        # Treat an output failure as disconnect, not a world-storage failure.
+        # Redirect the descriptor so interpreter shutdown cannot flush again
+        # into the dead pipe and turn a handled disconnect into exit code 120.
+        try:
+            with open(os.devnull, 'w') as sink:
+                os.dup2(sink.fileno(), sys.stdout.fileno())
+        except (OSError, ValueError, AttributeError):
+            pass
+        raise BrokenPipeError('Terminal output closed') from exc
 
 
 def out_line(text: str = "") -> None:
@@ -3505,4 +3517,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        # Includes output loss while reporting an early metadata error.
+        sys.exit(0)

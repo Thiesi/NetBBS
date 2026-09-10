@@ -2439,6 +2439,177 @@ def test_real_process_unicode_metadata_defaults_and_local_override(tmp_path, hos
     assert b'SWITCHBOARD' in result.stdout
 
 
+@pytest.mark.parametrize('action', ['prepare', 'execute', 'abandon', 'recon'])
+@pytest.mark.parametrize('commit', [False, True])
+def test_real_process_operation_and_recon_disconnect_at_final_act(tmp_path, action, commit):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b'>\x1b[0m ')
+        conn = wd.connect(path)
+        now = wd.now_utc()
+        wd.load_or_create_player(conn, 2, 'Rival', now, 1)
+        stage = 1 if action == 'prepare' else 2
+        conn.execute("UPDATE players SET operation_contract=0, operation_approach=0, operation_stage=?, support='burner' WHERE user_id=0", (stage,))
+        before = wd.read_player(conn, 0)
+        conn.close()
+        send(b'o')
+        wait_for(b'cancel')
+        send(b'2' if action == 'recon' else b'1')
+        wait_for(b'cancel')
+        send(b'2' if action == 'abandon' else b'1')
+        wait_for(b'[A]Act')
+        if commit:
+            send(b'a')
+            wait_for(b'OPERATION ABANDONED' if action == 'abandon' else b'ACTION RESULT')
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        conn = wd.connect(path)
+        actor = wd.read_player(conn, 0)
+        if not commit:
+            assert (actor.cash, actor.crew, actor.turns_used, actor.operation_stage, actor.support) == (300, 3, 0, stage, 'burner')
+        elif action == 'prepare':
+            assert (actor.cash, actor.turns_used, actor.operation_stage, actor.support) == (250, 1, 2, 'burner')
+        elif action == 'abandon':
+            assert (actor.cash, actor.turns_used, actor.operation_stage, actor.support) == (300, 0, 0, 'burner')
+        elif action == 'execute':
+            assert actor.turns_used == 1 and actor.operation_stage in (0, 1)
+            assert actor.support == '' and actor.crew == 3
+            assert wd.rank_score(actor) == (30 if actor.operation_stage == 0 else 0)
+        else:
+            assert (actor.cash, actor.turns_used, actor.operation_stage, actor.support) == (300, 1, 2, 'burner')
+        assert conn.execute('SELECT COUNT(*) FROM recon').fetchone()[0] == int(commit and action == 'recon')
+        conn.close()
+
+
+@pytest.mark.parametrize('exchange_id', [1, 4, 5])
+@pytest.mark.parametrize('commit', [False, True])
+def test_real_process_every_owner_service_disconnect_preserves_commit_boundary(tmp_path, exchange_id, commit):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b'>\x1b[0m ')
+        conn = wd.connect(path)
+        now = wd.now_utc()
+        conn.execute("UPDATE exchanges SET controller_user_id=0,garrison=1,npc_key='',controlled_since=? WHERE id=?", (wd.to_iso(now), exchange_id))
+        conn.execute('UPDATE players SET heat=30,heat_updated_at=? WHERE user_id=0', (wd.to_iso(now),))
+        actor = wd.read_player(conn, 0)
+        exchange = next(e for e in wd.list_exchanges(conn) if e.id == exchange_id)
+        service_key = wd.PICK_KEYS[len(wd.garrison_options(actor, exchange))].encode()
+        conn.close()
+        send(b'g')
+        wait_for(b'cancel')
+        send(b'1')
+        wait_for(b'cancel')
+        send(service_key)
+        wait_for(b'[A]Act')
+        if commit:
+            send(b'a')
+            wait_for(b'ACTION RESULT')
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        conn = wd.connect(path)
+        actor = wd.read_player(conn, 0)
+        assert actor.turns_used == int(commit)
+        if not commit:
+            assert actor.cash == 300 and actor.crew == 3
+        elif exchange.role == 'carrier':
+            assert actor.cash == 235 and actor.crew == 4
+        elif exchange.role == 'hub':
+            assert 330 <= actor.cash <= 370 and actor.crew == 3
+        else:
+            assert actor.cash == 300 and actor.crew == 3 and 14 <= actor.heat <= 15
+        assert wd.assigned_crew(conn, 0) == 1
+        conn.close()
+
+
+
+def test_real_process_lost_output_pipe_exits_cleanly_without_spending(tmp_path):
+    path = tmp_path / 'lost-output.db'
+    conn = wd.connect(path)
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 0, 'Guest', now, 1)
+    conn.close()
+    env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), PYTHONIOENCODING='utf-8')
+    env.pop('NETBBS_DOOR_INFO', None)
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        result = subprocess.run([sys.executable, '-u', str(_WAR_DIALER_PATH)], input=b'q',
+            stdout=write_fd, stderr=subprocess.PIPE, env=env, timeout=10)
+    finally:
+        os.close(write_fd)
+    assert result.returncode == 0, result.stderr.decode(errors='replace')
+    assert result.stderr == b''
+    conn = wd.connect(path)
+    actor = wd.read_player(conn, 0)
+    assert (actor.cash, actor.crew, actor.turns_used) == (300, 3, 0)
+    conn.close()
+
+
+
+def test_real_process_output_loss_after_commit_retains_paid_action(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    path = tmp_path / 'committed-output.db'
+    conn = wd.connect(path)
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 0, 'Guest', now, 1)
+    conn.close()
+    code = """
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('game', sys.argv[1])
+game = importlib.util.module_from_spec(spec)
+sys.modules['game'] = game
+spec.loader.exec_module(game)
+original = game.show_action_result
+def pause_before_result(*args, **kwargs):
+    print('COMMITTED', flush=True)
+    sys.stdin.buffer.read(1)
+    return original(*args, **kwargs)
+game.show_action_result = pause_before_result
+sys.exit(game.main())
+"""
+    env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), PYTHONIOENCODING='utf-8')
+    env.pop('NETBBS_DOOR_INFO', None)
+    process = subprocess.Popen([sys.executable, '-u', '-c', code, str(_WAR_DIALER_PATH)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    pool = ThreadPoolExecutor(1)
+    def until(marker):
+        def read():
+            data = bytearray()
+            while marker not in data:
+                part = process.stdout.read(1)
+                assert part, bytes(data)
+                data.extend(part)
+        pool.submit(read).result(timeout=10)
+    def send(key):
+        process.stdin.write(key)
+        process.stdin.flush()
+    try:
+        until(b'>\x1b[0m ')
+        send(b'c')
+        until(b'[A]Act')
+        send(b'a')
+        until(b'COMMITTED')
+        process.stdout.close()
+        send(b'X')
+        assert process.wait(timeout=10) == 0
+        assert process.stderr.read() == b''
+    finally:
+        if process.poll() is None: process.kill()
+        process.wait(timeout=5)
+        pool.shutdown(wait=True)
+        process.stdin.close()
+        process.stdout.close()
+        process.stderr.close()
+    conn = wd.connect(path)
+    actor = wd.read_player(conn, 0)
+    assert (actor.cash, actor.crew, actor.turns_used, wd.rank_score(actor)) == (225, 4, 1, 10)
+    conn.close()
+
+
 
 def test_fast_goodbye_retains_rank_without_a_decorative_frame(tmp_path, monkeypatch):
     conn = wd.connect(tmp_path / 'fast-goodbye.db')

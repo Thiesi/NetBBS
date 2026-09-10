@@ -501,6 +501,12 @@ boolean keys. Cosmetic toggles read the latest object under the write lock and
 never save the caller's competitive snapshot. Keep ASCII conversion limited to
 authored decorations; never encode whole output with replacement, which loses
 Unicode handles. Strip SGR for monochrome while retaining terminal navigation.
+On Windows, writing to a closed anonymous output pipe can raise `OSError(22)`
+instead of `BrokenPipeError`. Normalize failures at the output writer, so they
+take the disconnect path instead of the storage-error path. Redirect the dead
+stdout descriptor to the null device before Python's final flush. Real-pipe
+tests must cover loss before any action and after commit but before its result;
+the latter must retain the paid action with no duplicate spend or traceback.
 
 `python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
 against disposable SQLite worlds through the actual action resolvers. The default
