@@ -4730,6 +4730,17 @@ because dropping the tokens can buy the row that makes it a single page. Any new
 action bar that offers paging must be built so that removing the tokens leaves a
 valid prompt.
 
+`World.checkpoint()` is turn processing plus a commit, and the two halves are
+callable separately (issue #417). `advance_station_state()` expires contracts,
+repairs duplicate mission ids and prepares the station's offer board; it writes
+nothing and runs only where a turn begins -- launch, docking and the fresh
+career after retirement. `commit()` persists, and also captures a rank reached
+by the action (before later spending can lower it) and re-observes the local
+market (a docked caller who just traded has just watched its stock move). Every
+other call site commits only. A new caller that changes the day or the station
+must call `checkpoint()`; one that finishes an ordinary action must call
+`commit()`, or the board rerolls under the caller.
+
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen
 reserves its own hotkeys in its letter map (`MARKET_LETTERS`, `YARD_LETTERS`,
