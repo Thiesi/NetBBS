@@ -8101,7 +8101,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     else:
         if used:
             chance = combat_evade_chance(world, pirate, dumped_cargo=True, tactics=tactics, cargo_units=max(0, used - 1))
-            lines.append(f"[D] Dump: jettison one unit of a random held commodity and break contact; about "
+            lines.append(f"[D] Dump: jettison one unit of a random held commodity to try to break contact; about "
                      f"{chance:.0%} success; failure draws fire." + escort_at_stake)
         cost = bribe_cost(pirate)
         lines.append((f"[P] Pay bribe: " if pilot.credits >= cost else "Pay bribe unavailable: ") +
