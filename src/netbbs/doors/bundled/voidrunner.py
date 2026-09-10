@@ -2635,7 +2635,7 @@ def record_mission_loss(world: World, mission: Mission, outcome: str) -> str:
     once, in the same checkpoint as the removal, so the pilot record and dossier
     can show what was lost and why.
     """
-    reward = bounty_reward_for(world, mission.reward) if mission.kind in ("bounty", "escort") else mission.reward
+    reward = mission_reward_for(world.save, mission.kind, mission.reward)
     if outcome == "expired":
         world.save.pilot.missions_expired += 1
         message = f"Mission expired: {mission.description} (unpaid {reward:,}cr)"
@@ -3117,9 +3117,14 @@ def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
         page = 0
 
 
-def faction_perk_active(world: World, faction: str) -> bool:
+def perk_active(save: SaveData, faction: str) -> bool:
+    """Save-level core: retirement quotes payouts without a live `World`."""
     info = FACTION_MEMBERSHIPS[faction]
-    return bool(getattr(world.save.pilot, info["field"]) and world.save.pilot.reputation.get(faction, 0) > FACTION_PERK_SUSPEND_AT)
+    return bool(getattr(save.pilot, info["field"]) and save.pilot.reputation.get(faction, 0) > FACTION_PERK_SUSPEND_AT)
+
+
+def faction_perk_active(world: World, faction: str) -> bool:
+    return perk_active(world.save, faction)
 
 
 def faction_membership_status(world: World, faction: str) -> str:
@@ -3196,11 +3201,20 @@ def blackwake_made_available(world: World) -> bool:
             and world.save.pilot.reputation.get(FACTION_BLACKWAKE, 0) >= BLACKWAKE_MADE_THRESHOLD)
 
 
-def bounty_reward_for(world: World, base_reward: int) -> int:
-    """Evaluate the retained Concord credential and current standing at payout."""
-    if faction_perk_active(world, FACTION_CONCORD):
+def mission_reward_for(save: SaveData, kind: str, base_reward: int) -> int:
+    """One payout rule for every screen that names a contract's credits.
+
+    The Concord commission is evaluated at payout, so the figure a contract
+    quotes, the figure it pays and the figure retirement records as forfeited
+    are the same number (issue #403 review)."""
+    if kind in ("bounty", "escort") and perk_active(save, FACTION_CONCORD):
         return round(base_reward * (1 + CONCORD_COMMISSION_BOUNTY_BONUS))
     return base_reward
+
+
+def bounty_reward_for(world: World, base_reward: int) -> int:
+    """Evaluate the retained Concord credential and current standing at payout."""
+    return mission_reward_for(world.save, "bounty", base_reward)
 
 
 def screen_concord_commission(p: Palette, world: World) -> None:
@@ -3476,7 +3490,8 @@ def finish_career(save: SaveData, finale: str) -> SaveData:
     is never mutated: the finale screen builds the result before the final
     confirmation, and a cancelled retirement must leave the career untouched."""
     if blocker := career_finale_blocker(save, finale): raise ValueError(blocker)
-    abandoned = [f"Abandoned at retirement: {m.description} (forfeited {m.reward:,}cr)." for m in save.active_missions]
+    abandoned = [f"Abandoned at retirement: {m.description} (forfeited {mission_reward_for(save, m.kind, m.reward):,}cr)."
+                 for m in save.active_missions]
     dossier = {"version":1, "number":save.pilot.retirements+1, "seed":save.seed,
                "started":save.pilot.career_started, "ended":time.strftime("%Y-%m-%d"), "finale":finale,
                "rank":career_rank_index(save.pilot), "ship":save.ship.hull_class, "days":save.turn,
@@ -6018,7 +6033,7 @@ def mission_bearing(world: World, mission: Mission) -> str:
 def mission_details(world: World, mission: Mission) -> list[str]:
     """Read-only terms and explicit estimates; never reveal remote market state."""
     path = mission_route(world, mission)
-    reward = bounty_reward_for(world, mission.reward) if mission.kind in ("bounty", "escort") else mission.reward
+    reward = mission_reward_for(world.save, mission.kind, mission.reward)
     target = world.by_id[mission.target_system]
     lines = [mission.description, f"Destination: {mission_bearing(world, mission)}",
              f"Target danger: {target.danger}" if target.discovered else "Target danger: uncharted"]
@@ -6486,7 +6501,7 @@ def pilot_record_lines(world: World, section: str = "O") -> list[str]:
             target = world.by_id[mission.target_system]
             deadline = "no deadline" if mission.deadline_turn is None else f"due day {mission.deadline_turn} inclusive ({mission.deadline_turn - world.save.turn} day(s) remaining)"
             kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
-            reward = bounty_reward_for(world, mission.reward) if mission.kind in ("bounty", "escort") else mission.reward
+            reward = mission_reward_for(world.save, mission.kind, mission.reward)
             lines.append(f"#{mission.id} {kind}: {mission.description}. Target: {target.name} ({target.x},{target.y}); {deadline}; reward {reward}cr.")
         if not world.save.active_missions: lines.append("No active missions.")
         return lines

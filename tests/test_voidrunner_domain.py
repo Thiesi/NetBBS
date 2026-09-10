@@ -12223,6 +12223,23 @@ def test_abandonment_counts_as_failed_and_names_the_forfeit():
     assert world.save.pilot.missions_failed == 1 and not world.save.active_missions
 
 
+def test_retirement_forfeits_the_commissioned_reward_the_contract_showed():
+    """The dossier quotes what the contract was worth, commission included."""
+    world = _finale_world("legend")
+    target = sorted(world.here.connections)[0]
+    world.save.active_missions = [vr.Mission(4, "bounty", "Intercept raider", 1000, 0, target, pirate_tier=1)]
+    world.save.pilot.has_concord_commission = True
+    world.save.pilot.reputation[vr.FACTION_CONCORD] = 100
+    quoted = vr.bounty_reward_for(world, 1000)
+    assert quoted == 1250  # the commission the contract screen and every loss path show
+    assert f"forfeited {quoted:,}cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)
+    world.save.pilot.has_concord_commission = False
+    assert "forfeited 1,000cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)
+    world.save.active_missions = [vr.Mission(5, "delivery", "Deliver goods", 1000, 0, target, commodity="food", quantity=2)]
+    world.save.pilot.has_concord_commission = True
+    assert "forfeited 1,000cr" in " ".join(vr.finish_career(world.save, "legend").pilot.log)  # deliveries carry no commission
+
+
 def test_legacy_pilots_load_with_zero_loss_counters_and_records_show_them():
     world = _world_with_seed(42)
     data = world.save.to_dict()
