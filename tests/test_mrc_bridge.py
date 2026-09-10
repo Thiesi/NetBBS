@@ -510,6 +510,14 @@ def test_outbound_queue_is_bounded(db, lane, lobby):
             assert bridge.status().dropped_outbound > 0
             assert bridge._outbound.qsize() + bridge._held_total <= cap
             assert bridge.state is MrcState.CONNECTED
+            # The cap follows the announced set down: after four callers
+            # leave, the next line brings the queue under the smaller cap.
+            for name in ("u2", "u3", "u4", "u5"):
+                await bridge.local_leave(lobby, name)
+            smaller = bridge._outbound_cap()
+            assert smaller == 16 + 8
+            await bridge.local_away("u1", "one more")
+            assert bridge._outbound.qsize() + bridge._held_total <= smaller
         finally:
             await bridge.close()
             await fake.close()

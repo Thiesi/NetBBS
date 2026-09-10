@@ -972,7 +972,7 @@ session needs the same treatment.
   Unlike the other per-caller caches it is *not* pruned to the announced
   set -- it is written before the announcement, and a keepalive tick in the
   gap would erase it -- but capped, dropping unannounced callers' entries
-  at the cap and refusing a note when none can go; `_announce` sends
+  at the cap; what remains is bounded by the announced set; `_announce` sends
   `TERMSIZE` always and `USERIP`/`BBSMETA` only when `MrcSettings.
   send_caller_ip`/`send_caller_meta` say so, so a reconnect repeats them
   like the away state. `USERIP` travels only for an address made of
@@ -987,7 +987,8 @@ session needs the same treatment.
   is `_outbound_cap()`: the configured 200, or the connection's own prefix
   (`OUTBOUND_CONNECTION_OVERHEAD`) plus eight lines per announced caller
   when that is more, so a reconnect's announcements never evict each other
-  or the INFO lines ahead of them. An IMALIVE's timestamp is rewritten by
+  or the INFO lines ahead of them; `_enqueue` evicts until the new line
+  fits, since the cap shrinks as callers leave. An IMALIVE's timestamp is rewritten by
   the writer as the line reaches the socket (`_stamp_imalive`), so the
   round trip measures the hub, not this node's queue. The audit row for a
   settings save records both caller-disclosure switches.

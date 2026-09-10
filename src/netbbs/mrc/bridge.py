@@ -959,15 +959,19 @@ class MrcBridge:
             self._dropped_outbound += 1
             _logger.warning("Dropped outbound MRC packet: %s", exc)
             return
-        if self._outbound.qsize() + self._held_total >= self._outbound_cap():
+        cap = self._outbound_cap()
+        while self._outbound.qsize() + self._held_total >= cap:
             # One cap for queued and held lines together (the documented
-            # 200): the oldest queued line goes first, else the oldest
-            # held line of the nick holding the most.
+            # 200, or more while callers are announced): the oldest queued
+            # line goes first, else the oldest held line of the nick
+            # holding the most. A loop, since the cap shrinks as callers
+            # leave and the queue must follow it down.
             try:
                 self._outbound.get_nowait()
             except asyncio.QueueEmpty:
-                if self._held:
-                    self._pop_held(max(self._held, key=lambda n: len(self._held[n])))
+                if not self._held:
+                    break
+                self._pop_held(max(self._held, key=lambda n: len(self._held[n])))
             self._dropped_outbound += 1
         # The spacing key: the sending nick, or "" for the node's own
         # control packets (`CLIENT`), which the hub's per-user rate does
@@ -1280,14 +1284,16 @@ class MrcBridge:
         per-caller caches it is not pruned to the announced set (a
         keepalive tick between the note and the NEWROOM would lose it);
         it is bounded instead: at the cap, entries of callers announced
-        nowhere are dropped, and if none can be, the new note is not
-        kept."""
+        nowhere are dropped, and the rest is bounded by the announced
+        set, live sessions all."""
         if username not in self._caller_facts and len(self._caller_facts) >= MAX_CALLER_FACTS:
+            # At the cap, entries of callers announced nowhere go; what
+            # remains belongs to announced callers, live sessions all, and
+            # a live session's own facts are never refused -- the bound is
+            # `MAX_CALLER_FACTS` plus the announced set.
             announced = {name for nicks in self._announced.values() for name in nicks}
             for stale in [name for name in self._caller_facts if name not in announced]:
                 del self._caller_facts[stale]
-            if len(self._caller_facts) >= MAX_CALLER_FACTS:
-                return
         self._caller_facts[username] = (address, int(width), int(height), int(level))
 
     def _send_caller_facts(self, mapping: MrcChannelMapping, nick: str, username: str) -> None:
