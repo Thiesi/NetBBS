@@ -180,6 +180,12 @@ def _parse_input_events(data: str) -> list[str | _SpecialKey]:
 class WebSession(Session):
     """A single browser client's terminal session, over a websocket."""
 
+    #: Never, by construction (issue #475): this transport's raw I/O
+    #: exists only inside door mode, and a browser tab has no Zmodem
+    #: implementation to drive it with. The file screens ask this
+    #: before offering a transfer nobody could complete.
+    supports_zmodem = False
+
     def __init__(self, ws: web.WebSocketResponse, peer_address: str | None = None):
         self._ws = ws
         self._char_queue: asyncio.Queue[str | _SpecialKey | None] = asyncio.Queue(

@@ -85,6 +85,13 @@ from netbbs.files.categories import (
 )
 from netbbs.files.diz import MAX_DESCRIPTION_BYTES, MAX_DESCRIPTION_LINES, read_archive_description
 from netbbs.files.storage import new_incoming_temp_path
+from netbbs.net.file_transfer import (
+    DEFAULT_GRANT_TTL_SECONDS,
+    DOWNLOAD,
+    UPLOAD,
+    TransferError,
+    TransferGrants,
+)
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_profiles import (
     identity_for_peer, latest_identity_observation, present_link_author_label,
@@ -98,7 +105,7 @@ from netbbs.link.files import (
 )
 from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
-from netbbs.net.char_input import EditorKey, EditorKeyKind
+from netbbs.net.char_input import EditorKey, EditorKeyKind, reject_unhandled_key
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import edit_line_body
 from netbbs.net.confirm import prompt_yes_no
@@ -165,6 +172,7 @@ async def enter_file_area(
     *,
     initial_cursor: tuple[str, str] | None = None,
     link_context: LinkContext | None = None,
+    transfers: TransferGrants | None = None,
 ) -> None:
     """Enter `area` directly, bypassing the category picker entirely --
     public (unlike `_show_area`) so issue #56's `[N]ew scan` screen
@@ -180,7 +188,7 @@ async def enter_file_area(
     test/CLI call site) simply hides that command, same degrade-
     gracefully shape every other optional `link_context` parameter
     already has."""
-    await _show_area(session, lane, area, user, initial_cursor=initial_cursor, link_context=link_context)
+    await _show_area(session, lane, area, user, initial_cursor=initial_cursor, link_context=link_context, transfers=transfers)
 
 
 async def browse_file_areas(
@@ -192,12 +200,13 @@ async def browse_file_areas(
     community_scoped: bool = False,
     title_prefix: str | None = None,
     link_context: LinkContext | None = None,
+    transfers: TransferGrants | None = None,
 ) -> None:
     """Entry point: browse from the top level (no category selected yet)."""
     await _browse_areas_in_category(
         session, lane, user, category_id=None,
         community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-        link_context=link_context,
+        link_context=link_context, transfers=transfers,
     )
 
 
@@ -229,6 +238,7 @@ async def _browse_areas_in_category(
     community_scoped: bool = False,
     title_prefix: str | None = None,
     link_context: LinkContext | None = None,
+    transfers: TransferGrants | None = None,
 ) -> None:
     """
     Browse file areas within a category (or the top level), mirroring
@@ -348,7 +358,7 @@ async def _browse_areas_in_category(
             masthead=area_masthead,
         )
         if area is not None:
-            await _show_area(session, lane, area, user, link_context=link_context)
+            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
         return
 
     mixed: list[FileAreaCategory | FileArea] = [*categories_here, *areas_here]
@@ -398,10 +408,10 @@ async def _browse_areas_in_category(
         await _browse_areas_in_category(
             session, lane, user, category_id=selected.id,
             community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-            link_context=link_context,
+            link_context=link_context, transfers=transfers,
         )
     else:
-        await _show_area(session, lane, selected, user, link_context=link_context)
+        await _show_area(session, lane, selected, user, link_context=link_context, transfers=transfers)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -444,6 +454,7 @@ async def _render_area_page(
     can_write: bool,
     name_requirement: str | None,
     can_describe: bool = False,
+    show_transfer_hint: bool = False,
     show_remote_hint: bool = False,
     description_level: str = "off",
     redraw_in_place: bool = False,
@@ -471,16 +482,28 @@ async def _render_area_page(
         f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
     )
 
+    # Named for what this caller's transport can actually do (issue
+    # #475): telling a browser caller to "receive via Zmodem" describes
+    # a transfer their client cannot start, which is how the file area
+    # came to look broken to most people in the first place.
+    zmodem = _supports_zmodem(session)
+    _receive_how = "receive via Zmodem" if zmodem else "get a browser download link"
+    _send_how = "Send a file via Zmodem" if zmodem else "Send a file from your browser"
+
     n_files = len(page.entries)
     if n_files > 0:
         num_label = f"1-{n_files}" if n_files > 1 else "1"
-        hints = [MenuEntry(label=menu_key(num_label, " or /download <name|#> — receive via Zmodem"))]
+        hints = [MenuEntry(label=menu_key(num_label, f" or /download <name|#> — {_receive_how}"))]
     else:
-        hints = [MenuEntry(label=menu_key("/download <filename>", " — receive via Zmodem"))]
+        hints = [MenuEntry(label=menu_key("/download <filename>", f" — {_receive_how}"))]
     if can_write:
-        hints.append(MenuEntry(label=menu_key("U", "pload"), brief="Send a file via Zmodem"))
+        hints.append(MenuEntry(label=menu_key("U", "pload"), brief=_send_how))
     if can_describe:
         hints.append(MenuEntry(label=menu_key("E", "dit description"), brief="Describe the highlighted file"))
+    if show_transfer_hint and zmodem:
+        hints.append(
+            MenuEntry(label=menu_key("W", "eb transfer"), brief="Get a browser link instead of Zmodem")
+        )
     if show_remote_hint:
         hints.append(MenuEntry(label=menu_key("/remote", " — browse/fetch this file area's remote catalogue")))
     await session.write_line(
@@ -573,6 +596,9 @@ async def _read_file_choice(
                 if char.lower() == "u":
                     await session.write_line(char)
                     return ("upload", None, highlighted)
+                if char.lower() == "w":
+                    await session.write_line(char)
+                    return ("weblink", None, highlighted)
                 await session.write(char)
                 rest = await session.read_line()
                 return ("command", (char + rest).strip(), highlighted)
@@ -594,6 +620,7 @@ async def _show_area(
     *,
     initial_cursor: tuple[str, str] | None = None,
     link_context: LinkContext | None = None,
+    transfers: TransferGrants | None = None,
 ) -> None:
     """
     Show `area`, one bounded page of files at a time (design doc,
@@ -715,6 +742,7 @@ async def _show_area(
         await _render_area_page(
             session, lane, area_name, current_page, can_write=can_write, name_requirement=effective_name_requirement,
             can_describe=_can_describe(current_page),
+            show_transfer_hint=transfers is not None,
             show_remote_hint=show_remote_hint, description_level=description_level, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
         )
@@ -749,14 +777,24 @@ async def _show_area(
                 continue
             elif kind == "download":
                 if target is not None:
-                    await _handle_download(session, lane, area, target, user)
+                    await _handle_download(session, lane, area, target, user, transfers=transfers)
                     return
             elif kind == "upload":
                 if not can_write:
                     await session.write("\a")
                     continue
-                await _handle_upload(session, lane, area, user, link_context=link_context)
+                await _handle_upload(session, lane, area, user, link_context=link_context, transfers=transfers)
                 return
+            elif kind == "weblink":
+                if transfers is None:
+                    await session.write("\a")
+                    continue
+                await _transfer_link_screen(
+                    session, lane, user, area, page,
+                    highlighted=highlighted, can_write=can_write, transfers=transfers,
+                )
+                await _render_and_advance_cursor(page, highlighted=highlighted)
+                continue
             elif kind == "describe":
                 if not _can_describe(page):
                     await session.write("\a")
@@ -814,8 +852,14 @@ async def _show_area(
                     page = await lane.run(list_files_page, area, user)
                     highlighted = None
                     await _render_and_advance_cursor(page, highlighted=highlighted)
+                elif choice.lower() in ("w", "/weblink") and transfers is not None:
+                    await _transfer_link_screen(
+                        session, lane, user, area, page,
+                        highlighted=highlighted, can_write=can_write, transfers=transfers,
+                    )
+                    await _render_and_advance_cursor(page, highlighted=highlighted)
                 elif choice.lower() in ("u", "/upload") and can_write:
-                    await _handle_upload(session, lane, area, user, link_context=link_context)
+                    await _handle_upload(session, lane, area, user, link_context=link_context, transfers=transfers)
                     return
                 elif choice.lower().startswith("/describe ") or (
                     choice.lower() in ("e", "/describe") and _can_describe(page)
@@ -844,11 +888,11 @@ async def _show_area(
                     return
                 elif choice.isdigit() and 1 <= int(choice) <= len(page.entries):
                     target_file = page.entries[int(choice) - 1].filename
-                    await _handle_download(session, lane, area, target_file, user)
+                    await _handle_download(session, lane, area, target_file, user, transfers=transfers)
                     return
                 elif choice.startswith("#") and choice[1:].isdigit() and 1 <= int(choice[1:]) <= len(page.entries):
                     target_file = page.entries[int(choice[1:]) - 1].filename
-                    await _handle_download(session, lane, area, target_file, user)
+                    await _handle_download(session, lane, area, target_file, user, transfers=transfers)
                     return
                 elif choice.lower().startswith("/download ") or choice.lower().startswith("d ") or choice.lower().startswith("dl "):
                     arg = choice.split(maxsplit=1)[1].strip()
@@ -857,16 +901,16 @@ async def _show_area(
                         target_file = exact if exact is not None else page.entries[int(arg) - 1].filename
                     else:
                         target_file = arg
-                    await _handle_download(session, lane, area, target_file, user)
+                    await _handle_download(session, lane, area, target_file, user, transfers=transfers)
                     return
                 elif choice.lower() in ("/download", "d", "dl"):
                     if highlighted is not None and 0 <= highlighted < len(page.entries):
                         target_file = page.entries[highlighted].filename
-                        await _handle_download(session, lane, area, target_file, user)
+                        await _handle_download(session, lane, area, target_file, user, transfers=transfers)
                         return
                     elif len(page.entries) == 1:
                         target_file = page.entries[0].filename
-                        await _handle_download(session, lane, area, target_file, user)
+                        await _handle_download(session, lane, area, target_file, user, transfers=transfers)
                         return
                     else:
                         await session.write("File number or name to download: ")
@@ -878,7 +922,7 @@ async def _show_area(
                             target_file = exact if exact is not None else page.entries[int(sub_choice) - 1].filename
                         else:
                             target_file = sub_choice
-                        await _handle_download(session, lane, area, target_file, user)
+                        await _handle_download(session, lane, area, target_file, user, transfers=transfers)
                         return
                 else:
                     await session.write("\a")
@@ -904,7 +948,12 @@ async def _show_area(
 
     hints = []
     if can_write:
-        hints.append(MenuEntry(label=menu_key("U", "pload"), brief="Send a file via Zmodem"))
+        hints.append(
+            MenuEntry(
+                label=menu_key("U", "pload"),
+                brief="Send a file via Zmodem" if _supports_zmodem(session) else "Send a file from your browser",
+            )
+        )
     if describable:
         hints.append(
             MenuEntry(label=menu_key("E", "dit description"), brief="Describe an upload awaiting approval")
@@ -920,7 +969,7 @@ async def _show_area(
     if not command:
         return
     elif command.lower() in ("u", "/upload") and can_write:
-        await _handle_upload(session, lane, area, user, link_context=link_context)
+        await _handle_upload(session, lane, area, user, link_context=link_context, transfers=transfers)
     elif command.lower().startswith("/describe ") or (
         command.lower() in ("e", "/describe") and describable
     ):
@@ -1550,9 +1599,158 @@ async def _handle_describe(
     )
 
 
+def _supports_zmodem(session: Session) -> bool:
+    """Whether this session's transport can carry a Zmodem transfer at
+    all (issue #475).
+
+    Read with `getattr` rather than as an attribute, matching how this
+    module already asks about `read_editor_key`: a `Session` here is a
+    duck-typed protocol as much as a base class, and a transport (or a
+    test double) written before this capability existed means "an
+    ordinary byte-carrying terminal", which is the default anyway."""
+    return getattr(session, "supports_zmodem", True)
+
+
+async def _offer_transfer_link(
+    session: Session,
+    lane: DatabaseLane,
+    user: User,
+    area: FileArea,
+    transfers: TransferGrants,
+    *,
+    direction: str,
+    entry: FileEntry | None = None,
+) -> None:
+    """Mint one single-use transfer link and put it on screen (issue
+    #475).
+
+    Printed rather than acted on, because the caller is on a terminal
+    and the transfer happens somewhere else -- their browser. What is
+    said about it matters as much as the URL: a link that works once,
+    for a few minutes, is a promise this node has to keep and the
+    caller has to understand, so both facts are stated every time
+    rather than documented somewhere they will not look.
+    """
+    try:
+        grant = await lane.run(
+            lambda db: transfers.issue(
+                direction=direction, user_id=user.id, area_id=area.id,
+                file_id=entry.file_id if entry is not None else None,
+            )
+        )
+    except TransferError as exc:
+        await session.write_line(colored(f"\r\n{exc}", fg_color=ERROR_COLOR))
+        return
+
+    url = transfers.url_for(grant)
+    if url is None:
+        # A node whose SysOp never told it how it is reached cannot
+        # print a URL that works. Saying which setting is missing beats
+        # printing a loopback address that fails in a browser.
+        await session.write_line(
+            colored(
+                "\r\nThis node has no public web address configured, so it cannot hand out "
+                "transfer links. Ask the SysOp to set the web transport's public URL.",
+                fg_color=ERROR_COLOR,
+            )
+        )
+        return
+
+    what = (
+        f"upload to [{sanitize_text(area.name)}]"
+        if direction == UPLOAD
+        else f"download of {sanitize_text(entry.filename)!r}"
+    )
+    await session.write_line(colored(f"\r\nOpen this in a browser to {what}:", fg_color=MUTED_COLOR))
+    await session.write_line(f"  {colored(url, fg_color=VALUE_COLOR)}")
+    await session.write_line(
+        colored(
+            f"It works once, and stops working in {DEFAULT_GRANT_TTL_SECONDS // 60} minutes.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+
+
+async def _transfer_link_screen(
+    session: Session,
+    lane: DatabaseLane,
+    user: User,
+    area: FileArea,
+    page: FileEntryPage,
+    *,
+    highlighted: int | None,
+    can_write: bool,
+    transfers: TransferGrants,
+) -> None:
+    """`[W]eb transfer`: hand this caller a browser link for an upload
+    or for one file, without them having to own a Zmodem-capable
+    terminal.
+
+    A screen with an action bar rather than a question (design doc
+    §3.5): it says what it can do, does whichever the caller picks, and
+    `[B]ack` leaves having written nothing.
+    """
+    target = None
+    if highlighted is not None and 0 <= highlighted < len(page.entries):
+        target = page.entries[highlighted]
+    elif len(page.entries) == 1:
+        target = page.entries[0]
+
+    heading = screen_title(
+        "Browser transfer",
+        breadcrumb=(session.node_display_name, "Files", sanitize_text(area.name)),
+        subtitle="for a terminal without Zmodem",
+        width=session.terminal_width,
+        clear=await lane.run(redraw_in_place_enabled, user),
+        unicode_style=await lane.run(unicode_style_enabled, user),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
+        header_color=await lane.run(effective_header_color_256),
+        node_name_gradient=session.node_name_gradient,
+    )
+    while True:
+        await session.write_line(f"\r\n{heading}")
+        await session.write_line(
+            colored(
+                "Each link works once and expires in "
+                f"{DEFAULT_GRANT_TTL_SECONDS // 60} minutes.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        options = []
+        if can_write:
+            options.append(MenuEntry(label=menu_key("U", "pload link"), brief="Send a file from your browser"))
+        if target is not None:
+            options.append(
+                MenuEntry(
+                    label=menu_key("D", "ownload link"),
+                    brief=f"Fetch {sanitize_text(target.filename)}",
+                )
+            )
+        options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the file list"))
+        await session.write_line(
+            f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level='off')}"
+        )
+        await session.write("Choice: ")
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
+
+        if choice == "b":
+            return
+        if choice == "u" and can_write:
+            await _offer_transfer_link(session, lane, user, area, transfers, direction=UPLOAD)
+            return
+        if choice == "d" and target is not None:
+            await _offer_transfer_link(
+                session, lane, user, area, transfers, direction=DOWNLOAD, entry=target
+            )
+            return
+        await session.write(reject_unhandled_key(choice))
+
+
 async def _handle_upload(
     session: Session, lane: DatabaseLane, area: FileArea, user: User, *,
     link_context: LinkContext | None = None,
+    transfers: TransferGrants | None = None,
 ) -> None:
     """
     `receive_file` (GitHub issue #34, reopened a second time) now
@@ -1585,6 +1783,23 @@ async def _handle_upload(
     a moderation queue never leaks onto the network (design doc
     §9.2/§11.2).
     """
+    if not _supports_zmodem(session):
+        # This transport could never carry the transfer (issue #475),
+        # so it is not started: a browser link is the whole of what
+        # this caller can do, and offering it beats a Zmodem handshake
+        # that waits for a client which is not there.
+        if transfers is not None:
+            await _offer_transfer_link(session, lane, user, area, transfers, direction=UPLOAD)
+        else:
+            await session.write_line(
+                colored(
+                    "\r\nThis transport cannot carry a Zmodem transfer, and this node has no "
+                    "browser transfer configured. Ask the SysOp to enable the web listener.",
+                    fg_color=ERROR_COLOR,
+                )
+            )
+        return
+
     heading = screen_title(
         "Upload",
         breadcrumb=(session.node_display_name, "Files", sanitize_text(area.name)),
@@ -1677,7 +1892,10 @@ async def _handle_upload(
         )
 
 
-async def _handle_download(session: Session, lane: DatabaseLane, area: FileArea, filename: str, user: User) -> None:
+async def _handle_download(
+    session: Session, lane: DatabaseLane, area: FileArea, filename: str, user: User, *,
+    transfers: TransferGrants | None = None,
+) -> None:
     # Looked up by exact name across the whole area (get_file_by_name),
     # not just the currently displayed page -- see _show_area's
     # docstring. Matched against the raw, unsanitized `filename` the
@@ -1693,6 +1911,24 @@ async def _handle_download(session: Session, lane: DatabaseLane, area: FileArea,
         await session.write_line(
             colored(f"\r\nNo file named {sanitize_text(filename)!r} in this file area.", fg_color=ERROR_COLOR)
         )
+        return
+
+    if not _supports_zmodem(session):
+        # Issue #475: same reasoning as the upload side -- this
+        # transport cannot carry the transfer, so the browser link is
+        # the whole of what this caller can do.
+        if transfers is not None:
+            await _offer_transfer_link(
+                session, lane, user, area, transfers, direction=DOWNLOAD, entry=entry
+            )
+        else:
+            await session.write_line(
+                colored(
+                    "\r\nThis transport cannot carry a Zmodem transfer, and this node has no "
+                    "browser transfer configured. Ask the SysOp to enable the web listener.",
+                    fg_color=ERROR_COLOR,
+                )
+            )
         return
 
     entry_filename = sanitize_text(entry.filename)

@@ -191,6 +191,11 @@ async def handle_session(
     direct_invites: DirectChatInvites | None = None,
     mrc_bridge: MrcBridge | None = None,
     backup_identity_dir: Path | None = None,
+    # Issue #475: this node's `netbbs.net.file_transfer.
+    # TransferGrants`, or `None` on a node with no web listener --
+    # the file screens use it to hand a caller whose terminal has
+    # no Zmodem a browser link instead.
+    transfers: object | None = None,
 ) -> None:
     """
     Top-level per-connection entry point.
@@ -293,6 +298,7 @@ async def handle_session(
         mrc_bridge=mrc_bridge,
         chat_hub=hub,
         backup_identity_dir=backup_identity_dir,
+        transfers=transfers,
     )
 
     session_registry.enter(session)
@@ -817,6 +823,11 @@ async def handle_ssh_session(
     direct_invites: DirectChatInvites | None = None,
     mrc_bridge: MrcBridge | None = None,
     backup_identity_dir: Path | None = None,
+    # Issue #475: this node's `netbbs.net.file_transfer.
+    # TransferGrants`, or `None` on a node with no web listener --
+    # the file screens use it to hand a caller whose terminal has
+    # no Zmodem a browser link instead.
+    transfers: object | None = None,
 ) -> None:
     """
     SSH-specific top-level entry point (GitHub issue #25) — the
@@ -872,6 +883,7 @@ async def handle_ssh_session(
         mrc_bridge=mrc_bridge,
         chat_hub=hub,
         backup_identity_dir=backup_identity_dir,
+        transfers=transfers,
     )
 
     session_registry.enter(session)

@@ -294,7 +294,15 @@ class TransferGateway:
     def __init__(self, grants: "TransferGrants", lane, *, announce_identity=None) -> None:
         self._grants = grants
         self._lane = lane
-        self._announce_identity = announce_identity
+        # A callable, not a value: a node builds its listeners before it
+        # loads its Link identity, so asking at construction time would
+        # be asking too early. Called once per upload, which is late
+        # enough for the answer to exist and cheap enough not to care.
+        # A plain identity (or `None`) is accepted too, for tests and
+        # for any caller that already has one.
+        self._announce_identity = (
+            announce_identity if callable(announce_identity) else (lambda: announce_identity)
+        )
 
     def add_routes(self, app) -> None:
         app.router.add_get("/transfer/{token}", self.handle_download)
@@ -368,7 +376,7 @@ class TransferGateway:
                 _store_upload, resolved.area, resolved.user, filename,
                 temp_path=temp_path, sha256=sha256, size_bytes=size_bytes,
                 description=await read_archive_description(temp_path, filename),
-                announce_identity=self._announce_identity,
+                announce_identity=self._announce_identity(),
             )
         except Exception as exc:
             temp_path.unlink(missing_ok=True)

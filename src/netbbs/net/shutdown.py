@@ -329,6 +329,13 @@ class NodeControls:
     # bottom of the `netbbs.net` import graph) never imports the chat
     # stack; the real type is annotated at every consumer.
     mrc_bridge: Any = None
+    # Issue #475: the node's one `netbbs.net.file_transfer.
+    # TransferGrants`, from which the file screens mint HTTP
+    # transfer links for callers whose terminal cannot speak
+    # Zmodem. `None` on a node with no web listener -- there is
+    # nowhere for a link to point -- and typed `Any` for the same
+    # import-graph reason as `mrc_bridge` above.
+    transfers: Any = None
     # Issue #277: the node's one in-process `netbbs.chat.hub.ChatHub` --
     # live channel membership only a running node has, `None` from the
     # standalone `python -m netbbs.admin` CLI, exactly like

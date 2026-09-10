@@ -863,6 +863,12 @@ async def _resource_type_menu(
                     session, lane, user,
                     community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
                     link_context=link_context,
+                    # Issue #475: the node's transfer-grant table, so a
+                    # caller whose terminal has no Zmodem can be handed
+                    # a browser link instead. `None` on a node with no
+                    # web listener -- there would be nowhere for the
+                    # link to point.
+                    transfers=node_controls.transfers if node_controls is not None else None,
                 )
             else:
                 await session.write_line(

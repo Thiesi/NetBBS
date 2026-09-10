@@ -282,6 +282,10 @@ async def _start_servers(
     link_realtime_relay=None,
     live_relays_provider=None,
     own_hello_provider=None,
+    # Issue #475: the file-transfer gateway, built by `run()` (which
+    # is where the lane and the node identity it needs exist) and
+    # served on the web listener's own application.
+    transfers=None,
 ) -> list:
     """
     Start every enabled, available listener. On any failure partway
@@ -398,7 +402,10 @@ async def _start_servers(
         else:
             await _start_one(
                 "web",
-                WebServer(host=config.web.host, port=config.web.port, session_handler=session_handler),
+                WebServer(
+                    host=config.web.host, port=config.web.port,
+                    session_handler=session_handler, transfers=transfers,
+                ),
             )
             any_interactive_started = True
             _logger.info("NetBBS listening on %s:%d (web)", config.web.host, config.web.port)
@@ -764,6 +771,7 @@ async def run(
             direct_invites=direct_invites,
             mrc_bridge=mrc_bridge,
             backup_identity_dir=config.identity_dir,
+            transfers=transfer_grants,
         )
 
     async def ssh_session_handler(session):
@@ -1094,6 +1102,28 @@ async def run(
         # bridging disclosure as everyone after -- `is_bridged()` is
         # never false merely because the listeners came up first.
         await mrc_bridge.start()
+        # Issue #475: this node's file-transfer grants, and the gateway
+        # that redeems them. Only meaningful with the web listener
+        # running -- that HTTP server is where the endpoint lives -- so a
+        # node without it has `None` here and the file screens simply
+        # never offer a link. Built here rather than beside the
+        # listeners because everything it needs (the foreground lane,
+        # this node's Link identity) exists by now and not before.
+        transfer_grants = None
+        transfer_gateway = None
+        if config.web.enabled:
+            from netbbs.net.file_transfer import TransferGateway, TransferGrants
+
+            transfer_grants = TransferGrants(base_url=_transfer_base_url(config))
+            transfer_gateway = TransferGateway(
+                transfer_grants, foreground_lane,
+                # Signs a Link announcement for anything uploaded this
+                # way, exactly as the Zmodem path does (#464); `None`
+                # when Link is off, which makes queueing a no-op rather
+                # than a special case.
+                announce_identity=lambda: node_identity if link_node is not None else None,
+            )
+
         servers = await _start_servers(
             config, db, session_handler, ssh_session_handler, throttle, link_node, background_lane,
             link_realtime_registry, link_realtime_bridge, link_realtime_relay, _live_relays_provider,
@@ -1464,3 +1494,25 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+def _transfer_base_url(config) -> str | None:
+    """Where a file-transfer link should point (issue #475).
+
+    The operator's `[web] public_url` if they set one -- the only
+    answer that survives a reverse proxy, a different external port, or
+    TLS terminated in front of this process. Otherwise the listener's
+    own address, but only when that is an address someone else could
+    actually reach: a node bound to loopback or to the 0.0.0.0 wildcard
+    knows it is listening, not how it is reached, and saying so beats
+    printing a URL that fails in a browser.
+    """
+    if config.web.public_url:
+        return config.web.public_url
+    if config.web.host in {"127.0.0.1", "::1", "localhost"}:
+        # Loopback is honest for a single-machine node: the caller's
+        # browser really is on this machine.
+        return f"http://{config.web.host}:{config.web.port}"
+    if config.web.host in {"0.0.0.0", "::", ""}:
+        return None
+    return f"http://{config.web.host}:{config.web.port}"
