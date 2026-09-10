@@ -6413,10 +6413,12 @@ wiping the scene's boards.
 
 **Decision 6 (locked in) — bounded action economy and a self-limiting
 risk curve, no separate anti-snowball mechanic.** 15 turns/day on a
-rolling 24h window. Heat gain per action (Trade Warez +2, Root Exchange
+rolling 24h window. Base Heat gain per action (Trade Warez +2, Root Exchange
 +8, Raid +10, Run a Job +5/+15/+25 by approach) decays −5/real-hour; above 80, each
 heat-gaining action rolls a bust chance of `(Heat−80)×2%`, capped ~40%,
-costing 25% cash and 20% crew and resetting Heat to 0. Success chance
+normally costing 25% cash and 20% crew and resetting Heat to 0. The adopted
+crew specialty/support rules below adjust added Heat, failure recovery and bust
+cash loss; zero added Heat does not remove an existing bust risk. Success chance
 for both PvE and PvP actions is `attacker_crew / (attacker_crew +
 defender_crew)`, clamped to [10%, 90%] so nothing is ever a guaranteed
 win or loss. New accounts get 48h Raid immunity. Under the adopted slice 5
@@ -6588,6 +6590,35 @@ Heat/bust stakes. Only Act spends or draws randomness, under the existing fresh
 actor validation and atomic action transaction. A caller with no turns can still
 inspect every offer and preview. Browsing, cancellation and reconnect never
 reroll offers; fixed repeatability needs no persistent offer cache or migration.
+
+**Crew development (issue #362, slice 6; maintainer approved).** `[S]Kit` opens
+the crew's specialty and support choices; `[C]rew` retains direct recruitment.
+One crew-wide specialty is active at a time. Training or switching costs $150
+and one turn: Phreakers reduce contract Heat by 3; Fixers recover $20 on a failed
+contract, before any bust and without Rank; Lookouts reduce raid/root Heat by 3.
+Training persists through ordinary crew losses and assignments until switched
+or the competitive season resets. Buying the already-active specialty is rejected.
+
+One consumable support slot holds either a $40 Burner Kit or a $75 Cash Stash;
+each purchase also costs one turn. Occupied slots cannot be replaced or stacked.
+A Burner Kit removes up to 10 added Heat after specialty reductions, floored at
+zero, on the next committed job/raid/root attempt, win or lose. That attempt
+consumes it even if fewer than 10 Heat were removed. Trade, recruitment, garrison
+transfers and purchases do not consume it. Existing Heat still causes an ordinary
+bust roll even if added Heat is zero. A Cash Stash is consumed only by a bust,
+changing that bust's cash loss from 25% to 10%; crew losses remain unchanged.
+Fixer recovery cash is included before bust losses. Neither purchases nor support
+use earn Rank. Season reset clears specialty and support with competitive state.
+
+The content-first crew screen shows effects, prices and current slots. A selection
+is a draft until its final preview and Act. Stale-resource rejection retains that
+selection for a refreshed preview. Cancelling and disconnecting purchase nothing.
+Action previews account for specialty, support, its consumption and actual bust
+stakes. Revalidation includes both slots; purchases and consumption share the
+same transaction as action resources and turn cost. Schema 5 adds two bounded
+choice columns, initially empty, without changing existing player resources or
+identity. Upgrades and the version marker are atomic; earlier migrations remain
+unchanged. Manual stop-session and verified-backup upgrade guidance applies.
 
 **Compact action screens (issue #362, slice 3).** Target pickers, results,
 rejections and season notices use terminal-height pagination as well as width

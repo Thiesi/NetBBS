@@ -613,6 +613,17 @@ JOB_APPROACHES: tuple[tuple[str, int, int, int], ...] = (
     ("Bold", 140, 25, 1),
 )
 
+# ID, display name, price, effect. One specialty and one consumable slot.
+CREW_ITEMS = (
+    ("phreakers", "Phreakers", 150, "Contract Heat -3."),
+    ("fixers", "Fixers", 150, "Failed contracts recover $20 before any bust; no Rank."),
+    ("lookouts", "Lookouts", 150, "Raid/root Heat -3."),
+    ("burner", "Burner Kit", 40, "Next job/raid/root adds up to 10 less Heat, then consumed."),
+    ("stash", "Cash Stash", 75, "Next bust takes 10% cash instead of 25%, then consumed."),
+)
+SPECIALTIES = {item[0] for item in CREW_ITEMS[:3]}
+SUPPORT_ITEMS = {item[0] for item in CREW_ITEMS[3:]}
+
 # (name, income per real hour controlled)
 EXCHANGE_SEEDS: tuple[tuple[str, int], ...] = (
     ("212-555 Uptown Exchange", 2),
@@ -679,6 +690,8 @@ class Player:
     control_remainder: int = 0
     captured_exchanges: tuple[int, ...] = ()
     raid_shield_until: str = ""
+    specialty: str = ""
+    support: str = ""
 
 
 @dataclass
@@ -702,6 +715,11 @@ class GameEvent:
     summary_text: str
     created_at: str
     seen_at: str | None = None
+
+
+@dataclass(frozen=True)
+class CrewChoice:
+    item: str
 
 
 @dataclass(frozen=True)
@@ -793,6 +811,8 @@ def reset_player_for_season(player: Player, season_number: int, now: datetime) -
     player.turn_day_start = ""
     player.last_raided_by = None
     player.raid_shield_until = ""
+    player.specialty = ""
+    player.support = ""
     player.season_number = season_number
 
 
@@ -819,16 +839,30 @@ def settle_player_clocks(player: Player, now: datetime) -> datetime:
     return effective_now
 
 
-def apply_heat(player: Player, amount: float, rng: random.Random) -> bool:
+def adjusted_heat(player: Player, action: str, amount: float) -> float:
+    if (action == "job" and player.specialty == "phreakers"
+            or action in {"raid", "root"} and player.specialty == "lookouts"):
+        amount = max(0, amount - 3)
+    if action in {"job", "raid", "root"} and player.support == "burner":
+        amount = max(0, amount - 10)
+    return amount
+
+
+def apply_heat(player: Player, amount: float, rng: random.Random, *, action: str = "trade") -> bool:
     """Adds `amount` Heat and rolls the bust check. Returns whether a
     bust happened -- the caller narrates it; this function only applies
     the mechanical consequence."""
-    player.heat += amount
+    player.heat += adjusted_heat(player, action, amount)
+    if action in {"job", "raid", "root"} and player.support == "burner":
+        player.support = ""
     if player.heat <= HEAT_BUST_THRESHOLD:
         return False
     chance = min(HEAT_BUST_CHANCE_CAP, (player.heat - HEAT_BUST_THRESHOLD) * HEAT_BUST_CHANCE_PER_POINT)
     if rng.random() < chance:
-        player.cash = int(player.cash * (1 - BUST_CASH_LOSS_FRACTION))
+        cash_loss = .10 if player.support == "stash" else BUST_CASH_LOSS_FRACTION
+        player.cash = int(player.cash * (1 - cash_loss))
+        if player.support == "stash":
+            player.support = ""
         player.crew = max(1, int(player.crew * (1 - BUST_CREW_LOSS_FRACTION)))
         player.heat = 0.0
         return True
@@ -868,9 +902,10 @@ def action_job(player: Player, rng: random.Random, choice: JobChoice = JobChoice
         player.cash += payout
         player.successful_jobs += 1
     else:
-        payout = 0
+        payout = 20 if player.specialty == "fixers" else 0
+        player.cash += payout
         player.crew = max(1, player.crew - loss)
-    busted = apply_heat(player, heat, rng)
+    busted = apply_heat(player, heat, rng, action="job")
     return name, success, payout, busted
 
 
@@ -888,7 +923,7 @@ def action_raid(attacker: Player, target: Player, rng: random.Random, *, now: da
         attacker.cash = max(0, attacker.cash - loss)
     target.last_raided_by = attacker.user_id
     target.raid_shield_until = to_iso((now or now_utc()) + RAID_SHIELD)
-    busted = apply_heat(attacker, RAID_HEAT, rng)
+    busted = apply_heat(attacker, RAID_HEAT, rng, action="raid")
     return success, amount, busted
 
 
@@ -919,7 +954,7 @@ def action_root_exchange(attacker: Player, exchange: Exchange, now: datetime, rn
             attacker.captured_exchanges += (exchange.id,)
     else:
         attacker.crew = max(1, attacker.crew - 1)
-    busted = apply_heat(attacker, ROOT_EXCHANGE_HEAT, rng)
+    busted = apply_heat(attacker, ROOT_EXCHANGE_HEAT, rng, action="root")
     return success, busted
 
 
@@ -939,7 +974,7 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
-WORLD_SCHEMA_VERSION = 4
+WORLD_SCHEMA_VERSION = 5
 
 # Versioned schema contract: future additions need a new numbered migration.
 _WORLD_COLUMNS_V1 = {
@@ -973,6 +1008,8 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
             expected = expected | _ECONOMY_COLUMNS
         if version >= 4 and table == "players":
             expected = expected | {"raid_shield_until"}
+        if version >= 5 and table == "players":
+            expected = expected | {"specialty", "support"}
         if not expected <= columns:
             raise WorldStateError(f"War Dialer {table} schema is incomplete. Preserve it for SysOp recovery; no replacement was created.")
 
@@ -1034,6 +1071,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     _migrate_world_v3(fresh)
                     _migrate_world_v4(fresh)
                     fresh.execute("PRAGMA user_version=4")
+                    _migrate_world_v5(fresh)
+                    fresh.execute("PRAGMA user_version=5")
             finally:
                 fresh.close()
             try:
@@ -1086,6 +1125,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if version < 4:
             _migrate_world_v4(conn)
             conn.execute("PRAGMA user_version=4")
+        if version < 5:
+            _migrate_world_v5(conn)
+            conn.execute("PRAGMA user_version=5")
         _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
 
 
@@ -1225,6 +1267,11 @@ def _migrate_world_v3(conn: sqlite3.Connection) -> None:
                      "capture attempts cost $50 and exchange income is $1-$3/hour. See Help for the new rules.", now)
     for row, (_, rate) in zip(exchanges, EXCHANGE_SEEDS):
         conn.execute("UPDATE exchanges SET income_per_hour=? WHERE id=?", (rate, row[0]))
+
+
+def _migrate_world_v5(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE players ADD COLUMN specialty TEXT NOT NULL DEFAULT '' CHECK (specialty IN ('', 'phreakers', 'fixers', 'lookouts'))")
+    conn.execute("ALTER TABLE players ADD COLUMN support TEXT NOT NULL DEFAULT '' CHECK (support IN ('', 'burner', 'stash'))")
 
 
 def _migrate_world_v4(conn: sqlite3.Connection) -> None:
@@ -1372,6 +1419,8 @@ def _row_to_player(row: sqlite3.Row) -> Player:
         control_remainder=row["control_remainder"] if "control_remainder" in row.keys() else 0,
         captured_exchanges=tuple(json.loads(row["captured_exchanges"])) if "captured_exchanges" in row.keys() else (),
         raid_shield_until=row["raid_shield_until"] if "raid_shield_until" in row.keys() else "",
+        specialty=row["specialty"] if "specialty" in row.keys() else "",
+        support=row["support"] if "support" in row.keys() else "",
     )
 
 
@@ -1400,6 +1449,10 @@ def _save_player(conn: sqlite3.Connection, player: Player) -> None:
                       json.dumps(player.captured_exchanges), player.user_id))
     if _world_schema_version(conn) >= 4:
         conn.execute("UPDATE players SET raid_shield_until=? WHERE user_id=?", (player.raid_shield_until, player.user_id))
+
+    if _world_schema_version(conn) >= 5:
+        conn.execute("UPDATE players SET specialty=?, support=? WHERE user_id=?",
+                     (player.specialty, player.support, player.user_id))
 
 
 _INCOME_UNITS_PER_DOLLAR = 3_600_000_000  # microseconds per hour
@@ -1514,7 +1567,7 @@ def assigned_crew(conn: sqlite3.Connection, user_id: int) -> int:
 
 
 def actor_preview_state(player: Player) -> tuple:
-    return (player.cash, player.crew, player.turns_used, player.season_number, rank_score(player))
+    return (player.cash, player.crew, player.turns_used, player.season_number, rank_score(player), player.specialty, player.support)
 
 
 @contextmanager
@@ -1567,6 +1620,38 @@ def resolve_recruit(conn: sqlite3.Connection, player: Player, now: datetime, *, 
         if not action_recruit(actor):
             raise ActionRejected(f"Not enough cash (need ${RECRUIT_COST}). No resources spent.")
     return True
+
+
+def crew_item(choice: CrewChoice) -> tuple[str, str, int, str]:
+    for item in CREW_ITEMS:
+        if item[0] == choice.item:
+            return item
+    raise ActionRejected("Crew choice is unavailable; nothing spent.")
+
+
+def crew_block_reason(player: Player, choice: CrewChoice) -> str | None:
+    item, _, cost, _ = crew_item(choice)
+    if item == player.specialty:
+        return "This specialty is already trained. Nothing to purchase."
+    if item in SUPPORT_ITEMS and player.support:
+        return "Support slot occupied. Use its current item before buying another."
+    if player.cash < cost:
+        return f"Need ${cost - player.cash} more cash. Trade or run a contract to fund it."
+    return action_block_reason("crew", player)
+
+
+def resolve_crew_purchase(conn: sqlite3.Connection, player: Player, now: datetime,
+                          choice: CrewChoice, *, require_preview: bool = False,
+                          delta: ActionDelta | None = None) -> None:
+    with _action_player(conn, player, now, require_preview=require_preview, delta=delta) as (actor, _):
+        if reason := crew_block_reason(actor, choice):
+            raise ActionRejected(reason)
+        item, _, price, _ = crew_item(choice)
+        actor.cash -= price
+        if item in SPECIALTIES:
+            actor.specialty = item
+        else:
+            actor.support = item
 
 
 def resolve_job(conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, *, choice: JobChoice = JobChoice(), require_preview: bool = False, delta: ActionDelta | None = None) -> tuple[str, bool, int, bool]:
@@ -2003,6 +2088,7 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
         lines.append("Raid shield ends: " + expires.strftime("%Y-%m-%d %H:%M UTC"))
     lines.append("Exchange territory is always contestable.")
     lines.append(f"Season {player.season_number} ends in {countdown(state.season_ends_at - now)}")
+    lines.append(f"[S]Skills/support: {player.specialty or 'untrained'}; {player.support or 'empty slot'}")
     lines.append("Season end: " + state.season_ends_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
     return lines
 
@@ -2011,9 +2097,9 @@ def draw_dashboard(p: Palette, state: DashboardState, now: datetime, width: int,
                    height: int, page_index: int = 0) -> tuple[int, int]:
     """Render one compact command-center page with the action keys always visible."""
     width = max(1, width - 1)
-    footer_text = (["[T]rade [C]rew [J]ob [R]aid [X]Root [G]arrison", "[B]Rank [E]Map [V]Rivals [H]Log [?]Help [Q]uit"]
+    footer_text = (["[T]rade [C]rew [J]ob [R]aid [X]Root [G]arrison [S]Kit", "[B]Rank [E]Map [V]Rivals [H]Log [?]Help [Q]uit"]
                    if width >= 39 else
-                   ["[T]rade [C]rew", "[J]ob [R]aid", "[X]Root [G]Defense", "[B]Rank [E]Map", "[V]Rivals [H]Log", "[?]Help [Q]uit"])
+                   ["[T]rade [C]rew", "[J]ob [R]aid [S]Kit", "[X]Root [G]Defense", "[B]Rank [E]Map", "[V]Rivals [H]Log", "[?]Help [Q]uit"])
     footer = [line for text in footer_text + ["[N]ext [P]rev"] for line in _event_wrap(text, width)]
     body_rows = max(1, height - len(footer) - 2)  # heading and prompt
     lines = [line for text in dashboard_lines(state, now) for line in _event_wrap(text, width)]
@@ -2089,6 +2175,7 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "First visit: inspect Map, compare a Root preview for unclaimed territory, or Trade to fund Crew recruitment. Back always cancels a preview.",
         f"Each action costs one of {TURNS_PER_DAY} turns. The rolling 24-hour window starts with your first action.",
         "[T]rade Warez: quick cash. [C]rew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
+        "[S]Kit: train one crew specialty or buy one consumable support item. Each costs cash and one turn; preview before Act. Both reset each season.",
         "[J]obs: choose one of five repeatable contracts, then Cautious, Standard or Bold. Exact odds and stakes appear before Act. Offers stay fixed; browsing and reconnecting do not reroll them.",
         "Cautious pays less with lower Heat and no ordinary failure crew loss. Bold pays more with higher Heat. A bust can still cost cash and available crew with any approach. Harder contracts pay more as your crew grows.",
         "[R]aid: steal rival cash. [X]Root: take an exchange for hourly income.",
@@ -2172,12 +2259,19 @@ def action_block_reason(action: str, player: Player) -> str | None:
     return " ".join(reasons) or None
 
 
-def action_preview_lines(action: str, player: Player, target: Player | Exchange | JobChoice | None = None) -> list[str]:
-    cost = RECRUIT_COST if action == "recruit" else ROOT_EXCHANGE_COST if action == "root" else 0
+def action_preview_lines(action: str, player: Player, target: Player | Exchange | JobChoice | CrewChoice | None = None) -> list[str]:
+    cost = crew_item(target)[2] if action == "crew" else RECRUIT_COST if action == "recruit" else ROOT_EXCHANGE_COST if action == "root" else 0
     lines = [f"Season {player.season_number}; turns {TURNS_PER_DAY - player.turns_used}/{TURNS_PER_DAY}; cash ${player.cash:,}",
              f"Cost: 1 turn, ${cost} cash. Back spends nothing."]
     if reason := action_block_reason(action, player):
         lines.append("Unavailable: " + reason)
+    if action == "crew":
+        _, name, _, effect = crew_item(target)
+        lines += [f"Purchase: {name}. {effect}", f"Current specialty: {player.specialty or 'none'}; support: {player.support or 'empty'}.",
+                  "One turn; no Heat, bust roll or Rank. Specialty replaces prior training; support cannot stack. Both reset each season."]
+        if reason := crew_block_reason(player, target):
+            lines.append("Unavailable: " + reason)
+        return lines
     job = job_terms(target if isinstance(target, JobChoice) else JobChoice()) if action == "job" else None
     heat = {"trade": TRADE_WAREZ_HEAT, "recruit": 0, "job": job[4] if job else JOB_HEAT,
             "raid": RAID_HEAT, "root": ROOT_EXCHANGE_HEAT}[action]
@@ -2205,14 +2299,21 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
                   f"Capture Rank is once per exchange per season. Holding earns +1 Rank per {CONTROL_RANK_HOURS} exchange-hours; the ${ROOT_EXCHANGE_COST} attempt cost applies win or lose.",
                   f"Success assigns 1 crew to defense, leaving {player.crew - 1} available before any bust. [G]arrison manages defenders.",
                   f"Failure loses {min(1, player.crew - 1)} crew before any bust."]
-    if heat:
+    if action == "job" and player.specialty == "fixers":
+        lines.append("Fixers: ordinary failure recovers $20 before any bust, without Rank.")
+    if action in {"job", "raid", "root"} and player.support == "burner":
+        lines.append("Burner Kit: removes up to 10 added Heat; consumed by this attempt, win or lose.")
+    if player.support == "stash":
+        lines.append("Cash Stash: consumed only if a bust occurs; that bust takes 10% cash instead of 25%.")
+    heat = adjusted_heat(player, action, heat)
+    if action != "recruit":
         projected = player.heat + heat
         chance = min(HEAT_BUST_CHANCE_CAP, max(0, projected - HEAT_BUST_THRESHOLD) * HEAT_BUST_CHANCE_PER_POINT)
         risk = "under 0.1%" if 0 < chance < 0.001 else f"{chance:.1%}"
         lines.append(f"Heat: {player.heat:.1f} + {heat} = {projected:.1f}; bust risk {risk} now.")
         lines.append("Heat decays while you wait; the committed risk may be lower.")
         if chance:
-            lines.append(f"A bust then keeps {1 - BUST_CASH_LOSS_FRACTION:.0%} cash and "
+            lines.append(f"A bust then keeps {1 - (.10 if player.support == 'stash' else BUST_CASH_LOSS_FRACTION):.0%} cash and "
                          f"{1 - BUST_CREW_LOSS_FRACTION:.0%} crew, rounded down (crew floor 1); Heat resets.")
     return lines
 
@@ -2225,10 +2326,10 @@ def update_display_player(p: Palette, player: Player, refreshed: Player, width: 
 
 
 def confirm_action(p: Palette, conn: sqlite3.Connection, player: Player, action: str,
-                   width: int, height: int, target: Player | Exchange | JobChoice | None = None) -> bool:
+                   width: int, height: int, target: Player | Exchange | JobChoice | CrewChoice | None = None) -> bool:
     refreshed = refresh_player(conn, player.user_id, now_utc())
     update_display_player(p, player, refreshed, width, height)
-    available = action_block_reason(action, player) is None
+    available = (crew_block_reason(player, target) if action == "crew" else action_block_reason(action, player)) is None
     return show_text_pages(p, action.upper() + " PREVIEW", action_preview_lines(action, player, target),
                            width, height, accept=available) == "A"
 
@@ -2328,6 +2429,26 @@ def do_trade_warez(p: Palette, conn: sqlite3.Connection, player: Player, now: da
     return True
 
 
+def do_crew(p: Palette, conn: sqlite3.Connection, player: Player, width: int, height: int) -> bool:
+    update_display_player(p, player, refresh_player(conn, player.user_id, now_utc()), width, height)
+    records = [([name, effect, f"${price}, 1 turn. Current: {player.specialty or 'untrained'} / {player.support or 'empty support'}."], True)
+               for _, name, price, effect in CREW_ITEMS]
+    key = pick_record_page(p, "CREW DEVELOPMENT", records, width, height)
+    if key in "BQ":
+        return False
+    choice = CrewChoice(CREW_ITEMS[PICK_KEYS.index(key)][0])
+    while confirm_action(p, conn, player, "crew", width, height, choice):
+        delta = ActionDelta()
+        try:
+            resolve_crew_purchase(conn, player, now_utc(), choice, require_preview=True, delta=delta)
+        except ActionRejected as exc:
+            show_text_pages(p, "PURCHASE UNAVAILABLE", [str(exc), "Your selection is retained; review the refreshed preview."], width, height, onboarding=True)
+            continue
+        show_action_result(p, [crew_item(choice)[1] + " ready."], delta, False, width, height)
+        return True
+    return False
+
+
 def do_recruit(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
                w: int = 78, height: int = 24) -> bool:
     if not confirm_action(p, conn, player, "recruit", w, height):
@@ -2362,7 +2483,7 @@ def do_job(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
         return False
     delta = ActionDelta()
     name, success, payout, busted = resolve_job(conn, player, now_utc(), rng, choice=choice, require_preview=True, delta=delta)
-    show_action_result(p, [f"Job: {name} ({JOB_APPROACHES[choice.approach][0]})", f"Success! Gross payout ${payout}." if success else "Job failed."],
+    show_action_result(p, [f"Job: {name} ({JOB_APPROACHES[choice.approach][0]})", f"Success! Gross payout ${payout}." if success else f"Job failed. Recovery payout ${payout}."],
                        delta, busted, w, height)
     return True
 
@@ -2547,7 +2668,7 @@ def main() -> int:
             page_index, page_count = draw_dashboard(palette, state, screen_now, w, height, page_index)
             # Always recognize action keys: a displayed zero-turn snapshot
             # may sit idle past its refill. The transaction decides allowance.
-            valid = "BEVHQ?TCJRXGNP"
+            valid = "BEVHQ?TCJRXGSNP"
             choice = read_menu_choice(valid)
             action_now = now_utc()
             try:
@@ -2577,6 +2698,8 @@ def main() -> int:
                     do_raid(palette, conn, player, action_now, rng, w, height)
                 elif choice == "X":
                     do_root_exchange(palette, conn, player, action_now, rng, w, height)
+                elif choice == "S":
+                    do_crew(palette, conn, player, w, height)
                 elif choice == "G":
                     do_garrison(palette, conn, player, w, height)
             except ActionRejected as exc:

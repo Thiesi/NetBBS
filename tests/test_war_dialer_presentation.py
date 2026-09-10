@@ -1523,3 +1523,92 @@ def test_real_process_disconnect_from_contract_picker_spends_nothing(tmp_path, s
         player = wd.read_player(conn, 0)
         assert (player.cash, player.crew, player.turns_used, player.successful_jobs) == (300, 3, 0, 0)
         conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('index', range(5))
+def test_crew_screen_previews_every_purchase_before_committing(tmp_path, monkeypatch, width, height, index):
+    conn = wd.connect(tmp_path / 'crew.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    calls = 0
+    def select(valid):
+        nonlocal calls
+        calls += 1
+        assert calls < 100
+        assert wd.read_player(conn, 1).cash == 300
+        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        if 'CREW DEVELOPMENT' in screen:
+            key = str(index + 1)
+            return key if key in valid else 'N'
+        assert 'CREW PREVIEW' in screen
+        return 'A' if 'A' in valid else 'N'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
+    monkeypatch.setattr(wd, 'read_input_key', lambda: ' ')
+    assert wd.do_crew(wd.Palette(False), conn, actor, width, height)
+    item, _, price, _ = wd.CREW_ITEMS[index]
+    assert actor.cash == 300 - price and actor.turns_used == 1
+    assert item in (actor.specialty, actor.support)
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()
+
+
+def test_crew_purchase_retains_selection_after_stale_preview(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / 'draft.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    acts = 0
+    def select(valid):
+        nonlocal acts
+        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        if 'CREW DEVELOPMENT' in screen: return '1' if '1' in valid else 'N'
+        assert 'CREW PREVIEW' in screen
+        if 'A' not in valid: return 'N'
+        acts += 1
+        assert acts <= 2
+        if acts == 1: conn.execute('UPDATE players SET cash=299 WHERE user_id=1')
+        return 'A'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
+    monkeypatch.setattr(wd, 'read_input_key', lambda: ' ')
+    assert wd.do_crew(wd.Palette(False), conn, actor, 80, 24)
+    assert acts == 2 and actor.specialty == 'phreakers'
+    assert (actor.cash, actor.turns_used) == (149, 1)
+    assert 'selection is retained' in ''.join(written)
+    conn.close()
+
+
+@pytest.mark.parametrize('stage', ['board', 'preview', 'committed'])
+def test_real_process_crew_disconnect_boundaries(tmp_path, stage):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b'>\x1b[0m ')
+        send(b's')
+        wait_for(b'cancel')
+        if stage != 'board':
+            send(b'1')
+            wait_for(b'[A]Act')
+        if stage == 'committed':
+            send(b'a')
+            wait_for(b'Phreakers ready.')
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b''
+        conn = wd.connect(path)
+        player = wd.read_player(conn, 0)
+        assert (player.cash, player.turns_used, player.specialty) == ((150, 1, 'phreakers') if stage == 'committed' else (300, 0, ''))
+        conn.close()

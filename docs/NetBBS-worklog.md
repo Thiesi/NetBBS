@@ -350,6 +350,15 @@ failure crew loss, not a subsequent Heat bust; show and test these separately.
 Drive both pickers in real-process preview/disconnect tests so they still reach
 the final Act boundary after adding the contract board.
 
+Crew specialty/support slots belong in actor preview conflict checks and atomic
+player persistence. Calculate effective action Heat in the same pure helper for
+preview and resolution, but consume support only inside the action transaction.
+Zero added Heat still rolls a bust against existing Heat. A Cash Stash changes
+only bust cash loss and survives ordinary failures; Burner Kit consumption is
+bound to a committed job/raid/root attempt. Purchase rejection retains the draft
+selection. Upgrade fixtures must remove later columns when reconstructing an old
+schema, so tests exercise real shipped layouts rather than impossible hybrids.
+
 Target selection binds digit keys only to complete visible entries. Keep those
 keys separate from Back/Next/Prev and carry database-batch direction through local
 row pagination. Regression coverage must drive the composed picker beyond fifty

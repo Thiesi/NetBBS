@@ -1351,7 +1351,7 @@ def _legacy_income_world(db_path):
     old_schema = schema.replace(addition, "")
     values = asdict(a)
     values.pop("income_remainder")
-    for column in wd._ECONOMY_COLUMNS | {"raid_shield_until"}:
+    for column in wd._ECONOMY_COLUMNS | {"raid_shield_until", "specialty", "support"}:
         values.pop(column)
     conn.execute("DROP TABLE players")
     conn.execute(old_schema)
@@ -1838,7 +1838,7 @@ def test_process_death_releases_world_session_guard(db_path):
 
 
 def _downgrade_economy_fixture(conn):
-    for column in wd._ECONOMY_COLUMNS | {"raid_shield_until"}:
+    for column in wd._ECONOMY_COLUMNS | {"raid_shield_until", "specialty", "support"}:
         conn.execute(f'ALTER TABLE players DROP COLUMN {column}')
     conn.execute('PRAGMA user_version=2')
 
@@ -2032,6 +2032,8 @@ def test_failed_raid_commit_rolls_back_target_shield_with_cash_event_and_turn(db
 def test_legacy_raid_protection_upgrades_once_to_one_day(db_path, monkeypatch):
     conn, now, actor, victim = _rivals(db_path)
     conn.execute('UPDATE players SET last_raided_by=1 WHERE user_id=2')
+    conn.execute('ALTER TABLE players DROP COLUMN specialty')
+    conn.execute('ALTER TABLE players DROP COLUMN support')
     conn.execute('ALTER TABLE players DROP COLUMN raid_shield_until')
     conn.execute('PRAGMA user_version=3')
     monkeypatch.setattr(wd, 'now_utc', lambda: now)
@@ -2049,6 +2051,8 @@ def test_legacy_raid_protection_upgrades_once_to_one_day(db_path, monkeypatch):
 def test_raid_upgrade_failure_preserves_original_world(db_path, monkeypatch):
     conn, now, _, _ = _rivals(db_path)
     conn.execute('UPDATE players SET last_raided_by=1 WHERE user_id=2')
+    conn.execute('ALTER TABLE players DROP COLUMN specialty')
+    conn.execute('ALTER TABLE players DROP COLUMN support')
     conn.execute('ALTER TABLE players DROP COLUMN raid_shield_until')
     conn.execute('PRAGMA user_version=3')
     before = list(conn.iterdump())
@@ -2143,4 +2147,164 @@ def test_selected_contract_commit_is_atomic_and_rejects_stale_resources(db_path)
     delta = wd.ActionDelta()
     wd.resolve_job(conn, actor, now, FixedRandom(), choice=choice, require_preview=True, delta=delta)
     assert (delta.cash, delta.rank, delta.turns, delta.heat) == (532, 15, 1, 25)
+    conn.close()
+
+
+@pytest.mark.parametrize('item,name,price,effect', wd.CREW_ITEMS)
+def test_crew_purchase_commits_cost_slot_and_turn_without_rank(db_path, item, name, price, effect):
+    conn, now, actor, _ = _rivals(db_path)
+    choice = wd.CrewChoice(item)
+    delta = wd.ActionDelta()
+    wd.resolve_crew_purchase(conn, actor, now, choice, require_preview=True, delta=delta)
+    assert (delta.cash, delta.turns, delta.rank, delta.heat) == (-price, 1, 0, 0)
+    assert (actor.specialty if item in wd.SPECIALTIES else actor.support) == item
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected):
+        wd.resolve_crew_purchase(conn, actor, now, choice)
+    assert list(conn.iterdump()) == before
+    conn.close()
+    conn = wd.connect(db_path)
+    restored = wd.read_player(conn, 1)
+    assert (restored.specialty, restored.support) == (actor.specialty, actor.support)
+    conn.close()
+
+
+@pytest.mark.parametrize('action,base_heat', [('job', 15), ('raid', 10), ('root', 8), ('trade', 5)])
+@pytest.mark.parametrize('specialty', ['', 'phreakers', 'fixers', 'lookouts'])
+def test_specialty_and_burner_effects_match_actual_action_and_preview(action, base_heat, specialty):
+    player = _make_player(crew=5, cash=300)
+    player.specialty, player.support = specialty, 'burner'
+    target = _make_player(user_id=2) if action == 'raid' else wd.Exchange(1, 'Test', 2, None, None, 0, None, wd.to_iso(wd.now_utc()), 1) if action == 'root' else None
+    # Trade has its own unchanged Heat constant.
+    if action == 'trade': base_heat = wd.TRADE_WAREZ_HEAT
+    reduction = 3 if (action == 'job' and specialty == 'phreakers' or action in {'raid', 'root'} and specialty == 'lookouts') else 0
+    expected = max(0, base_heat - reduction - (0 if action == 'trade' else 10))
+    preview = '\n'.join(wd.action_preview_lines(action, player, target))
+    assert f'+ {expected} =' in preview
+    if action == 'job': wd.action_job(player, FixedRandom(.99))
+    elif action == 'raid': wd.action_raid(player, target, FixedRandom(.99))
+    elif action == 'root': wd.action_root_exchange(player, target, wd.now_utc(), FixedRandom())
+    else: wd.action_trade_warez(player, FixedRandom())
+    assert player.heat == expected
+    assert player.support == ('burner' if action == 'trade' else '')
+    if action == 'job' and specialty == 'fixers':
+        assert player.cash == 320 and wd.rank_score(player) == 0
+
+
+def test_zero_added_heat_still_previews_and_rolls_existing_bust_risk():
+    player = _make_player(crew=5, cash=300, heat=95)
+    player.specialty, player.support = 'phreakers', 'burner'
+    preview = '\n'.join(wd.action_preview_lines('job', player, wd.JobChoice(0, 0)))
+    assert '+ 0 = 95.0; bust risk 30.0%' in preview
+    assert wd.action_job(player, FixedRandom(), wd.JobChoice(0, 0))[3]
+    assert player.support == '' and player.heat == 0
+
+
+def test_cash_stash_waits_for_bust_and_limits_only_its_cash_loss(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_crew_purchase(conn, actor, now, wd.CrewChoice('stash'))
+    wd.resolve_job(conn, actor, now, FixedRandom(.99), choice=wd.JobChoice(0, 0))
+    assert actor.support == 'stash'
+    conn.execute('UPDATE players SET heat=95, crew=5 WHERE user_id=1')
+    actor = wd.read_player(conn, 1)
+    before_cash = actor.cash
+    preview = '\n'.join(wd.action_preview_lines('trade', actor))
+    assert 'keeps 90% cash' in preview
+    assert wd.resolve_trade_warez(conn, actor, now, FixedRandom())[1]
+    assert actor.cash == int((before_cash + wd.TRADE_WAREZ_RANGE[0]) * .9)
+    assert actor.crew == 4 and actor.support == ''
+    conn.close()
+
+
+def test_failed_commit_preserves_support_and_rejects_changed_preview(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_crew_purchase(conn, actor, now, wd.CrewChoice('burner'))
+    stale = wd.read_player(conn, 1)
+    conn.execute("UPDATE players SET specialty='phreakers' WHERE user_id=1")
+    with pytest.raises(wd.ActionRejected, match='resources changed'):
+        wd.resolve_job(conn, stale, now, FixedRandom(), require_preview=True)
+    actor = wd.read_player(conn, 1)
+    before = list(conn.iterdump())
+    conn.execute("CREATE TRIGGER deny_crew_action BEFORE UPDATE ON players BEGIN SELECT RAISE(ABORT, 'write failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='write failed'):
+        wd.resolve_job(conn, actor, now, FixedRandom())
+    conn.execute('DROP TRIGGER deny_crew_action')
+    assert list(conn.iterdump()) == before and actor.support == 'burner'
+    wd.resolve_job(conn, actor, now, FixedRandom(), require_preview=True)
+    assert actor.support == '' and actor.heat == 2
+    conn.close()
+
+
+def test_competing_support_purchases_have_one_slot_and_one_paid_turn(db_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    conn, now, actor, _ = _rivals(db_path)
+    barrier = threading.Barrier(2)
+    def buy(item):
+        connection = wd.connect(db_path)
+        try:
+            player = wd.read_player(connection, 1)
+            barrier.wait(timeout=5)
+            try:
+                wd.resolve_crew_purchase(connection, player, now, wd.CrewChoice(item))
+                return True
+            except wd.ActionRejected:
+                return False
+        finally:
+            connection.close()
+    with ThreadPoolExecutor(2) as pool:
+        assert sorted(pool.map(buy, ['burner', 'stash'])) == [False, True]
+    actual = wd.read_player(conn, 1)
+    assert actual.turns_used == 1
+    assert actual.cash == actor.cash - (40 if actual.support == 'burner' else 75)
+    conn.close()
+
+
+def test_crew_schema_upgrade_rollback_idempotence_and_season_reset(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    conn.execute('ALTER TABLE players DROP COLUMN specialty')
+    conn.execute('ALTER TABLE players DROP COLUMN support')
+    conn.execute('PRAGMA user_version=4')
+    before = list(conn.iterdump())
+    def deny_version(action, name, value, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == 'user_version' and value == '5' else sqlite3.SQLITE_OK
+    conn.set_authorizer(deny_version)
+    with pytest.raises(sqlite3.DatabaseError): wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert list(conn.iterdump()) == before
+    wd.ensure_schema(conn)
+    assert wd.read_player(conn, 1) == actor
+    wd.resolve_crew_purchase(conn, actor, now, wd.CrewChoice('phreakers'))
+    wd.resolve_crew_purchase(conn, actor, now, wd.CrewChoice('stash'))
+    before = list(conn.iterdump())
+    wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
+    reset = wd.refresh_player(conn, 1, now + wd.SEASON)
+    assert reset.specialty == reset.support == ''
+    assert reset.created_at == actor.created_at and reset.user_id == actor.user_id
+    conn.close()
+
+
+@pytest.mark.parametrize('cash,turns', [(39, 0), (300, 15)])
+def test_unaffordable_or_exhausted_crew_purchase_spends_nothing(db_path, cash, turns):
+    conn, now, actor, _ = _rivals(db_path)
+    conn.execute('UPDATE players SET cash=?, turns_used=?, turn_day_start=? WHERE user_id=1', (cash, turns, wd.to_iso(now)))
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected):
+        wd.resolve_crew_purchase(conn, actor, now, wd.CrewChoice('burner'))
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_specialty_switch_replaces_training_and_purchase_failure_rolls_back(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_crew_purchase(conn, actor, now, wd.CrewChoice('phreakers'))
+    before = list(conn.iterdump())
+    conn.execute("CREATE TRIGGER deny_purchase BEFORE UPDATE ON players BEGIN SELECT RAISE(ABORT, 'purchase failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='purchase failed'):
+        wd.resolve_crew_purchase(conn, actor, now, wd.CrewChoice('lookouts'))
+    conn.execute('DROP TRIGGER deny_purchase')
+    assert list(conn.iterdump()) == before and actor.specialty == 'phreakers'
+    wd.resolve_crew_purchase(conn, actor, now, wd.CrewChoice('lookouts'))
+    assert actor.specialty == 'lookouts' and actor.turns_used == 2 and actor.cash == 700
     conn.close()
