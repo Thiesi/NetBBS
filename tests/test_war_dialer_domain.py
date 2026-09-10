@@ -3033,6 +3033,16 @@ spec.loader.exec_module(game)
 conn = game.connect(game.Path(sys.argv[2]))
 print('READY', flush=True)
 sys.stdin.buffer.read(1)
+conn.execute('PRAGMA busy_timeout=0')
+try:
+    game.settle_world(conn, game.from_iso(sys.argv[3]))
+except game.sqlite3.OperationalError as exc:
+    assert exc.sqlite_errorcode == game.sqlite3.SQLITE_BUSY, exc
+else:
+    raise AssertionError('Rollover did not encounter the held write lock')
+print('BLOCKED', flush=True)
+sys.stdin.buffer.read(1)
+conn.execute('PRAGMA busy_timeout=5000')
 game.settle_world(conn, game.from_iso(sys.argv[3]))
 conn.close()
 """
@@ -3048,7 +3058,13 @@ conn.close()
         for child in children:
             child.stdin.write(b'X')
             child.stdin.flush()
+        blocked = [pool.submit(child.stdout.readline) for child in children]
+        for future in blocked: assert future.result(timeout=10).strip() == b'BLOCKED'
+        assert conn.execute('SELECT COUNT(*) FROM seasons').fetchone()[0] == 0
         conn.rollback()
+        for child in children:
+            child.stdin.write(b'Y')
+            child.stdin.flush()
         for child in children:
             _, error = child.communicate(timeout=15)
             assert child.returncode == 0, error.decode(errors='replace')
