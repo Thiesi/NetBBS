@@ -326,6 +326,15 @@ Schema 6 preserves existing resources and identity while adding these records.
 before activating this version. Restore carries saved progress and intelligence;
 competition reset or season advance clears them. Old binaries refuse schema 6.
 
+For a short visit, Trade, Recruit and Job remain direct choices. A new operation
+needs at least three turns and $50 to reach its first execution; cased progress
+needs two turns and $50, prepared progress one turn. These are attempt budgets,
+not guaranteed completions. The switchboard and operation hub show your remaining
+budget and cash shortfall. Leave whenever you like: preparation does not expire
+between visits within a season. With no turns, contracts, saved operations and
+dossiers remain free to inspect. No operation setup is required to play ordinary
+jobs or territorial actions.
+
 Target pickers use digits 1-9/0, with Next/Prev and Back. Only fully displayed,
 eligible entries have active selection keys; protected rivals and your own exchanges
 show why they cannot be selected. Raid selection reaches every crew through batches
