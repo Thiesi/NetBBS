@@ -19,12 +19,20 @@ manipulation with no dependency on bytes, so only the byte-vs-already-
 decoded-character *reading* half stays genuinely separate between the
 two transports.
 
-**File transfer is not available over this transport.** Real Zmodem
-interop (`netbbs.net.zmodem`) depends on the *terminal client*
-auto-detecting and driving the protocol — a property of native terminal
-emulators (SyncTERM, lrzsz) that a JS widget running in a browser tab
-doesn't have. Raw I/O is available only within explicit, stream-scoped
-door mode; it does not enable Zmodem in the ordinary browser interface.
+**Zmodem is not available over this transport**, and never can be:
+real Zmodem interop (`netbbs.net.zmodem`) depends on the *terminal
+client* auto-detecting and driving the protocol — a property of native
+terminal emulators (SyncTERM, lrzsz) that a JS widget running in a
+browser tab doesn't have. Raw I/O is available only within explicit,
+stream-scoped door mode; it does not enable Zmodem in the ordinary
+browser interface.
+
+File transfer itself *is* available (issue #475), over HTTP rather than
+over the terminal: `netbbs.net.file_transfer` registers
+`/transfer/{token}` onto this same application when the node is
+configured for it. That is also the path a Telnet or SSH caller uses
+when their own terminal has no Zmodem, which is most of them — see that
+module's docstring for which clients do.
 """
 
 from __future__ import annotations
@@ -758,10 +766,18 @@ class WebServer:
         session_handler: SessionHandler,
         *,
         allowed_origins: set[str] | None = None,
+        transfers=None,
     ):
         self._host = host
         self._port = port
         self._session_handler = session_handler
+        # Issue #475: the file-transfer gateway, when this node has one.
+        # Registered onto the same application as the terminal because a
+        # node offering transfer links has an HTTP listener by
+        # definition -- but it is built and owned elsewhere
+        # (`netbbs.net.file_transfer`), so nothing here needs to know
+        # what a file area is.
+        self._transfers = transfers
         self._allowed_origins = (
             {origin.rstrip("/") for origin in allowed_origins}
             if allowed_origins is not None
@@ -783,6 +799,8 @@ class WebServer:
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/ws", self._handle_websocket)
         app.router.add_static("/static/", _STATIC_DIR)
+        if self._transfers is not None:
+            self._transfers.add_routes(app)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()

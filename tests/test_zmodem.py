@@ -34,7 +34,7 @@ from netbbs.net.zmodem import (
     ZRPOS,
     ZmodemError,
     _crc16,
-    _safe_filename,
+    safe_filename,
     _send_header,
     _send_subpacket,
     _wait_for_header,
@@ -499,33 +499,33 @@ def test_round_trip_still_works_within_the_limit():
     assert data == b"hello world"
 
 
-# -- _safe_filename (GitHub issue #34) --------------------------------------
+# -- safe_filename (GitHub issue #34) --------------------------------------
 
 
 def test_safe_filename_strips_unix_path_components():
-    assert _safe_filename("../../etc/passwd") == "passwd"
+    assert safe_filename("../../etc/passwd") == "passwd"
 
 
 def test_safe_filename_strips_windows_path_components():
-    assert _safe_filename("C:\\Users\\alice\\file.txt") == "file.txt"
+    assert safe_filename("C:\\Users\\alice\\file.txt") == "file.txt"
 
 
 def test_safe_filename_drops_control_characters():
-    assert _safe_filename("evil\x00\x01name.txt") == "evilname.txt"
+    assert safe_filename("evil\x00\x01name.txt") == "evilname.txt"
 
 
 def test_safe_filename_caps_length():
-    assert len(_safe_filename("x" * 500)) == 255
+    assert len(safe_filename("x" * 500)) == 255
 
 
 def test_safe_filename_falls_back_when_empty():
-    assert _safe_filename("") == "unnamed"
-    assert _safe_filename("/") == "unnamed"
-    assert _safe_filename("\x00\x00\x00") == "unnamed"
+    assert safe_filename("") == "unnamed"
+    assert safe_filename("/") == "unnamed"
+    assert safe_filename("\x00\x00\x00") == "unnamed"
 
 
 def test_safe_filename_preserves_an_ordinary_name():
-    assert _safe_filename("report-final.pdf") == "report-final.pdf"
+    assert safe_filename("report-final.pdf") == "report-final.pdf"
 
 
 def test_read_header_raises_on_cancel_signal():
