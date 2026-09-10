@@ -998,7 +998,7 @@ async def _draw_admin_menu(
     if link_context is not None:
         quick.extend([
             MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
-            MenuEntry(label=menu_key("X", "outbox"), brief="Pending outgoing Link work items"),
+            MenuEntry(label=menu_key("X", "", prefix="Outbo"), brief="Pending outgoing Link work items"),
         ])
     await session.write_line(
         "\r\n"
@@ -5214,7 +5214,7 @@ async def _mrc_settings_screen(
 
     fields = [
         FieldSpec(
-            key="enabled", hotkey="e", menu_text=menu_key("E", "nabled"), label="Enabled",
+            key="enabled", hotkey="e", menu_text=menu_key("E", "nable/Disable"), label="Enabled",
             render=lambda d: "yes" if d["enabled"] else "no",
             prompt=bool_field("enabled", "Connect this node to the MRC hub?"),
             brief="Switch the hub link on or off", section="Hub",
@@ -7245,8 +7245,8 @@ async def _draw_banners_and_mastheads_menu(
     await session.write_line(
         "\r\n" + _menu_row(
             [
-                MenuEntry(label=menu_key("n", "nners", prefix="Ba"), brief="Welcome, logoff, and new-account text"),
                 MenuEntry(label=menu_key("M", "astheads"), brief="Art above the main menu and section pickers"),
+                MenuEntry(label=menu_key("n", "nners", prefix="Ba"), brief="Welcome, logoff, and new-account text"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
             ],
             description_level,
