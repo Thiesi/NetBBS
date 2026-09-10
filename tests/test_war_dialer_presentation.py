@@ -2230,7 +2230,8 @@ def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, mo
     state = wd.dashboard_state(conn, 1, late)
     text = ' '.join(wd.dashboard_lines(state, late))
     assert 'Joining late?' in text and 'Cautious' in text
-    assert 'even without a medal' in text and 'prepared operations reset' in text
+    assert 'even without a medal' in text and 'all saved operation progress (cased or prepared)' in text
+    assert 'All competitive progress and resources reset' in text and 'assigned crew, exchanges, Rank' in text
     wd.resolve_recruit(conn, actor, late)
     after = start + wd.SEASON
     state = wd.dashboard_state(conn, 1, after)
@@ -2240,12 +2241,22 @@ def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, mo
     assert not wd.is_in_grace(state.player, after + wd.DAY)
     assert conn.execute('SELECT rank,medal FROM season_results WHERE user_id=1').fetchone()['rank'] == 10
     text = ' '.join(wd.dashboard_lines(state, after))
-    assert 'Fresh competition: $300, 3 available crew and 15 turns' in text
+    assert 'Ready to play: $300, 3 available crew and 15 turns' in text
     assert 'medals give no resource or protection bonus' in text
     wd.load_or_create_player(conn, 2, 'FirstVisitInSeasonTwo', after, 2)
     first_visit = ' '.join(wd.dashboard_lines(wd.dashboard_state(conn, 2, after), after))
     assert 'any retained results' in first_visit and 'Past results remain' not in first_visit
     assert conn.execute('SELECT COUNT(*) FROM season_results WHERE user_id=2').fetchone()[0] == 0
+    conn.execute('UPDATE players SET cash=328, crew=2 WHERE user_id=2')
+    class TradeRandom:
+        def randint(self, low, high): return low
+        def random(self): return .99
+    trading = wd.read_player(conn, 2)
+    wd.resolve_trade_warez(conn, trading, after, TradeRandom())
+    assert trading.turns_used == 1 and wd.rank_score(trading) == 0
+    refill = ' '.join(wd.dashboard_lines(wd.dashboard_state(conn, 2, after + wd.DAY), after + wd.DAY))
+    assert f'Ready to play: ${trading.cash}, 2 available crew and 15 turns' in refill
+    assert 'Ready to play: $300' not in refill
     monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
     written = []
     monkeypatch.setattr(wd, 'out', written.append)
@@ -2253,7 +2264,10 @@ def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, mo
     for stamp in (late, after):
         # Refresh only forward; the saved late state is used for its own display.
         shown = state if stamp == after else wd.DashboardState(actor, [], 0, after, None)
+        page_start = len(written)
         _, count = wd.draw_dashboard(wd.Palette(False), shown, stamp, width, height)
+        if stamp == late:
+            assert 'Reset in' in ''.join(written[page_start:])
         for page in range(1, count): wd.draw_dashboard(wd.Palette(False), shown, stamp, width, height, page)
     assert list(conn.iterdump()) == before
     for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:

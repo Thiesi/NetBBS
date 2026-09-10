@@ -6951,10 +6951,12 @@ results arrive. The crackdown screen points callers back to the switchboard's
 Log and Scene for the receipt and recognition; reading these views does not
 acknowledge private receipts or spend turns.
 
-During the final 48 hours, the switchboard surfaces the end time, a Cautious-job
+During the final 48 hours, the first switchboard page starts with a compact reset
+countdown. Subsequent lines explain the end time, a Cautious-job
 entry point needing no rival or territory, and the expiry of competitive resources
-including training, support and prepared operations. Zero-Rank fresh-season
-callers with unused turns see starting resources and actionable job/trade routes.
+including territory, assigned crew, training, support and all saved operation
+progress (cased or prepared). Zero-Rank fresh-season
+callers with unused turns see their current resources and actionable job/trade routes.
 Help explains that newcomer protection follows preserved account age and is not
 renewed by rollover. These cues change no payout, protection, award or reset rule.
 
