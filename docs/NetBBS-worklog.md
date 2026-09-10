@@ -4654,6 +4654,15 @@ before that timeout, then retain their payload across subsequent delays.
 OSC accepts BEL or ST; other control strings require ST, and bracketed paste
 recognizes both CSI encodings of its terminator.
 
+Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
+`B` is Back on every screen and must not be a live action, and each list screen
+reserves its own hotkeys in its letter map (`MARKET_LETTERS`, `YARD_LETTERS`,
+`CREW_LETTERS`, `CHART_CONNECTION_LETTERS`). Adding a hotkey to a list screen
+means adding it to that screen's reserved string, not choosing a free-looking
+letter. The chart's departure confirmation is the last keystroke; scripted chart
+tests that select a connection must answer it, and a constant `read_key` stub
+that returns a former hotkey now loops forever instead of failing.
+
 Voidrunner's standalone input decoder reads unbuffered stdin bytes. Mixing
 buffered `sys.stdin.buffer.read` with readiness checks can hide prefetched bytes
 from the OS and strand a partial key. POSIX uses `select` for partial-key waits;

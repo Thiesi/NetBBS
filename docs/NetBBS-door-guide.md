@@ -544,7 +544,9 @@ career, and a later checkpoint retries publication from its saved high-water mar
 
 Choose **[G] Pilot Guide** on the station deck for flight instructions and a recap
 of contracts, tracked plans and futures orders. Pages fit the negotiated terminal
-size; **[B]ack** leaves without changing the career or advancing the day.
+size; **[B]ack** leaves without changing the career or advancing the day. **[B]**
+is Back on every screen below the deck and never does anything else; **[Q]** on
+the deck saves and leaves, and is also accepted as Back elsewhere.
 
 On day zero at Freeport, **[O]ffer** shows an optional First Flight delivery to a
 real adjacent station. The terms show the legal cargo to buy, payment, danger,
@@ -596,13 +598,15 @@ access; subsequent route legs always need a new command.
 ### Direct jump chart
 
 The direct chart keeps current fuel in its heading and paginates full connection
-entries with **[>]Next**, **[<]Prev** and **[Q]Back**. Each entry shows its bearing,
+entries with **[>]Next**, **[<]Prev** and **[B]Back**. Each entry shows its bearing,
 known sector/economy and danger, fuel cost, low-fuel warning and tracked-next marker.
 Uncharted neighbors keep unknown names and danger. The opening pages list route,
 map, scanner and tracked-contract actions when available.
 
-Ordinary connection letters remain stable. Exceptionally dense charts reuse
-letters on later pages; choose the letter on the page currently displayed.
+Ordinary connection letters remain stable (B is never one of them). Exceptionally
+dense charts reuse letters on later pages; choose the letter on the page currently
+displayed. A chosen letter asks for a final **Y/N** with the fuel cost and the
+destination's danger; **N** keeps you docked and writes nothing.
 Rejected departures and scanner results remain on the refreshed first page.
 Browsing and rejected jumps leave the career unchanged; a deliberate scan retains
 its normal discovery and checkpoint behavior.
@@ -896,8 +900,8 @@ original sequential rules.
 
 ### Derelicts and distress calls
 
-Use **[<] Previous / [>] Next** to read encounter terms. Derelicts offer **[B]
-Board** with a 70% salvage chance and a 30% ambush chance. The displayed reward
+Use **[<] Previous / [>] Next** to read encounter terms. Derelicts offer **[S]
+Salvage** (boarding) with a 70% salvage chance and a 30% ambush chance. The displayed reward
 and opponent tier ranges follow the sector you are entering. Boarding itself
 costs no fuel; an ambush uses ordinary combat choices and losses.
 
@@ -932,12 +936,12 @@ new undisclosed post-kill identity penalty. Earlier career history stays intact.
 An inspection pages its full terms with **[<] Previous / [>] Next**, keeping
 credits and action keys visible. **[S] Surrender** gives up all contraband without
 a fine, improves Concord standing within its limit, and leaves notoriety unchanged.
-An affordable **[B] Bribe** has a 60% acceptance chance: you pay only on acceptance
+An affordable **[P] Pay bribe** has a 60% acceptance chance: you pay only on acceptance
 and keep the cargo. Refusal confiscates contraband, reduces Concord standing and
 raises notoriety. The stated fine takes at most your available credits and leaves
 no debt; the result reports the amount actually collected.
 
-An unaffordable bribe is unavailable. Typing B anyway changes no cargo, money,
+An unaffordable bribe is unavailable. Typing P anyway changes no cargo, money,
 standing, notoriety or randomness. Paging and invalid input are read-only; if you
 disconnect before choosing, the same inspection resumes next visit. Completed
 outcomes save before acknowledgement and replay without repeating their effects.
@@ -945,7 +949,7 @@ outcomes save before acknowledgement and replay without repeating their effects.
 ### Combat telemetry and last exchange
 
 Combat pages show current credits, enemy HP, hull/fuel and cargo usage. Browse
-with **[<] Previous / [>] Next** and toggle **[Q] Info** for shields, weapons,
+with **[<] Previous / [>] Next** and toggle **[I] Info** for shields, weapons,
 notoriety and faction consequences. These keys spend no turn; the last saved
 exchange stays available at the front of the pages, including after reconnecting.
 
@@ -962,7 +966,7 @@ under the original rules keeps those rules until resolved, then new fights use
 intents and Brace. Invalid repeat-Brace input spends no turn or randomness.
 
 **[F] Fight** exchanges one round, **[E] Evade** attempts escape, and pirates also
-allow **[D] Dump & evade** (one random cargo unit) and an affordable **[B] Bribe**.
+allow **[D] Dump & evade** (one random cargo unit) and an affordable **[P] Pay bribe**.
 Read the displayed odds and consequences: failed evasion or refused bribery draws
 fire; a pirate takes bribe credits only on acceptance. Patrols instead allow an
 affordable **[S] Surrender**, which pays the stated fine and clears notoriety.
@@ -1015,7 +1019,7 @@ can appear together; prohibited purchases are identified before a trade.
 
 Buying or selling retains the result in the refreshed catalog after saving it.
 Cancel a quantity with Enter to leave the career unchanged and keep the prior
-result. **[X] Futures** opens wholesale orders; **[Q] Back** returns to the station.
+result. **[X] Futures** opens wholesale orders; **[B] Back** returns to the station.
 
 ### Futures exchange pages
 
@@ -1034,7 +1038,7 @@ returning to the futures list and market.
 ### Engineering yard and crew pages
 
 The yard and crew roster fit the terminal height, stacking terms at narrow widths.
-Use **[>]Next** and **[<]Prev** to browse; **[Q]Back** is available on every page.
+Use **[>]Next** and **[<]Prev** to browse; **[B]Back** is available on every page.
 Upgrade/refit letters work directly, and the yard keeps **[R]Fuel**, **[P]Repair**
 and **[K]Crew** available across pages. The heading shows current credits. Full
 costs, upgrade benefits, fuel/hull prices and ongoing crew wages remain readable.
