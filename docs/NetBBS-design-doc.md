@@ -4764,6 +4764,17 @@ destination's danger (or unknown) and that a day passes; No retains the chart
 with a cancelled-departure result and writes nothing. Contract and route jumps
 keep their existing preview screens and deliberate Jump actions.
 
+At every action bar -- service pages, the chart, the mission board, the star
+map, the route planner and the draft editors alike -- whitespace and unsupported
+terminal keys are absorbed at the prompt rather than reprinting the page; an
+unknown hotkey still redraws so the action bar is shown again (issue #416).
+`read_command_at_prompt` is the single reader for a command key, so the rule
+cannot hold on some screens and not others. No screen may therefore treat whitespace
+as a hotkey: the Pilot Record and Hall of Fame previously left on an unlisted
+Space, which both cost a redraw for every stray keypress and contradicted `B`
+being Back on every screen. Counts in prose are pluralised and the board says
+"New offers on day N".
+
 Route planning starts from something real (issue #415): the chart's route
 planner opens its destination picker at once instead of an empty screen, the
 ledger lists Opportunities first, and the ledger's route draft pre-fills from the
