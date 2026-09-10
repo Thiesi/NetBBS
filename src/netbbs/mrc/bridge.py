@@ -65,7 +65,10 @@ on every exit path.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import os
 from collections import deque
+from pathlib import Path
 import logging
 import platform
 import random
@@ -162,6 +165,12 @@ KEEPALIVE_INTERVAL_SECONDS = 60.0
 USERLIST_REFRESH_INTERVAL_SECONDS = 300.0
 USERLIST_MIN_INTERVAL_SECONDS = 5.0
 OUTBOUND_QUEUE_SIZE = 200
+# NEWROOM, USERLIST, STATUS AFK, IAMHERE, TERMSIZE, USERIP, BBSMETA, STATUS
+# LASTSEEN: what one announcement can queue at most.
+OUTBOUND_LINES_PER_ANNOUNCEMENT = 8
+# What a connection queues before any caller: up to five INFO lines,
+# IMALIVE, CAPABILITIES, the STATS ask -- with room to spare.
+OUTBOUND_CONNECTION_OVERHEAD = 16
 OUTBOUND_RATE_PER_SECOND = 5.0
 OUTBOUND_BURST = 10
 # Issue #375: the hub's own limit is one message per 0.5 s per user
@@ -222,6 +231,10 @@ class MrcStatus:
     network_users: int | None = None
     network_stats_age_seconds: float | None = None
     network_stats_raw: str | None = None
+    # Issue #377: the round trip measured from the hub's PONG to the
+    # last IMALIVE that carried a timestamp, and how old that reading is.
+    hub_latency_seconds: float | None = None
+    hub_latency_age_seconds: float | None = None
 
     @property
     def network_summary(self) -> str | None:
@@ -245,6 +258,34 @@ class _Connection:
 
 
 OpenConnection = Callable[..., Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
+
+
+def _stamp_imalive(line: str) -> str:
+    """Replace the epoch in a queued IMALIVE line's field 5 with the
+    moment it is written, so a PONG measures the hub, not this node's
+    own outbound queue."""
+    fields = line.rstrip("\n").split(protocol.SEPARATOR)
+    if len(fields) >= 5 and fields[4]:
+        fields[4] = f"{time.time():.6f}"
+        return protocol.SEPARATOR.join(fields) + "\n"
+    return line
+
+
+def _script_hash() -> str:
+    """SHA256 of this module's source, the spec's `hash` field of
+    `CAPABILITIES` (MRCDoc rev 1.26: "SHA256 hex digest of the
+    Multiplexer script"); empty if the source cannot be read."""
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+_SCRIPT_HASH = _script_hash()
+# The capabilities this bridge really has (issue #377): pipe-code colour,
+# CTCP replies, hub-directed room moves, and the graceful GOODBYE.
+CAPABILITIES = ("MCI", "CTCP", "USERROOM", "GOODBYE")
+MAX_CALLER_FACTS = 500
 
 
 _OS_LABELS = {"windows": "Windows", "linux": "Linux", "darwin": "OSX"}
@@ -378,7 +419,12 @@ class MrcBridge:
         self._network_stats_raw: str | None = None
         self._stats_requested: set[str] = set()
 
-        self._outbound: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=outbound_queue_size)
+        # Unbounded as a Queue; the bound is `_outbound_cap()`, enforced by
+        # `_enqueue`: the configured size, or more when this node has more
+        # announced callers than that size can announce at once (a reconnect
+        # re-announces everyone before the writer has drained anything).
+        self._outbound: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self._outbound_size = outbound_queue_size
         # Issue #375: per-nick spacing state for the writer -- when each
         # nick last had a packet written, and packets held back because
         # their nick wrote too recently (per nick, in order). Both are
@@ -386,6 +432,13 @@ class MrcBridge:
         self._last_sent: dict[str, float] = {}
         self._held: dict[str, deque[str]] = {}
         self._held_total = 0  # held lines count against `outbound_queue_size`
+        self._announced_peak = 0
+        # Issue #377: what chat_flow told the bridge about each caller
+        # (address, terminal size, level) for the announcement verbs,
+        # pruned with the other per-caller caches; and the hub's latency.
+        self._caller_facts: dict[str, tuple[str | None, int, int, int]] = {}
+        self._hub_latency: float | None = None
+        self._hub_latency_at: float | None = None
         self._node_bucket = _TokenBucket(OUTBOUND_BURST, OUTBOUND_RATE_PER_SECOND, clock)
         self._user_buckets: dict[str, _TokenBucket] = {}
         self._inbound_bucket = _TokenBucket(INBOUND_BURST, INBOUND_RATE_PER_SECOND, clock)
@@ -474,6 +527,8 @@ class MrcBridge:
             self._network_stats_raw = None
             self._banner.clear()
             self._known_sites.clear()
+            self._hub_latency = None
+            self._hub_latency_at = None
             await self._reload_from_db()
             self._notify_on_connect = True
             if not self._stopping:
@@ -662,9 +717,12 @@ class MrcBridge:
         self._nick_colors.clear()
         self._private_optin.clear()
         self._last_private_sender.clear()
+        self._hub_latency = None
+        self._hub_latency_at = None
         self._private_buckets.clear()
         self._private_drop_noted.clear()
         self._connected_at_monotonic = self._clock()
+        self._announced_peak = 0  # this connection's announcement high-water mark
         self._last_error = None
         _logger.info("Connected to MRC hub %s:%d as %r", settings.host, settings.port, settings.site_name)
         self._drain_outbound_queue()
@@ -721,8 +779,16 @@ class MrcBridge:
         for key, value in infos:
             if value:
                 self._enqueue(protocol.info(site, key, value))
-        self._enqueue(protocol.imalive(site, settings.site_name))
-        self._enqueue(protocol.capabilities(site, ["MCI"] + (["SSL"] if settings.tls else [])))
+        self._enqueue(self._imalive(settings))
+        caps = list(CAPABILITIES) + (["SSL"] if settings.tls else [])
+        self._enqueue(protocol.capabilities(site, caps, script_hash=_SCRIPT_HASH))
+
+    def _imalive(self, settings: MrcSettings) -> MrcPacket:
+        """IMALIVE with the process id and a timestamp the hub echoes in
+        PONG (issue #377), so the status screen can show the round trip."""
+        return protocol.imalive(
+            settings.site_wire_name, settings.site_name, pid=str(os.getpid()), sent_at=f"{time.time():.6f}",
+        )
 
     async def _reader_loop(self, reader: asyncio.StreamReader) -> None:
         buffer = b""
@@ -777,6 +843,8 @@ class MrcBridge:
             while not self._node_bucket.has_token():
                 await asyncio.sleep(1.0 / OUTBOUND_RATE_PER_SECOND)
             self._node_bucket.consume()
+            if not nick and "~IMALIVE:" in line:
+                line = _stamp_imalive(line)  # the round trip starts now, not at enqueue
             writer.write(line.encode("ascii", errors="replace"))
             await writer.drain()
             if nick:
@@ -893,21 +961,39 @@ class MrcBridge:
             self._dropped_outbound += 1
             _logger.warning("Dropped outbound MRC packet: %s", exc)
             return
-        if self._outbound.qsize() + self._held_total >= self._outbound.maxsize:
+        cap = self._outbound_cap()
+        while self._outbound.qsize() + self._held_total >= cap:
             # One cap for queued and held lines together (the documented
-            # 200): the oldest queued line goes first, else the oldest
-            # held line of the nick holding the most.
+            # 200, or more while callers are announced): the oldest queued
+            # line goes first, else the oldest held line of the nick
+            # holding the most. A loop, since the cap shrinks as callers
+            # leave and the queue must follow it down.
             try:
                 self._outbound.get_nowait()
             except asyncio.QueueEmpty:
-                if self._held:
-                    self._pop_held(max(self._held, key=lambda n: len(self._held[n])))
+                if not self._held:
+                    break
+                self._pop_held(max(self._held, key=lambda n: len(self._held[n])))
             self._dropped_outbound += 1
         # The spacing key: the sending nick, or "" for the node's own
         # control packets (`CLIENT`), which the hub's per-user rate does
         # not cover.
         nick = "" if packet.from_user.upper() == protocol.CLIENT else packet.from_user.lower()
         self._outbound.put_nowait((nick, line))
+
+    def _outbound_cap(self) -> int:
+        """The queue's bound (review of #388): the configured size, or
+        `OUTBOUND_LINES_PER_ANNOUNCEMENT` lines for every announced
+        caller plus the connection's own prefix (INFO, IMALIVE,
+        CAPABILITIES, STATS) when that is more -- a reconnect queues all
+        of it before the writer sends a line, and the oldest must not be
+        evicted by the newest. Announced callers are live sessions, so
+        this stays a bound."""
+        # The peak, not the current count: callers leaving while a
+        # reconnect's announcements are still queued must not shrink the
+        # cap under packets that belong to callers still here.
+        announced = max(self._announced_peak, sum(len(nicks) for nicks in self._announced.values()))
+        return max(self._outbound_size, OUTBOUND_CONNECTION_OVERHEAD + OUTBOUND_LINES_PER_ANNOUNCEMENT * announced)
 
     def _drain_outbound_queue(self) -> None:
         """Anything queued while disconnected refers to a session the
@@ -1108,8 +1194,10 @@ class MrcBridge:
                 return False
         nick = protocol.nick_for_username(username)
         nicks[username] = nick
+        self._announced_peak = max(self._announced_peak, sum(len(others) for others in self._announced.values()))
         self._announced_rooms[mapping.channel.id] = mapping.room
         self._enqueue(protocol.newroom(nick, settings.site_wire_name, "", mapping.room))
+        self._send_caller_facts(mapping, nick, username)
         self._request_userlist(mapping, nick)
         away = self._away_message(username)
         if away is not None:
@@ -1177,6 +1265,58 @@ class MrcBridge:
                 )
             else:
                 self._private_optin[username] = bool(optin)
+
+    def _note_pong(self, echoed: str) -> None:
+        """`PONG` echoes the epoch an IMALIVE carried (issue #377); an
+        unparseable or absurd value is ignored, never shown."""
+        try:
+            sent_at = float(echoed)
+        except (TypeError, ValueError):
+            return
+        latency = time.time() - sent_at
+        # The stamp carries microseconds and rounds; a PONG answered
+        # within the same clock tick can read a few hundred nanoseconds
+        # negative. That is a zero round trip, not a bad value.
+        if not -0.01 <= latency < 300.0:
+            return
+        self._hub_latency = max(0.0, latency)
+        self._hub_latency_at = self._clock()
+
+    def note_caller(self, username: str, *, address: str | None, width: int, height: int, level: int) -> None:
+        """What chat_flow knows about a caller entering a bridged
+        channel, for the announcement verbs (issue #377): remembered
+        per username so a reconnect or a later announcement can repeat
+        them. Noted *before* the announcement, so unlike the other
+        per-caller caches it is not pruned to the announced set (a
+        keepalive tick between the note and the NEWROOM would lose it);
+        it is bounded instead: at the cap, entries of callers announced
+        nowhere are dropped, and the rest is bounded by the announced
+        set, live sessions all."""
+        if username not in self._caller_facts and len(self._caller_facts) >= MAX_CALLER_FACTS:
+            # At the cap, entries of callers announced nowhere go; what
+            # remains belongs to announced callers, live sessions all, and
+            # a live session's own facts are never refused -- the bound is
+            # `MAX_CALLER_FACTS` plus the announced set.
+            announced = {name for nicks in self._announced.values() for name in nicks}
+            for stale in [name for name in self._caller_facts if name not in announced]:
+                del self._caller_facts[stale]
+        self._caller_facts[username] = (address, int(width), int(height), int(level))
+
+    def _send_caller_facts(self, mapping: MrcChannelMapping, nick: str, username: str) -> None:
+        """After NEWROOM: `TERMSIZE` always (harmless, lets the hub
+        format wide replies), `USERIP` and `BBSMETA` only when the
+        SysOp switched them on (MrcSettings; issue #377)."""
+        settings = self._settings
+        facts = self._caller_facts.get(username)
+        if settings is None or facts is None:
+            return
+        address, width, height, level = facts
+        site = settings.site_wire_name
+        self._enqueue(protocol.termsize(nick, site, width, height))
+        if settings.send_caller_ip and address and protocol.is_wire_address(address):
+            self._enqueue(protocol.userip(nick, site, address))
+        if settings.send_caller_meta:
+            self._enqueue(protocol.bbsmeta(nick, site, level, settings.info_sysop))
 
     def _prune_caller_caches(self) -> None:
         """Drop the per-caller Profile caches of everyone announced
@@ -1452,7 +1592,7 @@ class MrcBridge:
             return
         command, params = protocol.parse_server_command(packet.body)
         if command == "PING":
-            self._enqueue(protocol.imalive(settings.site_wire_name, settings.site_name))
+            self._enqueue(self._imalive(settings))
             return
         if command == "HELLO":
             self._send_site_info(settings)
@@ -1503,7 +1643,10 @@ class MrcBridge:
                 self._banner.append(text)
                 del self._banner[:-10]
             return
-        if command in ("PROTOCOLVERSION", "PONG"):
+        if command == "PONG":
+            self._note_pong(packet.msg_ext)
+            return
+        if command == "PROTOCOLVERSION":
             return
         addressed = self._caller_for_nick(packet.to_user)
         if addressed is not None:
@@ -2177,6 +2320,10 @@ class MrcBridge:
                 self._clock() - self._network_stats_at if self._network_stats_at is not None else None
             ),
             network_stats_raw=self._network_stats_raw,
+            hub_latency_seconds=self._hub_latency,
+            hub_latency_age_seconds=(
+                self._clock() - self._hub_latency_at if self._hub_latency_at is not None else None
+            ),
         )
 
     @property

@@ -289,3 +289,22 @@ def test_ctcp_packets_parse_and_build_both_ways():
 def test_parse_userlist_and_server_commands_ignore_colour_decoration():
     assert parse_userlist("|12Carol@third,bob@|04other") == ["Carol@third", "bob@other"]
     assert parse_server_command("|07USERLIST:a,b") == ("USERLIST", "a,b")
+
+
+def test_client_context_verbs_follow_the_spec():
+    """Issue #377: IMALIVE with pid and epoch, CAPABILITIES with the
+    hash in field 3 (not cut to a room name), USERIP, TERMSIZE, BBSMETA."""
+    from netbbs.mrc import protocol
+
+    line = build_line(protocol.imalive("My_Board", "My Board", pid="4242", sent_at="1757462400.123456"))
+    assert line == "CLIENT~My_Board~4242~SERVER~1757462400.123456~~IMALIVE:My Board~\n"
+    digest = "ab" * 32
+    line = build_line(protocol.capabilities("My_Board", ["MCI", "CTCP"], script_hash=digest))
+    assert line == f"CLIENT~My_Board~{digest}~SERVER~~~CAPABILITIES:MCI CTCP~\n"
+    assert build_line(protocol.userip("alice", "S", "203.0.113.5")) == "alice~S~~SERVER~~~USERIP:203.0.113.5~\n"
+    assert build_line(protocol.termsize("alice", "S", 132, 50)) == "alice~S~~SERVER~~~TERMSIZE:132x50~\n"
+    assert build_line(protocol.bbsmeta("alice", "S", 10, "Thie si!")) == "alice~S~~SERVER~~~BBSMETA: SecLevel(10) Sysop(Thiesi)~\n"
+    assert build_line(protocol.bbsmeta("alice", "S", 10, "Jos\u00e9 \u00d6")) == "alice~S~~SERVER~~~BBSMETA: SecLevel(10) Sysop(Jos)~\n"
+    assert build_line(protocol.bbsmeta("alice", "S", 1000, "")) == "alice~S~~SERVER~~~BBSMETA: SecLevel(999)~\n"
+    assert protocol.is_wire_address("2001:db8::1") and protocol.is_wire_address("10.0.0.7")
+    assert not protocol.is_wire_address("") and not protocol.is_wire_address("unix:/tmp/sock")

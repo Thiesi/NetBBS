@@ -4099,6 +4099,18 @@ async def _chat_loop(
             mrc_bridge.note_entry(channel)
 
     participant_id = ParticipantId(username=user.username, session_key=id(session))
+    if mrc_bridge is not None:
+        # Issue #377: what the hub may be told about this caller (the
+        # bridge and the SysOp's switches decide what leaves). Noted on
+        # every entry, bridged or not, and *before* the ChatHub join makes
+        # this session visible: a reconciliation running during the awaits
+        # below would otherwise announce the caller with no facts, or a
+        # previous session's.
+        mrc_bridge.note_caller(
+            user.username, address=getattr(session, "peer_address", None),
+            width=int(getattr(session, "terminal_width", 80) or 80),
+            height=int(getattr(session, "terminal_height", 24) or 24), level=int(user.user_level),
+        )
     queue = hub.join(channel.name, participant_id)
     # Design doc §8.10.2, issue #148: the live real-time subscribe
     # attempt (started below, once this channel's join is fully set up)

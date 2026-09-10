@@ -307,7 +307,9 @@ def build_line(packet: MrcPacket) -> str:
     fields = [
         sanitize_name(packet.from_user),
         sanitize_name(packet.from_site),
-        sanitize_room(packet.from_room),
+        # A control packet's field 3 is the multiplexer's pid or a script
+        # hash (`string[128]`), never a room name (issue #377).
+        _name_chars(packet.from_room)[:128] if packet.from_user.upper() == CLIENT else sanitize_room(packet.from_room),
         sanitize_name(packet.to_user),
         sanitize_name(packet.msg_ext),
         sanitize_room(packet.to_room),
@@ -440,16 +442,53 @@ def userlist(nick: str, site: str, room: str) -> MrcPacket:
     return user_command(nick, site, room, "USERLIST")
 
 
-def imalive(site: str, site_display: str) -> MrcPacket:
-    return site_command(site, f"IMALIVE:{site_display}")
+def imalive(site: str, site_display: str, *, pid: str = "", sent_at: str = "") -> MrcPacket:
+    """`CLIENT~bbs~pid~SERVER~msgext~~IMALIVE:bbsname~` (MRCDoc rev 1.26):
+    the multiplexer's process id in field 3 and, in field 5, a
+    high-precision epoch the hub echoes back in `PONG` so the round
+    trip can be measured (issue #377). Both optional."""
+    return MrcPacket(CLIENT, site, pid, SERVER, sent_at, "", f"IMALIVE:{site_display}")
+
+
+def userip(nick: str, site: str, address: str) -> MrcPacket:
+    """`USERIP:ipaddress` for an announced caller (MRCDoc rev 1.26): the
+    hub uses it to tell callers of one board apart when it bans. Sent
+    only when the SysOp switched it on (issue #377)."""
+    return MrcPacket(nick, site, "", SERVER, "", "", f"USERIP:{address}")
+
+
+def termsize(nick: str, site: str, width: int, height: int) -> MrcPacket:
+    """`TERMSIZE:WxH` for an announced caller, so the hub may format
+    wide replies (MRCDoc rev 1.26; issue #377)."""
+    return MrcPacket(nick, site, "", SERVER, "", "", f"TERMSIZE:{max(1, min(width, 999))}x{max(1, min(height, 999))}")
+
+
+def bbsmeta(nick: str, site: str, level: int, sysop: str) -> MrcPacket:
+    """`BBSMETA: SecLevel(level) Sysop(name)` for an announced caller
+    (MRCDoc rev 1.26, alphanumeric only); sent only when the SysOp
+    switched it on (issue #377)."""
+    name = "".join(ch for ch in sysop if ch.isascii() and ch.isalnum())[:32]
+    body = f"BBSMETA: SecLevel({max(0, min(level, 999))})"
+    if name:
+        body += f" Sysop({name})"
+    return MrcPacket(nick, site, "", SERVER, "", "", body)
+
+
+def is_wire_address(address: str) -> bool:
+    """Whether `address` can travel in `USERIP` as the spec spells it
+    (digits, colons, dots; hex digits for IPv6)."""
+    return bool(address) and len(address) <= 50 and all(ch in "0123456789abcdefABCDEF:." for ch in address)
 
 
 def info(site: str, key: str, value: str) -> MrcPacket:
     return site_command(site, f"INFO{key.upper()}:{value}")
 
 
-def capabilities(site: str, caps: list[str]) -> MrcPacket:
-    return site_command(site, "CAPABILITIES:" + " ".join(caps))
+def capabilities(site: str, caps: list[str], *, script_hash: str = "") -> MrcPacket:
+    """`CLIENT~bbs~hash~SERVER~msgext~~CAPABILITIES:data~`: field 3 is a
+    SHA256 hex digest of the client script (MRCDoc rev 1.26); NetBBS
+    sends the bridge module's (issue #377)."""
+    return MrcPacket(CLIENT, site, script_hash, SERVER, "", "", "CAPABILITIES:" + " ".join(caps))
 
 
 def shutdown(site: str) -> MrcPacket:

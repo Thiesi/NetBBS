@@ -323,3 +323,16 @@ def test_standalone_mapping_changes_say_they_are_not_instant(db, lane, sysop, lo
     asyncio.run(_open_channel_detail(session, lane, sysop, lobby))
     text = _visible(_written_text(session))
     assert text.count("A running node applies this within a minute") == 3
+
+
+def test_mrc_settings_caller_switches_toggle_and_save(db, lane, sysop):
+    """Issue #377: USERIP and BBSMETA are SysOp switches, off by default."""
+    assert load_mrc_settings(db).send_caller_ip is False and load_mrc_settings(db).send_caller_meta is False
+    session = FakeSession(["s", "i", "u", "m", "s", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    text = _visible(_written_text(session))
+    assert "USERIP" in text and "BBSMETA" in text
+    saved = load_mrc_settings(db)
+    assert saved.send_caller_ip is True and saved.send_caller_meta is True
+    detail = [a for a in list_recent_actions(db, limit=5) if a.action == "set_mrc_settings"][0].detail
+    assert "send_caller_ip=True send_caller_meta=True" in detail
