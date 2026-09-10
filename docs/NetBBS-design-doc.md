@@ -5381,8 +5381,11 @@ queried. The board is read-only and paginated. Human play remains necessary to
 validate whether these opportunities encourage satisfying route variety.
 
 The engineer costs 200 credits to hire and 2 per jump. Fuel savings follow the
-paid-service progression defined above. The role is an investment for longer
-routes; one-unit jumps cannot benefit, and hiring does not refund old hire costs.
+paid-service progression defined above; one-unit jumps cannot benefit, and
+hiring does not refund old hire costs. Because most adjacent jumps cost one unit,
+fuel alone was worth under a credit per jump (issue #409), so the engineer also
+cuts yard repairs from 4 credits per hull point to 3 (Recruit and Seasoned) and
+2 (Veteran and Ace); the yard and crew screens show the current rate.
 
 New futures orders lock goods for pickup at their issuing station after maturity.
 Up to eight orders may be active; insufficient hold space leaves a ready order
