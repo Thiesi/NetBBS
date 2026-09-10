@@ -4721,14 +4721,34 @@ The refusal is a first-class outcome, not an error: it names the reason, changes
 nothing by itself, and offers to begin a new career. Declining leaves the file
 exactly as it was, so a caller who wants to fetch the old build first can. There
 is one active save slot per pilot, so accepting the offer takes it: the schema-1
-document is aged into the existing `.previous` copy and the new career is written
-in its place, which is the same retention every checkpoint already performs. That
-is a deliberate replacement of a readable-but-unsupported career, not the case
-`write_save` refuses, which is overwriting a career it cannot read at all.
+document is retained as a recovery copy and the new career is written in its
+place. Not `.previous`, as first planned -- `.previous` is the *preceding
+checkpoint*, so the launch tick that follows registration would overwrite it and
+the retention would have been a promise good for one turn. The recovery namespace
+is the one that is never removed, and is already where a rollback puts the career
+it replaces. Failing to archive fails the replacement, because taking the slot is
+not worth losing what was in it. That is a deliberate replacement of a
+readable-but-unsupported career, not the case `write_save` refuses, which is
+overwriting a career it cannot read at all.
 
-Implementation is a single slice: `SCHEMA_VERSION = 2`, the refusal path, and the
+Shipped as a single slice: `SCHEMA_VERSION = 2`, the refusal path, and the
 deletion of the branches it makes unreachable, together, because a half-retired
-legacy path is worse than either end state. Splitting the module into a package
+legacy path is worse than either end state. What the validator now requires,
+rather than tolerating and repairing, is the list itself: every fight carries its
+tactical state and the hull it started the exchange with, every futures order
+names its station, its goods cost and the stock it reserved, every unit in the
+hold has an acquisition-cost lot, active contract ids are unique, a two-raider
+encounter carries its formation record, an economy event names the stations it
+reaches, a career records the contraband milestone step it was awarded under, and
+the four fields a pre-overhaul career could omit are present. The repairs those
+shapes needed are gone with them: no per-turn id renumbering, no `uncosted_*`
+ledger totals, no second set of fire and evasion rules, and no leaderboard read
+on the commit path. The id counter's own maintenance stays, because the counter
+is derived state rather than a saved invariant, and a posted offer keeps its id
+after acceptance, so uniqueness is a property of the active contracts and not of
+the board.
+
+Splitting the module into a package
 (`domain.py`, `save.py`, `ui/`) is a follow-up to that slice; the launcher
 resolves the door through `resolve_bundled_door_path`, which would need a package
 entry, and the tests import the module by path.
@@ -4768,9 +4788,10 @@ copies, versions this build cannot recognise and failed preservation require
 manual SysOp repair; there is no caller-facing reset that bypasses preservation.
 A career from a *known older* schema is the one exception, because nothing about
 it is in doubt: it is offered a new career instead, and accepting still preserves
-the old document as the `.previous` copy rather than bypassing preservation. Recovery copies are
-limited to eight per pilot; a SysOp must archive older copies manually before
-another restore. The pilot session lease covers recovery as well as normal play.
+the old document, as a recovery copy, rather than bypassing preservation.
+Recovery copies are limited to eight per pilot; a SysOp must archive older copies
+manually before another restore, and a refused career is not replaced at all once
+that limit is reached. The pilot session lease covers recovery as well as normal play.
 This local previous-checkpoint copy is not a substitute for node backup coverage.
 
 The optional Pilot Guide is reachable from the station deck without changing

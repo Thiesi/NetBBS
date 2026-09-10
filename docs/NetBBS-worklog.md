@@ -4808,6 +4808,24 @@ maintenance reporting busy without creating a career.
 `departed` is not a travel phase. It appears in fixtures as an *invalid* phase for
 fault injection; the real phases are `primary`, `escorts`, `arrival` and `customs`.
 
+Voidrunner saves are schema 2 and there is no migration (issue #421). A schema-1
+document raises `OutdatedSave`, which is a refusal rather than a recovery case:
+`screen_save_recovery` would only offer a `.previous` copy of the same retired
+schema. Taking the slot goes through `replace_unsupported_career`, not
+`write_save`, because `write_save` decodes what it is replacing and must keep
+refusing a career it cannot read; the difference is that this replacement is the
+caller's own confirmed decision. It happens after the registration is confirmed,
+never before, or a cancelled registration would have destroyed the career, and
+the refused document is retained as a recovery copy rather than as `.previous`,
+which the launch tick immediately after registration would have overwritten.
+
+The `leaderboard.json` import belongs to the launch and runs before any pilot
+lock is taken (issue #421). It needs the maintenance gate, and `pilot_session`
+takes that gate itself, so asking for it while holding a pilot lock would
+deadlock against `maintenance_session`. Nothing is deleted and each row only
+raises what is already stored, which is what makes the import safe to retry on
+every launch.
+
 Voidrunner prints every hotkey as `[K] Label`, without exception (issue #400).
 A test must not tell an action bar from a body row by its hotkey style -- there
 is only one -- and must not assume a phrase lands on a given page at 20 columns,
