@@ -6526,9 +6526,9 @@ Onboarding and summary disconnects exit cleanly.
 
 **Switchboard dashboard (issue #362, slice 3).** The main screen shows settled
 cash, crew, Heat and turns; current holdings and hourly income; monotonic Rank
-and the next tier's threshold; unread event count; newcomer and consecutive-raid
+and the next tier's threshold; unread event count; newcomer and target-wide raid-recovery
 protection; turn refill and season end time. The read obtains these from one
-world transaction and never clears login-based protection or acknowledges events.
+world transaction and never clears raid protection or acknowledges events.
 The countdowns are snapshots refreshed when navigating or returning from an action.
 
 Next/Prev pages keep action and free-browsing keys visible at 80x24, 40x12 and
@@ -6542,7 +6542,7 @@ ordered by descending Rank, then ascending stable account ID for ties. Your exac
 position is shown even outside the current batch. `[E]Map` shows exchange ownership,
 defenses and hourly income; `[V]Rivals` lists other crews in account-ID order with
 their Rank/tier and current raid eligibility reason. This directory exposes no
-additional crew-strength or cash intelligence; those policy choices remain slice 5.
+additional crew-strength or cash intelligence; slice 5 deliberately keeps them private.
 `[H]Log` replays events and `[?]Help` opens the rules. Every view is content-first
 with Back, and costs no turns or cash. World reads still settle elapsed resources.
 
@@ -6590,6 +6590,29 @@ Unavailable raid/root actions explain the refill before opening a target picker.
 Recruit previews show the actual cash shortfall; empty rival worlds explain the
 available non-PvP alternatives. Advice does not grant resources, spend turns,
 change protection, or imply a waiting caller's snapshot updates continuously.
+
+**Raid recovery and public intelligence (issue #362, slice 5; maintainer approved).**
+Every committed raid attempt gives its target a 24-hour recovery shield against
+all attackers, whether the raid succeeds or fails. Rejected or cancelled choices
+spend nothing and grant no shield. Eligibility, transfer/losses, shield, receipt
+and turn cost share the action transaction: racing or alternating attackers cannot
+bypass recovery. Login, resource refresh and receipt acknowledgement never remove
+or extend it. At expiry the ordinary eligibility rules apply again. The existing
+48-hour lifetime-account newcomer shield and own-tier +/-1 bracket remain; season
+reset clears competitive recovery but never renews veteran newcomer grace.
+
+Public intelligence is handle, season Rank/tier, protection reasons and exact
+UTC expiry. The dashboard also shows remaining recovery time. Available crew and
+cash remain private, so raid previews explicitly describe uncertain odds and
+percentage stakes. Exchange ownership, garrison and income remain public;
+raid recovery does not block territory contests. Later recon must explicitly
+define earned intelligence before revealing additional private resources.
+
+Schema 4 adds the recovery deadline. An old last-attacker marker has no attempt
+timestamp, so upgrade preserves its protection for 24 hours from upgrade against
+all attackers and leaves an explanatory receipt. Empty old markers grant no new
+shield. Migration is atomic and idempotent; ordinary login does not clear the
+last-attacker record or recovery deadline. No service or background timer is needed.
 
 **Economy targets and rules (issue #362, slice 5; maintainer approved).**
 The full map must earn no more passive cash per day than fifteen average trades;
@@ -6660,8 +6683,7 @@ receipt with assigned/available and released counts. Cash, monotonic Rank, IDs,
 handles and account age survive conversion; no copied garrison becomes a recruit.
 The version marker and all conversion changes share one transaction. Old processes
 must be stopped and a verified backup taken before activation. Host ownership and
-maintenance checks precede conversion. Raid-rule tuning remains a later
-slice 5 bullet; defense alone does not establish balanced play.
+maintenance checks precede conversion. Defense alone does not establish balanced play.
 
 **World paths (issue #362, slice 4).** The native runtime supplies the bundled
 War Dialer with `<resolved-node-db-filename>.doors/war-dialer.db` beside that node
@@ -6718,7 +6740,7 @@ before world creation; it never falls back to Guest. Caller messages remain clea
 and SysOp diagnostics are bounded. Commands do not activate or redeploy services.
 
 **World schema compatibility.** SQLite `user_version=1` identifies the original
-War Dialer schema; the current version is 3. `user_version=2` added shared-crew
+War Dialer schema; the current version is 4. `user_version=2` added shared-crew
 resource semantics without
 changing its column layout. A complete unversioned world is adopted through a
 numbered migration; its additive fields, retained history and version marker

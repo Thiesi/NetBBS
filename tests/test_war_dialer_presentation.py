@@ -1388,3 +1388,35 @@ def test_incomplete_host_owner_does_not_initialize_world(tmp_path, owner):
     assert result.returncode == 1
     assert b"launch metadata is invalid" in result.stdout
     assert not path.exists()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+def test_rival_shield_expiry_is_public_and_private_resources_stay_hidden(tmp_path, monkeypatch, width, height):
+    conn = wd.connect(tmp_path / 'shield.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 1, 'Viewer', now, 1)
+    wd.load_or_create_player(conn, 2, 'Rival', now, 1)
+    conn.execute('UPDATE players SET cash=87654321, crew=7654321, created_at=?, raid_shield_until=? WHERE user_id=2',
+                 (wd.to_iso(now - wd.GRACE), wd.to_iso(now + wd.RAID_SHIELD)))
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    def choose(valid):
+        page = next(re.search(r'Page (\d+)/(\d+)', text) for text in reversed(written) if 'Page ' in text)
+        return 'N' if page[1] != page[2] else 'B'
+    monkeypatch.setattr(wd, 'read_menu_choice', choose)
+    wd.show_player_directory(wd.Palette(False), conn, 1, width, height)
+    text = _ANSI_RE.sub('', ''.join(written))
+    assert 'Raid shield until' in ' '.join(text.split())
+    assert (now + wd.RAID_SHIELD).strftime('%Y-%m-%d') in text
+    assert '87654321' not in text and '87,654,321' not in text
+    assert '7654321' not in text and '7,654,321' not in text
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()

@@ -400,6 +400,13 @@ available and assigned changes separately so reinforcement is not narrated as de
 Version 2 abandonment markers remain compatible migration data; schema 3 uses
 the player capture ledger for the stronger once-per-season award rule.
 
+Raid recovery is target-wide: persist its deadline in the same transaction as
+any committed attempt, losses, receipt and turn. Login and acknowledgement must
+not clear it. Real SQLite concurrency tests must show exactly one accepted
+attempt when distinct attackers race one unshielded target. The last-attacker
+identity is historical data, not the eligibility key; an old marker migrates to
+one day of recovery because its original attempt time is unavailable.
+
 Economy schema 3 keeps an explicit bounded list of rewarded exchange IDs per
 player: aggregate capture counts or the latest 500 receipts cannot reconstruct
 all previous ownership. Legacy captures retain their old Rank through a season

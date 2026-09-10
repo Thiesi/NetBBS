@@ -568,6 +568,7 @@ TURNS_PER_DAY = 15
 DAY = timedelta(hours=24)
 SEASON = timedelta(days=28)
 GRACE = timedelta(hours=48)
+RAID_SHIELD = timedelta(hours=24)
 HEAT_DECAY_PER_HOUR = 5.0
 HEAT_BUST_THRESHOLD = 80.0
 HEAT_BUST_CHANCE_PER_POINT = 0.02
@@ -671,6 +672,7 @@ class Player:
     control_rank: int = 0
     control_remainder: int = 0
     captured_exchanges: tuple[int, ...] = ()
+    raid_shield_until: str = ""
 
 
 @dataclass
@@ -745,11 +747,11 @@ def raid_eligibility_reason(attacker: Player, target: Player, now: datetime) -> 
     if target.user_id == attacker.user_id:
         return "Your own crew"
     if is_in_grace(target, now):
-        return "Newcomer shield"
+        return "Newcomer shield until " + (from_iso(target.created_at) + GRACE).strftime("%Y-%m-%d %H:%M UTC")
+    if target.raid_shield_until and now < from_iso(target.raid_shield_until):
+        return "Raid shield until " + from_iso(target.raid_shield_until).strftime("%Y-%m-%d %H:%M UTC")
     if abs(tier_index(rank_score(target)) - tier_index(rank_score(attacker))) > 1:
         return "Outside your tier +/-1"
-    if target.last_raided_by == attacker.user_id:
-        return "Repeat raid blocked until target logs in"
     return "Eligible"
 
 
@@ -778,6 +780,7 @@ def reset_player_for_season(player: Player, season_number: int, now: datetime) -
     player.turns_used = 0
     player.turn_day_start = ""
     player.last_raided_by = None
+    player.raid_shield_until = ""
     player.season_number = season_number
 
 
@@ -850,7 +853,7 @@ def action_job(player: Player, rng: random.Random) -> tuple[str, bool, int, bool
     return name, success, payout, busted
 
 
-def action_raid(attacker: Player, target: Player, rng: random.Random) -> tuple[bool, int, bool]:
+def action_raid(attacker: Player, target: Player, rng: random.Random, *, now: datetime | None = None) -> tuple[bool, int, bool]:
     success = rng.random() < success_chance(attacker.crew, target.crew)
     if success:
         amount = int(target.cash * RAID_STEAL_FRACTION)
@@ -863,6 +866,7 @@ def action_raid(attacker: Player, target: Player, rng: random.Random) -> tuple[b
         loss = int(attacker.cash * RAID_FAIL_CASH_LOSS_FRACTION)
         attacker.cash = max(0, attacker.cash - loss)
     target.last_raided_by = attacker.user_id
+    target.raid_shield_until = to_iso((now or now_utc()) + RAID_SHIELD)
     busted = apply_heat(attacker, RAID_HEAT, rng)
     return success, amount, busted
 
@@ -914,7 +918,7 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
-WORLD_SCHEMA_VERSION = 3
+WORLD_SCHEMA_VERSION = 4
 
 # Versioned schema contract: future additions need a new numbered migration.
 _WORLD_COLUMNS_V1 = {
@@ -946,6 +950,8 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
         expected = required - {"income_remainder"} if version == 0 and table == "players" else required
         if version >= 3 and table == "players":
             expected = expected | _ECONOMY_COLUMNS
+        if version >= 4 and table == "players":
+            expected = expected | {"raid_shield_until"}
         if not expected <= columns:
             raise WorldStateError(f"War Dialer {table} schema is incomplete. Preserve it for SysOp recovery; no replacement was created.")
 
@@ -1005,7 +1011,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     _migrate_world_v1(fresh)
                     _migrate_world_v2(fresh)
                     _migrate_world_v3(fresh)
-                    fresh.execute("PRAGMA user_version=3")
+                    _migrate_world_v4(fresh)
+                    fresh.execute("PRAGMA user_version=4")
             finally:
                 fresh.close()
             try:
@@ -1055,6 +1062,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if version < 3:
             _migrate_world_v3(conn)
             conn.execute("PRAGMA user_version=3")
+        if version < 4:
+            _migrate_world_v4(conn)
+            conn.execute("PRAGMA user_version=4")
         _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
 
 
@@ -1194,6 +1204,19 @@ def _migrate_world_v3(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE exchanges SET income_per_hour=? WHERE id=?", (rate, row[0]))
 
 
+def _migrate_world_v4(conn: sqlite3.Connection) -> None:
+    """Replace login-cleared attacker protection with bounded target recovery."""
+    conn.execute("ALTER TABLE players ADD COLUMN raid_shield_until TEXT NOT NULL DEFAULT ''")
+    now = now_utc()
+    # Legacy rows record an attacker but not the attempt time. Preserve those
+    # protections for one day from upgrade, rather than clearing them silently.
+    conn.execute("UPDATE players SET raid_shield_until=? WHERE last_raided_by IS NOT NULL", (to_iso(now + RAID_SHIELD),))
+    for row in conn.execute("SELECT user_id FROM players WHERE last_raided_by IS NOT NULL").fetchall():
+        record_event(conn, row[0], None,
+                     "Raid protection upgrade: your previous protection now covers all attackers for 24 hours. "
+                     "Login and reading receipts do not remove it. Your dashboard shows expiry.", now)
+
+
 def get_or_create_season_anchor(conn: sqlite3.Connection, now: datetime) -> datetime:
     row = conn.execute("SELECT value FROM meta WHERE key='season_anchor'").fetchone()
     if row is not None:
@@ -1325,6 +1348,7 @@ def _row_to_player(row: sqlite3.Row) -> Player:
         control_rank=row["control_rank"] if "control_rank" in row.keys() else 0,
         control_remainder=row["control_remainder"] if "control_remainder" in row.keys() else 0,
         captured_exchanges=tuple(json.loads(row["captured_exchanges"])) if "captured_exchanges" in row.keys() else (),
+        raid_shield_until=row["raid_shield_until"] if "raid_shield_until" in row.keys() else "",
     )
 
 
@@ -1351,6 +1375,8 @@ def _save_player(conn: sqlite3.Connection, player: Player) -> None:
         conn.execute("UPDATE players SET legacy_rank=?, control_rank=?, control_remainder=?, captured_exchanges=? WHERE user_id=?",
                      (player.legacy_rank, player.control_rank, player.control_remainder,
                       json.dumps(player.captured_exchanges), player.user_id))
+    if _world_schema_version(conn) >= 4:
+        conn.execute("UPDATE players SET raid_shield_until=? WHERE user_id=?", (player.raid_shield_until, player.user_id))
 
 
 _INCOME_UNITS_PER_DOLLAR = 3_600_000_000  # microseconds per hour
@@ -1444,7 +1470,6 @@ def load_or_create_player(conn: sqlite3.Connection, user_id: int, handle: str, n
         player = read_player(conn, user_id)
         player.handle = handle
         now = settle_player_clocks(player, now)
-        player.last_raided_by = None
         player.cash += _collect_exchange_income(conn, player, now)
         _save_player(conn, player)
     return player
@@ -1672,6 +1697,7 @@ def raid_selection_state(player: Player) -> tuple:
     return (
         player.user_id, player.handle, player.cash, player.crew, rank_score(player),
         player.last_raided_by, player.season_number, player.created_at,
+        player.raid_shield_until,
     )
 
 
@@ -1691,12 +1717,12 @@ def resolve_raid(
         target.cash += _collect_exchange_income(conn, target, max(now, from_iso(target.heat_updated_at)))
         if not is_eligible_raid_target(actor, target, now):
             raise ActionRejected("Rival is no longer eligible after control Rank settlement. No resources spent.")
-        success, amount, busted = action_raid(actor, target, rng)
+        success, amount, busted = action_raid(actor, target, rng, now=now)
         _save_player(conn, target)
         if success:
-            record_event(conn, target.user_id, actor.handle, f"{actor.handle} raided you and got away with ${amount}!", now)
+            record_event(conn, target.user_id, actor.handle, f"{actor.handle} raided you and got away with ${amount}! All-attacker raid shield: 24 hours.", now)
         else:
-            record_event(conn, target.user_id, actor.handle, f"{actor.handle} tried to raid you and got bounced.", now)
+            record_event(conn, target.user_id, actor.handle, f"{actor.handle} tried to raid you and got bounced. All-attacker raid shield: 24 hours.", now)
     return success, amount, busted
 
 
@@ -1948,8 +1974,10 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
         lines.append(f"Raid shield: newcomer, {countdown(expires - now)} remaining")
     else:
         lines.append("Raid shield: newcomer protection expired")
-    if state.repeat_blocked_handle:
-        lines.append(f"Repeat raid blocked from {state.repeat_blocked_handle} until your next login.")
+    if player.raid_shield_until and effective_now < from_iso(player.raid_shield_until):
+        expires = from_iso(player.raid_shield_until)
+        lines.append(f"Raid recovery: all attackers blocked for {countdown(expires - now)}.")
+        lines.append("Raid shield ends: " + expires.strftime("%Y-%m-%d %H:%M UTC"))
     lines.append("Exchange territory is always contestable.")
     lines.append(f"Season {player.season_number} ends in {countdown(state.season_ends_at - now)}")
     lines.append("Season end: " + state.season_ends_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
@@ -2039,6 +2067,8 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         f"Each action costs one of {TURNS_PER_DAY} turns. The rolling 24-hour window starts with your first action.",
         "[T]rade Warez: quick cash. [C]rew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
         "[J]ob: risky payout. [R]aid: steal rival cash. [X]Root: take an exchange for hourly income.",
+        "Raids respect a 48-hour newcomer shield and your tier +/-1. Any raid attempt gives its target 24 hours of protection from every attacker, win or lose. Login and reading receipts never clear it.",
+        "Rival Rank, shield reasons and expiry times are public. Available crew and cash stay private; raid odds and payout remain explicitly uncertain. Exchange garrisons are public and territory stays ungated.",
         "Capture commits one available member to its garrison. Assigned crew defend only that exchange; jobs, raids and attacks use available crew.",
         "[G]arrison: reinforce or withdraw crew for one turn, with no Heat or Rank reward. One crew member must stay available. Withdrawing the last defender abandons the exchange and stops income.",
         f"Each capture attempt costs ${ROOT_EXCHANGE_COST}, win or lose. Each exchange earns +{CAPTURE_RANK} capture Rank only on your first success this season; recaptures earn none.",
@@ -2140,7 +2170,7 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
                   f"Success steals {RAID_STEAL_FRACTION:.0%} of their unknown cash and earns +25 Rank.",
                   f"Failure loses {min(RAID_FAIL_CREW_LOSS, player.crew - 1)} crew and "
                   f"{RAID_FAIL_CASH_LOSS_FRACTION:.0%} cash before any bust.",
-                  "Win or lose, another consecutive raid is blocked until the rival logs in."]
+                  "Win or lose, the target gets a 24-hour shield against every attacker. Login and reading receipts do not clear it."]
     elif action == "root":
         chance = 1.0 if target.controller_user_id is None else success_chance(player.crew, target.garrison)
         lines += [f"Exchange: {target.name}", f"Success: {chance:.0%}; garrison {target.garrison}.",
