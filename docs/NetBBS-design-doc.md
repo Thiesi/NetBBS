@@ -6821,6 +6821,34 @@ Fresh worlds and rollover populate the same three homes. Deadline, occupancy,
 defenders and version marker commit atomically; backups preserve them and SysOp
 competition reset uses the same season boundary. Older migrations stay immutable.
 
+**Scene and crew identity (issue #362, slice 7; maintainer approved).** A caller
+chooses one of four fixed ASCII insignia: Modem `[::]`, Relay `<-->`, Signal
+`=||=`, or Archive `{##}`. The default is Modem. It is a free cosmetic choice,
+previewed before Act, with no turn, cash, Heat or Rank cost. It remains part of
+identity through ordinary seasons and explicit competition reset. Identity also
+shows the existing handle, current Rank/tier and trained specialty; no new
+player-authored text is introduced.
+
+The free `[I]Scene` screen offers insignia, three neutral-operator dossiers and
+public territory bulletins. Dossiers combine fixed fictional biographies with
+actual home ownership, defense and any pending return deadline. A human-held
+home is described as displaced, never as an NPC takeover in progress. Cosmetic
+identity, static biography and current facts must remain distinguishable.
+
+Only committed captures, final-defender abandonment and NPC stationing create
+public bulletins, in the same transaction as the underlying change. Each includes
+UTC time, season and bounded sanitized names; no cash, available crew, recon,
+job results or private receipts are published. Keep the latest 500 per world,
+ordered by committed row ID, without age expiry. Normal rollover retains this
+bounded history and labels new-season events; explicit SysOp competition reset
+clears it with private receipts. Empty/old worlds get an honest empty bulletin
+board: migration never fabricates historical events. NPC initial stationing and
+actual returns are labeled NPC activity, with no synthetic human accounts.
+
+Schema 9 adds the persistent insignia and bounded scene table transactionally.
+Backup/restore includes both; reset retains insignia and clears scene history.
+Synchronous storage rules and free, content-first paginated browsing remain.
+
 **Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
 living crew is the available crew plus the members assigned across their owned
 exchanges. Capture requires at least two available members and commits one to the

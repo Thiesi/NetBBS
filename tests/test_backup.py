@@ -1551,7 +1551,7 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
     held = wd.connect(path)
     held.execute("PRAGMA wal_autocheckpoint=0")
     held.execute("UPDATE exchanges SET npc_key='', npc_return_at='2026-09-11T08:00:00+00:00', garrison=0 WHERE id=5")
-    held.execute("UPDATE players SET cash=98765, specialty='fixers', support='stash', operation_contract=4, operation_approach=2, operation_stage=2, successful_operations=3")
+    held.execute("UPDATE players SET cash=98765, insignia='archive', specialty='fixers', support='stash', operation_contract=4, operation_approach=2, operation_stage=2, successful_operations=3")
     held.execute("INSERT INTO recon VALUES (1,2,'Historical Rival',1234,7,'2026-09-10T00:00:00+00:00','2026-09-11T00:00:00+00:00',1)")
     try:
         assert Path(str(path) + "-wal").stat().st_size > 0
@@ -1571,6 +1571,8 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
     with contextlib.closing(sqlite3.connect(target)) as conn:
         assert conn.execute("SELECT income_remainder FROM players").fetchone()[0] == 9876
         assert conn.execute("SELECT specialty,support FROM players").fetchone() == ("fixers", "stash")
+        assert conn.execute("SELECT insignia FROM players").fetchone() == ("archive",)
+        assert conn.execute("SELECT COUNT(*) FROM scene").fetchone()[0] == 3
         assert conn.execute("SELECT role FROM exchanges ORDER BY id LIMIT 1").fetchone() == ("carrier",)
         assert conn.execute("SELECT npc_key,garrison FROM exchanges WHERE id=6").fetchone() == ("relay", 4)
         assert conn.execute("SELECT operation_contract,operation_approach,operation_stage,successful_operations FROM players").fetchone() == (4, 2, 2, 3)
@@ -1705,17 +1707,22 @@ def test_war_dialer_cli_create_and_restore_names_destinations(tmp_path, db_path,
 
 
 
+@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("reset", [False, True])
-def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(tmp_path, db_path, identity_dir, reset):
+def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(tmp_path, db_path, identity_dir, reset, legacy):
     from netbbs.doors import war_dialer_admin as admin
     bootstrap_node_identity("test-node").save(identity_dir)
     (identity_dir / "operator-marker").write_bytes(b"retain identity contents")
     path = _populate_war_dialer(db_path)
     with contextlib.closing(sqlite3.connect(path)) as conn:
         before_identity = conn.execute("SELECT user_id,handle,created_at FROM players").fetchall()
-        conn.execute("UPDATE players SET crew=40, crew_recruited_total=40, turns_used=8, specialty='lookouts', support='burner', operation_contract=3, operation_approach=1, operation_stage=2, successful_operations=4")
+        conn.execute("UPDATE players SET crew=40, insignia='signal', crew_recruited_total=40, turns_used=8, specialty='lookouts', support='burner', operation_contract=3, operation_approach=1, operation_stage=2, successful_operations=4")
         conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=30")
         conn.execute("INSERT INTO recon VALUES (1,2,'Historical Rival',1234,7,'2026-09-10T00:00:00+00:00','2026-09-11T00:00:00+00:00',1)")
+        if legacy:
+            conn.execute("ALTER TABLE players DROP COLUMN insignia")
+            conn.execute("DROP TABLE scene")
+            conn.execute("PRAGMA user_version=8")
         conn.commit()
     admin.set_maintenance(db_path, path, True)
     destination = tmp_path / "before-reset"
@@ -1728,6 +1735,11 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
         cash, crew, turns, rank_count = conn.execute("SELECT cash,crew,turns_used,crew_recruited_total FROM players").fetchone()
         assert (cash, crew, turns, rank_count) == (300, 3, 0, 0)
         assert conn.execute("SELECT specialty,support FROM players").fetchone() == ("", "")
+        if not legacy:
+            assert conn.execute("SELECT insignia FROM players").fetchone() == ("signal",)
+            assert conn.execute("SELECT COUNT(*) FROM scene").fetchone()[0] == (0 if reset else 6)
+        else:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
         assert conn.execute("SELECT operation_stage,successful_operations FROM players").fetchone() == (0, 0)
         assert conn.execute("SELECT role FROM exchanges ORDER BY id LIMIT 1").fetchone() == ("carrier",)
         assert conn.execute("SELECT npc_key,garrison FROM exchanges WHERE id=6").fetchone() == ("relay", 4)

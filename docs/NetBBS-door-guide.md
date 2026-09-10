@@ -48,12 +48,13 @@ refuses to silently create a replacement. Choose an explicit override or complet
 the migration. An explicit path for a new independent node deliberately selects
 its own world; it does not adopt the old world's users or records.
 
-War Dialer records schema version 8 in SQLite `user_version`. A complete older
+War Dialer records schema version 9 in SQLite `user_version`. A complete older
 world upgrades automatically in one transaction: version 1 adopts the original
 layout and latest 500 events per player; version 2 converts copied garrisons to
 shared crew assignments; version 3 adds the capture/control economy described
 below; version 4 adds raid recovery; version 5 adds crew/support; version 6 adds
-recon/operations; version 7 adds exchange roles; version 8 adds neutral operators. A failed upgrade rolls
+recon/operations; version 7 adds exchange roles; version 8 adds neutral operators; version 9 adds crew insignia and public scene
+bulletins. A failed upgrade rolls
 back its schema/data changes and version marker. Newer versions, incomplete or
 unrelated schemas, and corrupt files are refused with a caller-facing error;
 startup does not replace them with an empty world. Existing zero-byte files are
@@ -225,7 +226,7 @@ their exchange. The switchboard and results show the two pools separately.
 
 **MANUAL — outside NetBBS, before activating shared-crew rules:** stop all old
 War Dialer processes and create/verify a node backup with its world component.
-The first permitted launch upgrades the world to schema 8 transactionally.
+The first permitted launch upgrades the world to schema 9 transactionally.
 When upgrading from copied defenses, schema 2 conversion runs first.
 After normal overdue season settlement, it reserves one available member per
 owner, keeps holdings by descending hourly income then ID within the real crew
@@ -233,7 +234,7 @@ budget, and distributes the remaining members evenly across those holdings.
 Unstaffable holdings become unclaimed after paying income; a receipt explains
 the conversion. IDs, handles, account age, cash and Rank are retained. Review
 the receipt and use Garrison to adjust assignments. Never mix old and new game
-processes; older versions refuse schema 8. Restore the verified backup with a
+processes; older versions refuse schema 9. Restore the verified backup with a
 matching game version if the operator chooses to undo the upgrade.
 
 Schema 3 pays already-earned income at the previous rates before applying the
@@ -301,6 +302,26 @@ sessions and create/verify the node backup with its world component as above.
 Schema 8 preserves human holdings and resources and populates only unclaimed NPC
 homes. Inspect the map, labels and return deadlines after upgrade/restore. Old
 binaries refuse schema 8; do not mix game versions. No background service is needed.
+
+`[I]Scene` is free even with no turns or cash. Your crew identity combines your
+handle, Rank/tier, specialty and a cosmetic ASCII insignia: Modem `[::]`, Relay
+`<-->`, Signal `=||=`, or Archive `{##}`. Choose a design, inspect the free-change
+preview, then Act; Back keeps the current design. Insignia survive seasons and
+SysOp competition resets. No new player-authored text is accepted.
+
+Scene also offers NPC biographies with actual home ownership/defense and return
+deadlines, plus the latest 500 public territory bulletins. These timestamped,
+season-labeled entries record actual captures, abandonment and NPC stationing;
+private resources, recon, jobs and receipts stay private. Ordinary season rollover
+retains the bounded history, while explicit competition reset clears it. An empty
+board says so. NPC biographies are fixed fiction; their displayed home status is
+read from the current world.
+
+**MANUAL ? outside NetBBS, before activating Scene:** stop old game sessions and
+create/verify the node backup with its world component as above. Schema 9 adds
+insignia and the scene ledger without recreating past activity. Verify insignia,
+NPC home status and public bulletins after upgrade/restore. Old binaries refuse
+schema 9; do not mix game versions. No additional service is required.
 
 Free screens: `[B]Rank` shows season standings and your position; ties use account
 ID order. `[E]Map` shows the fixed ring, exchange roles, owners, garrisons, security,

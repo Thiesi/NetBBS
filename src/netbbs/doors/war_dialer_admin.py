@@ -94,6 +94,8 @@ def change_competition(db_path: Path, world: Path, *, identity_dir: Path, backup
             wd._settle_world(conn, now)
             if reset:
                 conn.execute("DELETE FROM events")
+                if wd._world_schema_version(conn) >= 9:
+                    conn.execute("DELETE FROM scene")
             _audit(conn, "reset competition" if reset else "advance season", reason=reason,
                    backup_path=backup_to, before=before, after=season)
     return world_status(db_path, world)

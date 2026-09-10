@@ -1980,3 +1980,72 @@ def test_real_process_neutral_capture_preview_boundaries(tmp_path, stage):
         assert (exchange.controller_user_id == 0) != bool(exchange.npc_key)
         assert conn.execute('SELECT COUNT(*) FROM players').fetchone()[0] == 1
         conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('entry', ['1', '2', '3'])
+def test_scene_and_insignia_are_free_and_fit_small_terminals(tmp_path, monkeypatch, width, height, entry):
+    conn = wd.connect(tmp_path / 'scene.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    conn.execute('UPDATE players SET cash=0,turns_used=15,turn_day_start=? WHERE user_id=1', (wd.to_iso(now),))
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    monkeypatch.setattr(wd, 'read_input_key', lambda: ' ')
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    stage, calls = 0, 0
+    def select(valid):
+        nonlocal stage, calls
+        calls += 1
+        assert calls < 150
+        if stage == 0:
+            if entry in valid:
+                stage += 1
+                return entry
+            return 'N'
+        if entry == '1':
+            key = '4' if stage == 1 else 'A'
+            if key in valid:
+                stage += 1
+                return key
+            return 'N'
+        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        page = re.search(r'Page (\d+)/(\d+)', screen)
+        return 'B' if page.group(1) == page.group(2) else 'N'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
+    wd.do_scene(wd.Palette(False), conn, actor, width, height)
+    assert (actor.cash, actor.turns_used, actor.crew, actor.heat) == (0, 15, 3, 0)
+    assert actor.insignia == ('archive' if entry == '1' else 'modem')
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()
+
+
+@pytest.mark.parametrize('stage', ['scene', 'preview', 'committed'])
+def test_real_process_scene_disconnect_preserves_only_selected_insignia(tmp_path, stage):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b'>\x1b[0m ')
+        send(b'i')
+        wait_for(b'cancel')
+        assert b'BBS SCENE' in output
+        if stage != 'scene':
+            send(b'1')
+            wait_for(b'cancel')
+            send(b'4')
+            wait_for(b'[A]Act')
+        if stage == 'committed':
+            send(b'a')
+            wait_for(b'Archive insignia selected.')
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        conn = wd.connect(path)
+        actor = wd.read_player(conn, 0)
+        assert actor.insignia == ('archive' if stage == 'committed' else 'modem')
+        assert (actor.cash, actor.turns_used, actor.crew) == (300, 0, 3)
+        conn.close()

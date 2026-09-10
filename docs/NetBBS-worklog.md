@@ -463,6 +463,16 @@ ownership. Schema 8 helpers must not run before its columns exist; legacy upgrad
 fixtures must remove those columns when reconstructing older layouts. Exercise
 restart, simultaneous returns and a return between preview and Act with real SQLite.
 
+Public scene history is an allowlist of three territory events, not a copy of
+private receipts. Capture, abandonment and neutral stationing publish and prune
+inside their mutation transaction; a failed bulletin write must roll back the
+underlying action. Keep at most 500 rows, order by committed ID, bound stored
+names/text and sanitize before display. Do not backfill fictional activity on
+upgrade. Ordinary rollover retains the bounded, season-labeled history; explicit
+competition reset clears it after world settlement. Insignia are noncompetitive
+identity: fresh actor reads and season/reset saves must retain them, including
+when another session changes the cosmetic choice during an action preview.
+
 `python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
 against disposable SQLite worlds through the actual action resolvers. The default
 is fourteen days and seeds 362/363/364; use `--scenario NAME`, `--days 1..21`, and
