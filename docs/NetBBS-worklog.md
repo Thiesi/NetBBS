@@ -485,6 +485,11 @@ identity fields when rendering old results. SysOp advance/reset settles overdue
 natural seasons before changing the anchor, then closes the current season at
 the confirmed operator boundary. Moving the anchor first changes past cutoffs
 and permanently miscounts territory Rank in a quiet world.
+Private finale receipts share the archive/reset transaction and ordinary receipt
+retention/acknowledgement rules. A receipt write failure must roll back final
+earnings and archives too; otherwise a returning dormant caller can lose their
+only private explanation of the reset. Recognition views read archive snapshots,
+never recompute awards or mutate receipt acknowledgement state.
 
 `python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
 against disposable SQLite worlds through the actual action resolvers. The default

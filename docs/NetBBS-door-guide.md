@@ -343,6 +343,14 @@ insignia are snapshots. Skipped seasons are marked inactive with no invented
 winners. Cash and available crew are not published. Ordinary play never rewrites
 past results; advancing or resetting competition retains these cosmetic records.
 
+Scene also offers Your season reports (your retained medals and best results)
+and Hall of Fame (the actual medal winners by season). Both are free and use the
+same twelve-season archive. A private crackdown receipt in `[H]Log` records your
+final Rank, placement and medal, including when you were offline at rollover.
+The normal latest-500 receipt limit applies; an explicit SysOp competition reset
+clears receipts while retaining the cosmetic archive. No medal grants resources
+or protection in the fresh season.
+
 **MANUAL ? outside NetBBS, before activating season results:** stop old game
 sessions and create/verify the node backup with its world component as above.
 Schema 10 starts the archive without fabricating missing historical seasons.

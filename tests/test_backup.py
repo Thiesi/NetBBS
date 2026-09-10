@@ -1584,7 +1584,8 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
         assert conn.execute("SELECT operation_contract,operation_approach,operation_stage,successful_operations FROM players").fetchone() == (4, 2, 2, 3)
         assert conn.execute("SELECT cash,crew FROM recon WHERE viewer=1 AND target=2").fetchone() == (1234, 7)
         assert conn.execute("SELECT npc_key,npc_return_at FROM exchanges WHERE id=5").fetchone() == ("", "2026-09-11T08:00:00+00:00")
-        assert conn.execute("SELECT summary_text FROM events").fetchone()[0] == "A retained receipt"
+        assert "A retained receipt" in [r[0] for r in conn.execute("SELECT summary_text FROM events")]
+        assert any("Crackdown closed season 1" in r[0] for r in conn.execute("SELECT summary_text FROM events"))
     backup_module._validate_backup_source(source, allow_migrate=False)
 
 
@@ -1755,7 +1756,7 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
         assert conn.execute("SELECT npc_key,garrison FROM exchanges WHERE id=6").fetchone() == ("relay", 4)
         assert conn.execute("SELECT COUNT(*) FROM recon").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM exchanges WHERE controller_user_id IS NOT NULL").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == (0 if reset else 1)
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == (0 if reset else (1 if legacy else 2))
     audit = result["recent_operations"][-1]
     assert audit["action"] == ("reset competition" if reset else "advance season")
     assert audit["manifest_sha256"] == hashlib.sha256((destination / "manifest.json").read_bytes()).hexdigest()

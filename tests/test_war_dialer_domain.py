@@ -2885,6 +2885,36 @@ def test_archive_ties_positive_rank_and_historical_handles_survive_later_identit
     conn.close()
 
 
+def test_crackdown_receipts_include_dormant_results_once_and_remain_private(db_path):
+    conn, now, actor, rival = _rivals(db_path)
+    conn.execute('UPDATE players SET crew_recruited_total=10 WHERE user_id=1')
+    _give_exchange(conn, 2, now)
+    wd.settle_world(conn, now + wd.SEASON)
+    rows = conn.execute('SELECT target_user_id,summary_text,created_at,seen_at FROM events ORDER BY target_user_id').fetchall()
+    assert len(rows) == 2
+    assert 'Final Rank 100; place 2/2; Silver' in rows[0]['summary_text']
+    assert 'Final Rank 112; place 1/2; Gold' in rows[1]['summary_text']
+    assert all(row['seen_at'] is None and wd.from_iso(row['created_at']) == now + wd.SEASON for row in rows)
+    assert all('Final Rank' not in row['summary'] for row in wd.read_scene(conn))
+    conn.close()
+    conn = wd.connect(db_path)
+    wd.settle_world(conn, now + wd.SEASON + wd.DAY)
+    assert conn.execute('SELECT COUNT(*) FROM events').fetchone()[0] == 2
+    conn.close()
+
+
+def test_crackdown_receipt_failure_rolls_back_archive_and_competitive_reset(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    _give_exchange(conn, 2, now)
+    before = list(conn.iterdump())
+    conn.execute("CREATE TRIGGER deny_finale BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'receipt failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='receipt failed'):
+        wd.settle_world(conn, now + wd.SEASON)
+    conn.execute('DROP TRIGGER deny_finale')
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
 def test_archive_failure_rolls_back_cutoff_income_results_and_world_reset(db_path):
     conn, now, actor, _ = _rivals(db_path)
     _give_exchange(conn, 2, now)
