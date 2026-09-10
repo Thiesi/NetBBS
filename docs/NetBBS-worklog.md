@@ -4744,6 +4744,16 @@ other call site commits only. A new caller that changes the day or the station
 must call `checkpoint()`; one that finishes an ordinary action must call
 `commit()`, or the board rerolls under the caller.
 
+Every paged Voidrunner screen measures its capacity with `page_capacity` and
+fills pages with `paginate` (issue #418): one implementation that keeps a
+logical group -- a wrapped line, an authored silhouette, a keyed list entry --
+whole where it fits and continues it on the next page where it does not. With
+`keys`, a page also breaks rather than repeat a selection letter and carries its
+own letter map, so a letter always means what the page printing it says. Page
+movement goes through `page_step`, which clamps at both ends and returns `None`
+for anything that is not a paging key. A new paged screen that measures or
+clamps for itself will disagree with the rest at some width.
+
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen
 reserves its own hotkeys in its letter map (`MARKET_LETTERS`, `YARD_LETTERS`,

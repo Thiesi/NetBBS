@@ -4775,6 +4775,24 @@ Space, which both cost a redraw for every stray keypress and contradicted `B`
 being Back on every screen. Counts in prose are pluralised and the board says
 "New offers on day N".
 
+Every paged Voidrunner screen shares one paginator (issue #418). A screen names
+its content as groups -- a wrapped line, an authored silhouette, a keyed list
+entry -- and the paginator keeps a group whole where it fits, continues it on the
+next page where it does not, and never repeats a selection letter on one page.
+Prose screens are the degenerate case: every row is its own group. Capacity is
+measured once, from the wrapped title and the action bar the caller will see.
+Page movement is clamped in one place, for both spellings of the paging keys
+(`<`/`>` and `P`/`N`), and a screen pages with the pair it advertises, because
+`N` is a live action on screens that do not page with it. A screen that measures
+or clamps for itself will disagree with the rest at some terminal width, so it
+must not.
+
+The loop itself stays with each screen. A single driver owning Back, paging and
+dispatch for every paged screen was considered and rejected: it would rewrite the
+control flow of some thirty screens in one change, against a test suite that is
+their only safety net, to remove one line per screen that the shared page step
+already removes. The paginator is the part that was genuinely duplicated.
+
 Route planning starts from something real (issue #415): the chart's route
 planner opens its destination picker at once instead of an empty screen, the
 ledger lists Opportunities first, and the ledger's route draft pre-fills from the
