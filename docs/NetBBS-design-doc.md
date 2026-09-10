@@ -6958,6 +6958,20 @@ callers with unused turns see starting resources and actionable job/trade routes
 Help explains that newcomer protection follows preserved account age and is not
 renewed by rollover. These cues change no payout, protection, award or reset rule.
 
+**Terminal presentation (issue #362, slice 9; maintainer approved).** Scene offers
+a free Display screen with immediate ASCII-decoration, monochrome and Fast-mode
+toggles. Back writes nothing. Store one bounded boolean preference object per
+caller in world metadata; preserve it across season and competition resets and
+include it in the world backup. No competitive state or archive row is modified.
+ASCII mode changes authored box decorations while preserving caller names;
+monochrome removes styling SGR while retaining the screen controls used by the
+existing terminal UI. Every status, stake and outcome is readable without color.
+Static, compact ASCII diagrams identify exchange roles and NPC operators beside
+their actual current state. Normal action results may add a short fictional
+vignette; Fast omits optional art/flavor and keeps all stakes and net deltas.
+There are no animation delays. Optional native-door metadata will honor the
+caller's existing NetBBS Unicode preference when no local override is stored.
+
 **Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
 living crew is the available crew plus the members assigned across their owned
 exchanges. Capture requires at least two available members and commits one to the
@@ -7049,7 +7063,7 @@ before world creation; it never falls back to Guest. Caller messages remain clea
 and SysOp diagnostics are bounded. Commands do not activate or redeploy services.
 
 **World schema compatibility.** SQLite `user_version=1` identifies the original
-War Dialer schema; the current version is 4. `user_version=2` added shared-crew
+War Dialer schema; the current version is 10. `user_version=2` added shared-crew
 resource semantics without
 changing its column layout. A complete unversioned world is adopted through a
 numbered migration; its additive fields, retained history and version marker

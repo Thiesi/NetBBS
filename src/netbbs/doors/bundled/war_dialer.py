@@ -144,8 +144,13 @@ def _load_door_info() -> dict:
 class Palette:
     def __init__(self, truecolor: bool):
         self._truecolor = truecolor
+        self.ascii_art = False
+        self.monochrome = False
+        self.fast = False
 
     def _sgr(self, rgb: tuple[int, int, int], idx256: int) -> str:
+        if self.monochrome:
+            return ""
         if self._truecolor:
             r, g, b = rgb
             return f"{ESC}[38;2;{r};{g};{b}m"
@@ -188,7 +193,16 @@ class Palette:
         return self._sgr((250, 250, 255), 255)
 
 
+_ASCII_DECOR = False
+_MONOCHROME = False
+_ASCII_GLYPHS = str.maketrans({ch: '+' for ch in '\u2554\u2557\u255a\u255d'} | {'\u2550': '-', '\u2551': '|', '\u2502': '|'})
+
+
 def out(text: str = "") -> None:
+    if _ASCII_DECOR:
+        text = text.translate(_ASCII_GLYPHS)
+    if _MONOCHROME:
+        text = re.sub(r"\x1b\[[0-9;:]*m", "", text)
     sys.stdout.write(text)
     sys.stdout.flush()
 
@@ -2314,6 +2328,9 @@ def resolve_garrison(conn: sqlite3.Connection, player: Player, exchange_id: int,
 
 
 def draw_title(p: Palette, info: dict, season_number: int, w: int) -> None:
+    if p.fast:
+        out_line(f"WAR DIALER - Season {season_number}")
+        return
     out_line()
     out_line(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}")
     t1 = f"{p.gold}{BOLD}W A R   D I A L E R{RESET}"
@@ -2593,6 +2610,7 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "[T]rade Warez: quick cash. [C]rew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
         "Each completed season leaves a private crackdown receipt with your final Rank, placement and medal. Back on the switchboard, [I]Scene offers personal reports and Hall of Fame winners from the retained twelve seasons. Cosmetic recognition survives the competitive reset.",
         "Season awards are cosmetic Gold/Silver/Bronze for the top three positive-Rank players. Ties use ascending account ID. [I]Scene / Season results retains the latest 12 completed seasons, with inactive skipped seasons labeled and no permanent power bonus.",
+        "[I]Scene / Display offers ASCII decorations, monochrome and Fast mode. Settings survive seasons; there are no animation delays. Fast skips optional art and flavor while keeping every result and stake.",
         "[I]Scene is free: choose a cosmetic crew insignia, read NPC biographies/current homes, and browse the latest 500 public territory bulletins. Insignia survive season resets. Q leaves any screen or quits from the switchboard.",
         "[O]Ops: resume one three-step operation, buy rival recon, or read your latest ten 24-hour dossiers. Steps cost turns; browsing and reconnecting never reroll outcomes.",
         "[S]Kit: train one crew specialty or buy one consumable support item. Each costs cash and one turn; preview before Act. Both reset each season.",
@@ -2662,6 +2680,7 @@ def do_scene(p: Palette, conn: sqlite3.Connection, player: Player, width: int, h
         (["Season results", "Cosmetic podium awards and the latest twelve completed seasons; historical handles and final Rank."], True),
         (["Your season reports", "Personal results, medal counts and best Rank/placement within the retained archive."], True),
         (["Hall of Fame", "The recorded Gold, Silver and Bronze winners, grouped by season. Cosmetic recognition only."], True),
+        (["Display", "Free ASCII decorations, monochrome and Fast mode toggles. Preferences survive seasons."], True),
     ], width, height)
     if key in "BQ":
         return
@@ -2683,6 +2702,8 @@ def do_scene(p: Palette, conn: sqlite3.Connection, player: Player, width: int, h
             homes = [e for e in list_exchanges(conn) if e.npc_home]
         lines = []
         for exchange in homes:
+            if not p.fast:
+                lines.append(NPC_ART.get(exchange.npc_home, "[::]--[##]"))
             lines += ["NPC: " + NPC_NAMES[exchange.npc_home], NPC_STORIES[exchange.npc_home],
                       f"Home: #{exchange.id} {exchange.name}; {exchange_terms(exchange)[0]}.",
                       f"Current owner: {exchange_owner(exchange)}; defense {exchange_defense(exchange)}."]
@@ -2706,6 +2727,51 @@ def do_scene(p: Palette, conn: sqlite3.Connection, player: Player, width: int, h
         show_season_recognition(p, conn, player.user_id, width, height)
     elif key == "6":
         show_season_recognition(p, conn, player.user_id, width, height, hall=True)
+    elif key == "7":
+        do_display(p, conn, player.user_id, width, height)
+
+
+DISPLAY_KEYS = ('ascii_art', 'monochrome', 'fast')
+ROLE_ART = {'pbx': '[o]-[o] PBX', 'carrier': '==[##]== CARRIER', 'hub': '[::]---{##} HUB'}
+NPC_ART = {'patch': '(o)--[::]', 'relay': '<==[##]==>', 'spool': '[##]--{##}'}
+
+
+def read_display(conn: sqlite3.Connection, user_id: int) -> dict[str, bool]:
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (f'display:{user_id}',)).fetchone()
+    if row is None:
+        return {}
+    try:
+        values = json.loads(row[0])
+        return {key: value for key, value in values.items() if key in DISPLAY_KEYS and type(value) is bool}
+    except (ValueError, AttributeError):
+        return {}
+
+
+def apply_display(p: Palette, values: dict[str, bool]) -> None:
+    global _ASCII_DECOR, _MONOCHROME
+    for key in DISPLAY_KEYS:
+        setattr(p, key, values.get(key, False))
+    _ASCII_DECOR, _MONOCHROME = p.ascii_art, p.monochrome
+
+
+def do_display(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, height: int) -> None:
+    labels = ('ASCII decorations', 'Monochrome', 'Fast mode')
+    while True:
+        values = read_display(conn, user_id)
+        apply_display(p, values)
+        records = [([f"{label}: {'ON' if getattr(p, key) else 'OFF'}",
+                     "Toggle freely; retained across seasons. Fast skips static art/flavor; all stakes and results remain visible."], True)
+                   for key, label in zip(DISPLAY_KEYS, labels)]
+        choice = pick_record_page(p, 'DISPLAY', records, width, height)
+        if choice in 'BQ':
+            return
+        key = DISPLAY_KEYS[int(choice) - 1]
+        with _write_transaction(conn):
+            values = read_display(conn, user_id)
+            values[key] = not values.get(key, False)
+            conn.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         (f'display:{user_id}', json.dumps(values)))
+        apply_display(p, values)
 
 
 def show_season_recognition(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, height: int, *, hall: bool = False) -> None:
@@ -2759,6 +2825,8 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
              "Ring links: " + " -- ".join(f"#{e.id}" for e in ring),
              "Owning either linked neighbor discounts a capture attempt by $10. All sites remain attackable. [G]arrison opens owner services."]
     for exchange in exchanges:
+        if not p.fast:
+            lines.append(ROLE_ART[exchange.role])
         owner = exchange_owner(exchange)
         lines += [f"#{exchange.id} {exchange.name} - {exchange_terms(exchange)[0]}",
                   f"Owner: {owner}; garrison {exchange.garrison}; security +{exchange_defense(exchange)-exchange.garrison}; total defense {exchange_defense(exchange)}; ${exchange.income_per_hour}/hour",
@@ -2900,6 +2968,10 @@ def confirm_action(p: Palette, conn: sqlite3.Connection, player: Player, action:
 def show_action_result(p: Palette, headlines: list[str], delta: ActionDelta, busted: bool,
                        width: int, height: int) -> None:
     lines = list(headlines)
+    if not p.fast:
+        lines.append("Sirens cut through the carrier tone." if busted else
+                     "A clean signal carries your crew's name across the boards." if delta.rank > 0 else
+                     "The line goes quiet as the crew closes the log.")
     if busted:
         lines.append("*** BUSTED *** Heat reset; losses included below.")
     lines += [f"Net cash: {'+' if delta.cash >= 0 else '-'}${abs(delta.cash):,}; available crew: {delta.crew:+,}",
@@ -3343,6 +3415,7 @@ def main() -> int:
         is_new_player = conn.execute("SELECT 1 FROM players WHERE user_id=?", (user_id,)).fetchone() is None
         player = load_or_create_player(conn, user_id, handle, now, season_number)
 
+        apply_display(palette, read_display(conn, user_id))
         draw_title(palette, info, player.season_number, w)
         if is_new_player:
             draw_help(palette, w, height, onboarding=True)
@@ -3354,6 +3427,7 @@ def main() -> int:
             screen_now = now_utc()
             state = dashboard_state(conn, user_id, screen_now)
             player = state.player
+            apply_display(palette, read_display(conn, user_id))
             if player.season_number != previous_season:
                 draw_season_change(palette, player.season_number, w, height)
             page_index, page_count = draw_dashboard(palette, state, screen_now, w, height, page_index)
