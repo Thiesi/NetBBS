@@ -2476,7 +2476,7 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
     elif player.season_number > 1 and rank == 0 and player.turns_used == 0:
         lines += [f"Fresh competition: ${STARTING_CASH}, {STARTING_CREW} available crew and {TURNS_PER_DAY} turns. "
                   "Start with [J]Job, or [T]rade to fund recruitment; previews show exact stakes.",
-                  "Your identity, account age and insignia survive. Past results remain in [I]Scene; medals give no resource or protection bonus."]
+                  "Identity, account age and insignia persist across seasons. [I]Scene shows any retained results; medals give no resource or protection bonus."]
     lines.append(f"Rank: {rank:,} - {tier_name(rank)}")
     tier = tier_index(rank)
     if tier + 1 < len(RANK_TIERS):
