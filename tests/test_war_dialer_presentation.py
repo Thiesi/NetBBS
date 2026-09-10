@@ -2215,3 +2215,63 @@ def test_season_recognition_from_scene_is_historical_free_and_bounded(tmp_path, 
     else:
         assert ('No completed-season result' if choice == '5' else 'No medals awarded') in normalized
     conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, monkeypatch, width, height):
+    conn = wd.connect(tmp_path / 'late-join.db')
+    wd.ensure_schema(conn)
+    start = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, start)
+    wd.ensure_exchanges_seeded(conn, 1, start)
+    late = start + wd.SEASON - wd.DAY
+    actor = wd.load_or_create_player(conn, 1, 'LateCaller', late, 1)
+    identity_age = actor.created_at
+    state = wd.dashboard_state(conn, 1, late)
+    text = ' '.join(wd.dashboard_lines(state, late))
+    assert 'Joining late?' in text and 'Cautious' in text
+    assert 'even without a medal' in text and 'all saved operation progress (cased or prepared)' in text
+    assert 'All competitive progress and resources reset' in text and 'assigned crew, exchanges, Rank' in text
+    wd.resolve_recruit(conn, actor, late)
+    after = start + wd.SEASON
+    state = wd.dashboard_state(conn, 1, after)
+    assert (state.player.cash, state.player.crew, state.player.turns_used) == (300, 3, 0)
+    assert state.player.created_at == identity_age
+    assert wd.is_in_grace(state.player, after)
+    assert not wd.is_in_grace(state.player, after + wd.DAY)
+    assert conn.execute('SELECT rank,medal FROM season_results WHERE user_id=1').fetchone()['rank'] == 10
+    text = ' '.join(wd.dashboard_lines(state, after))
+    assert 'Ready to play: $300, 3 available crew and 15 turns' in text
+    assert 'medals give no resource or protection bonus' in text
+    wd.load_or_create_player(conn, 2, 'FirstVisitInSeasonTwo', after, 2)
+    first_visit = ' '.join(wd.dashboard_lines(wd.dashboard_state(conn, 2, after), after))
+    assert 'any retained results' in first_visit and 'Past results remain' not in first_visit
+    assert conn.execute('SELECT COUNT(*) FROM season_results WHERE user_id=2').fetchone()[0] == 0
+    conn.execute('UPDATE players SET cash=328, crew=2 WHERE user_id=2')
+    class TradeRandom:
+        def randint(self, low, high): return low
+        def random(self): return .99
+    trading = wd.read_player(conn, 2)
+    wd.resolve_trade_warez(conn, trading, after, TradeRandom())
+    assert trading.turns_used == 1 and wd.rank_score(trading) == 0
+    refill = ' '.join(wd.dashboard_lines(wd.dashboard_state(conn, 2, after + wd.DAY), after + wd.DAY))
+    assert f'Ready to play: ${trading.cash}, 2 available crew and 15 turns' in refill
+    assert 'Ready to play: $300' not in refill
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    before = list(conn.iterdump())
+    for stamp in (late, after):
+        # Refresh only forward; the saved late state is used for its own display.
+        shown = state if stamp == after else wd.DashboardState(actor, [], 0, after, None)
+        page_start = len(written)
+        _, count = wd.draw_dashboard(wd.Palette(False), shown, stamp, width, height)
+        if stamp == late:
+            assert 'Reset in' in ''.join(written[page_start:])
+        for page in range(1, count): wd.draw_dashboard(wd.Palette(False), shown, stamp, width, height, page)
+    assert list(conn.iterdump()) == before
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()
