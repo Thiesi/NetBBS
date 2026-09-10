@@ -4205,7 +4205,8 @@ def title_rows(info: dict, inner_w: int) -> list[tuple[str, str, str]]:
     if large:
         rows += [("logo", row, "center") for row in TITLE_LOGO]
     wordmark = "V O I D R U N N E R" if inner_w >= 19 else "VOIDRUNNER"
-    rows.append(("wordmark", _fit_text(wordmark, inner_w), "center"))
+    # Below the wordmark's width the letters wrap onto more rows; nothing is cut.
+    rows += [("wordmark", part, "center") for part in _wrap_output(wordmark, max(1, inner_w)).split("\r\n")]
     rows.append(("blank", "", "left"))
     rows += [("sub", line, "center") for line in _wrap_output(TITLE_SUBTITLE, max(1, inner_w - 2)).split("\r\n")]
     rows += [("blank", "", "left"), ("rule", "", "left")]
@@ -4214,14 +4215,14 @@ def title_rows(info: dict, inner_w: int) -> list[tuple[str, str, str]]:
     if large and _visible_width(one_line) <= inner_w:
         rows.append(("meta", one_line, "left"))
     else:
-        short = [("NODE", _fit_text(node, 16)), ("PILOT", _fit_text(handle, 16)), ("GALAXY", "48 Systems")]
-        joined = "  " + "  │  ".join(f"{label}: {value}" for label, value in short)
-        if large and _visible_width(joined) <= inner_w:
-            rows.append(("meta", joined, "left"))
-        else:
-            galaxy = "48 Star Systems" if _visible_width("  GALAXY: 48 Star Systems") <= inner_w else "48 Systems"
-            stacked = [("NODE", node), ("PILOT", handle), ("GALAXY", galaxy)]
-            rows += [("meta", _fit_text(f"  {label}: {value}", inner_w), "left") for label, value in stacked]
+        # Stack rather than clip: the callsign is caller-visible identity text and
+        # a valid 16-character wide-glyph handle must survive intact.
+        galaxy = "48 Star Systems" if _visible_width("  GALAXY: 48 Star Systems") <= inner_w else "48 Systems"
+        stacked = [("NODE", node), ("PILOT", handle), ("GALAXY", galaxy)]
+        for label, value in stacked:
+            # Wrap, never trim: a long or wide callsign continues on the next row.
+            parts = _wrap_output(f"{label}: {value}", max(1, inner_w - 2)).split("\r\n")
+            rows += [("meta", "  " + part, "left") for part in parts]
     return rows
 
 
