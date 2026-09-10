@@ -168,6 +168,9 @@ OUTBOUND_QUEUE_SIZE = 200
 # NEWROOM, USERLIST, STATUS AFK, IAMHERE, TERMSIZE, USERIP, BBSMETA, STATUS
 # LASTSEEN: what one announcement can queue at most.
 OUTBOUND_LINES_PER_ANNOUNCEMENT = 8
+# What a connection queues before any caller: up to five INFO lines,
+# IMALIVE, CAPABILITIES, the STATS ask -- with room to spare.
+OUTBOUND_CONNECTION_OVERHEAD = 16
 OUTBOUND_RATE_PER_SECOND = 5.0
 OUTBOUND_BURST = 10
 # Issue #375: the hub's own limit is one message per 0.5 s per user
@@ -255,6 +258,17 @@ class _Connection:
 
 
 OpenConnection = Callable[..., Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
+
+
+def _stamp_imalive(line: str) -> str:
+    """Replace the epoch in a queued IMALIVE line's field 5 with the
+    moment it is written, so a PONG measures the hub, not this node's
+    own outbound queue."""
+    fields = line.rstrip("\n").split(protocol.SEPARATOR)
+    if len(fields) >= 5 and fields[4]:
+        fields[4] = f"{time.time():.6f}"
+        return protocol.SEPARATOR.join(fields) + "\n"
+    return line
 
 
 def _script_hash() -> str:
@@ -827,6 +841,8 @@ class MrcBridge:
             while not self._node_bucket.has_token():
                 await asyncio.sleep(1.0 / OUTBOUND_RATE_PER_SECOND)
             self._node_bucket.consume()
+            if not nick and "~IMALIVE:" in line:
+                line = _stamp_imalive(line)  # the round trip starts now, not at enqueue
             writer.write(line.encode("ascii", errors="replace"))
             await writer.drain()
             if nick:
@@ -962,12 +978,13 @@ class MrcBridge:
     def _outbound_cap(self) -> int:
         """The queue's bound (review of #388): the configured size, or
         `OUTBOUND_LINES_PER_ANNOUNCEMENT` lines for every announced
-        caller when that is more -- a reconnect queues every caller's
-        NEWROOM, USERLIST and facts before the writer sends a line, and
-        the oldest of those must not be evicted by the newest. Announced
-        callers are live sessions, so this stays a bound."""
+        caller plus the connection's own prefix (INFO, IMALIVE,
+        CAPABILITIES, STATS) when that is more -- a reconnect queues all
+        of it before the writer sends a line, and the oldest must not be
+        evicted by the newest. Announced callers are live sessions, so
+        this stays a bound."""
         announced = sum(len(nicks) for nicks in self._announced.values())
-        return max(self._outbound_size, OUTBOUND_LINES_PER_ANNOUNCEMENT * announced)
+        return max(self._outbound_size, OUTBOUND_CONNECTION_OVERHEAD + OUTBOUND_LINES_PER_ANNOUNCEMENT * announced)
 
     def _drain_outbound_queue(self) -> None:
         """Anything queued while disconnected refers to a session the

@@ -984,9 +984,13 @@ session needs the same treatment.
   `reload_settings`. Facts are noted on every channel entry, bridged or
   not, so `_reconcile_announced` (a mapping added while callers are
   inside) announces with this session's facts. The outbound queue's bound
-  is `_outbound_cap()`: the configured 200, or eight lines per announced
-  caller when that is more, so a reconnect's announcements never evict
-  each other (review of #388).
+  is `_outbound_cap()`: the configured 200, or the connection's own prefix
+  (`OUTBOUND_CONNECTION_OVERHEAD`) plus eight lines per announced caller
+  when that is more, so a reconnect's announcements never evict each other
+  or the INFO lines ahead of them. An IMALIVE's timestamp is rewritten by
+  the writer as the line reaches the socket (`_stamp_imalive`), so the
+  round trip measures the hub, not this node's queue. The audit row for a
+  settings save records both caller-disclosure switches.
 - Wire limits (issue #376, MRCDoc rev 1.26): `MAX_ROOM` 20, `MAX_TOPIC` 55,
   `MAX_PASSWORD` 20, `MAX_ROOM_PASSWORD` 32, `MAX_ARGUMENT` 20 live in
   `netbbs.mrc.protocol` beside `MAX_NAME` and `MAX_BODY`. `sanitize_room`

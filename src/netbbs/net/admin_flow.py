@@ -5371,7 +5371,8 @@ async def _mrc_settings_screen(
                 db, actor=actor, action="set_mrc_settings",
                 detail=(
                     f"enabled={saved.enabled} hub={saved.host}:{saved.port} tls={saved.tls} site={saved.site_name!r} "
-                    f"open_rooms={open_saved.enabled} cap={open_saved.cap} retention={open_saved.retention_days}d"
+                    f"open_rooms={open_saved.enabled} cap={open_saved.cap} retention={open_saved.retention_days}d "
+                    f"send_caller_ip={saved.send_caller_ip} send_caller_meta={saved.send_caller_meta}"
                 ),
             )
             return saved

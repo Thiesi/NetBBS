@@ -493,12 +493,22 @@ def test_outbound_queue_is_bounded(db, lane, lobby):
         _enable(db, fake.port)
         set_mrc_room(db, lobby, "lobby")
         hub = ChatHub()
-        bridge = await _connected_bridge(db, lane, hub, fake, outbound_queue_size=2)
+        # The bound is `_outbound_cap()`: never below what one connection
+        # and its announced callers need, so announcements are never the
+        # thing evicted -- a flood from one caller beyond that is.
+        bridge = await _connected_bridge(db, lane, hub, fake, outbound_queue_size=2, per_user_interval_seconds=60.0)
         try:
             for name in ("u1", "u2", "u3", "u4", "u5"):
                 await bridge.local_join(lobby, name)
+            await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM::lobby")) == 5, timeout=5.0)
+            assert bridge.status().dropped_outbound == 0
+            cap = bridge._outbound_cap()
+            assert cap == 16 + 8 * 5
+            for i in range(cap):
+                await bridge.local_away("u1", f"away {i}")  # two unbucketed lines each
             await asyncio.sleep(0.1)
             assert bridge.status().dropped_outbound > 0
+            assert bridge._outbound.qsize() + bridge._held_total <= cap
             assert bridge.state is MrcState.CONNECTED
         finally:
             await bridge.close()
@@ -1077,8 +1087,8 @@ def test_held_lines_count_against_the_outbound_cap(db, lane, lobby, alice):
                 await bridge.local_away("alice", f"away {i}")  # two unbucketed packets each
                 await asyncio.sleep(0.01)
             await asyncio.sleep(0.2)
-            cap = bridge._outbound_cap()  # 8 per announced caller beats the tiny configured size
-            assert cap == 8
+            cap = bridge._outbound_cap()  # the connection prefix plus 8 per announced caller
+            assert cap == 16 + 8
             assert bridge._held_total + bridge._outbound.qsize() <= cap
             assert bridge.status().dropped_outbound - before >= 20 - cap
         finally:
@@ -1232,3 +1242,15 @@ def test_facts_reach_a_mapping_added_while_callers_are_inside(db, lane, lobby, a
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_imalive_is_stamped_at_the_socket_and_the_audit_names_the_switches(db, lane, lobby, alice):
+    """Review of #388: a queued IMALIVE carries the time it is written,
+    so local queueing never inflates the round trip."""
+    from netbbs.mrc.bridge import _stamp_imalive
+
+    stale = "CLIENT~My_Board~4242~SERVER~1000000000.000000~~IMALIVE:My Board\n"
+    fresh = _stamp_imalive(stale)
+    assert fresh.startswith("CLIENT~My_Board~4242~SERVER~") and fresh.endswith("~~IMALIVE:My Board\n")
+    assert float(fresh.split("~")[4]) > 1_700_000_000.0
+    assert _stamp_imalive("alice~S~lobby~SERVER~~lobby~IAMHERE\n") == "alice~S~lobby~SERVER~~lobby~IAMHERE\n"

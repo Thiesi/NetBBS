@@ -334,3 +334,5 @@ def test_mrc_settings_caller_switches_toggle_and_save(db, lane, sysop):
     assert "USERIP" in text and "BBSMETA" in text
     saved = load_mrc_settings(db)
     assert saved.send_caller_ip is True and saved.send_caller_meta is True
+    detail = [a for a in list_recent_actions(db, limit=5) if a.action == "set_mrc_settings"][0].detail
+    assert "send_caller_ip=True send_caller_meta=True" in detail
