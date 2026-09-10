@@ -6419,9 +6419,9 @@ heat-gaining action rolls a bust chance of `(Heat−80)×2%`, capped ~40%,
 costing 25% cash and 20% crew and resetting Heat to 0. Success chance
 for both PvE and PvP actions is `attacker_crew / (attacker_crew +
 defender_crew)`, clamped to [10%, 90%] so nothing is ever a guaranteed
-win or loss. New accounts get 48h Raid immunity, and no attacker may
-Raid the same target twice in a row without the target logging in
-between.
+win or loss. New accounts get 48h Raid immunity. Under the adopted slice 5
+rule, every committed raid attempt grants its target 24 hours of immunity
+against all attackers; login and receipt acknowledgement do not clear it.
 
 Explicitly out of scope for v1: procedural exchange generation, a
 multi-resource economy, factions/alliances, and an item/weapon shop —
@@ -6441,7 +6441,7 @@ season and ownership as applicable, and commits all effects, events and its
 one-turn cost together before result output. A target changed since selection
 is rejected without cost. Login settlement also holds one write transaction.
 Refresh, quit and disconnect never save a session snapshot; ordinary refresh
-does not clear the login-based repeat-raid protection.
+does not clear target-wide raid recovery.
 
 World initialization checks for existing exchanges under the same write lock
 as seeding. An existing nonempty world with an unexpected exchange count is
@@ -6456,7 +6456,7 @@ rather than letting delayed suffixes select an action. A standalone Escape can
 dismiss a pause and is ignored at menus.
 
 **Clock settlement (issue #362, slice 2).** Screen refresh and action transactions
-settle Heat and the turn allowance without clearing login-based raid protection.
+settle Heat and the turn allowance without clearing raid recovery.
 An unused allowance has no running window; the first committed action anchors
 its 24 hours. Reading, login, an unaffordable attempt and cancellation do not
 start it. Existing nonzero allowances keep their stored anchor; expiry leaves
