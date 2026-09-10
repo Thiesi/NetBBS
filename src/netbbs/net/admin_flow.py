@@ -246,7 +246,7 @@ from netbbs.link.work_items import (
 )
 from netbbs.moderation.blocklist import BlocklistError, block_user, is_blocked, unblock_user
 from netbbs.moderation.log import list_actions_for_target_user, list_recent_actions, record_action
-from netbbs.mrc.protocol import room_name_error
+from netbbs.mrc.protocol import display_roster_entry, room_name_error
 from netbbs.mrc.bridge import MrcBridge, MrcState, MrcStatus
 from netbbs.mrc.settings import (
     MrcChannelMapping,
@@ -5590,7 +5590,7 @@ async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, no
             roster = mrc_bridge.remote_roster(mapping.channel)
             who = f"{len(roster)} MRC user{'s' if len(roster) != 1 else ''}"
             if roster:
-                who += ": " + ", ".join(sanitize_text(name) for name in roster[:12])
+                who += ": " + ", ".join(sanitize_text(display_roster_entry(name)) for name in roster[:12])
                 if len(roster) > 12:
                     who += ", ..."
             await session.write_line(

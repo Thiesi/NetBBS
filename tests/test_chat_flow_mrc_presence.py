@@ -192,10 +192,12 @@ def test_secret_helpers_are_refused_as_chat(db, lane, hub, presence, channel, al
         rig = await _rig(db, lane, hub, channel)
         try:
             session, _ = await _run(
-                lane, hub, presence, channel, alice, ["!identify hunter2", "!Register hunter2", "!weather", "/quit"], mrc_bridge=rig.bridge,
+                lane, hub, presence, channel, alice,
+                ["!identify hunter2", "!Register hunter2", "|03!update password hunter2", "!weather", "/quit"], mrc_bridge=rig.bridge,
             )
             text = _text(session)
-            assert text.count("would carry your password into chat") == 2
+            # A pipe-code prefix does not slip past: the wire would strip it.
+            assert text.count("would carry your password into chat") == 3
             await rig.fake.wait_for(lambda p: p.body.endswith(" !weather") and p.from_user == "alice")
             assert not [p for p in rig.fake.received if "hunter2" in p.body]
             assert not [m for m in get_scrollback(db, channel) if "hunter2" in (m.body or "")]
@@ -229,6 +231,26 @@ def test_secret_helpers_are_refused_in_an_unbridged_channel_too(db, lane, hub, p
             session, _ = await _run(lane, hub, presence, plain, alice, ["!identify hunter2 ", "/quit"], mrc_bridge=rig.bridge)
             assert "would carry your password into chat" in _text(session)
             assert not [m for m in get_scrollback(db, plain) if "hunter2" in (m.body or "")]
+        finally:
+            await rig.close()
+    asyncio.run(scenario())
+
+
+def test_the_roster_shows_handles_with_spaces(db, lane, hub, presence, channel, alice):
+    """Review of #390: `/who` shows a USERLIST entry's nick in display
+    spelling; the bridge keeps the wire spelling for matching."""
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            async def push_roster():
+                await rig.fake.wait_for(lambda p: p.body == "NEWROOM::lobby" and p.from_user == "alice")
+                await rig.fake.send_line("SERVER~~~CLIENT~~lobby~USERLIST:Some_User@Other,bob~")
+                await asyncio.sleep(0.2)
+
+            session, _ = await _run(lane, hub, presence, channel, alice, ["/who", "/quit"], mrc_bridge=rig.bridge, while_joined=push_roster)
+            text = _text(session)
+            assert "Some User@Other" in text and "Some_User" not in text
+            assert "Some_User@Other" in rig.bridge.remote_roster(channel)
         finally:
             await rig.close()
     asyncio.run(scenario())

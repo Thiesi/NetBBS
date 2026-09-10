@@ -555,6 +555,13 @@ def display_handle(name: str) -> str:
     return name.replace("_", " ")
 
 
+def display_roster_entry(entry: str) -> str:
+    """A `USERLIST` entry (`nick` or `nick@site`) as shown: the nick
+    half in display spelling, the site as sent."""
+    nick, sep, site = entry.partition("@")
+    return display_handle(nick) + sep + site
+
+
 ACTIVITY_LABELS = {0: "quiet", 1: "low activity", 2: "medium activity", 3: "high activity"}
 
 

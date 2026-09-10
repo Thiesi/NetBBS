@@ -146,7 +146,7 @@ from netbbs.link.node_profiles import (
     latest_identity_observation,
 )
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX
-from netbbs.mrc.protocol import MAX_ARGUMENT
+from netbbs.mrc.protocol import MAX_ARGUMENT, display_roster_entry
 from netbbs.mrc.bridge import MrcBridge, MrcNotice, MrcStatus
 from netbbs.mrc.settings import (
     MrcChannelMapping,
@@ -2579,7 +2579,7 @@ def _mrc_roster_entries(ctx: ChatCommandContext) -> list[str]:
     state, same as `_remote_roster_entries`."""
     if ctx.mrc_bridge is None or not ctx.mrc_bridge.is_bridged(ctx.channel):
         return []
-    return [sanitize_text(name) for name in ctx.mrc_bridge.remote_roster(ctx.channel)]
+    return [sanitize_text(display_roster_entry(name)) for name in ctx.mrc_bridge.remote_roster(ctx.channel)]
 
 
 async def _announce_mrc_bridge(session: Session, mrc_bridge: MrcBridge, channel: Channel, user: User) -> None:
@@ -2665,6 +2665,9 @@ _MRC_SECRET_HELPERS = frozenset({"!identify", "!register", "!update", "!roompass
 
 
 def _mrc_helper_carries_a_secret(line: str) -> bool:
+    """`line` as the outbound path would send it (pipe codes stripped,
+    leading whitespace gone): a `|03!identify secret` is `!identify
+    secret` on the wire."""
     return line.split(" ", 1)[0].lower() in _MRC_SECRET_HELPERS
 
 
@@ -4399,7 +4402,7 @@ async def _chat_loop(
 
                         if not line:
                             continue
-                        if mrc_bridge is not None and _mrc_helper_carries_a_secret(line):
+                        if mrc_bridge is not None and _mrc_helper_carries_a_secret(strip_pipe_codes(line).lstrip()):
                             history.forget(raw_line)  # read_line recorded it before we saw it
                             # Issue #378: the hub is moving its identity
                             # verbs to `!helper` chat text; typed here, the

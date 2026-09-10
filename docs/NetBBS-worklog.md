@@ -973,8 +973,11 @@ session needs the same treatment.
   `_broadcast_notice` to every active mapping and is not remembered (unlike
   `BANNER:`); `_record_stats` also keeps the fourth `STATS` field as
   `_network_activity` (`parse_stats_activity`, 0-3, `ACTIVITY_LABELS`);
-  `display_handle` (underscores to spaces) is applied to author labels and
-  private/broadcast sender labels only, never to anything matched or sent;
+  `display_handle` (underscores to spaces) is applied at display boundaries
+  only -- author labels, private/broadcast/CTCP sender labels, roster
+  entries (`display_roster_entry`, the nick half) -- never to anything
+  matched or sent; `_mrc_helper_carries_a_secret` classifies the line with
+  pipe codes stripped, as the outbound path would send it;
   `_mrc_helper_carries_a_secret` refuses `!identify`, `!register`,
   `!update` and `!roompass` as chat in *any* channel while the node has an
   MRC bridge -- a paused mapping or a local channel would still record the
