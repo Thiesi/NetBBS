@@ -6971,8 +6971,12 @@ existing terminal UI. Every status, stake and outcome is readable without color.
 Static, compact ASCII diagrams identify exchange roles and NPC operators beside
 their actual current state. Normal action results may add a short fictional
 vignette; Fast omits optional art/flavor and keeps all stakes and net deltas.
-There are no animation delays. Optional native-door metadata will honor the
-caller's existing NetBBS Unicode preference when no local override is stored.
+There are no animation delays. War Dialer launch metadata includes the optional
+boolean `unicode_style`, copied from the caller's existing NetBBS preference.
+False defaults to ASCII decorations; true or omission preserves the rich default.
+An explicit in-game ASCII choice wins. Changing monochrome/Fast alone does not
+freeze the inherited Unicode default. Unrelated doors receive no new fields;
+the existing native-door JSON boundary and supervision remain unchanged.
 
 **Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
 living crew is the available crew plus the members assigned across their owned

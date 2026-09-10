@@ -2388,6 +2388,57 @@ def test_real_process_display_disconnect_preserves_only_chosen_toggle(tmp_path, 
         conn.close()
 
 
+@pytest.mark.parametrize('default_ascii', [False, True])
+def test_display_local_override_wins_over_host_default_without_affecting_other_toggles(tmp_path, monkeypatch, default_ascii):
+    conn = wd.connect(tmp_path / 'host-display.db')
+    wd.ensure_schema(conn)
+    palette = wd.Palette(False)
+    palette.default_ascii = default_ascii
+    monkeypatch.setattr(wd, '_ASCII_DECOR', False)
+    monkeypatch.setattr(wd, '_MONOCHROME', False)
+    monkeypatch.setattr(wd, 'out', lambda text='': None)
+    wd.apply_display(palette, {})
+    assert palette.ascii_art is default_ascii
+    choices = iter(['2', 'B'])
+    monkeypatch.setattr(wd, 'pick_record_page', lambda *a, **k: next(choices))
+    wd.do_display(palette, conn, 1, 80, 24)
+    assert wd.read_display(conn, 1) == {'monochrome': True}
+    assert palette.ascii_art is default_ascii
+    choices = iter(['1', 'B'])
+    wd.do_display(palette, conn, 1, 80, 24)
+    assert wd.read_display(conn, 1) == {'monochrome': True, 'ascii_art': not default_ascii}
+    palette.default_ascii = not default_ascii
+    wd.apply_display(palette, wd.read_display(conn, 1))
+    assert palette.ascii_art is (not default_ascii)
+    conn.close()
+
+
+@pytest.mark.parametrize('host_unicode,local_ascii', [(None, None), (True, None), (False, None), (False, False), (True, True)])
+def test_real_process_unicode_metadata_defaults_and_local_override(tmp_path, host_unicode, local_ascii):
+    import json
+    path = tmp_path / 'host-world.db'
+    conn = wd.connect(path)
+    wd.ensure_schema(conn)
+    wd.bind_world_owner(conn, 'a' * 32)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    if local_ascii is not None:
+        conn.execute("INSERT INTO meta(key,value) VALUES ('display:1',?)", (json.dumps({'ascii_art': local_ascii}),))
+    conn.close()
+    info = {'user_id': 1, 'handle': 'Caller', 'war_dialer_owner': 'a' * 32}
+    if host_unicode is not None: info['unicode_style'] = host_unicode
+    metadata = tmp_path / 'door_info.json'
+    metadata.write_text(json.dumps(info), encoding='utf-8')
+    env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(metadata), PYTHONIOENCODING='utf-8')
+    result = subprocess.run([sys.executable, '-u', str(_WAR_DIALER_PATH)], input=b'q', capture_output=True, env=env, timeout=10)
+    assert result.returncode == 0 and result.stderr == b''
+    ascii_expected = local_ascii if local_ascii is not None else host_unicode is False
+    assert ('\u2554'.encode('utf-8') not in result.stdout) is ascii_expected
+    assert b'SWITCHBOARD' in result.stdout
+
+
 
 def test_fast_goodbye_retains_rank_without_a_decorative_frame(tmp_path, monkeypatch):
     conn = wd.connect(tmp_path / 'fast-goodbye.db')

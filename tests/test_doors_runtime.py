@@ -658,3 +658,15 @@ def test_war_dialer_path_probes_run_outside_event_loop(db, lane, player, tmp_pat
     door = create_door(db, "Probe", sys.executable, args=(str(script),), creator=player)
     assert asyncio.run(_run(FakeSession(), lane, door, player)).exit_code == 0
     assert len(probes) == 1
+
+
+@pytest.mark.parametrize('unicode_enabled', [False, True])
+def test_war_dialer_metadata_forwards_only_the_existing_unicode_choice(db, player, tmp_path, unicode_enabled):
+    from netbbs.doors.runtime import _write_door_info
+    from netbbs.net.unicode_style_preference import set_unicode_style_enabled
+    set_unicode_style_enabled(db, player, unicode_enabled)
+    info = json.loads(_write_door_info(db, tmp_path, FakeSession(), player, war_dialer=True).read_text(encoding='utf-8'))
+    assert info['unicode_style'] is unicode_enabled
+    unrelated = json.loads(_write_door_info(db, tmp_path, FakeSession(), player).read_text(encoding='utf-8'))
+    assert 'unicode_style' not in unrelated and 'war_dialer_owner' not in unrelated
+    assert set(info) - set(unrelated) == {'unicode_style', 'war_dialer_owner'}

@@ -105,6 +105,7 @@ def _load_door_info() -> dict:
         "terminal_width": 80,
         "terminal_height": 24,
         "color_depth": "256",
+        "unicode_style": True,
         "node_name": "NetBBS",
     }
     path = os.environ.get("NETBBS_DOOR_INFO")
@@ -145,6 +146,7 @@ class Palette:
     def __init__(self, truecolor: bool):
         self._truecolor = truecolor
         self.ascii_art = False
+        self.default_ascii = False
         self.monochrome = False
         self.fast = False
 
@@ -2755,7 +2757,7 @@ def read_display(conn: sqlite3.Connection, user_id: int) -> dict[str, bool]:
 def apply_display(p: Palette, values: dict[str, bool]) -> None:
     global _ASCII_DECOR, _MONOCHROME
     for key in DISPLAY_KEYS:
-        setattr(p, key, values.get(key, False))
+        setattr(p, key, values.get(key, p.default_ascii if key == 'ascii_art' else False))
     _ASCII_DECOR, _MONOCHROME = p.ascii_art, p.monochrome
 
 
@@ -2772,7 +2774,7 @@ def do_display(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, h
         key = DISPLAY_KEYS[int(choice) - 1]
         with _write_transaction(conn):
             values = read_display(conn, user_id)
-            values[key] = not values.get(key, False)
+            values[key] = not values.get(key, p.default_ascii if key == 'ascii_art' else False)
             conn.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                          (f'display:{user_id}', json.dumps(values)))
         apply_display(p, values)
@@ -3376,6 +3378,7 @@ def main() -> int:
         out_line(str(exc))
         return 1
     palette = Palette(truecolor=info.get("color_depth") == "truecolor")
+    palette.default_ascii = info.get("unicode_style", True) is False
     try:
         _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
     except (TypeError, ValueError):

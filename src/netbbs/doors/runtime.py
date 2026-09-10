@@ -25,6 +25,7 @@ from netbbs.doors.endpoints import NodeLease, StreamEndpoint, pty_endpoint, sock
 from netbbs.doors.dropfiles import write_drop_files
 from netbbs.doors.profiles import preflight
 from netbbs.net.color_depth_preference import effective_truecolor
+from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.session import SessionClosedError
 from netbbs.moderation.log import record_action
 
@@ -52,6 +53,7 @@ def _write_door_info(db, workdir, session, player, war_dialer=False):
             "color_depth": "truecolor" if effective_truecolor(session, db, player) else "256",
             "node_name": session.node_display_name}
     if war_dialer:
+        info["unicode_style"] = unicode_style_enabled(db, player)
         # An opaque namespace belongs to the node database and survives its backup.
         # It is not a credential and does not depend on a mutable display name.
         db.connection.execute("INSERT OR IGNORE INTO node_config (key, value) VALUES (?, ?)",
