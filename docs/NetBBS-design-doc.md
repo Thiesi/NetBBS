@@ -4698,44 +4698,31 @@ multiplier, cargo with no recorded acquisition cost and the `uncosted_*` ledger
 fields, duplicate mission ids, sequential squadrons without a `formation` record,
 and the pre-`scores/` `leaderboard.json`.
 
-The population that needs them is not the project's own nodes. Persistent
-Voidrunner shipped in v5.4.0 and that release stays downloadable, so any external
-installation can hold, and can still create, a schema-1 career. The migration is
-therefore scoped to every released installation, and it must be **total**: no
-save may require an executable the SysOp no longer has, and no caller's career
-may become unopenable because it was saved at an awkward moment.
+There is no migration. `SCHEMA_VERSION` becomes 2, a schema-1 career is refused
+with a message that says the save predates this version and a new career can be
+started, and the eight runtime branches are deleted so the validator can require
+the new shapes. This is a door game whose affected population is a handful of
+pre-overhaul careers on a handful of nodes; a migration for them would be more
+code, and more code that can go wrong on someone's save, than the thing it
+protects. Hall of Fame records are the exception worth keeping, because they
+outlive careers by design: a `leaderboard.json` predating `scores/` is imported
+after the loading career has validated, and the old file is retained. The import
+is complete-or-retry -- it is attempted on each launch until every record it
+holds has been written, and a partial or failed attempt leaves it to be tried
+again -- because the alternative is a transient error stranding historical
+rankings permanently.
 
-The decision is to define `SCHEMA_VERSION = 2` with an explicit
-`upgrade_save(document)` that runs once on load, before validation, and then to
-delete the runtime branches it makes unreachable so the validator can require the
-new shapes. The upgrade settles or refunds legacy futures at current terms, marks
-unknown-cost cargo lots with a recorded sentinel rather than a fabricated basis,
-assigns unique mission ids, and imports `leaderboard.json` into `scores/` once.
-The previous document is retained as the existing `.previous` copy, which is the
-recovery path if an upgraded career will not load.
+The refusal is a first-class outcome, not an error: it names the reason, keeps
+the existing file untouched -- alongside its `.previous` copy -- and offers to
+begin a new career. Nothing is rewritten, so nothing can be rewritten wrongly,
+and a SysOp who wants the old career back has both files exactly as they were.
 
-An interrupted journey is upgraded with everything else, because refusing it
-would need a recovery an external SysOp may not be able to perform. Only the
-records the retired rules owned are rewritten, and only in ways the running game
-could itself have produced. A fight that has not begun -- no outcome, opponent at
-full strength -- receives the tactical state a new fight would have been given. A
-fight already under way under the retired rules is resolved as a disengagement:
-the pilot breaks contact, hull, cargo and standing stay exactly as saved, and the
-journey continues at its next phase. A cached squadron without a formation record
-receives one matching the position it had reached. Nothing else inside
-`pending_travel` is touched, and the phase, destination and RNG state are carried
-across unchanged, so every resume-consistency invariant still holds afterwards.
-
-Implementation is a single slice, not a series: a half-retired legacy path is
-worse than either end state. It is not a blocker for anything else, and it lands
-with its own regression pass over every retained legacy fixture -- each must
-upgrade to a document the strict validator accepts, and gameplay after the
-upgrade must match the legacy behaviour wherever the design says it must,
-including a career saved in each travel phase.
-Splitting the module into a package (`domain.py`, `save.py`, `ui/`) is a
-follow-up to that slice rather than part of it; the launcher resolves the door
-through `resolve_bundled_door_path`, which would need a package entry, and the
-tests import the module by path.
+Implementation is a single slice: `SCHEMA_VERSION = 2`, the refusal path, and the
+deletion of the branches it makes unreachable, together, because a half-retired
+legacy path is worse than either end state. Splitting the module into a package
+(`domain.py`, `save.py`, `ui/`) is a follow-up to that slice; the launcher
+resolves the door through `resolve_bundled_door_path`, which would need a package
+entry, and the tests import the module by path.
 
 Voidrunner's showcase development is tracked in issue #310. Completed station
 actions (including trading, equipment, crew, contracts, scans, faction rewards,
@@ -4751,8 +4738,8 @@ payouts, docking, and customs decisions commit with their corresponding progress
 state before narration or further input. A restart preserves the event RNG state
 and cannot reroll an encounter or duplicate a reward. Only the interrupted hop
 resumes; the pilot can plan the remaining route after resolving it. Existing
-galaxy seeds stay compatible; schema-1 careers are carried forward by the
-schema-2 migration described above rather than by additive fields.
+galaxy seeds stay compatible; schema-1 careers are refused at load rather than
+carried forward, as described above.
 Career loading validates the supported schema and galaxy-generator version,
 record shapes, types, references and gameplay ranges before any startup write.
 Missing additive fields retain their legacy defaults; unknown structural fields
@@ -4902,9 +4889,8 @@ accepting offers does not replenish them; jumps
 advance game time. Posted terms and consumed offers survive restart. New careers
 may hold at most three active contracts; legacy over-limit careers retain every
 job but cannot accept more until below the limit. IDs are unique across active
-jobs and cached offers. Duplicate IDs from a schema-1 career are repaired by the
-migration, together with the contract snapshots inside any interrupted journey,
-so the two still match afterwards.
+jobs and cached offers, and the validator requires it: a document that repeats one
+is refused rather than repaired.
 Deadlines are inclusive: a contract is eligible on its deadline day, expires
 before rewards or mission encounters on the next day, and is never paid late.
 Already-charted survey offers are unavailable. Selecting a posted or active
@@ -5315,9 +5301,8 @@ therefore protects against the pair, while target selection can remove a fragile
 or dangerous partner first. No healing occurs between foes; successful evasion or
 bribery breaks contact with the whole squadron, as before.
 
-Formation metadata is attached when a new pair is generated, and by the schema-2
-migration to a cached squadron from a schema-1 career, matching the position that
-squadron had reached. Target selection checkpoints
+Formation metadata is attached when a new pair is generated, and every saved
+squadron carries it. Target selection checkpoints
 order and combat state before acknowledgement and closes after any valid combat
 decision. Formation creation and target changes consume no encounter RNG.
 
@@ -5343,11 +5328,9 @@ generated raiders use destination danger for both squadron chance and tier; stor
 opponents retain their stats, and tier/name RNG draw ordering stays unchanged.
 
 The tactical pattern step and Brace readiness checkpoint with opponent HP and the
-last exchange. Pattern selection consumes no extra RNG. Every fight uses the
-tactical rules: the schema-2 migration gives a not-yet-begun schema-1 fight the
-state a new fight would have had, and resolves one already under way as a
-disengagement rather than inventing a mid-fight tactical position it never held.
-Reject malformed or unknown tactical versions through preserving recovery. Automated probes establish bounded fight lengths and
+last exchange. Pattern selection consumes no extra RNG. Every fight uses the tactical
+rules and every saved fight carries its tactical state. Reject malformed or
+unknown tactical versions through preserving recovery. Automated probes establish bounded fight lengths and
 mechanical tradeoffs; human playtesting remains required for engagement/balance.
 
 Voidrunner customs inspections show complete surrender/bribe terms in height-aware
@@ -5546,9 +5529,9 @@ Splitting orders cannot reduce that per-unit fee. Purchase screens show quantity
 term, pickup station, principal, fee and the station stock remaining after the
 order before signing, with Back writing nothing.
 Mature goods settle on arrival or station entry before mission completion checks.
-Orders from a schema-1 career carry no pickup or principal metadata; the schema-2
-migration settles or refunds them at current terms as it loads, so no order is
-left running under retired rules.
+Every saved order carries its pickup and principal metadata; a document without
+it is refused with the rest of its schema-1 career rather than settled early
+under terms its pilot did not agree to.
 
 Voidrunner permits one active session per pilot within a save directory. A
 nonblocking OS file lock is held from before loading through the final checkpoint;
@@ -5567,8 +5550,9 @@ for the manual directory move and service configuration steps.
 
 Hall of Fame records are retained independently at `scores/<user_id>.json`; only
 the displayed ranking is limited to 20. A `leaderboard.json` from before those
-records is imported into `scores/` once by the schema-2 migration, and the old
-file is retained but no longer read at runtime. Updates replace only that pilot's file using a flushed
+records is imported into `scores/` once, after the loading career has validated,
+and the old file is retained but no longer read at runtime. Scores outlive
+careers, so they survive the schema-2 cutoff even though careers do not. Updates replace only that pilot's file using a flushed
 private temporary file. The career save also retains the credit high-water mark
 across retirement and temporary score-write failures, allowing a later checkpoint
 to repair its score. The career save is authoritative for live gameplay state and
