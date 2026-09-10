@@ -12074,13 +12074,28 @@ def test_combat_session_passes_the_patrol_flag_to_destruction(monkeypatch):
         assert world.save.pilot.notoriety == expected
 
 
-def test_salvage_fee_is_capped_at_credits_and_never_creates_debt():
-    world = _world_with_seed(42); world.save.pilot.credits = 50
+def test_underfunded_destruction_never_creates_debt_and_buys_only_the_hull_it_pays_for():
+    world = _world_with_seed(42); ship = world.save.ship; maximum = vr.hull_hp_max(ship)
+    world.save.pilot.credits = 100; ship.hull_hp = 10
+    message = vr.destroy_ship(world)
+    assert world.save.pilot.credits == 0 and ship.hull_hp == maximum // 4 + (maximum - maximum // 4) * 100 // vr.salvage_fee(ship) < maximum
+    assert "the tug patched what 100cr covers" in message
+    for paid in range(0, vr.salvage_fee(ship)):
+        assert maximum // 4 <= vr.salvage_hull(ship, paid) < maximum  # never full until the whole fee is paid
+    ship.hull_hp = 1
     vr.destroy_ship(world)
-    assert world.save.pilot.credits == 0
-    world.save.pilot.credits = 0
-    vr.destroy_ship(world)
-    assert world.save.pilot.credits == 0 and world.save.current_system == 0
+    assert world.save.pilot.credits == 0 and ship.hull_hp == maximum // 4 and world.save.current_system == 0
+    world.save.pilot.credits = vr.salvage_fee(ship); vr.destroy_ship(world)
+    assert ship.hull_hp == maximum and world.save.pilot.credits == 0
+
+
+def test_destruction_is_never_cheaper_per_hull_point_than_repair():
+    world = _world_with_seed(42); ship = world.save.ship; maximum = vr.hull_hp_max(ship)
+    for credits in (0, 40, 100, 200, 1000):
+        ship.hull_hp = 10; world.save.pilot.credits = credits
+        repaired = 10 + min(maximum - 10, credits // 4)
+        vr.destroy_ship(world)
+        assert ship.hull_hp <= repaired + maximum // 4 or credits >= vr.salvage_fee(ship)  # the only free hull is the flyable quarter floor
 
 
 def test_combat_screen_discloses_the_salvage_fee_when_hull_is_low():
@@ -12095,5 +12110,6 @@ def test_combat_screen_discloses_the_salvage_fee_when_hull_is_low():
     low = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
     assert f"LOW HULL: one third of maximum hull or less. Destruction: {fee}cr salvage fee" in low
     world.save.pilot.credits = 30
-    assert "Destruction: 30cr salvage fee" in " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    low = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    assert "Destruction: 30cr salvage fee" in low and f"hull patched to {vr.salvage_hull(world.save.ship, 30)}/{vr.hull_hp_max(world.save.ship)}" in low
     assert f"destruction costs {fee}cr salvage" in " ".join(vr.station_deck_lines(world))

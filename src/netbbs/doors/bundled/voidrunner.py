@@ -3190,6 +3190,19 @@ def salvage_fee(ship: Ship) -> int:
     return SALVAGE_FEE_BASE + hull_hp_max(ship) * 4
 
 
+def salvage_hull(ship: Ship, paid: int) -> int:
+    """Hull after a tow: full only when the fee is paid in full; otherwise the
+    flyable quarter of maximum plus the share of the rest that the paid fraction
+    of the fee buys, which stays below maximum until the whole fee is paid
+    (issue #402 review)."""
+    maximum = hull_hp_max(ship)
+    fee = salvage_fee(ship)
+    if paid >= fee:
+        return maximum
+    floor = max(1, maximum // 4)
+    return floor + (maximum - floor) * max(0, paid) // fee
+
+
 def destroy_ship(world: World, *, patrol: bool = False) -> str:
     """Ship destruction has real consequences -- lost cargo, a salvage fee
     scaled to the hull, and a tow back home -- but is never a dead end. A
@@ -3199,14 +3212,19 @@ def destroy_ship(world: World, *, patrol: bool = False) -> str:
 
     Notoriety clears only when a Concord patrol destroys the ship: the
     wanted status ends with the patrol's report. A raider kill leaves it
-    unchanged, so losing a fight is never the cheapest way to shed it."""
+    unchanged, so losing a fight is never the cheapest way to shed it.
+
+    A pilot who cannot pay the whole fee gets the hull the fee covers: a
+    quarter of maximum plus the paid fraction of the rest, always short of
+    full hull, so an empty account buys a flyable ship, not a repair."""
     ship = world.save.ship
     lost_cargo = sum(world.save.cargo.values())
     for commodity, quantity in list(world.save.cargo.items()):
         _dispose_cargo(world, commodity, quantity)
-    penalty = min(world.save.pilot.credits, salvage_fee(ship))
+    fee = salvage_fee(ship)
+    penalty = min(world.save.pilot.credits, fee)
     world.save.pilot.credits -= penalty
-    ship.hull_hp = hull_hp_max(ship)
+    ship.hull_hp = salvage_hull(ship, penalty)
     world.save.current_system = 0
     if patrol:
         world.save.pilot.notoriety = 0
@@ -3214,7 +3232,8 @@ def destroy_ship(world: World, *, patrol: bool = False) -> str:
     world.save.pilot.note(f"Ship destroyed -- salvage tug towed you back to Freeport ({penalty}cr fee)."
                           + (" Concord closed your file." if patrol else ""))
     return (f"Your ship is destroyed! {lost_cargo} units of cargo lost, "
-            f"a {penalty}cr salvage fee charged. You wake up at Freeport Anchorage."
+            f"a {penalty}cr salvage fee charged. You wake up at Freeport Anchorage"
+            + (f" with hull {ship.hull_hp}/{hull_hp_max(ship)}: the tug patched what {penalty}cr covers." if penalty < fee else ".")
             + (" Notoriety cleared." if patrol else ""))
 
 
@@ -7516,7 +7535,9 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
             lines.append("Cover/harry reduce your shot; recovery exposes the enemy. Harry lowers escape chance by 10 percentage points, minimum 5%.")
     else: lines.append("Original fight rules (no Brace).")
     if ship.hull_hp * 3 <= hull_hp_max(ship):
-        lines.append(f"LOW HULL: one third of maximum hull or less. Destruction: {min(pilot.credits, salvage_fee(ship))}cr salvage fee, all cargo lost, tow to Freeport.")
+        paid = min(pilot.credits, salvage_fee(ship))
+        lines.append(f"LOW HULL: one third of maximum hull or less. Destruction: {paid}cr salvage fee, all cargo lost, tow to Freeport"
+                     + (f" with hull patched to {salvage_hull(ship, paid)}/{hull_hp_max(ship)} (the fee is {salvage_fee(ship)}cr)." if paid < salvage_fee(ship) else "."))
     lines += [
         "[F] Fight: fire once; a surviving enemy returns fire.",
         f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics):.0%} success; failure draws enemy fire.",
@@ -7535,7 +7556,8 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                      f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
                      "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable."))
     if details:
-        lines += [f"Destruction: {salvage_fee(ship)}cr salvage fee (capped at your credits), all cargo lost, tow to Freeport; "
+        lines += [f"Destruction: {salvage_fee(ship)}cr salvage fee, all cargo lost, tow to Freeport; paying less than the fee leaves the hull "
+                  f"at a quarter of maximum plus the paid share of the rest, never full; "
                   + ("this patrol's kill clears notoriety." if patrol else "notoriety stays."),
                   f"Shields Tier {ship.shield_tier}: reduce incoming damage by {ship.shield_tier * 3}, minimum 1.",
                   f"Weapons Tier {ship.weapon_tier}: +{ship.weapon_tier * 4} damage; gunner bonus +{gunner_bonus(ship)}.",
