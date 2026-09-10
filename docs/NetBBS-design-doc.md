@@ -4705,17 +4705,26 @@ the new shapes. This is a door game whose affected population is a handful of
 pre-overhaul careers on a handful of nodes; a migration for them would be more
 code, and more code that can go wrong on someone's save, than the thing it
 protects. Hall of Fame records are the exception worth keeping, because they
-outlive careers by design: a `leaderboard.json` predating `scores/` is imported
-after the loading career has validated, and the old file is retained. The import
-is complete-or-retry -- it is attempted on each launch until every record it
-holds has been written, and a partial or failed attempt leaves it to be tried
-again -- because the alternative is a transient error stranding historical
-rankings permanently.
+outlive careers by design, including for pilots who never launch again: a
+`leaderboard.json` predating `scores/` is imported in full, every row of it, and
+the old file is retained. Because that writes files other sessions own, the
+import runs under the maintenance gate -- the same exclusion a restore takes, and
+the one thing that guarantees no pilot session is aboard -- and a launch that
+cannot take the gate skips the import rather than racing a live checkpoint. It
+belongs to the launch, not to a career: it runs before the career is loaded and
+whatever the load then decides, so a node whose only returning caller is refused
+still imports its rankings. It is complete-or-retry: attempted on each launch
+until every row has been written, so neither a busy node nor a transient error
+strands a historical ranking.
 
-The refusal is a first-class outcome, not an error: it names the reason, keeps
-the existing file untouched -- alongside its `.previous` copy -- and offers to
-begin a new career. Nothing is rewritten, so nothing can be rewritten wrongly,
-and a SysOp who wants the old career back has both files exactly as they were.
+The refusal is a first-class outcome, not an error: it names the reason, changes
+nothing by itself, and offers to begin a new career. Declining leaves the file
+exactly as it was, so a caller who wants to fetch the old build first can. There
+is one active save slot per pilot, so accepting the offer takes it: the schema-1
+document is aged into the existing `.previous` copy and the new career is written
+in its place, which is the same retention every checkpoint already performs. That
+is a deliberate replacement of a readable-but-unsupported career, not the case
+`write_save` refuses, which is overwriting a career it cannot read at all.
 
 Implementation is a single slice: `SCHEMA_VERSION = 2`, the refusal path, and the
 deletion of the branches it makes unreachable, together, because a half-retired
@@ -4755,8 +4764,11 @@ The screen shows the candidate's callsign, day, credits and whether travel is
 pending. Restoring it explicitly rolls back progress to that checkpoint, requires
 a final confirmation, and first retains the original bytes in a unique recovery
 copy. Back/EOF writes nothing. Unreadable or oversized originals, invalid previous
-copies, unsupported versions and failed preservation require manual SysOp repair;
-there is no caller-facing reset that bypasses preservation. Recovery copies are
+copies, versions this build cannot recognise and failed preservation require
+manual SysOp repair; there is no caller-facing reset that bypasses preservation.
+A career from a *known older* schema is the one exception, because nothing about
+it is in doubt: it is offered a new career instead, and accepting still preserves
+the old document as the `.previous` copy rather than bypassing preservation. Recovery copies are
 limited to eight per pilot; a SysOp must archive older copies manually before
 another restore. The pilot session lease covers recovery as well as normal play.
 This local previous-checkpoint copy is not a substitute for node backup coverage.
@@ -5551,9 +5563,12 @@ for the manual directory move and service configuration steps.
 
 Hall of Fame records are retained independently at `scores/<user_id>.json`; only
 the displayed ranking is limited to 20. A `leaderboard.json` from before those
-records is imported into `scores/` once, after the loading career has validated,
-and the old file is retained but no longer read at runtime. Scores outlive
-careers, so they survive the schema-2 cutoff even though careers do not. Updates replace only that pilot's file using a flushed
+records is imported into `scores/` once per save directory, under the maintenance
+gate, and the old file is retained but no longer read at runtime. The import
+belongs to the launch rather than to a career: a node whose only returning caller
+holds a refused schema-1 save still imports its rankings, which is exactly when
+they matter most. Scores outlive careers, so they survive the schema-2 cutoff
+even though careers do not. Updates replace only that pilot's file using a flushed
 private temporary file. The career save also retains the credit high-water mark
 across retirement and temporary score-write failures, allowing a later checkpoint
 to repair its score. The career save is authoritative for live gameplay state and
