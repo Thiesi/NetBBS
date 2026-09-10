@@ -4735,6 +4735,8 @@ same career. Its payment covers the quoted cargo and round-trip fuel/wages plus
 The guide explains buying cargo, jumps advancing game time, refuelling, first
 upgrades and encounter choices, and retains a recap of active commitments for
 returning pilots. Reading or declining it neither writes a save nor advances time.
+Accepting First Flight returns straight to the station deck, which shows the next
+step (market, quantity, chart destination) as a result line (issue #415).
 
 Escape answers No at every yes/no confirmation and cancels a quantity field,
 erasing what was typed (issue #413); prompts say so. Unsupported keys still do
@@ -4761,6 +4763,11 @@ action, so it ends with a yes/no confirmation that states the fuel cost, the
 destination's danger (or unknown) and that a day passes; No retains the chart
 with a cancelled-departure result and writes nothing. Contract and route jumps
 keep their existing preview screens and deliberate Jump actions.
+
+Route planning starts from something real (issue #415): the chart's route
+planner opens its destination picker at once instead of an empty screen, the
+ledger lists Opportunities first, and the ledger's route draft pre-fills from the
+best remembered lead when one exists. Counts in prose are pluralised.
 
 Contract details state only the notes that apply (issue #412): the cargo-basis
 note when cargo of that commodity is already aboard, the crew-wage note when crew
