@@ -368,7 +368,11 @@ def test_the_lastseen_opt_out_is_sent_on_announcement(db, lane, lobby, alice):
         set_mrc_room(db, lobby, "lobby")
         hub = ChatHub()
         recorded: dict = {"alice": None}
-        bridge = await _connected_bridge(db, lane, hub, fake, load_lastseen=lambda db_, u: recorded.get(u))
+        # A slow keepalive: its reconciliation would race the scripted
+        # leave/re-enter below; the test is about the announcement packets.
+        bridge = await _connected_bridge(
+            db, lane, hub, fake, load_lastseen=lambda db_, u: recorded.get(u), keepalive_interval_seconds=5.0,
+        )
         try:
             hub.join(lobby.name, ParticipantId("alice", 1))
             await bridge.local_join(lobby, "alice")
