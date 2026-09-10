@@ -4660,6 +4660,11 @@ the removal; a resumed hop must not record it twice, which the escort index and
 cached bounty outcome already guarantee. Dossiers carry `failed` and `expired`
 as a pair or not at all; the validator rejects one without the other.
 
+Tactical damage reads its threat curve from the fight's own `tactics["version"]`
+through `tactical_threat_bonus`; changing a curve means a new version in
+`TACTICAL_THREAT_BONUS_BY_VERSION` and a `TACTICAL_RULESET_VERSION` bump, never
+editing an existing tuple, so cached fights resume with the damage they showed.
+
 `salvage_fee` must exceed a full repair from zero for every hull class and tier
 (`hull_hp_max * 4` plus a base); `destroy_ship` takes `patrol=` from the combat
 session and only that path clears notoriety. Any new destruction path must pass
