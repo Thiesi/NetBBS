@@ -2280,6 +2280,10 @@ def test_display_toggles_are_free_paginated_and_survive_seasons(tmp_path, monkey
         nonlocal selected, calls
         calls += 1
         assert calls < 60
+        screen = ' '.join(_ANSI_RE.sub('', ''.join(written).split('\x1b[2J\x1b[H')[-1]).split())
+        for digit, label in zip('123', ('ASCII decorations', 'Monochrome', 'Fast mode')):
+            if digit in valid:
+                assert label in screen
         if selected: return 'B'
         if setting in valid:
             selected = True
@@ -2308,8 +2312,8 @@ def test_display_toggles_are_free_paginated_and_survive_seasons(tmp_path, monkey
 def test_ascii_monochrome_output_preserves_controls_names_and_noncolor_results(monkeypatch, capsys):
     monkeypatch.setattr(wd, '_ASCII_DECOR', True)
     monkeypatch.setattr(wd, '_MONOCHROME', True)
-    wd.out('\x1b[2J\x1b[38;5;51m\u2554\u2550\u2551\u2557\x1b[0m Caller Jos\u00e9: +10 Rank')
-    assert capsys.readouterr().out == '\x1b[2J+-|+ Caller Jos\u00e9: +10 Rank'
+    wd.out(wd.decor('\x1b[2J\x1b[38;5;51m\u2554\u2550\u2551\u2557\x1b[0m') + ' Caller Jos\u00e9 A\u2502B: +10 Rank')
+    assert capsys.readouterr().out == '\x1b[2J+-|+ Caller Jos\u00e9 A\u2502B: +10 Rank'
 
 
 def test_fast_mode_skips_only_optional_flavor_and_art(tmp_path, monkeypatch):
@@ -2418,3 +2422,17 @@ def test_real_process_unicode_metadata_defaults_and_local_override(tmp_path, hos
     ascii_expected = local_ascii if local_ascii is not None else host_unicode is False
     assert ('\u2554'.encode('utf-8') not in result.stdout) is ascii_expected
     assert b'SWITCHBOARD' in result.stdout
+
+
+
+def test_fast_goodbye_retains_rank_without_a_decorative_frame(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / 'fast-goodbye.db')
+    wd.ensure_schema(conn)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', wd.now_utc(), 1)
+    palette = wd.Palette(False)
+    palette.fast = True
+    lines = []
+    monkeypatch.setattr(wd, 'out_line', lines.append)
+    wd.draw_goodbye(palette, actor, 20)
+    assert lines == ['Carrier lost. Rank 0 - Newbie']
+    conn.close()
