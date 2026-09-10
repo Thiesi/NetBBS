@@ -556,7 +556,8 @@ at the market, refuel at the yard if necessary, and select the station on the
 chart. Docking with the full load delivers it automatically. Jumps advance the
 day; this introductory contract has no deadline.
 
-First Flight can be accepted once per career. Abandoning it closes that offer;
+Accepting the offer returns you to the deck, where a result line names the next
+step. First Flight can be accepted once per career. Abandoning it closes that offer;
 the guide remains available. Completion points toward a first upgrade and regular
 trading or contracts. The normal risks of travel still apply.
 
