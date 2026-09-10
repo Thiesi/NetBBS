@@ -2123,8 +2123,8 @@ def test_destroy_ship_clears_cargo_and_returns_player_to_freeport_with_full_hull
     assert world.save.cargo == {}
     assert world.save.current_system == 0
     assert world.save.ship.hull_hp == vr.hull_hp_max(world.save.ship)
-    assert world.save.pilot.credits < 1200  # salvage fee charged
-    assert world.save.pilot.notoriety == 0  # any ship loss wipes wanted status
+    assert world.save.pilot.credits == 1200 - vr.salvage_fee(world.save.ship)  # salvage fee charged
+    assert world.save.pilot.notoriety == 7  # a raider kill does not clear wanted status (#402)
 
 
 # -- travel encounter variety -------------------------------------------
@@ -12041,3 +12041,59 @@ def test_order_screens_show_stock_after_reservation(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr._screen_futures_order(vr.Palette(False), world, world.save.active_futures[0])
     assert "10 units reserved from that station's stock; cancelling returns them." in " ".join(output.getvalue().split())
+
+
+# --- #402: destruction is dearer than repair; only a patrol kill clears notoriety ----
+
+
+@pytest.mark.parametrize("hull_class", list(vr.HULL_REFITS))
+@pytest.mark.parametrize("hull_tier", [0, vr.UPGRADES["hull"]["max_tier"]])
+def test_salvage_fee_exceeds_a_full_repair_for_every_hull(hull_class, hull_tier):
+    world = _world_with_seed(42)
+    world.save.ship.hull_class, world.save.ship.hull_tier = hull_class, hull_tier
+    world.save.ship.hull_hp = 1
+    full_repair = (vr.hull_hp_max(world.save.ship) - 1) * 4
+    assert vr.salvage_fee(world.save.ship) > full_repair
+
+
+def test_raider_destruction_keeps_notoriety_and_patrol_destruction_clears_it():
+    world = _world_with_seed(42); world.save.pilot.notoriety = 9
+    assert "Notoriety" not in vr.destroy_ship(world) and world.save.pilot.notoriety == 9
+    world.save.pilot.notoriety = 9
+    assert "Notoriety cleared" in vr.destroy_ship(world, patrol=True) and world.save.pilot.notoriety == 0
+
+
+def test_combat_session_passes_the_patrol_flag_to_destruction(monkeypatch):
+    for patrol, expected in ((False, 5), (True, 0)):
+        world, pirate = _world_with_pending_fight()
+        world.save.pilot.notoriety = 5; world.save.ship.hull_hp = 1
+        monkeypatch.setattr(vr, "read_key", lambda: "F")
+        monkeypatch.setattr(vr, "tactical_round", lambda w, p, t, a: (0, 0, ["they fire"]) if not setattr(w.save.ship, "hull_hp", 0) else None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert vr._screen_combat_session(vr.Palette(False), world, pirate, patrol=patrol) == "destroyed"
+        assert world.save.pilot.notoriety == expected
+
+
+def test_salvage_fee_is_capped_at_credits_and_never_creates_debt():
+    world = _world_with_seed(42); world.save.pilot.credits = 50
+    vr.destroy_ship(world)
+    assert world.save.pilot.credits == 0
+    world.save.pilot.credits = 0
+    vr.destroy_ship(world)
+    assert world.save.pilot.credits == 0 and world.save.current_system == 0
+
+
+def test_combat_screen_discloses_the_salvage_fee_when_hull_is_low():
+    world = _world_with_seed(42); pirate = vr.Pirate("Opponent", 1, 50, 50)
+    fee = vr.salvage_fee(world.save.ship)
+    world.save.ship.hull_hp = vr.hull_hp_max(world.save.ship)
+    calm = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    assert f"{fee}cr salvage fee" not in calm
+    assert "notoriety stays" in " ".join(vr.combat_display_lines(world, pirate, [], patrol=False, details=True))
+    assert "clears notoriety" in " ".join(vr.combat_display_lines(world, pirate, [], patrol=True, details=True))
+    world.save.ship.hull_hp = 10
+    low = " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    assert f"LOW HULL: one third of maximum hull or less. Destruction: {fee}cr salvage fee" in low
+    world.save.pilot.credits = 30
+    assert "Destruction: 30cr salvage fee" in " ".join(vr.combat_display_lines(world, pirate, [], patrol=False))
+    assert f"destruction costs {fee}cr salvage" in " ".join(vr.station_deck_lines(world))

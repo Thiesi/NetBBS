@@ -967,6 +967,10 @@ intents and Brace. Invalid repeat-Brace input spends no turn or randomness.
 
 **[F] Fight** exchanges one round, **[E] Evade** attempts escape, and pirates also
 allow **[D] Dump & evade** (one random cargo unit) and an affordable **[P] Pay bribe**.
+Losing the fight costs a salvage fee of 200 credits plus four per point of maximum
+hull (never more than you have), all cargo, and a tow to Freeport with full hull;
+it is always dearer than repairing beforehand. Only a Concord patrol's kill clears
+notoriety. The low-hull warning and the Info view show the fee.
 Read the displayed odds and consequences: failed evasion or refused bribery draws
 fire; a pirate takes bribe credits only on acceptance. Patrols instead allow an
 affordable **[S] Surrender**, which pays the stated fine and clears notoriety.
