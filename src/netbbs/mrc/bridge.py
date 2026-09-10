@@ -247,9 +247,22 @@ class _Connection:
 OpenConnection = Callable[..., Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
 
 
+_OS_LABELS = {"windows": "Windows", "linux": "Linux", "darwin": "OSX"}
+_ARCH_LABELS = {
+    "amd64": "x86_64", "x86_64": "x86_64", "x64": "x86_64",
+    "arm64": "aarch64", "aarch64": "aarch64",
+    "x86": "i386", "i386": "i386", "i686": "i386",
+}
+
+
 def _platform_label() -> str:
-    machine = platform.machine() or "unknown"
-    return f"{sys.platform}.{machine}"
+    """The handshake's `{Os}.{arch}` in the hub's own convention
+    (`Linux.x86_64`, `Windows.x86_64`, `OSX.x86_64`; MRCDoc rev 1.26),
+    normalised from what Python reports (issue #376)."""
+    system = platform.system() or "Unknown"  # "NetBSD", "FreeBSD", "Windows", "Linux", "Darwin"
+    os_name = _OS_LABELS.get(system.lower(), system)
+    machine = (platform.machine() or "unknown").lower()
+    return f"{os_name}.{_ARCH_LABELS.get(machine, machine)}"
 
 
 class MrcBridge:
@@ -637,7 +650,7 @@ class MrcBridge:
         connection = _Connection(reader=reader, writer=writer)
         self._connection = connection
         handshake = protocol.build_handshake(
-            settings.site_name, software=f"NetBBS_{self._version}", platform=_platform_label()
+            settings.site_name, platform=_platform_label(), client_version=self._version,
         )
         writer.write(handshake.encode("ascii", errors="replace"))
         await writer.drain()
@@ -1226,8 +1239,8 @@ class MrcBridge:
         body = protocol.sanitize_body(text)
         if not body:
             return "nothing to send"
-        if len(f"NEWTOPIC:{mapping.room}:{body}") > protocol.MAX_BODY:
-            return f"that topic is longer than MRC allows ({protocol.MAX_BODY} characters with the room name)"
+        if len(body) > protocol.MAX_TOPIC:
+            return f"that topic is longer than MRC allows ({protocol.MAX_TOPIC} characters)"
         bucket = self._user_bucket(username)
         if not bucket.has_token():
             self._dropped_outbound += 1
@@ -1724,7 +1737,11 @@ class MrcBridge:
         mapped channel or an open room -- or `None`. Resolved before any
         open-room gate is applied: entering an existing channel is that
         channel's own decision, the node-wide defaults only govern
-        materializing a new row."""
+        materializing a new row. A name the wire would cut matches
+        nothing: a 25-character request must not land in the
+        20-character room that shares its prefix (review of #387)."""
+        if protocol.room_name_error(room) is not None:
+            return None
         return self._by_room.get(protocol.sanitize_room(room).lower())
 
     def note_entry(self, channel: Channel) -> None:
@@ -1907,9 +1924,10 @@ class MrcBridge:
             return "you aren't announced to the hub yet"
         if not secret or any(ch in "~ " or not 33 <= ord(ch) <= 125 for ch in secret):
             return "MRC passwords are printable ASCII without spaces or tildes; that one cannot be sent as typed"
+        limit = protocol.MAX_ROOM_PASSWORD if command == "ROOMPASS" else protocol.MAX_PASSWORD
+        if len(secret) > limit:
+            return f"that password is longer than MRC allows ({limit} characters)"
         body = f"{command} {secret}"
-        if len(body) > protocol.MAX_BODY:
-            return f"that password is longer than MRC allows ({protocol.MAX_BODY - len(command) - 1} characters)"
         bucket = self._user_bucket(username)
         if not bucket.has_token():
             self._dropped_outbound += 1

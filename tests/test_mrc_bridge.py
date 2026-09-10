@@ -104,8 +104,8 @@ def test_connects_handshakes_and_announces_site_info(db, lane, lobby):
         bridge = await _connected_bridge(db, lane, hub, fake)
         try:
             await fake.wait_for(lambda p: p.body.startswith("CAPABILITIES:"))
-            assert fake.handshakes == ["My Board~NetBBS_5.7.0/" + fake.handshakes[0].split("/", 1)[1]]
-            assert fake.handshakes[0].endswith("/1.3.5")
+            assert fake.handshakes == ["My Board~NETBBS/" + fake.handshakes[0].split("/", 1)[1]]
+            assert fake.handshakes[0].endswith("/5.7.0")  # the client's version, not the protocol's
             info = fake.packets(body_prefix="INFOSYS:")[0]
             assert (info.from_user, info.from_site, info.to_user) == ("CLIENT", "My_Board", "SERVER")
             assert info.body == "INFOSYS:Thiesi"
@@ -1072,6 +1072,47 @@ def test_held_lines_count_against_the_outbound_cap(db, lane, lobby, alice):
             await asyncio.sleep(0.2)
             assert bridge._held_total + bridge._outbound.qsize() <= 6
             assert bridge.status().dropped_outbound - before >= 14
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_platform_label_uses_the_hubs_convention(monkeypatch):
+    """Issue #376: `{Os}.{arch}` as the spec's table spells it."""
+    import platform as platform_module
+    import sys as sys_module
+
+    from netbbs.mrc import bridge as bridge_module
+
+    for reported, expected in (
+        (("Windows", "AMD64"), "Windows.x86_64"),
+        (("Linux", "x86_64"), "Linux.x86_64"),
+        (("Linux", "aarch64"), "Linux.aarch64"),
+        (("Darwin", "arm64"), "OSX.aarch64"),
+        (("NetBSD", "amd64"), "NetBSD.x86_64"),
+        (("FreeBSD", "i386"), "FreeBSD.i386"),
+    ):
+        monkeypatch.setattr(platform_module, "system", lambda value=reported[0]: value)
+        monkeypatch.setattr(platform_module, "machine", lambda value=reported[1]: value)
+        assert bridge_module._platform_label() == expected
+    assert sys_module  # the label no longer reads sys.platform
+
+
+def test_an_overlength_room_name_resolves_to_no_mapping(db, lane, lobby, alice):
+    """Review of #387: `mapping_for_room` must not cut a 25-character
+    request down to the 20-character room sharing its prefix."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "a" * 20)
+        hub = ChatHub()
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            assert bridge.mapping_for_room("a" * 20) is not None
+            assert bridge.mapping_for_room("#" + "A" * 20) is not None
+            assert bridge.mapping_for_room("a" * 25) is None
         finally:
             await bridge.close()
             await fake.close()

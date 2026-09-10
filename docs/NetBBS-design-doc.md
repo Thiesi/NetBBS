@@ -5929,9 +5929,11 @@ commands like `IAMHERE`, `USERLIST`, `STATS`, `LOGOFF`, `INFOSYS`/`INFOWEB`/
 etc.). The only "handshake" is one unauthenticated line the client sends
 on connect — `{boardName}~{clientSoftware}/{os}/{version}` — no password,
 token, or signature ties a connection, a user name, or a claimed board
-name to anything real; any client can claim to be any board. Name fields
-are constrained to ASCII 33–125, 30 chars, with Mystic `|NN` pipe-color
-codes stripped; message bodies to ASCII 32–125. There is no history or
+name to anything real; any client can claim to be any board. User and
+site name fields are constrained to ASCII 33–125, 30 chars, room names
+to 20 (the protocol page's `string[20]`, issue #376), with Mystic `|NN`
+pipe-color codes stripped; message bodies to ASCII 32–125. There is no
+history or
 backfill concept at all — a message reaches only whatever clients happen
 to be connected at the instant it's sent.
 
@@ -6070,7 +6072,11 @@ page is not publicly reachable:
   caller (the sender is told quietly when a line was not relayed), and
   on the way out packets from one nick are spaced at least 0.5 s apart
   -- the hub's own per-user limit (MRCDoc rev 1.26; issue #375) -- with
-  held-back lines counted under the same 200-line cap;
+  held-back lines counted under the same 200-line cap; the spec's field
+  limits are enforced where a caller or SysOp types (room names 20,
+  refused rather than cut; topics 55; passwords 20, room passwords 32;
+  LASTSEEN and HELP arguments 20), and the handshake names the client
+  as `NETBBS/<Os.arch>/<NetBBS version>` (issue #376);
   inbound 40-line burst / 20 lines/s ahead of any database write, 4 KiB
   line cap; a local line is split into at most three 140-character
   wire chunks. An `OLDVERSION` rejection from the hub is fatal until a

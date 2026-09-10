@@ -967,6 +967,17 @@ session needs the same treatment.
   section entry is re-decided from `open_rooms_enabled` on every return to
   the top level, and selecting an existing open room refuses while the switch
   is off.
+- Wire limits (issue #376, MRCDoc rev 1.26): `MAX_ROOM` 20, `MAX_TOPIC` 55,
+  `MAX_PASSWORD` 20, `MAX_ROOM_PASSWORD` 32, `MAX_ARGUMENT` 20 live in
+  `netbbs.mrc.protocol` beside `MAX_NAME` and `MAX_BODY`. `sanitize_room`
+  cuts to 20 (inbound fields, lookups), but every place a person types a
+  room name -- `set_mrc_room`, `materialize_open_room` and so the picker,
+  `/join` and `/rooms` -- asks `room_name_error` first and refuses a name
+  the wire would cut: a caller must never land in a room the hub knows by
+  another name. The handshake is `{site}~NETBBS/{Os.arch}/{NetBBS version}`
+  (`build_handshake(platform=, client_version=)`, `_platform_label`
+  normalising `win32`/`AMD64` to `Windows.x86_64` and so on); the protocol
+  version the bridge speaks (`PROTOCOL_VERSION`) is not on the wire.
 - Outbound pacing (issue #375): the hub enforces one message per 0.5 s per
   user (MRCDoc rev 1.26), so the admission buckets (node-wide 5/s burst 10,
   per caller 1/s burst 3, which bound *intake*) are not enough: a

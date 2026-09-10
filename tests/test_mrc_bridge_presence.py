@@ -164,7 +164,12 @@ def test_open_room_topics_come_from_the_hub_and_go_to_it(db, lane, lobby, alice,
             sent = await fake.wait_for(lambda p: p.body == "NEWTOPIC:garden:hello there")
             assert sent.from_user == "carol"
             await _wait_until(lambda: get_channel_by_name(db, "mrc:garden").topic == "hello there")
-            assert bridge.send_topic(lobby, "alice", "x" * 200) == "that topic is longer than MRC allows (140 characters with the room name)"
+            assert bridge.send_topic(lobby, "alice", "x" * 56) == "that topic is longer than MRC allows (55 characters)"
+            assert bridge.send_topic(garden, "carol", "y" * 55) is None
+            # Passwords: 20 for the identity commands, 32 for a room (issue #376).
+            assert bridge.send_secret_command(lobby, "alice", "IDENTIFY", "p" * 21) == "that password is longer than MRC allows (20 characters)"
+            assert bridge.send_secret_command(lobby, "alice", "ROOMPASS", "p" * 33) == "that password is longer than MRC allows (32 characters)"
+            assert bridge.send_secret_command(lobby, "alice", "ROOMPASS", "p" * 32) is None
             assert bridge.send_topic(garden, "zed", "hi") == "you aren't announced to the hub yet"
         finally:
             await bridge.close()

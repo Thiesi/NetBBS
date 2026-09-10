@@ -37,6 +37,8 @@ from netbbs.mrc.protocol import (
     DEFAULT_PORT_PLAIN,
     DEFAULT_PORT_TLS,
     MAX_NAME,
+    MAX_ROOM,
+    room_name_error,
     sanitize_body,
     sanitize_name,
     sanitize_room,
@@ -179,6 +181,11 @@ def default_port_for(tls: bool) -> int:
 def _mapping_from_row(row: sqlite3.Row) -> MrcChannelMapping | None:
     if row is None or row["mrc_room"] is None:
         return None
+    if len(row["mrc_room"]) > MAX_ROOM:
+        # A room the wire cannot name (a hand edit, or a row the upgrade
+        # migration did not see) is not a mapping; the channel shows as
+        # unbridged rather than bridging into the wrong room.
+        return None
     keys = row.keys()
     return MrcChannelMapping(
         channel=_row_to_channel(row), room=row["mrc_room"], paused=bool(row["mrc_paused"]),
@@ -204,9 +211,10 @@ def set_mrc_room(db: Database, channel: Channel, room: str) -> MrcChannelMapping
     rules; a leading `#` is fine). One room maps to at most one local
     channel -- otherwise one inbound line would be recorded twice and
     every local participant would appear twice on the hub."""
+    error = room_name_error(room)
+    if error is not None:
+        raise MrcSettingsError(error)
     normalized = sanitize_room(room)
-    if not normalized:
-        raise MrcSettingsError("Room name must contain at least one printable ASCII character.")
     holder = db.connection.execute(
         "SELECT name FROM channels WHERE lower(mrc_room) = lower(?) AND id != ?",
         (normalized, channel.id),
@@ -321,7 +329,21 @@ def _load_blocklist(db: Database) -> tuple[str, ...]:
         return ()
     if not isinstance(entries, list):
         return ()
-    return tuple(entry for entry in entries if isinstance(entry, str) and entry)
+    # An entry stored before the 20-character limit (issue #376) is cut to
+    # the room it can still name -- the same first 20 characters the upgrade
+    # migration gave a caller-opened room of that name -- so a block set
+    # then still holds, and every later save validates. Duplicates the cut
+    # produces collapse.
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str) or not entry:
+            continue
+        room = sanitize_room(entry) if room_name_error(entry) is not None else entry
+        if room and room.lower() not in seen:
+            seen.add(room.lower())
+            cleaned.append(room)
+    return tuple(cleaned)
 
 
 def validate_open_room_settings(settings: OpenRoomSettings) -> OpenRoomSettings:
@@ -339,6 +361,9 @@ def validate_open_room_settings(settings: OpenRoomSettings) -> OpenRoomSettings:
         raise MrcSettingsError(f"Retention must be between 1 and {MAX_OPEN_ROOM_RETENTION_DAYS} days.")
     seen: dict[str, str] = {}
     for entry in settings.blocklist:
+        error = room_name_error(entry)
+        if error is not None:
+            raise MrcSettingsError(f"Blocklist entry {entry!r}: {error}")
         room = sanitize_room(entry)
         if room and room.lower() not in seen:
             seen[room.lower()] = room
@@ -415,9 +440,10 @@ def materialize_open_room(db: Database, room: str, *, open_settings: OpenRoomSet
     the cap refuses, it never evicts a room someone may be in."""
     if not open_settings.enabled:
         raise MrcSettingsError("Opening MRC rooms is switched off on this node.")
+    error = room_name_error(room)
+    if error is not None:
+        raise MrcSettingsError(error)
     normalized = sanitize_room(room)
-    if not normalized:
-        raise MrcSettingsError("Room name must contain at least one printable ASCII character.")
     if open_settings.blocks(normalized):
         raise MrcSettingsError(f"The SysOp has blocked MRC room #{normalized} on this node.")
     existing = db.connection.execute(

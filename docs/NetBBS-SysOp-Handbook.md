@@ -425,7 +425,9 @@ channel picker since the section is its place. Inside one, `/join <room>`
 opens another MRC room (an existing local channel of that name still
 wins), `/join mrc:<room>` works from anywhere, and `/rooms` asks the hub.
 A room the SysOp has mapped is that channel: opening it by name lands the
-caller in yours.
+caller in yours. Room names are at most 20 characters on the network; a
+longer one is refused rather than quietly shortened, when you map a
+channel as well as when a caller opens a room.
 
 Open rooms are bounded: a `[C]ap` (default 32; opening refuses past it,
 nothing is evicted), a `[R]etention` period (default 7 days) after which
@@ -443,7 +445,8 @@ room it already holds.
 (and repeated on every reconnect), so MRC users see the same away state
 callers here see; the away message is cut to the network's 55
 characters, and a return is reported as activity, after which the hub
-decides when the caller stops showing as away. The first MRC room a caller enters in a session shows
+decides when the caller stops showing as away. Topics are 55 characters
+on the network too, and passwords 20 (room passwords 32). The first MRC room a caller enters in a session shows
 the hub's banner and its message of the day; `/mrc motd` asks again. The
 network's size -- "MRC: 41 users on 12 boards" -- appears above Who's
 online, in the picker's Multi Relay Chat section and on Node > Chat
@@ -479,7 +482,7 @@ codes are not relayed — NetBBS callers speak in one house style.
 
 `/mrc` also asks the hub things on the caller's behalf: `/mrc rooms`,
 `/mrc who`, `/mrc bbses [search]`, `/mrc info <bbs>`, `/mrc motd`,
-`/mrc stats`, `/mrc help`, `/mrc lastseen <nick>`, `/mrc topics`, plus
+`/mrc stats`, `/mrc help [topic]`, `/mrc lastseen <nick>`, `/mrc topics`, plus
 `/mrc send <command>` for any other server command, `/mrc ctcp <nick>
 VERSION|TIME|PING|CLIENTINFO`, and `/mrc msg <nick> <text>` / `/mrc r
 <text>` for a caller who opted in to private messages. The hub's reply

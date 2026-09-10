@@ -246,6 +246,7 @@ from netbbs.link.work_items import (
 )
 from netbbs.moderation.blocklist import BlocklistError, block_user, is_blocked, unblock_user
 from netbbs.moderation.log import list_actions_for_target_user, list_recent_actions, record_action
+from netbbs.mrc.protocol import room_name_error
 from netbbs.mrc.bridge import MrcBridge, MrcState, MrcStatus
 from netbbs.mrc.settings import (
     MrcChannelMapping,
@@ -5417,9 +5418,13 @@ async def _blocklist_field(session: Session, lane: DatabaseLane, draft: dict) ->
             await session.write_line("")
             await write_prompt(session, "Room to block (blank = cancel): ")
             raw = (await session.read_line()).strip()
-            room = sanitize_room(raw)
-            if not room:
+            if not raw:
                 continue
+            error = room_name_error(raw)
+            if error is not None:
+                await session.write_line(colored(error, fg_color=ERROR_COLOR))
+                continue
+            room = sanitize_room(raw)
             if room.lower() not in {entry.lower() for entry in entries}:
                 entries.append(room)
             draft["open_blocklist"] = entries

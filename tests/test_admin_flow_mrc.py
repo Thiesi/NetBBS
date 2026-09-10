@@ -131,7 +131,7 @@ def test_mrc_settings_save_reconnects_the_running_bridge(db, lane, sysop, lobby)
             text = _visible(_written_text(session))
             assert "Saved and applied" in text
             await _wait_state(bridge, MrcState.CONNECTED)
-            assert fake.handshakes and fake.handshakes[0].startswith("Test Board~NetBBS_")
+            assert fake.handshakes and fake.handshakes[0].startswith("Test Board~NETBBS/")
         finally:
             await bridge.close()
             await fake.close()
