@@ -1369,7 +1369,8 @@ def _validate_save_document(data: dict) -> None:
     # not reported as a missing field or an unsupported one (issue #421).
     if not isinstance(data, dict):
         raise ResumeError("The saved career is invalid.")
-    if data.get("schema_version") == 1:
+    version = data.get("schema_version")
+    if type(version) is int and version == 1:
         raise OutdatedSave("This career was saved before this version of the game.")
     for key, expected in (("schema_version", SCHEMA_VERSION), ("galaxy_version", 1)):
         if type(data.get(key, expected)) is not int or data.get(key, expected) != expected:
@@ -3985,7 +3986,10 @@ def replace_unsupported_career(save_dir: Path, user_id: int, save: SaveData) -> 
             _archive_career(save_dir, user_id, original)
         except OSError as exc:
             raise SaveError("The refused career could not be retained; nothing was replaced.") from exc
-    _write_bytes_atomic(path, new)
+    try:
+        _write_bytes_atomic(path, new)
+    except OSError as exc:
+        raise SaveError("The replacement career could not be written.") from exc
 
 
 HALL_OF_FAME_SIZE = 20
@@ -4096,18 +4100,21 @@ def import_hall_of_fame(save_dir: Path) -> None:
     before the career is loaded and whatever the load then decides, so a node
     whose only returning caller is refused still keeps its rankings.
 
-    Writing files other sessions own needs the maintenance gate, the same
-    exclusion a restore takes and the one thing that guarantees no pilot session
-    is aboard. A launch that cannot take it skips the import rather than racing a
-    live checkpoint. Nothing is deleted and each row is written only where it
-    raises what is already there, so this is complete-or-retry: every launch
-    attempts what is still missing until nothing is.
+    Writing files a live pilot also writes needs `maintenance_session`, the same
+    exclusion a restore takes: the gate alone would not do, because
+    `pilot_session` releases the gate the moment it owns its own lock and then
+    plays on holding only that, so an import under the bare gate could replace
+    `scores/USER_ID.json` while its owner was checkpointing it. A launch that
+    cannot take the session skips the import rather than racing. Nothing is
+    deleted and each row is written only where it raises what is already there,
+    so this is complete-or-retry: every launch attempts what is still missing
+    until nothing is.
     """
     entries = _leaderboard_entries(_read_score_json(save_dir / "leaderboard.json", 2 * 1024 * 1024))
     if not entries:
         return
     try:
-        with _maintenance_gate(save_dir):
+        with maintenance_session(save_dir):
             for user_id, entry in entries.items():
                 _import_one_score(save_dir, user_id, entry)
     except (OSError, PilotBusy):
@@ -4116,7 +4123,21 @@ def import_hall_of_fame(save_dir: Path) -> None:
 
 def _import_one_score(save_dir: Path, user_id: int, entry: dict) -> None:
     """Raise one pilot's stored record to the floors the old leaderboard holds."""
-    raw = _read_score_json(save_dir / "scores" / f"{user_id}.json")
+    path = save_dir / "scores" / f"{user_id}.json"
+    try:
+        path.stat()
+    except FileNotFoundError:
+        held = False
+    except OSError:
+        return  # Cannot tell what is there; never replace on a guess.
+    else:
+        held = True
+    raw = _read_score_json(path)
+    if held and raw is None:
+        # A record that exists but will not read this second is not an absent
+        # record: replacing it would discard counters this import cannot see.
+        # The next launch tries again (issue #421 review).
+        return
     if _future_score_achievements(raw):
         return  # A newer build owns this record; never write over what it knows.
     stored = _score_entry(raw, user_id)
@@ -4131,7 +4152,7 @@ def _import_one_score(save_dir: Path, user_id: int, entry: dict) -> None:
         if merged == stored:
             return
     try:
-        _write_json_atomic(save_dir / "scores" / f"{user_id}.json", merged)
+        _write_json_atomic(path, merged)
     except OSError:
         pass  # A later launch retries this row; the others still go in.
 
@@ -8371,8 +8392,8 @@ def screen_outdated_career(p: Palette, error: OutdatedSave) -> bool:
              "Nothing has been changed and your saved career is still on disk.",
              "This build no longer plays careers of that vintage, and there is no upgrade "
              "path for them; your Hall of Fame ranking is kept either way.",
-             "Beginning a new career takes the slot: the refused career is retained as the "
-             "previous checkpoint, exactly as an ordinary checkpoint retains the one before it."]
+             "Beginning a new career takes the slot: the refused career is kept as a recovery "
+             "copy, the same place a rollback puts the career it replaces."]
     pages = _mission_text_pages(lines, overhead=4)
     page = 0
     while True:

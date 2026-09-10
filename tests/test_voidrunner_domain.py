@@ -7520,16 +7520,103 @@ def test_importing_the_old_leaderboard_twice_changes_nothing_the_second_time(tmp
     assert (tmp_path / "scores" / "77.json").read_bytes() == stored
 
 
+def test_the_import_takes_the_exclusion_a_restore_takes(tmp_path, monkeypatch):
+    """Not the bare gate (issue #421 review).
+
+    `pilot_session` releases the maintenance gate as soon as it owns its own
+    pilot lock and then plays on holding only that, so an import under the bare
+    gate could replace `scores/USER_ID.json` while its owner was checkpointing
+    it. `maintenance_session` probes every pilot lock and is the only exclusion
+    that answers "is anyone aboard".
+    """
+    import json
+
+    path = tmp_path / "leaderboard.json"
+    path.write_text(json.dumps([{"user_id": 77, "handle": "Old", "best_credits": 9000}]), encoding="utf-8")
+    taken, real = [], vr.maintenance_session
+
+    @contextlib.contextmanager
+    def watched(save_dir):
+        taken.append(save_dir)
+        with real(save_dir):
+            yield
+
+    monkeypatch.setattr(vr, "maintenance_session", watched)
+    vr.import_hall_of_fame(tmp_path)
+    assert taken == [tmp_path]
+    assert vr.load_hall_of_fame(tmp_path)[0]["best_credits"] == 9000
+
+
 def test_a_busy_node_skips_the_import_and_keeps_it_for_the_next_launch(tmp_path, monkeypatch):
     import json
 
     path = tmp_path / "leaderboard.json"
     path.write_text(json.dumps([{"user_id": 77, "handle": "Old", "best_credits": 9000}]), encoding="utf-8")
-    with vr.maintenance_session(tmp_path):
-        vr.import_hall_of_fame(tmp_path)
-        assert not (tmp_path / "scores").exists()
+
+    @contextlib.contextmanager
+    def busy(save_dir):
+        raise vr.PilotBusy
+        yield  # pragma: no cover -- the raise is the whole point
+
+    monkeypatch.setattr(vr, "maintenance_session", busy)
+    vr.import_hall_of_fame(tmp_path)
+    assert not (tmp_path / "scores").exists()
+
+    monkeypatch.undo()
     vr.import_hall_of_fame(tmp_path)
     assert vr.load_hall_of_fame(tmp_path)[0]["best_credits"] == 9000
+
+
+def test_the_import_never_replaces_a_record_it_could_not_read(tmp_path, monkeypatch):
+    """A record that exists but will not read is not an absent record (#421 review).
+
+    Replacing it with the old leaderboard's row would discard counters and
+    achievement history this import cannot see -- and for a pilot whose career
+    was refused, nothing would ever republish them.
+    """
+    import json
+
+    (tmp_path / "leaderboard.json").write_text(
+        json.dumps([{"user_id": 77, "handle": "Old", "best_credits": 9000}]), encoding="utf-8")
+    stored = tmp_path / "scores" / "77.json"
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    stored.write_text(json.dumps({"user_id": 77, "handle": "Current", "best_credits": 40_000,
+                                  "retirements": 2, "kills": 9, "missions_completed": 30}), encoding="utf-8")
+    original = stored.read_bytes()
+
+    monkeypatch.setattr(vr, "_read_score_json", lambda path, limit=vr.MAX_SAVE_BYTES:
+                        None if path == stored else
+                        json.loads(path.read_text(encoding="utf-8")))
+    vr.import_hall_of_fame(tmp_path)
+    assert stored.read_bytes() == original
+
+
+@pytest.mark.parametrize("version", [True, 1.0, "1"])
+def test_a_malformed_save_version_is_corruption_not_an_old_career(tmp_path, version):
+    """`True` and `1.0` compare equal to 1; neither is a schema-1 career (#421 review)."""
+    import json
+
+    data = dict(_world_with_seed(42).save.to_dict(), schema_version=version)
+    path = tmp_path / "77.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(vr.ResumeError) as raised:
+        vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert not isinstance(raised.value, vr.OutdatedSave)
+    assert path.read_bytes() == json.dumps(data).encode("utf-8")
+
+
+def test_a_replacement_that_cannot_be_written_reaches_the_caller_as_a_save_failure(tmp_path, monkeypatch):
+    """`main` translates `SaveError` here and nothing else (issue #421 review)."""
+    import json
+
+    old = json.dumps(dict(_world_with_seed(42).save.to_dict(), schema_version=1)).encode()
+    (tmp_path / "77.json").write_bytes(old)
+    real = vr._write_bytes_atomic
+    monkeypatch.setattr(vr, "_write_bytes_atomic", lambda path, data: (_ for _ in ()).throw(
+        OSError("disk gone")) if path.name == "77.json" else real(path, data))
+    with pytest.raises(vr.SaveError):
+        vr.replace_unsupported_career(tmp_path, 77, vr._new_career("Tester"))
+    assert (tmp_path / "77.json").read_bytes() == old
 
 
 def test_failed_score_write_is_repaired_from_saved_peak_after_spending_and_retirement(tmp_path, monkeypatch):

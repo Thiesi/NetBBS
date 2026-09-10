@@ -4788,9 +4788,10 @@ copies, versions this build cannot recognise and failed preservation require
 manual SysOp repair; there is no caller-facing reset that bypasses preservation.
 A career from a *known older* schema is the one exception, because nothing about
 it is in doubt: it is offered a new career instead, and accepting still preserves
-the old document as the `.previous` copy rather than bypassing preservation. Recovery copies are
-limited to eight per pilot; a SysOp must archive older copies manually before
-another restore. The pilot session lease covers recovery as well as normal play.
+the old document, as a recovery copy, rather than bypassing preservation.
+Recovery copies are limited to eight per pilot; a SysOp must archive older copies
+manually before another restore, and a refused career is not replaced at all once
+that limit is reached. The pilot session lease covers recovery as well as normal play.
 This local previous-checkpoint copy is not a substitute for node backup coverage.
 
 The optional Pilot Guide is reachable from the station deck without changing
