@@ -4842,11 +4842,13 @@ twice -- the new document, and the old file before it is aged into `.previous`,
 which is what keeps a corrupt save from overwriting the last readable copy -- so
 anything a validation does happens twice per acknowledged action.
 
-The pre-`scores/` `leaderboard.json` is parsed once per session once it has been
-read successfully. A failed read is never cached: an absent file, a transient
-`OSError` and a temporarily unreadable one look the same from there, and caching
-that emptiness would drop the legacy wealth and retirement floors for the rest
-of the session.
+The pre-`scores/` `leaderboard.json` is not read on the commit path at all any
+more, and is not cached: it is imported into `scores/` at launch and the retained
+file is re-read on each launch until every row is in (issue #421). What the
+retired per-session cache was guarding against still applies to the import
+itself, one row at a time: an absent record, a transient `OSError` and a
+temporarily unreadable one look identical to `_read_score_json`, so the import
+stats the record first and defers rather than replacing what it could not read.
 
 Versioned sub-records go through `_validate_versioned`, which keeps the
 distinction the repeated blocks kept getting close to losing: a malformed record
@@ -4886,7 +4888,11 @@ fixtures, which is why they are not imported. `test_backup.py` reaches the same
 file again through the package: a second load under a second name, deliberately,
 because that test is about the installed package and this suite is about the
 shipped script. A split like this is a move, and the proof is that the set of
-collected test ids does not change; check that before the suite, not after.
+collected test ids does not change *once the module path is stripped* -- the path
+is part of a node id and necessarily changes, so compare
+`pytest --co -q | sed 's/.*:://' | sort` from before and after. Run that check
+before the suite, not after: it names what was lost, while a red suite only says
+something is wrong.
 
 Voidrunner saves are schema 2 and there is no migration (issue #421). A schema-1
 document raises `OutdatedSave`, which is a refusal rather than a recovery case:
