@@ -1847,7 +1847,8 @@ class MrcBridge:
             return
         command, text = reply
         await self._deliver_reply(
-            addressed[1], f"CTCP {command} reply from {packet.from_user}@{packet.from_site}: {text}".rstrip(": "),
+            addressed[1],
+            f"CTCP {command} reply from {protocol.display_handle(packet.from_user)}@{packet.from_site}: {text}".rstrip(": "),
         )
 
     def _caller_for_nick(self, nick: str) -> tuple[int, str] | None:
