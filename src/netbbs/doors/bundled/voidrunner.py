@@ -1685,7 +1685,7 @@ def _validate_pending_travel_consistency(save: SaveData) -> None:
                 if any(combat["pirate"][key] != source[key] for key in ("name", "tier", "hp_max")):
                     raise ValueError("formation target mismatch")
                 if not formation["engaged"] and (combat["outcome"] is not None or combat["pirate"]["hp"] != source["hp"]
-                                                  or combat["tactics"] != new_tactics(Pirate(**source))):
+                                                  or combat["tactics"] != new_tactics(Pirate(**source), combat["tactics"]["version"])):
                     raise ValueError("formation acted before engagement")
         if warrant is not None:
             if travel["phase"] != "primary" or travel["primary"] != "bounty":
@@ -2787,9 +2787,12 @@ def tactical_threat_bonus(tactics: dict | None) -> tuple[int, ...]:
     return TACTICAL_THREAT_BONUS_BY_VERSION[tactics.get("version", 1) if tactics else 1]
 
 
-def new_tactics(pirate: Pirate) -> dict:
+def new_tactics(pirate: Pirate, version: int = TACTICAL_RULESET_VERSION) -> dict:
+    """Opening tactical state. A fight keeps the ruleset it started under, so
+    resuming a checkpoint or switching squadron target inside one carries its
+    saved `version` rather than adopting the current one (issue #406 review)."""
     profile = list(TACTICAL_PROFILES)[sum(map(ord, pirate.name)) % len(TACTICAL_PROFILES)]
-    return {"version": TACTICAL_RULESET_VERSION, "profile": profile, "step": 0, "brace_ready": True}
+    return {"version": version, "profile": profile, "step": 0, "brace_ready": True}
 
 
 def tactical_intent(tactics: dict) -> str:
@@ -2812,7 +2815,7 @@ def switch_squadron_target(world: World) -> str:
     state["pirates"][0], state["pirates"][1] = state["pirates"][1], state["pirates"][0]
     pirate = Pirate(**state["pirates"][0])
     message = f"Target selected: {pirate.name}, tier {pirate.tier}."
-    combat.update(pirate=dataclasses.asdict(pirate), tactics=new_tactics(pirate), lines=[message])
+    combat.update(pirate=dataclasses.asdict(pirate), tactics=new_tactics(pirate, combat["tactics"]["version"]), lines=[message])
     return message
 
 

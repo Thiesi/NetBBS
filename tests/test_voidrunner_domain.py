@@ -8978,6 +8978,21 @@ def test_invalid_squadron_formation_preserves_original_save(tmp_path, fault):
     assert path.read_bytes() == before
 
 
+def test_a_version_1_squadron_checkpoint_still_resumes_and_keeps_its_ruleset(tmp_path):
+    """A fight checkpointed under the old curve must not become unloadable."""
+    import json
+    world, pirates = _world_with_coordinated_squadron()
+    combat = world.save.pending_travel["encounter"]["combat"]
+    combat["tactics"] = vr.new_tactics(pirates[0], 1)
+    world.save.event_rng_state = world.event_rng.getstate()
+    (tmp_path / "77.json").write_text(json.dumps(world.save.to_dict()), encoding="utf-8")
+    saved, _, _ = vr.load_or_create_save(tmp_path, 77, "Tester")
+    assert saved.pending_travel["encounter"]["combat"]["tactics"]["version"] == 1
+    restored = vr.World(saved)
+    assert vr.switch_squadron_target(restored)  # swapping target inside the fight keeps the old curve
+    assert restored.save.pending_travel["encounter"]["combat"]["tactics"]["version"] == 1
+
+
 def test_target_selection_closes_after_engagement_without_effects(monkeypatch):
     import copy
     world, pirates = _world_with_coordinated_squadron()

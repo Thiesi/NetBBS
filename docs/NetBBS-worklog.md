@@ -4678,6 +4678,13 @@ quarter of maximum. On a patrol kill the charge is the salvage fee plus
 fee alone is bounded by hull while the fine grows without limit, so a bare
 patrol amnesty is cheaper than surrendering as soon as notoriety climbs.
 
+A fight keeps the tactical ruleset it began under. `new_tactics` takes the
+version as a parameter and defaults to `TACTICAL_RULESET_VERSION`; every
+reconstruction of an existing fight's opening state -- the pending-travel
+consistency check and squadron target switching -- must pass the saved version.
+Comparing a saved v1 checkpoint against a freshly built v2 one makes the career
+unresumable after the ruleset changes.
+
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen
 reserves its own hotkeys in its letter map (`MARKET_LETTERS`, `YARD_LETTERS`,
