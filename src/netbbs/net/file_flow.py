@@ -739,7 +739,7 @@ async def _show_area(
                 if not can_write:
                     await session.write("\a")
                     continue
-                await _handle_upload(session, lane, area, user)
+                await _handle_upload(session, lane, area, user, link_context=link_context)
                 return
             elif kind == "describe":
                 if not _can_describe(page):
@@ -868,16 +868,23 @@ async def _show_area(
                     await session.write("\a")
         return
 
-    if not can_write and not show_remote_hint:
-        return
-
     # This screen has no listing to act on, so [E] resolves its target
     # from what the caller has waiting instead (Codex review): a
     # moderated area holding only their own pending upload renders
     # empty, since `list_files_page` shows nothing unapproved -- and
     # that upload is exactly the one they are most likely to want to
     # describe while it waits.
-    describable = await lane.run(list_pending_files, area, requesting_user=user) if can_write else []
+    #
+    # Asked regardless of `can_write` (Codex review): describing your
+    # own upload is not writing to the area, and a SysOp who raises the
+    # write level after it lands must not strand the file's own
+    # uploader with no way to describe it. `list_pending_files` shows a
+    # caller nothing but their own pending uploads unless they hold
+    # APPROVE, so this offers nothing it shouldn't.
+    describable = await lane.run(list_pending_files, area, requesting_user=user)
+
+    if not can_write and not show_remote_hint and not describable:
+        return
 
     hints = []
     if can_write:
@@ -898,7 +905,7 @@ async def _show_area(
         return
     elif command.lower() in ("u", "/upload") and can_write:
         await _handle_upload(session, lane, area, user, link_context=link_context)
-    elif (command.lower().startswith("/describe ") and can_write) or (
+    elif command.lower().startswith("/describe ") or (
         command.lower() in ("e", "/describe") and describable
     ):
         # A named file is looked up area-wide; the bare key picks from
@@ -1454,9 +1461,17 @@ async def _handle_describe(
             # directory, so its return says nothing (Codex review) --
             # and promising a caller their text is safe when it isn't
             # is the one outcome worse than losing it silently.
+            #
+            # Read back and compared, not merely checked for existence
+            # (Codex review again): a full disk or a short write leaves
+            # a file that exists and is wrong, and "kept as a draft" has
+            # to mean the whole thing.
             path = _description_draft_path(db, entry, user)
             save_draft(path, text)
-            return path.exists()
+            try:
+                return path.read_text(encoding="utf-8") == text
+            except OSError:
+                return False
 
         kept = await lane.run(_persist)
         await session.write_line(colored(f"\r\nNot saved: {exc}", fg_color=ERROR_COLOR))
@@ -1577,11 +1592,24 @@ async def _handle_upload(
             except OSError as cleanup_error:
                 _logger.warning("could not remove staging file %s: %s", temp_path, cleanup_error)
             raise
-        entry = await lane.run(
-            upload_file_from_temp, area, user, received.filename,
-            temp_path=temp_path, sha256=received.sha256, size_bytes=received.size_bytes,
-            description=description,
-        )
+        def _store_and_announce(db: Database) -> FileEntry:
+            # One database job, not two (Codex review): a cancellation
+            # between them would leave a committed, approved upload that
+            # nothing ever announces -- `DatabaseLane` lets a running
+            # worker finish, so the row would exist while the queueing
+            # call never ran, and no later pass revisits it.
+            stored = upload_file_from_temp(
+                db, area, user, received.filename,
+                temp_path=temp_path, sha256=received.sha256, size_bytes=received.size_bytes,
+                description=description,
+            )
+            if link_context is not None:
+                queue_file_descriptor_if_linked(
+                    db, stored, area, node_identity=link_context.node_identity
+                )
+            return stored
+
+        entry = await lane.run(_store_and_announce)
     except (zmodem.ZmodemError, NotImplementedError) as exc:
         # NotImplementedError: some transports (netbbs.net.web) can't
         # carry raw bytes at all -- see WebSession's docstring. Handled
@@ -1591,13 +1619,6 @@ async def _handle_upload(
         # receive_file never even opened it.
         await session.write_line(colored(f"\r\nUpload failed: {exc}", fg_color=ERROR_COLOR))
         return
-    if link_context is not None:
-        # A no-op for an unlinked area or a still-pending upload -- see
-        # `queue_file_descriptor_if_linked`, which owns both checks, the
-        # same way `queue_board_post_if_linked` does for a post.
-        await lane.run(
-            queue_file_descriptor_if_linked, entry, area, node_identity=link_context.node_identity
-        )
     await session.write_line(
         colored(
             f"\r\nUploaded {sanitize_text(entry.filename)!r} ({_format_size(entry.size_bytes)}) "

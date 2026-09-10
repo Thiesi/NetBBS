@@ -16,7 +16,7 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.files.areas import create_file_area, get_file_area_by_name
-from netbbs.files.entries import upload_file
+from netbbs.files.entries import get_file, upload_file
 from netbbs.link.events import FileAreaGenesis, build_file_area_genesis, build_file_descriptor
 from netbbs.link.files import (
     FileAreaCarryLimitError,
@@ -401,3 +401,40 @@ def test_has_queued_file_descriptor_is_about_the_file_not_its_area(db, alice, no
     assert is_area_linked(db, area)
     assert not has_queued_file_descriptor(db, older)
     assert has_queued_file_descriptor(db, newer)
+
+
+def test_a_file_no_peer_would_accept_is_not_announced(db, alice, node_identity):
+    """Codex review: a descriptor a peer refuses is not a harmless
+    no-op — it is stored on the row permanently and re-pushed on every
+    pass, where it takes down the whole request it travels in."""
+    area = create_file_area(db, "docs", creator=alice)
+    link_file_area(db, area, node_identity=node_identity)
+    area = get_file_area_by_name(db, "docs")
+
+    # A filename inside the local 255-*character* cap but past the
+    # descriptor's 255-*byte* one.
+    entry = upload_file(db, area, alice, "\u00e4" * 200 + ".zip", b"payload")
+    assert queue_file_descriptor_if_linked(db, entry, area, node_identity=node_identity) is None
+    assert not has_queued_file_descriptor(db, entry)
+
+    ordinary = upload_file(db, area, alice, "fine.zip", b"payload")
+    assert queue_file_descriptor_if_linked(db, ordinary, area, node_identity=node_identity) is not None
+
+
+def test_a_file_larger_than_a_catalogue_entry_may_claim_is_not_announced(db, alice, node_identity):
+    from netbbs.link.protocol import MAX_CATALOGUED_FILE_SIZE_BYTES
+
+    area = create_file_area(db, "docs", creator=alice)
+    link_file_area(db, area, node_identity=node_identity)
+    area = get_file_area_by_name(db, "docs")
+    entry = upload_file(db, area, alice, "huge.bin", b"payload")
+    # Rewritten rather than actually uploading ten gigabytes.
+    db.connection.execute(
+        "UPDATE files SET size_bytes = ? WHERE file_id = ?",
+        (MAX_CATALOGUED_FILE_SIZE_BYTES + 1, entry.file_id),
+    )
+    db.connection.commit()
+
+    assert queue_file_descriptor_if_linked(
+        db, get_file(db, entry.file_id), area, node_identity=node_identity
+    ) is None

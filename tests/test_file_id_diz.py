@@ -328,7 +328,7 @@ def test_a_lying_entry_count_does_not_get_an_archive_parsed(tmp_path, monkeypatc
     members["FILE_ID.DIZ"] = b"never read"
     archive = _zip(tmp_path / "liar.zip", members)
     raw = bytearray(archive.read_bytes())
-    marker = raw.rfind(b"PK")
+    marker = raw.rfind(bytes([0x50, 0x4B, 0x05, 0x06]))
     raw[marker + 8:marker + 12] = (1).to_bytes(2, "little") * 2  # entries on disk, total
     archive.write_bytes(bytes(raw))
 
@@ -361,3 +361,20 @@ def test_unicode_line_separators_are_normalized_to_newlines():
 
     assert len(fitted.splitlines()) == diz.MAX_DESCRIPTION_LINES
     assert validate_description(fitted) == fitted  # never raises
+
+
+def test_an_archive_carrying_a_zip64_locator_is_not_parsed_in_process(tmp_path):
+    """Codex review: a ZIP64 archive keeps the real central-directory
+    size in its own end record, which `ZipFile` follows and prefers, so
+    the legacy 32-bit field this reader checks is not what would
+    actually bound the parse. The locator is spliced in by hand --
+    `zipfile` only emits those records past four gigabytes or 65,535
+    members, which is not something a test should have to build."""
+    archive = _zip(tmp_path / "big.zip", {"FILE_ID.DIZ": b"never read"})
+    raw = archive.read_bytes()
+    eocd = raw.rfind(bytes([0x50, 0x4B, 0x05, 0x06]))
+    locator = bytes([0x50, 0x4B, 0x06, 0x07]) + bytes(16)
+    archive.write_bytes(raw[:eocd] + locator + raw[eocd:])
+
+    assert diz._zip_central_directory_bytes(archive) is None
+    assert _read(archive, "big.zip") is None

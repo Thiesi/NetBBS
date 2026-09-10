@@ -959,9 +959,13 @@ A description may also be written by hand, from the file listing, by the
 uploader themselves or by anyone holding `EDIT` on the area. Hand-written
 edits are local-only: a `file_descriptor` (§11.2) is immutable and single-shot,
 so a file whose descriptor has already been signed keeps the description its
-peers were told about. In a Linked area that is every edit — an approved
+peers were told about. In a Linked area that is most edits — an approved
 upload's descriptor is signed and queued the moment it lands (§11.2) — so the
 caller is told the change stays local rather than left to assume it travels.
+The exceptions are files no descriptor was ever built for: one approved before
+its area was promoted (pre-Link history is never backfilled), one in a carried
+area, and one whose name or size no descriptor may carry. The interface asks
+the file itself, not its area, before saying anything about what peers hold.
 
 Either way a description is stored already normalized — control and bidi
 characters stripped, at most 10 lines (the DIZ format's own limit, and what

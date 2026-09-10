@@ -29,6 +29,7 @@ convention as `netbbs.link.boards`/`netbbs.link.channels`.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
 from netbbs.files.areas import FileArea
@@ -42,8 +43,14 @@ from netbbs.link.events import (
     build_file_descriptor,
 )
 from netbbs.link.node_identity import NodeIdentity
+from netbbs.link.protocol import (
+    MAX_CATALOGUED_FILE_SIZE_BYTES,
+    MAX_FILE_DESCRIPTOR_FILENAME_BYTES,
+)
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
+
+_logger = logging.getLogger(__name__)
 
 
 class LinkFilesError(Exception):
@@ -427,6 +434,38 @@ def file_area_origin_fingerprint(db: Database, area: FileArea) -> str | None:
     return genesis.payload["origin_fingerprint"]
 
 
+def _peer_acceptable(file_entry: FileEntry) -> bool:
+    """Whether a `file_descriptor` for this file could be accepted at
+    all, by this project's own protocol limits (Codex review).
+
+    Signing one that cannot is not a harmless no-op: it is stored on the
+    row permanently and re-pushed on every sync pass, where the peer
+    refuses the request it arrives in -- taking every other event in
+    that batch with it. The two limits reachable from an ordinary
+    upload are a filename longer than the descriptor allows (easy with
+    multi-byte characters, since the local cap counts characters) and a
+    file larger than the catalogue accepts (only if a SysOp raised
+    `max_upload_bytes` past it).
+
+    The upload itself is untouched and still downloadable locally; only
+    the catalogue entry is withheld, with a line in the log saying why.
+    """
+    filename_bytes = len(file_entry.filename.encode("utf-8"))
+    if filename_bytes > MAX_FILE_DESCRIPTOR_FILENAME_BYTES:
+        _logger.warning(
+            "not announcing %r: its filename is %d bytes, more than the %d a file_descriptor "
+            "carries", file_entry.filename, filename_bytes, MAX_FILE_DESCRIPTOR_FILENAME_BYTES,
+        )
+        return False
+    if file_entry.size_bytes > MAX_CATALOGUED_FILE_SIZE_BYTES:
+        _logger.warning(
+            "not announcing %r: %d bytes is larger than the %d a catalogue entry may claim",
+            file_entry.filename, file_entry.size_bytes, MAX_CATALOGUED_FILE_SIZE_BYTES,
+        )
+        return False
+    return True
+
+
 def queue_file_descriptor_if_linked(
     db: Database,
     file_entry: FileEntry,
@@ -466,6 +505,8 @@ def queue_file_descriptor_if_linked(
     if not is_area_linked(db, area):
         return None
     if file_area_origin_fingerprint(db, area) != node_identity.fingerprint:
+        return None
+    if not _peer_acceptable(file_entry):
         return None
 
     existing = db.connection.execute(
