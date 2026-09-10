@@ -48,10 +48,11 @@ refuses to silently create a replacement. Choose an explicit override or complet
 the migration. An explicit path for a new independent node deliberately selects
 its own world; it does not adopt the old world's users or records.
 
-War Dialer records schema version 2 in SQLite `user_version`. A complete older
+War Dialer records schema version 3 in SQLite `user_version`. A complete older
 world upgrades automatically in one transaction: version 1 adopts the original
 layout and latest 500 events per player; version 2 converts copied garrisons to
-shared crew assignments as described below. A failed upgrade rolls
+shared crew assignments; version 3 adds the capture/control economy described
+below. A failed upgrade rolls
 back its schema/data changes and version marker. Newer versions, incomplete or
 unrelated schemas, and corrupt files are refused with a caller-facing error;
 startup does not replace them with an empty world. Existing zero-byte files are
@@ -212,22 +213,36 @@ eligible members, followed by an exact preview. Each transfer costs one turn, no
 cash or Heat, and gives no Rank. Keep one member available for recovery. The last
 withdrawal abandons the exchange after paying earned income. Displaced defenders
 return to their owner's available pool when a rival captures their exchange.
-Reclaiming your own abandoned exchange earns no capture Rank until another crew
-controls it or a new season starts. Reconnecting does not clear that restriction.
+Each capture attempt costs $50, win or lose. A first capture earns 50 Rank per
+exchange per season; recaptures earn none, even after another owner. Holding an
+exchange earns one Rank per six hours, with partial time retained. Rates are
+$1-$3/hour per exchange, $480/day for the whole map. Recruitment remains $75;
+trade earns $20-$60. The same cash budget funds expansion and recruitment.
 Jobs, raids, attacks and busts use available crew; stationed members defend only
 their exchange. The switchboard and results show the two pools separately.
 
 **MANUAL — outside NetBBS, before activating shared-crew rules:** stop all old
 War Dialer processes and create/verify a node backup with its world component.
-The first permitted launch upgrades the world to schema 2 transactionally.
+The first permitted launch upgrades the world to schema 3 transactionally.
+When upgrading from copied defenses, schema 2 conversion runs first.
 After normal overdue season settlement, it reserves one available member per
 owner, keeps holdings by descending hourly income then ID within the real crew
 budget, and distributes the remaining members evenly across those holdings.
 Unstaffable holdings become unclaimed after paying income; a receipt explains
 the conversion. IDs, handles, account age, cash and Rank are retained. Review
 the receipt and use Garrison to adjust assignments. Never mix old and new game
-processes; older versions refuse schema 2. Restore the verified backup with a
+processes; older versions refuse schema 3. Restore the verified backup with a
 matching game version if the operator chooses to undo the upgrade.
+
+Schema 3 pays already-earned income at the previous rates before applying the
+new rates. Earned Rank is preserved; control Rank starts at upgrade time. Existing
+players who have earned capture Rank cannot earn further capture awards until
+next season because old aggregate records cannot identify all past exchanges.
+Their history receipt explains this; they can still earn control, recruitment,
+job and raid Rank. Capture awards reopen for every exchange at the next season.
+Tiers now start at 0/100/300/700/1,400/2,800 Rank; the score itself never decreases.
+Review receipts and standings after upgrading. Human balance playtests remain
+necessary; automated simulations do not establish that a season is enjoyable.
 
 Free screens: `[B]Rank` shows season standings and your position; ties use account
 ID order. `[E]Map` shows all exchanges, owners, garrisons and hourly income.

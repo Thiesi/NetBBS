@@ -51,6 +51,7 @@ def _save_fixture(conn, player):
     if player.turns_used and not player.turn_day_start:
         player.turn_day_start = player.heat_updated_at
     values = asdict(player)
+    values["captured_exchanges"] = wd.json.dumps(player.captured_exchanges)
     assignments = ", ".join(f"{key}=?" for key in values if key != "user_id")
     conn.execute(
         f"UPDATE players SET {assignments} WHERE user_id=?",
@@ -103,11 +104,11 @@ def _make_exchange(id=1, controller_user_id=None, controller_handle=None, garris
 
 def test_tier_name_boundaries_match_thresholds():
     assert wd.tier_name(0) == "Newbie"
-    assert wd.tier_name(199) == "Newbie"
-    assert wd.tier_name(200) == "Wannabe"
-    assert wd.tier_name(999) == "Wannabe"
-    assert wd.tier_name(1000) == "Script Kiddie"
-    assert wd.tier_name(20000) == "Legend"
+    assert wd.tier_name(99) == "Newbie"
+    assert wd.tier_name(100) == "Wannabe"
+    assert wd.tier_name(299) == "Wannabe"
+    assert wd.tier_name(300) == "Script Kiddie"
+    assert wd.tier_name(2800) == "Legend"
     assert wd.tier_name(1_000_000) == "Legend"
 
 
@@ -603,10 +604,10 @@ def test_garrison_transfers_conserve_crew_and_abandon_after_income_settlement(db
     wd.resolve_garrison(conn, actor, 1, -1, now)
     assert (actor.crew, wd.assigned_crew(conn, actor.user_id)) == (2, 1)
     assert wd.resolve_garrison(conn, actor, 1, -1, now + timedelta(hours=2)) is True
-    assert (actor.crew, wd.assigned_crew(conn, actor.user_id), actor.cash) == (3, 0, 1080)
+    assert (actor.crew, wd.assigned_crew(conn, actor.user_id), actor.cash) == (3, 0, 954)
     assert wd.rank_score(actor) == rank
     assert wd.list_exchanges(conn)[0].controller_user_id is None
-    assert wd.refresh_player(conn, actor.user_id, now + timedelta(hours=3)).cash == 1080
+    assert wd.refresh_player(conn, actor.user_id, now + timedelta(hours=3)).cash == 954
     assert "abandoned" in wd.history_events(conn, actor.user_id)[0].summary_text
     conn.close()
 
@@ -654,20 +655,20 @@ def test_abandon_and_reclaim_cannot_farm_capture_rank_even_after_restart(db_path
     conn.close()
 
 
-def test_abandonment_rank_guard_ends_with_another_owner_or_new_season(db_path):
+def test_capture_rank_guard_survives_another_owner_until_new_season(db_path):
     conn, now, actor, rival = _rivals(db_path)
     wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
     wd.resolve_garrison(conn, actor, 1, -1, now)
     wd.resolve_root_exchange(conn, rival, 1, now, FixedRandom())
-    assert wd.rank_score(rival) == 500
+    assert wd.rank_score(rival) == wd.CAPTURE_RANK
     wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
-    assert wd.rank_score(actor) == 1000
+    assert wd.rank_score(actor) == wd.CAPTURE_RANK
     wd.resolve_garrison(conn, actor, 1, -1, now)
     later = now + wd.SEASON
     actor = wd.refresh_player(conn, actor.user_id, later)
     assert wd.list_exchanges(conn)[0].withdrawn_by is None
     wd.resolve_root_exchange(conn, actor, 1, later, FixedRandom())
-    assert wd.rank_score(actor) == 500
+    assert wd.rank_score(actor) == wd.CAPTURE_RANK
     conn.close()
 
 
@@ -728,6 +729,7 @@ def test_shared_crew_upgrade_preserves_real_total_and_pays_released_holdings(db_
     conn, now, actor, _ = _rivals(db_path)
     conn.execute("UPDATE players SET crew=? WHERE user_id=1", (crew,))
     conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=24, controlled_since=?", (wd.to_iso(now),))
+    _downgrade_economy_fixture(conn)
     conn.execute("PRAGMA user_version=1")
     before_identity = tuple(conn.execute("SELECT user_id, handle, created_at, crew_recruited_total FROM players WHERE user_id=1").fetchone())
     priority = [r[0] for r in conn.execute("SELECT id FROM exchanges ORDER BY income_per_hour DESC, id")]
@@ -738,7 +740,7 @@ def test_shared_crew_upgrade_preserves_real_total_and_pays_released_holdings(db_
     assert actor.crew + sum(e.garrison for e in holdings) == crew
     assert actor.crew == 1
     assert {e.id for e in holdings} == set(priority[:min(crew - 1, 10)])
-    assert actor.cash == 1411
+    assert actor.cash == 1020
     assert tuple(conn.execute("SELECT user_id, handle, created_at, crew_recruited_total FROM players WHERE user_id=1").fetchone()) == before_identity
     assert len(wd.history_events(conn, actor.user_id)) == 1
     before = list(conn.iterdump())
@@ -750,6 +752,7 @@ def test_shared_crew_upgrade_preserves_real_total_and_pays_released_holdings(db_
 def test_shared_crew_version_failure_preserves_legacy_allocations_and_income(db_path):
     conn, now, actor, _ = _rivals(db_path)
     conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=3, controlled_since=?", (wd.to_iso(now),))
+    _downgrade_economy_fixture(conn)
     conn.execute("PRAGMA user_version=1")
     before = list(conn.iterdump())
     def deny_version(action, name, value, *args):
@@ -1204,7 +1207,7 @@ def test_season_number_never_precedes_first_world_season():
 def _give_exchange(conn, user_id, now, exchange_id=1):
     conn.execute(
         "UPDATE exchanges SET controller_user_id=?, garrison=1, controlled_since=?, "
-        "income_collected_at=? WHERE id=?",
+        "income_collected_at=?, income_per_hour=40 WHERE id=?",
         (user_id, wd.to_iso(now), wd.to_iso(now), exchange_id),
     )
 
@@ -1229,7 +1232,7 @@ def test_capture_pays_prior_owners_earned_income(db_path):
     wd.load_or_create_player(conn, b.user_id, b.handle, later, 1)
     assert wd.read_player(conn, b.user_id).cash == 1080
     wd.refresh_player(conn, a.user_id, later + timedelta(hours=1))
-    assert wd.read_player(conn, a.user_id).cash == 1040
+    assert wd.read_player(conn, a.user_id).cash == 990
     conn.close()
 
 
@@ -1243,7 +1246,7 @@ def test_fractional_income_stays_with_player_across_losing_and_reclaiming(db_pat
     wd.resolve_root_exchange(conn, a, 1, later, FixedRandom())
     wd.refresh_player(conn, a.user_id, later + timedelta(seconds=30))
     actual = wd.read_player(conn, a.user_id)
-    assert actual.cash == 1001
+    assert actual.cash == 951
     assert actual.income_remainder == 0
     conn.close()
 
@@ -1331,6 +1334,7 @@ def test_income_collection_does_not_invalidate_exchange_selection(db_path):
 
 def _legacy_income_world(db_path):
     conn, now, a, _ = _rivals(db_path)
+    _downgrade_economy_fixture(conn)
     # Recreate the shipped unversioned layout, keeping a real populated row.
     conn.execute("PRAGMA user_version=0")
     schema = conn.execute("SELECT sql FROM sqlite_master WHERE name='players'").fetchone()[0]
@@ -1339,6 +1343,8 @@ def _legacy_income_world(db_path):
     old_schema = schema.replace(addition, "")
     values = asdict(a)
     values.pop("income_remainder")
+    for column in wd._ECONOMY_COLUMNS:
+        values.pop(column)
     conn.execute("DROP TABLE players")
     conn.execute(old_schema)
     names = ", ".join(values)
@@ -1403,7 +1409,7 @@ def test_refused_world_is_unchanged_before_journal_setup(db_path, kind):
 
 def test_current_version_does_not_silently_repair_missing_columns(db_path):
     conn, _ = _legacy_income_world(db_path)
-    conn.execute("PRAGMA user_version=1")
+    conn.execute(f"PRAGMA user_version={wd.WORLD_SCHEMA_VERSION}")
     conn.close()
     before = db_path.read_bytes()
     with pytest.raises(wd.WorldStateError, match="players schema is incomplete"):
@@ -1602,6 +1608,7 @@ def test_event_retention_keeps_latest_500_for_each_player(db_path):
 def test_legacy_event_retention_upgrade_is_atomic_and_idempotent(db_path):
     now = wd.now_utc()
     conn, _ = _setup(db_path, now)
+    _downgrade_economy_fixture(conn)
     conn.execute("PRAGMA user_version=0")
     conn.execute("DELETE FROM meta WHERE key='event_history_limit'")
     with wd._write_transaction(conn):
@@ -1669,16 +1676,16 @@ def test_dashboard_settles_income_and_preserves_active_raid_protection(db_path):
     conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=3 WHERE id=1")
     wd.record_event(conn, 1, "Rival", "Incoming raid", now)
     state = wd.dashboard_state(conn, 1, now + timedelta(hours=2))
-    assert state.player.cash == 380
+    assert state.player.cash == 304
     assert state.player.turns_used == 1
     assert state.player.last_raided_by == 2
     assert state.repeat_blocked_handle == "Rival"
-    assert [(e.id, e.income_per_hour) for e in state.holdings] == [(1, 40)]
+    assert [(e.id, e.income_per_hour) for e in state.holdings] == [(1, 2)]
     assert state.new_events == 1
     assert state.season_ends_at == now + wd.SEASON
-    assert wd.rank_score(state.player) == 500
+    assert wd.rank_score(state.player) == 50
     again = wd.dashboard_state(conn, 1, now + timedelta(hours=2))
-    assert again.player.cash == 380
+    assert again.player.cash == 304
     assert len(wd.unseen_events(conn, 1)) == 1
     conn.close()
 
@@ -1766,7 +1773,7 @@ def test_action_delta_excludes_income_collected_before_action(db_path):
     conn.execute("UPDATE exchanges SET controller_user_id=1 WHERE id=1")
     delta = wd.ActionDelta()
     wd.resolve_trade_warez(conn, player, now + timedelta(hours=1), FixedRandom(1), delta=delta)
-    assert player.cash == 360
+    assert player.cash == 322
     assert delta.cash == 20
     conn.close()
 
@@ -1820,3 +1827,166 @@ def test_process_death_releases_world_session_guard(db_path):
         child.communicate(timeout=5)
     with wd.world_session(db_path, maintenance=True):
         pass
+
+
+def _downgrade_economy_fixture(conn):
+    for column in wd._ECONOMY_COLUMNS:
+        conn.execute(f'ALTER TABLE players DROP COLUMN {column}')
+    conn.execute('PRAGMA user_version=2')
+
+
+def test_economy_upgrade_pays_old_income_preserves_rank_and_starts_control_clock(db_path, monkeypatch):
+    conn, now, actor, rival = _rivals(db_path)
+    conn.execute('UPDATE players SET exchanges_taken_total=4 WHERE user_id=1')
+    conn.execute('UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=?, income_per_hour=40 WHERE id=1', (wd.to_iso(now),))
+    _downgrade_economy_fixture(conn)
+    monkeypatch.setattr(wd, 'now_utc', lambda: now + timedelta(hours=2))
+    wd.ensure_schema(conn)
+    actual = wd.read_player(conn, 1)
+    assert actual.cash == 1080
+    assert wd.rank_score(actual) == 2000
+    assert actual.control_rank == actual.control_remainder == 0
+    assert actual.created_at == actor.created_at and actual.handle == actor.handle
+    assert actual.captured_exchanges == tuple(range(1, 11))
+    assert wd.read_player(conn, 2).captured_exchanges == ()
+    before = list(conn.iterdump())
+    wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
+    later = wd.refresh_player(conn, 1, now + timedelta(hours=8))
+    assert later.cash == 1092 and later.control_rank == 1
+    conn.close()
+
+
+def test_economy_marker_failure_rolls_back_income_rank_and_columns(db_path, monkeypatch):
+    conn, now, _, _ = _rivals(db_path)
+    conn.execute('UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=?, income_per_hour=40 WHERE id=1', (wd.to_iso(now),))
+    _downgrade_economy_fixture(conn)
+    before = list(conn.iterdump())
+    monkeypatch.setattr(wd, 'now_utc', lambda: now + timedelta(hours=2))
+    def deny_version(action, name, value, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == 'user_version' and value == '3' else sqlite3.SQLITE_OK
+    conn.set_authorizer(deny_version)
+    with pytest.raises(sqlite3.DatabaseError):
+        wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+@pytest.mark.parametrize('spaced', [False, True])
+def test_control_rank_combines_partial_holdings_without_login_advantage(db_path, spaced):
+    conn, now, actor, rival = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    wd.resolve_root_exchange(conn, actor, 2, now, FixedRandom())
+    if spaced:
+        for minute in range(1, 181):
+            wd.refresh_player(conn, actor.user_id, now + timedelta(minutes=minute))
+    player = wd.refresh_player(conn, actor.user_id, now + timedelta(hours=3))
+    assert player.control_rank == 1 and player.control_remainder == 0
+    wd.resolve_root_exchange(conn, rival, 1, now + timedelta(hours=4), FixedRandom())
+    player = wd.refresh_player(conn, actor.user_id, now + timedelta(hours=8))
+    assert player.control_rank == 2 and player.control_remainder == 0
+    assert wd.refresh_player(conn, rival.user_id, now + timedelta(hours=8)).control_rank == 0
+    conn.close()
+
+
+def test_standings_include_absent_owners_control_rank_without_clearing_protection(db_path):
+    conn, now, actor, rival = _rivals(db_path)
+    wd.resolve_root_exchange(conn, rival, 1, now, FixedRandom())
+    conn.execute('UPDATE players SET legacy_rank=51 WHERE user_id=1')
+    conn.execute('UPDATE players SET last_raided_by=1 WHERE user_id=2')
+    page = wd.read_player_page(conn, 1, now + timedelta(hours=12), standings=True)
+    assert page.position == 2
+    assert page.entries[0].user_id == 2 and wd.rank_score(page.entries[0]) == 52
+    assert wd.read_player(conn, 2).last_raided_by == 1
+    assert [wd.rank_score(p) for p in page.entries] == [52, 51]
+    conn.close()
+
+
+def test_failed_capture_charges_cash_but_never_earns_or_uses_capture_award(db_path):
+    conn, now, actor, rival = _rivals(db_path)
+    wd.resolve_root_exchange(conn, rival, 1, now, FixedRandom())
+    delta = wd.ActionDelta()
+    assert not wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom(.99), delta=delta)[0]
+    assert (delta.cash, delta.turns, delta.rank) == (-50, 1, 0)
+    assert actor.captured_exchanges == ()
+    assert wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom(), delta=delta)[0]
+    assert delta.rank == 50
+    conn.close()
+
+
+def test_capture_with_insufficient_cash_rejects_without_spending_anything(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    conn.execute('UPDATE players SET cash=49 WHERE user_id=1')
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected, match='capture attempt'):
+        wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    assert list(conn.iterdump()) == before
+    assert 'Need $1 more' in wd.action_block_reason('root', wd.read_player(conn, 1))
+    conn.close()
+
+
+def test_economy_state_resets_with_season_and_keeps_account_age(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    conn.execute('UPDATE players SET legacy_rank=450 WHERE user_id=1')
+    wd.refresh_player(conn, 1, now + timedelta(hours=6))
+    actual = wd.refresh_player(conn, 1, now + wd.SEASON)
+    assert (actual.legacy_rank, actual.control_rank, actual.control_remainder, actual.captured_exchanges) == (0, 0, 0, ())
+    assert actual.created_at == actor.created_at
+    conn.close()
+
+
+def test_full_map_daily_income_stays_below_fifteen_average_trades(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    conn.execute('UPDATE players SET crew=11, cash=10000 WHERE user_id=1')
+    for exchange in wd.list_exchanges(conn):
+        wd.resolve_root_exchange(conn, actor, exchange.id, now, FixedRandom())
+    cash_before = actor.cash
+    after = wd.refresh_player(conn, 1, now + wd.DAY)
+    income = after.cash - cash_before
+    assert income == 480 <= wd.TURNS_PER_DAY * sum(wd.TRADE_WAREZ_RANGE) / 2
+    assert after.control_rank == 40
+    assert after.exchanges_taken_total == 10 and len(after.captured_exchanges) == 10
+    conn.close()
+
+
+def test_worst_payout_post_bust_recovery_fits_one_allowance(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    conn.execute('UPDATE players SET cash=0, crew=1, heat=95 WHERE user_id=1')
+    assert wd.resolve_trade_warez(conn, actor, now, FixedRandom())[1]
+    assert actor.heat == 0 and actor.crew == 1
+    turns = 0
+    while actor.crew < 3 and turns < 15:
+        if actor.cash >= wd.RECRUIT_COST:
+            wd.resolve_recruit(conn, actor, now)
+        else:
+            assert not wd.resolve_trade_warez(conn, actor, now, FixedRandom())[1]
+        turns += 1
+    assert actor.crew == 3 and turns <= 15 and actor.turns_used <= 15
+    conn.close()
+
+
+def test_newcomer_can_capture_defended_territory_at_ten_percent_floor(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    conn.execute('UPDATE players SET legacy_rank=1000000 WHERE user_id=2')
+    conn.execute('UPDATE exchanges SET controller_user_id=2, garrison=1000000, controlled_since=? WHERE id=1', (wd.to_iso(now),))
+    preview = wd.action_preview_lines('root', actor, wd.list_exchanges(conn)[0])
+    assert 'Success: 10%' in '\n'.join(preview)
+    assert wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom(.099))[0]
+    conn.close()
+
+
+@pytest.mark.parametrize('count', [9, 20])
+def test_economy_upgrade_preserves_worlds_requiring_exchange_count_repair(db_path, count):
+    conn, now, _, _ = _rivals(db_path)
+    _downgrade_economy_fixture(conn)
+    if count == 9:
+        conn.execute('DELETE FROM exchanges WHERE id=10')
+    else:
+        conn.execute('INSERT INTO exchanges (name, income_per_hour, controller_user_id, garrison, controlled_since, income_collected_at, season_number) SELECT name, income_per_hour, controller_user_id, garrison, controlled_since, income_collected_at, season_number FROM exchanges')
+    before = list(conn.iterdump())
+    with pytest.raises(wd.WorldStateError, match='exchange count'):
+        wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
+    conn.close()
