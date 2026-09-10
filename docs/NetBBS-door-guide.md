@@ -366,6 +366,10 @@ simple and preserves names; monochrome retains explicit labels and numbers.
 Fast skips optional static art and action flavor, keeping every stake and net
 result. There are no animation delays in either mode. The map and NPC dossiers
 show compact role/operator diagrams beside actual ownership and defense.
+War Dialer inherits your NetBBS Unicode-decoration choice unless you explicitly
+toggle ASCII decorations in Display. Monochrome and Fast do not override that
+inheritance. Older launchers without the optional `unicode_style` metadata field
+keep rich decorations by default; standalone play uses the same default.
 
 **MANUAL ? outside NetBBS, before activating season results:** stop old game
 sessions and create/verify the node backup with its world component as above.
