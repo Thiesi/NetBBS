@@ -535,10 +535,14 @@ Use a local filesystem with OS locking and atomic file replacement. A directory
 shared between hosts is not a supported multiplayer setup.
 
 Each pilot's Hall of Fame record is retained in `scores/USER_ID.json`, including
-pilots outside the displayed top 20. Older `leaderboard.json` remains readable and
-is not rewritten. A pilot's next checkpoint carries their legacy high-water score
-forward. Scores are optional; a temporary score-write failure does not lose the
-career, and a later checkpoint retries publication from its saved high-water mark.
+pilots outside the displayed top 20. An older `leaderboard.json` is imported into
+`scores/` at launch, in full and for every pilot in it, whether or not that pilot
+ever launches again; the file itself is kept and never rewritten. The import
+needs the same exclusive access a restore does, so a launch that arrives while
+another session holds it simply skips the import and the next launch retries it
+until every row is in. Scores are optional; a temporary score-write failure does
+not lose the career, and a later checkpoint retries publication from its saved
+high-water mark.
 
 ### Starting and returning to Voidrunner
 
@@ -973,9 +977,9 @@ the enemy; harry also lowers your escape chance. The Info view shows the pattern
 
 Raider, Bulwark and Skirmisher patterns reward different timing. Ship upgrades
 still matter, and high-tier fire can seriously damage even heavy hulls. New raiders
-use destination danger; already stored opponents retain their stats. A fight saved
-under the original rules keeps those rules until resolved, then new fights use
-intents and Guard. Invalid repeat-Guard input spends no turn or randomness.
+use destination danger; already stored opponents retain their stats. A saved
+fight keeps the ruleset version it started under until it is resolved. Invalid
+repeat-Guard input spends no turn or randomness.
 
 **[F] Fire** exchanges one round, **[E] Evade** attempts escape, and pirates also
 allow **[D] Dump** (one random cargo unit; shown only with cargo aboard) and
@@ -1056,8 +1060,8 @@ stock cannot be signed, and signing reserves those units from spot stock until
 pickup or cancellation. Quantity and term edits remain unsaved until **[S] Sign**
 and its final confirmation. Invalid quantity
 input retains the draft; Back discards it. Modern-order cancellation remains an
-explicit **[X] Cancel** with a final refund/fee confirmation. Existing legacy terms
-remain visible. Signed/cancelled results are saved before display and retained when
+explicit **[X] Cancel** with a final refund/fee confirmation.
+Signed/cancelled results are saved before display and retained when
 returning to the futures list and market.
 
 ### Engineering yard and crew pages
@@ -1103,9 +1107,8 @@ current station's production and demand and your present per-jump wage budget.
 Pages fit the terminal; **[B] Back** leaves without changing anything.
 
 Costs are recorded for new purchases and futures pickups, including brokerage.
-Older cargo remains labelled **unknown cost**. Disposals use older unknown cargo
-first, then recorded purchases in order. Receipts from unknown-cost cargo are
-shown separately; they are not called profit. Sale and delivery margins exclude
+Every unit in the hold has a recorded acquisition cost, and disposals consume
+purchases in the order they were made. Sale and delivery margins exclude
 travel and other career spending. The ledger reports actual fuel purchases,
 paid wages, cancelled-order fees and lost cargo cost separately; it cannot
 reconstruct activity before recording began. A new career starts a fresh ledger.
@@ -1150,10 +1153,13 @@ starts travel. Visit markets and compare alternatives when a pool is exhausted.
 ### Voidrunner recovery
 
 Invalid or unreadable career files remain in place. The game shows a recovery
-screen with **[B] Back**, and never silently starts a replacement career. If
-`USER_ID.previous.json` is valid, the screen shows its callsign, day, credits and
-pending-journey status. **[R] Restore** appears on the final page and requires a
-confirmation: progress after that checkpoint will be rolled back. Before
+screen with **[B] Back**, and never silently starts a replacement career. A
+career that is merely too old for this build gets a different screen: it is
+refused, nothing is changed, and **[N] New career** on the last page offers a
+replacement. If `USER_ID.previous.json` is valid, the recovery screen shows its
+callsign, day, credits and pending-journey status. **[R] Restore** appears on the
+final page and requires a confirmation: progress after that checkpoint will be
+rolled back. Before
 replacement, the current bytes are retained as `USER_ID.recovery-UNIQUE.json`.
 Back, declined confirmation and disconnection leave the files unchanged.
 
@@ -1161,9 +1167,14 @@ Changed checkpoints retain the preceding valid save; identical writes leave the
 previous copy alone. Validation covers file structure, schema/generator versions,
 numeric types and ranges, references, ship/cargo capacity and resume state. The
 file limit is 4 MiB; excessive or malformed data requires manual inspection.
-Legacy additive fields default normally, including pre-limit active contracts.
-An unsupported schema, generator version or structural field requires the matching
-game build or manual repair; the game does not offer a downgrade to an older copy.
+A career saved before the current save version is refused rather than upgraded:
+the game says so, changes nothing, and offers to begin a new career in its place.
+Declining leaves the file exactly as it is, so an older build can still open it.
+Accepting takes the slot and retains the refused career as a
+`USER_ID.recovery-UNIQUE.json` copy, the same place a rollback puts the career it
+replaces; when no copy can be written, nothing is replaced. An unsupported
+generator version or structural field requires the matching game build or manual
+repair; the game does not offer a downgrade to an older copy.
 
 **Manual SysOp recovery:** stop all sessions using this pilot's save directory,
 retain a separate copy of the whole directory, and inspect the reported file.
