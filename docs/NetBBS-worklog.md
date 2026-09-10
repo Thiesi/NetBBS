@@ -4754,6 +4754,26 @@ movement goes through `page_step`, which clamps at both ends and returns `None`
 for anything that is not a paging key. A new paged screen that measures or
 clamps for itself will disagree with the rest at some width.
 
+The Voidrunner save validator never builds a galaxy (issue #419). It asks
+`galaxy_economies(seed)` and `galaxy_hops(seed, origin)`, both memoised because
+both are pure in the seed and neither returns anything mutable. `generate_galaxy`
+itself must stay uncached: every caller marks its systems discovered, so a shared
+list would alias one career's exploration into another. Every commit validates
+twice -- the new document, and the old file before it is aged into `.previous`,
+which is what keeps a corrupt save from overwriting the last readable copy -- so
+anything a validation does happens twice per acknowledged action.
+
+The pre-`scores/` `leaderboard.json` is parsed once per session once it has been
+read successfully. A failed read is never cached: an absent file, a transient
+`OSError` and a temporarily unreadable one look the same from there, and caching
+that emptiness would drop the legacy wealth and retirement floors for the rest
+of the session.
+
+Versioned sub-records go through `_validate_versioned`, which keeps the
+distinction the repeated blocks kept getting close to losing: a malformed record
+is a `ValueError` (the save is broken) while an unknown version is an
+`UnsupportedSave` (the save is fine, this build is too old).
+
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen
 reserves its own hotkeys in its letter map (`MARKET_LETTERS`, `YARD_LETTERS`,
