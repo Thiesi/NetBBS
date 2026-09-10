@@ -3469,13 +3469,19 @@ def career_finale_blocker(save: SaveData, finale: str) -> str | None:
 
 
 def finish_career(save: SaveData, finale: str) -> SaveData:
-    """Validate the deliberate ending; archive and reset share one saved payload."""
+    """Validate the deliberate ending; archive and reset share one saved payload.
+
+    Contracts still active at retirement end unpaid, so the dossier counts them
+    as abandoned and the new career's log names them. The retiring save itself
+    is never mutated: the finale screen builds the result before the final
+    confirmation, and a cancelled retirement must leave the career untouched."""
     if blocker := career_finale_blocker(save, finale): raise ValueError(blocker)
+    abandoned = [f"Abandoned at retirement: {m.description} (forfeited {m.reward:,}cr)." for m in save.active_missions]
     dossier = {"version":1, "number":save.pilot.retirements+1, "seed":save.seed,
                "started":save.pilot.career_started, "ended":time.strftime("%Y-%m-%d"), "finale":finale,
                "rank":career_rank_index(save.pilot), "ship":save.ship.hull_class, "days":save.turn,
                "credits":save.pilot.credits, "kills":save.pilot.kills, "missions":save.pilot.missions_completed,
-               "failed":save.pilot.missions_failed, "expired":save.pilot.missions_expired,
+               "failed":save.pilot.missions_failed + len(abandoned), "expired":save.pilot.missions_expired,
                "charted":len(save.discovered), "market_margin":career_accomplishments(save)["trader"],
                "highlights":list(save.pilot.highlights)}
     fresh = retire_pilot(save)
@@ -3483,6 +3489,8 @@ def finish_career(save: SaveData, finale: str) -> SaveData:
     info = CAREER_FINALES[finale]
     if info["tier"] is not None: setattr(fresh.ship, info["tier"] + "_tier", 1)
     fresh.pilot.log = [f"Retired as {info['label']} (retirement #{fresh.pilot.retirements}); a new career begins."]
+    for entry in abandoned:
+        fresh.pilot.note(entry)
     fresh.pilot.highlights = [info["closing"]]
     return fresh
 
@@ -3510,7 +3518,8 @@ def career_finale_lines(save: SaveData, selected: str) -> list[str]:
     gear = f"{info['tier'].title()} tier 1" if info["tier"] else "ordinary starting modules"
     lines += ["Selected ending: " + info["closing"],
               f"New Game+: a fresh galaxy, Shuttle with {gear}, full starting hull/fuel and {credits:,}cr including the accumulated retirement bonus.",
-              "Current cargo, contracts, faction/crew/story progress and career rank reset. Display style, lifetime score, retirement count and dossiers remain.",
+              "Current cargo, contracts, faction/crew/story progress and career rank reset. Display style, lifetime score, retirement count and dossiers remain."
+              + (f" {len(save.active_missions)} active contract(s) count as abandoned in the dossier." if save.active_missions else ""),
               f"Archive space: {len(save.retired_careers)}/{MAX_RETIRED_CAREERS}. The full current dossier and new career save together before acknowledgement.",
               "[S] Retire opens the final confirmation. [B] Back retains this career."]
     return lines

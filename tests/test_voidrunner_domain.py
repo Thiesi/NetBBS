@@ -12264,3 +12264,17 @@ def test_combat_lines_name_the_escort_at_stake_only_during_escort_fights():
     bribe = next(row for row in lines if row.startswith("[P]"))
     assert evade.endswith("Escaping fails the escort contract.") and dump.endswith("Escaping fails the escort contract.")
     assert bribe.endswith("An accepted bribe fails the escort contract.")
+
+
+def test_retiring_with_active_contracts_records_them_as_abandoned():
+    world = _world_with_seed(42); world.save.pilot.kills = 50
+    dest = sorted(world.here.connections)[0]
+    world.save.active_missions = [vr.Mission(1, "delivery", "Deliver goods", 300, 0, dest, commodity="food", quantity=2),
+                                  vr.Mission(2, "escort", "Escort a convoy", 800, 0, dest, pirate_tier=1)]
+    assert "2 active contract(s) count as abandoned" in " ".join(vr.career_finale_lines(world.save, "combat"))
+    import copy; before = copy.deepcopy(world.save.to_dict())
+    fresh = vr.finish_career(world.save, "combat")
+    assert fresh.retired_careers[-1]["failed"] == 2 and not fresh.active_missions
+    assert any("Abandoned at retirement: Escort a convoy (forfeited 800cr)" in entry for entry in fresh.pilot.log)
+    assert world.save.to_dict() == before  # a cancelled retirement leaves the live career untouched
+    assert vr.finish_career(world.save, "combat").retired_careers[-1]["failed"] == 2  # and repeating does not inflate it
