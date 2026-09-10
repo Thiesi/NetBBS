@@ -975,7 +975,9 @@ under the original rules keeps those rules until resolved, then new fights use
 intents and Brace. Invalid repeat-Brace input spends no turn or randomness.
 
 **[F] Fight** exchanges one round, **[E] Evade** attempts escape, and pirates also
-allow **[D] Dump & evade** (one random cargo unit) and an affordable **[P] Pay bribe**.
+allow **[D] Dump & evade** (one random cargo unit; shown only with cargo aboard) and
+an affordable **[P] Pay bribe**. The action bar names every verb at 40 columns or wider, and keeps the compact
+letter list below that so the page still shows the fight.
 While escorting, the Evade, Dump and Pay-bribe lines say that leaving fails the
 convoy. Failed, abandoned and expired contracts are counted on the Pilot Status
 page and in retirement dossiers, and the log names the forfeited reward.
