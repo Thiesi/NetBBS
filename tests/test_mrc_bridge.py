@@ -514,10 +514,12 @@ def test_outbound_queue_is_bounded(db, lane, lobby):
             # leave, the next line brings the queue under the smaller cap.
             for name in ("u2", "u3", "u4", "u5"):
                 await bridge.local_leave(lobby, name)
-            smaller = bridge._outbound_cap()
-            assert smaller == 16 + 8
+            # The cap keeps this connection's peak: the packets queued for
+            # the four callers still drain, and no live caller's line is
+            # evicted to make room for the newest.
+            assert bridge._outbound_cap() == cap
             await bridge.local_away("u1", "one more")
-            assert bridge._outbound.qsize() + bridge._held_total <= smaller
+            assert bridge._outbound.qsize() + bridge._held_total <= cap
         finally:
             await bridge.close()
             await fake.close()

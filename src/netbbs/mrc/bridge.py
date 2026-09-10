@@ -432,6 +432,7 @@ class MrcBridge:
         self._last_sent: dict[str, float] = {}
         self._held: dict[str, deque[str]] = {}
         self._held_total = 0  # held lines count against `outbound_queue_size`
+        self._announced_peak = 0
         # Issue #377: what chat_flow told the bridge about each caller
         # (address, terminal size, level) for the announcement verbs,
         # pruned with the other per-caller caches; and the hub's latency.
@@ -721,6 +722,7 @@ class MrcBridge:
         self._private_buckets.clear()
         self._private_drop_noted.clear()
         self._connected_at_monotonic = self._clock()
+        self._announced_peak = 0  # this connection's announcement high-water mark
         self._last_error = None
         _logger.info("Connected to MRC hub %s:%d as %r", settings.host, settings.port, settings.site_name)
         self._drain_outbound_queue()
@@ -987,7 +989,10 @@ class MrcBridge:
         of it before the writer sends a line, and the oldest must not be
         evicted by the newest. Announced callers are live sessions, so
         this stays a bound."""
-        announced = sum(len(nicks) for nicks in self._announced.values())
+        # The peak, not the current count: callers leaving while a
+        # reconnect's announcements are still queued must not shrink the
+        # cap under packets that belong to callers still here.
+        announced = max(self._announced_peak, sum(len(nicks) for nicks in self._announced.values()))
         return max(self._outbound_size, OUTBOUND_CONNECTION_OVERHEAD + OUTBOUND_LINES_PER_ANNOUNCEMENT * announced)
 
     def _drain_outbound_queue(self) -> None:
@@ -1189,6 +1194,7 @@ class MrcBridge:
                 return False
         nick = protocol.nick_for_username(username)
         nicks[username] = nick
+        self._announced_peak = max(self._announced_peak, sum(len(others) for others in self._announced.values()))
         self._announced_rooms[mapping.channel.id] = mapping.room
         self._enqueue(protocol.newroom(nick, settings.site_wire_name, "", mapping.room))
         self._send_caller_facts(mapping, nick, username)

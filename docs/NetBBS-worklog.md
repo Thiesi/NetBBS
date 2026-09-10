@@ -987,8 +987,13 @@ session needs the same treatment.
   is `_outbound_cap()`: the configured 200, or the connection's own prefix
   (`OUTBOUND_CONNECTION_OVERHEAD`) plus eight lines per announced caller
   when that is more, so a reconnect's announcements never evict each other
-  or the INFO lines ahead of them; `_enqueue` evicts until the new line
-  fits, since the cap shrinks as callers leave. An IMALIVE's timestamp is rewritten by
+  or the INFO lines ahead of them -- computed from the connection's
+  announcement peak, not the current count, so callers leaving while a
+  reconnect's announcements are still queued cannot shrink the cap under
+  packets of callers still here; `_enqueue` evicts until the new line
+  fits. Facts are noted before the ChatHub join makes a session visible,
+  so a reconciliation during the join's awaits announces with them. An
+  IMALIVE's timestamp is rewritten by
   the writer as the line reaches the socket (`_stamp_imalive`), so the
   round trip measures the hub, not this node's queue. The audit row for a
   settings save records both caller-disclosure switches.
