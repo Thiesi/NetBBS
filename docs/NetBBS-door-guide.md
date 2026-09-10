@@ -48,9 +48,10 @@ refuses to silently create a replacement. Choose an explicit override or complet
 the migration. An explicit path for a new independent node deliberately selects
 its own world; it does not adopt the old world's users or records.
 
-War Dialer records schema version 1 in SQLite `user_version`. A complete older
-unversioned world upgrades automatically in one transaction, preserving players,
-exchanges, clocks and the latest 500 events per player. A failed upgrade rolls
+War Dialer records schema version 2 in SQLite `user_version`. A complete older
+world upgrades automatically in one transaction: version 1 adopts the original
+layout and latest 500 events per player; version 2 converts copied garrisons to
+shared crew assignments as described below. A failed upgrade rolls
 back its schema/data changes and version marker. Newer versions, incomplete or
 unrelated schemas, and corrupt files are refused with a caller-facing error;
 startup does not replace them with an empty world. Existing zero-byte files are
@@ -203,6 +204,28 @@ are free and refresh these snapshots; action keys stay available on each page.
 Outcomes and rejection messages wait for acknowledgement before returning to the
 switchboard. The game requires at least 20 columns by 10 rows; resize and reconnect
 if the launch reports a smaller terminal.
+
+Your crew is shared across active play and exchange defense. Capture needs two
+available members and assigns one to the new garrison. `[G]arrison` shows owned
+exchanges and offers reinforcement/withdrawal in amounts of one, five or all
+eligible members, followed by an exact preview. Each transfer costs one turn, no
+cash or Heat, and gives no Rank. Keep one member available for recovery. The last
+withdrawal abandons the exchange after paying earned income. Displaced defenders
+return to their owner's available pool when a rival captures their exchange.
+Jobs, raids, attacks and busts use available crew; stationed members defend only
+their exchange. The switchboard and results show the two pools separately.
+
+**MANUAL — outside NetBBS, before activating shared-crew rules:** stop all old
+War Dialer processes and create/verify a node backup with its world component.
+The first permitted launch upgrades the world to schema 2 transactionally.
+After normal overdue season settlement, it reserves one available member per
+owner, keeps holdings by descending hourly income then ID within the real crew
+budget, and distributes the remaining members evenly across those holdings.
+Unstaffable holdings become unclaimed after paying income; a receipt explains
+the conversion. IDs, handles, account age, cash and Rank are retained. Review
+the receipt and use Garrison to adjust assignments. Never mix old and new game
+processes; older versions refuse schema 2. Restore the verified backup with a
+matching game version if the operator chooses to undo the upgrade.
 
 Free screens: `[B]Rank` shows season standings and your position; ties use account
 ID order. `[E]Map` shows all exchanges, owners, garrisons and hourly income.

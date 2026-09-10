@@ -362,7 +362,7 @@ def test_unusable_world_has_readable_exit_without_replacement(tmp_path, future_s
     path = tmp_path / "unusable.db"
     if future_schema:
         conn = sqlite3.connect(path)
-        conn.execute("PRAGMA user_version=2")
+        conn.execute(f"PRAGMA user_version={wd.WORLD_SCHEMA_VERSION + 1}")
         conn.close()
     else:
         path.write_bytes(b"Damaged world data; must not be replaced.")
@@ -978,6 +978,69 @@ def test_real_process_dashboard_keeps_action_result_until_acknowledged(tmp_path)
         send(b"q")
         assert process.wait(timeout=5) == 0
         assert process.stderr.read() == b""
+
+
+@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+def test_garrison_flow_fits_and_commits_only_after_final_preview(tmp_path, monkeypatch, width, height):
+    conn = wd.connect(tmp_path / "garrison.db")
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, "Owner", now, 1)
+    wd.resolve_root_exchange(conn, actor, 1, now, __import__("random").Random(1))
+    written = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(wd, "now_utc", lambda: now)
+    def select(valid):
+        screen = "".join(written).split("\x1b[2J\x1b[H")[-1]
+        # Every picker/preview key is driven by the currently displayed choices.
+        assert wd.read_player(conn, actor.user_id).turns_used == 1
+        if "[A]Act" in screen:
+            assert "A" in valid
+            return "A"
+        if "1" in valid:
+            return "1"
+        assert "N" in valid
+        return "N"
+    monkeypatch.setattr(wd, "read_menu_choice", select)
+    monkeypatch.setattr(wd, "read_input_key", lambda: " ")
+    assert wd.do_garrison(wd.Palette(False), conn, actor, width, height)
+    assert (actor.crew, wd.assigned_crew(conn, actor.user_id), actor.turns_used) == (1, 2, 2)
+    for screen in "".join(written).split("\x1b[2J\x1b[H")[1:]:
+        lines = _ANSI_RE.sub("", screen).split("\r\n")
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()
+
+
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_real_process_garrison_preview_cancel_and_disconnect_preserve_assignment(tmp_path, disconnect):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b">\x1b[0m ")
+        conn = wd.connect(path)
+        actor = wd.read_player(conn, 0)
+        wd.resolve_root_exchange(conn, actor, 1, wd.now_utc(), __import__("random").Random(1))
+        conn.close()
+        send(b"g")
+        wait_for(b"[B]ack (Q cancel)")
+        send(b"1")
+        wait_for(b"[B]ack (Q cancel)")
+        send(b"1")
+        wait_for(b"[A]Act [B]ack")
+        if disconnect:
+            process.stdin.close()
+        else:
+            send(b"b")
+            wait_for(b">\x1b[0m ")
+            send(b"q")
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b""
+        conn = wd.connect(path)
+        actor = wd.read_player(conn, 0)
+        assert (actor.crew, wd.assigned_crew(conn, 0), actor.turns_used) == (2, 1, 1)
+        conn.close()
 
 
 @pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
