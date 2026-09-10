@@ -63,3 +63,16 @@ def test_observation_does_not_collect_income_or_reset_protection_in_live_world(t
         assert list(conn.iterdump()) == before
     finally:
         conn.close()
+
+
+
+def test_mixed_visit_uses_paid_development_operations_and_all_fifteen_turns():
+    result = balance.run_scenario('mixed_visit', days=4)
+    assert not result['rejections']
+    actions = result['actions']['1']
+    assert actions['train'] == 1
+    assert all(actions[name] > 0 for name in ('recruit', 'case', 'prepare', 'execute'))
+    assert actions['operation_successes'] > 0
+    assert all(day['players']['1']['turns_spent'] == (day['day'] + 1) * 15 for day in result['daily'])
+    assert all(day['players']['1']['cash'] >= 0 for day in result['daily'])
+    assert result['daily'][0]['players']['1']['specialty'] == 'phreakers'

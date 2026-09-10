@@ -1751,3 +1751,22 @@ def test_operation_inspection_and_abandon_are_free_with_no_turns(tmp_path, monke
     assert wd.do_operation(wd.Palette(False), conn, actor, NoDraws(), 80, 24)
     assert actor.operation_stage == 0 and actor.turns_used == 15 and actor.cash == 300
     conn.close()
+
+
+@pytest.mark.parametrize('stage,used,cash,expected', [(1, 14, 30, '2 turns and $50'), (2, 14, 0, '1 turn and $0'), (2, 15, 0, '1 turn and $0')])
+def test_saved_operation_advice_names_remaining_budget_and_preserves_progress(tmp_path, stage, used, cash, expected):
+    conn = wd.connect(tmp_path / 'visit.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    conn.execute('UPDATE players SET operation_contract=0, operation_approach=0, operation_stage=?, turns_used=?, cash=?, turn_day_start=?', (stage, used, cash, wd.to_iso(now)))
+    state = wd.dashboard_state(conn, 1, now)
+    before = list(conn.iterdump())
+    advice = ' '.join(wd.next_steps(state, now))
+    assert expected in advice and '[O]Ops' in advice
+    if used == 15: assert 'No turns' in advice and 'Progress waits safely' in advice
+    if stage == 1: assert 'Need $20 more before Prepare' in advice and 'Progress waits safely' in advice
+    assert list(conn.iterdump()) == before
+    conn.close()

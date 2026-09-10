@@ -30,6 +30,7 @@ SCENARIOS = {
     "low_attendance": "Three territory callers visit every 1, 3 and 7 days.",
     "trade_only": "One caller spends every available turn trading.",
     "jobs_only": "One caller repeats the easiest contract with the Standard approach.",
+    "mixed_visit": "One caller trains Phreakers once, alternates recruitment with Cautious operations at >=60% execution odds, and trades when preparation is unaffordable.",
     "jobs_ladder": "One caller alternates recruitment with the highest-paying contract at >=60% odds, using Cautious.",
     "income_burst": "One exchange captured initially; subsequent turns trade in a short daily visit.",
     "income_spaced": "Same capture and RNG as income_burst; subsequent turns spread across 23 hours.",
@@ -65,6 +66,8 @@ def observe(conn, joined, totals, at):
                 "turns_spent": totals[uid]["turns"], "newcomer_protected": wd.is_in_grace(player, at),
                 "capture_rank": player.exchanges_taken_total * wd.CAPTURE_RANK,
                 "control_rank": player.control_rank,
+                "operation_stage": player.operation_stage, "successful_operations": player.successful_operations,
+                "specialty": player.specialty, "support": player.support,
             }
         return frame
     finally:
@@ -143,6 +146,13 @@ def run_scenario(name: str, *, days: int = 14, seed: int = 362) -> dict:
                             action, target = "root", exchanges[0].id
                         elif player.cash >= wd.RECRUIT_COST:
                             action = "recruit"
+                    elif name == "mixed_visit":
+                        if not player.specialty and player.cash >= 150:
+                            action = "train"
+                        elif turn % 4 == 0 and player.cash >= wd.RECRUIT_COST:
+                            action = "recruit"
+                        elif player.operation_stage != 1 or player.cash >= 50:
+                            action = ("case", "prepare", "execute")[player.operation_stage]
                     elif name in {"jobs_only", "jobs_ladder"}:
                         action = "job"
                         if name == "jobs_ladder" and turn % 2 == 0 and player.cash >= wd.RECRUIT_COST:
@@ -162,7 +172,17 @@ def run_scenario(name: str, *, days: int = 14, seed: int = 362) -> dict:
                             action = "recruit"
                     delta = wd.ActionDelta()
                     try:
-                        if action == "root":
+                        if action == "train":
+                            wd.resolve_crew_purchase(conn, player, now, wd.CrewChoice("phreakers"), delta=delta)
+                            busted = False
+                        elif action in {"case", "prepare", "execute"}:
+                            candidates = [i for i, (_, difficulty, _) in enumerate(wd.JOBS)
+                                          if min(.9, wd.success_chance(player.crew, difficulty) + .15) >= .6]
+                            choice = wd.JobChoice(max(candidates, default=0), 0)
+                            result = wd.resolve_operation(conn, player, now, action, rngs[uid], choice=choice, delta=delta)
+                            busted = bool(result and result[3])
+                            if result: totals[uid]["operation_successes"] += int(result[1])
+                        elif action == "root":
                             success, _, busted = wd.resolve_root_exchange(conn, player, target, now, rngs[uid], delta=delta)
                             totals[uid]["captures"] += int(success)
                         elif action == "raid":

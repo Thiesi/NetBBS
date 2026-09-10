@@ -6656,6 +6656,22 @@ together. Backup/restore includes progress and dossiers; SysOp competition reset
 and season advance clear them. The manual stop-sessions/verified-backup upgrade
 procedure applies before activating this version.
 
+**Short visits (issue #362, slice 6).** Direct Trade, Recruit and Job keys remain
+available alongside the optional operation hub. The switchboard and hub show
+the minimum budget to the next execution: a new operation needs three turns and
+$50, cased needs two and $50, prepared needs one and no further upfront cash.
+These are attempt budgets, not promises of success; failure still needs paid
+preparation. If turns or cash are short, the saved next step stays visible and
+the caller is told that progress can wait. Zero-turn callers retain free browsing
+of contracts, operations and dossiers. First-visit advice includes a one-turn
+Cautious contract. No setup prompt or compulsory operation blocks ordinary play.
+
+The deterministic mixed-visit probe combines specialty training, recruitment and
+saved operations within fifteen paid turns per day. It measures the actual
+transaction path and reports policy, outcomes and saved stage. Passing the probe
+establishes bounded turn use and reachable progression; human satisfaction,
+pace and multi-day balance remain separate acceptance gates in issue #362.
+
 **Compact action screens (issue #362, slice 3).** Target pickers, results,
 rejections and season notices use terminal-height pagination as well as width
 wrapping. Digits 1-9/0 choose a complete visible target entry and open its preview;
