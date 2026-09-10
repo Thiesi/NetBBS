@@ -4774,6 +4774,22 @@ distinction the repeated blocks kept getting close to losing: a malformed record
 is a `ValueError` (the save is broken) while an unknown version is an
 `UnsupportedSave` (the save is fine, this build is too old).
 
+Voidrunner's UI marker is a real boundary, not a comment: nothing above it may
+read a key or write to the terminal. Screens therefore live below it -- the four
+faction screens were the last that did not (issue #420). A data table heads the
+group of functions that reads it rather than sitting between two of them.
+
+`screen_*` is a screen a caller navigates to and can leave; `_screen_*` is a
+shared body or a sub-step another screen runs as part of one action (the combat
+session behind `screen_combat` and `screen_notoriety_patrol`, the faction contact
+behind the Concord and Blackwake screens, the opening offer inside the guide).
+Being reachable from the deck is not the test: `screen_travel`, `screen_customs`
+and `screen_auto_route` are screens the caller is in.
+
+A validator is named `_validate_*`. `_load_*` reads and returns; the three save
+validators named that way returned a coerced value only incidentally and were
+read as loaders.
+
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen
 reserves its own hotkeys in its letter map (`MARKET_LETTERS`, `YARD_LETTERS`,
