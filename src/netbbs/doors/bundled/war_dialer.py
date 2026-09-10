@@ -1181,6 +1181,8 @@ def _migrate_world_v3(conn: sqlite3.Connection) -> None:
     """Pay old rates before introducing the bounded capture/control economy."""
     now = now_utc()
     exchanges = conn.execute("SELECT id FROM exchanges ORDER BY id").fetchall()
+    if exchanges and len(exchanges) != len(EXCHANGE_SEEDS):
+        raise WorldStateError("Unexpected exchange count. Preserve the world for SysOp repair before upgrading the economy.")
     if exchanges:
         _settle_world(conn, now)
         for row in conn.execute("SELECT DISTINCT controller_user_id FROM exchanges WHERE controller_user_id IS NOT NULL").fetchall():

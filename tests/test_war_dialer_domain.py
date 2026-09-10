@@ -2070,3 +2070,18 @@ def test_raid_recovery_resets_at_season_boundary_but_account_age_does_not(db_pat
     assert reset.raid_shield_until == '' and reset.last_raided_by is None
     assert reset.created_at == victim.created_at
     conn.close()
+
+
+@pytest.mark.parametrize('count', [9, 20])
+def test_economy_upgrade_preserves_worlds_requiring_exchange_count_repair(db_path, count):
+    conn, now, _, _ = _rivals(db_path)
+    _downgrade_economy_fixture(conn)
+    if count == 9:
+        conn.execute('DELETE FROM exchanges WHERE id=10')
+    else:
+        conn.execute('INSERT INTO exchanges (name, income_per_hour, controller_user_id, garrison, controlled_since, income_collected_at, season_number) SELECT name, income_per_hour, controller_user_id, garrison, controlled_since, income_collected_at, season_number FROM exchanges')
+    before = list(conn.iterdump())
+    with pytest.raises(wd.WorldStateError, match='exchange count'):
+        wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
+    conn.close()
