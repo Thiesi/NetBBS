@@ -624,6 +624,13 @@ CREW_ITEMS = (
 SPECIALTIES = {item[0] for item in CREW_ITEMS[:3]}
 SUPPORT_ITEMS = {item[0] for item in CREW_ITEMS[3:]}
 
+# Role name, capture cash, base Heat, owned security defense, owner service.
+EXCHANGE_ROLES = {
+    "pbx": ("Public PBX", 25, 4, 0, "Lay Low: 1 turn, remove up to 15 Heat"),
+    "carrier": ("Carrier Switch", 50, 8, 2, "Recruit: 1 turn and $65 for one available crew"),
+    "hub": ("Warez Hub", 75, 12, 0, "Warez outlet: 1 turn, $30-$70 payout, +4 Heat"),
+}
+
 # (name, income per real hour controlled)
 EXCHANGE_SEEDS: tuple[tuple[str, int], ...] = (
     ("212-555 Uptown Exchange", 2),
@@ -710,6 +717,9 @@ class Exchange:
     income_collected_at: str
     season_number: int
     withdrawn_by: int | None = None
+    role: str = ""
+    linked_ids: tuple[int, ...] = ()
+    capture_discount: int = 0
 
 
 @dataclass
@@ -941,16 +951,29 @@ def capture_rank_award(attacker: Player, exchange: Exchange) -> int:
     return 0 if exchange.id in attacker.captured_exchanges else CAPTURE_RANK
 
 
+def exchange_terms(exchange: Exchange) -> tuple[str, int, int, int, str]:
+    return EXCHANGE_ROLES.get(exchange.role, ("Exchange", ROOT_EXCHANGE_COST, ROOT_EXCHANGE_HEAT, 0, "No service"))
+
+
+def exchange_defense(exchange: Exchange) -> int:
+    return exchange.garrison + (exchange_terms(exchange)[3] if exchange.controller_user_id is not None else 0)
+
+
+def capture_cost(exchange: Exchange) -> int:
+    return exchange_terms(exchange)[1] - exchange.capture_discount
+
+
 def action_root_exchange(attacker: Player, exchange: Exchange, now: datetime, rng: random.Random) -> tuple[bool, bool]:
     if attacker.crew < 2:
         raise ActionRejected("Need 2 available crew: one to hold the exchange and one to remain available. Recruit or withdraw defenders.")
-    if attacker.cash < ROOT_EXCHANGE_COST:
-        raise ActionRejected(f"Need ${ROOT_EXCHANGE_COST} for a capture attempt. Trade to fund it; nothing spent.")
-    attacker.cash -= ROOT_EXCHANGE_COST
+    cost = capture_cost(exchange)
+    if attacker.cash < cost:
+        raise ActionRejected(f"Need ${cost} for this capture attempt. Trade to fund it; nothing spent.")
+    attacker.cash -= cost
     if exchange.controller_user_id is None:
         success = True
     else:
-        success = rng.random() < success_chance(attacker.crew, exchange.garrison)
+        success = rng.random() < success_chance(attacker.crew, exchange_defense(exchange))
     if success:
         award = capture_rank_award(attacker, exchange)
         exchange.controller_user_id = attacker.user_id
@@ -964,7 +987,7 @@ def action_root_exchange(attacker: Player, exchange: Exchange, now: datetime, rn
             attacker.captured_exchanges += (exchange.id,)
     else:
         attacker.crew = max(1, attacker.crew - 1)
-    busted = apply_heat(attacker, ROOT_EXCHANGE_HEAT, rng, action="root")
+    busted = apply_heat(attacker, exchange_terms(exchange)[2], rng, action="root")
     return success, busted
 
 
@@ -984,7 +1007,7 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
-WORLD_SCHEMA_VERSION = 6
+WORLD_SCHEMA_VERSION = 7
 _OPERATION_COLUMNS = {"operation_contract", "operation_approach", "operation_stage", "successful_operations"}
 
 # Versioned schema contract: future additions need a new numbered migration.
@@ -1026,6 +1049,8 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
             expected = expected | {"specialty", "support"}
         if version >= 6 and table == "players":
             expected = expected | _OPERATION_COLUMNS
+        if version >= 7 and table == "exchanges":
+            expected = expected | {"role"}
         if not expected <= columns:
             raise WorldStateError(f"War Dialer {table} schema is incomplete. Preserve it for SysOp recovery; no replacement was created.")
 
@@ -1091,6 +1116,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     fresh.execute("PRAGMA user_version=5")
                     _migrate_world_v6(fresh)
                     fresh.execute("PRAGMA user_version=6")
+                    _migrate_world_v7(fresh)
+                    fresh.execute("PRAGMA user_version=7")
             finally:
                 fresh.close()
             try:
@@ -1149,6 +1176,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if version < 6:
             _migrate_world_v6(conn)
             conn.execute("PRAGMA user_version=6")
+        if version < 7:
+            _migrate_world_v7(conn)
+            conn.execute("PRAGMA user_version=7")
         _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
 
 
@@ -1290,6 +1320,15 @@ def _migrate_world_v3(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE exchanges SET income_per_hour=? WHERE id=?", (rate, row[0]))
 
 
+def _migrate_world_v7(conn: sqlite3.Connection) -> None:
+    ids = [row[0] for row in conn.execute("SELECT id FROM exchanges ORDER BY id")]
+    if ids and len(ids) != len(EXCHANGE_SEEDS):
+        raise WorldStateError("Unexpected exchange count; preserve and repair the original world before upgrading.")
+    conn.execute("ALTER TABLE exchanges ADD COLUMN role TEXT NOT NULL DEFAULT '' CHECK (role IN ('', 'pbx', 'carrier', 'hub'))")
+    for exchange_id, (_, income) in zip(ids, EXCHANGE_SEEDS):
+        conn.execute("UPDATE exchanges SET role=? WHERE id=?", ({1: "pbx", 2: "carrier", 3: "hub"}[income], exchange_id))
+
+
 def _migrate_world_v6(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE players ADD COLUMN operation_contract INTEGER NOT NULL DEFAULT -1 CHECK (operation_contract BETWEEN -1 AND 4)")
     conn.execute("ALTER TABLE players ADD COLUMN operation_approach INTEGER NOT NULL DEFAULT 1 CHECK (operation_approach BETWEEN 0 AND 2)")
@@ -1385,6 +1424,8 @@ def ensure_exchanges_seeded(conn: sqlite3.Connection, season_number: int, now: d
                 """,
                 (name, income, to_iso(now), season_number),
             )
+            if _world_schema_version(conn) >= 7:
+                conn.execute("UPDATE exchanges SET role=? WHERE id=last_insert_rowid()", ({1: "pbx", 2: "carrier", 3: "hub"}[income],))
 
 
 def _settle_world(conn: sqlite3.Connection, now: datetime) -> int:
@@ -1788,7 +1829,7 @@ def resolve_job(conn: sqlite3.Connection, player: Player, now: datetime, rng: ra
     return result
 
 
-def list_exchanges(conn: sqlite3.Connection) -> list[Exchange]:
+def list_exchanges(conn: sqlite3.Connection, viewer_id: int | None = None) -> list[Exchange]:
     rows = conn.execute(
         """
         SELECT e.*, p.handle AS controller_handle, withdrawal.value AS withdrawn_by
@@ -1797,16 +1838,23 @@ def list_exchanges(conn: sqlite3.Connection) -> list[Exchange]:
         ORDER BY e.id
         """
     ).fetchall()
-    return [
+    exchanges = [
         Exchange(
             id=r["id"], name=r["name"], income_per_hour=r["income_per_hour"],
             controller_user_id=r["controller_user_id"], controller_handle=r["controller_handle"],
             garrison=r["garrison"], controlled_since=r["controlled_since"],
             income_collected_at=r["income_collected_at"], season_number=r["season_number"],
             withdrawn_by=int(r["withdrawn_by"]) if r["withdrawn_by"] is not None else None,
+            role=r["role"] if "role" in r.keys() else "",
         )
         for r in rows
     ]
+    for index, exchange in enumerate(exchanges):
+        neighbors = (exchanges[(index - 1) % len(exchanges)], exchanges[(index + 1) % len(exchanges)])
+        exchange.linked_ids = tuple(neighbor.id for neighbor in neighbors)
+        if viewer_id is not None and any(neighbor.controller_user_id == viewer_id for neighbor in neighbors):
+            exchange.capture_discount = 10
+    return exchanges
 
 
 # Keep the standings expression aligned with rank_score; ties use stable account IDs.
@@ -1968,7 +2016,7 @@ def exchange_selection_state(exchange: Exchange) -> tuple:
         exchange.id, exchange.name, exchange.income_per_hour,
         exchange.controller_user_id, exchange.controller_handle, exchange.garrison,
         exchange.controlled_since, exchange.season_number,
-        exchange.withdrawn_by,
+        exchange.withdrawn_by, exchange.role,
     )
 
 
@@ -1978,7 +2026,7 @@ def resolve_root_exchange(
     require_preview: bool = False, delta: ActionDelta | None = None,
 ) -> tuple[bool, str, bool]:
     with _action_player(conn, attacker, now, require_preview=require_preview, delta=delta) as (actor, now):
-        exchange = next((e for e in list_exchanges(conn) if e.id == exchange_id), None)
+        exchange = next((e for e in list_exchanges(conn, actor.user_id) if e.id == exchange_id), None)
         if exchange is None:
             raise ActionRejected("Exchange no longer exists. No resources spent.")
         if exchange.season_number != actor.season_number:
@@ -1987,6 +2035,8 @@ def resolve_root_exchange(
             raise ActionRejected("You already control this exchange. No resources spent.")
         if expected_exchange is not None and exchange_selection_state(exchange) != exchange_selection_state(expected_exchange):
             raise ActionRejected("Exchange changed while you were choosing. Inspect the exchanges again.")
+        if expected_exchange is not None and exchange.capture_discount != expected_exchange.capture_discount:
+            raise ActionRejected("Linked-neighbor discount changed. Review the capture price; nothing spent.")
         prior_controller = exchange.controller_user_id
         prior_garrison = exchange.garrison
         # Another owner may already have observed a later server clock.
@@ -2018,6 +2068,39 @@ def _mark_withdrawal(conn: sqlite3.Connection, exchange_id: int, user_id: int) -
     # One marker per exchange, replaced on withdrawal and cleared by capture/season.
     conn.execute("INSERT INTO meta (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                  (f"exchange_withdrawal:{exchange_id}", str(user_id)))
+
+
+def service_cost(exchange: Exchange) -> int:
+    return 65 if exchange.role == "carrier" else 0
+
+
+def resolve_exchange_service(conn: sqlite3.Connection, player: Player, exchange_id: int,
+                             now: datetime, rng: random.Random, *, expected_exchange: Exchange | None = None,
+                             require_preview: bool = False, delta: ActionDelta | None = None) -> tuple[str, bool]:
+    with _action_player(conn, player, now, require_preview=require_preview, delta=delta) as (actor, _):
+        exchange = next((e for e in list_exchanges(conn) if e.id == exchange_id), None)
+        if exchange is None or exchange.controller_user_id != actor.user_id:
+            raise ActionRejected("You no longer control this exchange. No resources spent.")
+        if expected_exchange is not None and exchange_selection_state(exchange) != exchange_selection_state(expected_exchange):
+            raise ActionRejected("Exchange changed. Review its service; nothing spent.")
+        if reason := action_block_reason("service", actor, exchange):
+            raise ActionRejected(reason)
+        busted = False
+        if exchange.role == "pbx":
+            removed = min(15, actor.heat)
+            actor.heat -= removed
+            outcome = f"Lay Low removed {removed:g} Heat."
+        elif exchange.role == "carrier":
+            actor.cash -= 65
+            actor.crew += 1
+            actor.crew_recruited_total += 1
+            outcome = "Carrier recruitment: one member joins your available crew."
+        else:
+            gain = rng.randint(30, 70)
+            actor.cash += gain
+            busted = apply_heat(actor, 4, rng, action="trade")
+            outcome = f"Warez outlet gross payout ${gain}."
+    return outcome, busted
 
 
 def resolve_garrison(conn: sqlite3.Connection, player: Player, exchange_id: int, change: int,
@@ -2326,8 +2409,9 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "Raids respect a 48-hour newcomer shield and your tier +/-1. Any raid attempt gives its target 24 hours of protection from every attacker, win or lose. Login and reading receipts never clear it.",
         "Rival Rank, shield reasons and expiry times are public. Available crew and cash stay private; raid odds and payout remain explicitly uncertain. Exchange garrisons are public and territory stays ungated.",
         "Capture commits one available member to its garrison. Assigned crew defend only that exchange; jobs, raids and attacks use available crew.",
+        "[E]Map shows the fixed ring, roles, crew/security defense, capture prices and owner services. [G]arrison opens Lay Low at a PBX, discounted recruits at a Carrier Switch, or the Warez outlet at a Hub. Services cost one turn and require ownership at Act.",
         "[G]arrison: reinforce or withdraw crew for one turn, with no Heat or Rank reward. One crew member must stay available. Withdrawing the last defender abandons the exchange and stops income.",
-        f"Each capture attempt costs ${ROOT_EXCHANGE_COST}, win or lose. Each exchange earns +{CAPTURE_RANK} capture Rank only on your first success this season; recaptures earn none.",
+        f"Capture costs $25/$50/$75 by exchange role, less $10 with an owned linked neighbor, win or lose. Each exchange earns +{CAPTURE_RANK} capture Rank only on your first success this season; recaptures earn none.",
         f"Hold territory for +1 Rank per {CONTROL_RANK_HOURS} exchange-hours. Partial time combines across holdings and survives transfers. Income is $1-$3/hour per exchange; all ten earn $480/day.",
         "Displaced defenders return to their owner's available crew after capture. Busts and failed attacks affect available crew, not stationed defenders.",
         f"Past {HEAT_BUST_THRESHOLD:g} Heat, each extra point adds a bust chance; busts cost cash/crew and reset Heat. Heat decays over time.",
@@ -2369,14 +2453,21 @@ def show_player_directory(p: Palette, conn: sqlite3.Connection, user_id: int,
         offset = page.offset + (-PLAYER_PAGE_SIZE if backwards else PLAYER_PAGE_SIZE)
 
 
-def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int) -> None:
+def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int, *, viewer_id: int | None = None) -> None:
     with _write_transaction(conn):
         season = _settle_world(conn, now_utc())
-        exchanges = list_exchanges(conn)
-    lines = [f"Season {season}; ten shared exchanges. Territory is always contestable."]
+        exchanges = list_exchanges(conn, viewer_id)
+    ring = exchanges + exchanges[:1]
+    lines = [f"Season {season}; ten shared exchanges. Territory is always contestable.",
+             "Ring links: " + " -- ".join(f"#{e.id}" for e in ring),
+             "Owning either linked neighbor discounts a capture attempt by $10. All sites remain attackable. [G]arrison opens owner services."]
     for exchange in exchanges:
         owner = exchange.controller_handle or "unclaimed"
-        lines += [exchange.name, f"Owner: {owner}; garrison {exchange.garrison}; ${exchange.income_per_hour}/hour"]
+        lines += [f"#{exchange.id} {exchange.name} - {exchange_terms(exchange)[0]}",
+                  f"Owner: {owner}; garrison {exchange.garrison}; security +{exchange_defense(exchange)-exchange.garrison}; total defense {exchange_defense(exchange)}; ${exchange.income_per_hour}/hour",
+                  "Links: " + ", ".join(f"#{link}" for link in exchange.linked_ids),
+                  f"Capture ${capture_cost(exchange)} (discount ${exchange.capture_discount}); base Heat +{exchange_terms(exchange)[2]}.",
+                  "Owner service: " + exchange_terms(exchange)[4]]
     show_text_pages(p, "EXCHANGE TERRITORY", lines, width, height)
 
 
@@ -2388,7 +2479,7 @@ def read_menu_choice(valid: str) -> str:
             return key
 
 
-def action_block_reason(action: str, player: Player) -> str | None:
+def action_block_reason(action: str, player: Player, target: Exchange | Player | JobChoice | CrewChoice | None = None) -> str | None:
     reasons = []
     if player.turns_used >= TURNS_PER_DAY:
         refill = from_iso(player.turn_day_start) + DAY
@@ -2398,16 +2489,21 @@ def action_block_reason(action: str, player: Player) -> str | None:
         reasons.append(f"Need ${RECRUIT_COST - player.cash} more cash to recruit. Trade needs no cash; preview its Heat risk first.")
     if action == "root" and player.crew < 2:
         reasons.append("Need 2 available crew: one to hold the exchange and one to remain available. Recruit or use [G]arrison to withdraw defenders.")
-    if action == "root" and player.cash < ROOT_EXCHANGE_COST:
-        reasons.append(f"Need ${ROOT_EXCHANGE_COST - player.cash} more cash for a capture attempt. Trade to fund it.")
+    if action == "root" and isinstance(target, Exchange) and player.cash < capture_cost(target):
+        reasons.append(f"Need ${capture_cost(target) - player.cash} more cash for this capture attempt. Trade to fund it.")
+    if action == "service":
+        if not isinstance(target, Exchange) or target.controller_user_id != player.user_id or target.role not in EXCHANGE_ROLES:
+            reasons.append("This service requires ownership of the exchange.")
+        elif player.cash < service_cost(target):
+            reasons.append(f"Need ${service_cost(target) - player.cash} more for carrier recruitment.")
     return " ".join(reasons) or None
 
 
 def action_preview_lines(action: str, player: Player, target: Player | Exchange | JobChoice | CrewChoice | None = None, *, operation: bool = False) -> list[str]:
-    cost = crew_item(target)[2] if action == "crew" else RECRUIT_COST if action == "recruit" else ROOT_EXCHANGE_COST if action == "root" else 0
+    cost = service_cost(target) if action == "service" else crew_item(target)[2] if action == "crew" else RECRUIT_COST if action == "recruit" else capture_cost(target) if action == "root" else 0
     lines = [f"Season {player.season_number}; turns {TURNS_PER_DAY - player.turns_used}/{TURNS_PER_DAY}; cash ${player.cash:,}",
              f"Cost: 1 turn, ${cost} cash. Back spends nothing."]
-    if reason := action_block_reason(action, player):
+    if reason := action_block_reason(action, player, target):
         lines.append("Unavailable: " + reason)
     if action == "crew":
         _, name, _, effect = crew_item(target)
@@ -2416,13 +2512,22 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
         if reason := crew_block_reason(player, target):
             lines.append("Unavailable: " + reason)
         return lines
+    if action == "service":
+        lines += [f"{target.name}: {exchange_terms(target)[4]}.", "Ownership is checked again at Act."]
+        if target.role == "pbx":
+            return lines + [f"Remove {min(15, player.heat):g} Heat now; Heat cannot fall below zero.",
+                            "No cash/crew/Rank change, bust roll or support consumption."]
+        if target.role == "carrier":
+            return lines + ["Guaranteed +1 available crew and +10 Rank. No Heat, bust roll or support consumption."]
     job = job_terms(target if isinstance(target, JobChoice) else JobChoice()) if action == "job" else None
     heat = {"trade": TRADE_WAREZ_HEAT, "recruit": 0, "job": job[4] if job else JOB_HEAT,
-            "raid": RAID_HEAT, "root": ROOT_EXCHANGE_HEAT}[action]
+            "raid": RAID_HEAT, "root": exchange_terms(target)[2] if action == "root" else ROOT_EXCHANGE_HEAT, "service": 4}[action]
     if action == "trade":
         lines.append(f"Gross payout: ${TRADE_WAREZ_RANGE[0]}-${TRADE_WAREZ_RANGE[1]}, before any bust loss.")
     elif action == "recruit":
         lines.append("Guaranteed +1 crew and +10 Rank. No Heat or bust roll.")
+    elif action == "service":
+        lines.append("Gross payout: $30-$70, before any bust loss; no Rank. Burner Kit is preserved.")
     elif action == "job":
         name, difficulty, (lo, hi), approach, _, loss = job
         odds = min(.9, success_chance(player.crew, difficulty) + (.15 if operation else 0))
@@ -2442,10 +2547,13 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
                   f"{RAID_FAIL_CASH_LOSS_FRACTION:.0%} cash before any bust.",
                   "Win or lose, the target gets a 24-hour shield against every attacker. Login and reading receipts do not clear it."]
     elif action == "root":
-        chance = 1.0 if target.controller_user_id is None else success_chance(player.crew, target.garrison)
-        lines += [f"Exchange: {target.name}", f"Success: {chance:.0%}; garrison {target.garrison}.",
+        chance = 1.0 if target.controller_user_id is None else success_chance(player.crew, exchange_defense(target))
+        lines += [f"Exchange: {target.name} - {exchange_terms(target)[0]}",
+                  f"Base capture price ${exchange_terms(target)[1]}; linked-neighbor discount ${target.capture_discount}.",
+                  f"Success: {chance:.0%}; garrison {target.garrison}, total defense {exchange_defense(target)}.",
+                  f"Owner service: {exchange_terms(target)[4]}. Use [G]arrison after capture.",
                   f"Success earns +{capture_rank_award(player, target)} Rank and ${target.income_per_hour}/hour until lost or season reset.",
-                  f"Capture Rank is once per exchange per season. Holding earns +1 Rank per {CONTROL_RANK_HOURS} exchange-hours; the ${ROOT_EXCHANGE_COST} attempt cost applies win or lose.",
+                  f"Capture Rank is once per exchange per season. Holding earns +1 Rank per {CONTROL_RANK_HOURS} exchange-hours; the ${capture_cost(target)} attempt cost applies win or lose.",
                   f"Success assigns 1 crew to defense, leaving {player.crew - 1} available before any bust. [G]arrison manages defenders.",
                   f"Failure loses {min(1, player.crew - 1)} crew before any bust."]
     if action == "job" and player.specialty == "fixers":
@@ -2478,7 +2586,7 @@ def confirm_action(p: Palette, conn: sqlite3.Connection, player: Player, action:
                    width: int, height: int, target: Player | Exchange | JobChoice | CrewChoice | None = None) -> bool:
     refreshed = refresh_player(conn, player.user_id, now_utc())
     update_display_player(p, player, refreshed, width, height)
-    available = (crew_block_reason(player, target) if action == "crew" else action_block_reason(action, player)) is None
+    available = (crew_block_reason(player, target) if action == "crew" else action_block_reason(action, player, target)) is None
     lines = action_preview_lines(action, player, target)
     if action == "raid":
         for dossier in read_dossiers(conn, player.user_id, now_utc()):
@@ -2774,8 +2882,9 @@ def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: 
     if reason := action_block_reason("root", player):
         show_text_pages(p, "ROOT UNAVAILABLE", [reason], w, height)
         return False
-    exchanges = list_exchanges(conn)
-    records = [([e.name, f"Owner: {e.controller_handle or 'unclaimed'}; garrison {e.garrison}; ${e.income_per_hour}/hour",
+    exchanges = list_exchanges(conn, player.user_id)
+    records = [([e.name, f"Owner: {e.controller_handle or 'unclaimed'}; garrison {e.garrison}; defense {exchange_defense(e)}; ${e.income_per_hour}/hour",
+                 f"{exchange_terms(e)[0]}; capture ${capture_cost(e)}; base Heat +{exchange_terms(e)[2]}; links {e.linked_ids}.",
                  "Already yours" if e.controller_user_id == player.user_id else "Available to contest"],
                 e.controller_user_id != player.user_id) for e in exchanges]
     choice = pick_record_page(p, "ROOT EXCHANGE", records, w, height)
@@ -2811,14 +2920,16 @@ def garrison_preview_lines(player: Player, exchange: Exchange, change: int) -> l
              if remaining else "Last defenders withdrawn: exchange becomes unclaimed; earned income is paid and future income stops. Reclaiming it earns no capture Rank.")]
 
 
-def do_garrison(p: Palette, conn: sqlite3.Connection, player: Player, width: int, height: int) -> bool:
+def do_garrison(p: Palette, conn: sqlite3.Connection, player: Player, width: int, height: int,
+                *, rng: random.Random | None = None) -> bool:
     state = dashboard_state(conn, player.user_id, now_utc())
     update_display_player(p, player, state.player, width, height)
     if not state.holdings:
         show_text_pages(p, "YOUR GARRISONS", ["No exchanges held. Inspect [E]Map and capture an exchange first.",
                         "Capture assigns one crew member; keep one available for recovery."], width, height)
         return False
-    records = [([e.name, f"{e.garrison} assigned here; {player.crew} available; ${e.income_per_hour}/hour"], True)
+    records = [([e.name, f"{e.garrison} assigned here; {exchange_defense(e)} total defense; ${e.income_per_hour}/hour",
+                 exchange_terms(e)[0] + ": " + exchange_terms(e)[4]], True)
                for e in state.holdings]
     key = pick_record_page(p, "YOUR GARRISONS", records, width, height)
     if key in "BQ":
@@ -2832,9 +2943,19 @@ def do_garrison(p: Palette, conn: sqlite3.Connection, player: Player, width: int
                  f"Available: {player.crew - n}; assigned here: {exchange.garrison + n}",
                  "Abandons exchange; stops income" if -n == exchange.garrison else "1 turn; no cash, Heat or Rank"], True)
                for n in options]
-    key = pick_record_page(p, "MOVE CREW", records, width, height)
+    if exchange.role in EXCHANGE_ROLES:
+        records.append((["Owner service", exchange_terms(exchange)[4], "Preview before Act; requires continued ownership."], True))
+    key = pick_record_page(p, "EXCHANGE CONTROL", records, width, height)
     if key in "BQ":
         return False
+    if PICK_KEYS.index(key) == len(options):
+        if not confirm_action(p, conn, player, "service", width, height, exchange):
+            return False
+        delta = ActionDelta()
+        outcome, busted = resolve_exchange_service(conn, player, exchange.id, now_utc(), rng or random.Random(),
+                                                  expected_exchange=exchange, require_preview=True, delta=delta)
+        show_action_result(p, [outcome], delta, busted, width, height)
+        return True
     change = options[PICK_KEYS.index(key)]
     if show_text_pages(p, "GARRISON PREVIEW", garrison_preview_lines(player, exchange, change),
                        width, height, accept=True) != "A":
@@ -2948,7 +3069,7 @@ def main() -> int:
                 elif choice == "B":
                     show_player_directory(palette, conn, user_id, w, height, standings=True)
                 elif choice == "E":
-                    show_territory(palette, conn, w, height)
+                    show_territory(palette, conn, w, height, viewer_id=user_id)
                 elif choice == "V":
                     show_player_directory(palette, conn, user_id, w, height)
                 elif choice == "H":
@@ -2968,7 +3089,7 @@ def main() -> int:
                 elif choice == "S":
                     do_crew(palette, conn, player, w, height)
                 elif choice == "G":
-                    do_garrison(palette, conn, player, w, height)
+                    do_garrison(palette, conn, player, w, height, rng=rng)
             except ActionRejected as exc:
                 show_text_pages(palette, "ACTION UNAVAILABLE", [str(exc)], w, height, onboarding=True)
         draw_goodbye(palette, read_player(conn, user_id), w)

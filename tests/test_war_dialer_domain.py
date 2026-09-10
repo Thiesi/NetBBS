@@ -1931,7 +1931,7 @@ def test_capture_with_insufficient_cash_rejects_without_spending_anything(db_pat
     with pytest.raises(wd.ActionRejected, match='capture attempt'):
         wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
     assert list(conn.iterdump()) == before
-    assert 'Need $1 more' in wd.action_block_reason('root', wd.read_player(conn, 1))
+    assert 'Need $1 more' in wd.action_block_reason('root', wd.read_player(conn, 1), wd.list_exchanges(conn, 1)[0])
     conn.close()
 
 
@@ -2316,6 +2316,7 @@ def test_specialty_switch_replaces_training_and_purchase_failure_rolls_back(db_p
 
 
 def _downgrade_operations_fixture(conn):
+    conn.execute("ALTER TABLE exchanges DROP COLUMN role")
     for column in wd._OPERATION_COLUMNS:
         conn.execute(f'ALTER TABLE players DROP COLUMN {column}')
     conn.execute('DROP TABLE recon')
@@ -2481,4 +2482,142 @@ def test_operations_upgrade_and_season_reset_preserve_identity_not_competitive_i
     assert wd.operation_state(reset) == (-1, 1, 0) and reset.successful_operations == 0
     assert reset.created_at == actor.created_at
     assert conn.execute('SELECT COUNT(*) FROM recon').fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize('role,cost,heat', [('pbx', 25, 4), ('carrier', 50, 8), ('hub', 75, 12)])
+def test_role_capture_charges_exact_stakes_without_restricting_ring_access(db_path, role, cost, heat):
+    conn, now, actor, _ = _rivals(db_path)
+    target = next(e for e in wd.list_exchanges(conn, 1) if e.role == role)
+    assert target.capture_discount == 0
+    assert wd.resolve_root_exchange(conn, actor, target.id, now, FixedRandom(), expected_exchange=target)[0]
+    assert (actor.cash, actor.heat, actor.crew, actor.turns_used) == (1000-cost, heat, 2, 1)
+    assert wd.rank_score(actor) == 50 and wd.assigned_crew(conn, 1) == 1
+    conn.close()
+
+
+def test_ring_discount_wraps_does_not_stack_and_rechecks_at_capture(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    exchanges = wd.list_exchanges(conn, 1)
+    assert exchanges[0].linked_ids == (10, 2) and exchanges[-1].linked_ids == (9, 1)
+    _give_exchange(conn, 1, now, 10)
+    target = wd.list_exchanges(conn, 1)[0]
+    assert wd.capture_cost(target) == 40
+    _give_exchange(conn, 1, now, 2)
+    assert wd.capture_cost(wd.list_exchanges(conn, 1)[0]) == 40
+    # Losing both neighbors leaves the chosen exchange unchanged, but its price rises.
+    conn.execute('UPDATE exchanges SET controller_user_id=2 WHERE id IN (2,10)')
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected, match='discount changed'):
+        wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom(), expected_exchange=target)
+    assert list(conn.iterdump()) == before
+    _give_exchange(conn, 1, now, 10)
+    target = wd.list_exchanges(conn, 1)[0]
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom(), expected_exchange=target)
+    assert actor.cash == 960
+    conn.close()
+
+
+def test_carrier_security_changes_real_odds_without_creating_real_defenders(db_path):
+    conn, now, actor, defender = _rivals(db_path)
+    target = wd.list_exchanges(conn)[0]
+    assert target.role == 'carrier' and wd.exchange_defense(target) == 0
+    _give_exchange(conn, 2, now)
+    target = wd.list_exchanges(conn, 1)[0]
+    assert target.garrison == 1 and wd.exchange_defense(target) == 3
+    assert wd.success_chance(actor.crew, target.garrison) > .6
+    assert wd.success_chance(actor.crew, wd.exchange_defense(target)) < .6
+    assert not wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom(.6))[0]
+    assert wd.read_player(conn, 2).crew == defender.crew
+    assert wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())[0]
+    assert wd.read_player(conn, 2).crew == defender.crew + 1
+    assert wd.assigned_crew(conn, 1) == 1
+    assert wd.success_chance(2, 10002) == .1
+    conn.close()
+
+
+@pytest.mark.parametrize('role,heat,cash,crew,rank', [('pbx', 5, 1000, 3, 0), ('carrier', 20, 935, 4, 10), ('hub', 24, 1030, 3, 0)])
+def test_owner_service_has_exact_effects_and_preserves_burner(db_path, role, heat, cash, crew, rank):
+    conn, now, actor, _ = _rivals(db_path)
+    target = next(e for e in wd.list_exchanges(conn) if e.role == role)
+    _give_exchange(conn, 1, now, target.id)
+    actor.heat, actor.support = 20, 'burner'
+    _save_fixture(conn, actor)
+    target = next(e for e in wd.list_exchanges(conn) if e.id == target.id)
+    rng = FixedRandom() if role == 'hub' else NoOperationRolls()
+    assert not wd.resolve_exchange_service(conn, actor, target.id, now, rng, expected_exchange=target)[1]
+    assert (actor.heat, actor.cash, actor.crew, actor.turns_used, wd.rank_score(actor)) == (heat, cash, crew, 1, rank)
+    assert actor.support == 'burner' and wd.assigned_crew(conn, 1) == 1
+    conn.close()
+
+
+def test_lay_low_stops_at_zero_and_warez_outlet_uses_stash_on_bust(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    pbx = next(e for e in wd.list_exchanges(conn) if e.role == 'pbx')
+    hub = next(e for e in wd.list_exchanges(conn) if e.role == 'hub')
+    for target in (pbx, hub): _give_exchange(conn, 1, now, target.id)
+    wd.resolve_exchange_service(conn, actor, pbx.id, now, NoOperationRolls())
+    assert actor.heat == 0
+    actor.heat, actor.support = 99, 'stash'
+    _save_fixture(conn, actor)
+    assert wd.resolve_exchange_service(conn, actor, hub.id, now, FixedRandom())[1]
+    assert (actor.cash, actor.heat, actor.support, actor.turns_used) == (927, 0, '', 2)
+    conn.close()
+
+
+@pytest.mark.parametrize('problem', ['ownership', 'cash', 'turns', 'rollback'])
+def test_service_rejection_and_rollback_spend_nothing(db_path, problem):
+    conn, now, actor, _ = _rivals(db_path)
+    _give_exchange(conn, 1, now)
+    target = wd.list_exchanges(conn)[0]
+    if problem == 'ownership': conn.execute('UPDATE exchanges SET controller_user_id=2 WHERE id=1')
+    if problem == 'cash': actor.cash = 64
+    if problem == 'turns': actor.turns_used = 15
+    _save_fixture(conn, actor)
+    before = list(conn.iterdump())
+    if problem == 'rollback':
+        conn.execute("CREATE TRIGGER fail_service BEFORE UPDATE ON players BEGIN SELECT RAISE(ABORT, 'failed'); END")
+    with pytest.raises(sqlite3.IntegrityError if problem == 'rollback' else wd.ActionRejected):
+        wd.resolve_exchange_service(conn, actor, 1, now, NoOperationRolls(), expected_exchange=target)
+    if problem == 'rollback': conn.execute('DROP TRIGGER fail_service')
+    assert list(conn.iterdump()) == before
+    assert wd.read_player(conn, 1) == actor
+    conn.close()
+
+
+def test_exchange_role_upgrade_preserves_world_and_rolls_back_version_failure(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    _give_exchange(conn, 2, now)
+    conn.execute('ALTER TABLE exchanges DROP COLUMN role')
+    conn.execute('PRAGMA user_version=6')
+    before = list(conn.iterdump())
+    original = [tuple(row) for row in conn.execute('SELECT * FROM exchanges')]
+    def deny_version(action, name, value, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == 'user_version' and value == '7' else sqlite3.SQLITE_OK
+    conn.set_authorizer(deny_version)
+    with pytest.raises(sqlite3.DatabaseError): wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert list(conn.iterdump()) == before
+    wd.ensure_schema(conn)
+    assert [tuple(row)[:-1] for row in conn.execute('SELECT * FROM exchanges')] == original
+    assert wd.read_player(conn, 1) == actor
+    roles = [e.role for e in wd.list_exchanges(conn)]
+    assert roles.count('pbx') == 2 and roles.count('carrier') == 6 and roles.count('hub') == 2
+    wd.refresh_player(conn, 1, now + wd.SEASON)
+    assert [e.role for e in wd.list_exchanges(conn)] == roles
+    assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
+    conn.close()
+
+
+@pytest.mark.parametrize('count', [9, 20])
+def test_exchange_role_upgrade_rejects_unexpected_map_without_mutation(db_path, count):
+    conn, now, actor, _ = _rivals(db_path)
+    conn.execute('ALTER TABLE exchanges DROP COLUMN role')
+    conn.execute('PRAGMA user_version=6')
+    if count == 9: conn.execute('DELETE FROM exchanges WHERE id=10')
+    else:
+        conn.execute('INSERT INTO exchanges (name, income_per_hour, controller_user_id, garrison, controlled_since, income_collected_at, season_number) SELECT name, income_per_hour, controller_user_id, garrison, controlled_since, income_collected_at, season_number FROM exchanges')
+    before = list(conn.iterdump())
+    with pytest.raises(wd.WorldStateError, match='exchange count'): wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
     conn.close()
