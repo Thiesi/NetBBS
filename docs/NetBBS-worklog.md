@@ -4628,8 +4628,11 @@ of that function would silently regenerate a different galaxy for every
 existing save (system ids drifting to different names/economies/
 connections underneath a `discovered`-ids list that no longer matches).
 New randomness there is safe to add only at the very end of the
-function. (2) completed station actions must call `World.checkpoint()` after
-all their rule changes and before success output or another input read.
+function. (2) completed station actions must call `World.commit()` after
+all their rule changes and before success output or another input read; the
+turn boundaries -- launch, docking, the rescue tow and the fresh career after
+retirement -- call `World.checkpoint()`, which is turn processing plus that
+same commit (issue #417).
 `main` binds the storage callback; domain-only worlds can remain filesystem-free,
 and career reset preserves the callback. The outer menu loop alone cannot provide
 this guarantee because markets, yards and charts own nested input loops. Scans
