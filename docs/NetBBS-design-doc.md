@@ -6469,7 +6469,7 @@ wiping the scene's boards.
 **Decision 6 (locked in) — bounded action economy and a self-limiting
 risk curve, no separate anti-snowball mechanic.** 15 turns/day on a
 rolling 24h window. Heat gain per action (Trade Warez +2, Root Exchange
-+8, Raid +10, Run a Job +15) decays −5/real-hour; above 80, each
++8, Raid +10, Run a Job +5/+15/+25 by approach) decays −5/real-hour; above 80, each
 heat-gaining action rolls a bust chance of `(Heat−80)×2%`, capped ~40%,
 costing 25% cash and 20% crew and resetting Heat to 0. Success chance
 for both PvE and PvP actions is `attacker_crew / (attacker_crew +
@@ -6611,7 +6611,8 @@ help. Viewing directories does not reset raid protection or acknowledge receipts
 spending a turn. The final page offers `[A]Act`; Back and disconnect commit no action.
 Previews show turn/cash cost, success stakes, Heat and bust probability. Exchange
 odds use public garrisons; raids explicitly retain uncertainty about private crew
-strength and cash. A job is drawn only on commitment, so browsing cannot reroll it.
+strength and cash. Jobs use the fixed contract and approach selected by the caller;
+only their outcome is rolled on commitment.
 Recruitment has no Heat/bust roll. Failed actions show the actual crew-loss floor.
 
 Commit revalidates the actor's previewed cash, crew, turns, season and Rank as well
@@ -6620,6 +6621,28 @@ preview. Ordinary elapsed Heat decay can lower the advertised risk. Action delta
 are calculated inside the committed transaction after income collection and include
 bust losses; narration distinguishes gross payout from net cash/crew/Heat/Rank/turn
 changes. Receiving an outcome never depends on another session-snapshot save.
+
+**Contract board (issue #362, slice 6; maintainer approved).** Run a Job opens
+five fixed, repeatable contracts in ascending difficulty. The ladder is dial-up
+access (difficulty 2, $60-$100 Standard payout), software warehouse (6, $100-$170),
+billing database (12, $170-$280), bank transfer (20, $260-$400), and payroll
+(30, $380-$560). Success probability is available crew divided by available crew
+plus difficulty, bounded to 10%-90%; every success earns 15 season Rank.
+
+After selecting a contract, choose Cautious (70% payout, +5 Heat, no ordinary
+failure crew loss), Standard (100%, +15 Heat, one available member lost on failure),
+or Bold (140%, +25 Heat, one available member lost on failure). Payout range ends
+are rounded down to whole dollars. Approaches change stakes, not success odds.
+Every attempt costs one turn and no upfront cash; the one-member floor applies.
+A subsequent Heat bust can still take cash and crew, including after Cautious
+failure, and its risk and losses are shown separately before Act.
+
+The contract and approach pickers are free, content-first screens with Back.
+The final preview shows selected terms, current odds, payout, failure losses and
+Heat/bust stakes. Only Act spends or draws randomness, under the existing fresh
+actor validation and atomic action transaction. A caller with no turns can still
+inspect every offer and preview. Browsing, cancellation and reconnect never
+reroll offers; fixed repeatability needs no persistent offer cache or migration.
 
 **Compact action screens (issue #362, slice 3).** Target pickers, results,
 rejections and season notices use terminal-height pagination as well as width

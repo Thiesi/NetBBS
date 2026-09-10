@@ -1095,6 +1095,11 @@ def test_real_process_preview_cancel_or_disconnect_spends_nothing(tmp_path, key,
         if key == b"x":
             wait_for(b"cancel")
             send(b"1")
+        if key == b"j":
+            wait_for(b"cancel")
+            send(b"1")
+            wait_for(b"cancel")
+            send(b"1")
         wait_for(b"[A]Act [B]ack")
         assert b"Cost: 1 turn" in output
         if disconnect:
@@ -1420,3 +1425,101 @@ def test_rival_shield_expiry_is_public_and_private_resources_stay_hidden(tmp_pat
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('approach', [0, 1, 2])
+def test_contract_flow_reaches_chosen_job_and_commits_only_after_preview(tmp_path, monkeypatch, width, height, approach):
+    conn = wd.connect(tmp_path / 'contracts.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    calls = 0
+    def select(valid):
+        nonlocal calls
+        calls += 1
+        assert calls < 100
+        assert (wd.read_player(conn, 1).cash, wd.read_player(conn, 1).turns_used) == (300, 0)
+        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        if 'CONTRACT BOARD' in screen:
+            return '5' if '5' in valid else 'N'
+        if 'CHOOSE APPROACH' in screen:
+            key = str(approach + 1)
+            return key if key in valid else 'N'
+        assert 'JOB PREVIEW' in screen
+        return 'A' if 'A' in valid else 'N'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
+    monkeypatch.setattr(wd, 'read_input_key', lambda: ' ')
+    class SuccessRoll:
+        def random(self): return 0
+        def randint(self, low, high): return low
+    assert wd.do_job(wd.Palette(False), conn, actor, now, SuccessRoll(), width, height)
+    terms = wd.job_terms(wd.JobChoice(4, approach))
+    assert (actor.cash, actor.heat, actor.turns_used, actor.successful_jobs) == (300 + terms[2][0], terms[4], 1, 1)
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()
+
+
+@pytest.mark.parametrize('stage', ['board', 'approach', 'preview'])
+def test_contract_browsing_cancel_and_reconnect_preserve_offers_without_random_draws(tmp_path, monkeypatch, stage):
+    path = tmp_path / 'offers.db'
+    conn = wd.connect(path)
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    conn.execute('UPDATE players SET turns_used=15, turn_day_start=?', (wd.to_iso(now),))
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    class NoDraws:
+        def __getattr__(self, name):
+            raise AssertionError('Browsing must not draw randomness: ' + name)
+    captured = []
+    for _ in range(2):
+        written = []
+        monkeypatch.setattr(wd, 'out', written.append)
+        def select(valid):
+            screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+            if 'CONTRACT BOARD' in screen:
+                return 'B' if stage == 'board' else '1' if '1' in valid else 'N'
+            if 'CHOOSE APPROACH' in screen:
+                return 'B' if stage == 'approach' else '1' if '1' in valid else 'N'
+            assert 'JOB PREVIEW' in screen and 'A' not in valid
+            return 'B'
+        monkeypatch.setattr(wd, 'read_menu_choice', select)
+        before = list(conn.iterdump())
+        assert not wd.do_job(wd.Palette(False), conn, actor, now, NoDraws())
+        assert list(conn.iterdump()) == before
+        captured.append(''.join(written))
+        conn.close()
+        conn = wd.connect(path)
+        actor = wd.read_player(conn, 1)
+    assert captured[0] == captured[1]
+    conn.close()
+
+
+@pytest.mark.parametrize('stage', ['board', 'approach'])
+def test_real_process_disconnect_from_contract_picker_spends_nothing(tmp_path, stage):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b'>\x1b[0m ')
+        send(b'j')
+        wait_for(b'cancel')
+        if stage == 'approach':
+            send(b'1')
+            wait_for(b'cancel')
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0
+        assert process.stderr.read() == b''
+        conn = wd.connect(path)
+        player = wd.read_player(conn, 0)
+        assert (player.cash, player.crew, player.turns_used, player.successful_jobs) == (300, 3, 0, 0)
+        conn.close()

@@ -267,10 +267,20 @@ rival directory. The initial help is paginated too and can be left with Back.
 
 Action keys open a preview with costs, stakes and Heat/bust risk. Use Next to read
 all pages, then Act on the final page or Back to cancel. Recruitment is guaranteed;
-jobs are assigned only when committed, and rival cash/strength remain uncertain.
+jobs use your selected contract and approach, and rival cash/strength remain uncertain.
 If another action or incoming raid changes your resources during the preview, the
 game asks you to inspect them again without spending. Outcomes distinguish gross
 payout from actual net changes, including bust losses and the one-member crew floor.
+
+`[J]Job` opens five repeatable contracts, from dial-up access (difficulty 2) to
+payroll (30). Choose a contract, then Cautious (70% payout, +5 Heat, no ordinary
+failure crew loss), Standard (100%, +15 Heat, one member lost on failure), or Bold
+(140%, +25 Heat, one member lost on failure). The one-member floor applies.
+Approaches change payout and risk, not success odds. Each attempt costs one turn
+and no upfront cash; a success earns 15 Rank. The final preview shows exact odds,
+payout range and losses before Act. Cautious does not prevent a Heat bust: its
+possible cash and crew losses are shown separately. Offers stay fixed across
+browsing, cancellation and reconnect. You can inspect them with no turns left.
 
 Target pickers use digits 1-9/0, with Next/Prev and Back. Only fully displayed,
 eligible entries have active selection keys; protected rivals and your own exchanges
