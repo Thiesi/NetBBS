@@ -343,7 +343,12 @@ ordinary Heat decay must not invalidate every confirmation. Target checks remain
 inside the same action transaction. Capture action-resource baselines after income
 collection and publish deltas only after commit, so income is not called a payout
 and failed commits never expose an apparent result. Preview rendering must not
-consume RNG draws; jobs and all outcome rolls happen only on Act.
+consume RNG draws; all outcome rolls happen only on Act. Contract and approach
+selection use a fixed bounded catalog, so no persistent offer cache is needed.
+Preview and resolution share the same validated terms. Cautious prevents ordinary
+failure crew loss, not a subsequent Heat bust; show and test these separately.
+Drive both pickers in real-process preview/disconnect tests so they still reach
+the final Act boundary after adding the contract board.
 
 Target selection binds digit keys only to complete visible entries. Keep those
 keys separate from Back/Next/Prev and carry database-batch direction through local

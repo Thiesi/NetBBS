@@ -2085,3 +2085,62 @@ def test_economy_upgrade_preserves_worlds_requiring_exchange_count_repair(db_pat
         wd.ensure_schema(conn)
     assert list(conn.iterdump()) == before
     conn.close()
+
+
+@pytest.mark.parametrize('contract', range(5))
+@pytest.mark.parametrize('approach,percent,heat,loss', [(0, 70, 5, 0), (1, 100, 15, 1), (2, 140, 25, 1)])
+def test_selected_contract_and_approach_match_advertised_payout_and_failure(contract, approach, percent, heat, loss):
+    choice = wd.JobChoice(contract, approach)
+    player = _make_player(crew=3, cash=300)
+    name, success, payout, busted = wd.action_job(player, FixedRandom(), choice)
+    assert name == wd.JOBS[contract][0] and success and not busted
+    assert payout == wd.JOBS[contract][2][0] * percent // 100
+    assert player.cash == 300 + payout and player.heat == heat
+    assert wd.rank_score(player) == 15
+    player = _make_player(crew=3, cash=300)
+    name, success, payout, busted = wd.action_job(player, FixedRandom(.99), choice)
+    assert not success and payout == 0 and not busted
+    assert (player.cash, player.crew, player.heat, wd.rank_score(player)) == (300, 3-loss, heat, 0)
+    preview = '\n'.join(wd.action_preview_lines('job', player, choice))
+    assert name in preview and wd.JOB_APPROACHES[approach][0] in preview
+
+
+def test_cautious_failure_keeps_crew_but_does_not_immunize_against_busts():
+    player = _make_player(crew=5, cash=300, heat=95)
+    class FailedThenBusted(FixedRandom):
+        rolls = iter([.99, 0])
+        def random(self):
+            return next(self.rolls)
+    _, success, _, busted = wd.action_job(player, FailedThenBusted(), wd.JobChoice(0, 0))
+    assert not success and busted
+    assert (player.crew, player.cash, player.heat) == (4, 225, 0)
+
+
+@pytest.mark.parametrize('choice', [wd.JobChoice(-1, 0), wd.JobChoice(5, 0), wd.JobChoice(0, 3)])
+def test_invalid_contract_choice_spends_nothing(db_path, choice):
+    conn, now, actor, _ = _rivals(db_path)
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected, match='Contract or approach'):
+        wd.resolve_job(conn, actor, now, FixedRandom(), choice=choice)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_selected_contract_commit_is_atomic_and_rejects_stale_resources(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    choice = wd.JobChoice(4, 2)
+    wd.resolve_recruit(conn, wd.read_player(conn, 1), now)
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected, match='resources changed'):
+        wd.resolve_job(conn, actor, now, FixedRandom(), choice=choice, require_preview=True)
+    assert list(conn.iterdump()) == before
+    actor = wd.refresh_player(conn, 1, now)
+    conn.execute("CREATE TRIGGER fail_job BEFORE UPDATE ON players BEGIN SELECT RAISE(ABORT, 'job failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='job failed'):
+        wd.resolve_job(conn, actor, now, FixedRandom(), choice=choice)
+    conn.execute('DROP TRIGGER fail_job')
+    assert list(conn.iterdump()) == before
+    delta = wd.ActionDelta()
+    wd.resolve_job(conn, actor, now, FixedRandom(), choice=choice, require_preview=True, delta=delta)
+    assert (delta.cash, delta.rank, delta.turns, delta.heat) == (532, 15, 1, 25)
+    conn.close()

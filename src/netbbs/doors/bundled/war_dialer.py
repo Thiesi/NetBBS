@@ -600,11 +600,17 @@ RANK_TIERS: tuple[tuple[int, str], ...] = (
 
 # (description, difficulty (a defender-crew-equivalent), payout range)
 JOBS: tuple[tuple[str, int, tuple[int, int]], ...] = (
-    ("Skim a mail-order software warehouse's card numbers", 15, (80, 180)),
-    ("Pad a wire transfer at a regional bank", 25, (150, 320)),
-    ("Loot a phone company's billing database", 20, (100, 220)),
-    ("Divert a payroll run at a mid-size firm", 30, (200, 400)),
-    ("Fence stolen dial-up access on the boards", 10, (50, 120)),
+    ("Fence dial-up access on the boards", 2, (60, 100)),
+    ("Skim a mail-order software warehouse", 6, (100, 170)),
+    ("Loot a phone company's billing database", 12, (170, 280)),
+    ("Pad a regional bank's wire transfer", 20, (260, 400)),
+    ("Divert a mid-size firm's payroll run", 30, (380, 560)),
+)
+# Name, payout percentage, Heat, ordinary failure crew loss.
+JOB_APPROACHES: tuple[tuple[str, int, int, int], ...] = (
+    ("Cautious", 70, 5, 0),
+    ("Standard", 100, JOB_HEAT, 1),
+    ("Bold", 140, 25, 1),
 )
 
 # (name, income per real hour controlled)
@@ -696,6 +702,12 @@ class GameEvent:
     summary_text: str
     created_at: str
     seen_at: str | None = None
+
+
+@dataclass(frozen=True)
+class JobChoice:
+    contract: int = 0
+    approach: int = 1
 
 
 @dataclass
@@ -839,8 +851,17 @@ def action_recruit(player: Player) -> bool:
     return True
 
 
-def action_job(player: Player, rng: random.Random) -> tuple[str, bool, int, bool]:
-    name, difficulty, (lo, hi) = rng.choice(JOBS)
+def job_terms(choice: JobChoice) -> tuple[str, int, tuple[int, int], str, int, int]:
+    if (type(choice.contract) is not int or not 0 <= choice.contract < len(JOBS)
+            or type(choice.approach) is not int or not 0 <= choice.approach < len(JOB_APPROACHES)):
+        raise ActionRejected("Contract or approach is unavailable. Return to the contract board; nothing spent.")
+    name, difficulty, payout = JOBS[choice.contract]
+    approach, percent, heat, loss = JOB_APPROACHES[choice.approach]
+    return name, difficulty, (payout[0] * percent // 100, payout[1] * percent // 100), approach, heat, loss
+
+
+def action_job(player: Player, rng: random.Random, choice: JobChoice = JobChoice()) -> tuple[str, bool, int, bool]:
+    name, difficulty, (lo, hi), _, heat, loss = job_terms(choice)
     success = rng.random() < success_chance(player.crew, difficulty)
     if success:
         payout = rng.randint(lo, hi)
@@ -848,8 +869,8 @@ def action_job(player: Player, rng: random.Random) -> tuple[str, bool, int, bool
         player.successful_jobs += 1
     else:
         payout = 0
-        player.crew = max(1, player.crew - 1)
-    busted = apply_heat(player, JOB_HEAT, rng)
+        player.crew = max(1, player.crew - loss)
+    busted = apply_heat(player, heat, rng)
     return name, success, payout, busted
 
 
@@ -1548,9 +1569,9 @@ def resolve_recruit(conn: sqlite3.Connection, player: Player, now: datetime, *, 
     return True
 
 
-def resolve_job(conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, *, require_preview: bool = False, delta: ActionDelta | None = None) -> tuple[str, bool, int, bool]:
+def resolve_job(conn: sqlite3.Connection, player: Player, now: datetime, rng: random.Random, *, choice: JobChoice = JobChoice(), require_preview: bool = False, delta: ActionDelta | None = None) -> tuple[str, bool, int, bool]:
     with _action_player(conn, player, now, require_preview=require_preview, delta=delta) as (actor, now):
-        result = action_job(actor, rng)
+        result = action_job(actor, rng, choice)
     return result
 
 
@@ -2068,7 +2089,9 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "First visit: inspect Map, compare a Root preview for unclaimed territory, or Trade to fund Crew recruitment. Back always cancels a preview.",
         f"Each action costs one of {TURNS_PER_DAY} turns. The rolling 24-hour window starts with your first action.",
         "[T]rade Warez: quick cash. [C]rew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
-        "[J]ob: risky payout. [R]aid: steal rival cash. [X]Root: take an exchange for hourly income.",
+        "[J]obs: choose one of five repeatable contracts, then Cautious, Standard or Bold. Exact odds and stakes appear before Act. Offers stay fixed; browsing and reconnecting do not reroll them.",
+        "Cautious pays less with lower Heat and no ordinary failure crew loss. Bold pays more with higher Heat. A bust can still cost cash and available crew with any approach. Harder contracts pay more as your crew grows.",
+        "[R]aid: steal rival cash. [X]Root: take an exchange for hourly income.",
         "Raids respect a 48-hour newcomer shield and your tier +/-1. Any raid attempt gives its target 24 hours of protection from every attacker, win or lose. Login and reading receipts never clear it.",
         "Rival Rank, shield reasons and expiry times are public. Available crew and cash stay private; raid odds and payout remain explicitly uncertain. Exchange garrisons are public and territory stays ungated.",
         "Capture commits one available member to its garrison. Assigned crew defend only that exchange; jobs, raids and attacks use available crew.",
@@ -2149,24 +2172,26 @@ def action_block_reason(action: str, player: Player) -> str | None:
     return " ".join(reasons) or None
 
 
-def action_preview_lines(action: str, player: Player, target: Player | Exchange | None = None) -> list[str]:
+def action_preview_lines(action: str, player: Player, target: Player | Exchange | JobChoice | None = None) -> list[str]:
     cost = RECRUIT_COST if action == "recruit" else ROOT_EXCHANGE_COST if action == "root" else 0
     lines = [f"Season {player.season_number}; turns {TURNS_PER_DAY - player.turns_used}/{TURNS_PER_DAY}; cash ${player.cash:,}",
              f"Cost: 1 turn, ${cost} cash. Back spends nothing."]
     if reason := action_block_reason(action, player):
         lines.append("Unavailable: " + reason)
-    heat = {"trade": TRADE_WAREZ_HEAT, "recruit": 0, "job": JOB_HEAT,
+    job = job_terms(target if isinstance(target, JobChoice) else JobChoice()) if action == "job" else None
+    heat = {"trade": TRADE_WAREZ_HEAT, "recruit": 0, "job": job[4] if job else JOB_HEAT,
             "raid": RAID_HEAT, "root": ROOT_EXCHANGE_HEAT}[action]
     if action == "trade":
         lines.append(f"Gross payout: ${TRADE_WAREZ_RANGE[0]}-${TRADE_WAREZ_RANGE[1]}, before any bust loss.")
     elif action == "recruit":
         lines.append("Guaranteed +1 crew and +10 Rank. No Heat or bust roll.")
     elif action == "job":
-        odds = [success_chance(player.crew, difficulty) for _, difficulty, _ in JOBS]
-        lines += ["A job is assigned when you act; browsing does not draw or reroll one.",
-                  f"Success: {min(odds):.0%}-{max(odds):.0%}, depending on the assigned job.",
-                  f"Success pays ${min(j[2][0] for j in JOBS)}-${max(j[2][1] for j in JOBS)} and +15 Rank.",
-                  f"Failure loses {min(1, player.crew - 1)} crew before any bust."]
+        name, difficulty, (lo, hi), approach, _, loss = job
+        lines += [f"Contract: {name}; approach: {approach}.",
+                  f"Success: {success_chance(player.crew, difficulty):.1%}; difficulty {difficulty}, available crew {player.crew}.",
+                  f"Success pays ${lo}-${hi} and +15 Rank before any bust.",
+                  f"Failure loses {min(loss, player.crew - 1)} available crew before any bust; no cash penalty.",
+                  "Repeatable fixed contract: inspecting or reconnecting cannot reroll offers."]
     elif action == "raid":
         lines += [f"Rival: {target.handle}", "Success odds unknown (10%-90%): rival crew strength is private.",
                   f"Success steals {RAID_STEAL_FRACTION:.0%} of their unknown cash and earns +25 Rank.",
@@ -2200,7 +2225,7 @@ def update_display_player(p: Palette, player: Player, refreshed: Player, width: 
 
 
 def confirm_action(p: Palette, conn: sqlite3.Connection, player: Player, action: str,
-                   width: int, height: int, target: Player | Exchange | None = None) -> bool:
+                   width: int, height: int, target: Player | Exchange | JobChoice | None = None) -> bool:
     refreshed = refresh_player(conn, player.user_id, now_utc())
     update_display_player(p, player, refreshed, width, height)
     available = action_block_reason(action, player) is None
@@ -2315,11 +2340,29 @@ def do_recruit(p: Palette, conn: sqlite3.Connection, player: Player, now: dateti
 
 def do_job(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
            rng: random.Random, w: int = 78, height: int = 24) -> bool:
-    if not confirm_action(p, conn, player, "job", w, height):
+    refreshed = refresh_player(conn, player.user_id, now_utc())
+    update_display_player(p, player, refreshed, w, height)
+    records = [([name, f"Difficulty {difficulty}; success {success_chance(player.crew, difficulty):.1%} with {player.crew} available crew.",
+                 f"Standard payout ${lo}-${hi}; +15 Rank on success. Repeatable."], True)
+               for name, difficulty, (lo, hi) in JOBS]
+    selected = pick_record_page(p, "CONTRACT BOARD", records, w, height)
+    if selected in "BQ":
+        return False
+    contract = PICK_KEYS.index(selected)
+    records = []
+    for index in range(len(JOB_APPROACHES)):
+        _, _, (lo, hi), approach, heat, loss = job_terms(JobChoice(contract, index))
+        records.append(([approach, f"Payout ${lo}-${hi}; Heat +{heat}; 1 turn.",
+                         f"Failure loses {min(loss, player.crew - 1)} crew before any bust. Preview follows."], True))
+    selected = pick_record_page(p, "CHOOSE APPROACH", records, w, height)
+    if selected in "BQ":
+        return False
+    choice = JobChoice(contract, PICK_KEYS.index(selected))
+    if not confirm_action(p, conn, player, "job", w, height, choice):
         return False
     delta = ActionDelta()
-    name, success, payout, busted = resolve_job(conn, player, now_utc(), rng, require_preview=True, delta=delta)
-    show_action_result(p, [f"Job: {name}", f"Success! Gross payout ${payout}." if success else "Job failed."],
+    name, success, payout, busted = resolve_job(conn, player, now_utc(), rng, choice=choice, require_preview=True, delta=delta)
+    show_action_result(p, [f"Job: {name} ({JOB_APPROACHES[choice.approach][0]})", f"Success! Gross payout ${payout}." if success else "Job failed."],
                        delta, busted, w, height)
     return True
 

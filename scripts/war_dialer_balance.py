@@ -29,7 +29,8 @@ SCENARIOS = {
     "late_arrivals": "One caller starts day 0; two territory rivals join day 3.",
     "low_attendance": "Three territory callers visit every 1, 3 and 7 days.",
     "trade_only": "One caller spends every available turn trading.",
-    "jobs_only": "One caller spends every available turn on random jobs.",
+    "jobs_only": "One caller repeats the easiest contract with the Standard approach.",
+    "jobs_ladder": "One caller alternates recruitment with the highest-paying contract at >=60% odds, using Cautious.",
     "income_burst": "One exchange captured initially; subsequent turns trade in a short daily visit.",
     "income_spaced": "Same capture and RNG as income_burst; subsequent turns spread across 23 hours.",
     "capture_trading": "Two callers alternate contests for exchange 1; owning caller recruits/trades.",
@@ -142,8 +143,10 @@ def run_scenario(name: str, *, days: int = 14, seed: int = 362) -> dict:
                             action, target = "root", exchanges[0].id
                         elif player.cash >= wd.RECRUIT_COST:
                             action = "recruit"
-                    elif name == "jobs_only":
+                    elif name in {"jobs_only", "jobs_ladder"}:
                         action = "job"
+                        if name == "jobs_ladder" and turn % 2 == 0 and player.cash >= wd.RECRUIT_COST:
+                            action = "recruit"
                     elif name == "bust_recovery":
                         action = "recruit" if player.cash >= wd.RECRUIT_COST else "trade"
                     elif name.startswith("income_"):
@@ -166,7 +169,13 @@ def run_scenario(name: str, *, days: int = 14, seed: int = 362) -> dict:
                             success, amount, busted = wd.resolve_raid(conn, player, target, now, rngs[uid], delta=delta)
                             totals[uid].update(raid_successes=int(success), stolen_cash=amount if success else 0)
                         elif action == "job":
-                            _, success, _, busted = wd.resolve_job(conn, player, now, rngs[uid], delta=delta)
+                            choice = wd.JobChoice()
+                            if name == "jobs_ladder":
+                                candidates = [i for i, (_, difficulty, _) in enumerate(wd.JOBS)
+                                              if wd.success_chance(player.crew, difficulty) >= .6]
+                                choice = wd.JobChoice(max(candidates, default=0), 0)
+                            _, success, _, busted = wd.resolve_job(conn, player, now, rngs[uid], choice=choice, delta=delta)
+                            totals[uid][f"contract_{choice.contract + 1}"] += 1
                             totals[uid]["job_successes"] += int(success)
                         elif action == "recruit":
                             wd.resolve_recruit(conn, player, now, delta=delta)
