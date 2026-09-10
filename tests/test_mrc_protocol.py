@@ -86,6 +86,25 @@ def test_sanitize_room_drops_leading_hash():
     assert sanitize_room("  general chat ") == "general_chat"
 
 
+def test_room_names_are_twenty_characters_and_a_typed_name_is_refused_not_cut():
+    """Issue #376: the spec's `string[20]` for rooms."""
+    from netbbs.mrc.protocol import MAX_ROOM, room_name_error
+
+    assert MAX_ROOM == 20
+    assert sanitize_room("x" * 25) == "x" * 20
+    assert room_name_error("x" * 20) is None
+    assert room_name_error("#" + "x" * 20) is None
+    assert room_name_error("x" * 21) == "MRC room names are at most 20 characters; " + repr("x" * 21) + " has 21."
+    assert room_name_error("|12") == "Room name must contain at least one printable ASCII character."
+    # Inbound room fields are cut at the parser too, so a packet from a
+    # client that still emits longer names matches a shortened mapping.
+    from netbbs.mrc.protocol import parse_line
+    packet = parse_line("bob~Other~" + "r" * 25 + "~~~" + "r" * 25 + "~hello~")
+    assert packet.from_room == "r" * 20 and packet.to_room == "r" * 20
+    control = parse_line("CLIENT~Other~" + "ab" * 32 + "~SERVER~~~CAPABILITIES:MCI~")
+    assert control.from_room == "ab" * 32
+
+
 def test_sanitize_body_rules():
     assert sanitize_body("hi ~ there|07!") == "hi   there!"
     assert sanitize_body("Grüße \x1b[31mred") == "Gr??e red"
@@ -135,9 +154,12 @@ def test_build_line_recleans_fields():
 
 
 def test_build_handshake_keeps_display_spaces_in_site_only():
-    line = build_handshake("My Board", software="NetBBS_5.7.0", platform="netbsd amd64")
-    assert line == "My Board~NetBBS_5.7.0/netbsd_amd64/1.3.5\n"
-    assert build_handshake("~~~", software="NetBBS", platform="x").startswith("NetBBS~")
+    line = build_handshake("My Board", platform="Linux.x86_64", client_version="6.0.1")
+    assert line == "My Board~NETBBS/Linux.x86_64/6.0.1\n"
+    # The spec's shape: upper-case type, the platform convention kept,
+    # the client's own version -- never the protocol version.
+    assert build_handshake("B", platform="netbsd amd64", client_version="6.0.1", bbs_type="netbbs").endswith("~NETBBS/netbsd_amd64/6.0.1\n")
+    assert build_handshake("~~~", platform="x", client_version="1").startswith("NetBBS~")
 
 
 def test_server_command_and_userlist_parsing():
@@ -267,3 +289,35 @@ def test_ctcp_packets_parse_and_build_both_ways():
 def test_parse_userlist_and_server_commands_ignore_colour_decoration():
     assert parse_userlist("|12Carol@third,bob@|04other") == ["Carol@third", "bob@other"]
     assert parse_server_command("|07USERLIST:a,b") == ("USERLIST", "a,b")
+
+
+def test_client_context_verbs_follow_the_spec():
+    """Issue #377: IMALIVE with pid and epoch, CAPABILITIES with the
+    hash in field 3 (not cut to a room name), USERIP, TERMSIZE, BBSMETA."""
+    from netbbs.mrc import protocol
+
+    line = build_line(protocol.imalive("My_Board", "My Board", pid="4242", sent_at="1757462400.123456"))
+    assert line == "CLIENT~My_Board~4242~SERVER~1757462400.123456~~IMALIVE:My Board~\n"
+    digest = "ab" * 32
+    line = build_line(protocol.capabilities("My_Board", ["MCI", "CTCP"], script_hash=digest))
+    assert line == f"CLIENT~My_Board~{digest}~SERVER~~~CAPABILITIES:MCI CTCP~\n"
+    assert build_line(protocol.userip("alice", "S", "203.0.113.5")) == "alice~S~~SERVER~~~USERIP:203.0.113.5~\n"
+    assert build_line(protocol.termsize("alice", "S", 132, 50)) == "alice~S~~SERVER~~~TERMSIZE:132x50~\n"
+    assert build_line(protocol.bbsmeta("alice", "S", 10, "Thie si!")) == "alice~S~~SERVER~~~BBSMETA: SecLevel(10) Sysop(Thiesi)~\n"
+    assert build_line(protocol.bbsmeta("alice", "S", 10, "Jos\u00e9 \u00d6")) == "alice~S~~SERVER~~~BBSMETA: SecLevel(10) Sysop(Jos)~\n"
+    assert build_line(protocol.bbsmeta("alice", "S", 1000, "")) == "alice~S~~SERVER~~~BBSMETA: SecLevel(999)~\n"
+    assert protocol.is_wire_address("2001:db8::1") and protocol.is_wire_address("10.0.0.7")
+    assert not protocol.is_wire_address("") and not protocol.is_wire_address("unix:/tmp/sock")
+
+
+def test_spec_follow_up_helpers():
+    """Issue #378: STATUS LASTSEEN, the display spelling of a handle,
+    and the STATS activity field."""
+    from netbbs.mrc import protocol
+
+    assert build_line(protocol.status_lastseen("alice", "S", "lobby", False)) == "alice~S~lobby~SERVER~~lobby~STATUS LASTSEEN OFF~\n"
+    assert protocol.display_handle("Some_User") == "Some User"
+    assert protocol.parse_stats_activity("2 2 2 3") == 3
+    assert protocol.parse_stats_activity("2 2 2") is None
+    assert protocol.parse_stats_activity("2 2 2 9") is None and protocol.parse_stats_activity("2 2 2 x") is None
+    assert protocol.ACTIVITY_LABELS[2] == "medium activity"

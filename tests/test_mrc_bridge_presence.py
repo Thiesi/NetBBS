@@ -124,7 +124,8 @@ def test_stats_are_read_periodically_and_shown_only_when_asked(db, lane, lobby, 
             notice = await asyncio.wait_for(queue.get(), timeout=2)
             while not (isinstance(notice, MrcNotice) and notice.kind == "reply"):
                 notice = await asyncio.wait_for(queue.get(), timeout=2)
-            assert notice.text == "STATS:2 2 2"
+            assert notice.text == "STATS:2 2 2 1"
+            assert status.network_activity == 1 and status.network_activity_label == "low activity"
             # The banner the hub pushed on connect is remembered.
             assert bridge.banner_lines() == ["|14Welcome to the fake hub"]
             # An unparseable STATS keeps the raw line for the status screen.
@@ -164,7 +165,12 @@ def test_open_room_topics_come_from_the_hub_and_go_to_it(db, lane, lobby, alice,
             sent = await fake.wait_for(lambda p: p.body == "NEWTOPIC:garden:hello there")
             assert sent.from_user == "carol"
             await _wait_until(lambda: get_channel_by_name(db, "mrc:garden").topic == "hello there")
-            assert bridge.send_topic(lobby, "alice", "x" * 200) == "that topic is longer than MRC allows (140 characters with the room name)"
+            assert bridge.send_topic(lobby, "alice", "x" * 56) == "that topic is longer than MRC allows (55 characters)"
+            assert bridge.send_topic(garden, "carol", "y" * 55) is None
+            # Passwords: 20 for the identity commands, 32 for a room (issue #376).
+            assert bridge.send_secret_command(lobby, "alice", "IDENTIFY", "p" * 21) == "that password is longer than MRC allows (20 characters)"
+            assert bridge.send_secret_command(lobby, "alice", "ROOMPASS", "p" * 33) == "that password is longer than MRC allows (32 characters)"
+            assert bridge.send_secret_command(lobby, "alice", "ROOMPASS", "p" * 32) is None
             assert bridge.send_topic(garden, "zed", "hi") == "you aren't announced to the hub yet"
         finally:
             await bridge.close()
@@ -316,6 +322,113 @@ def test_the_keepalive_carries_the_activity_extension(db, lane, lobby, alice):
             presence.clear_away("alice")
             await _wait_until(lambda: fake.activity.get(("my_board", "alice")) == "ACTIVE", timeout=3.0)
             assert not [p for p in fake.received if p.body == "IAMHERE"] and fake.unknown_commands == []
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_notify_reaches_every_bridged_channel_and_handles_show_spaces(db, lane, lobby, alice):
+    """Issue #378: a hub NOTIFY is shown like a banner but not kept; an
+    inbound handle is displayed with underscores as spaces."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await fake.send_line("SERVER~~~CLIENT~~~NOTIFY:Maintenance at |12midnight~")
+            item = await asyncio.wait_for(queue.get(), timeout=2)
+            while not isinstance(item, MrcNotice) or "Maintenance" not in item.text:
+                item = await asyncio.wait_for(queue.get(), timeout=2)
+            assert item.text == "Maintenance at |12midnight"
+            assert bridge.banner_lines() == ["|14Welcome to the fake hub"]  # not remembered as a banner
+            await fake.send_line("Some_User~Other~lobby~~~lobby~|03<|11Some_User|03>|16|07 hello~")
+            from netbbs.chat.scrollback import get_scrollback
+            await _wait_until(lambda: any("hello" in m.body for m in get_scrollback(db, lobby)))
+            recorded = [m for m in get_scrollback(db, lobby) if "hello" in m.body][0]
+            assert recorded.author_label == "Some User@Other (MRC)"
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_the_lastseen_opt_out_is_sent_on_announcement(db, lane, lobby, alice):
+    """Issue #378: `STATUS LASTSEEN OFF` for a caller who turned the
+    Profile switch off; nothing for the default."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        recorded: dict = {"alice": None}
+        # A slow keepalive: its reconciliation would race the scripted
+        # leave/re-enter below; the test is about the announcement packets.
+        bridge = await _connected_bridge(
+            db, lane, hub, fake, load_lastseen=lambda db_, u: recorded.get(u), keepalive_interval_seconds=5.0,
+        )
+        try:
+            hub.join(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await asyncio.sleep(0.2)
+            assert not fake.packets(body_prefix="STATUS LASTSEEN")
+            hub.leave(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_leave(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "LOGOFF")
+            recorded["alice"] = False
+            hub.join(lobby.name, ParticipantId("alice", 2))
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "STATUS LASTSEEN OFF" and p.from_user == "alice", timeout=3.0)
+            await _wait_until(lambda: fake.lastseen.get(("my_board", "alice")) == "OFF")
+            # Re-enabled: an explicit ON reaches the hub (review of #390).
+            hub.leave(lobby.name, ParticipantId("alice", 2))
+            await bridge.local_leave(lobby, "alice")
+            await _wait_until(lambda: len(fake.packets(body_prefix="LOGOFF")) == 2, timeout=3.0)
+            recorded["alice"] = True
+            hub.join(lobby.name, ParticipantId("alice", 3))
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "STATUS LASTSEEN ON" and p.from_user == "alice", timeout=3.0)
+            await _wait_until(lambda: fake.lastseen.get(("my_board", "alice")) == "ON")
+            assert fake.unknown_commands == []
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_a_lastseen_choice_read_late_is_applied_at_once(db, lane, lobby, alice):
+    """Review of #390: the first read failed at announcement; the retry
+    (here, a mapping refresh) sends the choice without a re-entry."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        failing = {"on": True}
+
+        def _load(db_, username):
+            if failing["on"]:
+                raise RuntimeError("database is away")
+            return False
+
+        bridge = await _connected_bridge(db, lane, hub, fake, load_lastseen=_load)
+        try:
+            hub.join(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await asyncio.sleep(0.2)
+            assert not fake.packets(body_prefix="STATUS LASTSEEN")
+            failing["on"] = False
+            await bridge.refresh_channel_mappings()
+            await fake.wait_for(lambda p: p.body == "STATUS LASTSEEN OFF" and p.from_user == "alice", timeout=3.0)
         finally:
             await bridge.close()
             await fake.close()

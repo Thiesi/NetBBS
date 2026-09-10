@@ -43,7 +43,7 @@ def test_run_connects_to_the_hub_when_enabled_and_drains_on_shutdown(tmp_path):
             shutdown_event = asyncio.Event()
             task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
             await fake.wait_for(lambda p: p.body.startswith("IMALIVE:"), timeout=5)
-            assert fake.handshakes[0].startswith("Lifecycle Node~NetBBS_")
+            assert fake.handshakes[0].startswith("Lifecycle Node~NETBBS/")
             shutdown_event.set()
             await asyncio.wait_for(task, timeout=15)
             assert fake.packets(body_prefix="SHUTDOWN")

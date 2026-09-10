@@ -945,7 +945,9 @@ session needs the same treatment.
   one "cut short" notice per burst), CTCP replies per remote sender
   (`CTCP_BURST`), `USERROOM` re-announce at most once per keepalive tick
   (`_rehomed`, cleared on the tick). A CTCP request for a nick this node never
-  announced is ignored without a reply.
+  announced is ignored without a reply -- including the spec's wildcard
+  (target `*`, blank `to_user`), which would otherwise cost one reply per
+  announced nick (issue #378).
 - An empty `to_room` is treated as a network broadcast (shown in every active
   bridged channel), following ENiGMA½; if the live hub ever sends ordinary
   room traffic with an empty `to_room`, this is the switch to revisit.
@@ -1050,6 +1052,72 @@ session needs the same treatment.
   section entry is re-decided from `open_rooms_enabled` on every return to
   the top level, and selecting an existing open room refuses while the switch
   is off.
+- Smaller spec follow-ups (issue #378): a server `NOTIFY:` goes through
+  `_broadcast_notice` to every active mapping and is not remembered (unlike
+  `BANNER:`); `_record_stats` also keeps the fourth `STATS` field as
+  `_network_activity` (`parse_stats_activity`, 0-3, `ACTIVITY_LABELS`);
+  `display_handle` (underscores to spaces) is applied at display boundaries
+  only -- author labels, private/broadcast/CTCP sender labels, roster
+  entries (`display_roster_entry`, the nick half) -- never to anything
+  matched or sent; `_mrc_helper_carries_a_secret` classifies the line with
+  pipe codes stripped, as the outbound path would send it;
+  `_mrc_helper_carries_a_secret` refuses `!identify`, `!register`,
+  `!update` and `!roompass` as chat in *any* channel while the node has an
+  MRC bridge -- a paused mapping or a local channel would still record the
+  password, and relay it the moment the channel is bridged -- before
+  anything is recorded, and `InputHistory.forget` drops the raw line
+  `read_line` had already recorded (raw, since the loop strips what it
+  matches), so Up cannot bring the password back; the LASTSEEN choice is a tri-state Profile preference (never
+  chosen / on / off) read with the nick colour and opt-in (`load_lastseen`,
+  cached and pruned like them, and part of `_ensure_nick_color`'s guard so a
+  failed read is retried -- and a choice read after the caller was already
+  announced is sent at once, `_send_lastseen_choice`) and sent as
+  `STATUS LASTSEEN ON|OFF` on every announcement when chosen -- the hub keeps an opt-out across sessions, so
+  only an explicit ON undoes one. `_network_activity` is cleared with the
+  other hub readings on `reload_settings` and shown only beside a network
+  size. The fake hub records `STATUS LASTSEEN` and answers `STATS` with
+  four fields.
+- Caller facts (issue #377): `note_caller` (chat_flow, before `local_join`)
+  stores address, terminal size and level per username in `_caller_facts`.
+  Unlike the other per-caller caches it is *not* pruned to the announced
+  set -- it is written before the announcement, and a keepalive tick in the
+  gap would erase it -- but capped, dropping unannounced callers' entries
+  at the cap; what remains is bounded by the announced set; `_announce` sends
+  `TERMSIZE` always and `USERIP`/`BBSMETA` only when `MrcSettings.
+  send_caller_ip`/`send_caller_meta` say so, so a reconnect repeats them
+  like the away state. `USERIP` travels only for an address made of
+  digits, hex digits, colons and dots (`is_wire_address`). `build_line`
+  treats a `CLIENT` packet's field 3 as a pid or hash (`string[128]`), not
+  a room name, so the `CAPABILITIES` hash and the `IMALIVE` pid survive;
+  `PONG` is parsed for the echoed epoch and an absurd value (negative or
+  five minutes) is ignored. Latency is reset on every connection and on
+  `reload_settings`. Facts are noted on every channel entry, bridged or
+  not, so `_reconcile_announced` (a mapping added while callers are
+  inside) announces with this session's facts. The outbound queue's bound
+  is `_outbound_cap()`: the configured 200, or the connection's own prefix
+  (`OUTBOUND_CONNECTION_OVERHEAD`) plus eight lines per announced caller
+  when that is more, so a reconnect's announcements never evict each other
+  or the INFO lines ahead of them -- computed from the connection's
+  announcement peak, not the current count, so callers leaving while a
+  reconnect's announcements are still queued cannot shrink the cap under
+  packets of callers still here; `_enqueue` evicts until the new line
+  fits. Facts are noted before the ChatHub join makes a session visible,
+  so a reconciliation during the join's awaits announces with them. An
+  IMALIVE's timestamp is rewritten by
+  the writer as the line reaches the socket (`_stamp_imalive`), so the
+  round trip measures the hub, not this node's queue. The audit row for a
+  settings save records both caller-disclosure switches.
+- Wire limits (issue #376, MRCDoc rev 1.26): `MAX_ROOM` 20, `MAX_TOPIC` 55,
+  `MAX_PASSWORD` 20, `MAX_ROOM_PASSWORD` 32, `MAX_ARGUMENT` 20 live in
+  `netbbs.mrc.protocol` beside `MAX_NAME` and `MAX_BODY`. `sanitize_room`
+  cuts to 20 (inbound fields, lookups), but every place a person types a
+  room name -- `set_mrc_room`, `materialize_open_room` and so the picker,
+  `/join` and `/rooms` -- asks `room_name_error` first and refuses a name
+  the wire would cut: a caller must never land in a room the hub knows by
+  another name. The handshake is `{site}~NETBBS/{Os.arch}/{NetBBS version}`
+  (`build_handshake(platform=, client_version=)`, `_platform_label`
+  normalising `win32`/`AMD64` to `Windows.x86_64` and so on); the protocol
+  version the bridge speaks (`PROTOCOL_VERSION`) is not on the wire.
 - Outbound pacing (issue #375): the hub enforces one message per 0.5 s per
   user (MRCDoc rev 1.26), so the admission buckets (node-wide 5/s burst 10,
   per caller 1/s burst 3, which bound *intake*) are not enough: a
@@ -1119,7 +1187,8 @@ session needs the same treatment.
   evicted), fed by openings, `USERROOM` targets and the anchored `*** Joining
   <room>:` / `*** Leaving <room>:` templates; the hub only sends join chatter
   for rooms this node is in, so the list mostly reflects this node's own
-  history until the `LIST` reply format is known and parsed.
+  history; the protocol page (rev 1.26) documents no `LIST` reply format,
+  so this is the design, not a stopgap (issue #378).
 - The picker's section entry uses stable id 0 (channels are positive,
   categories negated), the section's own picker uses -1 for "open by name"
   and -2-n for observed rooms; `pick_item` shows the id beside every entry,

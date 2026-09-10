@@ -42,6 +42,8 @@ def test_away_is_mirrored_to_the_hub(db, lane, hub, presence, channel, alice):
             await rig.fake.wait_for(lambda p: p.body == "IAMHERE:AWAY" and p.from_user == "alice")
             await rig.fake.wait_for(lambda p: p.body == "IAMHERE:ACTIVE" and p.from_user == "alice")
             assert rig.fake.unknown_commands == []
+            # Issue #377: the caller's terminal size goes with the announcement.
+            await rig.fake.wait_for(lambda p: p.body.startswith("TERMSIZE:") and p.from_user == "alice")
         finally:
             await rig.close()
     asyncio.run(scenario())
@@ -157,6 +159,98 @@ def test_mrc_stats_shows_the_reply_and_the_section_carries_the_size(db, lane, hu
             assert rig.bridge.status().network_summary is not None
             from netbbs.net.chat_flow import _mrc_section_description
             assert rig.bridge.status().network_summary in _mrc_section_description(rig.bridge.status())
+        finally:
+            await rig.close()
+    asyncio.run(scenario())
+
+
+def test_hub_command_arguments_keep_to_the_spec(db, lane, hub, presence, channel, alice):
+    """Issue #376: LASTSEEN and HELP take a `string[20]`; `/mrc help
+    <topic>` is allowed (the spec's optional topic)."""
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            session, _ = await _run(
+                lane, hub, presence, channel, alice,
+                ["/mrc lastseen " + "n" * 21, "/mrc help topics", "/quit"], mrc_bridge=rig.bridge,
+            )
+            text = _text(session)
+            assert "names and help topics are at most 20 characters there" in text
+            await rig.fake.wait_for(lambda p: p.body == "HELP topics" and p.from_user == "alice")
+            assert not [p for p in rig.fake.received if p.body.startswith("LASTSEEN")]
+        finally:
+            await rig.close()
+    asyncio.run(scenario())
+
+
+def test_secret_helpers_are_refused_as_chat(db, lane, hub, presence, channel, alice):
+    """Issue #378: `!identify secret` typed in a bridged channel never
+    leaves as chat and is never recorded; other `!helpers` are chat."""
+    from netbbs.chat.scrollback import get_scrollback
+
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            session, _ = await _run(
+                lane, hub, presence, channel, alice,
+                ["!identify hunter2", "!Register hunter2", "|03!update password hunter2", "!weather", "/quit"], mrc_bridge=rig.bridge,
+            )
+            text = _text(session)
+            # A pipe-code prefix does not slip past: the wire would strip it.
+            assert text.count("would carry your password into chat") == 3
+            await rig.fake.wait_for(lambda p: p.body.endswith(" !weather") and p.from_user == "alice")
+            assert not [p for p in rig.fake.received if "hunter2" in p.body]
+            assert not [m for m in get_scrollback(db, channel) if "hunter2" in (m.body or "")]
+            # And the refused lines are not in the input history either
+            # (review of #390): Up in another channel must not resend them.
+            from netbbs.net.char_input import InputHistory
+            history = InputHistory()
+            history.record("!identify hunter2")
+            history.forget("!identify hunter2")
+            assert len(history) == 0
+            history.record("/quit")
+            history.forget("!identify hunter2")
+            assert len(history) == 1
+        finally:
+            await rig.close()
+    asyncio.run(scenario())
+
+
+def test_secret_helpers_are_refused_in_an_unbridged_channel_too(db, lane, hub, presence, channel, alice, sysop):
+    """Review of #390: a paused mapping or a plain local channel would
+    still record the password, so the guard does not depend on
+    `is_bridged`."""
+    from netbbs.chat.channels import create_channel
+    from netbbs.chat.scrollback import get_scrollback
+
+    plain = create_channel(db, "plain", creator=sysop)
+
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            session, _ = await _run(lane, hub, presence, plain, alice, ["!identify hunter2 ", "/quit"], mrc_bridge=rig.bridge)
+            assert "would carry your password into chat" in _text(session)
+            assert not [m for m in get_scrollback(db, plain) if "hunter2" in (m.body or "")]
+        finally:
+            await rig.close()
+    asyncio.run(scenario())
+
+
+def test_the_roster_shows_handles_with_spaces(db, lane, hub, presence, channel, alice):
+    """Review of #390: `/who` shows a USERLIST entry's nick in display
+    spelling; the bridge keeps the wire spelling for matching."""
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            async def push_roster():
+                await rig.fake.wait_for(lambda p: p.body == "NEWROOM::lobby" and p.from_user == "alice")
+                await rig.fake.send_line("SERVER~~~CLIENT~~lobby~USERLIST:Some_User@Other,bob~")
+                await asyncio.sleep(0.2)
+
+            session, _ = await _run(lane, hub, presence, channel, alice, ["/who", "/quit"], mrc_bridge=rig.bridge, while_joined=push_roster)
+            text = _text(session)
+            assert "Some User@Other" in text and "Some_User" not in text
+            assert "Some_User@Other" in rig.bridge.remote_roster(channel)
         finally:
             await rig.close()
     asyncio.run(scenario())

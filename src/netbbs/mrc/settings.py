@@ -37,6 +37,8 @@ from netbbs.mrc.protocol import (
     DEFAULT_PORT_PLAIN,
     DEFAULT_PORT_TLS,
     MAX_NAME,
+    MAX_ROOM,
+    room_name_error,
     sanitize_body,
     sanitize_name,
     sanitize_room,
@@ -54,6 +56,9 @@ INFO_DESCRIPTION_CONFIG_KEY = "mrc_info_description"
 INFO_TELNET_CONFIG_KEY = "mrc_info_telnet"
 INFO_SSH_CONFIG_KEY = "mrc_info_ssh"
 INFO_WEB_CONFIG_KEY = "mrc_info_web"
+# Issue #377: what the node tells the hub about each caller it announces.
+SEND_CALLER_IP_CONFIG_KEY = "mrc_send_caller_ip"
+SEND_CALLER_META_CONFIG_KEY = "mrc_send_caller_meta"
 
 # The hub's INFO* fields are free text shown to other MRC users via
 # `/info`; bounded so a mistyped paste can't produce an oversized line.
@@ -76,6 +81,15 @@ class MrcSettings:
     info_telnet: str = ""
     info_ssh: str = ""
     info_web: str = ""
+    # Issue #377: per-caller facts sent to the hub on announcement.
+    # `USERIP` lets the hub tell this board's callers apart when it
+    # bans (the spec warns a user without it "may get removed from
+    # room traffic routing"); `BBSMETA` is the caller's level and the
+    # SysOp's name. Both off by default: no address or level leaves the
+    # node unless the SysOp says so (the handle and terminal size do,
+    # as part of being on the network at all).
+    send_caller_ip: bool = False
+    send_caller_meta: bool = False
 
     @property
     def site_wire_name(self) -> str:
@@ -129,6 +143,8 @@ def load_mrc_settings(db: Database) -> MrcSettings:
         info_telnet=get_config(db, INFO_TELNET_CONFIG_KEY) or "",
         info_ssh=get_config(db, INFO_SSH_CONFIG_KEY) or "",
         info_web=get_config(db, INFO_WEB_CONFIG_KEY) or "",
+        send_caller_ip=get_config(db, SEND_CALLER_IP_CONFIG_KEY) == "1",
+        send_caller_meta=get_config(db, SEND_CALLER_META_CONFIG_KEY) == "1",
     )
 
 
@@ -150,7 +166,8 @@ def validate_mrc_settings(settings: MrcSettings) -> MrcSettings:
         infos[field] = sanitize_body(getattr(settings, field))[:MAX_INFO_LENGTH]
     return MrcSettings(
         enabled=settings.enabled, host=host, port=settings.port, tls=settings.tls,
-        site_name=site_name, **infos,
+        site_name=site_name, send_caller_ip=bool(settings.send_caller_ip),
+        send_caller_meta=bool(settings.send_caller_meta), **infos,
     )
 
 
@@ -166,6 +183,8 @@ def save_mrc_settings(db: Database, settings: MrcSettings) -> MrcSettings:
     set_config(db, INFO_TELNET_CONFIG_KEY, validated.info_telnet)
     set_config(db, INFO_SSH_CONFIG_KEY, validated.info_ssh)
     set_config(db, INFO_WEB_CONFIG_KEY, validated.info_web)
+    set_config(db, SEND_CALLER_IP_CONFIG_KEY, "1" if validated.send_caller_ip else "0")
+    set_config(db, SEND_CALLER_META_CONFIG_KEY, "1" if validated.send_caller_meta else "0")
     return validated
 
 
@@ -178,6 +197,11 @@ def default_port_for(tls: bool) -> int:
 
 def _mapping_from_row(row: sqlite3.Row) -> MrcChannelMapping | None:
     if row is None or row["mrc_room"] is None:
+        return None
+    if len(row["mrc_room"]) > MAX_ROOM:
+        # A room the wire cannot name (a hand edit, or a row the upgrade
+        # migration did not see) is not a mapping; the channel shows as
+        # unbridged rather than bridging into the wrong room.
         return None
     keys = row.keys()
     return MrcChannelMapping(
@@ -204,9 +228,10 @@ def set_mrc_room(db: Database, channel: Channel, room: str) -> MrcChannelMapping
     rules; a leading `#` is fine). One room maps to at most one local
     channel -- otherwise one inbound line would be recorded twice and
     every local participant would appear twice on the hub."""
+    error = room_name_error(room)
+    if error is not None:
+        raise MrcSettingsError(error)
     normalized = sanitize_room(room)
-    if not normalized:
-        raise MrcSettingsError("Room name must contain at least one printable ASCII character.")
     holder = db.connection.execute(
         "SELECT name FROM channels WHERE lower(mrc_room) = lower(?) AND id != ?",
         (normalized, channel.id),
@@ -321,7 +346,21 @@ def _load_blocklist(db: Database) -> tuple[str, ...]:
         return ()
     if not isinstance(entries, list):
         return ()
-    return tuple(entry for entry in entries if isinstance(entry, str) and entry)
+    # An entry stored before the 20-character limit (issue #376) is cut to
+    # the room it can still name -- the same first 20 characters the upgrade
+    # migration gave a caller-opened room of that name -- so a block set
+    # then still holds, and every later save validates. Duplicates the cut
+    # produces collapse.
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str) or not entry:
+            continue
+        room = sanitize_room(entry) if room_name_error(entry) is not None else entry
+        if room and room.lower() not in seen:
+            seen.add(room.lower())
+            cleaned.append(room)
+    return tuple(cleaned)
 
 
 def validate_open_room_settings(settings: OpenRoomSettings) -> OpenRoomSettings:
@@ -339,6 +378,9 @@ def validate_open_room_settings(settings: OpenRoomSettings) -> OpenRoomSettings:
         raise MrcSettingsError(f"Retention must be between 1 and {MAX_OPEN_ROOM_RETENTION_DAYS} days.")
     seen: dict[str, str] = {}
     for entry in settings.blocklist:
+        error = room_name_error(entry)
+        if error is not None:
+            raise MrcSettingsError(f"Blocklist entry {entry!r}: {error}")
         room = sanitize_room(entry)
         if room and room.lower() not in seen:
             seen[room.lower()] = room
@@ -415,9 +457,10 @@ def materialize_open_room(db: Database, room: str, *, open_settings: OpenRoomSet
     the cap refuses, it never evicts a room someone may be in."""
     if not open_settings.enabled:
         raise MrcSettingsError("Opening MRC rooms is switched off on this node.")
+    error = room_name_error(room)
+    if error is not None:
+        raise MrcSettingsError(error)
     normalized = sanitize_room(room)
-    if not normalized:
-        raise MrcSettingsError("Room name must contain at least one printable ASCII character.")
     if open_settings.blocks(normalized):
         raise MrcSettingsError(f"The SysOp has blocked MRC room #{normalized} on this node.")
     existing = db.connection.execute(

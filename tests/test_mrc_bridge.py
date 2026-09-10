@@ -104,13 +104,20 @@ def test_connects_handshakes_and_announces_site_info(db, lane, lobby):
         bridge = await _connected_bridge(db, lane, hub, fake)
         try:
             await fake.wait_for(lambda p: p.body.startswith("CAPABILITIES:"))
-            assert fake.handshakes == ["My Board~NetBBS_5.7.0/" + fake.handshakes[0].split("/", 1)[1]]
-            assert fake.handshakes[0].endswith("/1.3.5")
+            assert fake.handshakes == ["My Board~NETBBS/" + fake.handshakes[0].split("/", 1)[1]]
+            assert fake.handshakes[0].endswith("/5.7.0")  # the client's version, not the protocol's
             info = fake.packets(body_prefix="INFOSYS:")[0]
             assert (info.from_user, info.from_site, info.to_user) == ("CLIENT", "My_Board", "SERVER")
             assert info.body == "INFOSYS:Thiesi"
             alive = fake.packets(body_prefix="IMALIVE:")[0]
             assert alive.body == "IMALIVE:My Board"
+            # Issue #377: pid and a timestamp the hub echoes; the real
+            # capability list with the module's hash in the spec's field.
+            assert alive.from_room.isdigit() and float(alive.msg_ext) > 0
+            caps = fake.packets(body_prefix="CAPABILITIES:")[0]
+            assert caps.body == "CAPABILITIES:MCI CTCP USERROOM GOODBYE" and len(caps.from_room) == 64
+            await _wait_until(lambda: bridge.status().hub_latency_seconds is not None, timeout=5.0)
+            assert 0.0 <= bridge.status().hub_latency_seconds < 5.0
             status = bridge.status()
             assert status.connected and status.attempts == 1 and status.last_error is None
             assert status.bridged_channels == 1 and status.site_name == "My Board"
@@ -486,13 +493,33 @@ def test_outbound_queue_is_bounded(db, lane, lobby):
         _enable(db, fake.port)
         set_mrc_room(db, lobby, "lobby")
         hub = ChatHub()
-        bridge = await _connected_bridge(db, lane, hub, fake, outbound_queue_size=2)
+        # The bound is `_outbound_cap()`: never below what one connection
+        # and its announced callers need, so announcements are never the
+        # thing evicted -- a flood from one caller beyond that is.
+        bridge = await _connected_bridge(db, lane, hub, fake, outbound_queue_size=2, per_user_interval_seconds=60.0)
         try:
             for name in ("u1", "u2", "u3", "u4", "u5"):
                 await bridge.local_join(lobby, name)
+            await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM::lobby")) == 5, timeout=5.0)
+            assert bridge.status().dropped_outbound == 0
+            cap = bridge._outbound_cap()
+            assert cap == 16 + 8 * 5
+            for i in range(cap):
+                await bridge.local_away("u1", f"away {i}")  # two unbucketed lines each
             await asyncio.sleep(0.1)
             assert bridge.status().dropped_outbound > 0
+            assert bridge._outbound.qsize() + bridge._held_total <= cap
             assert bridge.state is MrcState.CONNECTED
+            # The cap follows the announced set down: after four callers
+            # leave, the next line brings the queue under the smaller cap.
+            for name in ("u2", "u3", "u4", "u5"):
+                await bridge.local_leave(lobby, name)
+            # The cap keeps this connection's peak: the packets queued for
+            # the four callers still drain, and no live caller's line is
+            # evicted to make room for the newest.
+            assert bridge._outbound_cap() == cap
+            await bridge.local_away("u1", "one more")
+            assert bridge._outbound.qsize() + bridge._held_total <= cap
         finally:
             await bridge.close()
             await fake.close()
@@ -1070,9 +1097,170 @@ def test_held_lines_count_against_the_outbound_cap(db, lane, lobby, alice):
                 await bridge.local_away("alice", f"away {i}")  # two unbucketed packets each
                 await asyncio.sleep(0.01)
             await asyncio.sleep(0.2)
-            assert bridge._held_total + bridge._outbound.qsize() <= 6
-            assert bridge.status().dropped_outbound - before >= 14
+            cap = bridge._outbound_cap()  # the connection prefix plus 8 per announced caller
+            assert cap == 16 + 8
+            assert bridge._held_total + bridge._outbound.qsize() <= cap
+            assert bridge.status().dropped_outbound - before >= 20 - cap
         finally:
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_platform_label_uses_the_hubs_convention(monkeypatch):
+    """Issue #376: `{Os}.{arch}` as the spec's table spells it."""
+    import platform as platform_module
+    import sys as sys_module
+
+    from netbbs.mrc import bridge as bridge_module
+
+    for reported, expected in (
+        (("Windows", "AMD64"), "Windows.x86_64"),
+        (("Linux", "x86_64"), "Linux.x86_64"),
+        (("Linux", "aarch64"), "Linux.aarch64"),
+        (("Darwin", "arm64"), "OSX.aarch64"),
+        (("NetBSD", "amd64"), "NetBSD.x86_64"),
+        (("FreeBSD", "i386"), "FreeBSD.i386"),
+    ):
+        monkeypatch.setattr(platform_module, "system", lambda value=reported[0]: value)
+        monkeypatch.setattr(platform_module, "machine", lambda value=reported[1]: value)
+        assert bridge_module._platform_label() == expected
+    assert sys_module  # the label no longer reads sys.platform
+
+
+def test_an_overlength_room_name_resolves_to_no_mapping(db, lane, lobby, alice):
+    """Review of #387: `mapping_for_room` must not cut a 25-character
+    request down to the 20-character room sharing its prefix."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "a" * 20)
+        hub = ChatHub()
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            assert bridge.mapping_for_room("a" * 20) is not None
+            assert bridge.mapping_for_room("#" + "A" * 20) is not None
+            assert bridge.mapping_for_room("a" * 25) is None
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+
+def test_caller_facts_follow_the_sysops_switches(db, lane, lobby, alice):
+    """Issue #377: TERMSIZE always; USERIP and BBSMETA only when switched
+    on; repeated on reconnect; an address the wire cannot carry stays."""
+    from netbbs.mrc.settings import MrcSettings, load_mrc_settings, save_mrc_settings
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            # As chat_flow does: the facts first, then the announcement.
+            hub.join(lobby.name, ParticipantId("alice", 1))
+            bridge.note_caller("alice", address="203.0.113.5", width=132, height=50, level=10)
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "TERMSIZE:132x50" and p.from_user == "alice")
+            await asyncio.sleep(0.2)
+            assert not fake.packets(body_prefix="USERIP") and not fake.packets(body_prefix="BBSMETA")
+            # Both switches on: the next connection announces with them.
+            current = load_mrc_settings(db)
+            save_mrc_settings(db, MrcSettings(
+                enabled=True, host=current.host, port=current.port, tls=False, site_name=current.site_name,
+                info_sysop="Thiesi", send_caller_ip=True, send_caller_meta=True,
+            ))
+            await bridge.reload_settings()
+            await _wait_until(lambda: bridge.state is MrcState.CONNECTED, timeout=3.0)
+            await fake.wait_for(lambda p: p.body == "USERIP:203.0.113.5" and p.from_user == "alice", timeout=3.0)
+            await fake.wait_for(lambda p: p.body == "BBSMETA: SecLevel(10) Sysop(Thiesi)" and p.from_user == "alice", timeout=3.0)
+            await _wait_until(lambda: fake.facts.get(("my_board", "alice"), {}).get("USERIP") == "203.0.113.5")
+            # An address the wire cannot carry is simply not sent.
+            hub.leave(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_leave(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "LOGOFF")
+            count = len(fake.packets(body_prefix="USERIP"))
+            bridge.note_caller("alice", address="unix:/run/netbbs.sock", width=80, height=24, level=10)
+            hub.join(lobby.name, ParticipantId("alice", 2))
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "TERMSIZE:80x24" and p.from_user == "alice", timeout=3.0)
+            await asyncio.sleep(0.2)
+            assert len(fake.packets(body_prefix="USERIP")) == count
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_a_reconnect_announces_everyone_without_evicting_anyone(db, lane, lobby, alice):
+    """Review of #388: with more callers than the configured queue can
+    announce at once, the cap grows with the announced set."""
+    from netbbs.auth.users import create_user
+
+    names = [f"user{i:02d}" for i in range(12)]
+    for name in names:
+        create_user(db, name, password="hunter2", user_level=10)
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        for i, name in enumerate(names):
+            hub.join(lobby.name, ParticipantId(name, i + 1))
+        bridge = await _connected_bridge(db, lane, hub, fake, outbound_queue_size=10, keepalive_interval_seconds=5.0)
+        try:
+            for name in names:
+                bridge.note_caller(name, address=None, width=80, height=24, level=10)
+            await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM::lobby")) == 12, timeout=8.0)
+            assert {p.from_user for p in fake.packets(body_prefix="NEWROOM::lobby")} == set(names)
+            assert bridge.status().dropped_outbound == 0
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_facts_reach_a_mapping_added_while_callers_are_inside(db, lane, lobby, alice):
+    """Review of #388: a channel mapped while a caller is in it announces
+    them with the facts noted at entry."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        hub = ChatHub()
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            hub.join(lobby.name, ParticipantId("alice", 1))
+            bridge.note_caller("alice", address=None, width=100, height=40, level=10)
+            set_mrc_room(db, lobby, "lobby")
+            await bridge.refresh_channel_mappings()
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby" and p.from_user == "alice")
+            await fake.wait_for(lambda p: p.body == "TERMSIZE:100x40" and p.from_user == "alice", timeout=3.0)
+            # And a reload forgets the old hub's round trip at once.
+            await _wait_until(lambda: bridge.status().hub_latency_seconds is not None, timeout=5.0)
+            await bridge.reload_settings()
+            assert bridge.status().hub_latency_seconds is None
+            await _wait_until(lambda: bridge.state is MrcState.CONNECTED, timeout=3.0)
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_imalive_is_stamped_at_the_socket_and_the_audit_names_the_switches(db, lane, lobby, alice):
+    """Review of #388: a queued IMALIVE carries the time it is written,
+    so local queueing never inflates the round trip."""
+    from netbbs.mrc.bridge import _stamp_imalive
+
+    stale = "CLIENT~My_Board~4242~SERVER~1000000000.000000~~IMALIVE:My Board\n"
+    fresh = _stamp_imalive(stale)
+    assert fresh.startswith("CLIENT~My_Board~4242~SERVER~") and fresh.endswith("~~IMALIVE:My Board\n")
+    assert float(fresh.split("~")[4]) > 1_700_000_000.0
+    assert _stamp_imalive("alice~S~lobby~SERVER~~lobby~IAMHERE\n") == "alice~S~lobby~SERVER~~lobby~IAMHERE\n"

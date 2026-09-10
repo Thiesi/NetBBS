@@ -146,6 +146,7 @@ from netbbs.link.node_profiles import (
     latest_identity_observation,
 )
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX
+from netbbs.mrc.protocol import MAX_ARGUMENT, display_roster_entry
 from netbbs.mrc.bridge import MrcBridge, MrcNotice, MrcStatus
 from netbbs.mrc.settings import (
     MrcChannelMapping,
@@ -725,6 +726,8 @@ def _mrc_section_description(status: MrcStatus) -> str:
         bits.append(f"{status.open_rooms} open here")
     if status.network_summary:
         bits.append(status.network_summary)
+        if status.network_activity_label:
+            bits.append(status.network_activity_label)
     return "rooms on the MRC network" + (" -- " + ", ".join(bits) if bits else "")
 
 
@@ -2576,7 +2579,7 @@ def _mrc_roster_entries(ctx: ChatCommandContext) -> list[str]:
     state, same as `_remote_roster_entries`."""
     if ctx.mrc_bridge is None or not ctx.mrc_bridge.is_bridged(ctx.channel):
         return []
-    return [sanitize_text(name) for name in ctx.mrc_bridge.remote_roster(ctx.channel)]
+    return [sanitize_text(display_roster_entry(name)) for name in ctx.mrc_bridge.remote_roster(ctx.channel)]
 
 
 async def _announce_mrc_bridge(session: Session, mrc_bridge: MrcBridge, channel: Channel, user: User) -> None:
@@ -2650,10 +2653,22 @@ _MRC_HUB_COMMANDS: dict[str, tuple[str, str]] = {
     "info": ("INFO", "required"),
     "motd": ("MOTD", "none"),
     "stats": ("STATS", "none"),
-    "help": ("HELP", "none"),
+    "help": ("HELP", "optional"),
     "lastseen": ("LASTSEEN", "required"),
     "topics": ("TOPICS", "none"),
 }
+
+
+# Issue #378: the hub's `!helper` forms of the identity verbs, whose
+# argument is a password. Refused as chat in a bridged channel.
+_MRC_SECRET_HELPERS = frozenset({"!identify", "!register", "!update", "!roompass"})
+
+
+def _mrc_helper_carries_a_secret(line: str) -> bool:
+    """`line` as the outbound path would send it (pipe codes stripped,
+    leading whitespace gone): a `|03!identify secret` is `!identify
+    secret` on the wire."""
+    return line.split(" ", 1)[0].lower() in _MRC_SECRET_HELPERS
 
 
 # Issue #305: said once per session, on the first private line sent or
@@ -2771,6 +2786,12 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
             failure = ctx.mrc_bridge.send_ctcp(ctx.channel, ctx.user.username, target, command.strip())
         elif subcommand in _MRC_HUB_COMMANDS:
             hub_command, argument = _MRC_HUB_COMMANDS[subcommand]
+            if hub_command in ("LASTSEEN", "HELP") and len(rest) > MAX_ARGUMENT:
+                await ctx.session.write_line(colored(
+                    f"(not sent to MRC: names and help topics are at most {MAX_ARGUMENT} characters there)",
+                    fg_color=MUTED_COLOR,
+                ))
+                return
             if (rest and argument == "none") or (not rest and argument == "required"):
                 await _show_usage(ctx.session, "mrc")
                 return
@@ -3157,7 +3178,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "revokeaccess": ("/revokeaccess <user>", "Revoke a user's access to this chat channel."),
     "members": ("/members", "List users with direct access to this chat channel."),
     "mrc": (
-        "/mrc [rooms|who|bbses [search]|info <bbs>|motd|stats|help|lastseen <nick>|topics|msg <nick> <text>|r <text>|register|identify|roompass|update password|send <command>|ctcp <nick> <VERSION|TIME|PING|CLIENTINFO>]",
+        "/mrc [rooms|who|bbses [search]|info <bbs>|motd|stats|help [topic]|lastseen <nick>|topics|msg <nick> <text>|r <text>|register|identify|roompass|update password|send <command>|ctcp <nick> <VERSION|TIME|PING|CLIENTINFO>]",
         "Show this channel's MRC bridge, ask the MRC hub something (its reply is shown to you alone), or message an MRC user privately if you opted in.",
     ),
 }
@@ -4092,6 +4113,18 @@ async def _chat_loop(
             mrc_bridge.note_entry(channel)
 
     participant_id = ParticipantId(username=user.username, session_key=id(session))
+    if mrc_bridge is not None:
+        # Issue #377: what the hub may be told about this caller (the
+        # bridge and the SysOp's switches decide what leaves). Noted on
+        # every entry, bridged or not, and *before* the ChatHub join makes
+        # this session visible: a reconciliation running during the awaits
+        # below would otherwise announce the caller with no facts, or a
+        # previous session's.
+        mrc_bridge.note_caller(
+            user.username, address=getattr(session, "peer_address", None),
+            width=int(getattr(session, "terminal_width", 80) or 80),
+            height=int(getattr(session, "terminal_height", 24) or 24), level=int(user.user_level),
+        )
     queue = hub.join(channel.name, participant_id)
     # Design doc §8.10.2, issue #148: the live real-time subscribe
     # attempt (started below, once this channel's join is fully set up)
@@ -4316,12 +4349,11 @@ async def _chat_loop(
 
             while True:
                 completer = await _build_completer(lane, hub, presence, channel, user)
-                line = (
-                    await session.read_line(
-                        history=history, completer=completer, live_buffer=live_buffer, lock=lock,
-                        list_candidates=list_candidates if pinned_ui.active else None,
-                    )
-                ).strip()
+                raw_line = await session.read_line(
+                    history=history, completer=completer, live_buffer=live_buffer, lock=lock,
+                    list_candidates=list_candidates if pinned_ui.active else None,
+                )
+                line = raw_line.strip()
 
                 # Everything from here to the next read_line() call is one
                 # atomic critical section under `lock` (design doc)
@@ -4369,6 +4401,20 @@ async def _chat_loop(
                             return _Quit()
 
                         if not line:
+                            continue
+                        if mrc_bridge is not None and _mrc_helper_carries_a_secret(strip_pipe_codes(line).lstrip()):
+                            history.forget(raw_line)  # read_line recorded it before we saw it
+                            # Issue #378: the hub is moving its identity
+                            # verbs to `!helper` chat text; typed here, the
+                            # password would be recorded as chat -- and
+                            # relayed the moment this channel is bridged, so
+                            # a paused mapping or a local channel is no safer.
+                            await session.write_line(colored(
+                                "(not sent: that line would carry your password into chat -- "
+                                "use /mrc identify, /mrc register, /mrc update password or /mrc roompass, "
+                                "which ask for it without echo)",
+                                fg_color=MUTED_COLOR,
+                            ))
                             continue
                         if line.startswith("/"):
                             ctx = ChatCommandContext(

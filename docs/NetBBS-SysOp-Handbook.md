@@ -395,7 +395,14 @@ unless you say so, twice:
    the site name this node presents as (default: the node's display
    name). The public hub, TLS and its port are pre-filled; the INFO
    fields (SysOp, description, telnet/SSH/web addresses) are what other
-   MRC users see with `/info`. Saving applies immediately — no restart.
+   MRC users see with `/info`. Two switches under *About callers*, both
+   off, decide what the hub learns about each caller you announce:
+   `[U]SERIP` sends their connecting IP address (the hub uses it to ban
+   one caller rather than your whole board, and its documentation warns
+   that a caller without it may be dropped from room traffic routing),
+   `[M]etadata` sends their security level and your SysOp name. Their
+   terminal size is always sent, so the hub can format wide replies.
+   Saving applies immediately — no restart.
 2. On each channel you want on the network: `[C]ontent` → Cha`[N]`nels →
    the channel → `[M]RC room`. Type the room name (`lobby` is the hub's
    default room). One room maps to at most one channel.
@@ -425,7 +432,9 @@ channel picker since the section is its place. Inside one, `/join <room>`
 opens another MRC room (an existing local channel of that name still
 wins), `/join mrc:<room>` works from anywhere, and `/rooms` asks the hub.
 A room the SysOp has mapped is that channel: opening it by name lands the
-caller in yours.
+caller in yours. Room names are at most 20 characters on the network; a
+longer one is refused rather than quietly shortened, when you map a
+channel as well as when a caller opens a room.
 
 Open rooms are bounded: a `[C]ap` (default 32; opening refuses past it,
 nothing is evicted), a `[R]etention` period (default 7 days) after which
@@ -443,7 +452,8 @@ room it already holds.
 (and repeated on every reconnect), so MRC users see the same away state
 callers here see; the away message is cut to the network's 55
 characters, and a return is reported as activity, after which the hub
-decides when the caller stops showing as away. The first MRC room a caller enters in a session shows
+decides when the caller stops showing as away. Topics are 55 characters
+on the network too, and passwords 20 (room passwords 32). The first MRC room a caller enters in a session shows
 the hub's banner and its message of the day; `/mrc motd` asks again. The
 network's size -- "MRC: 41 users on 12 boards" -- appears above Who's
 online, in the picker's Multi Relay Chat section and on Node > Chat
@@ -471,6 +481,13 @@ stored -- not in scrollback, not in search, not in any log. There is
 nothing for you to configure; a caller who leaves the switch off is told
 once per sender that somebody tried, as before.
 
+A caller can also stop the hub from answering `LASTSEEN` questions about
+their handle under `[P]rofile` → `[W]hen last seen on MRC`. Typing
+`!identify`, `!register`, `!update` or `!roompass` as chat in any channel
+is refused while the node has an MRC bridge, since the password would be
+recorded as chat and relayed as soon as the channel is bridged; the
+`/mrc` forms ask for it without echo.
+
 MRC users colour their lines with Mystic-style `|NN` codes. Those colours
 are shown by default; a caller who prefers plain text switches them off
 under `[P]rofile` → `[I]nter-BBS chat colours`. Either way an inbound
@@ -479,7 +496,7 @@ codes are not relayed — NetBBS callers speak in one house style.
 
 `/mrc` also asks the hub things on the caller's behalf: `/mrc rooms`,
 `/mrc who`, `/mrc bbses [search]`, `/mrc info <bbs>`, `/mrc motd`,
-`/mrc stats`, `/mrc help`, `/mrc lastseen <nick>`, `/mrc topics`, plus
+`/mrc stats`, `/mrc help [topic]`, `/mrc lastseen <nick>`, `/mrc topics`, plus
 `/mrc send <command>` for any other server command, `/mrc ctcp <nick>
 VERSION|TIME|PING|CLIENTINFO`, and `/mrc msg <nick> <text>` / `/mrc r
 <text>` for a caller who opted in to private messages. The hub's reply
@@ -494,7 +511,8 @@ at most once per minute; if the hub renames them they are told the new
 name; if the hub terminates the site's session the link stops until you
 change and save the MRC settings, like an `OLDVERSION` rejection.
 
-`[N]ode` → `[C]hat bridge (MRC)` shows the link state (connected,
+`[N]ode` → `[C]hat bridge (MRC)` shows the hub round trip, measured from
+the hub's answer to each keepalive, and the link state (connected,
 reconnecting, error, off), hub, last error, drop counters and every
 bridged channel with the hub's roster, plus `[R]econnect now`. To take a
 single channel off the network without touching the others, use its

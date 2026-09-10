@@ -246,6 +246,7 @@ from netbbs.link.work_items import (
 )
 from netbbs.moderation.blocklist import BlocklistError, block_user, is_blocked, unblock_user
 from netbbs.moderation.log import list_actions_for_target_user, list_recent_actions, record_action
+from netbbs.mrc.protocol import display_roster_entry, room_name_error
 from netbbs.mrc.bridge import MrcBridge, MrcState, MrcStatus
 from netbbs.mrc.settings import (
     MrcChannelMapping,
@@ -5177,6 +5178,7 @@ async def _mrc_settings_screen(
         "site_name": current.site_name, "info_sysop": current.info_sysop,
         "info_description": current.info_description, "info_telnet": current.info_telnet,
         "info_ssh": current.info_ssh, "info_web": current.info_web,
+        "send_caller_ip": current.send_caller_ip, "send_caller_meta": current.send_caller_meta,
         # Issue #300: the open-room half -- whether callers may open any
         # room, the gates a room opened that way starts with, and the
         # lifecycle bounds.
@@ -5222,7 +5224,7 @@ async def _mrc_settings_screen(
             key="host", hotkey="h", menu_text=menu_key("H", "ost"), label="Hub host",
             render=lambda d: d["host"], prompt=text_field("host", required=True),
             brief="The MRC hub to connect to", section="Hub",
-            help="The public hub is mrc.bottomlessabyss.net. Change it only for a private hub.",
+            help="The public hub is mrc.bottomlessabyss.net. Change it only for a private hub. The protocol page (rev 1.26) also lists the operator's pool: na-multi, eu-multi and au-multi.relaychat.net (5000 plain, 5001 TLS) and mrcdev.relaychat.net for development.",
         ),
         FieldSpec(
             key="port", hotkey="p", menu_text=menu_key("P", "ort"), label="Hub port",
@@ -5265,6 +5267,29 @@ async def _mrc_settings_screen(
             key="info_web", hotkey="w", menu_text=menu_key("W", "eb address"), label="Web address",
             render=lambda d: d["info_web"] or "(none)", prompt=_optional_text_field("info_web"),
             brief="URL of the web/xterm.js front door", section="Advertised addresses",
+        ),
+        FieldSpec(
+            key="send_caller_ip", hotkey="u", menu_text=menu_key("U", "SERIP"), label="Send callers' IP addresses (USERIP)",
+            render=lambda d: "yes" if d["send_caller_ip"] else "no",
+            prompt=_toggle_draft_field("send_caller_ip"),
+            brief="Off: the connecting address stays local", section="About callers",
+            help=(
+                "Off by default. On: each caller announced on the network is followed by their "
+                "connecting IP address (USERIP), which the hub uses to tell this board's callers apart "
+                "when it bans one for abuse. The hub's documentation warns that a caller without it "
+                "may be removed from room traffic routing; with it off, that risk is yours to take."
+            ),
+        ),
+        FieldSpec(
+            key="send_caller_meta", hotkey="m", menu_text=menu_key("M", "etadata"), label="Send caller level and SysOp name (BBSMETA)",
+            render=lambda d: "yes" if d["send_caller_meta"] else "no",
+            prompt=_toggle_draft_field("send_caller_meta"),
+            brief="Off: the hub learns no caller levels", section="About callers",
+            help=(
+                "Off by default. On: each announced caller is followed by their security level and "
+                "this node's SysOp name (BBSMETA), which the hub's operator uses to judge a caller's "
+                "standing on their home board. The SysOp name is the INFO field above."
+            ),
         ),
         FieldSpec(
             key="open_rooms", hotkey="o", menu_text=menu_key("O", "pen rooms"), label="Callers may open any room",
@@ -5326,6 +5351,7 @@ async def _mrc_settings_screen(
             site_name=str(draft["site_name"]), info_sysop=str(draft["info_sysop"]),
             info_description=str(draft["info_description"]), info_telnet=str(draft["info_telnet"]),
             info_ssh=str(draft["info_ssh"]), info_web=str(draft["info_web"]),
+            send_caller_ip=bool(draft["send_caller_ip"]), send_caller_meta=bool(draft["send_caller_meta"]),
         )
 
         open_candidate = OpenRoomSettings(
@@ -5345,7 +5371,8 @@ async def _mrc_settings_screen(
                 db, actor=actor, action="set_mrc_settings",
                 detail=(
                     f"enabled={saved.enabled} hub={saved.host}:{saved.port} tls={saved.tls} site={saved.site_name!r} "
-                    f"open_rooms={open_saved.enabled} cap={open_saved.cap} retention={open_saved.retention_days}d"
+                    f"open_rooms={open_saved.enabled} cap={open_saved.cap} retention={open_saved.retention_days}d "
+                    f"send_caller_ip={saved.send_caller_ip} send_caller_meta={saved.send_caller_meta}"
                 ),
             )
             return saved
@@ -5417,9 +5444,13 @@ async def _blocklist_field(session: Session, lane: DatabaseLane, draft: dict) ->
             await session.write_line("")
             await write_prompt(session, "Room to block (blank = cancel): ")
             raw = (await session.read_line()).strip()
-            room = sanitize_room(raw)
-            if not room:
+            if not raw:
                 continue
+            error = room_name_error(raw)
+            if error is not None:
+                await session.write_line(colored(error, fg_color=ERROR_COLOR))
+                continue
+            room = sanitize_room(raw)
             if room.lower() not in {entry.lower() for entry in entries}:
                 entries.append(room)
             draft["open_blocklist"] = entries
@@ -5511,13 +5542,22 @@ async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, no
         )
         if status.network_summary is not None:
             age = status.network_stats_age_seconds or 0.0
-            network_line = f"{status.network_summary}, {status.network_rooms} rooms (as of {int(age // 60)} min ago)"
+            activity = f", {status.network_activity_label}" if status.network_activity_label else ""
+            network_line = f"{status.network_summary}, {status.network_rooms} rooms{activity} (as of {int(age // 60)} min ago)"
         elif status.network_stats_raw:
             network_line = f"unknown -- the hub answered STATS with: {sanitize_text(status.network_stats_raw)}"
         else:
             network_line = "unknown yet (asked once a caller is announced)"
         await session.write_line(
             colored("Network size: ", fg_color=LABEL_COLOR) + colored(network_line, fg_color=METADATA_COLOR)
+        )
+        if status.hub_latency_seconds is not None:
+            latency_age = int(status.hub_latency_age_seconds or 0.0)
+            latency_line = f"{status.hub_latency_seconds * 1000:.0f} ms (as of {latency_age} s ago)"
+        else:
+            latency_line = "not measured yet (the hub answers the next keepalive)"
+        await session.write_line(
+            colored("Hub round trip: ", fg_color=LABEL_COLOR) + colored(latency_line, fg_color=METADATA_COLOR)
         )
     if status.enabled or status.open_rooms or status.retired_rooms:
         # Shown whenever there is open-room state to report -- with MRC
@@ -5550,7 +5590,7 @@ async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, no
             roster = mrc_bridge.remote_roster(mapping.channel)
             who = f"{len(roster)} MRC user{'s' if len(roster) != 1 else ''}"
             if roster:
-                who += ": " + ", ".join(sanitize_text(name) for name in roster[:12])
+                who += ": " + ", ".join(sanitize_text(display_roster_entry(name)) for name in roster[:12])
                 if len(roster) > 12:
                     who += ", ..."
             await session.write_line(

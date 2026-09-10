@@ -5929,9 +5929,11 @@ commands like `IAMHERE`, `USERLIST`, `STATS`, `LOGOFF`, `INFOSYS`/`INFOWEB`/
 etc.). The only "handshake" is one unauthenticated line the client sends
 on connect — `{boardName}~{clientSoftware}/{os}/{version}` — no password,
 token, or signature ties a connection, a user name, or a claimed board
-name to anything real; any client can claim to be any board. Name fields
-are constrained to ASCII 33–125, 30 chars, with Mystic `|NN` pipe-color
-codes stripped; message bodies to ASCII 32–125. There is no history or
+name to anything real; any client can claim to be any board. User and
+site name fields are constrained to ASCII 33–125, 30 chars, room names
+to 20 (the protocol page's `string[20]`, issue #376), with Mystic `|NN`
+pipe-color codes stripped; message bodies to ASCII 32–125. There is no
+history or
 backfill concept at all — a message reaches only whatever clients happen
 to be connected at the instant it's sent.
 
@@ -6070,7 +6072,11 @@ page is not publicly reachable:
   caller (the sender is told quietly when a line was not relayed), and
   on the way out packets from one nick are spaced at least 0.5 s apart
   -- the hub's own per-user limit (MRCDoc rev 1.26; issue #375) -- with
-  held-back lines counted under the same 200-line cap;
+  held-back lines counted under the same 200-line cap; the spec's field
+  limits are enforced where a caller or SysOp types (room names 20,
+  refused rather than cut; topics 55; passwords 20, room passwords 32;
+  LASTSEEN and HELP arguments 20), and the handshake names the client
+  as `NETBBS/<Os.arch>/<NetBBS version>` (issue #376);
   inbound 40-line burst / 20 lines/s ahead of any database write, 4 KiB
   line cap; a local line is split into at most three 140-character
   wire chunks. An `OLDVERSION` rejection from the hub is fatal until a
@@ -6187,9 +6193,12 @@ without teaching native chat anything about MRC. Decisions:
   channel, then opens `<name>` as a room; `/join mrc:<name>` opens the
   room from anywhere; `/rooms` asks the hub. Open rooms are excluded
   from the ordinary channel list, since the section is their place.
-- **Deferred until the hub's protocol documentation arrives:** parsing
-  the `LIST` reply into the observed-room list, and `ROOM_OPEN`/
-  `ROOM_CLOSE`. Nothing above depends on them.
+- **What the protocol page settled (read 2026-09-09, rev 1.26; issue
+  #378):** the `LIST` reply has no documented shape ("Return the list
+  of rooms"), so the observed-room list stays fed by join and leave
+  chatter and `/rooms` shows the hub's text; `ROOM_OPEN`/`ROOM_CLOSE`
+  do not exist in the protocol (they were ENiGMA½ names). Neither is
+  deferred any more; there is nothing to wait for.
 
 **Issue #304 (presence and welcome)** carries the presence a caller
 already has here onto the network and lets the network's own life show
@@ -6271,6 +6280,52 @@ planning pass intended:
 - **Nothing for the SysOp to configure.** The switch is the caller's;
   the node-wide MRC switch and the channel mappings already decide
   whether they are on the network at all.
+
+**Issue #377 (what the hub is told)** follows the protocol page's
+control-context verbs, read on 2026-09-09:
+
+- **Per caller, on announcement:** `TERMSIZE` always (the hub formats
+  wide replies with it; it says nothing about the person); `USERIP` and
+  `BBSMETA` only behind two SysOp switches under Inter-BBS chat (MRC),
+  both off. The infrastructure principle applies: the node provides
+  the interface, the SysOp owns the decision to hand a third party a
+  caller's address or level. The spec's warning that a caller without
+  `USERIP` "may get removed from room traffic routing" is stated on the
+  switch and in the Handbook rather than used to justify a default.
+- **Per connection:** `CAPABILITIES` lists what the bridge really
+  handles (`MCI`, `CTCP`, `USERROOM`, `GOODBYE`, `SSL` when on) and
+  carries the bridge module's SHA256 in the spec's hash field;
+  `IMALIVE` carries the process id and a timestamp the hub echoes in
+  `PONG`, from which the status screen shows the round trip.
+- The `INFO*` fields the issue asked for already existed (issue #275).
+
+**Issue #378 (smaller spec follow-ups)**, same reading:
+
+- A server `NOTIFY:` is a one-time notice shown in every bridged
+  channel like a banner and never remembered; the `STATS` reply's
+  fourth field is the hub's activity level, shown beside the network
+  size; handles are displayed with underscores as spaces, as the spec
+  asks, while matching and addressing keep the wire spelling.
+- The hub is moving its identity verbs to `!helper` chat text. Typed
+  as chat, `!identify secret` would be recorded in scrollback and,
+  the moment the channel is bridged, relayed to the room, so those
+  four helpers are refused as chat in every channel while the node
+  has an MRC bridge -- a paused mapping or a local channel is no
+  safer a place for a password -- with a pointer to the masked `/mrc`
+  forms, and the line is dropped from the input history. Nothing else
+  typed with a `!` is touched: the hub's own helpers (`!time`,
+  `!weather`) are ordinary chat.
+- `STATUS LASTSEEN OFF` is a caller's choice on the Profile (on by
+  default, the hub's default), sent on every announcement like the
+  away state.
+- A CTCP request whose target is `*` (blank `to_user`) is not answered:
+  every wildcard would cost one reply per announced nick.
+- Hub facts worth keeping: the handshake must arrive within one second
+  of connecting, the heartbeat times out at 125 s, a client may hold
+  at most eight connections per address, and the operator's public
+  pool is `na-multi`, `eu-multi` and `au-multi.relaychat.net` (5000
+  plain, 5001 TLS) with `mrcdev.relaychat.net` for development; the
+  default host stays what it was until the operator retires it.
 
 ### Issue #194 — trusted scrollback-on-join — closed
 

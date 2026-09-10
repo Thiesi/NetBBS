@@ -47,6 +47,15 @@ SEPARATOR = "~"
 MAX_LINE = 512
 MAX_BODY = 140
 MAX_NAME = 30
+# Field limits from the protocol specification (MRCDoc rev 1.26; issue
+# #376): room names are `string[20]`, topics `string[55]`, IDENTIFY /
+# REGISTER / UPDATE passwords `string[20]`, ROOMPASS `string[32]`, and
+# the argument of LASTSEEN and HELP `string[20]`.
+MAX_ROOM = 20
+MAX_TOPIC = 55
+MAX_PASSWORD = 20
+MAX_ROOM_PASSWORD = 32
+MAX_ARGUMENT = 20
 # How many `MAX_BODY` chunks one local chat line may be split into
 # before the rest is dropped -- bounds the outbound burst one caller
 # can produce with a single (long) line.
@@ -185,26 +194,51 @@ def _clean(text: str) -> str:
     return sanitize_text(strip_ansi(text)).replace(SEPARATOR, " ")
 
 
-def sanitize_name(name: str) -> str:
-    """A user or site name as it may appear on the wire: pipe codes
+def _name_chars(name: str) -> str:
+    """A name's wire characters before any length cut: pipe codes
     stripped, whitespace collapsed to single underscores, printable
-    ASCII 33-125 only, at most `MAX_NAME` characters. Non-ASCII
-    characters are dropped rather than replaced -- a `?` inside a
-    *name* would read as a different identity, whereas inside a body
-    it reads as an unrenderable character."""
+    ASCII 33-125 only. Non-ASCII characters are dropped rather than
+    replaced -- a `?` inside a *name* would read as a different
+    identity, whereas inside a body it reads as an unrenderable
+    character."""
     cleaned = strip_pipe_codes(_clean(name)).strip()
     cleaned = _WHITESPACE_RE.sub("_", cleaned)
-    cleaned = "".join(ch for ch in cleaned if 33 <= ord(ch) <= 125)
-    return cleaned[:MAX_NAME]
+    return "".join(ch for ch in cleaned if 33 <= ord(ch) <= 125)
 
 
-def sanitize_room(room: str) -> str:
-    """Room names follow the same rules as user names; a leading `#`
-    (IRC habit several clients accept) is dropped."""
-    cleaned = sanitize_name(room)
+def sanitize_name(name: str) -> str:
+    """A user or site name as it may appear on the wire (`_name_chars`),
+    at most `MAX_NAME` characters."""
+    return _name_chars(name)[:MAX_NAME]
+
+
+def _room_chars(room: str) -> str:
+    cleaned = _name_chars(room)
     if cleaned.startswith("#"):
         cleaned = cleaned[1:]
     return cleaned
+
+
+def sanitize_room(room: str) -> str:
+    """Room names follow the same rules as user names, at most
+    `MAX_ROOM` characters (the spec's `string[20]`); a leading `#` (IRC
+    habit several clients accept) is dropped. For a name a caller or
+    SysOp typed, check `room_name_error` first: this cuts, it does not
+    refuse."""
+    return _room_chars(room)[:MAX_ROOM]
+
+
+def room_name_error(room: str) -> str | None:
+    """Why `room`, as typed, cannot name an MRC room -- `None` when it
+    can. A name the wire would cut silently is refused instead: a
+    caller who asked for a 25-character room must not land in a
+    20-character one the hub knows under a different name."""
+    chars = _room_chars(room)
+    if not chars:
+        return "Room name must contain at least one printable ASCII character."
+    if len(chars) > MAX_ROOM:
+        return f"MRC room names are at most {MAX_ROOM} characters; {chars!r} has {len(chars)}."
+    return None
 
 
 def sanitize_body(body: str) -> str:
@@ -273,7 +307,9 @@ def build_line(packet: MrcPacket) -> str:
     fields = [
         sanitize_name(packet.from_user),
         sanitize_name(packet.from_site),
-        sanitize_room(packet.from_room),
+        # A control packet's field 3 is the multiplexer's pid or a script
+        # hash (`string[128]`), never a room name (issue #377).
+        _name_chars(packet.from_room)[:128] if packet.from_user.upper() == CLIENT else sanitize_room(packet.from_room),
         sanitize_name(packet.to_user),
         sanitize_name(packet.msg_ext),
         sanitize_room(packet.to_room),
@@ -310,7 +346,12 @@ def parse_line(line: str) -> MrcPacket | None:
     # store, rendered or stripped per viewer -- and loses every other
     # pipe token (Mystic MCI variables) right here.
     cleaned = [sanitize_text(strip_ansi(field)).strip() for field in fields]
-    names = [strip_pipe_codes(value)[:MAX_NAME] for value in cleaned[:6]]
+    # Rooms (fields 3 and 6) are `string[20]` (issue #376); every other
+    # name field is `string[30]`. Field 3 of a control packet is a pid or
+    # a script hash (`string[128]`), not a room.
+    is_control = strip_pipe_codes(cleaned[0]).strip().upper() in (SERVER, CLIENT)
+    limits = [MAX_NAME, MAX_NAME, 128 if is_control else MAX_ROOM, MAX_NAME, MAX_NAME, MAX_ROOM]
+    names = [strip_pipe_codes(value)[:limit] for value, limit in zip(cleaned[:6], limits)]
     return MrcPacket(
         from_user=names[0], from_site=names[1], from_room=names[2],
         to_user=names[3], msg_ext=names[4], to_room=names[5],
@@ -350,15 +391,21 @@ def looks_like_presence_chatter(body: str) -> bool:
 # `CLIENT~site~~SERVER~~~CMD~`; a room message leaves `to_user` empty.
 
 
-def build_handshake(site_name: str, *, software: str, platform: str, protocol_version: str = PROTOCOL_VERSION) -> str:
+BBS_TYPE = "NETBBS"
+
+
+def build_handshake(site_name: str, *, platform: str, client_version: str, bbs_type: str = BBS_TYPE) -> str:
     """The one unauthenticated line sent on connect:
-    `{site}~{software}/{platform}/{protocol_version}`. The site half
-    keeps spaces (uMRC and ANetBBS send the display name here; the
-    underscored form only appears in `from_site` fields); the software
-    half has none."""
+    `{site}~{BBSTYPE}/{Os.arch}/{client version}` -- the spec's
+    `{BBSType}/{Arch}/{AgentVersion}` (MRCDoc rev 1.26): the type in
+    upper case like `MYSTIC` and `SYNCHRONET`, the platform in the
+    `Linux.x86_64` convention, and the *client's* version in
+    three-part notation (issue #376). The site half keeps spaces (uMRC
+    and ANetBBS send the display name here; the underscored form only
+    appears in `from_site` fields); the client half has none."""
     site = _printable(_clean(site_name), low=32).strip()[:MAX_NAME] or "NetBBS"
     client = "/".join(
-        sanitize_name(part) or "unknown" for part in (software, platform, protocol_version)
+        sanitize_name(part) or "unknown" for part in (bbs_type.upper(), platform, client_version)
     )
     return f"{site}{SEPARATOR}{client}\n"
 
@@ -395,16 +442,53 @@ def userlist(nick: str, site: str, room: str) -> MrcPacket:
     return user_command(nick, site, room, "USERLIST")
 
 
-def imalive(site: str, site_display: str) -> MrcPacket:
-    return site_command(site, f"IMALIVE:{site_display}")
+def imalive(site: str, site_display: str, *, pid: str = "", sent_at: str = "") -> MrcPacket:
+    """`CLIENT~bbs~pid~SERVER~msgext~~IMALIVE:bbsname~` (MRCDoc rev 1.26):
+    the multiplexer's process id in field 3 and, in field 5, a
+    high-precision epoch the hub echoes back in `PONG` so the round
+    trip can be measured (issue #377). Both optional."""
+    return MrcPacket(CLIENT, site, pid, SERVER, sent_at, "", f"IMALIVE:{site_display}")
+
+
+def userip(nick: str, site: str, address: str) -> MrcPacket:
+    """`USERIP:ipaddress` for an announced caller (MRCDoc rev 1.26): the
+    hub uses it to tell callers of one board apart when it bans. Sent
+    only when the SysOp switched it on (issue #377)."""
+    return MrcPacket(nick, site, "", SERVER, "", "", f"USERIP:{address}")
+
+
+def termsize(nick: str, site: str, width: int, height: int) -> MrcPacket:
+    """`TERMSIZE:WxH` for an announced caller, so the hub may format
+    wide replies (MRCDoc rev 1.26; issue #377)."""
+    return MrcPacket(nick, site, "", SERVER, "", "", f"TERMSIZE:{max(1, min(width, 999))}x{max(1, min(height, 999))}")
+
+
+def bbsmeta(nick: str, site: str, level: int, sysop: str) -> MrcPacket:
+    """`BBSMETA: SecLevel(level) Sysop(name)` for an announced caller
+    (MRCDoc rev 1.26, alphanumeric only); sent only when the SysOp
+    switched it on (issue #377)."""
+    name = "".join(ch for ch in sysop if ch.isascii() and ch.isalnum())[:32]
+    body = f"BBSMETA: SecLevel({max(0, min(level, 999))})"
+    if name:
+        body += f" Sysop({name})"
+    return MrcPacket(nick, site, "", SERVER, "", "", body)
+
+
+def is_wire_address(address: str) -> bool:
+    """Whether `address` can travel in `USERIP` as the spec spells it
+    (digits, colons, dots; hex digits for IPv6)."""
+    return bool(address) and len(address) <= 50 and all(ch in "0123456789abcdefABCDEF:." for ch in address)
 
 
 def info(site: str, key: str, value: str) -> MrcPacket:
     return site_command(site, f"INFO{key.upper()}:{value}")
 
 
-def capabilities(site: str, caps: list[str]) -> MrcPacket:
-    return site_command(site, "CAPABILITIES:" + " ".join(caps))
+def capabilities(site: str, caps: list[str], *, script_hash: str = "") -> MrcPacket:
+    """`CLIENT~bbs~hash~SERVER~msgext~~CAPABILITIES:data~`: field 3 is a
+    SHA256 hex digest of the client script (MRCDoc rev 1.26); NetBBS
+    sends the bridge module's (issue #377)."""
+    return MrcPacket(CLIENT, site, script_hash, SERVER, "", "", "CAPABILITIES:" + " ".join(caps))
 
 
 def shutdown(site: str) -> MrcPacket:
@@ -454,6 +538,44 @@ def room_body_reserve(nick: str, *, nick_color: int = DEFAULT_NICK_COLOR) -> int
 MAX_AFK_MESSAGE = 55
 ACTIVITY_AWAY = "AWAY"
 ACTIVITY_ACTIVE = "ACTIVE"
+
+
+def status_lastseen(nick: str, site: str, room: str, recorded: bool) -> MrcPacket:
+    """`STATUS LASTSEEN ON|OFF`: whether the hub may answer `LASTSEEN`
+    about this nick (MRCDoc rev 1.26). NetBBS sends only the opt-out,
+    since ON is the hub's default (issue #378)."""
+    return user_command(nick, site, room, f"STATUS LASTSEEN {'ON' if recorded else 'OFF'}")
+
+
+def display_handle(name: str) -> str:
+    """A handle as the spec says to show it: "client must replace `_`
+    by spaces when received from server" (fields 1 and 4). Display
+    only -- matching and addressing keep the wire spelling, since the
+    spec also notes the character "may be part of handle"."""
+    return name.replace("_", " ")
+
+
+def display_roster_entry(entry: str) -> str:
+    """A `USERLIST` entry (`nick` or `nick@site`) as shown: the nick
+    half in display spelling, the site as sent."""
+    nick, sep, site = entry.partition("@")
+    return display_handle(nick) + sep + site
+
+
+ACTIVITY_LABELS = {0: "quiet", 1: "low activity", 2: "medium activity", 3: "high activity"}
+
+
+def parse_stats_activity(params: str) -> int | None:
+    """The fourth `STATS` field, the hub's activity level 0-3 (MRCDoc rev
+    1.26: 0 none, 1 low, 2 medium, 3 high), or `None` when absent."""
+    parts = strip_pipe_codes(params).split()
+    if len(parts) < 4:
+        return None
+    try:
+        level = int(parts[3])
+    except ValueError:
+        return None
+    return level if 0 <= level <= 3 else None
 
 
 def status_afk(nick: str, site: str, room: str, message: str) -> MrcPacket:
