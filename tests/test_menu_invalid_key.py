@@ -104,10 +104,11 @@ def test_disabled_account_is_disconnected_on_next_main_menu_action(tmp_path):
     set_user_disabled(db, user, True, changed_by=user)
     session = FakeSession(keys=["m"])  # any ordinary action
 
-    asyncio.run(
+    exit_was_voluntary = asyncio.run(
         _main_menu(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), user)
     )
 
+    assert exit_was_voluntary is False
     assert "no longer active" in "".join(session.written)
     db.close()
 
@@ -119,10 +120,11 @@ def test_deleted_account_is_disconnected_on_next_main_menu_action(tmp_path):
     delete_user(db, user, deleted_by=sysop)
     session = FakeSession(keys=["m"])
 
-    asyncio.run(
+    exit_was_voluntary = asyncio.run(
         _main_menu(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), user)
     )
 
+    assert exit_was_voluntary is False
     assert "no longer active" in "".join(session.written)
     db.close()
 
@@ -132,10 +134,11 @@ def test_still_active_account_is_not_disconnected(tmp_path):
     user = create_user(db, "alice", password="hunter2", user_level=10)
     session = FakeSession(keys=["z", "l"])  # invalid key, then logoff -- never disconnected
 
-    asyncio.run(
+    exit_was_voluntary = asyncio.run(
         _main_menu(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), user)
     )
 
+    assert exit_was_voluntary is True
     assert "no longer active" not in "".join(session.written)
     db.close()
 

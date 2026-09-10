@@ -384,7 +384,7 @@ async def _main_menu(
     lane: DatabaseLane | None = None,
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
-) -> None:
+) -> bool:
     """
     The main menu, now dispatching immediately on a single keystroke
     (`read_key`) rather than waiting for a full line + Enter — a direct
@@ -403,6 +403,11 @@ async def _main_menu(
     unrecognized key (design doc): that just sounds a bell and
     leaves the screen exactly as it was, no reprinted prompt, since
     nothing was actually communicated worth a fresh line for.
+
+    A normal return reports why the menu ended: ``True`` only for the
+    caller-confirmed Log off action, and ``False`` when an account is found
+    inactive. Cancellation and connection failures continue to raise, so the
+    session owner can distinguish every non-voluntary exit from a clean call.
 
     `direct_invites` (design doc §6.3): every loop iteration races the
     ordinary `read_key()` against `direct_invites.pending_for(session).
@@ -483,7 +488,7 @@ async def _main_menu(
             await session.write_line(
                 colored("\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR)
             )
-            return
+            return False
 
         if choice == REDRAW_KEY:
             # Issue #102: redraws in place, no state change -- the same
@@ -498,7 +503,7 @@ async def _main_menu(
             if not await prompt_yes_no(session, "Log off?", default=False):
                 await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
                 continue
-            return
+            return True
         elif choice == "c" and _has_visible_communities(db, user):
             await session.write_line("")
             await _enter_communities(

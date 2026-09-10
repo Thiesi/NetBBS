@@ -51,14 +51,15 @@ def test_record_session_start_creates_a_row_with_no_end_yet(db, alice):
 
 def test_record_session_end_fills_in_disconnected_at(db, alice):
     history_id = record_session_start(db, alice)
-    record_session_end(db, history_id)
+    completed = record_session_end(db, history_id)
     entry = list_recent_sessions(db)[0]
+    assert completed == entry
     assert entry.disconnected_at is not None
 
 
 def test_record_session_end_on_a_pruned_id_is_a_silent_no_op(db, alice):
     # Doesn't correspond to any real row -- must not raise.
-    record_session_end(db, 999999)
+    assert record_session_end(db, 999999) is None
 
 
 def test_list_recent_sessions_most_recent_first(db, alice):

@@ -2,7 +2,7 @@
 Profile editing, identity/attestation, and session-history screens:
 `[E]dit profile` (bio/signature/display prefs/SSH keys), `[I]dentity
 details` (age/name attestation, verification), `[L]ast sessions`, and
-the previous-callers screen shown between authentication and the main menu.
+the session-lifecycle presentations shown before and after the main menu.
 
 Split out of `netbbs.net.login_flow` (that module's own maintenance
 split -- see its module docstring), the last and second-largest of the
@@ -12,7 +12,7 @@ calls nothing else in `login_flow`.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -134,6 +134,13 @@ _PREVIOUS_CALLERS_GRADIENT = [
     (255, 70, 210),
     (255, 205, 70),
     (0, 245, 255),
+]
+_LOGOFF_SUMMARY_GRADIENT = [
+    (0, 255, 210),
+    (0, 170, 255),
+    (125, 90, 255),
+    (255, 75, 190),
+    (255, 190, 70),
 ]
 
 
@@ -317,6 +324,136 @@ async def _show_previous_callers_screen(
     )
     await session.read_any_key()
     return True
+
+
+def _format_call_duration(connected_at: str, disconnected_at: str) -> str:
+    """Human-sized elapsed time derived from the two persisted instants."""
+    storage_format = "%Y-%m-%dT%H:%M:%S.%fZ"
+    connected = datetime.strptime(connected_at, storage_format)
+    disconnected = datetime.strptime(disconnected_at, storage_format)
+    total_seconds = max(0, int((disconnected - connected).total_seconds()))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    if minutes:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{seconds}s"
+
+
+async def _show_logoff_summary_screen(
+    session: Session,
+    db: Database,
+    user: User,
+    entry: SessionHistoryEntry,
+) -> None:
+    """Render the completed call's persisted timing immediately before exit."""
+    if entry.disconnected_at is None:
+        return
+
+    use_truecolor = effective_truecolor(session, db, user)
+    unicode_style = unicode_style_enabled(db, user)
+    terminal_width = max(1, session.terminal_width)
+    connected = format_for_display(entry.connected_at, db)
+    disconnected = format_for_display(entry.disconnected_at, db)
+    duration = _format_call_duration(entry.connected_at, entry.disconnected_at)
+    color_depth = "TRUECOLOR" if use_truecolor else "256 COLOR"
+    size_separator = " × " if unicode_style else " x "
+    field_separator = "  •  " if unicode_style else "  /  "
+    terminal = (
+        f"{session.terminal_width}{size_separator}{session.terminal_height}"
+        f"{field_separator}{color_depth}"
+    )
+    facts = [
+        ("CONNECTED", connected),
+        ("SIGNED OFF", disconnected),
+        ("TIME ONLINE", duration),
+        ("TERMINAL", terminal),
+    ]
+
+    # Defensive fallback for synthetic tiny sessions. Real transports negotiate
+    # enough columns for the framed composition, but even a test or unusual
+    # adapter below that boundary must remain width-safe.
+    if terminal_width < 20:
+        lines = ["CALL COMPLETE", *(f"{label}: {value}" for label, value in facts)]
+        await session.write_line(
+            "\r\n" + "\r\n".join(cut_to_width(line, terminal_width) for line in lines)
+        )
+        return
+
+    frame_width = min(76, terminal_width)
+    body_width = frame_width - 4
+    header_color = (
+        effective_header_color(session, db)
+        if use_truecolor
+        else effective_header_color_256(db)
+    )
+    accent_color = (
+        effective_accent_color(session, db)
+        if use_truecolor
+        else effective_accent_color_256(db)
+    )
+    left, right = ("║", "║") if unicode_style else ("|", "|")
+    horizontal = "═" if unicode_style else "="
+    top_left, top_right = ("╔", "╗") if unicode_style else ("+", "+")
+    middle_left, middle_right = ("╠", "╣") if unicode_style else ("+", "+")
+    bottom_left, bottom_right = ("╚", "╝") if unicode_style else ("+", "+")
+    marker = "◆" if unicode_style else "*"
+
+    def _gradient(text: str, *, bold: bool = False) -> str:
+        return gradient_text(
+            text, _LOGOFF_SUMMARY_GRADIENT, bold=bold, truecolor=use_truecolor
+        )
+
+    def _rule(left_char: str, right_char: str) -> str:
+        return _gradient(
+            left_char + horizontal * (frame_width - 2) + right_char,
+            bold=True,
+        )
+
+    def _framed(content: str, border_color: int | tuple[int, int, int]) -> str:
+        padding = max(0, body_width - visible_width(content))
+        return (
+            colored(f"{left} ", fg_color=border_color, bold=True)
+            + content
+            + " " * padding
+            + colored(f" {right}", fg_color=border_color, bold=True)
+        )
+
+    def _centered(text: str, *, gradient: bool = False) -> str:
+        text = cut_to_width(text, body_width)
+        spare = body_width - display_width(text)
+        left_pad = spare // 2
+        rendered = _gradient(text, bold=True) if gradient else colored(
+            text, fg_color=METADATA_COLOR, bold=True
+        )
+        return " " * left_pad + rendered + " " * (spare - left_pad)
+
+    rendered = [
+        _rule(top_left, top_right),
+        _framed(
+            _centered(f"{marker}  C A L L   C O M P L E T E  {marker}", gradient=True),
+            header_color,
+        ),
+        _framed(_centered("FINAL SESSION TELEMETRY"), header_color),
+        _rule(middle_left, middle_right),
+    ]
+    for index, (label, value) in enumerate(facts):
+        rail_color = gradient_color(
+            _LOGOFF_SUMMARY_GRADIENT,
+            index / max(1, len(facts) - 1),
+            truecolor=use_truecolor,
+        )
+        content = colored_truncate(
+            [
+                (f" {label:<12}", rail_color),
+                (value, accent_color if label == "TIME ONLINE" else VALUE_COLOR),
+            ],
+            body_width,
+        )
+        rendered.append(_framed(content, rail_color))
+    rendered.append(_rule(bottom_left, bottom_right))
+    await session.write_line("\r\n" + "\r\n".join(rendered))
 
 
 async def _last_sessions_screen(session: Session, db: Database, user: User) -> None:

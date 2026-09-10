@@ -311,6 +311,18 @@ before, registration after, and logoff use distinct compositions and
 copy suited to that moment rather than re-labeling the main-menu
 masthead collection.
 
+Every caller-confirmed Log off also shows a final call summary immediately
+before the ordinary signed-out notice. It uses the same persisted session row
+that owns disconnect cleanup to report the node-formatted connection and
+sign-off times, elapsed time online to the second, and the negotiated terminal
+size/color depth. The summary has no SysOp toggle. It is limited to voluntary
+logoff: cancellation of the confirmation, idle timeout, kick, drain, account
+revocation, and exceptional disconnects do not show it. A configured logoff
+banner precedes the summary so the call statistics remain the final screen
+before the connection's signed-out notice. Confirmed truecolor gets the full
+gradient composition; 256-color and ASCII-style terminals retain the same
+width-safe information hierarchy with compatible colors and glyphs.
+
 The main-menu masthead (issue #161) also extends to the three top-level
 index/listing screens -- board list, file areas, and the chat channel
 picker (issue #176) -- since each renders once per view as a

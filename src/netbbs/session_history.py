@@ -92,17 +92,28 @@ def record_session_start(db: Database, user: User) -> int:
     return row_id
 
 
-def record_session_end(db: Database, history_id: int) -> None:
-    """A no-op if `history_id`'s row was already pruned away (an
+def record_session_end(db: Database, history_id: int) -> SessionHistoryEntry | None:
+    """Finalize and return a session row, or ``None`` if it was pruned.
+
+    A missing row is a no-op (an
     extremely long-lived session outlasting `_MAX_SESSION_HISTORY_ROWS`
     worth of *other* logins) -- matches `ActiveSessionRegistry.
     notify_one`/`disconnect_one`'s own tolerance for a target that's no
-    longer there by the time this runs."""
+    longer there by the time this runs. Returning the finalized row lets
+    the clean-logoff path present the exact persisted timestamps without
+    a second public lookup API or a separately sampled clock."""
+    disconnected_at = utc_now_iso()
     db.connection.execute(
         "UPDATE session_history SET disconnected_at = ? WHERE id = ?",
-        (utc_now_iso(), history_id),
+        (disconnected_at, history_id),
     )
+    row = db.connection.execute(
+        "SELECT id, user_id, username_label, connected_at, disconnected_at, interrupted_at, "
+        "name_visible_fallback FROM session_history WHERE id = ?",
+        (history_id,),
+    ).fetchone()
     db.connection.commit()
+    return _entry_from_row(row) if row is not None else None
 
 
 def list_recent_sessions(db: Database, *, limit: int = 20) -> list[SessionHistoryEntry]:
@@ -113,14 +124,18 @@ def list_recent_sessions(db: Database, *, limit: int = 20) -> list[SessionHistor
         (limit,),
     ).fetchall()
     return [
-        SessionHistoryEntry(
-            id=row["id"], user_id=row["user_id"], username_label=row["username_label"],
-            connected_at=row["connected_at"], disconnected_at=row["disconnected_at"],
-            interrupted_at=row["interrupted_at"],
-            name_visible_fallback=bool(row["name_visible_fallback"]),
-        )
+        _entry_from_row(row)
         for row in rows
     ]
+
+
+def _entry_from_row(row) -> SessionHistoryEntry:
+    return SessionHistoryEntry(
+        id=row["id"], user_id=row["user_id"], username_label=row["username_label"],
+        connected_at=row["connected_at"], disconnected_at=row["disconnected_at"],
+        interrupted_at=row["interrupted_at"],
+        name_visible_fallback=bool(row["name_visible_fallback"]),
+    )
 
 
 def previous_callers_enabled(db: Database) -> bool:

@@ -49,7 +49,7 @@ from netbbs.net.logoff_banner import load_logoff_banner
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.maintenance import LOCKDOWN_MESSAGE, LOCKDOWN_NOTICE, MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.onboarding_flow import offer_onboarding
-from netbbs.net.profile_flow import _show_previous_callers_screen
+from netbbs.net.profile_flow import _show_logoff_summary_screen, _show_previous_callers_screen
 from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.node_theme import effective_accent_color, effective_header_color_256, effective_node_name_gradient
@@ -668,6 +668,8 @@ async def run_authenticated_session(
     if not already_online and link_context is not None and link_context.realtime_bridge is not None:
         await link_context.realtime_bridge.broadcast_node_presence_live(change="join", username=user.username)
     history_id = record_session_start(db, user)
+    completed_history_entry = None
+    intentional_logoff = False
     watcher_task: asyncio.Task | None = None
     if node_controls is not None:
         node_controls.session_registry.mark_authenticated(
@@ -691,7 +693,7 @@ async def run_authenticated_session(
         await _show_previous_callers_screen(
             session, db, user, current_history_id=history_id
         )
-        await _main_menu(
+        intentional_logoff = await _main_menu(
             session, db, hub, presence, mailbox, history, user,
             node_controls=node_controls, lane=lane, link_context=link_context, direct_invites=direct_invites,
         )
@@ -703,7 +705,7 @@ async def run_authenticated_session(
             and link_context.realtime_bridge is not None
         ):
             await link_context.realtime_bridge.broadcast_node_presence_live(change="leave", username=user.username)
-        record_session_end(db, history_id)
+        completed_history_entry = record_session_end(db, history_id)
         if watcher_task is not None:
             # Same cancel-then-await-swallowing-CancelledError shape
             # editor autosave tasks already use (GitHub issue #43) --
@@ -738,6 +740,8 @@ async def run_authenticated_session(
     logoff_banner = load_logoff_banner(db)
     if logoff_banner:
         await write_preformatted_line(session, logoff_banner)
+    if intentional_logoff and completed_history_entry is not None:
+        await _show_logoff_summary_screen(session, db, user, completed_history_entry)
     await _write_connection_notice(session, db, "Signed out", "Goodbye!", tone="success")
 
 

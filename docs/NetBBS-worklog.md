@@ -4298,6 +4298,16 @@ its 10-row display limit to fit `Session.terminal_height`, but must never query
 or retain an unbounded history slice. An empty history and a disabled
 node-wide setting are non-events and consume no input.
 
+The clean-logoff summary must be keyed to the main menu's explicit confirmed
+Log off result, not merely to `run_authenticated_session` reaching the code
+after its cleanup `finally`: account revalidation can also return normally,
+while cancellation, drain, timeout, and transport loss unwind by exception.
+`record_session_end` returns the finalized persisted row so the screen formats
+the exact stored connection/disconnection instants and derives duration from
+them without sampling separate wall clocks. Presence leave, Link leave
+broadcast, history finalization, and watcher cleanup stay in the existing
+`finally`; only a successfully finalized voluntary call renders the summary.
+
 **A live operations dashboard must not insert slow refresh work into a
 shutdown/drain return path.** The SysOp console snapshot is loaded through the
 `DatabaseLane` on entry and on explicit refresh. Ordinary user/content/outbox

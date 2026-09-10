@@ -322,7 +322,7 @@ def test_live_sysop_overview_surfaces_node_and_link_health(db, lane, sysop):
     assert "Peers: 0" in text
     assert "Dead letters: 0" in text
     assert "ink status" in text
-    assert "outbox" in text
+    assert "Outbo[x]" in text
 
 
 def test_operations_are_a_coherent_top_level_console_area(db, lane, sysop):
