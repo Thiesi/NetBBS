@@ -490,6 +490,12 @@ retention/acknowledgement rules. A receipt write failure must roll back final
 earnings and archives too; otherwise a returning dormant caller can lose their
 only private explanation of the reset. Recognition views read archive snapshots,
 never recompute awards or mutate receipt acknowledgement state.
+For rollover recovery, abrupt child-process exit after archive insertion proves
+SQLite rollback before commit; exit just after settlement proves a fresh process
+does not duplicate awards or receipts after commit. Separate process contenders
+exercise the same file and writer lock. These complement the bounded skip,
+retention, historical-identity and world-component backup/restore checks; they
+do not substitute for a hands-on restore or a live season-transition exercise.
 
 `python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
 against disposable SQLite worlds through the actual action resolvers. The default

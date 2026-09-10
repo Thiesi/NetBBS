@@ -2977,3 +2977,88 @@ def test_archive_schema_upgrade_is_atomic_and_does_not_backfill_unknown_history(
     wd.ensure_schema(conn)
     assert list(conn.iterdump()) == before
     conn.close()
+
+
+@pytest.mark.parametrize('committed', [False, True])
+def test_process_exit_at_rollover_boundary_recovers_without_duplicate_awards(db_path, committed):
+    import subprocess
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_recruit(conn, actor, now)
+    _give_exchange(conn, 2, now)
+    before = list(conn.iterdump())
+    conn.close()
+    code = """
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location('game', sys.argv[1])
+game = importlib.util.module_from_spec(spec)
+sys.modules['game'] = game
+spec.loader.exec_module(game)
+conn = game.connect(game.Path(sys.argv[2]))
+if sys.argv[4] == 'False':
+    original = game._archive_season
+    def interrupted(*args):
+        original(*args)
+        os._exit(29)
+    game._archive_season = interrupted
+game.settle_world(conn, game.from_iso(sys.argv[3]))
+os._exit(29)
+"""
+    result = subprocess.run([sys.executable, '-c', code, str(_WAR_DIALER_PATH), str(db_path),
+                             wd.to_iso(now + wd.SEASON), str(committed)], capture_output=True, timeout=15)
+    assert result.returncode == 29, result.stderr.decode(errors='replace')
+    conn = wd.connect(db_path)
+    if not committed:
+        assert list(conn.iterdump()) == before
+    else:
+        assert conn.execute('SELECT COUNT(*) FROM seasons').fetchone()[0] == 1
+    wd.settle_world(conn, now + wd.SEASON + wd.DAY)
+    assert [tuple(row) for row in conn.execute('SELECT user_id,rank,medal FROM season_results ORDER BY placement')] == [(2, 112, 'Gold'), (1, 10, 'Silver')]
+    assert conn.execute('SELECT COUNT(*) FROM events WHERE seen_at IS NULL').fetchone()[0] == 2
+    assert conn.execute('SELECT COUNT(*) FROM seasons').fetchone()[0] == 1
+    assert wd.rank_score(wd.read_player(conn, 2)) == 0
+    assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    conn.close()
+
+
+def test_separate_processes_contend_at_rollover_and_preserve_one_archive(db_path):
+    import subprocess
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_recruit(conn, actor, now)
+    code = """
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('game', sys.argv[1])
+game = importlib.util.module_from_spec(spec)
+sys.modules['game'] = game
+spec.loader.exec_module(game)
+conn = game.connect(game.Path(sys.argv[2]))
+print('READY', flush=True)
+sys.stdin.buffer.read(1)
+game.settle_world(conn, game.from_iso(sys.argv[3]))
+conn.close()
+"""
+    children = []
+    pool = ThreadPoolExecutor(2)
+    try:
+        for _ in range(2):
+            children.append(subprocess.Popen([sys.executable, '-u', '-c', code, str(_WAR_DIALER_PATH), str(db_path),
+                wd.to_iso(now + wd.SEASON)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        ready = [pool.submit(child.stdout.readline) for child in children]
+        for future in ready: assert future.result(timeout=10).strip() == b'READY'
+        conn.execute('BEGIN IMMEDIATE')
+        for child in children:
+            child.stdin.write(b'X')
+            child.stdin.flush()
+        conn.rollback()
+        for child in children:
+            _, error = child.communicate(timeout=15)
+            assert child.returncode == 0, error.decode(errors='replace')
+        assert conn.execute('SELECT COUNT(*) FROM seasons').fetchone()[0] == 1
+        assert conn.execute('SELECT COUNT(*) FROM season_results').fetchone()[0] == 2
+        assert conn.execute('SELECT COUNT(*) FROM events WHERE seen_at IS NULL').fetchone()[0] == 2
+        assert conn.execute("SELECT user_id FROM season_results WHERE medal='Gold'").fetchone()[0] == 1
+    finally:
+        for child in children:
+            if child.poll() is None: child.kill()
+            child.communicate(timeout=5)
+        pool.shutdown(wait=True)
+        conn.close()
