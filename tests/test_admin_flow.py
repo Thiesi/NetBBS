@@ -3600,6 +3600,31 @@ def test_sysop_approves_a_pending_file_with_zero_grants(db, lane, sysop):
     assert get_file(db, entry.file_id).status == "approved"
 
 
+def test_pending_file_review_shows_a_diz_description_line_by_line(db, lane, sysop):
+    """Issue #463: a moderator deciding whether to approve an upload
+    reads the archive's own FILE_ID.DIZ, so its lines must not be run
+    together into one."""
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import upload_file
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "Docs", creator=sysop, moderated=True)
+    upload_file(
+        db, area, alice, "game.zip", b"hello",
+        description="Cool Game v1.0\nBy Someone",
+    )
+
+    # Same walk as the approval test above: the review screen is
+    # rendered before the approve keystroke is read.
+    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    _run(session, lane, sysop)
+
+    text = _written_text(session)
+    assert "Cool Game v1.0" in text
+    assert "Cool Game v1.0By Someone" not in text
+
+
 def test_create_and_delete_board_category_flow(db, lane, sysop):
     from netbbs.boards.categories import list_top_level_categories
 

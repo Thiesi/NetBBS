@@ -273,6 +273,31 @@ File bytes are node-local. Over Link, only catalogue/descriptor metadata
 is distributed — files are fetched on demand in bounded chunks, not
 mirrored to every node automatically.
 
+**Descriptions and `FILE_ID.DIZ`.** An uploaded archive is read for a
+`FILE_ID.DIZ` member; when it has one, that text becomes the file's
+description with no work from whoever uploaded it. ZIP works out of the
+box (no dependency, and it is recognised by content, so a renamed `.zip`
+or a self-extracting `.exe` still gets read). `.lzh`/`.lha`/`.arj`/
+`.rar`/`.7z` need an unpacker on the node's `PATH`, and installing one
+is how you opt in — NetBBS never installs any:
+
+| format | install (pkgsrc) | provides |
+| --- | --- | --- |
+| `.lzh`, `.lha` | `archivers/lhasa` | `lha` |
+| `.arj`, `.7z` (and `.lzh` as a fallback) | `archivers/p7zip` | `7z`/`7za` |
+| `.rar` | `archivers/unrar` | `unrar` |
+
+Uploads are untrusted input, so an unpacker only ever gets to write to
+its own stdout (never to disk), runs under CPU/memory/process limits and
+a timeout, and is killed and reaped afterwards. Anything that doesn't
+work out — no archive, no DIZ, no unpacker installed, a corrupt member —
+leaves the file with no description and never fails the upload.
+
+Anyone can also describe a file by hand: `[E]` on the file listing edits
+the description of your own upload, or of any file in an area where you
+hold EDIT. Hand-written edits stay local — a file already announced to
+Link peers keeps the description they were told about.
+
 ### Channels
 
 `[C]ontent` → Cha`[N]`nels. Channel visibility (listed/hidden) and join

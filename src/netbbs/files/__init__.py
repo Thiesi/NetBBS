@@ -9,7 +9,10 @@ here — matches the precedent set by `netbbs.boards`/`netbbs.chat`
 (their categories modules aren't re-exported from the package
 `__init__` either). Moderator/permission grants and the moderated-area
 approval/expiry lifecycle (§13) live in
-`netbbs.files.entries`.
+`netbbs.files.entries`. `netbbs.files.diz` (FILE_ID.DIZ extraction and
+the rules a description must satisfy) isn't re-exported either -- it is
+reached directly by the upload flow, the same way
+`netbbs.files.storage` already is.
 """
 
 from netbbs.files.areas import (
@@ -34,6 +37,7 @@ from netbbs.files.entries import (
     list_files_page,
     list_pending_files,
     list_pinned_files,
+    set_file_description,
     set_file_exempt,
     set_file_pinned,
     upload_file,
@@ -60,6 +64,7 @@ __all__ = [
     "list_files_page",
     "list_pending_files",
     "list_pinned_files",
+    "set_file_description",
     "set_file_exempt",
     "set_file_pinned",
     "upload_file",

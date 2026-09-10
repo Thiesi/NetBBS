@@ -34,6 +34,11 @@ from netbbs.auth.users import User
 from netbbs.boards.content_id import compute_content_id
 from netbbs.config import get_expiry_grace_period_days
 from netbbs.files.areas import FileArea
+from netbbs.files.diz import (
+    MAX_DESCRIPTION_BYTES,
+    MAX_DESCRIPTION_LINES,
+    normalize_description,
+)
 from netbbs.files.storage import move_temp_file_into_storage, read_bytes, store_bytes
 from netbbs.moderation import BoardPermission, has_permission, record_action
 from netbbs.permissions import require_level
@@ -154,6 +159,7 @@ def _finalize_upload(
     placed the content in storage its own way and knows its hash/size —
     everything from here on is identical regardless of how the bytes
     got there."""
+    description = validate_description(description)
     status = "pending" if area.moderated else "approved"
     created_at = utc_now_iso()
     uploader_identifier = uploader.fingerprint or uploader.username
@@ -477,6 +483,84 @@ def delete_file(db: Database, entry: FileEntry, *, deleted_by: User) -> None:
         detail=entry.file_id,
     )
     reindex_file(db, entry.area_id, entry.file_id)
+
+
+def validate_description(description: str | None) -> str | None:
+    """
+    The single gate every stored description passes through, whether it
+    came out of an uploaded archive's `FILE_ID.DIZ`
+    (`netbbs.files.diz.read_archive_description`) or from a caller
+    typing one: normalized to clean, newline-separated text (blank
+    becomes `None`), then bounded to what a listing can render and a
+    Link `file_descriptor` can carry.
+
+    Raises rather than truncating: `read_archive_description` has
+    already cut a DIZ down to fit before it gets here, so anything
+    still over the limit is a description someone wrote deliberately,
+    and quietly deleting half of it is the one outcome they did not
+    ask for. `netbbs.net.file_flow`'s editor catches this and keeps the
+    draft.
+    """
+    normalized = normalize_description(description) if description else None
+    if normalized is None:
+        return None
+    line_count = len(normalized.splitlines())
+    if line_count > MAX_DESCRIPTION_LINES:
+        raise FileEntryError(
+            f"a description may be at most {MAX_DESCRIPTION_LINES} lines -- this one is {line_count}"
+        )
+    byte_count = len(normalized.encode("utf-8"))
+    if byte_count > MAX_DESCRIPTION_BYTES:
+        raise FileEntryError(
+            f"a description may be at most {MAX_DESCRIPTION_BYTES} bytes -- this one is {byte_count}"
+        )
+    return normalized
+
+
+def set_file_description(
+    db: Database, entry: FileEntry, description: str | None, *, changed_by: User
+) -> FileEntry:
+    """
+    Replace `entry`'s description (issue #463). Allowed for the file's
+    own uploader, no permission grant needed -- the same "you may act on
+    it because you own it" rule `netbbs.boards.posts.edit_post`
+    establishes for a post's author -- or for anyone holding
+    `BoardPermission.EDIT` on the area, matching every other
+    moderator-side file mutation here.
+
+    An in-place `UPDATE`, unlike `edit_post`'s new-revision chain: a
+    `file_id` is a content hash of the *bytes* plus their upload
+    metadata (`_finalize_upload`), not of the description, so amending
+    the description leaves it just as valid as it was -- and nothing
+    references a file by description the way a reply references a
+    `parent_post_id`.
+
+    Local-only, deliberately. A file whose `file_descriptor` has already
+    been signed and pushed keeps the description its peers were told
+    about: rewriting a signed event would mean either re-signing the
+    same `file_id` with different content (which every peer would
+    correctly ignore, having already recorded it) or inventing a
+    `file_descriptor_edit` event type, which is a protocol change and a
+    separate decision. A description edited *before* the descriptor is
+    built is simply the one that propagates.
+    """
+    if entry.uploader_user_id != changed_by.id:
+        _require_area_permission(db, entry, changed_by, BoardPermission.EDIT)
+
+    normalized = validate_description(description)
+    db.connection.execute("UPDATE files SET description = ? WHERE id = ?", (normalized, entry.id))
+    db.connection.commit()
+    record_action(
+        db,
+        actor=changed_by,
+        action="describe",
+        object_type="file_area",
+        object_id=entry.area_id,
+        target_user_id=entry.uploader_user_id,
+        detail=entry.file_id,
+    )
+    reindex_file(db, entry.area_id, entry.file_id)
+    return get_file(db, entry.file_id)
 
 
 def set_file_pinned(db: Database, entry: FileEntry, pinned: bool, *, changed_by: User) -> FileEntry:

@@ -32,6 +32,7 @@ import json
 from dataclasses import dataclass
 
 from netbbs.files.areas import FileArea
+from netbbs.files.diz import fit_description
 from netbbs.files.entries import FileEntry
 from netbbs.link.events import (
     FILE_DESCRIPTOR_OBJECT_TYPE,
@@ -369,8 +370,18 @@ def materialize_carried_file_descriptor(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            # A peer's description is remotely influenced text that this
+            # node will render (and, once fetched, copy into a real
+            # `files` row -- see netbbs.link.file_transfer), so it is cut
+            # to the same shape a local description must satisfy rather
+            # than stored as claimed: the protocol layer only bounds its
+            # *bytes*, and 4096 bytes of newlines would otherwise be
+            # 4096 lines under one row of a file listing. Fitting, not
+            # refusing, for the same reason an over-long FILE_ID.DIZ is
+            # cut down -- a wordy peer is not a protocol violation.
             file_id, area_local_id, origin_fingerprint, payload["filename"],
-            payload.get("description"), payload["size_bytes"], payload["sha256"], payload["created_at"],
+            fit_description(payload["description"]) if payload.get("description") else None,
+            payload["size_bytes"], payload["sha256"], payload["created_at"],
             json.dumps(descriptor.to_dict()),
         ),
     )

@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import io
 import re
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -225,3 +227,60 @@ def test_upload_exceeding_the_node_limit_leaves_no_temp_file_and_no_entry(db, la
     assert list_files_page(db, area, alice).entries == []
     incoming_dir = storage_root(db) / ".incoming"
     assert not incoming_dir.exists() or list(incoming_dir.iterdir()) == []
+
+
+def test_uploading_a_zip_with_file_id_diz_describes_it(db, lane, alice):
+    """Issue #463 end to end: the archive's own catalogue text becomes
+    the file's description, over the real Zmodem path, with no
+    intervention from whoever uploaded it."""
+    area = create_file_area(db, "docs", creator=alice)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("GAME.EXE", b"MZ" + b"\x00" * 500)
+        # CP437, the encoding a DIZ from the era is actually written in.
+        archive.writestr("FILE_ID.DIZ", "\u2554\u2550\u2557\r\nCool Game v1.0\r\nBy Someone\r\n".encode("cp437"))
+    payload = buffer.getvalue()
+
+    client_to_server, server_to_client = _BytePipe(), _BytePipe()
+    server_session = _ServerSession(["/upload"], read_pipe=client_to_server, write_pipe=server_to_client)
+    client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
+
+    async def scenario():
+        server_task = asyncio.create_task(file_flow._show_area(server_session, lane, area, alice))
+        client_task = asyncio.create_task(zmodem.send_file(client_session, "game.zip", payload))
+        await asyncio.wait_for(server_task, timeout=5)
+        try:
+            await asyncio.wait_for(client_task, timeout=1)
+        except Exception:
+            pass
+
+    asyncio.run(scenario())
+
+    entry = list_files_page(db, area, alice).entries[0]
+    assert entry.description == "\u2554\u2550\u2557\nCool Game v1.0\nBy Someone"
+    assert "Description read from FILE_ID.DIZ" in _visible_text(server_session)
+    # And the bytes stored are still the archive, untouched by reading it.
+    assert Path(entry.storage_path).read_bytes() == payload
+
+
+def test_uploading_a_file_with_no_diz_says_so_and_points_at_the_editor(db, lane, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    payload = b"just a text file, no archive at all"
+
+    client_to_server, server_to_client = _BytePipe(), _BytePipe()
+    server_session = _ServerSession(["/upload"], read_pipe=client_to_server, write_pipe=server_to_client)
+    client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
+
+    async def scenario():
+        server_task = asyncio.create_task(file_flow._show_area(server_session, lane, area, alice))
+        client_task = asyncio.create_task(zmodem.send_file(client_session, "notes.txt", payload))
+        await asyncio.wait_for(server_task, timeout=5)
+        try:
+            await asyncio.wait_for(client_task, timeout=1)
+        except Exception:
+            pass
+
+    asyncio.run(scenario())
+
+    assert list_files_page(db, area, alice).entries[0].description is None
+    assert "No FILE_ID.DIZ inside" in _visible_text(server_session)
