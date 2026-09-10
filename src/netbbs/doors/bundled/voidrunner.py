@@ -2525,7 +2525,12 @@ def posted_mission_offers(world: World) -> list[Mission]:
 def delivery_contract_ceiling(ship: Ship) -> int:
     """Largest delivery a board posts: ten units, or two fifths of the hold when that is
     more, so bulk contracts give large hulls work that spot-stock pools cannot throttle
-    (issue #408). The draw count is unchanged, so board seeds keep their sequence."""
+    (issue #408).
+
+    A board is a function of its seed, station, day and the pilot's hold. Widening
+    the quantity draw changes how many words `randint` rejects, so the offers after
+    a delivery can differ between hulls; a posted board is persisted and never
+    regenerated under a pilot, so nothing a caller sees changes underneath them."""
     return max(10, cargo_capacity(ship) * 2 // 5)
 
 
