@@ -4791,8 +4791,10 @@ drop Prev/Next from their action bar but keep the page counter, and a screen is
 paginated against the bar it will actually show, so dropping the tokens can be
 what makes it a single page. Market rows carry no filler status word, the
 exchange reminder appears once in the catalog, and a row that would overflow the
-terminal gives up its depth figures and then its hold count -- never a truncated
-word -- so a tagged contraband row still reads as one row.
+terminal gives up its depth figures first and its hold count only as a last
+resort -- never a truncated word -- so a tagged contraband row still reads as
+one row, and a terminal too narrow for even the shortest form keeps the whole
+row and wraps it.
 
 A hop's narration is retained for the next deck page (issue #410): departure
 costs and events, discoveries, encounter and combat outcomes, customs results,

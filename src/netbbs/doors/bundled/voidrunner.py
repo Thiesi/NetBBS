@@ -4893,7 +4893,17 @@ def ship_portrait(ship: Ship, layout: str) -> list[str]:
 
 def portrait_pages(p: Palette, large: list[str], compact: list[str], details: list[str], title: str,
                    footer: str, *, color: str | None = None, leading: list[str] | None = None) -> list[list[str]]:
-    """Keep one authored silhouette together; wrap and paginate ordinary prose."""
+    """Keep one authored silhouette together; wrap and paginate ordinary prose.
+
+    Paged against the bar the caller will see, so a portrait that fits once the
+    paging tokens are dropped is one page (issue #412 review)."""
+    return _paginate_against_shown_footer(
+        lambda bar: _portrait_pages_for(p, large, compact, details, title, bar, color=color, leading=leading),
+        footer)
+
+
+def _portrait_pages_for(p: Palette, large: list[str], compact: list[str], details: list[str], title: str,
+                        footer: str, *, color: str | None = None, leading: list[str] | None = None) -> list[list[str]]:
     width = max(1,_OUTPUT_WIDTH-1)
     art = list(large if _OUTPUT_WIDTH >= 40 and _OUTPUT_HEIGHT >= 16 else compact)
     all_lines = (leading or []) + art + details
@@ -4970,14 +4980,15 @@ def screen_landmark(p: Palette, world: World) -> None:
 def _market_row(head: str, depth: dict, held: int, tags: list[str]) -> str:
     """One commodity, one row.
 
-    Price and tags are what the row exists for, so they never go; the depth
-    figures and the hold count are also on the depth screen and the cargo view,
-    so they are the parts that give way when a tagged row would otherwise wrap
-    (issue #412 review). Nothing is ever truncated mid-word.
+    Price and tags are what the row exists for, so they never go. The depth
+    figures give way first -- they are on the depth screen -- and the hold count
+    only as a last resort, because it is what tells the caller whether there is
+    anything here to sell (issue #412 review). Nothing is truncated mid-word: a
+    terminal too narrow for even the shortest form keeps the whole row and wraps.
     """
     trailer = (" " + " ".join(tags)) if tags else ""
     optional = [f" Stock {depth['stock']}; demand {depth['demand']}; hold {held}.",
-                f" Stock {depth['stock']}; demand {depth['demand']}.",
+                f" Hold {held}.",
                 ""]
     rows = [head + detail + trailer for detail in optional]
     for row in rows:
@@ -5787,20 +5798,26 @@ def _detail_action_bar(actions: str, labels: dict[str, str]) -> str:
     return "".join(f"[{key}]{labels[key]} " for key in actions.split("/") if key) + "[B]Back [<>]Page: "
 
 
-def _service_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
-    """Group-aware paging.
+def _paginate_against_shown_footer(build, footer: str):
+    """Paginate against the action bar the caller will actually see.
 
-    A screen that fits once the paging tokens are dropped is one page: measuring
-    against the longer footer split screens into a full page and a two-row
-    remainder, then showed the shortened bar anyway (issue #412 review)."""
-    pages = _service_pages_for(lines, title, footer)
+    Measuring against the longer footer split screens that fit once the paging
+    tokens are gone -- and then displayed the shortened bar anyway. Every
+    group-aware paginator goes through here, including the ones that hand their
+    pages to `_draw_service_page` ready-made (issue #412 review)."""
+    pages = build(footer)
     if len(pages) > 1:
         shortened = single_page_footer(footer, 1)
         if shortened != footer:
-            candidate = _service_pages_for(lines, title, shortened)
+            candidate = build(shortened)
             if len(candidate) == 1:
                 return candidate
     return pages
+
+
+def _service_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
+    """Group-aware paging against the bar the caller will see."""
+    return _paginate_against_shown_footer(lambda bar: _service_pages_for(lines, title, bar), footer)
 
 
 def _service_pages_for(lines: list[str], title: str, footer: str) -> list[list[str]]:
@@ -5821,8 +5838,8 @@ def _service_pages_for(lines: list[str], title: str, footer: str) -> list[list[s
 # text: a literal table missed every colon-terminated bar, which is most of them
 # (issue #412 review).
 _PAGING_PATTERN = re.compile(r"\[<\]\s*Prev\s+\[>\]\s*Next"
-                             r"|\[N\]ext\s+\[P\]rev(?:ious)?"
-                             r"|\[P\]rev(?:ious)?\s+\[N\]ext"
+                             r"|\[N\](?:ext|Next)\s+\[P\](?:rev(?:ious)?|Prev)"
+                             r"|\[P\](?:rev(?:ious)?|Prev)\s+\[N\](?:ext|Next)"
                              r"|\[<\s*>\]\s*Page"
                              r"|\[<\]\s*\[>\]")
 
@@ -6981,6 +6998,11 @@ def keyed_rows(key: str, rows: list[str]) -> list[str]:
 
 
 def _chart_pages(world: World, title: str, footer: str, result: str | None):
+    """Paged against the bar the caller will see (issue #412 review)."""
+    return _paginate_against_shown_footer(lambda bar: _chart_pages_for(world, title, bar, result), footer)
+
+
+def _chart_pages_for(world: World, title: str, footer: str, result: str | None):
     entries = chart_entries(world, result)
     # Budget conservatively with one key prefix per wrapped continuation row.
     wrapped = [(sid, _wrap_output(_mission_plain(text), max(1, _OUTPUT_WIDTH - 5)).split("\r\n")) for sid, text in entries]

@@ -12981,6 +12981,7 @@ def test_wording_uses_singular_forms_and_names_the_offer_refresh():
     ("[R]oute [N]ext [P]rev [B]ack", "[R]oute [B]ack"),
     ("[1-9] Details [N]ext [P]rev [B]ack > ", "[1-9] Details [B]ack > "),
     ("[A]ccept [N]ext [P]rev [B]ack: ", "[A]ccept [B]ack: "),
+    ("[1-5]View [N]Next [P]Prev [B]Back: ", "[1-5]View [B]Back: "),  # the Hall of Fame spelling
     ("[E]dit draft [B]ack: ", "[E]dit draft [B]ack: "),
 ])
 def test_single_page_footers_drop_every_spelling_of_the_paging_tokens(footer, expected):
@@ -13029,6 +13030,12 @@ def test_a_tagged_market_row_still_fits_one_line(monkeypatch):
     rows = [row for row in vr.market_catalog_lines(world, [contraband]) if row.startswith("[")]
     assert rows and all(vr._visible_width(row) <= 79 for row in rows)
     assert "Illegal" in rows[0] and ("[CRASH]" in rows[0] or "[BOOM]" in rows[0])
+    depth = {"stock": 96, "demand": 48}
+    head = "[J] Narcotics: buy 1200cr; sell 1100cr."
+    assert vr._market_row(head, depth, 7, []) == head + " Stock 96; demand 48; hold 7."
+    tagged = vr._market_row(head, depth, 7, ["Illegal", "[CRASH]"])
+    assert tagged == head + " Hold 7. Illegal [CRASH]"  # depth gives way first, the hold last
+    assert vr._visible_width(tagged) <= 79
     monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 20)  # too narrow for any form: keep everything and wrap
     narrow = [row for row in vr.market_catalog_lines(world, [contraband]) if row.startswith("[")]
     assert "Stock" in narrow[0] and "hold 7" in narrow[0]
@@ -13069,3 +13076,21 @@ def test_a_blocked_survey_does_not_advertise_scanning(monkeypatch):
     assert "BLOCKED SURVEY" in blocked
     assert "Survey scanning may avoid travel." not in blocked
     assert "Area surveys require a scanner" not in blocked
+
+
+@pytest.mark.parametrize("width,height", [(20, 12), (40, 12), (80, 24)])
+def test_precomputed_portrait_pages_also_paginate_against_the_shown_footer(monkeypatch, width, height):
+    """The viewport builds its pages ahead of `_draw_service_page`, so it needs the
+    same single-page retry (issue #412 review)."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", height)
+    world = _world_with_seed(42)
+    large, compact, details, title = vr.viewport_content(world, "1")
+    footer = "[1-4]View [<]Prev [>]Next [B]Back: "
+    pages = vr.portrait_pages(vr.Palette(False), large, compact, details, title, footer)
+    shortened = vr.single_page_footer(footer, 1)
+    assert shortened != footer
+    if len(pages) == 1:
+        # It fits: it must be the layout measured against the bar that will be shown.
+        assert pages == vr._portrait_pages_for(vr.Palette(False), large, compact, details, title, shortened)
+    else:
+        assert len(vr._portrait_pages_for(vr.Palette(False), large, compact, details, title, shortened)) > 1
