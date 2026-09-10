@@ -4796,6 +4796,14 @@ actual replacements after input, excluding the ordinary EOF cleanup checkpoint.
 Score reads share the existing
 4 MiB career/backup per-file ceiling; the summary has at most 129 career entries.
 
+Voidrunner's box family (`_box_title`, `_pad`, the title splash and the
+registration box) measures with `_visible_width`, never `len()` after an ANSI
+strip: a callsign may contain East Asian wide characters, which are two columns
+each. `title_rows` yields the large composition only when the 49-column logo
+fits and otherwise a complete compact one (wordmark, wrapped subtitle, stacked
+meta fields); no row may exceed `_box_inner_width()`, and tests assert one
+display width across every box row at 80, 40 and 20 columns.
+
 Voidrunner portraits paginate an entire authored composition as one group.
 Choose a complete compact version when either width or height rules out the
 large version; omit artwork only if even the compact composition cannot fit.
