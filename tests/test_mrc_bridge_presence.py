@@ -397,3 +397,35 @@ def test_the_lastseen_opt_out_is_sent_on_announcement(db, lane, lobby, alice):
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_a_lastseen_choice_read_late_is_applied_at_once(db, lane, lobby, alice):
+    """Review of #390: the first read failed at announcement; the retry
+    (here, a mapping refresh) sends the choice without a re-entry."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        failing = {"on": True}
+
+        def _load(db_, username):
+            if failing["on"]:
+                raise RuntimeError("database is away")
+            return False
+
+        bridge = await _connected_bridge(db, lane, hub, fake, load_lastseen=_load)
+        try:
+            hub.join(lobby.name, ParticipantId("alice", 1))
+            await bridge.local_join(lobby, "alice")
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await asyncio.sleep(0.2)
+            assert not fake.packets(body_prefix="STATUS LASTSEEN")
+            failing["on"] = False
+            await bridge.refresh_channel_mappings()
+            await fake.wait_for(lambda p: p.body == "STATUS LASTSEEN OFF" and p.from_user == "alice", timeout=3.0)
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())

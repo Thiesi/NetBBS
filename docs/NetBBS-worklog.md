@@ -976,14 +976,17 @@ session needs the same treatment.
   `display_handle` (underscores to spaces) is applied to author labels and
   private/broadcast sender labels only, never to anything matched or sent;
   `_mrc_helper_carries_a_secret` refuses `!identify`, `!register`,
-  `!update` and `!roompass` as chat in a bridged channel before anything is
-  recorded or relayed, and `InputHistory.forget` drops the line `read_line`
-  had already recorded, so Up cannot bring the password back in another
-  channel; the LASTSEEN choice is a tri-state Profile preference (never
+  `!update` and `!roompass` as chat in *any* channel while the node has an
+  MRC bridge -- a paused mapping or a local channel would still record the
+  password, and relay it the moment the channel is bridged -- before
+  anything is recorded, and `InputHistory.forget` drops the raw line
+  `read_line` had already recorded (raw, since the loop strips what it
+  matches), so Up cannot bring the password back; the LASTSEEN choice is a tri-state Profile preference (never
   chosen / on / off) read with the nick colour and opt-in (`load_lastseen`,
   cached and pruned like them, and part of `_ensure_nick_color`'s guard so a
-  failed read is retried) and sent as `STATUS LASTSEEN ON|OFF` on every
-  announcement when chosen -- the hub keeps an opt-out across sessions, so
+  failed read is retried -- and a choice read after the caller was already
+  announced is sent at once, `_send_lastseen_choice`) and sent as
+  `STATUS LASTSEEN ON|OFF` on every announcement when chosen -- the hub keeps an opt-out across sessions, so
   only an explicit ON undoes one. `_network_activity` is cleared with the
   other hub readings on `reload_settings` and shown only beside a network
   size. The fake hub records `STATUS LASTSEEN` and answers `STATS` with

@@ -4346,12 +4346,11 @@ async def _chat_loop(
 
             while True:
                 completer = await _build_completer(lane, hub, presence, channel, user)
-                line = (
-                    await session.read_line(
-                        history=history, completer=completer, live_buffer=live_buffer, lock=lock,
-                        list_candidates=list_candidates if pinned_ui.active else None,
-                    )
-                ).strip()
+                raw_line = await session.read_line(
+                    history=history, completer=completer, live_buffer=live_buffer, lock=lock,
+                    list_candidates=list_candidates if pinned_ui.active else None,
+                )
+                line = raw_line.strip()
 
                 # Everything from here to the next read_line() call is one
                 # atomic critical section under `lock` (design doc)
@@ -4400,13 +4399,15 @@ async def _chat_loop(
 
                         if not line:
                             continue
-                        if mrc_bridge is not None and mrc_bridge.is_bridged(channel) and _mrc_helper_carries_a_secret(line):
-                            history.forget(line)  # read_line recorded it before we saw it
+                        if mrc_bridge is not None and _mrc_helper_carries_a_secret(line):
+                            history.forget(raw_line)  # read_line recorded it before we saw it
                             # Issue #378: the hub is moving its identity
                             # verbs to `!helper` chat text; typed here, the
-                            # password would go to the room as chat.
+                            # password would be recorded as chat -- and
+                            # relayed the moment this channel is bridged, so
+                            # a paused mapping or a local channel is no safer.
                             await session.write_line(colored(
-                                "(not sent: that line would carry your password into the room as chat -- "
+                                "(not sent: that line would carry your password into chat -- "
                                 "use /mrc identify, /mrc register, /mrc update password or /mrc roompass, "
                                 "which ask for it without echo)",
                                 fg_color=MUTED_COLOR,

@@ -96,6 +96,10 @@ def test_a_caller_who_did_not_opt_in_gets_the_one_notice_only(db, lane, lobby, a
             while not queue.empty():
                 items.append(queue.get_nowait())
             assert len(items) == 1 and "tried to message you privately" in str(items[0])
+            # The refusal notice uses the display spelling as well.
+            await fake.send_line("Some_User~Other~garden~alice~My_Board~~hi~")
+            await asyncio.sleep(0.2)
+            assert "Some User@Other tried to message" in str(queue.get_nowait())
             assert "secret" not in str(items[0])
             assert bridge.reply_target("alice") is None
             # Sending is refused too: the opt-in is one switch for both ways.

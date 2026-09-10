@@ -1297,6 +1297,20 @@ class MrcBridge:
                 _logger.warning("Could not read the MRC last-seen choice for %r; the hub's default applies: %s", username, exc)
             else:
                 self._lastseen_recorded[username] = None if recorded is None else bool(recorded)
+                if recorded is not None:
+                    # Read after the caller was announced (the first read
+                    # failed): apply it now rather than at their next entry.
+                    self._send_lastseen_choice(username, bool(recorded))
+
+    def _send_lastseen_choice(self, username: str, recorded: bool) -> None:
+        settings = self._settings
+        if settings is None or self._state is not MrcState.CONNECTED:
+            return
+        for channel_id, nicks in self._announced.items():
+            mapping = self._by_channel.get(channel_id)
+            nick = nicks.get(username)
+            if mapping is not None and nick is not None:
+                self._enqueue(protocol.status_lastseen(nick, settings.site_wire_name, mapping.room, recorded))
 
     def _note_pong(self, echoed: str) -> None:
         """`PONG` echoes the epoch an IMALIVE carried (issue #377); an
@@ -2193,7 +2207,7 @@ class MrcBridge:
                 if mapping is None:
                     return
                 notice = colored(
-                    f"[MRC] {sanitize_text(packet.from_user)}@{sanitize_text(packet.from_site)} tried to message "
+                    f"[MRC] {sanitize_text(protocol.display_handle(packet.from_user))}@{sanitize_text(packet.from_site)} tried to message "
                     "you privately. Private MRC chat isn't bridged; only room traffic is.",
                     fg_color=MUTED_COLOR,
                 )

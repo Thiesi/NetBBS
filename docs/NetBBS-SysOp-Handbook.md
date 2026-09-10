@@ -483,8 +483,9 @@ once per sender that somebody tried, as before.
 
 A caller can also stop the hub from answering `LASTSEEN` questions about
 their handle under `[P]rofile` → `[W]hen last seen on MRC`. Typing
-`!identify`, `!register`, `!update` or `!roompass` as chat in a bridged
-channel is refused, since the password would leave as room text; the
+`!identify`, `!register`, `!update` or `!roompass` as chat in any channel
+is refused while the node has an MRC bridge, since the password would be
+recorded as chat and relayed as soon as the channel is bridged; the
 `/mrc` forms ask for it without echo.
 
 MRC users colour their lines with Mystic-style `|NN` codes. Those colours

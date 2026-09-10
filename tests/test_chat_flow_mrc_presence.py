@@ -195,7 +195,7 @@ def test_secret_helpers_are_refused_as_chat(db, lane, hub, presence, channel, al
                 lane, hub, presence, channel, alice, ["!identify hunter2", "!Register hunter2", "!weather", "/quit"], mrc_bridge=rig.bridge,
             )
             text = _text(session)
-            assert text.count("would carry your password into the room as chat") == 2
+            assert text.count("would carry your password into chat") == 2
             await rig.fake.wait_for(lambda p: p.body.endswith(" !weather") and p.from_user == "alice")
             assert not [p for p in rig.fake.received if "hunter2" in p.body]
             assert not [m for m in get_scrollback(db, channel) if "hunter2" in (m.body or "")]
@@ -209,6 +209,26 @@ def test_secret_helpers_are_refused_as_chat(db, lane, hub, presence, channel, al
             history.record("/quit")
             history.forget("!identify hunter2")
             assert len(history) == 1
+        finally:
+            await rig.close()
+    asyncio.run(scenario())
+
+
+def test_secret_helpers_are_refused_in_an_unbridged_channel_too(db, lane, hub, presence, channel, alice, sysop):
+    """Review of #390: a paused mapping or a plain local channel would
+    still record the password, so the guard does not depend on
+    `is_bridged`."""
+    from netbbs.chat.channels import create_channel
+    from netbbs.chat.scrollback import get_scrollback
+
+    plain = create_channel(db, "plain", creator=sysop)
+
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            session, _ = await _run(lane, hub, presence, plain, alice, ["!identify hunter2 ", "/quit"], mrc_bridge=rig.bridge)
+            assert "would carry your password into chat" in _text(session)
+            assert not [m for m in get_scrollback(db, plain) if "hunter2" in (m.body or "")]
         finally:
             await rig.close()
     asyncio.run(scenario())
