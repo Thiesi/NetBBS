@@ -6193,9 +6193,12 @@ without teaching native chat anything about MRC. Decisions:
   channel, then opens `<name>` as a room; `/join mrc:<name>` opens the
   room from anywhere; `/rooms` asks the hub. Open rooms are excluded
   from the ordinary channel list, since the section is their place.
-- **Deferred until the hub's protocol documentation arrives:** parsing
-  the `LIST` reply into the observed-room list, and `ROOM_OPEN`/
-  `ROOM_CLOSE`. Nothing above depends on them.
+- **What the protocol page settled (read 2026-09-09, rev 1.26; issue
+  #378):** the `LIST` reply has no documented shape ("Return the list
+  of rooms"), so the observed-room list stays fed by join and leave
+  chatter and `/rooms` shows the hub's text; `ROOM_OPEN`/`ROOM_CLOSE`
+  do not exist in the protocol (they were ENiGMA½ names). Neither is
+  deferred any more; there is nothing to wait for.
 
 **Issue #304 (presence and welcome)** carries the presence a caller
 already has here onto the network and lets the network's own life show
@@ -6295,6 +6298,34 @@ control-context verbs, read on 2026-09-09:
   `IMALIVE` carries the process id and a timestamp the hub echoes in
   `PONG`, from which the status screen shows the round trip.
 - The `INFO*` fields the issue asked for already existed (issue #275).
+
+**Issue #378 (smaller spec follow-ups)**, same reading:
+
+- A server `NOTIFY:` is a one-time notice shown in every bridged
+  channel like a banner and never remembered; the `STATS` reply's
+  fourth field is the hub's activity level, shown beside the network
+  size; handles are displayed with underscores as spaces, as the spec
+  asks, while matching and addressing keep the wire spelling.
+- The hub is moving its identity verbs to `!helper` chat text. Typed
+  as chat, `!identify secret` would be recorded in scrollback and,
+  the moment the channel is bridged, relayed to the room, so those
+  four helpers are refused as chat in every channel while the node
+  has an MRC bridge -- a paused mapping or a local channel is no
+  safer a place for a password -- with a pointer to the masked `/mrc`
+  forms, and the line is dropped from the input history. Nothing else
+  typed with a `!` is touched: the hub's own helpers (`!time`,
+  `!weather`) are ordinary chat.
+- `STATUS LASTSEEN OFF` is a caller's choice on the Profile (on by
+  default, the hub's default), sent on every announcement like the
+  away state.
+- A CTCP request whose target is `*` (blank `to_user`) is not answered:
+  every wildcard would cost one reply per announced nick.
+- Hub facts worth keeping: the handshake must arrive within one second
+  of connecting, the heartbeat times out at 125 s, a client may hold
+  at most eight connections per address, and the operator's public
+  pool is `na-multi`, `eu-multi` and `au-multi.relaychat.net` (5000
+  plain, 5001 TLS) with `mrcdev.relaychat.net` for development; the
+  default host stays what it was until the operator retires it.
 
 ### Issue #194 — trusted scrollback-on-join — closed
 

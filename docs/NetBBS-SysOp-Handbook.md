@@ -481,6 +481,13 @@ stored -- not in scrollback, not in search, not in any log. There is
 nothing for you to configure; a caller who leaves the switch off is told
 once per sender that somebody tried, as before.
 
+A caller can also stop the hub from answering `LASTSEEN` questions about
+their handle under `[P]rofile` → `[W]hen last seen on MRC`. Typing
+`!identify`, `!register`, `!update` or `!roompass` as chat in any channel
+is refused while the node has an MRC bridge, since the password would be
+recorded as chat and relayed as soon as the channel is bridged; the
+`/mrc` forms ask for it without echo.
+
 MRC users colour their lines with Mystic-style `|NN` codes. Those colours
 are shown by default; a caller who prefers plain text switches them off
 under `[P]rofile` → `[I]nter-BBS chat colours`. Either way an inbound

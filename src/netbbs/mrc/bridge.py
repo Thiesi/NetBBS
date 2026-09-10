@@ -102,6 +102,7 @@ from netbbs.mrc.settings import (
     touch_open_room,
 )
 from netbbs.net.mrc_nick_color_preference import mrc_nick_color_for_username
+from netbbs.net.mrc_lastseen_preference import mrc_lastseen_for_username
 from netbbs.net.mrc_private_preference import mrc_private_messages_for_username
 from netbbs.net.throttle import _TokenBucket
 from netbbs.rendering import colored
@@ -231,6 +232,8 @@ class MrcStatus:
     network_users: int | None = None
     network_stats_age_seconds: float | None = None
     network_stats_raw: str | None = None
+    # Issue #378: the hub's activity level from the same reading, 0-3.
+    network_activity: int | None = None
     # Issue #377: the round trip measured from the hub's PONG to the
     # last IMALIVE that carried a timestamp, and how old that reading is.
     hub_latency_seconds: float | None = None
@@ -244,6 +247,13 @@ class MrcStatus:
         users = f"{self.network_users} user{'s' if self.network_users != 1 else ''}"
         boards = f"{self.network_bbses} board{'s' if self.network_bbses != 1 else ''}"
         return f"{users} on {boards}"
+
+    @property
+    def network_activity_label(self) -> str | None:
+        """"medium activity" from the hub's own 0-3 reading (issue #378)."""
+        if self.network_activity is None:
+            return None
+        return protocol.ACTIVITY_LABELS.get(self.network_activity)
 
     @property
     def connected(self) -> bool:
@@ -319,6 +329,7 @@ class MrcBridge:
         load_open_settings: Callable[[Database], OpenRoomSettings] = load_open_room_settings,
         load_nick_color: Callable[[Database, str], int] = mrc_nick_color_for_username,
         load_private_optin: Callable[[Database, str], bool] = mrc_private_messages_for_username,
+        load_lastseen: Callable[[Database, str], bool | None] = mrc_lastseen_for_username,
         open_connection: OpenConnection = asyncio.open_connection,
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -344,6 +355,7 @@ class MrcBridge:
         self._load_open_settings = load_open_settings
         self._load_nick_color = load_nick_color
         self._load_private_optin = load_private_optin
+        self._load_lastseen = load_lastseen
         self._open_connection = open_connection
         self._rng = rng if rng is not None else random.Random()
         self._clock = clock
@@ -410,11 +422,15 @@ class MrcBridge:
         # last private sender per caller (for `/mrc r`), and the
         # per-remote-sender allowance.
         self._private_optin: dict[str, bool] = {}
+        # Issue #378: the caller's explicit LASTSEEN choice (None = never
+        # chosen, the hub's default applies), read with the others.
+        self._lastseen_recorded: dict[str, bool | None] = {}
         self._known_sites: dict[str, tuple[str, str, float]] = {}
         self._last_private_sender: dict[str, tuple[str, str]] = {}
         self._private_buckets: dict[tuple[str, str], _TokenBucket] = {}
         self._private_drop_noted: set[tuple[str, tuple[str, str]]] = set()
         self._network_stats: tuple[int, int, int] | None = None
+        self._network_activity: int | None = None
         self._network_stats_at: float | None = None
         self._network_stats_raw: str | None = None
         self._stats_requested: set[str] = set()
@@ -527,6 +543,7 @@ class MrcBridge:
             self._network_stats_raw = None
             self._banner.clear()
             self._known_sites.clear()
+            self._network_activity = None
             self._hub_latency = None
             self._hub_latency_at = None
             await self._reload_from_db()
@@ -716,6 +733,7 @@ class MrcBridge:
         self._banner.clear()
         self._nick_colors.clear()
         self._private_optin.clear()
+        self._lastseen_recorded.clear()
         self._last_private_sender.clear()
         self._hub_latency = None
         self._hub_latency_at = None
@@ -1199,6 +1217,13 @@ class MrcBridge:
         self._enqueue(protocol.newroom(nick, settings.site_wire_name, "", mapping.room))
         self._send_caller_facts(mapping, nick, username)
         self._request_userlist(mapping, nick)
+        lastseen = self._lastseen_recorded.get(username)
+        if lastseen is not None:
+            # Issue #378: the caller's explicit LASTSEEN choice, ON or OFF,
+            # repeated on every announcement like the away state -- the hub
+            # keeps an opt-out across sessions, so only an explicit ON
+            # undoes one (review of #390).
+            self._enqueue(protocol.status_lastseen(nick, settings.site_wire_name, mapping.room, lastseen))
         away = self._away_message(username)
         if away is not None:
             # The hub is never behind on a caller's away state: told on
@@ -1247,7 +1272,7 @@ class MrcBridge:
         failed opt-in read is logged and left unread: the caller shows
         as "not read yet", inbound private lines take the opt-out path,
         and the next announcement or `send_private` tries again."""
-        if username in self._nick_colors and username in self._private_optin:
+        if username in self._nick_colors and username in self._private_optin and username in self._lastseen_recorded:
             return
         if username not in self._nick_colors:
             try:
@@ -1265,6 +1290,27 @@ class MrcBridge:
                 )
             else:
                 self._private_optin[username] = bool(optin)
+        if username not in self._lastseen_recorded:
+            try:
+                recorded = await self._lane.run(self._load_lastseen, username)
+            except Exception as exc:
+                _logger.warning("Could not read the MRC last-seen choice for %r; the hub's default applies: %s", username, exc)
+            else:
+                self._lastseen_recorded[username] = None if recorded is None else bool(recorded)
+                if recorded is not None:
+                    # Read after the caller was announced (the first read
+                    # failed): apply it now rather than at their next entry.
+                    self._send_lastseen_choice(username, bool(recorded))
+
+    def _send_lastseen_choice(self, username: str, recorded: bool) -> None:
+        settings = self._settings
+        if settings is None or self._state is not MrcState.CONNECTED:
+            return
+        for channel_id, nicks in self._announced.items():
+            mapping = self._by_channel.get(channel_id)
+            nick = nicks.get(username)
+            if mapping is not None and nick is not None:
+                self._enqueue(protocol.status_lastseen(nick, settings.site_wire_name, mapping.room, recorded))
 
     def _note_pong(self, echoed: str) -> None:
         """`PONG` echoes the epoch an IMALIVE carried (issue #377); an
@@ -1326,7 +1372,7 @@ class MrcBridge:
         announced = set()
         for nicks in self._announced.values():
             announced.update(nicks)
-        for cache in (self._nick_colors, self._private_optin, self._last_private_sender):
+        for cache in (self._nick_colors, self._private_optin, self._lastseen_recorded, self._last_private_sender):
             for username in [name for name in cache if name not in announced]:
                 del cache[username]
 
@@ -1398,6 +1444,7 @@ class MrcBridge:
     def _record_stats(self, params: str) -> None:
         parsed = protocol.parse_stats(params)
         self._network_stats_at = self._clock()
+        self._network_activity = protocol.parse_stats_activity(params)
         if parsed is None:
             self._network_stats = None
             self._network_stats_raw = strip_pipe_codes(params).strip()[:protocol.MAX_LINE]
@@ -1550,7 +1597,9 @@ class MrcBridge:
         plain_text = strip_pipe_codes(text).strip()
         if not plain_text:
             return
-        author_label = f"{packet.from_user or 'unknown'}@{packet.from_site or 'unknown'} (MRC)"
+        # Display only (issue #378): the spec says to show underscores as
+        # spaces; matching and addressing keep the wire spelling.
+        author_label = f"{protocol.display_handle(packet.from_user) or 'unknown'}@{packet.from_site or 'unknown'} (MRC)"
         try:
             recorded = await self._lane.run(
                 record_message, mapping.channel, kind=kind, author_label=author_label,
@@ -1646,6 +1695,15 @@ class MrcBridge:
         if command == "PONG":
             self._note_pong(packet.msg_ext)
             return
+        if command == "NOTIFY":
+            # Issue #378: a one-time hub notice ("SERVER~~~CLIENT~~~NOTIFY:message~"),
+            # shown in every bridged channel like a banner, never remembered.
+            text = params.strip()
+            if text:
+                for mapping in self._by_channel.values():
+                    if mapping.active:
+                        await self._broadcast_notice(mapping, text)
+            return
         if command == "PROTOCOLVERSION":
             return
         addressed = self._caller_for_nick(packet.to_user)
@@ -1739,7 +1797,7 @@ class MrcBridge:
         kind, text = protocol.split_sender_prefix(packet.body.strip(), packet.from_user)
         if not strip_pipe_codes(text).strip():
             return
-        sender = f"{packet.from_user or 'unknown'}@{packet.from_site or 'unknown'}"
+        sender = f"{protocol.display_handle(packet.from_user) or 'unknown'}@{packet.from_site or 'unknown'}"
         notice = MrcNotice(f"{sender}: {text.strip()}", utc_now_iso(), kind="broadcast")
         for mapping in self._by_channel.values():
             if mapping.active:
@@ -1789,7 +1847,8 @@ class MrcBridge:
             return
         command, text = reply
         await self._deliver_reply(
-            addressed[1], f"CTCP {command} reply from {packet.from_user}@{packet.from_site}: {text}".rstrip(": "),
+            addressed[1],
+            f"CTCP {command} reply from {protocol.display_handle(packet.from_user)}@{packet.from_site}: {text}".rstrip(": "),
         )
 
     def _caller_for_nick(self, nick: str) -> tuple[int, str] | None:
@@ -2149,7 +2208,7 @@ class MrcBridge:
                 if mapping is None:
                     return
                 notice = colored(
-                    f"[MRC] {sanitize_text(packet.from_user)}@{sanitize_text(packet.from_site)} tried to message "
+                    f"[MRC] {sanitize_text(protocol.display_handle(packet.from_user))}@{sanitize_text(packet.from_site)} tried to message "
                     "you privately. Private MRC chat isn't bridged; only room traffic is.",
                     fg_color=MUTED_COLOR,
                 )
@@ -2190,7 +2249,7 @@ class MrcBridge:
                 await self._deliver_to_caller(
                     username,
                     MrcNotice(
-                        f"(private lines from {packet.from_user}@{packet.from_site} arrived faster than can be shown -- some were dropped)",
+                        f"(private lines from {protocol.display_handle(packet.from_user)}@{packet.from_site} arrived faster than can be shown -- some were dropped)",
                         utc_now_iso(), kind="private",
                     ),
                     priority=True,
@@ -2203,7 +2262,7 @@ class MrcBridge:
         text = text.strip()
         if not strip_pipe_codes(text).strip():
             return
-        sender = f"{packet.from_user or 'unknown'}@{packet.from_site or 'unknown'}"
+        sender = f"{protocol.display_handle(packet.from_user) or 'unknown'}@{packet.from_site or 'unknown'}"
         if not await self._deliver_reply(username, f"{sender}: {text}", kind="private"):
             return  # `/mrc r` answers the last line they saw, never one they did not
         self._last_private_sender[username] = (packet.from_user, packet.from_site)
@@ -2320,6 +2379,7 @@ class MrcBridge:
                 self._clock() - self._network_stats_at if self._network_stats_at is not None else None
             ),
             network_stats_raw=self._network_stats_raw,
+            network_activity=self._network_activity,
             hub_latency_seconds=self._hub_latency,
             hub_latency_age_seconds=(
                 self._clock() - self._hub_latency_at if self._hub_latency_at is not None else None

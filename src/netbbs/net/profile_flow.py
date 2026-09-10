@@ -76,6 +76,7 @@ from netbbs.net.sort_ui import SORT_MODE_LABELS
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.mrc_color_preference import mrc_colors_enabled, set_mrc_colors_enabled
 from netbbs.net.mrc_nick_color_preference import mrc_nick_color, set_mrc_nick_color
+from netbbs.net.mrc_lastseen_preference import mrc_lastseen_recorded, set_mrc_lastseen_recorded
 from netbbs.net.mrc_private_preference import mrc_private_messages_enabled, set_mrc_private_messages_enabled
 from netbbs.rendering.pipe_codes import CGA_COLOR_NAMES
 from netbbs.net.unicode_style_preference import set_unicode_style_enabled, unicode_style_enabled
@@ -368,6 +369,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "fullscreen_editor": await lane.run(fullscreen_editor_enabled, user),
         "accepts_dm": await lane.run(accepts_direct_messages, user),
         "mrc_private": await lane.run(mrc_private_messages_enabled, user),
+        "mrc_lastseen": await lane.run(mrc_lastseen_recorded, user),
         "history_name_visible": await lane.run(session_history_name_visible, user),
         "color_depth": await lane.run(color_depth_override, user) or "auto",
         "description_level": description_level,
@@ -590,6 +592,22 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "(/mrc msg), and whether you can message them. Off by default: a private MRC "
                 "message is not private on that network -- the hub and any client can read or "
                 "spoof it. Applies the next time you enter an MRC room."
+            ),
+            section="Communication",
+        ),
+        FieldSpec(
+            key="mrc_lastseen", hotkey="w", menu_text=menu_key("W", "hen last seen on MRC"),
+            label="MRC may remember when you were last seen",
+            render=lambda d: "yes" if d["mrc_lastseen"] else "no",
+            prompt=live_choice_field(
+                "mrc_lastseen", [False, True],
+                persist=lambda lane, v: lane.run(set_mrc_lastseen_recorded, user, v),
+            ),
+            brief="The hub's LASTSEEN record; on is the hub's default",
+            help=(
+                "Whether the Multi Relay Chat hub may answer other users' LASTSEEN questions about "
+                "your handle. On by default, as on the hub itself. Off sends the hub an opt-out each "
+                "time you enter an MRC room. Applies the next time you enter one."
             ),
             section="Communication",
         ),

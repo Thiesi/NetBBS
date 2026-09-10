@@ -51,7 +51,14 @@ def test_inbound_bodies_lose_the_senders_own_embedded_handle(db, lane, lobby, al
             ]
             for line in lines:
                 await fake.send_line(line)
-            delivered = [await asyncio.wait_for(queue.get(), timeout=2) for _ in lines]
+            # The connect-time "this channel is bridged" notice (a plain
+            # string) may land among the messages; it is not what this
+            # test reads.
+            delivered = []
+            while len(delivered) < len(lines):
+                item = await asyncio.wait_for(queue.get(), timeout=2)
+                if not isinstance(item, str):
+                    delivered.append(item)
             assert [(m.kind, m.author_label, m.body) for m in delivered] == [
                 ("message", "bob@Mystic (MRC)", "from mystic"),
                 ("message", "bob@Enigma (MRC)", "|03from enigma"),
@@ -139,6 +146,10 @@ def test_ctcp_requests_are_answered_from_the_targets_nick_and_bounded(db, lane, 
             notice = await asyncio.wait_for(queue.get(), timeout=2)
             assert isinstance(notice, MrcNotice) and notice.kind == "reply"
             assert notice.text == "CTCP VERSION reply from bob@Other: Mystic 1.12"
+            # An underscored handle is shown with spaces here too (issue #378).
+            await fake.send_line("Some_User~Other~ctcp_echo_channel~alice~~ctcp_echo_channel~[CTCP-REPLY] TIME noon~")
+            notice = await asyncio.wait_for(queue.get(), timeout=2)
+            assert notice.text == "CTCP TIME reply from Some User@Other: noon"
         finally:
             await bridge.close()
             await fake.close()

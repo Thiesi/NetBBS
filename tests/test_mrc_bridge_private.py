@@ -96,6 +96,10 @@ def test_a_caller_who_did_not_opt_in_gets_the_one_notice_only(db, lane, lobby, a
             while not queue.empty():
                 items.append(queue.get_nowait())
             assert len(items) == 1 and "tried to message you privately" in str(items[0])
+            # The refusal notice uses the display spelling as well.
+            await fake.send_line("Some_User~Other~garden~alice~My_Board~~hi~")
+            await asyncio.sleep(0.2)
+            assert "Some User@Other tried to message" in str(queue.get_nowait())
             assert "secret" not in str(items[0])
             assert bridge.reply_target("alice") is None
             # Sending is refused too: the opt-in is one switch for both ways.
@@ -167,6 +171,8 @@ def test_private_lines_are_bounded_per_remote_sender(db, lane, lobby, alice):
             for i in range(PRIVATE_BURST + 3):
                 await fake.send_line(f"bob~Other~garden~alice~My_Board~~line {i}~")
             await fake.send_line("carol~Third~garden~alice~My_Board~~hello from carol~")
+            for i in range(PRIVATE_BURST + 1):
+                await fake.send_line(f"Some_User~Other~garden~alice~My_Board~~u {i}~")
             await asyncio.sleep(0.3)
             texts = []
             while not queue.empty():
@@ -174,13 +180,16 @@ def test_private_lines_are_bounded_per_remote_sender(db, lane, lobby, alice):
                 if isinstance(item, MrcNotice) and item.kind == "private":
                     texts.append(item.text)
             # bob's flood is cut at his own allowance -- and the caller is
-            # told once -- while carol's line is untouched by it.
+            # told once -- while carol's line is untouched by it; the
+            # notice shows an underscored handle with spaces too.
             assert texts == (
                 [f"bob@Other: line {i}" for i in range(PRIVATE_BURST)]
                 + ["(private lines from bob@Other arrived faster than can be shown -- some were dropped)"]
                 + ["carol@Third: hello from carol"]
+                + [f"Some User@Other: u {i}" for i in range(PRIVATE_BURST)]
+                + ["(private lines from Some User@Other arrived faster than can be shown -- some were dropped)"]
             )
-            assert bridge.status().dropped_inbound == 3
+            assert bridge.status().dropped_inbound == 4
         finally:
             await bridge.close()
             await fake.close()

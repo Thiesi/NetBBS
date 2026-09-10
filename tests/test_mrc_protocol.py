@@ -308,3 +308,16 @@ def test_client_context_verbs_follow_the_spec():
     assert build_line(protocol.bbsmeta("alice", "S", 1000, "")) == "alice~S~~SERVER~~~BBSMETA: SecLevel(999)~\n"
     assert protocol.is_wire_address("2001:db8::1") and protocol.is_wire_address("10.0.0.7")
     assert not protocol.is_wire_address("") and not protocol.is_wire_address("unix:/tmp/sock")
+
+
+def test_spec_follow_up_helpers():
+    """Issue #378: STATUS LASTSEEN, the display spelling of a handle,
+    and the STATS activity field."""
+    from netbbs.mrc import protocol
+
+    assert build_line(protocol.status_lastseen("alice", "S", "lobby", False)) == "alice~S~lobby~SERVER~~lobby~STATUS LASTSEEN OFF~\n"
+    assert protocol.display_handle("Some_User") == "Some User"
+    assert protocol.parse_stats_activity("2 2 2 3") == 3
+    assert protocol.parse_stats_activity("2 2 2") is None
+    assert protocol.parse_stats_activity("2 2 2 9") is None and protocol.parse_stats_activity("2 2 2 x") is None
+    assert protocol.ACTIVITY_LABELS[2] == "medium activity"

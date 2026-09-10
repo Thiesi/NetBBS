@@ -246,7 +246,7 @@ from netbbs.link.work_items import (
 )
 from netbbs.moderation.blocklist import BlocklistError, block_user, is_blocked, unblock_user
 from netbbs.moderation.log import list_actions_for_target_user, list_recent_actions, record_action
-from netbbs.mrc.protocol import room_name_error
+from netbbs.mrc.protocol import display_roster_entry, room_name_error
 from netbbs.mrc.bridge import MrcBridge, MrcState, MrcStatus
 from netbbs.mrc.settings import (
     MrcChannelMapping,
@@ -5224,7 +5224,7 @@ async def _mrc_settings_screen(
             key="host", hotkey="h", menu_text=menu_key("H", "ost"), label="Hub host",
             render=lambda d: d["host"], prompt=text_field("host", required=True),
             brief="The MRC hub to connect to", section="Hub",
-            help="The public hub is mrc.bottomlessabyss.net. Change it only for a private hub.",
+            help="The public hub is mrc.bottomlessabyss.net. Change it only for a private hub. The protocol page (rev 1.26) also lists the operator's pool: na-multi, eu-multi and au-multi.relaychat.net (5000 plain, 5001 TLS) and mrcdev.relaychat.net for development.",
         ),
         FieldSpec(
             key="port", hotkey="p", menu_text=menu_key("P", "ort"), label="Hub port",
@@ -5542,7 +5542,8 @@ async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, no
         )
         if status.network_summary is not None:
             age = status.network_stats_age_seconds or 0.0
-            network_line = f"{status.network_summary}, {status.network_rooms} rooms (as of {int(age // 60)} min ago)"
+            activity = f", {status.network_activity_label}" if status.network_activity_label else ""
+            network_line = f"{status.network_summary}, {status.network_rooms} rooms{activity} (as of {int(age // 60)} min ago)"
         elif status.network_stats_raw:
             network_line = f"unknown -- the hub answered STATS with: {sanitize_text(status.network_stats_raw)}"
         else:
@@ -5589,7 +5590,7 @@ async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, no
             roster = mrc_bridge.remote_roster(mapping.channel)
             who = f"{len(roster)} MRC user{'s' if len(roster) != 1 else ''}"
             if roster:
-                who += ": " + ", ".join(sanitize_text(name) for name in roster[:12])
+                who += ": " + ", ".join(sanitize_text(display_roster_entry(name)) for name in roster[:12])
                 if len(roster) > 12:
                     who += ", ..."
             await session.write_line(

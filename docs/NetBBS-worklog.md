@@ -862,7 +862,9 @@ session needs the same treatment.
   one "cut short" notice per burst), CTCP replies per remote sender
   (`CTCP_BURST`), `USERROOM` re-announce at most once per keepalive tick
   (`_rehomed`, cleared on the tick). A CTCP request for a nick this node never
-  announced is ignored without a reply.
+  announced is ignored without a reply -- including the spec's wildcard
+  (target `*`, blank `to_user`), which would otherwise cost one reply per
+  announced nick (issue #378).
 - An empty `to_room` is treated as a network broadcast (shown in every active
   bridged channel), following ENiGMA½; if the live hub ever sends ordinary
   room traffic with an empty `to_room`, this is the switch to revisit.
@@ -967,6 +969,31 @@ session needs the same treatment.
   section entry is re-decided from `open_rooms_enabled` on every return to
   the top level, and selecting an existing open room refuses while the switch
   is off.
+- Smaller spec follow-ups (issue #378): a server `NOTIFY:` goes through
+  `_broadcast_notice` to every active mapping and is not remembered (unlike
+  `BANNER:`); `_record_stats` also keeps the fourth `STATS` field as
+  `_network_activity` (`parse_stats_activity`, 0-3, `ACTIVITY_LABELS`);
+  `display_handle` (underscores to spaces) is applied at display boundaries
+  only -- author labels, private/broadcast/CTCP sender labels, roster
+  entries (`display_roster_entry`, the nick half) -- never to anything
+  matched or sent; `_mrc_helper_carries_a_secret` classifies the line with
+  pipe codes stripped, as the outbound path would send it;
+  `_mrc_helper_carries_a_secret` refuses `!identify`, `!register`,
+  `!update` and `!roompass` as chat in *any* channel while the node has an
+  MRC bridge -- a paused mapping or a local channel would still record the
+  password, and relay it the moment the channel is bridged -- before
+  anything is recorded, and `InputHistory.forget` drops the raw line
+  `read_line` had already recorded (raw, since the loop strips what it
+  matches), so Up cannot bring the password back; the LASTSEEN choice is a tri-state Profile preference (never
+  chosen / on / off) read with the nick colour and opt-in (`load_lastseen`,
+  cached and pruned like them, and part of `_ensure_nick_color`'s guard so a
+  failed read is retried -- and a choice read after the caller was already
+  announced is sent at once, `_send_lastseen_choice`) and sent as
+  `STATUS LASTSEEN ON|OFF` on every announcement when chosen -- the hub keeps an opt-out across sessions, so
+  only an explicit ON undoes one. `_network_activity` is cleared with the
+  other hub readings on `reload_settings` and shown only beside a network
+  size. The fake hub records `STATUS LASTSEEN` and answers `STATS` with
+  four fields.
 - Caller facts (issue #377): `note_caller` (chat_flow, before `local_join`)
   stores address, terminal size and level per username in `_caller_facts`.
   Unlike the other per-caller caches it is *not* pruned to the announced
@@ -1077,7 +1104,8 @@ session needs the same treatment.
   evicted), fed by openings, `USERROOM` targets and the anchored `*** Joining
   <room>:` / `*** Leaving <room>:` templates; the hub only sends join chatter
   for rooms this node is in, so the list mostly reflects this node's own
-  history until the `LIST` reply format is known and parsed.
+  history; the protocol page (rev 1.26) documents no `LIST` reply format,
+  so this is the design, not a stopgap (issue #378).
 - The picker's section entry uses stable id 0 (channels are positive,
   categories negated), the section's own picker uses -1 for "open by name"
   and -2-n for observed rooms; `pick_item` shows the id beside every entry,
