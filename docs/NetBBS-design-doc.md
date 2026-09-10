@@ -6953,8 +6953,8 @@ acknowledge private receipts or spend turns.
 
 During the final 48 hours, the switchboard surfaces the end time, a Cautious-job
 entry point needing no rival or territory, and the expiry of competitive resources
-including training, support and prepared operations. Zero-Rank fresh-season
-callers with unused turns see starting resources and actionable job/trade routes.
+including training, support and all saved operation progress (cased or prepared). Zero-Rank fresh-season
+callers with unused turns see their current resources and actionable job/trade routes.
 Help explains that newcomer protection follows preserved account age and is not
 renewed by rollover. These cues change no payout, protection, award or reset rule.
 

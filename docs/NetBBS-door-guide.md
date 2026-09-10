@@ -353,7 +353,7 @@ or protection in the fresh season.
 
 Joining near the deadline is still a way to learn the board: inspect a Cautious
 job's odds and stakes without needing rivals or territory. The switchboard flags
-the last 48 hours and warns that training, support and prepared operations reset
+the last 48 hours and warns that training, support and all saved operation progress reset
 along with cash and crew. Your final Rank is recorded even without a medal.
 At the next season, start again with $300, three available crew and fifteen turns;
 identity, account age and insignia survive. Newcomer protection expires by account
