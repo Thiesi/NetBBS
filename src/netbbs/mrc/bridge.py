@@ -1264,9 +1264,12 @@ class MrcBridge:
         except (TypeError, ValueError):
             return
         latency = time.time() - sent_at
-        if not 0.0 <= latency < 300.0:
+        # The stamp carries microseconds and rounds; a PONG answered
+        # within the same clock tick can read a few hundred nanoseconds
+        # negative. That is a zero round trip, not a bad value.
+        if not -0.01 <= latency < 300.0:
             return
-        self._hub_latency = latency
+        self._hub_latency = max(0.0, latency)
         self._hub_latency_at = self._clock()
 
     def note_caller(self, username: str, *, address: str | None, width: int, height: int, level: int) -> None:
