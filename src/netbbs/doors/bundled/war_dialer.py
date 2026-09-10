@@ -198,9 +198,12 @@ _MONOCHROME = False
 _ASCII_GLYPHS = str.maketrans({ch: '+' for ch in '\u2554\u2557\u255a\u255d'} | {'\u2550': '-', '\u2551': '|', '\u2502': '|'})
 
 
+def decor(text: str) -> str:
+    """Convert authored decorations only; never completed text containing names."""
+    return text.translate(_ASCII_GLYPHS) if _ASCII_DECOR else text
+
+
 def out(text: str = "") -> None:
-    if _ASCII_DECOR:
-        text = text.translate(_ASCII_GLYPHS)
     if _MONOCHROME:
         text = re.sub(r"\x1b\[[0-9;:]*m", "", text)
     sys.stdout.write(text)
@@ -443,7 +446,7 @@ def _wrap_output(text: str, width: int) -> str:
 
     if (
         width >= 2
-        and atoms[0][1] in ("│", "║")
+        and atoms[0][1] in ("│", "║", "|")
         and atoms[-1][1] == atoms[0][1]
         and sum(atom_width for _, _, atom_width in atoms) > width
     ):
@@ -548,6 +551,7 @@ def _box_line(left: str, content: str, right: str, width: int) -> str:
 
 
 def _center_line(left: str, content: str, right: str, width: int) -> str:
+    left, right = decor(left), decor(right)
     target_inner = width - _dlen(left) - _dlen(right)
     pad_total = max(0, target_inner - _dlen(content))
     pad_left = pad_total // 2
@@ -2332,12 +2336,12 @@ def draw_title(p: Palette, info: dict, season_number: int, w: int) -> None:
         out_line(f"WAR DIALER - Season {season_number}")
         return
     out_line()
-    out_line(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}")
+    out_line(decor(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}"))
     t1 = f"{p.gold}{BOLD}W A R   D I A L E R{RESET}"
     out_line(_center_line(f"{p.border}{BOLD}║{RESET}", t1, f"{p.border}{BOLD}║{RESET}", w))
     t2 = f"{p.title}Rival crews. Ten exchanges. One scene.{RESET}"
     out_line(_center_line(f"{p.border}{BOLD}║{RESET}", t2, f"{p.border}{BOLD}║{RESET}", w))
-    out_line(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}")
+    out_line(decor(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}"))
     out_line(f"  {p.muted}Node:{RESET} {p.accent}{info.get('node_name', 'NetBBS')}{RESET}   "
               f"{p.muted}Handle:{RESET} {p.gold}{BOLD}{info.get('handle', 'Guest')}{RESET}   "
               f"{p.muted}Season:{RESET} {p.accent}{BOLD}{season_number}{RESET}")
@@ -3352,10 +3356,10 @@ def draw_season_change(p: Palette, season_number: int, width: int = 78, height: 
 
 def draw_goodbye(p: Palette, player: Player, w: int) -> None:
     out_line()
-    out_line(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}")
+    out_line(decor(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}"))
     msg = f"{p.gold}{BOLD}Carrier lost.{RESET} {p.white}Rank: {tier_name(rank_score(player))}{RESET}"
     out_line(_center_line(f"{p.border}{BOLD}║{RESET}", msg, f"{p.border}{BOLD}║{RESET}", w))
-    out_line(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}")
+    out_line(decor(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}"))
 
 
 def main() -> int:
