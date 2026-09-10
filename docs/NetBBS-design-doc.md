@@ -4853,8 +4853,9 @@ resort -- never a truncated word -- so a tagged contraband row still reads as
 one row, and a terminal too narrow for even the shortest form keeps the whole
 row and wraps it.
 
-A hop's narration is retained for the next deck page (issue #410): departure
-costs and events, discoveries, encounter and combat outcomes, customs results,
+A hop's narration is retained for the next deck page (issue #410): the departure
+charge itself -- fuel burned, fuel left, crew wages paid and credits on hand --
+then events, discoveries, encounter and combat outcomes, customs results,
 settlements and mission completions appear as `Result:` lines on the first
 Command Deck page after the jump, and are cleared by the next deck action. The
 report is session state, never persisted and bounded to the newest eight lines
