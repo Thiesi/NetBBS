@@ -2522,6 +2522,13 @@ def posted_mission_offers(world: World) -> list[Mission]:
             and not (m["kind"] == "scan" and world.by_id[m["target_system"]].discovered)]
 
 
+def delivery_contract_ceiling(ship: Ship) -> int:
+    """Largest delivery a board posts: ten units, or two fifths of the hold when that is
+    more, so bulk contracts give large hulls work that spot-stock pools cannot throttle
+    (issue #408). The draw count is unchanged, so board seeds keep their sequence."""
+    return max(10, cargo_capacity(ship) * 2 // 5)
+
+
 def _generate_mission(world: World, kind: str, hops: dict[int, int], *, rng=None) -> Mission | None:
     rng = world.event_rng if rng is None else rng
     origin = world.save.current_system
@@ -2531,7 +2538,7 @@ def _generate_mission(world: World, kind: str, hops: dict[int, int], *, rng=None
             return None
         target = rng.choice(candidates)
         commodity = rng.choice(LEGAL_COMMODITIES)
-        qty = rng.randint(3, 10)
+        qty = rng.randint(3, delivery_contract_ceiling(world.save.ship))
         reward = round(qty * COMMODITIES[commodity]["base"] * (0.9 + 0.15 * hops[target])) + 50
         desc = f"Deliver {qty}x {COMMODITIES[commodity]['label']} to {world.by_id[target].name}"
         return Mission(id=world.save.next_mission_id, kind=kind, description=desc, reward=reward,

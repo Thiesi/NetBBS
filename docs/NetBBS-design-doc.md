@@ -4735,6 +4735,13 @@ destination's danger (or unknown) and that a day passes; No retains the chart
 with a cancelled-departure result and writes nothing. Contract and route jumps
 keep their existing preview screens and deliberate Jump actions.
 
+Posted deliveries scale with the pilot's hold (issue #408): a board draws the
+quantity between three and the larger of ten and two fifths of cargo capacity,
+so a Shuttle's boards are unchanged while a Carrier sees bulk contracts whose
+reward scales with the quantity. Spot-stock pools do not limit contract cargo,
+which gives large hulls work that depth cannot throttle; the RNG draw sequence
+is unchanged, so existing board seeds still reproduce.
+
 Completed legal contracts (deliveries, surveys and escorts) earn one point of
 Concord standing each (issue #407), so a contract-running career reaches the
 commission without combat; lost or expired contracts earn nothing. Combat and
