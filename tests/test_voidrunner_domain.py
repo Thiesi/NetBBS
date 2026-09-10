@@ -12466,6 +12466,45 @@ def test_escort_completion_earns_concord_standing_and_a_lost_escort_does_not(mon
         assert world.save.pilot.reputation.get("concord", 0) == delta
 
 
+def test_a_legacy_milestone_count_is_rescaled_rather_than_re_awarded():
+    """The counter is standing already granted, so halving the step must not
+    hand a loaded career free points for gains it was already paid for."""
+    world = _world_with_seed(42)
+    world.save.contraband_trade_balance = 1000
+    world.save.contraband_trade_milestones = 2  # two points, awarded per 500cr
+    data = world.save.to_dict()
+    data.pop("contraband_standing_step")  # a career saved before the step changed
+    restored = vr.SaveData.from_dict(data)
+    assert restored.contraband_trade_milestones == 4  # 1,000cr of gain, now four 250cr steps
+    reloaded = vr.World(restored)
+    reloaded.save.pilot.reputation["blackwake"] = 0
+    vr.record_contraband_trade(reloaded, "weapons", 249)
+    assert reloaded.save.pilot.reputation["blackwake"] == 0  # settled gains mint nothing
+    vr.record_contraband_trade(reloaded, "weapons", 1)
+    assert reloaded.save.pilot.reputation["blackwake"] == 1  # the next genuine step still pays
+    assert vr.SaveData.from_dict(reloaded.save.to_dict()).contraband_trade_milestones == 5  # and reloads unchanged
+    data["contraband_standing_step"] = 0
+    with pytest.raises(vr.ResumeError): vr.SaveData.from_dict(data)
+
+
+def test_the_concord_standing_a_contract_pays_is_visible_before_and_after():
+    """A new progression route the player cannot see is not a route (#407)."""
+    world = _world_with_seed(42)
+    dest = sorted(world.here.connections)[0]
+    mission = vr.Mission(1, "delivery", "Deliver", 300, 0, dest, commodity="food", quantity=2)
+    world.save.active_missions = [mission]
+    terms = " ".join(vr.mission_details(world, mission))
+    assert f"+{vr.CONCORD_STANDING_PER_CONTRACT} Concord standing" in terms
+    bounty = vr.Mission(2, "bounty", "Intercept", 500, 0, dest, pirate_tier=1)
+    assert "Completion also pays" not in " ".join(vr.mission_details(world, bounty))  # the kill pays that, not the contract
+    contact = " ".join(vr.faction_contact_lines(world, vr.FACTION_CONCORD))
+    assert f"+{vr.CONCORD_STANDING_PER_CONTRACT} for every delivery, survey or escort contract" in contact
+    assert f"{vr.CONTRABAND_STANDING_STEP}cr of net contraband trading gain" in " ".join(
+        vr.faction_contact_lines(world, vr.FACTION_BLACKWAKE))
+    world.save.cargo = {"food": 2}; world.save.current_system = dest
+    assert "Concord standing" in " ".join(vr.check_mission_completions(world))
+
+
 def test_contraband_milestones_follow_the_shorter_step_without_recycling():
     world = _world_with_seed(42)
     vr.record_contraband_trade(world, "weapons", 249)
