@@ -6938,6 +6938,19 @@ cutoffs, then closes the current season at the operator-selected boundary
 and retains cosmetic archive recognition while resetting competitive resources.
 Older worlds remain operable before upgrade; unknown past results are not backfilled.
 
+Each archived player receives an unread private crackdown receipt with season,
+final Rank, placement and medal, committed with the archive/reset transaction.
+The existing latest-500 receipt limit applies. Explicit SysOp competition reset
+clears these receipts while preserving archived cosmetic recognition.
+From `[I]Scene`, `Your season reports` lists the caller's historical results,
+retained medal counts and best retained Rank/placement; `Hall of Fame` lists the
+actual positive-Rank medal winners grouped by season. Both are free, paginated
+views of the same latest-twelve-season archive, with historical handles and
+insignia and no new scoring or gameplay advantage. Empty archives explain when
+results arrive. The crackdown screen points callers back to the switchboard's
+Log and Scene for the receipt and recognition; reading these views does not
+acknowledge private receipts or spend turns.
+
 **Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
 living crew is the available crew plus the members assigned across their owned
 exchanges. Capture requires at least two available members and commits one to the

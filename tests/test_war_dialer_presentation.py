@@ -2160,3 +2160,58 @@ def test_season_rules_and_archived_results_are_readable_and_free(tmp_path, monke
     assert 'Gold: HistoricalCaller, Rank 10' in normalized
     assert 'inactive' in normalized and 'Your result: #1, Rank 10.' in normalized
     conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('choice', ['5', '6'])
+@pytest.mark.parametrize('played', [False, True])
+def test_season_recognition_from_scene_is_historical_free_and_bounded(tmp_path, monkeypatch, width, height, choice, played):
+    conn = wd.connect(tmp_path / 'recognition.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'HistoricalCaller', now, 1)
+    if played:
+        wd.set_insignia(conn, actor, 'archive', now)
+        wd.resolve_recruit(conn, actor, now)
+        now += wd.SEASON
+        actor = wd.load_or_create_player(conn, 1, 'RenamedCaller', now, 2)
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    selected, calls = False, 0
+    def select(valid):
+        nonlocal selected, calls
+        calls += 1
+        assert calls < 150
+        if not selected:
+            if choice in valid:
+                selected = True
+                return choice
+            return 'N'
+        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        page = re.search(r'Page (\d+)/(\d+)', screen)
+        return 'B' if page.group(1) == page.group(2) else 'N'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
+    before = list(conn.iterdump())
+    wd.do_scene(wd.Palette(False), conn, actor, width, height)
+    assert list(conn.iterdump()) == before
+    body = []
+    title = 'YOUR SEASON REPORTS' if choice == '5' else 'HALL OF FAME'
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+        if title in lines[0]: body.extend(lines[2:-2])
+    normalized = ' '.join(' '.join(body).split())
+    if played:
+        assert '{##} HistoricalCaller' in normalized and 'RenamedCaller' not in normalized
+        assert 'Gold; final Rank 10; #1 of 1.' in normalized
+        if choice == '5':
+            assert 'Gold 1, Silver 0, Bronze 0' in normalized
+            assert 'Best retained Rank: 10' in normalized
+    else:
+        assert ('No completed-season result' if choice == '5' else 'No medals awarded') in normalized
+    conn.close()

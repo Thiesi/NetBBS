@@ -1399,6 +1399,9 @@ def _archive_season(conn: sqlite3.Connection, old: int, current: int, now: datet
         medal = ('Gold', 'Silver', 'Bronze')[place - 1] if place <= 3 and player['rank'] > 0 else ''
         conn.execute("INSERT INTO season_results(season,user_id,handle,rank,placement,medal,insignia) VALUES (?,?,?,?,?,?,?)",
                      (old, player['user_id'], _event_plain(player['handle'])[:80], player['rank'], place, medal, player['insignia']))
+        record_event(conn, player['user_id'], None,
+                     f"Crackdown closed season {old}. Final Rank {player['rank']}; place {place}/{len(players)}; {medal or 'no medal'}. "
+                     f"Fresh season {current}: competitive resources reset. Back on the switchboard, [I]Scene shows retained season results.", cutoff)
     # Bounded by retained history, even after a very long absence.
     for number in range(max(old + 1, current - SEASON_ARCHIVE_LIMIT), current):
         conn.execute("INSERT INTO seasons(number,ended_at,status,players) VALUES (?,?,'inactive',0)",
@@ -2579,6 +2582,7 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "First visit: inspect Map, compare a Root preview for unclaimed territory, or Trade to fund Crew recruitment. Back always cancels a preview.",
         f"Each action costs one of {TURNS_PER_DAY} turns. The rolling 24-hour window starts with your first action.",
         "[T]rade Warez: quick cash. [C]rew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
+        "Each completed season leaves a private crackdown receipt with your final Rank, placement and medal. Back on the switchboard, [I]Scene offers personal reports and Hall of Fame winners from the retained twelve seasons. Cosmetic recognition survives the competitive reset.",
         "Season awards are cosmetic Gold/Silver/Bronze for the top three positive-Rank players. Ties use ascending account ID. [I]Scene / Season results retains the latest 12 completed seasons, with inactive skipped seasons labeled and no permanent power bonus.",
         "[I]Scene is free: choose a cosmetic crew insignia, read NPC biographies/current homes, and browse the latest 500 public territory bulletins. Insignia survive season resets. Q leaves any screen or quits from the switchboard.",
         "[O]Ops: resume one three-step operation, buy rival recon, or read your latest ten 24-hour dossiers. Steps cost turns; browsing and reconnecting never reroll outcomes.",
@@ -2645,6 +2649,8 @@ def do_scene(p: Palette, conn: sqlite3.Connection, player: Player, width: int, h
         (["Neutral operator dossiers", "Three labeled NPC crews: biographies and current home status."], True),
         (["Public scene bulletins", "Latest 500 captures, abandonments and NPC arrivals. Timestamped actual activity; no private resources."], True),
         (["Season results", "Cosmetic podium awards and the latest twelve completed seasons; historical handles and final Rank."], True),
+        (["Your season reports", "Personal results, medal counts and best Rank/placement within the retained archive."], True),
+        (["Hall of Fame", "The recorded Gold, Silver and Bronze winners, grouped by season. Cosmetic recognition only."], True),
     ], width, height)
     if key in "BQ":
         return
@@ -2685,6 +2691,31 @@ def do_scene(p: Palette, conn: sqlite3.Connection, player: Player, width: int, h
 
     elif key == "4":
         show_season_results(p, conn, player.user_id, width, height)
+    elif key == "5":
+        show_season_recognition(p, conn, player.user_id, width, height)
+    elif key == "6":
+        show_season_recognition(p, conn, player.user_id, width, height, hall=True)
+
+
+def show_season_recognition(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, height: int, *, hall: bool = False) -> None:
+    with _write_transaction(conn):
+        _settle_world(conn, now_utc())
+        where, args = ("r.medal!=''", ()) if hall else ("r.user_id=?", (user_id,))
+        rows = conn.execute("SELECT r.*,s.players,s.ended_at FROM season_results r JOIN seasons s ON s.number=r.season WHERE "
+                            + where + " ORDER BY r.season DESC,r.placement LIMIT ?", (*args, SEASON_ARCHIVE_LIMIT * (3 if hall else 1))).fetchall()
+    lines = ["Recognition from the latest twelve retained seasons. Cosmetic only; no gameplay advantage."]
+    if not hall and rows:
+        medals = ", ".join(f"{name} {sum(row['medal'] == name for row in rows)}" for name in ('Gold', 'Silver', 'Bronze'))
+        lines += ["Your retained medals: " + medals,
+                  f"Best retained Rank: {max(row['rank'] for row in rows)}; best recorded placement: #{min(row['placement'] for row in rows)}."]
+    for row in rows:
+        symbol = INSIGNIA[row['insignia']][0]
+        lines += [f"Season {row['season']}: {symbol} {row['handle']}",
+                  f"{row['medal'] or 'No medal'}; final Rank {row['rank']}; #{row['placement']} of {row['players']}.",
+                  "Closed: " + from_iso(row['ended_at']).strftime("%Y-%m-%d %H:%M UTC")]
+    if not rows:
+        lines.append("No medals awarded in the retained archive yet." if hall else "No completed-season result for your crew yet. Your first report arrives after a season closes.")
+    show_text_pages(p, "HALL OF FAME" if hall else "YOUR SEASON REPORTS", lines, width, height)
 
 
 def show_season_results(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, height: int) -> None:
@@ -3232,7 +3263,8 @@ def do_garrison(p: Palette, conn: sqlite3.Connection, player: Player, width: int
 
 def draw_season_change(p: Palette, season_number: int, width: int = 78, height: int = 24) -> None:
     show_text_pages(p, "FED CRACKDOWN", [f"Fed crackdown: season {season_number} has started.",
-                    "Crews and exchanges have reset; review your fresh resources."], width, height, onboarding=True)
+                    "Crews and exchanges have reset; review your fresh resources.",
+                    "Back on the switchboard, read [H]Log for your crackdown receipt or [I]Scene for retained reports and medals."], width, height, onboarding=True)
 
 
 def draw_goodbye(p: Palette, player: Player, w: int) -> None:
