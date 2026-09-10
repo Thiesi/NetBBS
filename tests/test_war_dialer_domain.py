@@ -221,15 +221,15 @@ def test_tier_gap_beyond_one_bracket_blocks_a_raid():
 def test_cannot_raid_the_same_target_twice_in_a_row():
     now = wd.now_utc()
     attacker = _make_player(user_id=1, now=now)
-    target = _make_player(user_id=2, now=now, last_raided_by=1)
+    target = _make_player(user_id=2, now=now, last_raided_by=1, raid_shield_until=wd.to_iso(now + wd.RAID_SHIELD))
     assert wd.is_eligible_raid_target(attacker, target, now) is False
 
 
-def test_a_different_attacker_can_still_raid_a_recently_hit_target():
+def test_a_different_attacker_cannot_raid_a_recently_hit_target():
     now = wd.now_utc()
     other_attacker = _make_player(user_id=3, now=now)
-    target = _make_player(user_id=2, now=now, last_raided_by=1)
-    assert wd.is_eligible_raid_target(other_attacker, target, now) is True
+    target = _make_player(user_id=2, now=now, last_raided_by=1, raid_shield_until=wd.to_iso(now + wd.RAID_SHIELD))
+    assert wd.is_eligible_raid_target(other_attacker, target, now) is False
 
 
 # -- raid / root-exchange resolution mechanics -----------------------------
@@ -357,18 +357,17 @@ def test_load_or_create_player_decays_heat_lazily_from_elapsed_time(db_path):
     assert reloaded.heat == pytest.approx(35.0)
 
 
-def test_load_or_create_player_resets_last_raided_by_on_its_own_next_login(db_path):
-    """The anti-farming throttle: a target becomes raidable again by the
-    same attacker specifically when *the target* next logs in -- not on
-    any elapsed-time basis."""
+def test_login_preserves_raid_shield_and_last_attacker(db_path):
     now = wd.now_utc()
     conn, season_number = _setup(db_path, now)
     victim = wd.load_or_create_player(conn, 2, "victim", now, season_number)
     victim.last_raided_by = 1
+    victim.raid_shield_until = wd.to_iso(now + wd.RAID_SHIELD)
     _save_fixture(conn, victim)
-
     reloaded = wd.load_or_create_player(conn, 2, "victim", now + timedelta(minutes=1), season_number)
-    assert reloaded.last_raided_by is None
+    assert reloaded.last_raided_by == 1
+    assert reloaded.raid_shield_until == victim.raid_shield_until
+    conn.close()
 
 
 def test_load_or_create_player_resets_stats_on_new_season_but_keeps_created_at(db_path):
@@ -478,12 +477,9 @@ def test_resolve_root_exchange_notifies_the_prior_controller(db_path):
 
 
 def test_concurrent_raids_on_the_same_target_conserve_total_cash(db_path):
-    """Two separate door *processes* (modeled here as two independent
-    sqlite3 connections on two threads) both raiding the same target at
-    once must not lose either write -- `resolve_raid`'s `BEGIN
-    IMMEDIATE` re-read is what this pins. If it silently lost one
-    update, total money in the system would be created out of nowhere
-    (one attacker's steal credited with no matching deduction)."""
+    """Two real connections racing a target commit exactly one paid attempt.
+    The loser sees fresh target protection and cannot spend or transfer cash.
+    """
     now = wd.now_utc()
     conn, season_number = _setup(db_path, now)
     a = wd.load_or_create_player(conn, 1, "attacker_a", now, season_number)
@@ -502,13 +498,20 @@ def test_concurrent_raids_on_the_same_target_conserve_total_cash(db_path):
     total_before = a.cash + b.cash + target.cash
 
     errors: list[Exception] = []
+    rejected = []
+    barrier = threading.Barrier(2)
 
     def _attack(user_id: int, handle: str) -> None:
         try:
             thread_conn = wd.connect(db_path)
             attacker = wd.load_or_create_player(thread_conn, user_id, handle, now, season_number)
-            wd.resolve_raid(thread_conn, attacker, target.user_id, now, FixedRandom(0.0))
-            thread_conn.close()
+            barrier.wait(timeout=5)
+            try:
+                wd.resolve_raid(thread_conn, attacker, target.user_id, now, FixedRandom(0.0))
+            except wd.ActionRejected:
+                rejected.append(user_id)
+            finally:
+                thread_conn.close()
         except Exception as exc:  # pragma: no cover - surfaced via `errors`
             errors.append(exc)
 
@@ -526,9 +529,14 @@ def test_concurrent_raids_on_the_same_target_conserve_total_cash(db_path):
     final_b = wd.load_or_create_player(verify_conn, 2, "attacker_b", now, season_number)
     final_target = wd.load_or_create_player(verify_conn, 3, "target", now, season_number)
 
-    assert final_a.successful_raids == 1
-    assert final_b.successful_raids == 1
+    assert len(rejected) == 1
+    assert final_a.successful_raids + final_b.successful_raids == 1
+    assert final_a.turns_used + final_b.turns_used == 1
+    assert final_target.cash == 850
+    assert final_target.raid_shield_until == wd.to_iso(now + wd.RAID_SHIELD)
     assert final_a.cash + final_b.cash + final_target.cash == total_before
+
+    verify_conn.close()
 
 
 def _rivals(db_path):
@@ -807,7 +815,7 @@ def test_raid_revalidates_fresh_eligibility_without_effects(db_path, reason):
     if reason == "grace":
         conn.execute("UPDATE players SET created_at=? WHERE user_id=2", (wd.to_iso(now),))
     elif reason == "repeat":
-        conn.execute("UPDATE players SET last_raided_by=1 WHERE user_id=2")
+        conn.execute("UPDATE players SET last_raided_by=1, raid_shield_until=? WHERE user_id=2", (wd.to_iso(now + wd.RAID_SHIELD),))
     elif reason == "bracket":
         conn.execute("UPDATE players SET exchanges_taken_total=100 WHERE user_id=1")
     elif reason == "self":
@@ -1343,7 +1351,7 @@ def _legacy_income_world(db_path):
     old_schema = schema.replace(addition, "")
     values = asdict(a)
     values.pop("income_remainder")
-    for column in wd._ECONOMY_COLUMNS:
+    for column in wd._ECONOMY_COLUMNS | {"raid_shield_until"}:
         values.pop(column)
     conn.execute("DROP TABLE players")
     conn.execute(old_schema)
@@ -1731,7 +1739,7 @@ def test_rival_directory_reaches_crews_beyond_old_fifty_row_sample(db_path):
     conn.execute("UPDATE players SET created_at=? WHERE user_id=56", (wd.to_iso(now - wd.GRACE),))
     page = wd.read_player_page(conn, 1, now, 50)
     assert [p.user_id for p in page.entries] == [52, 53, 54, 55, 56]
-    assert wd.raid_eligibility_reason(page.player, page.entries[0], now) == "Newcomer shield"
+    assert wd.raid_eligibility_reason(page.player, page.entries[0], now) == "Newcomer shield until " + (now + wd.GRACE).strftime("%Y-%m-%d %H:%M UTC")
     assert wd.raid_eligibility_reason(page.player, page.entries[-1], now) == "Eligible"
     assert page.player.turns_used == 0
     conn.close()
@@ -1830,7 +1838,7 @@ def test_process_death_releases_world_session_guard(db_path):
 
 
 def _downgrade_economy_fixture(conn):
-    for column in wd._ECONOMY_COLUMNS:
+    for column in wd._ECONOMY_COLUMNS | {"raid_shield_until"}:
         conn.execute(f'ALTER TABLE players DROP COLUMN {column}')
     conn.execute('PRAGMA user_version=2')
 
@@ -1974,6 +1982,93 @@ def test_newcomer_can_capture_defended_territory_at_ten_percent_floor(db_path):
     preview = wd.action_preview_lines('root', actor, wd.list_exchanges(conn)[0])
     assert 'Success: 10%' in '\n'.join(preview)
     assert wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom(.099))[0]
+    conn.close()
+
+
+@pytest.mark.parametrize('roll', [0.0, .99])
+def test_raid_shield_blocks_every_attacker_survives_login_ack_and_restart(db_path, roll):
+    conn, now, actor, victim = _rivals(db_path)
+    other = wd.load_or_create_player(conn, 3, 'Third', now, 1)
+    wd.resolve_raid(conn, actor, victim.user_id, now, FixedRandom(roll))
+    shield = wd.to_iso(now + wd.RAID_SHIELD)
+    for uid in (1, 3):
+        before = list(conn.iterdump())
+        with pytest.raises(wd.ActionRejected, match='eligible'):
+            wd.resolve_raid(conn, wd.read_player(conn, uid), victim.user_id, now, FixedRandom())
+        assert list(conn.iterdump()) == before
+    victim = wd.load_or_create_player(conn, victim.user_id, victim.handle, now + timedelta(hours=1), 1)
+    events = wd.unseen_events(conn, victim.user_id)
+    wd.mark_events_seen(conn, victim.user_id, [e.id for e in events], now + timedelta(hours=1))
+    assert wd.read_player(conn, victim.user_id).raid_shield_until == shield
+    conn.close()
+    conn = wd.connect(db_path)
+    with pytest.raises(wd.ActionRejected):
+        wd.resolve_raid(conn, other, victim.user_id, now + wd.RAID_SHIELD - timedelta(microseconds=1), FixedRandom())
+    assert wd.resolve_raid(conn, other, victim.user_id, now + wd.RAID_SHIELD, FixedRandom())[0]
+    assert wd.read_player(conn, victim.user_id).raid_shield_until == wd.to_iso(now + 2 * wd.RAID_SHIELD)
+    conn.close()
+
+
+def test_raid_shield_does_not_protect_owned_territory(db_path):
+    conn, now, actor, victim = _rivals(db_path)
+    wd.resolve_root_exchange(conn, victim, 1, now, FixedRandom())
+    wd.resolve_raid(conn, actor, victim.user_id, now, FixedRandom())
+    assert wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())[0]
+    assert wd.read_player(conn, victim.user_id).raid_shield_until == wd.to_iso(now + wd.RAID_SHIELD)
+    conn.close()
+
+
+def test_failed_raid_commit_rolls_back_target_shield_with_cash_event_and_turn(db_path):
+    conn, now, actor, victim = _rivals(db_path)
+    before = list(conn.iterdump())
+    conn.execute("CREATE TRIGGER reject_raid_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'event failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='event failed'):
+        wd.resolve_raid(conn, actor, victim.user_id, now, FixedRandom())
+    conn.execute('DROP TRIGGER reject_raid_event')
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_legacy_raid_protection_upgrades_once_to_one_day(db_path, monkeypatch):
+    conn, now, actor, victim = _rivals(db_path)
+    conn.execute('UPDATE players SET last_raided_by=1 WHERE user_id=2')
+    conn.execute('ALTER TABLE players DROP COLUMN raid_shield_until')
+    conn.execute('PRAGMA user_version=3')
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    wd.ensure_schema(conn)
+    assert wd.read_player(conn, 1).raid_shield_until == ''
+    assert wd.read_player(conn, 2).raid_shield_until == wd.to_iso(now + wd.RAID_SHIELD)
+    assert 'all attackers' in wd.history_events(conn, 2)[0].summary_text
+    before = list(conn.iterdump())
+    monkeypatch.setattr(wd, 'now_utc', lambda: now + timedelta(hours=2))
+    wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_raid_upgrade_failure_preserves_original_world(db_path, monkeypatch):
+    conn, now, _, _ = _rivals(db_path)
+    conn.execute('UPDATE players SET last_raided_by=1 WHERE user_id=2')
+    conn.execute('ALTER TABLE players DROP COLUMN raid_shield_until')
+    conn.execute('PRAGMA user_version=3')
+    before = list(conn.iterdump())
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    def deny_version(action, name, value, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == 'user_version' and value == '4' else sqlite3.SQLITE_OK
+    conn.set_authorizer(deny_version)
+    with pytest.raises(sqlite3.DatabaseError):
+        wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_raid_recovery_resets_at_season_boundary_but_account_age_does_not(db_path):
+    conn, now, actor, victim = _rivals(db_path)
+    wd.resolve_raid(conn, actor, victim.user_id, now, FixedRandom())
+    reset = wd.refresh_player(conn, victim.user_id, now + wd.SEASON)
+    assert reset.raid_shield_until == '' and reset.last_raided_by is None
+    assert reset.created_at == victim.created_at
     conn.close()
 
 

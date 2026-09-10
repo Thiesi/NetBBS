@@ -48,11 +48,11 @@ refuses to silently create a replacement. Choose an explicit override or complet
 the migration. An explicit path for a new independent node deliberately selects
 its own world; it does not adopt the old world's users or records.
 
-War Dialer records schema version 3 in SQLite `user_version`. A complete older
+War Dialer records schema version 4 in SQLite `user_version`. A complete older
 world upgrades automatically in one transaction: version 1 adopts the original
 layout and latest 500 events per player; version 2 converts copied garrisons to
 shared crew assignments; version 3 adds the capture/control economy described
-below. A failed upgrade rolls
+below; version 4 adds raid recovery. A failed upgrade rolls
 back its schema/data changes and version marker. Newer versions, incomplete or
 unrelated schemas, and corrupt files are refused with a caller-facing error;
 startup does not replace them with an empty world. Existing zero-byte files are
@@ -223,7 +223,7 @@ their exchange. The switchboard and results show the two pools separately.
 
 **MANUAL — outside NetBBS, before activating shared-crew rules:** stop all old
 War Dialer processes and create/verify a node backup with its world component.
-The first permitted launch upgrades the world to schema 3 transactionally.
+The first permitted launch upgrades the world to schema 4 transactionally.
 When upgrading from copied defenses, schema 2 conversion runs first.
 After normal overdue season settlement, it reserves one available member per
 owner, keeps holdings by descending hourly income then ID within the real crew
@@ -231,7 +231,7 @@ budget, and distributes the remaining members evenly across those holdings.
 Unstaffable holdings become unclaimed after paying income; a receipt explains
 the conversion. IDs, handles, account age, cash and Rank are retained. Review
 the receipt and use Garrison to adjust assignments. Never mix old and new game
-processes; older versions refuse schema 3. Restore the verified backup with a
+processes; older versions refuse schema 4. Restore the verified backup with a
 matching game version if the operator chooses to undo the upgrade.
 
 Schema 3 pays already-earned income at the previous rates before applying the
@@ -243,6 +243,19 @@ job and raid Rank. Capture awards reopen for every exchange at the next season.
 Tiers now start at 0/100/300/700/1,400/2,800 Rank; the score itself never decreases.
 Review receipts and standings after upgrading. Human balance playtests remain
 necessary; automated simulations do not establish that a season is enjoyable.
+
+Any committed raid attempt grants its target a 24-hour shield against every
+attacker, successful or failed. Login, reconnect, browsing and reading receipts
+never clear it. The dashboard shows remaining time and UTC expiry; Rivals and the
+raid picker show protection reasons and expiry. The 48-hour newcomer shield and
+tier +/-1 rule still apply. Rank/tier and protection are public; cash and available
+crew stay private, so raid odds and payout are explicitly uncertain. Exchange
+garrisons remain public and raid shields never protect territory.
+
+Schema 4 gives targets with an old last-attacker marker one day of recovery from
+upgrade time, since the previous format stored no raid timestamp. An offline
+receipt explains this. The same manual stop-sessions/verified-backup procedure
+above applies; repeated startup does not renew the migration shield.
 
 Free screens: `[B]Rank` shows season standings and your position; ties use account
 ID order. `[E]Map` shows all exchanges, owners, garrisons and hourly income.

@@ -29,7 +29,8 @@ def test_late_arrivals_and_absent_victim_are_real_absences():
     victim = balance.run_scenario("repeated_victim", days=4)
     assert victim["actions"]["3"] == {}
     assert victim["daily"][-1]["players"]["3"]["turns_spent"] == 0
-    assert all(victim["actions"][uid]["raid"] > 1 for uid in ("1", "2"))
+    assert sum(victim["actions"][uid].get("raid", 0) for uid in ("1", "2")) == 4
+    assert victim["rejections"]  # Alternating attackers cannot bypass the shield.
 
 
 def test_income_comparison_changes_cadence_without_changing_actions_or_pay():
