@@ -5267,7 +5267,14 @@ remains available while paging or toggling tactical details. Browsing consumes n
 combat turn or encounter randomness. Escape odds, conditional bribe payment and
 refusal retaliation, random one-unit cargo sacrifice and patrol surrender terms
 are visible before choosing an action. Existing action hotkeys work across pages;
-browsing preserves encounter RNG and resumable state.
+browsing preserves encounter RNG and resumable state. The combat action bar
+labels every verb like the other detail screens (`[F]Fire [G]Brace [E]Evade
+[D]Dump [P]Bribe ... [I]Info`) instead of a bare letter list, and Dump appears
+only with cargo aboard; with an empty hold `D` is not a displayed action and
+does nothing (issue #414). Below 40 columns the bar keeps the compact letter
+list, as the pilot record already does for its view keys: the labels wrap to
+four rows there and would leave a ten-row page a single row for the fight
+itself, and on that terminal the fight is what the caller needs to see.
 
 Every path that ends an active contract without payment records it (issue #403):
 failed escort or bounty fights and abandonment count as failed, deadline expiry
