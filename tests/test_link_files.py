@@ -344,3 +344,24 @@ def test_load_own_file_area_events_excludes_carried_areas_genesis(db, alice, nod
     materialize_carried_file_area(db, _remote_genesis(remote_node_identity))
     events = load_own_file_area_events(db, node_identity.fingerprint)
     assert events == []
+
+
+def test_a_peers_description_is_cut_to_a_locally_renderable_shape(db, remote_node_identity):
+    """Issue #463: the protocol layer bounds a descriptor's description
+    in *bytes*, which still allows thousands of lines of it. The file
+    listing renders every line, so remote text is fitted on arrival --
+    the same treatment an over-long FILE_ID.DIZ gets, since a wordy peer
+    is not a protocol violation."""
+    area_id = _carried_area(db, remote_node_identity)
+    descriptor = _remote_descriptor(
+        remote_node_identity,
+        area_id=area_id,
+        description="\n".join(f"line {i}" for i in range(500)) + "\x1b[2J",
+    )
+
+    remote_file = materialize_carried_file_descriptor(
+        db, descriptor, sender_fingerprint=remote_node_identity.fingerprint
+    )
+
+    assert len(remote_file.description.split("\n")) == 10
+    assert "\x1b" not in remote_file.description

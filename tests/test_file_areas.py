@@ -22,6 +22,7 @@ from netbbs.files import (
     get_file_area_by_name,
     list_file_areas,
     list_files_page,
+    set_file_description,
     update_file_area,
     upload_file,
     upload_file_from_temp,
@@ -584,3 +585,88 @@ def test_delete_file_area_records_an_audit_entry_before_deleting(db, alice):
     delete_file_area(db, area, deleted_by=alice)
     entries = list_actions_for_object(db, "file_area", area_id)
     assert any(e.action == "delete_file_area" for e in entries)
+
+
+# -- descriptions (issue #463) ------------------------------------------
+
+
+def test_uploader_can_describe_their_own_file(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+    assert entry.description is None
+
+    updated = set_file_description(db, entry, "Cool Game v1.0\nBy Someone", changed_by=alice)
+
+    assert updated.description == "Cool Game v1.0\nBy Someone"
+    assert get_file(db, entry.file_id).description == "Cool Game v1.0\nBy Someone"
+
+
+def test_describing_someone_elses_file_needs_edit_permission(db, alice, bob):
+    area = create_file_area(db, "docs", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+
+    with pytest.raises(FileEntryError):
+        set_file_description(db, entry, "not mine", changed_by=bob)
+
+    grant_permissions(
+        db, bob, object_type="file_area", object_id=area.id, permissions=BoardPermission.EDIT,
+        granted_by=alice,
+    )
+    assert set_file_description(db, entry, "moderated", changed_by=bob).description == "moderated"
+
+
+def test_describing_a_file_is_recorded_in_the_moderation_log(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+
+    set_file_description(db, entry, "described", changed_by=alice)
+
+    actions = list_actions_for_object(db, "file_area", area.id)
+    assert any(e.action == "describe" and e.detail == entry.file_id for e in actions)
+
+
+def test_describing_a_file_updates_the_search_index(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload", description="original text")
+
+    set_file_description(db, entry, "replacement text", changed_by=alice)
+
+    indexed = db.connection.execute(
+        "SELECT description FROM file_search WHERE file_id = ?", (entry.file_id,)
+    ).fetchone()
+    assert indexed["description"] == "replacement text"
+
+
+def test_a_blank_description_clears_it(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload", description="original")
+
+    assert set_file_description(db, entry, "   \n\n", changed_by=alice).description is None
+
+
+def test_an_over_long_description_is_refused_rather_than_truncated(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload", description="keep me")
+
+    with pytest.raises(FileEntryError):
+        set_file_description(db, entry, "\n".join(f"line {i}" for i in range(40)), changed_by=alice)
+    with pytest.raises(FileEntryError):
+        set_file_description(db, entry, "x" * 5000, changed_by=alice)
+
+    assert get_file(db, entry.file_id).description == "keep me"
+
+
+def test_an_uploaded_description_is_normalized(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload", description="a\x1b b\r\nc \n\n")
+    assert entry.description == "a b\nc"
+
+
+def test_an_over_long_upload_description_is_refused(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    with pytest.raises(FileEntryError):
+        upload_file(
+            db, area, alice, "game.zip", b"payload",
+            description="\n".join(f"line {i}" for i in range(40)),
+        )
+    assert list_files_page(db, area, alice).entries == []

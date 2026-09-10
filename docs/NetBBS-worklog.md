@@ -779,6 +779,47 @@ Incoming transfers:
 The implemented Zmodem subset is intentionally limited. Keep the limitations
 explicit rather than implying full protocol coverage.
 
+### Reading `FILE_ID.DIZ` out of an upload (issue #463)
+
+Extraction happens between the transfer and `upload_file_from_temp`, while the
+content is still at its `.incoming` path: content-addressed storage names a
+blob by hash, and the extension — which is what selects an unpacker — only
+exists on the uploader's filename.
+
+The external unpackers (`lha`, `unrar`, `7z`) parse hostile input, so the
+constraints on that path are the point, not incidental:
+
+- read the member from the tool's **stdout**; never extract to disk, which is
+  what makes a crafted `../..` member name unable to write anything;
+- argv lists, never a shell, with the member name a fixed constant rather than
+  anything derived from the upload;
+- POSIX rlimits via `netbbs.doors.launcher` (reached by path — that module
+  imports `fcntl`/`termios` at import time and is meant to be exec'd, never
+  imported);
+- bounded stdout read, per-spawn timeout, whole-attempt budget, and `SIGKILL`
+  to the process *group* plus a shielded `wait()` on every exit path;
+- output over the member cap is discarded, not truncated: a real DIZ is under
+  a kilobyte, so a larger member is not one.
+
+`.arj` deliberately has no `arj` entry — its `p` command prints a banner onto
+the same stdout the member content arrives on. Anything an installed tool
+cannot do is "no description", never a failed upload.
+
+A tool's presence on `PATH` is the SysOp's opt-in; NetBBS installs none.
+
+Descriptions are normalized at the domain boundary (control/bidi characters
+stripped, ≤10 lines, ≤ the Link `file_descriptor` byte cap) rather than only at
+render time, because the same text is also carried over Link, indexed for
+search, and printed by the local CLI. An over-long *hand-written* description
+is refused so the draft survives; an over-long *extracted* one is cut down,
+since refusing a stranger's archive over its DIZ would be absurd.
+
+Description edits are in-place and local-only. A `file_id` hashes the bytes and
+upload metadata, not the description, so amending it keeps the row valid — but
+`file_descriptor` is immutable and single-shot, so an already-signed catalogue
+entry keeps the description its peers saw. Changing that means a new event
+type, not a re-signed one.
+
 ### Local mail
 
 Local asynchronous mail is distinct from real-time `/msg` and future Link

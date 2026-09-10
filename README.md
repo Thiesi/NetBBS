@@ -602,9 +602,13 @@ banner` → `[X] edit`; see `examples/README.md` for two ready-made
 placeholder banners to drop in and try it against instead of starting
 from a blank canvas.
 
-**File transfer** uses real Zmodem — `/upload`/`/download` inside a
-file area work with any Zmodem-capable terminal (SyncTERM, `lrzsz`'s
-`rz`/`sz`, etc.), not just NetBBS-aware clients.
+**File transfer** uses real Zmodem — `[U]pload`/`[1-9]` (or
+`/upload`/`/download <name>`) inside a file area work with any
+Zmodem-capable terminal (SyncTERM, `lrzsz`'s `rz`/`sz`, etc.), not just
+NetBBS-aware clients. Upload an archive with
+a `FILE_ID.DIZ` inside and its description fills itself in, the way it
+did in 1994; `[E]` on the listing writes one by hand for everything
+else.
 
 ## Trying NetBBS Link: a two-node quickstart
 

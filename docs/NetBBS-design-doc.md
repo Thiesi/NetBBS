@@ -938,6 +938,37 @@ File bytes are node-local. NetBBS Link will distribute catalogue/descriptor
 information and fetch content on demand in bounded resumable chunks. It will
 not replicate every file to every node.
 
+Every file carries an optional description, and the two ways one is written
+are deliberate (issue #463).
+
+An uploaded archive is read for a `FILE_ID.DIZ` member, the BBS-era convention
+where the archive's own author, not its uploader, supplies the catalogue text;
+finding one fills the description in with no further interaction. ZIP is read
+in-process and recognised by content rather than by the uploader's chosen
+extension. Legacy formats (`.lzh`/`.lha`/`.arj`/`.rar`/`.7z`) are read through
+whichever external unpacker the SysOp has installed, and installing one *is*
+the opt-in — NetBBS never installs an unpacker, and a node without them simply
+gets no description from those formats. Because every such tool parses hostile
+input, extraction reads the member from the tool's stdout and never writes to
+disk, passes argv lists with a fixed member name and no shell, applies POSIX
+CPU/memory/process rlimits, bounds the read and the wall clock, and kills and
+reaps on every exit path. No archive, no DIZ, no unpacker, or a corrupt member
+are all "no description", never a failed upload.
+
+A description may also be written by hand, from the file listing, by the
+uploader themselves or by anyone holding `EDIT` on the area. Hand-written
+edits are local-only: a `file_descriptor` (§11.2) is immutable and single-shot,
+so a file whose descriptor has already been signed keeps the description its
+peers were told about, and a description edited before that keeps propagating
+normally.
+
+Either way a description is stored already normalized — control and bidi
+characters stripped, at most 10 lines (the DIZ format's own limit, and what
+keeps a listing page bounded), and within the same byte ceiling §11.2's
+`file_descriptor` accepts, so a locally valid description is always one Link
+can carry. The area listing renders every line of it, because a DIZ's line
+layout is content.
+
 ### 6.3 Real-time chat
 
 Local chat is typed event traffic, not preformatted strings. Initial event types

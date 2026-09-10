@@ -49,6 +49,10 @@ for, not a structural requirement the way the picker case was.
 
 from __future__ import annotations
 
+import logging
+from dataclasses import replace
+from pathlib import Path
+
 from netbbs.activity import record_file_area_seen
 from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
 from netbbs.auth.users import User, get_user_by_id
@@ -62,11 +66,15 @@ from netbbs.communities import (
 from netbbs.config import get_max_upload_bytes
 from netbbs.files import (
     FileArea,
+    FileEntry,
+    FileEntryError,
     FileEntryPage,
     download_file,
     get_file_by_name,
     list_file_areas,
     list_files_page,
+    list_pending_files,
+    set_file_description,
     upload_file_from_temp,
 )
 from netbbs.files.categories import (
@@ -75,6 +83,7 @@ from netbbs.files.categories import (
     list_subcategories,
     list_top_level_categories,
 )
+from netbbs.files.diz import MAX_DESCRIPTION_BYTES, MAX_DESCRIPTION_LINES, read_archive_description
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_profiles import (
@@ -85,12 +94,17 @@ from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.color_depth_preference import effective_truecolor
+from netbbs.net.composition import edit_line_body
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.draft_storage import drafts_directory, save_draft
+from netbbs.net.editor_preference import fullscreen_editor_enabled
 from netbbs.net.file_area_banner import load_file_area_banner
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.picker import pick_item
+from netbbs.net.prose_editor import edit_prose
 from netbbs.net.session import Session
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
+from netbbs.moderation import BoardPermission, has_permission
 from netbbs.permissions import meets_level
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.redraw_preference import redraw_in_place_enabled
@@ -121,6 +135,9 @@ from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, resolve_display_preferences
+
+
+_logger = logging.getLogger(__name__)
 
 
 def _menu_row(entries: list[MenuEntry], *, width: int, height: int, description_level: str) -> str:
@@ -420,6 +437,7 @@ async def _render_area_page(
     *,
     can_write: bool,
     name_requirement: str | None,
+    can_describe: bool = False,
     show_remote_hint: bool = False,
     description_level: str = "off",
     redraw_in_place: bool = False,
@@ -454,7 +472,9 @@ async def _render_area_page(
     else:
         hints = [MenuEntry(label=menu_key("/download <filename>", " — receive via Zmodem"))]
     if can_write:
-        hints.append(MenuEntry(label=menu_key("/upload", " — send via Zmodem")))
+        hints.append(MenuEntry(label=menu_key("U", "pload"), brief="Send a file via Zmodem"))
+    if can_describe:
+        hints.append(MenuEntry(label=menu_key("E", "dit description"), brief="Describe the highlighted file"))
     if show_remote_hint:
         hints.append(MenuEntry(label=menu_key("/remote", " — browse/fetch this file area's remote catalogue")))
     await session.write_line(
@@ -472,9 +492,24 @@ async def _read_file_choice(
     Returns:
       ('nav', action, None) - navigation command ('b', 'o', 'n', 'r')
       ('download', filename, None) - direct file download
+      ('upload', None, highlighted) - start a Zmodem upload
+      ('describe', None, highlighted) - edit a description (issue #463)
       ('highlight', None, new_index) - arrow key highlight change
       ('command', full_cmd, None) - multi-character command line
       ('none', None, highlighted) - no-op / rejected key
+
+    `e` and `u` join `b`/`o`/`n`/`r` as immediate single keystrokes
+    rather than `/describe` and `/upload` command lines. `e` acts on
+    whatever the cursor is already on, which is the whole point of
+    having a cursor; `u` never took an argument in the first place.
+    Nothing typed on this screen starts with either letter.
+
+    `u` was a slash command for no reason anyone recorded: this screen
+    read whole lines before it grew editor-key support (issue #184's
+    numbered download shortcuts), and when that arrived only navigation
+    and download were given keys. The slash forms still work — both
+    here, through the `read_line()` fallback below for a transport with
+    no editor-key support, and as typed commands in `_show_area`.
     """
     await session.write("Choice or command: ")
 
@@ -526,6 +561,12 @@ async def _read_file_choice(
                 if char.lower() in ("b", "o", "n", "r"):
                     await session.write_line(char)
                     return ("nav", char.lower(), None)
+                if char.lower() == "e":
+                    await session.write_line(char)
+                    return ("describe", None, highlighted)
+                if char.lower() == "u":
+                    await session.write_line(char)
+                    return ("upload", None, highlighted)
                 await session.write(char)
                 rest = await session.read_line()
                 return ("command", (char + rest).strip(), highlighted)
@@ -577,6 +618,13 @@ async def _show_area(
     what can be referenced by a name the user already knows (from an
     earlier page, or from outside this session entirely).
 
+    `[E]` (issue #463) edits the highlighted file's description in the
+    caller's own editor, and `/describe <file>` names one the same way
+    `/download` does. Offered only when this caller could actually use
+    it on something on screen — their own upload, or any file if they
+    hold `BoardPermission.EDIT` on the area — since a hotkey that is
+    always refused is worse than one that isn't there.
+
     `link_context` (design doc, issue #92), if given *and this specific
     area is actually Linked* (`is_area_linked` — Link being enabled
     node-wide is not enough, the same distinction `netbbs.net.admin_flow`'s
@@ -595,7 +643,7 @@ async def _show_area(
     """
     area_name = sanitize_text(area.name)
 
-    def _load(db: Database) -> tuple[FileEntryPage, str | None, bool, bool, str, bool, bool, bool, bool]:
+    def _load(db: Database) -> tuple[FileEntryPage, str | None, bool, bool, str, bool, bool, bool, bool, bool]:
         # Bundled into one lane call: the page, the effective
         # name_requirement, the can_write gate, whether this area is
         # actually Linked, and the menu-description preference all come
@@ -616,11 +664,25 @@ async def _show_area(
             menu_description_level(db, user), redraw_in_place_enabled(db, user),
             unicode_style_enabled(db, user), breadcrumb_collapsed_enabled(db, user),
             effective_truecolor(session, db, user),
+            # Whether this caller could edit *any* file's description
+            # here (issue #463) -- the per-file "or it's your own
+            # upload" half is a pure comparison against the page in
+            # hand, so only the permission lookup needs the database.
+            has_permission(
+                db, user, object_type="file_area", object_id=area.id, permission=BoardPermission.EDIT
+            ),
         )
 
-    page, effective_name_requirement, can_write, area_linked, description_level, redraw_in_place, unicode_style, collapsed, truecolor = (
-        await lane.run(_load)
-    )
+    (
+        page, effective_name_requirement, can_write, area_linked, description_level, redraw_in_place,
+        unicode_style, collapsed, truecolor, can_edit_any_file,
+    ) = await lane.run(_load)
+
+    def _can_describe(current_page: FileEntryPage) -> bool:
+        """`[E]dit description` is only offered when this caller could
+        actually use it on something currently on screen -- a moderator
+        holding EDIT, or an uploader looking at their own upload."""
+        return can_edit_any_file or any(entry.uploader_user_id == user.id for entry in current_page.entries)
 
     show_remote_hint = link_context is not None and area_linked
 
@@ -630,6 +692,7 @@ async def _show_area(
         whatever is now newest on screen."""
         await _render_area_page(
             session, lane, area_name, current_page, can_write=can_write, name_requirement=effective_name_requirement,
+            can_describe=_can_describe(current_page),
             show_remote_hint=show_remote_hint, description_level=description_level, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
         )
@@ -666,6 +729,22 @@ async def _show_area(
                 if target is not None:
                     await _handle_download(session, lane, area, target, user)
                     return
+            elif kind == "upload":
+                if not can_write:
+                    await session.write("\a")
+                    continue
+                await _handle_upload(session, lane, area, user)
+                return
+            elif kind == "describe":
+                if not _can_describe(page):
+                    await session.write("\a")
+                    continue
+                page = await _handle_describe(
+                    session, lane, area, user, page,
+                    highlighted=highlighted, target=None, can_edit_any_file=can_edit_any_file,
+                )
+                await _render_and_advance_cursor(page, highlighted=highlighted)
+                continue
             elif kind == "nav":
                 if target == "b":
                     break
@@ -712,9 +791,30 @@ async def _show_area(
                     page = await lane.run(list_files_page, area, user)
                     highlighted = None
                     await _render_and_advance_cursor(page, highlighted=highlighted)
-                elif choice.lower() == "/upload" and can_write:
+                elif choice.lower() in ("u", "/upload") and can_write:
                     await _handle_upload(session, lane, area, user)
                     return
+                elif choice.lower().startswith("/describe ") or (
+                    choice.lower() in ("e", "/describe") and _can_describe(page)
+                ):
+                    # The read_line() path (a transport without
+                    # editor-key support) and an explicit
+                    # "/describe <file>" both land here; the immediate
+                    # `e` keystroke is handled as its own kind above.
+                    #
+                    # Only the no-argument forms are gated on the page
+                    # (Codex review): `_can_describe` answers "is this
+                    # hotkey worth offering for what is on screen",
+                    # which is the wrong question for a filename the
+                    # caller typed -- that file may be their own
+                    # upload on some other page, and its real answer
+                    # comes from the domain either way.
+                    argument = choice.split(maxsplit=1)[1].strip() if " " in choice else None
+                    page = await _handle_describe(
+                        session, lane, area, user, page,
+                        highlighted=highlighted, target=argument, can_edit_any_file=can_edit_any_file,
+                    )
+                    await _render_and_advance_cursor(page, highlighted=highlighted)
                 elif choice.lower() == "/remote" and show_remote_hint:
                     await _browse_remote_files(session, lane, area, user, link_context)
                     return
@@ -763,9 +863,21 @@ async def _show_area(
     if not can_write and not show_remote_hint:
         return
 
+    # This screen has no listing to act on, so [E] resolves its target
+    # from what the caller has waiting instead (Codex review): a
+    # moderated area holding only their own pending upload renders
+    # empty, since `list_files_page` shows nothing unapproved -- and
+    # that upload is exactly the one they are most likely to want to
+    # describe while it waits.
+    describable = await lane.run(list_pending_files, area, requesting_user=user) if can_write else []
+
     hints = []
     if can_write:
-        hints.append(MenuEntry(label=menu_key("/upload", " — send via Zmodem")))
+        hints.append(MenuEntry(label=menu_key("U", "pload"), brief="Send a file via Zmodem"))
+    if describable:
+        hints.append(
+            MenuEntry(label=menu_key("E", "dit description"), brief="Describe an upload awaiting approval")
+        )
     if show_remote_hint:
         hints.append(MenuEntry(label=menu_key("/remote", " — browse/fetch this file area's remote catalogue")))
     await session.write_line(
@@ -776,8 +888,21 @@ async def _show_area(
 
     if not command:
         return
-    elif command.lower() == "/upload" and can_write:
+    elif command.lower() in ("u", "/upload") and can_write:
         await _handle_upload(session, lane, area, user)
+    elif (command.lower().startswith("/describe ") and can_write) or (
+        command.lower() in ("e", "/describe") and describable
+    ):
+        # A named file is looked up area-wide; the bare key picks from
+        # what is waiting, through the same single-entry/picker logic
+        # the listing screen uses.
+        named = command.split(maxsplit=1)[1].strip() if " " in command else None
+        await _handle_describe(
+            session, lane, area, user,
+            FileEntryPage(entries=[] if named else describable, has_older=False, has_newer=False),
+            highlighted=None, target=named,
+            can_edit_any_file=can_edit_any_file,
+        )
     elif command.lower() == "/remote" and show_remote_hint:
         await _browse_remote_files(session, lane, area, user, link_context)
     else:
@@ -1105,8 +1230,237 @@ async def _render_file_page(
 
         row_cells = [idx_cell, name_cell, size_cell, date_cell, uploader_cell]
         await session.write_line(" ".join(row_cells))
-        if entry.description:
-            await session.write_line(f"      {colored(sanitize_text(entry.description), fg_color=MUTED_COLOR)}")
+        # Every line, not just the first (issue #463): a description
+        # read out of an archive's FILE_ID.DIZ is up to ten lines of
+        # deliberate layout, and collapsing it into one would throw
+        # away the thing the convention exists to carry. Capped here as
+        # well as at every write path -- a row stored before those
+        # existed (a peer's catalogue entry, a dev script) must not be
+        # able to decide how tall this page is. A blank line inside a
+        # DIZ is written empty rather than as an indent of trailing
+        # spaces.
+        for line in (entry.description or "").splitlines()[:MAX_DESCRIPTION_LINES]:
+            if not line.strip():
+                await session.write_line("")
+                continue
+            await session.write_line(f"      {colored(sanitize_text(line), fg_color=MUTED_COLOR)}")
+
+
+def _description_draft_path(db: Database, entry: FileEntry, user: User) -> Path:
+    """One stable per-(file, caller) draft slot, colocated with every
+    other in-progress composition (`netbbs.net.draft_storage`) — the
+    file-description counterpart of `netbbs.net.board_flow.
+    _post_draft_path`.
+
+    Keyed on the content-addressed `file_id`, not the row id (Codex
+    review): drafts outlive the editor that made them, are not deleted
+    when their file is, and `files.id` is a plain SQLite rowid a later
+    upload can reuse -- which would offer one upload's abandoned draft
+    to whoever next describes a different one. Sixteen hex characters
+    is plenty to keep those apart and keeps the filename readable."""
+    return drafts_directory(db) / f"filedesc_{entry.file_id[:16]}_{user.id}.draft"
+
+
+async def _compose_description(
+    session: Session, lane: DatabaseLane, user: User, entry: FileEntry, *, initial_text: str | None
+) -> str | None:
+    """
+    Enter (or amend) one file's description, in whichever editor this
+    caller has opted into — mirrors `netbbs.net.board_flow._compose_
+    body`'s dispatch deliberately rather than sharing it: the two have
+    genuinely different ceilings (a description is bounded by what a
+    listing row and a Link `file_descriptor` can carry, a post body
+    isn't), and `netbbs.net.composition`'s own docstring keeps that
+    module free of the database lookup the preference needs.
+
+    `None` means "leave the description as it is" — an explicit
+    `/cancel`, a fullscreen quit-without-saving, or a
+    `/exit`-keeps-the-draft.
+
+    One asymmetry worth knowing rather than hiding: the plain line
+    editor refuses to finish on an empty body, so *removing* a
+    description outright is only reachable from the fullscreen editor
+    (save an empty buffer). Replacing a wrong description with a right
+    one works in both, which is the case that actually comes up.
+    """
+    draft_path = await lane.run(_description_draft_path, entry, user)
+    if await lane.run(fullscreen_editor_enabled, user):
+        return await edit_prose(
+            session, initial_text=initial_text, draft_path=draft_path,
+            max_bytes=MAX_DESCRIPTION_BYTES, unicode_style=await lane.run(unicode_style_enabled, user),
+        )
+    return await edit_line_body(
+        session, initial_text=initial_text, max_bytes=MAX_DESCRIPTION_BYTES,
+        max_lines=MAX_DESCRIPTION_LINES, draft_path=draft_path,
+    )
+
+
+async def _handle_describe(
+    session: Session,
+    lane: DatabaseLane,
+    area: FileArea,
+    user: User,
+    page: FileEntryPage,
+    *,
+    highlighted: int | None,
+    target: str | None,
+    can_edit_any_file: bool,
+) -> FileEntryPage:
+    """
+    Edit one file's description (issue #463) and hand back the page to
+    keep rendering — the same page object with the amended entry
+    swapped in, never a re-query: this screen's keyset cursor is
+    positional (`netbbs.files.entries.list_files_page`), and re-fetching
+    "the current page" after an in-place edit would silently move the
+    caller somewhere else.
+
+    Which file: whatever `target` names (a number on this page or a
+    filename anywhere in the area, matching `/download`'s own
+    resolution), else the cursor-highlighted entry, else the only entry
+    on the page, else whichever one `pick_item` returns. The permission
+    answer comes from the domain (`set_file_description`); the check
+    here only decides whether to open an editor at all, so nobody types
+    out a description that was never going to be saved.
+    """
+    entry: FileEntry | None = None
+    if target is None and highlighted is not None and 0 <= highlighted < len(page.entries):
+        entry = page.entries[highlighted]
+    elif target is None and len(page.entries) == 1:
+        entry = page.entries[0]
+    elif target is None:
+        # A picker, not a "which one?" prompt in front of the editor
+        # (design doc §3.5, Codex review): `[E]` with nothing under the
+        # cursor still has to find out which file it means, and the way
+        # this codebase asks that question is `pick_item` -- backing out
+        # of it changes nothing, exactly like backing out of the editor
+        # behind it.
+        entry = await pick_item(
+            session, page.entries,
+            name_of=lambda file_entry: sanitize_text(file_entry.filename),
+            stable_id_of=lambda file_entry: file_entry.id,
+            description_of=lambda file_entry: (file_entry.description or "").splitlines()[0]
+            if file_entry.description else "(no description yet)",
+            title=f"Describe a file in {sanitize_text(area.name)}",
+            empty_message="No files to describe.",
+            redraw_in_place=await lane.run(redraw_in_place_enabled, user),
+            unicode_style=await lane.run(unicode_style_enabled, user),
+            collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=await lane.run(effective_header_color_256),
+        )
+        if entry is None:
+            return page
+    else:
+        if target.isdigit() and 1 <= int(target) <= len(page.entries):
+            exact = next((e for e in page.entries if e.filename == target), None)
+            entry = exact if exact is not None else page.entries[int(target) - 1]
+        else:
+            entry = await lane.run(get_file_by_name, area, target, requesting_user=user)
+    if entry is None:
+        await session.write_line(
+            colored(f"\r\nNo file named {sanitize_text(target or '')!r} in this file area.", fg_color=ERROR_COLOR)
+        )
+        return page
+
+    # A typed filename bypasses the on-screen gate above, so this is
+    # where a caller who named someone else's file is told so.
+    if not can_edit_any_file and entry.uploader_user_id != user.id:
+        await session.write_line(
+            colored(
+                f"\r\n{sanitize_text(entry.filename)!r} was uploaded by someone else — only its "
+                "uploader or a moderator of this area can describe it.",
+                fg_color=ERROR_COLOR,
+            )
+        )
+        return page
+
+    heading = screen_title(
+        "Describe",
+        breadcrumb=(session.node_display_name, "Files", sanitize_text(area.name)),
+        subtitle=sanitize_text(entry.filename),
+        width=session.terminal_width,
+        clear=await lane.run(redraw_in_place_enabled, user),
+        unicode_style=await lane.run(unicode_style_enabled, user),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
+        header_color=await lane.run(effective_header_color_256),
+        node_name_gradient=session.node_name_gradient,
+    )
+    await session.write_line(f"\r\n{heading}")
+    await session.write_line(
+        colored(
+            f"Up to {MAX_DESCRIPTION_LINES} lines, shown under this file in the area listing.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+
+    text = await _compose_description(session, lane, user, entry, initial_text=entry.description)
+    if text is None:
+        # Both editors return `None` for "cancelled" and for "leaving,
+        # keep what I typed", and only the draft file on disk tells
+        # them apart (issue #149's own contract) -- so say which one
+        # happened rather than reporting a cancel over a draft the
+        # caller expects to find again (Codex review).
+        kept = await lane.run(_description_draft_path, entry, user)
+        if kept.exists():
+            await session.write_line(
+                colored(
+                    "\r\nDraft kept — press [E] on this file again to pick it up.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
+        else:
+            await session.write_line(colored("\r\nDescription unchanged.", fg_color=MUTED_COLOR))
+        return page
+
+    try:
+        updated = await lane.run(set_file_description, entry, text, changed_by=user)
+    except FileEntryError as exc:
+        # A rejected save must never be a lost draft (design doc §3.5,
+        # issue #282's own lesson) -- so the text goes back to disk
+        # *before* anything is awaited (Codex review): the editor
+        # deleted its own draft on the way out believing the save would
+        # take, and until this write it exists only in memory.
+        #
+        # Reported and returned rather than looped straight back into
+        # the editor: reopening over a draft that now exists would make
+        # the editor's own recovery prompt ask about text the caller
+        # just typed, and a question they did not ask for is exactly
+        # what §3.5 is about. One keystroke picks it up again, and they
+        # are told which one.
+        def _persist(db: Database) -> bool:
+            # `save_draft` logs and swallows an unwritable drafts
+            # directory, so its return says nothing (Codex review) --
+            # and promising a caller their text is safe when it isn't
+            # is the one outcome worse than losing it silently.
+            path = _description_draft_path(db, entry, user)
+            save_draft(path, text)
+            return path.exists()
+
+        kept = await lane.run(_persist)
+        await session.write_line(colored(f"\r\nNot saved: {exc}", fg_color=ERROR_COLOR))
+        if kept:
+            await session.write_line(
+                colored(
+                    "Your text is kept as a draft — press [E] on this file again to fix it.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
+        else:
+            await session.write_line(
+                colored(
+                    "This node could not keep a draft of it either — copy your text before "
+                    "leaving this screen.",
+                    fg_color=ERROR_COLOR,
+                )
+            )
+        return page
+
+    await session.write_line(
+        colored(f"\r\nDescription saved for {sanitize_text(entry.filename)!r}.", fg_color=SUCCESS_COLOR)
+    )
+    return replace(
+        page, entries=[updated if e.file_id == updated.file_id else e for e in page.entries]
+    )
 
 
 async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, user: User) -> None:
@@ -1119,6 +1473,15 @@ async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, u
     storage (or discards it, if this exact content is already stored)
     without ever holding the full content in memory in this module
     either.
+
+    Between those two steps the upload is offered to
+    `netbbs.files.diz.read_archive_description` (issue #463): if it is
+    an archive carrying a `FILE_ID.DIZ`, that text becomes the file's
+    description, the BBS convention where the archive's own author
+    writes the catalogue entry. Anything else — not an archive, no DIZ,
+    no unpacker installed for that format, a corrupt member — is
+    reported as "no description yet" and pointed at `[E]`, never as a
+    failed upload.
     """
     heading = screen_title(
         "Upload",
@@ -1136,9 +1499,34 @@ async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, u
     max_upload_bytes = await lane.run(get_max_upload_bytes)
     try:
         received = await zmodem.receive_file(session, max_bytes=max_upload_bytes, dest_path=temp_path)
+        # Read while the content is still at `temp_path` (issue #463):
+        # `upload_file_from_temp` moves it into content-addressed
+        # storage under a name with no extension, and the extension is
+        # what picks an unpacker. Never fails an upload -- see
+        # `read_archive_description`.
+        #
+        # Its own cleanup, though: between a finished transfer and the
+        # move into storage, this is the only code that owns the
+        # staging file, and a caller who drops the line mid-extraction
+        # would otherwise leave it for the next startup sweep to find
+        # (Codex review). `receive_file`'s cleanup covers only failures
+        # of its own.
+        try:
+            description = await read_archive_description(temp_path, received.filename)
+        except BaseException:
+            # Cleanup never masks what actually went wrong (Codex
+            # review) -- a failed unlink here (Windows holding the file
+            # open behind a cancelled worker, say) must not replace a
+            # session cancellation with an OSError about a temp file.
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                _logger.warning("could not remove staging file %s: %s", temp_path, cleanup_error)
+            raise
         entry = await lane.run(
             upload_file_from_temp, area, user, received.filename,
             temp_path=temp_path, sha256=received.sha256, size_bytes=received.size_bytes,
+            description=description,
         )
     except (zmodem.ZmodemError, NotImplementedError) as exc:
         # NotImplementedError: some transports (netbbs.net.web) can't
@@ -1156,6 +1544,22 @@ async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, u
             fg_color=SUCCESS_COLOR,
         )
     )
+    if entry.description:
+        await session.write_line(colored("Description read from FILE_ID.DIZ:", fg_color=MUTED_COLOR))
+        for line in entry.description.splitlines():
+            await session.write_line(f"  {colored(sanitize_text(line), fg_color=MUTED_COLOR)}")
+    else:
+        # Deliberately not "there is no FILE_ID.DIZ in it" (Codex
+        # review): the same `None` covers an archive whose format has
+        # no unpacker installed here, one this node couldn't read, and
+        # a plain file that was never an archive. Say what is true --
+        # nothing was read — and offer the way to fix it.
+        await session.write_line(
+            colored(
+                "No description was read from it — press [E] on the listing to write one.",
+                fg_color=MUTED_COLOR,
+            )
+        )
 
 
 async def _handle_download(session: Session, lane: DatabaseLane, area: FileArea, filename: str, user: User) -> None:

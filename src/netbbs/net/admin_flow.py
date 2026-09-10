@@ -159,6 +159,7 @@ from netbbs.files.categories import delete_category as delete_file_category
 from netbbs.files.categories import get_category_by_id as get_file_area_category_by_id
 from netbbs.files.categories import list_subcategories as list_file_subcategories
 from netbbs.files.categories import list_top_level_categories as list_top_level_file_categories
+from netbbs.files.diz import MAX_DESCRIPTION_LINES
 from netbbs.files.gc import GCReport, reclaim_orphaned_blobs
 from netbbs.files.entries import (
     FileEntry,
@@ -12814,8 +12815,12 @@ async def _draw_file_action(
     )
     await session.write_line(status_line)
     await session.write_line(f"By: {sanitize_text(entry.uploader_label)}")
-    if entry.description:
-        await session.write_line(sanitize_text(entry.description))
+    # Line by line (issue #463): a description may be a FILE_ID.DIZ
+    # block now, and running its ten lines together into one is exactly
+    # what a moderator deciding whether to approve the upload should not
+    # be shown. Same cap the file listing applies, for the same reason.
+    for description_line in (entry.description or "").splitlines()[:MAX_DESCRIPTION_LINES]:
+        await session.write_line(sanitize_text(description_line))
     await session.write_line(f"Size: {entry.size_bytes} bytes")
     options = _menu_row(
         [
