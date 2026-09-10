@@ -2248,7 +2248,7 @@ class MrcBridge:
                 await self._deliver_to_caller(
                     username,
                     MrcNotice(
-                        f"(private lines from {packet.from_user}@{packet.from_site} arrived faster than can be shown -- some were dropped)",
+                        f"(private lines from {protocol.display_handle(packet.from_user)}@{packet.from_site} arrived faster than can be shown -- some were dropped)",
                         utc_now_iso(), kind="private",
                     ),
                     priority=True,

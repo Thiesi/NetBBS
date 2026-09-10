@@ -77,8 +77,9 @@ screen shows the round trip to the hub, measured from each keepalive.
 Hub notices (`NOTIFY`) now reach every bridged channel instead of being
 dropped. The network-size line gains the hub's own activity level. MRC
 handles are shown with underscores as spaces, as the specification asks.
-Typing `!identify`, `!register`, `!update` or `!roompass` as chat in a
-bridged channel is refused, because the hub is moving those to chat-text
-helpers and the password would otherwise leave as room text; the `/mrc`
+Typing `!identify`, `!register`, `!update` or `!roompass` as chat is
+refused in every channel while the node has an MRC bridge, because the hub
+is moving those to chat-text helpers and the password would otherwise be
+recorded as chat and relayed as soon as the channel is bridged; the `/mrc`
 forms ask for it without echo. A new Profile switch, on by default, lets a
 caller stop the hub from answering `LASTSEEN` questions about their handle.

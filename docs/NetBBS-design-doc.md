@@ -6307,10 +6307,14 @@ control-context verbs, read on 2026-09-09:
   size; handles are displayed with underscores as spaces, as the spec
   asks, while matching and addressing keep the wire spelling.
 - The hub is moving its identity verbs to `!helper` chat text. Typed
-  in a bridged channel, `!identify secret` would leave as room chat, so
-  those four helpers are refused as chat with a pointer to the masked
-  `/mrc` forms. Nothing else typed with a `!` is touched: the hub's
-  own helpers (`!time`, `!weather`) are ordinary chat.
+  as chat, `!identify secret` would be recorded in scrollback and,
+  the moment the channel is bridged, relayed to the room, so those
+  four helpers are refused as chat in every channel while the node
+  has an MRC bridge -- a paused mapping or a local channel is no
+  safer a place for a password -- with a pointer to the masked `/mrc`
+  forms, and the line is dropped from the input history. Nothing else
+  typed with a `!` is touched: the hub's own helpers (`!time`,
+  `!weather`) are ordinary chat.
 - `STATUS LASTSEEN OFF` is a caller's choice on the Profile (on by
   default, the hub's default), sent on every announcement like the
   away state.
