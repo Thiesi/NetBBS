@@ -267,7 +267,7 @@ def test_min_age_gate_hides_the_upload_hint_when_unmet(tmp_path):
 
     asyncio.run(_show_area(session, lane, area, alice))
 
-    assert "/upload" not in session.output
+    assert "[U]pload" not in session.visible_output
     lane.close()
     db.close()
 
@@ -288,7 +288,7 @@ def test_min_age_gate_allows_upload_hint_once_met(tmp_path):
 
     asyncio.run(_show_area(session, lane, area, alice))
 
-    assert "/upload" in session.output
+    assert "[U]pload" in session.visible_output
     lane.close()
     db.close()
 
@@ -304,7 +304,7 @@ def test_name_requirement_hides_the_upload_hint_when_unmet(tmp_path):
 
     asyncio.run(_show_area(session, lane, area, alice))
 
-    assert "/upload" not in session.output
+    assert "[U]pload" not in session.visible_output
     lane.close()
     db.close()
 

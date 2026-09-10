@@ -98,6 +98,11 @@ def upload_file(
     resolved, and `list_pending_files` for the moderation queue view.
     """
     require_level(uploader, area.min_write_level)
+    # Before the bytes are stored, not after (Codex review): a
+    # description this node will refuse should never leave a blob in
+    # content-addressed storage with no row referencing it, waiting for
+    # `netbbs.files.gc` to notice.
+    description = validate_description(description)
     sha256, path = store_bytes(db, data)
     return _finalize_upload(
         db, area, uploader, filename,
@@ -133,6 +138,12 @@ def upload_file_from_temp(
     """
     try:
         require_level(uploader, area.min_write_level)
+        # Validated before the move, for the same reason `upload_file`
+        # validates before storing (Codex review) -- and here a refusal
+        # after the move would strand the staging file's content in
+        # storage while this function's own cleanup only ever removes
+        # the *staging* path.
+        description = validate_description(description)
         storage_path = move_temp_file_into_storage(db, temp_path, sha256)
     except Exception:
         temp_path.unlink(missing_ok=True)

@@ -73,6 +73,7 @@ from netbbs.files import (
     get_file_by_name,
     list_file_areas,
     list_files_page,
+    list_pending_files,
     set_file_description,
     upload_file_from_temp,
 )
@@ -471,7 +472,7 @@ async def _render_area_page(
     else:
         hints = [MenuEntry(label=menu_key("/download <filename>", " — receive via Zmodem"))]
     if can_write:
-        hints.append(MenuEntry(label=menu_key("/upload", " — send via Zmodem")))
+        hints.append(MenuEntry(label=menu_key("U", "pload"), brief="Send a file via Zmodem"))
     if can_describe:
         hints.append(MenuEntry(label=menu_key("E", "dit description"), brief="Describe the highlighted file"))
     if show_remote_hint:
@@ -491,18 +492,24 @@ async def _read_file_choice(
     Returns:
       ('nav', action, None) - navigation command ('b', 'o', 'n', 'r')
       ('download', filename, None) - direct file download
+      ('upload', None, highlighted) - start a Zmodem upload
       ('describe', None, highlighted) - edit a description (issue #463)
       ('highlight', None, new_index) - arrow key highlight change
       ('command', full_cmd, None) - multi-character command line
       ('none', None, highlighted) - no-op / rejected key
 
-    `e` joins `b`/`o`/`n`/`r` as an immediate single keystroke rather
-    than a `/describe` command line: it acts on whatever the cursor is
-    already on, which is the whole point of having a cursor, and no
-    typed command on this screen starts with `e`. The `read_line()`
-    fallback path below (a transport with no editor-key support) still
-    reaches it as an ordinary one-character command, handled by
-    `_show_area`.
+    `e` and `u` join `b`/`o`/`n`/`r` as immediate single keystrokes
+    rather than `/describe` and `/upload` command lines. `e` acts on
+    whatever the cursor is already on, which is the whole point of
+    having a cursor; `u` never took an argument in the first place.
+    Nothing typed on this screen starts with either letter.
+
+    `u` was a slash command for no reason anyone recorded: this screen
+    read whole lines before it grew editor-key support (issue #184's
+    numbered download shortcuts), and when that arrived only navigation
+    and download were given keys. The slash forms still work — both
+    here, through the `read_line()` fallback below for a transport with
+    no editor-key support, and as typed commands in `_show_area`.
     """
     await session.write("Choice or command: ")
 
@@ -557,6 +564,9 @@ async def _read_file_choice(
                 if char.lower() == "e":
                     await session.write_line(char)
                     return ("describe", None, highlighted)
+                if char.lower() == "u":
+                    await session.write_line(char)
+                    return ("upload", None, highlighted)
                 await session.write(char)
                 rest = await session.read_line()
                 return ("command", (char + rest).strip(), highlighted)
@@ -719,6 +729,12 @@ async def _show_area(
                 if target is not None:
                     await _handle_download(session, lane, area, target, user)
                     return
+            elif kind == "upload":
+                if not can_write:
+                    await session.write("\a")
+                    continue
+                await _handle_upload(session, lane, area, user)
+                return
             elif kind == "describe":
                 if not _can_describe(page):
                     await session.write("\a")
@@ -775,7 +791,7 @@ async def _show_area(
                     page = await lane.run(list_files_page, area, user)
                     highlighted = None
                     await _render_and_advance_cursor(page, highlighted=highlighted)
-                elif choice.lower() == "/upload" and can_write:
+                elif choice.lower() in ("u", "/upload") and can_write:
                     await _handle_upload(session, lane, area, user)
                     return
                 elif choice.lower().startswith("/describe ") or (
@@ -847,9 +863,21 @@ async def _show_area(
     if not can_write and not show_remote_hint:
         return
 
+    # This screen has no listing to act on, so [E] resolves its target
+    # from what the caller has waiting instead (Codex review): a
+    # moderated area holding only their own pending upload renders
+    # empty, since `list_files_page` shows nothing unapproved -- and
+    # that upload is exactly the one they are most likely to want to
+    # describe while it waits.
+    describable = await lane.run(list_pending_files, area, requesting_user=user) if can_write else []
+
     hints = []
     if can_write:
-        hints.append(MenuEntry(label=menu_key("/upload", " — send via Zmodem")))
+        hints.append(MenuEntry(label=menu_key("U", "pload"), brief="Send a file via Zmodem"))
+    if describable:
+        hints.append(
+            MenuEntry(label=menu_key("E", "dit description"), brief="Describe an upload awaiting approval")
+        )
     if show_remote_hint:
         hints.append(MenuEntry(label=menu_key("/remote", " — browse/fetch this file area's remote catalogue")))
     await session.write_line(
@@ -860,8 +888,21 @@ async def _show_area(
 
     if not command:
         return
-    elif command.lower() == "/upload" and can_write:
+    elif command.lower() in ("u", "/upload") and can_write:
         await _handle_upload(session, lane, area, user)
+    elif (command.lower().startswith("/describe ") and can_write) or (
+        command.lower() in ("e", "/describe") and describable
+    ):
+        # A named file is looked up area-wide; the bare key picks from
+        # what is waiting, through the same single-entry/picker logic
+        # the listing screen uses.
+        named = command.split(maxsplit=1)[1].strip() if " " in command else None
+        await _handle_describe(
+            session, lane, area, user,
+            FileEntryPage(entries=[] if named else describable, has_older=False, has_newer=False),
+            highlighted=None, target=named,
+            can_edit_any_file=can_edit_any_file,
+        )
     elif command.lower() == "/remote" and show_remote_hint:
         await _browse_remote_files(session, lane, area, user, link_context)
     else:
@@ -1386,14 +1427,32 @@ async def _handle_describe(
         # just typed, and a question they did not ask for is exactly
         # what §3.5 is about. One keystroke picks it up again, and they
         # are told which one.
-        await lane.run(lambda db: save_draft(_description_draft_path(db, entry, user), text))
+        def _persist(db: Database) -> bool:
+            # `save_draft` logs and swallows an unwritable drafts
+            # directory, so its return says nothing (Codex review) --
+            # and promising a caller their text is safe when it isn't
+            # is the one outcome worse than losing it silently.
+            path = _description_draft_path(db, entry, user)
+            save_draft(path, text)
+            return path.exists()
+
+        kept = await lane.run(_persist)
         await session.write_line(colored(f"\r\nNot saved: {exc}", fg_color=ERROR_COLOR))
-        await session.write_line(
-            colored(
-                "Your text is kept as a draft — press [E] on this file again to fix it.",
-                fg_color=MUTED_COLOR,
+        if kept:
+            await session.write_line(
+                colored(
+                    "Your text is kept as a draft — press [E] on this file again to fix it.",
+                    fg_color=MUTED_COLOR,
+                )
             )
-        )
+        else:
+            await session.write_line(
+                colored(
+                    "This node could not keep a draft of it either — copy your text before "
+                    "leaving this screen.",
+                    fg_color=ERROR_COLOR,
+                )
+            )
         return page
 
     await session.write_line(

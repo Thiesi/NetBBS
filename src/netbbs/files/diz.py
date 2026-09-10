@@ -84,6 +84,14 @@ MAX_DIZ_BYTES = 8192
 characters; this leaves generous room for the CP437 art people actually
 put in them while staying far below anything worth calling a bomb."""
 
+_READABLE_ZIP_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
+"""The only compression methods a `FILE_ID.DIZ` is read from in-process
+(Codex review). Both have a fixed, small window; every other method
+(LZMA above all) sizes its decoder from attacker-controlled stream
+properties, which is memory allocated before any output exists to cap.
+No real DIZ -- a few hundred bytes of text -- is compressed any other
+way."""
+
 MAX_ZIP_CENTRAL_DIRECTORY_BYTES = 2 * 1024 * 1024
 """How large a ZIP's central directory may be before this node declines
 to parse it at all (Codex review). `ZipFile` builds a `ZipInfo` for
@@ -317,6 +325,21 @@ def _read_zip_diz(archive_path: Path) -> bytes | None:
                 # `PurePosixPath` would keep as part of the name.
                 if info.filename.replace("\\", "/").rsplit("/", 1)[-1].upper() != DIZ_MEMBER_NAME:
                     continue
+                if info.compress_type not in _READABLE_ZIP_COMPRESSION:
+                    # Codex review: opening an LZMA-compressed member
+                    # builds a decoder whose dictionary size comes out
+                    # of the member's own stream properties -- a tiny
+                    # archive can ask for gigabytes before a single
+                    # byte of output exists to be capped, and this
+                    # reader, unlike the external tools, runs in-process
+                    # with no address-space limit of its own. Store and
+                    # deflate have fixed, small windows and cover every
+                    # DIZ anyone has ever written.
+                    _logger.info(
+                        "FILE_ID.DIZ: %s uses compression method %s; not reading it in-process",
+                        archive_path.name, info.compress_type,
+                    )
+                    return None
                 with archive.open(info) as member:
                     data = member.read(MAX_DIZ_BYTES + 1)
                 return None if len(data) > MAX_DIZ_BYTES else data

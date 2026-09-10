@@ -400,3 +400,86 @@ def test_a_rejected_save_is_written_back_to_disk_before_anything_else(db, lane, 
     asyncio.run(_show_area(session, lane, area, alice))
 
     assert seen and "a replacement" in seen[0]
+
+
+def test_u_starts_an_upload_without_typing_a_slash_command(db, lane, alice, monkeypatch):
+    """`/upload` was a slash command only because this screen read whole
+    lines before it grew editor-key support; it never took an argument.
+    `[U]` now starts it, and `/upload` still works."""
+    started: list[str] = []
+
+    async def fake_upload(session, lane_, area_, user_, **kwargs):
+        started.append(area_.name)
+
+    monkeypatch.setattr(file_flow, "_handle_upload", fake_upload)
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+
+    asyncio.run(_show_area(FakeSession(editor_keys=[_key("u")]), lane, area, alice))
+    assert started == ["downloads"]
+
+    started.clear()
+    asyncio.run(_show_area(FakeLineSession(lines=["/upload"]), lane, area, alice))
+    assert started == ["downloads"]
+
+
+def test_u_is_refused_without_write_access(db, lane, alice, bob, monkeypatch):
+    started: list[str] = []
+
+    async def fake_upload(session, lane_, area_, user_, **kwargs):
+        started.append(area_.name)
+
+    monkeypatch.setattr(file_flow, "_handle_upload", fake_upload)
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+    # Raised only after the file is in place, so alice's own upload
+    # above still stands while bob is now below the write gate.
+    from netbbs.files.areas import get_file_area_by_name
+
+    db.connection.execute("UPDATE file_areas SET min_write_level = 50 WHERE id = ?", (area.id,))
+    db.connection.commit()
+    area = get_file_area_by_name(db, "downloads")
+
+    session = FakeSession(editor_keys=[_key("u")])
+    asyncio.run(_show_area(session, lane, area, bob))
+
+    assert started == []
+    # ("Uploader" is a column header, hence matching the offered key.)
+    assert "[U]pload" not in session.visible_output
+
+
+def test_e_describes_a_pending_upload_on_the_empty_screen(db, lane, alice):
+    """A moderated area holding only the caller's own pending upload
+    renders as the empty state — `list_files_page` shows nothing
+    unapproved — so `[E]` there resolves its target from what they have
+    waiting rather than from a listing that has nothing on it."""
+    area = create_file_area(db, "downloads", creator=alice, moderated=True)
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+    assert get_file(db, entry.file_id).status == "pending"
+
+    session = FakeLineSession(lines=["e", "describing it while it waits", ""])
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert "dit description" in session.visible_output
+    assert get_file(db, entry.file_id).description == "describing it while it waits"
+
+
+def test_the_empty_screen_offers_nothing_to_describe_when_nothing_is_waiting(db, lane, alice):
+    area = create_file_area(db, "downloads", creator=alice)
+    session = FakeLineSession(lines=["e"])
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert "dit description" not in session.visible_output
+    assert "Unknown command." in session.visible_output
+
+
+def test_describe_by_name_still_works_on_the_empty_screen(db, lane, alice):
+    area = create_file_area(db, "downloads", creator=alice, moderated=True)
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+    session = FakeLineSession(lines=["/describe game.zip", "named while pending", ""])
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert get_file(db, entry.file_id).description == "named while pending"
