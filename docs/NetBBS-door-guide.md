@@ -637,7 +637,9 @@ tracks or travels, and Back returns to the route preview.
 Use **[<] Previous / [>] Next** to page the station cockpit and **[X] Expand**
 for pilot, sector, crew and progress details. Press X again for Compact; this view
 choice lasts for the current deck visit. Every service letter works from every
-page, and **[Q] Exit** saves and disembarks. Credits stay in the heading.
+page, and **[Q] Exit** saves and disembarks. Credits stay in the heading. After a
+jump, the first deck page lists what happened on the way as **Result:** lines
+(events, discoveries, fights, customs, deliveries); the next deck action clears them.
 
 Hull and fuel show current/maximum; cargo shows used/capacity. Contraband and
 regional-event notices are separate, and low fuel, critical hull or wages beyond

@@ -4735,6 +4735,17 @@ destination's danger (or unknown) and that a day passes; No retains the chart
 with a cancelled-departure result and writes nothing. Contract and route jumps
 keep their existing preview screens and deliberate Jump actions.
 
+A hop's narration is retained for the next deck page (issue #410): departure
+costs and events, discoveries, encounter and combat outcomes, customs results,
+settlements and mission completions appear as `Result:` lines on the first
+Command Deck page after the jump, and are cleared by the next deck action. The
+report is session state, never persisted and bounded to the newest eight lines
+so the deck still fits 24 rows. A journey resumed after an interruption
+therefore reports the phases it actually replays, not the ones that completed
+before the interruption: narration is a convenience for the caller who is
+sitting there, and is not worth a save field or a resume-consistency rule of
+its own.
+
 Posted deliveries scale with the pilot's hold (issue #408): a board draws the
 quantity between three and the larger of ten and two fifths of cargo capacity,
 so a Shuttle's boards keep their existing range while a Carrier sees bulk
