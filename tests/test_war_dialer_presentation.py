@@ -2077,6 +2077,8 @@ def test_complete_visit_stays_productive_without_pvp_at_every_world_size(tmp_pat
             scoped.setattr(wd, 'show_text_pages', lambda p, title, content, *args, **kw: lines.extend(content))
             assert wd.choose_rival(wd.Palette(False), conn, actor, width, height) is None
         assert '[J]Jobs and [O]Operations need no rival' in ' '.join(lines)
+        guidance = ' '.join(lines)
+        assert guidance.index('[B]ack to the switchboard') < guidance.index('[J]Jobs')
     class Success:
         def random(self): return .01
         def randint(self, low, high): return low
