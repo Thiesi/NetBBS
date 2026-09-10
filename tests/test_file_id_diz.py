@@ -289,31 +289,64 @@ def test_zip_member_stored_with_a_dos_backslash_path_is_found(tmp_path):
 # -- review follow-ups --------------------------------------------------------
 
 
-def test_entry_count_is_read_without_parsing_the_central_directory(tmp_path):
+def test_central_directory_size_is_read_without_parsing_it(tmp_path):
     archive = _zip(tmp_path / "many.zip", {f"file{i}.txt": b"x" for i in range(25)})
-    assert diz._zip_entry_count(archive) == 25
+    declared = diz._zip_central_directory_bytes(archive)
+    # 46 bytes of fixed header per entry, plus each name.
+    assert declared >= 25 * 46
 
 
-def test_entry_count_of_a_non_zip_is_none(tmp_path):
+def test_central_directory_size_of_a_non_zip_is_none(tmp_path):
     plain = tmp_path / "notes.txt"
     plain.write_bytes(b"not a zip at all")
-    assert diz._zip_entry_count(plain) is None
+    assert diz._zip_central_directory_bytes(plain) is None
 
 
-def test_an_archive_with_too_many_entries_is_left_unparsed(tmp_path, monkeypatch):
-    """Codex review: `ZipFile()` builds a `ZipInfo` for every member
-    before anything can look for a DIZ, so the cost of reading one is
-    set by the entry count, not by the upload's size."""
-    monkeypatch.setattr(diz, "MAX_ZIP_ENTRIES", 4)
+def test_an_archive_with_an_oversized_central_directory_is_left_unparsed(tmp_path, monkeypatch):
+    """Codex review, twice over: `ZipFile()` builds a `ZipInfo` for
+    every member before anything can look for a DIZ, and the entry
+    *count* in the EOCD is not what bounds that work -- CPython walks
+    `size_cd` bytes and never consults the count, so a crafted archive
+    can understate it freely. The byte count is what has to be
+    checked."""
     members = {f"pad{i}.txt": b"x" for i in range(10)}
     members["FILE_ID.DIZ"] = b"never read"
     archive = _zip(tmp_path / "many.zip", members)
 
+    monkeypatch.setattr(diz, "MAX_ZIP_CENTRAL_DIRECTORY_BYTES", 100)
     assert _read(archive, "many.zip") is None
 
-    # ... and the same archive is read fine once it fits the cap.
-    monkeypatch.setattr(diz, "MAX_ZIP_ENTRIES", 50)
+    monkeypatch.setattr(diz, "MAX_ZIP_CENTRAL_DIRECTORY_BYTES", 1024 * 1024)
     assert _read(archive, "many.zip") == "never read"
+
+
+def test_a_lying_entry_count_does_not_get_an_archive_parsed(tmp_path, monkeypatch):
+    """The specific bypass: patch both EOCD entry-count fields to 1 and
+    the archive would sail past an entry-count check while still
+    carrying every one of its members."""
+    members = {f"pad{i}.txt": b"x" for i in range(30)}
+    members["FILE_ID.DIZ"] = b"never read"
+    archive = _zip(tmp_path / "liar.zip", members)
+    raw = bytearray(archive.read_bytes())
+    marker = raw.rfind(b"PK")
+    raw[marker + 8:marker + 12] = (1).to_bytes(2, "little") * 2  # entries on disk, total
+    archive.write_bytes(bytes(raw))
+
+    monkeypatch.setattr(diz, "MAX_ZIP_CENTRAL_DIRECTORY_BYTES", 100)
+    assert _read(archive, "liar.zip") is None
+
+
+def test_output_from_a_failed_unpacker_is_ignored(tmp_path, monkeypatch):
+    """Codex review: an unpacker that streams a damaged member and then
+    reports the CRC error, or writes a diagnostic to stdout, must not
+    have that taken as a description -- nor block the next candidate."""
+    failing = _fake_tool("import sys; sys.stdout.write('partial garbage'); sys.exit(2)")
+    working = _fake_tool("import sys; sys.stdout.write('the real one')")
+    monkeypatch.setitem(diz._ARCHIVE_TOOLS, ".rar", (failing, working))
+    archive = tmp_path / "game.rar"
+    archive.write_text("payload")
+
+    assert _read(archive, "game.rar") == "the real one"
 
 
 def test_unicode_line_separators_are_normalized_to_newlines():

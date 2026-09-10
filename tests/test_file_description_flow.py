@@ -215,6 +215,12 @@ def test_the_editor_enforces_the_same_line_cap_the_domain_does(db, lane, alice):
 
 
 def test_a_rejected_save_keeps_the_draft_and_changes_nothing(db, lane, alice, monkeypatch):
+    """Codex review: the fullscreen editor deletes its own draft on the
+    way out, believing the save will take, so a rejection has to put the
+    text back on disk before anything is awaited -- and then say where
+    it went rather than reopening over its own recovery prompt."""
+    from netbbs.net.draft_storage import drafts_directory
+
     area = create_file_area(db, "downloads", creator=alice)
     entry = upload_file(db, area, alice, "game.zip", b"payload", description="the original")
 
@@ -222,20 +228,17 @@ def test_a_rejected_save_keeps_the_draft_and_changes_nothing(db, lane, alice, mo
         raise FileEntryError("nope")
 
     monkeypatch.setattr(file_flow, "set_file_description", refuse)
-    session = FakeSession(
-        editor_keys=[_key("e")],
-        # First pass writes a description and finishes; the refusal
-        # sends it back into the editor, where /cancel gives up.
-        lines=["a replacement", "", "/cancel"],
-    )
+    session = FakeSession(editor_keys=[_key("e")], lines=["a replacement", ""])
 
     asyncio.run(_show_area(session, lane, area, alice))
 
     output = session.visible_output
     assert "Not saved: nope" in output
-    # Re-opened seeded with what was typed, not with a blank buffer.
-    assert output.rindex("a replacement") > output.index("Not saved: nope")
+    assert "kept as a draft" in output
     assert get_file(db, entry.file_id).description == "the original"
+    draft = drafts_directory(db) / f"filedesc_{entry.file_id[:16]}_{alice.id}.draft"
+    assert draft.exists()
+    assert "a replacement" in draft.read_text(encoding="utf-8")
 
 
 def test_cancelling_the_editor_leaves_the_description_alone(db, lane, alice):
@@ -361,3 +364,39 @@ def test_describing_a_file_deleted_meanwhile_fails_instead_of_claiming_success(d
 
     with pytest.raises(FileEntryError):
         set_file_description(db, entry, "into the void", changed_by=alice)
+
+
+def test_a_rejected_save_is_written_back_to_disk_before_anything_else(db, lane, alice, monkeypatch, tmp_path):
+    """Codex review: the fullscreen editor deletes its own draft on the
+    way out, believing the save will take. If the domain then rejects
+    it, the text lives only in memory until the reopened editor's next
+    autosave — so it goes back to disk first, before any awaited UI."""
+    from netbbs.net.draft_storage import drafts_directory
+
+    area = create_file_area(db, "downloads", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+    seen: list[str] = []
+
+    def refuse(db_, entry_, description, *, changed_by):
+        raise FileEntryError("nope")
+
+    async def capture_write_line(text=""):
+        # Whatever is on disk at the moment the failure is announced.
+        draft = drafts_directory(db) / f"filedesc_{entry.file_id[:16]}_{alice.id}.draft"
+        if draft.exists():
+            seen.append(draft.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(file_flow, "set_file_description", refuse)
+    session = FakeSession(editor_keys=[_key("e")], lines=["a replacement", "", "/cancel"])
+    original_write_line = session.write_line
+
+    async def write_line(text: str = "") -> None:
+        if "Not saved" in text:
+            await capture_write_line(text)
+        await original_write_line(text)
+
+    session.write_line = write_line
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert seen and "a replacement" in seen[0]

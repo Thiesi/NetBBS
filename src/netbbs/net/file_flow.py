@@ -49,6 +49,7 @@ for, not a structural requirement the way the picker case was.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from pathlib import Path
 
@@ -94,7 +95,7 @@ from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import edit_line_body
 from netbbs.net.confirm import prompt_yes_no
-from netbbs.net.draft_storage import drafts_directory
+from netbbs.net.draft_storage import drafts_directory, save_draft
 from netbbs.net.editor_preference import fullscreen_editor_enabled
 from netbbs.net.file_area_banner import load_file_area_banner
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
@@ -133,6 +134,9 @@ from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, resolve_display_preferences
+
+
+_logger = logging.getLogger(__name__)
 
 
 def _menu_row(entries: list[MenuEntry], *, width: int, height: int, description_level: str) -> str:
@@ -1205,11 +1209,15 @@ def _description_draft_path(db: Database, entry: FileEntry, user: User) -> Path:
     """One stable per-(file, caller) draft slot, colocated with every
     other in-progress composition (`netbbs.net.draft_storage`) — the
     file-description counterpart of `netbbs.net.board_flow.
-    _post_draft_path`. Keyed on the row id rather than the
-    content-addressed `file_id` only to keep the filename short; a
-    draft is per-session scratch, not something that has to survive a
-    file being deleted and its id reused."""
-    return drafts_directory(db) / f"filedesc_{entry.area_id}_{entry.id}_{user.id}.draft"
+    _post_draft_path`.
+
+    Keyed on the content-addressed `file_id`, not the row id (Codex
+    review): drafts outlive the editor that made them, are not deleted
+    when their file is, and `files.id` is a plain SQLite rowid a later
+    upload can reuse -- which would offer one upload's abandoned draft
+    to whoever next describes a different one. Sixteen hex characters
+    is plenty to keep those apart and keeps the filename readable."""
+    return drafts_directory(db) / f"filedesc_{entry.file_id[:16]}_{user.id}.draft"
 
 
 async def _compose_description(
@@ -1344,42 +1352,56 @@ async def _handle_describe(
         )
     )
 
-    initial_text = entry.description
-    while True:
-        text = await _compose_description(session, lane, user, entry, initial_text=initial_text)
-        if text is None:
-            # Both editors return `None` for "cancelled" and for
-            # "leaving, keep what I typed", and only the draft file on
-            # disk tells them apart (issue #149's own contract) -- so
-            # say which one happened rather than reporting a cancel
-            # over a draft the caller expects to find again (Codex
-            # review).
-            kept = await lane.run(_description_draft_path, entry, user)
-            if kept.exists():
-                await session.write_line(
-                    colored(
-                        "\r\nDraft kept — press [E] on this file again to pick it up.",
-                        fg_color=MUTED_COLOR,
-                    )
+    text = await _compose_description(session, lane, user, entry, initial_text=entry.description)
+    if text is None:
+        # Both editors return `None` for "cancelled" and for "leaving,
+        # keep what I typed", and only the draft file on disk tells
+        # them apart (issue #149's own contract) -- so say which one
+        # happened rather than reporting a cancel over a draft the
+        # caller expects to find again (Codex review).
+        kept = await lane.run(_description_draft_path, entry, user)
+        if kept.exists():
+            await session.write_line(
+                colored(
+                    "\r\nDraft kept — press [E] on this file again to pick it up.",
+                    fg_color=MUTED_COLOR,
                 )
-            else:
-                await session.write_line(colored("\r\nDescription unchanged.", fg_color=MUTED_COLOR))
-            return page
-        try:
-            updated = await lane.run(set_file_description, entry, text, changed_by=user)
-        except FileEntryError as exc:
-            # Back into the editor with what they wrote still in hand
-            # -- a rejected save must never be a lost draft (design doc
-            # §3.5, issue #282's own lesson).
-            await session.write_line(colored(f"\r\nNot saved: {exc}", fg_color=ERROR_COLOR))
-            initial_text = text
-            continue
+            )
+        else:
+            await session.write_line(colored("\r\nDescription unchanged.", fg_color=MUTED_COLOR))
+        return page
+
+    try:
+        updated = await lane.run(set_file_description, entry, text, changed_by=user)
+    except FileEntryError as exc:
+        # A rejected save must never be a lost draft (design doc §3.5,
+        # issue #282's own lesson) -- so the text goes back to disk
+        # *before* anything is awaited (Codex review): the editor
+        # deleted its own draft on the way out believing the save would
+        # take, and until this write it exists only in memory.
+        #
+        # Reported and returned rather than looped straight back into
+        # the editor: reopening over a draft that now exists would make
+        # the editor's own recovery prompt ask about text the caller
+        # just typed, and a question they did not ask for is exactly
+        # what §3.5 is about. One keystroke picks it up again, and they
+        # are told which one.
+        await lane.run(lambda db: save_draft(_description_draft_path(db, entry, user), text))
+        await session.write_line(colored(f"\r\nNot saved: {exc}", fg_color=ERROR_COLOR))
         await session.write_line(
-            colored(f"\r\nDescription saved for {sanitize_text(entry.filename)!r}.", fg_color=SUCCESS_COLOR)
+            colored(
+                "Your text is kept as a draft — press [E] on this file again to fix it.",
+                fg_color=MUTED_COLOR,
+            )
         )
-        return replace(
-            page, entries=[updated if e.file_id == updated.file_id else e for e in page.entries]
-        )
+        return page
+
+    await session.write_line(
+        colored(f"\r\nDescription saved for {sanitize_text(entry.filename)!r}.", fg_color=SUCCESS_COLOR)
+    )
+    return replace(
+        page, entries=[updated if e.file_id == updated.file_id else e for e in page.entries]
+    )
 
 
 async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, user: User) -> None:
@@ -1433,7 +1455,14 @@ async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, u
         try:
             description = await read_archive_description(temp_path, received.filename)
         except BaseException:
-            temp_path.unlink(missing_ok=True)
+            # Cleanup never masks what actually went wrong (Codex
+            # review) -- a failed unlink here (Windows holding the file
+            # open behind a cancelled worker, say) must not replace a
+            # session cancellation with an OSError about a temp file.
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                _logger.warning("could not remove staging file %s: %s", temp_path, cleanup_error)
             raise
         entry = await lane.run(
             upload_file_from_temp, area, user, received.filename,

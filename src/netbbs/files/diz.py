@@ -84,12 +84,20 @@ MAX_DIZ_BYTES = 8192
 characters; this leaves generous room for the CP437 art people actually
 put in them while staying far below anything worth calling a bomb."""
 
-MAX_ZIP_ENTRIES = 50_000
-"""How many members a ZIP may claim before this node declines to parse
-its central directory at all (Codex review) -- `zipfile` builds every
-`ZipInfo` up front, so the cost is set by the entry count rather than
-by the upload's size. Far above any real release archive, far below
-what a hostile one can pack into a few megabytes."""
+MAX_ZIP_CENTRAL_DIRECTORY_BYTES = 2 * 1024 * 1024
+"""How large a ZIP's central directory may be before this node declines
+to parse it at all (Codex review). `ZipFile` builds a `ZipInfo` for
+every member up front, so the cost is set by the directory rather than
+by the upload's size.
+
+Measured in bytes rather than in the entry count the end-of-central-
+directory record also carries, because only this number bounds the
+work: CPython reads `size_cd` bytes and walks entries until they are
+consumed (`ZipFile._RealGetContents`), never consulting the count,
+which a crafted archive is free to understate. `size_cd` cannot lie the
+same way -- those bytes have to actually be in the file or parsing
+fails immediately. At 46 bytes minimum per entry this still allows
+~45,000 members, far past any real release archive."""
 
 MAX_DESCRIPTION_LINES = 10
 """The DIZ spec's own line limit, applied to every description
@@ -281,20 +289,22 @@ def _read_zip_diz(archive_path: Path) -> bytes | None:
     `MAX_DIZ_BYTES`, so a member which lies about its size (or inflates
     from nothing at all) costs one bounded read rather than memory.
 
-    Neither is the *number* of members (Codex review): `ZipFile()`
-    parses the whole central directory eagerly and builds a `ZipInfo`
-    per entry before any of this can look for a DIZ, so an archive of
-    nothing but empty entries turns a modest upload into hundreds of
-    megabytes of objects. The entry count is read out of the end-of-
-    central-directory record first, and anything past
-    `MAX_ZIP_ENTRIES` is left unread -- an archive with that many
-    members is not one somebody wrote a `FILE_ID.DIZ` for."""
-    entries = _zip_entry_count(archive_path)
-    if entries is None or entries > MAX_ZIP_ENTRIES:
-        if entries is not None:
+    Neither is the *size of the central directory* (Codex review):
+    `ZipFile()` parses it eagerly and builds a `ZipInfo` per member
+    before any of this can look for a DIZ, so an archive of nothing but
+    empty entries turns a modest upload into hundreds of megabytes of
+    objects. Its declared size is read out of the end-of-central-
+    directory record first, and anything past
+    `MAX_ZIP_CENTRAL_DIRECTORY_BYTES` is left unread -- an archive with
+    a directory that large is not one somebody wrote a `FILE_ID.DIZ`
+    for."""
+    directory_bytes = _zip_central_directory_bytes(archive_path)
+    if directory_bytes is None or directory_bytes > MAX_ZIP_CENTRAL_DIRECTORY_BYTES:
+        if directory_bytes is not None:
             _logger.info(
-                "FILE_ID.DIZ: %s has %d entries, more than the %d this node will parse",
-                archive_path.name, entries, MAX_ZIP_ENTRIES,
+                "FILE_ID.DIZ: %s declares a %d-byte central directory, more than the %d "
+                "this node will parse",
+                archive_path.name, directory_bytes, MAX_ZIP_CENTRAL_DIRECTORY_BYTES,
             )
         return None
     try:
@@ -318,18 +328,18 @@ def _read_zip_diz(archive_path: Path) -> bytes | None:
     return None
 
 
-def _zip_entry_count(archive_path: Path) -> int | None:
-    """How many members this file's end-of-central-directory record
-    claims, or `None` if it is not a readable ZIP at all -- read
-    directly rather than through `zipfile`, whose only way to answer
-    the question is to parse every entry first, which is precisely
-    what this exists to avoid.
+def _zip_central_directory_bytes(archive_path: Path) -> int | None:
+    """How many bytes of central directory this file's end-of-central-
+    directory record commits to, or `None` if it is not a readable ZIP
+    at all -- read directly rather than through `zipfile`, whose only
+    way to answer the question is to parse the whole thing first, which
+    is precisely what this exists to avoid.
 
-    The EOCD is the last 22 bytes plus an optional trailing comment of
-    up to 64 KiB, so a bounded tail read finds it. A ZIP64 archive
-    stores `0xFFFF` here and keeps the real count elsewhere; that is
-    reported as "too many" rather than chased, since a genuine ZIP64
-    entry count is far past anything worth scanning for a DIZ.
+    The EOCD is the last 22 bytes plus an optional comment of up to
+    64 KiB, so a bounded tail read finds it. A ZIP64 archive stores
+    `0xFFFFFFFF` here and keeps the real size elsewhere; that is
+    reported as "too large" rather than chased, since a genuine ZIP64
+    central directory is far past anything worth scanning for a DIZ.
     """
     try:
         with archive_path.open("rb") as handle:
@@ -341,10 +351,10 @@ def _zip_entry_count(archive_path: Path) -> int | None:
     except OSError as exc:
         _logger.info("FILE_ID.DIZ: could not read %s: %s", archive_path.name, exc)
         return None
-    marker = tail.rfind(b"PK\x05\x06")
+    marker = tail.rfind(b"PK")
     if marker < 0 or len(tail) - marker < 22:
         return None
-    return int.from_bytes(tail[marker + 10:marker + 12], "little")
+    return int.from_bytes(tail[marker + 12:marker + 16], "little")
 
 
 async def _run_extractor(argv: list[str], *, deadline: float) -> bytes | None:
@@ -389,20 +399,40 @@ async def _run_extractor(argv: list[str], *, deadline: float) -> bytes | None:
     except (OSError, ValueError) as exc:
         _logger.info("FILE_ID.DIZ: could not run %s: %s", argv[0], exc)
         return None
+    killed = True
     try:
-        assert proc.stdout is not None
+        if proc.stdout is None:  # pragma: no cover - stdout=PIPE guarantees one
+            return None
+        deadline_left = min(remaining, _SPAWN_TIMEOUT_SECONDS)
+        started = time.monotonic()
         data = await asyncio.wait_for(
-            _read_bounded(proc.stdout, MAX_DIZ_BYTES + 1),
-            timeout=min(remaining, _SPAWN_TIMEOUT_SECONDS),
+            _read_bounded(proc.stdout, MAX_DIZ_BYTES + 1), timeout=deadline_left
         )
+        if len(data) > MAX_DIZ_BYTES:
+            return None
+        # Output alone is not a result (Codex review): an unpacker that
+        # streams a damaged member and *then* reports a CRC error, or
+        # one that writes a "no such member" line to stdout, would
+        # otherwise hand back rubbish as a description -- and, worse,
+        # stop the lowercase-name retry and the next candidate tool from
+        # ever running. Exit status is the tool's own verdict on what it
+        # just printed, so wait for it and believe it. The kill path
+        # below stays for the cases where there is no verdict coming.
+        await asyncio.wait_for(proc.wait(), timeout=max(0.1, deadline_left - (time.monotonic() - started)))
+        killed = False
+        if proc.returncode != 0:
+            _logger.info(
+                "FILE_ID.DIZ: %s exited %s; ignoring its output",
+                Path(argv[0]).name, proc.returncode,
+            )
+            return None
     except asyncio.TimeoutError:
         _logger.warning("FILE_ID.DIZ: %s timed out; killing it", Path(argv[0]).name)
         return None
     finally:
-        await _stop(proc)
-    if not data or len(data) > MAX_DIZ_BYTES:
-        return None
-    return data
+        if killed:
+            await _stop(proc)
+    return data or None
 
 
 async def _read_bounded(stream: asyncio.StreamReader, limit: int) -> bytes:
