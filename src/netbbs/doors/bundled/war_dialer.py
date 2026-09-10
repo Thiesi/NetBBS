@@ -2159,22 +2159,23 @@ def countdown(delta: timedelta) -> str:
     return (f"{days}d " if days else "") + f"{hours}h {minutes}m"
 
 
-def operation_visit_budget(player: Player) -> str:
+def operation_visit_budget(player: Player, *, in_hub: bool = False) -> str:
     turns = 3 - player.operation_stage
     cash = 0 if player.operation_stage == 2 else 50
     remaining = TURNS_PER_DAY - player.turns_used
     label = "Saved operation" if player.operation_stage else "New operation"
-    text = f"{label}: {turns} turn{'s' if turns != 1 else ''} and ${cash} to the next execution; {remaining} turns available. [O]Ops previews each step."
+    text = f"{label}: {turns} turn{'s' if turns != 1 else ''} and ${cash} to the next execution; {remaining} turns available."
+    text += " Select this entry to preview each step." if in_hub else " [O]Ops previews each step."
     if player.cash < cash:
         text += f" Need ${cash - player.cash} more before Prepare."
-    if remaining < turns:
+    if remaining < turns or (player.operation_stage and player.cash < cash):
         text += " Progress waits safely for another visit; no need to finish now."
     return text
 
 
 def next_steps(state: DashboardState, now: datetime) -> list[str]:
     player = state.player
-    lines = [operation_visit_budget(player)] if player.operation_stage else []
+    lines = [operation_visit_budget(player)]
     if player.turns_used >= TURNS_PER_DAY:
         return lines + ["No turns: browse Rank, Map, Rivals, Log, contracts and [O]Ops/dossiers free; return when the refill is ready."]
     if player.heat + TRADE_WAREZ_HEAT > HEAT_BUST_THRESHOLD:
@@ -2184,7 +2185,7 @@ def next_steps(state: DashboardState, now: datetime) -> list[str]:
         lines.append(f"Need ${RECRUIT_COST - player.cash} more to recruit. Trade needs no cash; inspect its Heat risk first.")
     if player.crew == 1:
         lines.append("Available crew is at the one-member floor. Recruit or use [G]arrison to withdraw defenders before another capture.")
-    if rank_score(player) == 0 and not lines:
+    if rank_score(player) == 0 and not player.operation_stage and len(lines) == 1:
         lines.append("First goals: [J]Job offers a one-turn Cautious contract; inspect Map or Trade to fund Crew recruitment.")
     elif not state.holdings:
         lines.append("No territory income yet. Back on the switchboard, inspect Map and compare Root previews.")
@@ -2680,7 +2681,7 @@ def do_operations_hub(p: Palette, conn: sqlite3.Connection, player: Player, rng:
                       width: int, height: int) -> bool:
     update_display_player(p, player, refresh_player(conn, player.user_id, now_utc()), width, height)
     key = pick_record_page(p, "OPERATIONS / RECON", [
-        (["PvE operation", operation_visit_budget(player),
+        (["PvE operation", operation_visit_budget(player, in_hub=True),
           "Active: " + (JOBS[player.operation_contract][0] if player.operation_stage else "none")], True),
         (["Rival recon", "One turn buys a private 24-hour cash/available-crew snapshot."], True),
         (["Your dossiers", "Free inspection of your latest ten unexpired rival snapshots."], True)], width, height)
