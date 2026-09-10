@@ -4736,6 +4736,10 @@ The guide explains buying cargo, jumps advancing game time, refuelling, first
 upgrades and encounter choices, and retains a recap of active commitments for
 returning pilots. Reading or declining it neither writes a save nor advances time.
 
+Escape answers No at every yes/no confirmation and cancels a quantity field,
+erasing what was typed (issue #413); prompts say so. Unsupported keys still do
+nothing at either prompt.
+
 Voidrunner uses one UTF-8 and terminal-key decoder for menus and text fields.
 Unsupported special keys, terminal control strings, and bracketed paste cannot
 become menu commands or confirmations. Partial sequences survive transport gaps;
