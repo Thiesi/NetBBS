@@ -23,7 +23,9 @@ from netbbs.link.files import (
     LinkFilesError,
     RemoteFileCatalogueLimitError,
     carried_file_area_count,
+    file_area_origin_fingerprint,
     get_remote_file,
+    has_queued_file_descriptor,
     is_area_linked,
     link_file_area,
     list_remote_files,
@@ -365,3 +367,37 @@ def test_a_peers_description_is_cut_to_a_locally_renderable_shape(db, remote_nod
 
     assert len(remote_file.description.split("\n")) == 10
     assert "\x1b" not in remote_file.description
+
+
+def test_a_carried_area_never_gets_a_descriptor_this_node_signed(db, alice, node_identity, remote_node_identity):
+    """Codex review of issue #464: a carried area is a real, writable
+    local area, but a peer verifies every `file_descriptor` against the
+    *area's genesis origin* key. One signed here would verify nowhere,
+    sit on the row permanently, and be re-pushed and re-rejected with
+    the rest of its batch."""
+    area_id = _carried_area(db, remote_node_identity)
+    area = get_file_area_by_name(db, _remote_genesis(remote_node_identity, area_id=area_id).payload["name"])
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+
+    assert is_area_linked(db, area)
+    assert file_area_origin_fingerprint(db, area) == remote_node_identity.fingerprint
+    assert queue_file_descriptor_if_linked(db, entry, area, node_identity=node_identity) is None
+    assert not has_queued_file_descriptor(db, entry)
+    assert load_own_file_area_events(db, node_identity.fingerprint) == []
+
+
+def test_has_queued_file_descriptor_is_about_the_file_not_its_area(db, alice, node_identity):
+    """A file approved before its area was Linked has no descriptor and
+    never gets one — pre-Link history is deliberately not backfilled —
+    so "is this area Linked" is the wrong question to answer with
+    (Codex review)."""
+    area = create_file_area(db, "docs", creator=alice)
+    older = upload_file(db, area, alice, "older.zip", b"payload")
+    link_file_area(db, area, node_identity=node_identity)
+    area = get_file_area_by_name(db, "docs")
+    newer = upload_file(db, area, alice, "newer.zip", b"payload")
+    queue_file_descriptor_if_linked(db, newer, area, node_identity=node_identity)
+
+    assert is_area_linked(db, area)
+    assert not has_queued_file_descriptor(db, older)
+    assert has_queued_file_descriptor(db, newer)

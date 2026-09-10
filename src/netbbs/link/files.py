@@ -392,6 +392,41 @@ def materialize_carried_file_descriptor(
     )
 
 
+def has_queued_file_descriptor(db: Database, file_entry: FileEntry) -> bool:
+    """Whether this file's own `file_descriptor` has been built and
+    signed -- i.e. whether peers have anything about it at all.
+
+    Not the same question as "is its area Linked" (Codex review): a
+    file approved before its area was promoted has no descriptor and
+    never gets one, since pre-Link history is deliberately never
+    backfilled (the rule `netbbs.link.boards.queue_board_post_if_linked`
+    states for posts, applied here for the same reason). Anything told
+    to a caller about what peers already hold has to ask this, not the
+    area."""
+    row = db.connection.execute(
+        "SELECT link_event_json FROM files WHERE file_id = ?", (file_entry.file_id,)
+    ).fetchone()
+    return row is not None and row["link_event_json"] is not None
+
+
+def file_area_origin_fingerprint(db: Database, area: FileArea) -> str | None:
+    """The node a peer will check this area's `file_descriptor`s
+    against: the `origin_fingerprint` its own `file_area_genesis`
+    claims, or `None` for an area that is not Linked at all.
+
+    For an area this node Linked itself that is this node; for one
+    materialized from a peer's genesis (`materialize_carried_file_area`)
+    it is that peer, forever -- there is no origin succession for file
+    areas (§11.1)."""
+    row = db.connection.execute(
+        "SELECT link_genesis_json FROM file_areas WHERE id = ?", (area.id,)
+    ).fetchone()
+    if row is None or row["link_genesis_json"] is None:
+        return None
+    genesis = FileAreaGenesis.from_dict(json.loads(row["link_genesis_json"]))
+    return genesis.payload["origin_fingerprint"]
+
+
 def queue_file_descriptor_if_linked(
     db: Database,
     file_entry: FileEntry,
@@ -410,10 +445,27 @@ def queue_file_descriptor_if_linked(
     Idempotent: a file that already has a queued event returns it as-is
     rather than building (and re-signing, with a fresh `nonce`) a second,
     different one for the same logical upload.
+
+    A **carried** area gets nothing (Codex review): a peer verifies every
+    `file_descriptor` against the signing key of the area's own genesis
+    origin (`netbbs.link.protocol`, design doc §11.2), so a descriptor
+    this node signed for someone else's area cannot verify anywhere --
+    it would sit on the row permanently and be pushed, rejected, and
+    pushed again, taking the rest of its batch down with it. Unlike a
+    `board_post`, which carries an explicit author tier and is meant to
+    travel from any node into a carried board, a file descriptor has no
+    such tier: describing a file in an area is the origin's own act.
+    The upload itself still succeeds and is still downloadable locally;
+    it simply never enters the catalogue peers see.
+
+    That check lives here rather than at the call sites so it holds for
+    every future one too.
     """
     if file_entry.status != "approved":
         return None
     if not is_area_linked(db, area):
+        return None
+    if file_area_origin_fingerprint(db, area) != node_identity.fingerprint:
         return None
 
     existing = db.connection.execute(
