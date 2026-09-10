@@ -212,6 +212,8 @@ eligible members, followed by an exact preview. Each transfer costs one turn, no
 cash or Heat, and gives no Rank. Keep one member available for recovery. The last
 withdrawal abandons the exchange after paying earned income. Displaced defenders
 return to their owner's available pool when a rival captures their exchange.
+Reclaiming your own abandoned exchange earns no capture Rank until another crew
+controls it or a new season starts. Reconnecting does not clear that restriction.
 Jobs, raids, attacks and busts use available crew; stationed members defend only
 their exchange. The switchboard and results show the two pools separately.
 

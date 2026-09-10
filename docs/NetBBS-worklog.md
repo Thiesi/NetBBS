@@ -397,6 +397,9 @@ marker must roll back together. Validate host ownership before this conversion.
 Capture must return the previous garrison exactly once under the same action lock;
 otherwise a stale session can lose or duplicate defenders. Action deltas report
 available and assigned changes separately so reinforcement is not narrated as death.
+An abandonment marker per exchange survives reconnects and is included in preview
+validation, preventing withdrawal/reclaim loops from awarding solo capture Rank.
+Clear it only on capture or season change, atomically with the relevant action.
 
 `python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
 against disposable SQLite worlds through the actual action resolvers. The default

@@ -677,6 +677,7 @@ class Exchange:
     controlled_since: str | None
     income_collected_at: str
     season_number: int
+    withdrawn_by: int | None = None
 
 
 @dataclass
@@ -854,6 +855,10 @@ def action_raid(attacker: Player, target: Player, rng: random.Random) -> tuple[b
     return success, amount, busted
 
 
+def capture_rank_award(attacker: Player, exchange: Exchange) -> int:
+    return 0 if exchange.controller_user_id is None and exchange.withdrawn_by == attacker.user_id else 500
+
+
 def action_root_exchange(attacker: Player, exchange: Exchange, now: datetime, rng: random.Random) -> tuple[bool, bool]:
     if attacker.crew < 2:
         raise ActionRejected("Need 2 available crew: one to hold the exchange and one to remain available. Recruit or withdraw defenders.")
@@ -862,13 +867,14 @@ def action_root_exchange(attacker: Player, exchange: Exchange, now: datetime, rn
     else:
         success = rng.random() < success_chance(attacker.crew, exchange.garrison)
     if success:
+        award = capture_rank_award(attacker, exchange)
         exchange.controller_user_id = attacker.user_id
         exchange.controller_handle = attacker.handle
         exchange.garrison = 1
         attacker.crew -= 1
         exchange.controlled_since = to_iso(now)
         exchange.income_collected_at = to_iso(now)
-        attacker.exchanges_taken_total += 1
+        attacker.exchanges_taken_total += int(award > 0)
     else:
         attacker.crew = max(1, attacker.crew - 1)
     busted = apply_heat(attacker, ROOT_EXCHANGE_HEAT, rng)
@@ -1128,6 +1134,7 @@ def _migrate_world_v2(conn: sqlite3.Connection) -> None:
             else:
                 conn.execute("UPDATE exchanges SET controller_user_id=NULL, garrison=0, controlled_since=NULL WHERE id=?",
                              (holding[0],))
+                _mark_withdrawal(conn, holding[0], player.user_id)
         player.crew -= budget if retained else 0
         _save_player(conn, player)
         record_event(conn, player.user_id, None,
@@ -1243,6 +1250,7 @@ def _settle_world(conn: sqlite3.Connection, now: datetime) -> int:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (str(season),),
     )
+    conn.execute("DELETE FROM meta WHERE key LIKE 'exchange_withdrawal:%'")
     return season
 
 
@@ -1455,8 +1463,9 @@ def resolve_job(conn: sqlite3.Connection, player: Player, now: datetime, rng: ra
 def list_exchanges(conn: sqlite3.Connection) -> list[Exchange]:
     rows = conn.execute(
         """
-        SELECT e.*, p.handle AS controller_handle
+        SELECT e.*, p.handle AS controller_handle, withdrawal.value AS withdrawn_by
         FROM exchanges e LEFT JOIN players p ON p.user_id = e.controller_user_id
+        LEFT JOIN meta withdrawal ON withdrawal.key = 'exchange_withdrawal:' || e.id
         ORDER BY e.id
         """
     ).fetchall()
@@ -1466,6 +1475,7 @@ def list_exchanges(conn: sqlite3.Connection) -> list[Exchange]:
             controller_user_id=r["controller_user_id"], controller_handle=r["controller_handle"],
             garrison=r["garrison"], controlled_since=r["controlled_since"],
             income_collected_at=r["income_collected_at"], season_number=r["season_number"],
+            withdrawn_by=int(r["withdrawn_by"]) if r["withdrawn_by"] is not None else None,
         )
         for r in rows
     ]
@@ -1531,11 +1541,12 @@ def _prune_events(conn: sqlite3.Connection, user_id: int) -> None:
     )
 
 
-def record_event(conn: sqlite3.Connection, target_user_id: int, actor_handle: str | None, summary_text: str, now: datetime) -> None:
+def record_event(conn: sqlite3.Connection, target_user_id: int, actor_handle: str | None, summary_text: str,
+                 now: datetime, *, seen: bool = False) -> None:
     with nullcontext() if conn.in_transaction else _write_transaction(conn):
         conn.execute(
-            "INSERT INTO events (target_user_id, actor_handle, summary_text, created_at, seen_at) VALUES (?, ?, ?, ?, NULL)",
-            (target_user_id, actor_handle, summary_text, to_iso(now)),
+            "INSERT INTO events (target_user_id, actor_handle, summary_text, created_at, seen_at) VALUES (?, ?, ?, ?, ?)",
+            (target_user_id, actor_handle, summary_text, to_iso(now), to_iso(now) if seen else None),
         )
         _prune_events(conn, target_user_id)
 
@@ -1613,6 +1624,7 @@ def exchange_selection_state(exchange: Exchange) -> tuple:
         exchange.id, exchange.name, exchange.income_per_hour,
         exchange.controller_user_id, exchange.controller_handle, exchange.garrison,
         exchange.controlled_since, exchange.season_number,
+        exchange.withdrawn_by,
     )
 
 
@@ -1644,6 +1656,8 @@ def resolve_root_exchange(
             prior.cash += _collect_exchange_income(conn, prior, now)
             prior.crew += prior_garrison
             _save_player(conn, prior)
+        if success:
+            conn.execute("DELETE FROM meta WHERE key=?", (f"exchange_withdrawal:{exchange.id}",))
         conn.execute(
             "UPDATE exchanges SET controller_user_id=?, garrison=?, controlled_since=?, income_collected_at=? WHERE id=?",
             (exchange.controller_user_id, exchange.garrison, exchange.controlled_since, exchange.income_collected_at, exchange.id),
@@ -1654,6 +1668,12 @@ def resolve_root_exchange(
         elif not success and prior_controller is not None:
             record_event(conn, prior_controller, actor.handle, f"{actor.handle} tried to root {exchange.name} and failed.", now)
     return success, exchange.name, busted
+
+
+def _mark_withdrawal(conn: sqlite3.Connection, exchange_id: int, user_id: int) -> None:
+    # One marker per exchange, replaced on withdrawal and cleared by capture/season.
+    conn.execute("INSERT INTO meta (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (f"exchange_withdrawal:{exchange_id}", str(user_id)))
 
 
 def resolve_garrison(conn: sqlite3.Connection, player: Player, exchange_id: int, change: int,
@@ -1674,11 +1694,12 @@ def resolve_garrison(conn: sqlite3.Connection, player: Player, exchange_id: int,
             conn.execute("UPDATE exchanges SET garrison=? WHERE id=?", (remaining, exchange.id))
         else:
             # _action_player has already paid every owned exchange's earned income.
+            _mark_withdrawal(conn, exchange.id, actor.user_id)
             conn.execute("UPDATE exchanges SET controller_user_id=NULL, garrison=0, controlled_since=NULL WHERE id=?",
                          (exchange.id,))
         verb = f"Reinforced {exchange.name} with {change}" if change > 0 else f"Withdrew {-change} from {exchange.name}"
         record_event(conn, actor.user_id, actor.handle,
-                     verb + (f"; garrison now {remaining}." if remaining else "; exchange abandoned and income stopped."), now)
+                     verb + (f"; garrison now {remaining}." if remaining else "; exchange abandoned and income stopped. Reclaiming it earns no capture Rank."), now, seen=True)
     return remaining == 0
 
 
@@ -1938,6 +1959,7 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "[J]ob: risky payout. [R]aid: steal rival cash. [X]Root: take an exchange for hourly income.",
         "Capture commits one available member to its garrison. Assigned crew defend only that exchange; jobs, raids and attacks use available crew.",
         "[G]arrison: reinforce or withdraw crew for one turn, with no Heat or Rank reward. One crew member must stay available. Withdrawing the last defender abandons the exchange and stops income.",
+        "Reclaiming your own abandoned exchange earns no capture Rank. Another crew taking control or a new season ends that restriction.",
         "Displaced defenders return to their owner's available crew after capture. Busts and failed attacks affect available crew, not stationed defenders.",
         f"Past {HEAT_BUST_THRESHOLD:g} Heat, each extra point adds a bust chance; busts cost cash/crew and reset Heat. Heat decays over time.",
         f"Rank only climbs during a season. Every {SEASON.days} days, cash, crew, Heat, turns, exchanges and Rank totals reset.",
@@ -2037,7 +2059,7 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
     elif action == "root":
         chance = 1.0 if target.controller_user_id is None else success_chance(player.crew, target.garrison)
         lines += [f"Exchange: {target.name}", f"Success: {chance:.0%}; garrison {target.garrison}.",
-                  f"Success earns +500 Rank and ${target.income_per_hour}/hour until lost or season reset.",
+                  f"Success earns +{capture_rank_award(player, target)} Rank and ${target.income_per_hour}/hour until lost or season reset.",
                   f"Success assigns 1 crew to defense, leaving {player.crew - 1} available before any bust. [G]arrison manages defenders.",
                   f"Failure loses {min(1, player.crew - 1)} crew before any bust."]
     if heat:
@@ -2239,7 +2261,7 @@ def garrison_preview_lines(player: Player, exchange: Exchange, change: int) -> l
             f"Assigned here: {exchange.garrison} -> {remaining}",
             "Only available crew take jobs, raid or attack. Assigned crew defend this exchange alone.",
             (f"Income remains ${exchange.income_per_hour}/hour; one available member is reserved."
-             if remaining else "Last defenders withdrawn: exchange becomes unclaimed; earned income is paid and future income stops.")]
+             if remaining else "Last defenders withdrawn: exchange becomes unclaimed; earned income is paid and future income stops. Reclaiming it earns no capture Rank.")]
 
 
 def do_garrison(p: Palette, conn: sqlite3.Connection, player: Player, width: int, height: int) -> bool:

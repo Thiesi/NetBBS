@@ -611,6 +611,18 @@ def test_garrison_transfers_conserve_crew_and_abandon_after_income_settlement(db
     conn.close()
 
 
+def test_garrison_history_receipt_is_read_without_acknowledging_incoming_events(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    wd.record_event(conn, actor.user_id, "Rival", "Incoming event", now)
+    wd.resolve_garrison(conn, actor, 1, 1, now)
+    assert wd.dashboard_state(conn, actor.user_id, now).new_events == 1
+    receipts = wd.history_events(conn, actor.user_id)
+    assert "Reinforced" in receipts[0].summary_text and receipts[0].seen_at is not None
+    assert receipts[1].summary_text == "Incoming event" and receipts[1].seen_at is None
+    conn.close()
+
+
 def test_captured_defenders_return_once_even_with_an_old_owner_session(db_path):
     conn, now, attacker, owner = _rivals(db_path)
     wd.resolve_root_exchange(conn, owner, 1, now, FixedRandom())
@@ -624,6 +636,38 @@ def test_captured_defenders_return_once_even_with_an_old_owner_session(db_path):
     assert owner.crew == 4
     assert attacker.crew + owner.crew + wd.assigned_crew(conn, attacker.user_id) == 7
     assert "2 defenders returned" in wd.history_events(conn, owner.user_id)[0].summary_text
+    conn.close()
+
+
+def test_abandon_and_reclaim_cannot_farm_capture_rank_even_after_restart(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    rank = wd.rank_score(actor)
+    for _ in range(2):
+        wd.resolve_garrison(conn, actor, 1, -1, now)
+        assert "+0 Rank" in "\n".join(wd.action_preview_lines("root", actor, wd.list_exchanges(conn)[0]))
+        conn.close()
+        conn = wd.connect(db_path)
+        actor = wd.read_player(conn, actor.user_id)
+        wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+        assert wd.rank_score(actor) == rank
+    conn.close()
+
+
+def test_abandonment_rank_guard_ends_with_another_owner_or_new_season(db_path):
+    conn, now, actor, rival = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    wd.resolve_garrison(conn, actor, 1, -1, now)
+    wd.resolve_root_exchange(conn, rival, 1, now, FixedRandom())
+    assert wd.rank_score(rival) == 500
+    wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
+    assert wd.rank_score(actor) == 1000
+    wd.resolve_garrison(conn, actor, 1, -1, now)
+    later = now + wd.SEASON
+    actor = wd.refresh_player(conn, actor.user_id, later)
+    assert wd.list_exchanges(conn)[0].withdrawn_by is None
+    wd.resolve_root_exchange(conn, actor, 1, later, FixedRandom())
+    assert wd.rank_score(actor) == 500
     conn.close()
 
 

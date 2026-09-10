@@ -6609,10 +6609,16 @@ offline loser a recovery resource without duplicating members or raising Rank.
 transfer choices and an explicit action preview. Reinforcement/withdrawal costs
 one ordinary turn, no cash or Heat, and earns no Rank. One member must remain
 available. Withdrawing the last defender abandons ownership after paying earned
-income; it cannot leave a free, unstaffed income source. Previews show both pools,
+income; it cannot leave a free, unstaffed income source. Reclaiming one's own
+abandoned exchange earns no capture Rank until another crew controls it or the
+season changes. A persisted marker per exchange prevents reconnect farming;
+the capture counter records rewarded captures. Migration-released holdings use
+the same guard. Previews show the actual Rank award, both pools,
 the resulting defense and abandonment. Commit rechecks resources, season and
 ownership. Back/disconnect spends nothing. The dashboard shows available and
 assigned crew separately; action results distinguish transfers from losses.
+Voluntary transfer receipts are retained as read history, avoiding an unread
+self-notification; incoming rival and upgrade receipts remain unread.
 
 Version 2 converts legacy copied garrisons atomically, after any normal overdue
 season reset. For each remaining owner, preserve the real crew total, reserve one
