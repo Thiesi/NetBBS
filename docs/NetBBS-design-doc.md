@@ -6555,8 +6555,9 @@ A persisted active-season marker commits with the resets and never regresses.
 Existing mixed-season worlds are adopted without erasing already-current-season
 progress. Skipped seasons advance directly to the current season; there is no
 old ownership income or competitive power carried through the reset. Failed
-rollover writes preserve the entire previous world. Future archives must capture
-the outgoing season before the resets inside this same transaction (slice 8).
+rollover writes preserve the entire previous world. Schema 10 archives the
+outgoing season and final territory Rank before resetting, in this same transaction
+(see season results below).
 
 A selection made with an old-season snapshot is rejected without spending
 resources. The next menu refresh shows the crackdown notice and fresh resources,
@@ -6903,6 +6904,39 @@ actual returns are labeled NPC activity, with no synthetic human accounts.
 Schema 9 adds the persistent insignia and bounded scene table transactionally.
 Backup/restore includes both; reset retains insignia and clears scene history.
 Synchronous storage rules and free, content-first paginated browsing remain.
+
+**Season results and awards (issue #362, slice 8; maintainer approved).** Before
+rollover, publish the UTC end time and the existing standings order: descending
+season Rank, then ascending account ID. Award cosmetic Gold, Silver and Bronze
+to the first three placements with positive Rank. Fewer than three qualifying
+players means fewer medals; zero Rank never receives one. Medals grant no money,
+crew, protection or other permanent gameplay advantage.
+
+Under the existing rollover write lock, settle each existing human owner's final
+territory earnings through the outgoing season's cutoff before computing final
+Rank. Archive one snapshot for every player in that season, including dormant
+players: account ID, historical handle (bounded to 80 sanitized characters), Rank,
+placement, medal and insignia. Cash and available crew are not in the public
+archive. Later renames, deletion of a live game row, resource changes or cosmetic
+choices do not rewrite historical results. An orphaned exchange cannot credit a
+missing player; reset still clears that stale holding.
+
+Archive insertion, final earnings, competitive reset, neutral-home population and
+active-season marker commit together. Any failure preserves the previous world.
+Repeated/concurrent boundary visits must produce exactly one result per player.
+Keep the latest twelve completed season numbers, deleting their result rows with
+evicted headers. For skipped, unmaterialized seasons record only an inactive
+header with no players or invented winners; process at most the retained twelve
+headers regardless of absence length. Upgrade creates no fictional past results.
+
+Schema 10 creates the archive tables. The current standings and dashboard publish
+awards in advance; `[I]Scene / Season results` shows retained season status, cutoff,
+podium and the viewing caller's placement. Archive records are snapshots, never
+updated by ordinary play. Existing stop-sessions/verified-backup procedures apply.
+SysOp advance/reset first settles overdue seasons at their published natural
+cutoffs, then closes the current season at the operator-selected boundary
+and retains cosmetic archive recognition while resetting competitive resources.
+Older worlds remain operable before upgrade; unknown past results are not backfilled.
 
 **Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
 living crew is the available crew plus the members assigned across their owned

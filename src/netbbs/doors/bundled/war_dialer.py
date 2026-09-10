@@ -646,6 +646,8 @@ NPC_STORIES = {
 INSIGNIA = {"modem": ("[::]", "Modem"), "relay": ("<-->", "Relay"),
             "signal": ("=||=", "Signal"), "archive": ("{##}", "Archive")}
 SCENE_LIMIT = 500
+SEASON_ARCHIVE_LIMIT = 12
+SEASON_AWARDS = "Gold / Silver / Bronze: top three positive-Rank players. Rank descending, then account ID ascending; cosmetic only."
 
 # (name, income per real hour controlled)
 EXCHANGE_SEEDS: tuple[tuple[str, int], ...] = (
@@ -1036,7 +1038,7 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
-WORLD_SCHEMA_VERSION = 9
+WORLD_SCHEMA_VERSION = 10
 _OPERATION_COLUMNS = {"operation_contract", "operation_approach", "operation_stage", "successful_operations"}
 
 # Versioned schema contract: future additions need a new numbered migration.
@@ -1067,6 +1069,9 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
         required_tables["recon"] = {"viewer", "target", "handle", "cash", "crew", "observed_at", "expires_at", "season"}
     if version >= 9:
         required_tables["scene"] = {"id", "created_at", "season", "kind", "summary"}
+    if version >= 10:
+        required_tables["seasons"] = {"number", "ended_at", "status", "players"}
+        required_tables["season_results"] = {"season", "user_id", "handle", "rank", "placement", "medal", "insignia"}
     if not set(required_tables) <= tables:
         raise WorldStateError("Unrecognized or incomplete War Dialer database. Preserve it for SysOp recovery; no replacement was created.")
     for table, required in required_tables.items():
@@ -1157,6 +1162,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     fresh.execute("PRAGMA user_version=8")
                     _migrate_world_v9(fresh)
                     fresh.execute("PRAGMA user_version=9")
+                    _migrate_world_v10(fresh)
+                    fresh.execute("PRAGMA user_version=10")
             finally:
                 fresh.close()
             try:
@@ -1224,6 +1231,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if version < 9:
             _migrate_world_v9(conn)
             conn.execute("PRAGMA user_version=9")
+        if version < 10:
+            _migrate_world_v10(conn)
+            conn.execute("PRAGMA user_version=10")
         _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
 
 
@@ -1363,6 +1373,39 @@ def _migrate_world_v3(conn: sqlite3.Connection) -> None:
                      "capture attempts cost $50 and exchange income is $1-$3/hour. See Help for the new rules.", now)
     for row, (_, rate) in zip(exchanges, EXCHANGE_SEEDS):
         conn.execute("UPDATE exchanges SET income_per_hour=? WHERE id=?", (rate, row[0]))
+
+
+def _migrate_world_v10(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE seasons (number INTEGER PRIMARY KEY, ended_at TEXT NOT NULL, "
+                 "status TEXT NOT NULL CHECK (status IN ('completed', 'inactive')), players INTEGER NOT NULL)")
+    conn.execute("CREATE TABLE season_results (season INTEGER NOT NULL, user_id INTEGER NOT NULL, "
+                 "handle TEXT NOT NULL CHECK (length(handle) <= 80), rank INTEGER NOT NULL CHECK (rank >= 0), "
+                 "placement INTEGER NOT NULL, medal TEXT NOT NULL CHECK (medal IN ('', 'Gold', 'Silver', 'Bronze')), "
+                 "insignia TEXT NOT NULL, PRIMARY KEY(season,user_id), UNIQUE(season,placement))")
+
+
+def _archive_season(conn: sqlite3.Connection, old: int, current: int, now: datetime) -> None:
+    """Finalize the last materialized season once; skipped seasons have no winners."""
+    anchor = get_or_create_season_anchor(conn, now)
+    cutoff = anchor + old * SEASON
+    owners = conn.execute("SELECT DISTINCT e.controller_user_id FROM exchanges e JOIN players p ON p.user_id=e.controller_user_id WHERE e.season_number=? AND p.season_number=e.season_number", (old,)).fetchall()
+    for row in owners:
+        player = read_player(conn, row[0])
+        player.cash += _collect_exchange_income(conn, player, cutoff)
+        _save_player(conn, player)
+    players = conn.execute(f"SELECT user_id,handle,{_RANK_SQL} AS rank,insignia FROM players WHERE season_number=? ORDER BY rank DESC,user_id", (old,)).fetchall()
+    conn.execute("INSERT INTO seasons(number,ended_at,status,players) VALUES (?,?,'completed',?)", (old, to_iso(cutoff), len(players)))
+    for place, player in enumerate(players, 1):
+        medal = ('Gold', 'Silver', 'Bronze')[place - 1] if place <= 3 and player['rank'] > 0 else ''
+        conn.execute("INSERT INTO season_results(season,user_id,handle,rank,placement,medal,insignia) VALUES (?,?,?,?,?,?,?)",
+                     (old, player['user_id'], _event_plain(player['handle'])[:80], player['rank'], place, medal, player['insignia']))
+    # Bounded by retained history, even after a very long absence.
+    for number in range(max(old + 1, current - SEASON_ARCHIVE_LIMIT), current):
+        conn.execute("INSERT INTO seasons(number,ended_at,status,players) VALUES (?,?,'inactive',0)",
+                     (number, to_iso(anchor + number * SEASON)))
+    keep = "SELECT number FROM seasons ORDER BY number DESC LIMIT ?"
+    conn.execute("DELETE FROM season_results WHERE season NOT IN (" + keep + ")", (SEASON_ARCHIVE_LIMIT,))
+    conn.execute("DELETE FROM seasons WHERE number NOT IN (" + keep + ")", (SEASON_ARCHIVE_LIMIT,))
 
 
 def _migrate_world_v9(conn: sqlite3.Connection) -> None:
@@ -1541,7 +1584,7 @@ def ensure_exchanges_seeded(conn: sqlite3.Connection, season_number: int, now: d
 def _settle_world(conn: sqlite3.Connection, now: datetime) -> int:
     """One season boundary for every player and exchange, inside the caller's lock.
 
-    Future season archives belong before these resets in this same transaction.
+    Final results and earned territory Rank are archived before competitive reset.
     The marker commits last; a failed transition leaves the prior world intact.
     """
     if not conn.in_transaction:
@@ -1557,6 +1600,8 @@ def _settle_world(conn: sqlite3.Connection, now: datetime) -> int:
             _settle_neutral_operators(conn, now)
         return season
 
+    if marker is not None and _world_schema_version(conn) >= 10:
+        _archive_season(conn, int(marker["value"]), season, now)
     if _world_schema_version(conn) >= 8:
         conn.execute("UPDATE exchanges SET npc_key='', npc_return_at='' WHERE season_number < ?", (season,))
     rows = conn.execute("SELECT * FROM players WHERE season_number < ? ORDER BY user_id", (season,))
@@ -2447,6 +2492,8 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
     lines.append("[I]Scene: crew insignia, NPC dossiers and public bulletins.")
     lines.append(f"[S]Skills/support: {player.specialty or 'untrained'}; {player.support or 'empty slot'}")
     lines.append("Season end: " + state.season_ends_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+    lines.append(SEASON_AWARDS)
+    lines.append("[I]Scene / Season results: latest 12 completed seasons.")
     return lines
 
 
@@ -2532,6 +2579,7 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "First visit: inspect Map, compare a Root preview for unclaimed territory, or Trade to fund Crew recruitment. Back always cancels a preview.",
         f"Each action costs one of {TURNS_PER_DAY} turns. The rolling 24-hour window starts with your first action.",
         "[T]rade Warez: quick cash. [C]rew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
+        "Season awards are cosmetic Gold/Silver/Bronze for the top three positive-Rank players. Ties use ascending account ID. [I]Scene / Season results retains the latest 12 completed seasons, with inactive skipped seasons labeled and no permanent power bonus.",
         "[I]Scene is free: choose a cosmetic crew insignia, read NPC biographies/current homes, and browse the latest 500 public territory bulletins. Insignia survive season resets. Q leaves any screen or quits from the switchboard.",
         "[O]Ops: resume one three-step operation, buy rival recon, or read your latest ten 24-hour dossiers. Steps cost turns; browsing and reconnecting never reroll outcomes.",
         "[S]Kit: train one crew specialty or buy one consumable support item. Each costs cash and one turn; preview before Act. Both reset each season.",
@@ -2566,7 +2614,8 @@ def show_player_directory(p: Palette, conn: sqlite3.Connection, user_id: int,
         lines = [f"Season {page.player.season_number}; crews {page.offset + 1 if page.entries else 0}-{page.offset + len(page.entries)} of {page.total}"]
         if standings:
             lines += [f"Your position: {page.position}/{page.total}; Rank {rank_score(page.player):,}",
-                      "Ties: lower account ID first."]
+                      SEASON_AWARDS,
+                      "Season end: " + (get_or_create_season_anchor(conn, now) + page.player.season_number * SEASON).strftime("%Y-%m-%d %H:%M UTC")]
         else:
             lines += ["Raid eligibility now; crew strength and cash are not public intelligence."]
         for index, rival in enumerate(page.entries, page.offset + 1):
@@ -2595,6 +2644,7 @@ def do_scene(p: Palette, conn: sqlite3.Connection, player: Player, width: int, h
           f"{name} insignia. Choose a free cosmetic design; retained across seasons."], True),
         (["Neutral operator dossiers", "Three labeled NPC crews: biographies and current home status."], True),
         (["Public scene bulletins", "Latest 500 captures, abandonments and NPC arrivals. Timestamped actual activity; no private resources."], True),
+        (["Season results", "Cosmetic podium awards and the latest twelve completed seasons; historical handles and final Rank."], True),
     ], width, height)
     if key in "BQ":
         return
@@ -2631,6 +2681,31 @@ def do_scene(p: Palette, conn: sqlite3.Connection, player: Player, width: int, h
         for bulletin in read_scene(conn):
             lines += [from_iso(bulletin["created_at"]).strftime("%Y-%m-%d %H:%M UTC") + f"; season {bulletin['season']}", bulletin["summary"]]
         show_text_pages(p, "SCENE BULLETINS", lines or ["No public territory activity recorded yet."], width, height)
+
+
+    elif key == "4":
+        show_season_results(p, conn, player.user_id, width, height)
+
+
+def show_season_results(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, height: int) -> None:
+    with _write_transaction(conn):
+        _settle_world(conn, now_utc())
+        seasons = conn.execute("SELECT * FROM seasons ORDER BY number DESC LIMIT ?", (SEASON_ARCHIVE_LIMIT,)).fetchall()
+        lines = [SEASON_AWARDS, "Historical handles and final Rank are preserved; private resources are not published."]
+        for season in seasons:
+            number = season['number']
+            lines += [f"Season {number}: {season['status']}; {season['players']} players.",
+                      "Ended: " + from_iso(season['ended_at']).strftime("%Y-%m-%d %H:%M UTC")]
+            if season['status'] == 'inactive':
+                lines.append("No activity materialized this season; no winners awarded.")
+                continue
+            podium = conn.execute("SELECT handle,rank,medal FROM season_results WHERE season=? AND medal!='' ORDER BY placement", (number,)).fetchall()
+            lines.extend(f"{row['medal']}: {row['handle']}, Rank {row['rank']}" for row in podium)
+            if not podium: lines.append("No positive Rank; no medals awarded.")
+            own = conn.execute("SELECT placement,rank FROM season_results WHERE season=? AND user_id=?", (number, user_id)).fetchone()
+            if own: lines.append(f"Your result: #{own['placement']}, Rank {own['rank']}.")
+        if not seasons: lines.append("No completed seasons archived yet. Current standings and end time are on the switchboard.")
+    show_text_pages(p, "SEASON RESULTS", lines, width, height)
 
 
 def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int, *, viewer_id: int | None = None) -> None:

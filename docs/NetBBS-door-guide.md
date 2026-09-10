@@ -48,13 +48,13 @@ refuses to silently create a replacement. Choose an explicit override or complet
 the migration. An explicit path for a new independent node deliberately selects
 its own world; it does not adopt the old world's users or records.
 
-War Dialer records schema version 9 in SQLite `user_version`. A complete older
+War Dialer records schema version 10 in SQLite `user_version`. A complete older
 world upgrades automatically in one transaction: version 1 adopts the original
 layout and latest 500 events per player; version 2 converts copied garrisons to
 shared crew assignments; version 3 adds the capture/control economy described
 below; version 4 adds raid recovery; version 5 adds crew/support; version 6 adds
 recon/operations; version 7 adds exchange roles; version 8 adds neutral operators; version 9 adds crew insignia and public scene
-bulletins. A failed upgrade rolls
+bulletins; version 10 adds completed-season results. A failed upgrade rolls
 back its schema/data changes and version marker. Newer versions, incomplete or
 unrelated schemas, and corrupt files are refused with a caller-facing error;
 startup does not replace them with an empty world. Existing zero-byte files are
@@ -226,7 +226,7 @@ their exchange. The switchboard and results show the two pools separately.
 
 **MANUAL — outside NetBBS, before activating shared-crew rules:** stop all old
 War Dialer processes and create/verify a node backup with its world component.
-The first permitted launch upgrades the world to schema 9 transactionally.
+The first permitted launch upgrades the world to schema 10 transactionally.
 When upgrading from copied defenses, schema 2 conversion runs first.
 After normal overdue season settlement, it reserves one available member per
 owner, keeps holdings by descending hourly income then ID within the real crew
@@ -234,7 +234,7 @@ budget, and distributes the remaining members evenly across those holdings.
 Unstaffable holdings become unclaimed after paying income; a receipt explains
 the conversion. IDs, handles, account age, cash and Rank are retained. Review
 the receipt and use Garrison to adjust assignments. Never mix old and new game
-processes; older versions refuse schema 9. Restore the verified backup with a
+processes; older versions refuse schema 10. Restore the verified backup with a
 matching game version if the operator chooses to undo the upgrade.
 
 Schema 3 pays already-earned income at the previous rates before applying the
@@ -331,6 +331,24 @@ turns, Rank, Map, Scene, history and saved-operation inspection remain free.
 Larger worlds use the same paginated directories; NPCs never inflate human
 standings. Automated complete-visit checks cover 1, 3 and 80 callers at all three
 supported test sizes; human satisfaction and transport usability remain manual.
+
+Season awards are announced before the deadline: Gold/Silver/Bronze go to up to
+three positive-Rank players, ordered by Rank descending and account ID ascending.
+They are cosmetic and grant no gameplay power. Final territory earnings through
+the season cutoff count toward final Rank, including for offline owners.
+
+Open `[I]Scene`, then Season results to see the latest twelve completed seasons,
+their end times, podium and your archived placement. Historical handles and
+insignia are snapshots. Skipped seasons are marked inactive with no invented
+winners. Cash and available crew are not published. Ordinary play never rewrites
+past results; advancing or resetting competition retains these cosmetic records.
+
+**MANUAL ? outside NetBBS, before activating season results:** stop old game
+sessions and create/verify the node backup with its world component as above.
+Schema 10 starts the archive without fabricating missing historical seasons.
+Check the announced end time, award rules and retained results after upgrade or
+restore. Old binaries refuse schema 10; do not mix game versions. Reset/advance
+still requires its own verified backup and explicit confirmation.
 
 Free screens: `[B]Rank` shows season standings and your position; ties use account
 ID order. `[E]Map` shows the fixed ring, exchange roles, owners, garrisons, security,

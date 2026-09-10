@@ -473,6 +473,19 @@ competition reset clears it after world settlement. Insignia are noncompetitive
 identity: fresh actor reads and season/reset saves must retain them, including
 when another session changes the cosmetic choice during an action preview.
 
+Archive final territory Rank before resetting the world, using the season cutoff
+rather than a late visitor's current time. Do not call a public refresh helper
+from the archiver: it would recurse into rollover. Settle existing owners directly,
+then snapshot all season players with the same Rank expression and account-ID tie
+rule used by live standings. NPCs have no player row and cannot receive medals.
+Archive, income settlement, reset and active marker share one transaction. Keep
+at most twelve headers and their result rows; skip replay of unretained inactive
+seasons after long absences. Snapshot handles/insignia rather than joining live
+identity fields when rendering old results. SysOp advance/reset settles overdue
+natural seasons before changing the anchor, then closes the current season at
+the confirmed operator boundary. Moving the anchor first changes past cutoffs
+and permanently miscounts territory Rank in a quiet world.
+
 `python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
 against disposable SQLite worlds through the actual action resolvers. The default
 is fourteen days and seeds 362/363/364; use `--scenario NAME`, `--days 1..21`, and

@@ -2317,6 +2317,8 @@ def test_specialty_switch_replaces_training_and_purchase_failure_rolls_back(db_p
 
 def _downgrade_operations_fixture(conn):
     conn.execute("UPDATE exchanges SET garrison=0, controlled_since=NULL WHERE controller_user_id IS NULL")
+    conn.execute("DROP TABLE season_results")
+    conn.execute("DROP TABLE seasons")
     conn.execute("ALTER TABLE players DROP COLUMN insignia")
     conn.execute("DROP TABLE scene")
     conn.execute("ALTER TABLE exchanges DROP COLUMN npc_key")
@@ -2593,6 +2595,8 @@ def test_service_rejection_and_rollback_spend_nothing(db_path, problem):
 def test_exchange_role_upgrade_preserves_world_and_rolls_back_version_failure(db_path, monkeypatch):
     conn, now, actor, _ = _rivals(db_path)
     _give_exchange(conn, 2, now)
+    conn.execute("DROP TABLE season_results")
+    conn.execute("DROP TABLE seasons")
     conn.execute('ALTER TABLE players DROP COLUMN insignia')
     conn.execute('DROP TABLE scene')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_key')
@@ -2622,6 +2626,8 @@ def test_exchange_role_upgrade_preserves_world_and_rolls_back_version_failure(db
 @pytest.mark.parametrize('count', [9, 20])
 def test_exchange_role_upgrade_rejects_unexpected_map_without_mutation(db_path, count):
     conn, now, actor, _ = _rivals(db_path)
+    conn.execute("DROP TABLE season_results")
+    conn.execute("DROP TABLE seasons")
     conn.execute('ALTER TABLE players DROP COLUMN insignia')
     conn.execute('DROP TABLE scene')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_key')
@@ -2709,6 +2715,8 @@ def test_neutral_upgrade_preserves_human_ownership_and_rolls_back_marker_failure
     conn, now, actor, _ = _rivals(db_path)
     wd.resolve_root_exchange(conn, actor, 5, now, FixedRandom())
     conn.execute("UPDATE exchanges SET garrison=0, controlled_since=NULL WHERE npc_key != ''")
+    conn.execute("DROP TABLE season_results")
+    conn.execute("DROP TABLE seasons")
     conn.execute('ALTER TABLE players DROP COLUMN insignia')
     conn.execute('DROP TABLE scene')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_key')
@@ -2824,6 +2832,8 @@ def test_insignia_is_free_persistent_and_does_not_overwrite_new_competitive_stat
 
 def test_scene_upgrade_is_atomic_and_does_not_invent_old_bulletins(db_path):
     conn, now, actor, _ = _rivals(db_path)
+    conn.execute("DROP TABLE season_results")
+    conn.execute("DROP TABLE seasons")
     conn.execute('ALTER TABLE players DROP COLUMN insignia')
     conn.execute('DROP TABLE scene')
     conn.execute('PRAGMA user_version=8')
@@ -2836,6 +2846,103 @@ def test_scene_upgrade_is_atomic_and_does_not_invent_old_bulletins(db_path):
     assert list(conn.iterdump()) == before
     wd.ensure_schema(conn)
     assert wd.read_player(conn, 1) == actor and wd.read_scene(conn) == []
+    before = list(conn.iterdump())
+    wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+
+def test_season_archive_settles_dormant_owner_at_cutoff_before_awarding_medals(db_path):
+    conn, now, actor, rival = _rivals(db_path)
+    conn.execute('UPDATE players SET crew_recruited_total=10 WHERE user_id=1')
+    _give_exchange(conn, 2, now)
+    wd.refresh_player(conn, 1, now + wd.SEASON + timedelta(days=7))
+    results = [tuple(r) for r in conn.execute('SELECT user_id,rank,placement,medal FROM season_results ORDER BY placement')]
+    assert results == [(2, 112, 1, 'Gold'), (1, 100, 2, 'Silver')]
+    season = conn.execute('SELECT * FROM seasons').fetchone()
+    assert wd.from_iso(season['ended_at']) == now + wd.SEASON and season['players'] == 2
+    assert wd.read_player(conn, 2).cash == 300 and wd.rank_score(wd.read_player(conn, 2)) == 0
+    assert wd.read_player(conn, 2).created_at == rival.created_at
+    assert conn.execute('SELECT COUNT(*) FROM season_results').fetchone()[0] == 2
+    conn.close()
+
+
+def test_archive_ties_positive_rank_and_historical_handles_survive_later_identity_changes(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    for uid in (3, 4): wd.load_or_create_player(conn, uid, 'Crew' + str(uid), now, 1)
+    conn.execute('UPDATE players SET crew_recruited_total=1 WHERE user_id<4')
+    wd.settle_world(conn, now + wd.SEASON)
+    rows = [tuple(r) for r in conn.execute('SELECT user_id,rank,placement,medal FROM season_results ORDER BY placement')]
+    assert rows == [(1, 10, 1, 'Gold'), (2, 10, 2, 'Silver'), (3, 10, 3, 'Bronze'), (4, 0, 4, '')]
+    archived = [tuple(r) for r in conn.execute('SELECT * FROM season_results ORDER BY placement')]
+    fresh = wd.load_or_create_player(conn, 1, 'Renamed', now + wd.SEASON, 2)
+    wd.resolve_recruit(conn, fresh, now + wd.SEASON)
+    conn.execute('DELETE FROM players WHERE user_id=4')
+    wd.settle_world(conn, now + wd.SEASON + wd.DAY)
+    assert [tuple(r) for r in conn.execute('SELECT * FROM season_results ORDER BY placement')] == archived
+    assert conn.execute('SELECT handle FROM season_results WHERE user_id=1').fetchone()[0] == 'Alpha'
+    conn.close()
+
+
+def test_archive_failure_rolls_back_cutoff_income_results_and_world_reset(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    _give_exchange(conn, 2, now)
+    before = list(conn.iterdump())
+    conn.execute("CREATE TRIGGER deny_result BEFORE INSERT ON season_results BEGIN SELECT RAISE(ABORT, 'archive failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='archive failed'):
+        wd.settle_world(conn, now + wd.SEASON)
+    conn.execute('DROP TRIGGER deny_result')
+    assert list(conn.iterdump()) == before
+    assert conn.execute('SELECT COUNT(*) FROM seasons').fetchone()[0] == 0
+    conn.close()
+
+
+def test_season_archive_retains_twelve_completed_seasons_and_marks_skipped_seasons_inactive(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    for number in range(2, 16): wd.settle_world(conn, now + (number - 1) * wd.SEASON)
+    assert [r[0] for r in conn.execute('SELECT number FROM seasons ORDER BY number')] == list(range(3, 15))
+    assert conn.execute('SELECT COUNT(*) FROM season_results').fetchone()[0] == 24
+    assert conn.execute("SELECT COUNT(*) FROM season_results WHERE medal!=''").fetchone()[0] == 0
+    # A long absence must not replay thousands of empty seasons or invent winners.
+    wd.settle_world(conn, now + 1000 * wd.SEASON)
+    assert [r[0] for r in conn.execute('SELECT number FROM seasons ORDER BY number')] == list(range(989, 1001))
+    assert all(r[0] == 'inactive' for r in conn.execute('SELECT status FROM seasons'))
+    assert conn.execute('SELECT COUNT(*) FROM season_results').fetchone()[0] == 0
+    conn.close()
+
+
+def test_two_rollover_sessions_create_only_one_final_result_per_player(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_recruit(conn, actor, now)
+    barrier = threading.Barrier(2)
+    def rollover(_):
+        connection = wd.connect(db_path)
+        try:
+            barrier.wait(timeout=5)
+            wd.settle_world(connection, now + wd.SEASON)
+        finally: connection.close()
+    with ThreadPoolExecutor(2) as pool: list(pool.map(rollover, range(2)))
+    assert conn.execute('SELECT COUNT(*) FROM seasons').fetchone()[0] == 1
+    assert conn.execute('SELECT COUNT(*) FROM season_results').fetchone()[0] == 2
+    assert conn.execute("SELECT user_id FROM season_results WHERE medal='Gold'").fetchone()[0] == 1
+    conn.close()
+
+
+def test_archive_schema_upgrade_is_atomic_and_does_not_backfill_unknown_history(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    conn.execute('DROP TABLE season_results')
+    conn.execute('DROP TABLE seasons')
+    conn.execute('PRAGMA user_version=9')
+    before = list(conn.iterdump())
+    def deny_version(action, name, value, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == 'user_version' and value == '10' else sqlite3.SQLITE_OK
+    conn.set_authorizer(deny_version)
+    with pytest.raises(sqlite3.DatabaseError): wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert list(conn.iterdump()) == before
+    wd.ensure_schema(conn)
+    assert wd.read_player(conn, 1) == actor and conn.execute('SELECT COUNT(*) FROM seasons').fetchone()[0] == 0
     before = list(conn.iterdump())
     wd.ensure_schema(conn)
     assert list(conn.iterdump()) == before
