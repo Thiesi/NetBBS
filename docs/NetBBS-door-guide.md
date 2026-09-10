@@ -729,6 +729,7 @@ Browse their terms and your standing, then **[B] Back** without changing anythin
 At standing 75, **[J] Join** offers a final confirmation. Each faction grants
 2,000 credits once; you may hold both memberships.
 
+- Every completed delivery, survey or escort earns one point of Concord standing.
 - Concord's active commission adds 25% to bounty and escort payouts. The bonus
   uses your standing when the reward is paid, which can change during the mission.
 - Blackwake's active membership halves the chance of a new customs inspection.

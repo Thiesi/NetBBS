@@ -2682,6 +2682,7 @@ def check_mission_completions(world: World, *, just_discovered: int | None = Non
             done = True
         if done:
             world.save.pilot.credits += m.reward
+            adjust_reputation(world, FACTION_CONCORD, CONCORD_STANDING_PER_CONTRACT)
             if m.opening_assignment:
                 world.save.flags["opening_assignment_completed"] = True
             if world.save.pilot.missions_completed == 0:
@@ -2918,7 +2919,12 @@ def bribe_chance(world: World, pirate: Pirate) -> float:
     return max(0.05, min(0.85, chance))
 
 
-CONTRABAND_STANDING_STEP = 500
+# 250, not 500: with the non-Haven demand pool capped at 48 units, a deliberate
+# smuggler needed about a hundred round trips at 30% customs risk per arrival to
+# reach Cartel membership through trade (issue #407). Milestones still follow
+# lifetime net cash surplus, so buying and same-station recycling grant nothing.
+CONTRABAND_STANDING_STEP = 250
+CONCORD_STANDING_PER_CONTRACT = 1  # Legal contract work earns Concord standing (issue #407).
 
 
 def _load_trade_total(value, *, nonnegative=False, label="contraband trading record") -> int:
@@ -4886,7 +4892,7 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
                      f"Stock {depth['stock']}; station buys {depth['demand']}; in hold {world.save.cargo.get(commodity, 0)}. "
                      + " ".join(tags or ["Normal"]))
     if any(not COMMODITIES[c]["legal"] for c in goods):
-        lines.append("Blackwake: +1 standing per new 500cr net contraband trading gain; purchases count against gains.")
+        lines.append(f"Blackwake: +1 standing per new {CONTRABAND_STANDING_STEP}cr net contraband trading gain; purchases count against gains.")
     return lines
 
 
@@ -7410,6 +7416,7 @@ def _resolve_escort_missions(p: Palette, world: World, dest_id: int) -> None:
                 world.save.active_missions.remove(mission)
                 reward = bounty_reward_for(world, mission.reward)
                 world.save.pilot.credits += reward
+                adjust_reputation(world, FACTION_CONCORD, CONCORD_STANDING_PER_CONTRACT)
                 if world.save.pilot.missions_completed == 0:
                     world.save.pilot.highlight(f"First mission complete: {mission.description}.")
                 world.save.pilot.missions_completed += 1
