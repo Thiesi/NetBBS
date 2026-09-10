@@ -2294,6 +2294,10 @@ def test_display_toggles_are_free_paginated_and_survive_seasons(tmp_path, monkey
         nonlocal selected, calls
         calls += 1
         assert calls < 60
+        screen = ' '.join(_ANSI_RE.sub('', ''.join(written).split('\x1b[2J\x1b[H')[-1]).split())
+        for digit, label in zip('123', ('ASCII decorations', 'Monochrome', 'Fast mode')):
+            if digit in valid:
+                assert label in screen
         if selected: return 'B'
         if setting in valid:
             selected = True
@@ -2602,4 +2606,18 @@ sys.exit(game.main())
     conn = wd.connect(path)
     actor = wd.read_player(conn, 0)
     assert (actor.cash, actor.crew, actor.turns_used, wd.rank_score(actor)) == (225, 4, 1, 10)
+    conn.close()
+
+
+
+def test_fast_goodbye_retains_rank_without_a_decorative_frame(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / 'fast-goodbye.db')
+    wd.ensure_schema(conn)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', wd.now_utc(), 1)
+    palette = wd.Palette(False)
+    palette.fast = True
+    lines = []
+    monkeypatch.setattr(wd, 'out_line', lines.append)
+    wd.draw_goodbye(palette, actor, 20)
+    assert lines == ['Carrier lost. Rank 0 - Newbie']
     conn.close()

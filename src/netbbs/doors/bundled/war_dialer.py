@@ -2777,8 +2777,7 @@ def do_display(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, h
     while True:
         values = read_display(conn, user_id)
         apply_display(p, values)
-        records = [([f"{label}: {'ON' if getattr(p, key) else 'OFF'}",
-                     "Toggle freely; retained across seasons. Fast skips static art/flavor; all stakes and results remain visible."], True)
+        records = [([f"{label}: {'ON' if getattr(p, key) else 'OFF'}"], True)
                    for key, label in zip(DISPLAY_KEYS, labels)]
         choice = pick_record_page(p, 'DISPLAY', records, width, height)
         if choice in 'BQ':
@@ -3369,6 +3368,9 @@ def draw_season_change(p: Palette, season_number: int, width: int = 78, height: 
 
 
 def draw_goodbye(p: Palette, player: Player, w: int) -> None:
+    if p.fast:
+        out_line(f"Carrier lost. Rank {rank_score(player)} - {tier_name(rank_score(player))}")
+        return
     out_line()
     out_line(decor(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}"))
     msg = f"{p.gold}{BOLD}Carrier lost.{RESET} {p.white}Rank: {tier_name(rank_score(player))}{RESET}"
