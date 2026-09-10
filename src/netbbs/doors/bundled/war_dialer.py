@@ -2847,7 +2847,7 @@ def choose_rival(p: Palette, conn: sqlite3.Connection, player: Player, width: in
             return None
         if not page.entries:
             show_text_pages(p, "NO RIVAL CREWS", ["No other crews have joined yet.",
-                            "Back to the switchboard to trade, recruit or inspect exchange territory. All browsing is free."], width, height)
+                            "First [B]ack to the switchboard. There, [J]Jobs and [O]Operations need no rival. [X]Root contests labeled NPC homes; [I]Scene shows operators and public activity. All browsing is free."], width, height)
             return None
         effective_now = max(now, from_iso(player.heat_updated_at))
         records = [([rival.handle, f"{tier_name(rank_score(rival))}; Rank {rank_score(rival):,}",
