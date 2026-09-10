@@ -483,3 +483,92 @@ def test_describe_by_name_still_works_on_the_empty_screen(db, lane, alice):
     asyncio.run(_show_area(session, lane, area, alice))
 
     assert get_file(db, entry.file_id).description == "named while pending"
+def test_describing_a_file_in_a_linked_area_says_the_change_stays_local(db, lane, alice):
+    """Issue #464 made an approved upload's catalogue entry go out the
+    moment it lands, so by the time anyone edits its description peers
+    already have the original — and a `file_descriptor` is immutable.
+    Say so rather than let the caller assume the edit travels."""
+    from netbbs.files.areas import get_file_area_by_name
+    from netbbs.link.files import link_file_area, queue_file_descriptor_if_linked
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    identity = bootstrap_node_identity("roanoke")
+    area = create_file_area(db, "downloads", creator=alice)
+    link_file_area(db, area, node_identity=identity)
+    area = get_file_area_by_name(db, "downloads")
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+    queue_file_descriptor_if_linked(db, entry, area, node_identity=identity)
+    session = FakeSession(editor_keys=[_key("e")], lines=["a better description", ""])
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert get_file(db, entry.file_id).description == "a better description"
+    assert "peers keep the description they were already sent" in session.visible_output
+
+
+def test_an_unlinked_area_says_nothing_about_peers(db, lane, alice):
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+    session = FakeSession(editor_keys=[_key("e")], lines=["a better description", ""])
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert "peers keep" not in session.visible_output
+
+
+def test_a_file_predating_the_link_is_not_described_as_already_sent(db, lane, alice):
+    """Codex review: a file approved before its area was Linked has no
+    descriptor and never gets one (pre-Link history is not backfilled),
+    so telling its describer that peers hold an older wording would be
+    false."""
+    from netbbs.link.files import link_file_area
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    area = create_file_area(db, "downloads", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+    link_file_area(db, area, node_identity=bootstrap_node_identity("roanoke"))
+    session = FakeSession(editor_keys=[_key("e")], lines=["a better description", ""])
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert get_file(db, entry.file_id).description == "a better description"
+    assert "peers keep" not in session.visible_output
+
+
+def test_an_approved_file_in_a_moderated_area_offers_its_uploader_no_editor(db, lane, alice, bob):
+    """Codex review: the domain refuses this save, so advertising `[E]`
+    and opening an editor would take the caller's text only to throw it
+    back at them."""
+    area = create_file_area(db, "downloads", creator=bob, moderated=True)
+    grant_permissions(
+        db, bob, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.APPROVE, granted_by=bob,
+    )
+    entry = upload_file(db, area, alice, "game.zip", b"payload", description="honest")
+    from netbbs.files.entries import approve_file
+
+    approve_file(db, entry, approved_by=bob)
+
+    session = FakeSession(editor_keys=[_key("e")], lines=["spam", ""])
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert "dit description" not in session.visible_output
+    assert get_file(db, entry.file_id).description == "honest"
+
+
+def test_naming_an_approved_file_in_a_moderated_area_says_why_not(db, lane, alice, bob):
+    area = create_file_area(db, "downloads", creator=bob, moderated=True)
+    grant_permissions(
+        db, bob, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.APPROVE, granted_by=bob,
+    )
+    entry = upload_file(db, area, alice, "game.zip", b"payload", description="honest")
+    from netbbs.files.entries import approve_file
+
+    approve_file(db, entry, approved_by=bob)
+
+    session = FakeLineSession(lines=["/describe game.zip", "b"])
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert "already been approved in a moderated area" in session.visible_output
+    assert get_file(db, entry.file_id).description == "honest"

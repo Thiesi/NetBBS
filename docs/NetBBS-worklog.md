@@ -818,7 +818,36 @@ Description edits are in-place and local-only. A `file_id` hashes the bytes and
 upload metadata, not the description, so amending it keeps the row valid — but
 `file_descriptor` is immutable and single-shot, so an already-signed catalogue
 entry keeps the description its peers saw. Changing that means a new event
-type, not a re-signed one.
+type, not a re-signed one. The UI says this out loud in a Linked area rather
+than leaving it to be discovered.
+
+### Queueing a `file_descriptor`
+
+A file descriptor is queued from every path by which a file becomes approved —
+upload into an unmoderated area, and moderator approval in a moderated one —
+and from nowhere else. The helper refuses a non-`'approved'` file, which is
+what keeps a moderation queue off the network; the two call sites are not
+themselves allowed to decide that.
+
+It also refuses an area this node did not originate. A peer verifies every
+`file_descriptor` against the signing key of the area's genesis origin, so one
+signed here for a carried area verifies nowhere, sits on the row permanently,
+and is re-pushed and re-rejected with the rest of its batch. Unlike a
+`board_post`, which carries an author tier and is meant to travel from any node
+into a carried board, describing a file is the origin's own act. Uploads into a
+carried area stay local by design.
+
+Nothing is backfilled at promotion: a file approved before its area was Linked
+has no descriptor and never gets one, matching the pre-Link-history rule
+already stated for posts. Anything the UI says about what peers hold must
+therefore ask the file, not the area.
+
+**Test method.** A queue-on-write helper can be complete, tested, and called
+from nowhere — this one was, for as long as remote file areas have shipped, as
+`link_file_area` had been before it. End-to-end Link tests that call the helper
+themselves prove propagation while proving nothing about whether anything calls
+it. Drive the flow and assert against `load_own_file_area_events`, which is
+what `netbbs.link.sync` actually pushes.
 
 ### Local mail
 

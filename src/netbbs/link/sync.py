@@ -176,7 +176,7 @@ from netbbs.link.mail import (
     get_link_mail_acknowledgement,
     get_link_message_for_delivery,
 )
-from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
+from netbbs.link.protocol import MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.relay_mailbox import RelayableEnvelope
 from netbbs.link.relay_selection import relays_needing_replacement, select_relay_candidates
 from netbbs.link.reliability import record_dial_outcome
@@ -538,10 +538,22 @@ async def _sync_one_seed(
         + await lane.run(load_own_file_area_events, node.identity.fingerprint)
     )
     if peer_state == TrustState.ESTABLISHED:
-        try:
-            await push_events(node, session, seed_url, own_events)
-        except LinkTransportError as exc:
-            _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
+        # Pushed in bounded slices, not as one request (Codex review of
+        # issue #464). A peer refuses any request carrying more than
+        # `MAX_EVENTS_PER_REQUEST` events, and this list grows with
+        # everything this node has ever originated -- every key
+        # transition, board, channel, file area and, now that uploads
+        # are announced at all, every catalogued file. One node with a
+        # couple of hundred of them would otherwise send a request that
+        # is rejected in full, on every pass, forever: not a backlog
+        # that drains but a node whose direct pushes stop working.
+        for index in range(0, len(own_events), MAX_EVENTS_PER_REQUEST):
+            batch = own_events[index:index + MAX_EVENTS_PER_REQUEST]
+            try:
+                await push_events(node, session, seed_url, batch)
+            except LinkTransportError as exc:
+                _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
+                break
 
     # Also ask this seed who else it knows -- feeds the
     # candidate pool `_try_candidate_fallback` (below) draws from.

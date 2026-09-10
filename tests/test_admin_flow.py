@@ -2954,6 +2954,45 @@ def test_link_this_file_area_flow(db, lane, sysop):
     assert genesis.payload["origin_fingerprint"] == link_context.node_identity.fingerprint
 
 
+def test_approving_a_pending_file_announces_it_to_link_peers(db, lane, sysop):
+    """Issue #464: approving a moderated upload is the other half of
+    where a Linked area's catalogue entry gets signed and queued (the
+    upload itself is `netbbs.net.file_flow._handle_upload`), mirroring
+    `queue_board_post_if_linked` on the post-approval screen. Nothing
+    called either for files before, so a Linked file area never
+    announced anything it held.
+
+    Asserted through `load_own_file_area_events` -- what
+    `netbbs.link.sync` actually pushes -- not merely the column it
+    reads."""
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import upload_file
+    from netbbs.link.files import link_file_area, load_own_file_area_events
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    link_context = _link_context()
+    area = create_file_area(db, "Docs", creator=sysop, moderated=True)
+    link_file_area(db, area, node_identity=link_context.node_identity)
+    entry = upload_file(db, area, alice, "game.zip", b"hello", description="Cool Game v1.0")
+
+    def announced():
+        return [
+            event for event in load_own_file_area_events(db, link_context.node_identity.fingerprint)
+            if event.payload.get("file_id") == entry.file_id
+        ]
+
+    assert announced() == []  # still pending: never leaked to the network
+
+    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    assert "Approved." in _written_text(session)
+    descriptors = announced()
+    assert len(descriptors) == 1
+    assert descriptors[0].payload["description"] == "Cool Game v1.0"
+
+
 def test_link_this_file_area_is_not_offered_once_already_linked(db, lane, sysop):
     from netbbs.files.areas import create_file_area
     from netbbs.link.files import link_file_area

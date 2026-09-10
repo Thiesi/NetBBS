@@ -13,6 +13,7 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.files import (
+    approve_file,
     FileAreaError,
     FileEntryError,
     create_file_area,
@@ -670,3 +671,40 @@ def test_an_over_long_upload_description_is_refused(db, alice):
             description="\n".join(f"line {i}" for i in range(40)),
         )
     assert list_files_page(db, area, alice).entries == []
+
+
+def test_an_uploader_cannot_rewrite_an_approved_description_in_a_moderated_area(db, alice, bob):
+    """Codex review: approval is what puts a file's text in front of
+    everyone, so letting its uploader replace that text afterwards
+    without review would hand them an unmoderated listing entry."""
+    area = create_file_area(db, "docs", creator=bob, moderated=True)
+    grant_permissions(
+        db, bob, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.APPROVE | BoardPermission.EDIT, granted_by=bob,
+    )
+    entry = upload_file(db, area, alice, "game.zip", b"payload", description="honest")
+    approved = approve_file(db, entry, approved_by=bob)
+
+    with pytest.raises(FileEntryError):
+        set_file_description(db, approved, "spam once nobody is looking", changed_by=alice)
+    assert get_file(db, entry.file_id).description == "honest"
+
+    # ... while it is still pending, its uploader owns it outright.
+    second = upload_file(db, area, alice, "other.zip", b"other", description="first go")
+    assert set_file_description(db, second, "second go", changed_by=alice).description == "second go"
+
+    # ... and a moderator holding EDIT can always fix an approved one.
+    grant_permissions(
+        db, alice, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.EDIT, granted_by=bob,
+    )
+    assert set_file_description(db, approved, "moderator wording", changed_by=alice).description == (
+        "moderator wording"
+    )
+
+
+def test_an_uploader_may_still_rewrite_a_description_in_an_unmoderated_area(db, alice):
+    area = create_file_area(db, "open", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload", description="first")
+    assert entry.status == "approved"
+    assert set_file_description(db, entry, "second", changed_by=alice).description == "second"

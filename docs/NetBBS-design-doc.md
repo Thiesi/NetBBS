@@ -959,8 +959,13 @@ A description may also be written by hand, from the file listing, by the
 uploader themselves or by anyone holding `EDIT` on the area. Hand-written
 edits are local-only: a `file_descriptor` (§11.2) is immutable and single-shot,
 so a file whose descriptor has already been signed keeps the description its
-peers were told about, and a description edited before that keeps propagating
-normally.
+peers were told about. In a Linked area that is most edits — an approved
+upload's descriptor is signed and queued the moment it lands (§11.2) — so the
+caller is told the change stays local rather than left to assume it travels.
+The exceptions are files no descriptor was ever built for: one approved before
+its area was promoted (pre-Link history is never backfilled), one in a carried
+area, and one whose name or size no descriptor may carry. The interface asks
+the file itself, not its area, before saying anything about what peers hold.
 
 Either way a description is stored already normalized — control and bidi
 characters stripped, at most 10 lines (the DIZ format's own limit, and what
@@ -2773,6 +2778,21 @@ carries no bearing on whether a peer should fetch the bytes. Only an
 network" rule §9.2 already states for `board_post`. Immutable, single-shot,
 like `board_post`/`channel_message` — no edit chain; a changed file is a new
 upload with its own new `file_id`, not a revision of an old one.
+
+Queued from exactly two places, mirroring `board_post`'s own pair (issue #464,
+which fixed a period where neither existed and a Linked area consequently
+announced nothing it held): the upload itself, once the transfer finishes, and
+the SysOp's pending-file approval, for a moderated area. That split is what
+implements the rule above, rather than restating it — the upload-side call is
+simply a no-op while the file is `'pending'`.
+
+Only the area's own origin ever queues one. A carried area is a real, writable
+local area, but a peer verifies each `file_descriptor` against the signing key
+of the area's genesis origin, so a descriptor signed by anyone else verifies
+nowhere; unlike a `board_post`, which carries an author tier precisely so it
+can travel from any node into a carried board, describing a file is the
+origin's act. An upload into a carried area is stored, listed and downloadable
+locally, and never enters the catalogue peers see.
 
 A receiving node's catalogue materialization is genuinely different from a
 carried board's: the *area* becomes a real local `FileArea` row (browsable

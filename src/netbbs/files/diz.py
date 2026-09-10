@@ -84,6 +84,14 @@ MAX_DIZ_BYTES = 8192
 characters; this leaves generous room for the CP437 art people actually
 put in them while staying far below anything worth calling a bomb."""
 
+_EOCD_SIGNATURE = bytes([0x50, 0x4B, 0x05, 0x06])
+"""End-of-central-directory record signature."""
+
+_ZIP64_LOCATOR_SIGNATURE = bytes([0x50, 0x4B, 0x06, 0x07])
+"""ZIP64 end-of-central-directory *locator*, which sits immediately
+before the legacy record in a ZIP64 archive."""
+
+
 _READABLE_ZIP_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 """The only compression methods a `FILE_ID.DIZ` is read from in-process
 (Codex review). Both have a fixed, small window; every other method
@@ -374,7 +382,18 @@ def _zip_central_directory_bytes(archive_path: Path) -> int | None:
     except OSError as exc:
         _logger.info("FILE_ID.DIZ: could not read %s: %s", archive_path.name, exc)
         return None
-    marker = tail.rfind(b"PK")
+    if tail.rfind(_ZIP64_LOCATOR_SIGNATURE) >= 0:
+        # A ZIP64 archive keeps the real directory size in its own
+        # end-of-central-directory record, which `ZipFile` follows
+        # and prefers -- so the legacy field read below is not what
+        # would actually be parsed, and a crafted archive can make
+        # the two disagree (Codex review). Rather than parse a
+        # second attacker-supplied record to find out, decline: a
+        # genuine ZIP64 archive is one past four gigabytes or
+        # 65,535 members, not one anybody wrote a FILE_ID.DIZ for.
+        _logger.info("FILE_ID.DIZ: %s is ZIP64; not reading it in-process", archive_path.name)
+        return None
+    marker = tail.rfind(_EOCD_SIGNATURE)
     if marker < 0 or len(tail) - marker < 22:
         return None
     return int.from_bytes(tail[marker + 12:marker + 16], "little")

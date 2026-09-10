@@ -528,6 +528,11 @@ def validate_description(description: str | None) -> str | None:
     return normalized
 
 
+def _area_is_moderated(db: Database, area_id: int) -> bool:
+    row = db.connection.execute("SELECT moderated FROM file_areas WHERE id = ?", (area_id,)).fetchone()
+    return bool(row["moderated"]) if row is not None else False
+
+
 def set_file_description(
     db: Database, entry: FileEntry, description: str | None, *, changed_by: User
 ) -> FileEntry:
@@ -566,6 +571,18 @@ def set_file_description(
     """
     current = get_file(db, entry.file_id)
     if current.uploader_user_id != changed_by.id:
+        _require_area_permission(db, current, changed_by, BoardPermission.EDIT)
+    elif current.status == "approved" and _area_is_moderated(db, current.area_id):
+        # An uploader may describe their own file freely -- until a
+        # moderator has approved it in a moderated area (Codex review).
+        # After that, rewriting the description would put unreviewed
+        # text straight into the listing and the search index, which is
+        # precisely what approval was for; a post's edit re-enters
+        # moderation for the same reason (design doc §13). A file has no
+        # revision chain to fall back on, so it cannot re-enter the
+        # queue without vanishing from the area, and hiding an approved
+        # file because someone fixed a typo is worse than asking a
+        # moderator to make the change.
         _require_area_permission(db, current, changed_by, BoardPermission.EDIT)
 
     normalized = validate_description(description)

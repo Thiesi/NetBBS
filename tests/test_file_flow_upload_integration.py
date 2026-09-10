@@ -284,3 +284,128 @@ def test_uploading_a_file_with_no_diz_says_so_and_points_at_the_editor(db, lane,
 
     assert list_files_page(db, area, alice).entries[0].description is None
     assert "No description was read from it" in _visible_text(server_session)
+
+
+def _link_context():
+    from netbbs.link.boards import LinkContext
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+
+    node_identity = bootstrap_node_identity("roanoke")
+    return LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+
+
+def _upload(db, lane, area, user, filename, payload, *, link_context=None):
+    client_to_server, server_to_client = _BytePipe(), _BytePipe()
+    server_session = _ServerSession(["/upload"], read_pipe=client_to_server, write_pipe=server_to_client)
+    client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
+
+    async def scenario():
+        server_task = asyncio.create_task(
+            file_flow._show_area(server_session, lane, area, user, link_context=link_context)
+        )
+        client_task = asyncio.create_task(zmodem.send_file(client_session, filename, payload))
+        await asyncio.wait_for(server_task, timeout=5)
+        try:
+            await asyncio.wait_for(client_task, timeout=1)
+        except Exception:
+            pass
+
+    asyncio.run(scenario())
+    return server_session
+
+
+def test_uploading_into_a_linked_area_queues_its_link_descriptor(db, lane, alice):
+    """Issue #464: nothing in the running BBS ever called
+    `queue_file_descriptor_if_linked`, so a Linked file area never
+    announced its own uploads — only the test suite, calling it by hand,
+    ever exercised §11.2 at all.
+
+    Asserted against `load_own_file_area_events`, which is exactly what
+    `netbbs.link.sync` pushes to peers, rather than only against the
+    column it reads: the column being set is not the point, being in
+    that list is."""
+    from netbbs.link.files import link_file_area, load_own_file_area_events
+
+    link_context = _link_context()
+    area = create_file_area(db, "docs", creator=alice)
+    link_file_area(db, area, node_identity=link_context.node_identity)
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("FILE_ID.DIZ", b"Cool Game v1.0\r\nBy Someone\r\n")
+    _upload(db, lane, area, alice, "game.zip", buffer.getvalue(), link_context=link_context)
+
+    entry = list_files_page(db, area, alice).entries[0]
+    descriptors = [
+        event for event in load_own_file_area_events(db, link_context.node_identity.fingerprint)
+        if event.payload.get("file_id") == entry.file_id
+    ]
+    assert len(descriptors) == 1
+    # And it carries the FILE_ID.DIZ description (issue #463), which is
+    # only true because extraction happens before the row is written.
+    assert descriptors[0].payload["description"] == "Cool Game v1.0\nBy Someone"
+    assert descriptors[0].payload["sha256"] == entry.sha256
+
+
+def test_uploading_into_an_unlinked_area_queues_nothing(db, lane, alice):
+    from netbbs.link.files import load_own_file_area_events
+
+    link_context = _link_context()
+    area = create_file_area(db, "docs", creator=alice)
+
+    _upload(db, lane, area, alice, "notes.txt", b"hello", link_context=link_context)
+
+    assert load_own_file_area_events(db, link_context.node_identity.fingerprint) == []
+
+
+def test_a_pending_upload_into_a_moderated_linked_area_is_not_announced(db, lane, alice):
+    """The moderation queue must never leak onto the network (design
+    doc §9.2/§11.2): a pending upload is queued by the approval screen,
+    not by the upload itself."""
+    from netbbs.link.files import link_file_area, load_own_file_area_events
+
+    link_context = _link_context()
+    area = create_file_area(db, "docs", creator=alice, moderated=True)
+    link_file_area(db, area, node_identity=link_context.node_identity)
+
+    _upload(db, lane, area, alice, "game.zip", b"hello", link_context=link_context)
+
+    entry = db.connection.execute("SELECT status, link_event_json FROM files").fetchone()
+    assert entry["status"] == "pending"
+    assert entry["link_event_json"] is None
+    # The area's own genesis is there; no descriptor alongside it.
+    events = load_own_file_area_events(db, link_context.node_identity.fingerprint)
+    assert [event.payload.get("file_id") for event in events] == [None]
+
+
+def test_uploading_into_a_carried_area_announces_nothing(db, lane, alice):
+    """Codex review of issue #464: a carried area is writable locally,
+    but peers verify a `file_descriptor` against the area's own genesis
+    origin — signing one here would be permanently unverifiable
+    everywhere it went."""
+    from netbbs.link.events import build_file_area_genesis
+    from netbbs.link.files import load_own_file_area_events, materialize_carried_file_area
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.files.areas import get_file_area_by_name
+
+    link_context = _link_context()
+    peer_identity = bootstrap_node_identity("faraway")
+    genesis = build_file_area_genesis(
+        signing_identity=peer_identity.signing_key,
+        origin_fingerprint=peer_identity.fingerprint,
+        area_id="carried-area-id",
+        name="theirs",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    materialize_carried_file_area(db, genesis)
+    area = get_file_area_by_name(db, "theirs")
+
+    _upload(db, lane, area, alice, "game.zip", b"hello", link_context=link_context)
+
+    entry = list_files_page(db, area, alice).entries[0]
+    assert entry.filename == "game.zip"  # the upload itself still worked
+    assert db.connection.execute(
+        "SELECT link_event_json FROM files WHERE file_id = ?", (entry.file_id,)
+    ).fetchone()["link_event_json"] is None
+    assert load_own_file_area_events(db, link_context.node_identity.fingerprint) == []

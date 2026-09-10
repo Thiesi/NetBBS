@@ -89,7 +89,13 @@ from netbbs.link.boards import LinkContext
 from netbbs.link.node_profiles import (
     identity_for_peer, latest_identity_observation, present_link_author_label,
 )
-from netbbs.link.files import RemoteFile, is_area_linked, list_remote_files
+from netbbs.link.files import (
+    RemoteFile,
+    has_queued_file_descriptor,
+    is_area_linked,
+    list_remote_files,
+    queue_file_descriptor_if_linked,
+)
 from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
 from netbbs.net.char_input import EditorKey, EditorKeyKind
@@ -678,11 +684,27 @@ async def _show_area(
         unicode_style, collapsed, truecolor, can_edit_any_file,
     ) = await lane.run(_load)
 
+    def _may_describe(entry: FileEntry) -> bool:
+        """Whether this caller's save would actually be accepted for
+        `entry` -- the same question `netbbs.files.entries.
+        set_file_description` answers, asked before an editor is
+        offered rather than after the caller has typed into one (Codex
+        review).
+
+        The moderated-area rule is the subtle half: an uploader owns
+        their own file's description until a moderator approves it, and
+        from then on only an EDIT holder may change what everyone is
+        already reading."""
+        if can_edit_any_file:
+            return True
+        if entry.uploader_user_id != user.id:
+            return False
+        return not (area.moderated and entry.status == "approved")
+
     def _can_describe(current_page: FileEntryPage) -> bool:
         """`[E]dit description` is only offered when this caller could
-        actually use it on something currently on screen -- a moderator
-        holding EDIT, or an uploader looking at their own upload."""
-        return can_edit_any_file or any(entry.uploader_user_id == user.id for entry in current_page.entries)
+        actually use it on something currently on screen."""
+        return any(_may_describe(entry) for entry in current_page.entries)
 
     show_remote_hint = link_context is not None and area_linked
 
@@ -733,7 +755,7 @@ async def _show_area(
                 if not can_write:
                     await session.write("\a")
                     continue
-                await _handle_upload(session, lane, area, user)
+                await _handle_upload(session, lane, area, user, link_context=link_context)
                 return
             elif kind == "describe":
                 if not _can_describe(page):
@@ -742,6 +764,7 @@ async def _show_area(
                 page = await _handle_describe(
                     session, lane, area, user, page,
                     highlighted=highlighted, target=None, can_edit_any_file=can_edit_any_file,
+                    area_linked=area_linked,
                 )
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
@@ -792,7 +815,7 @@ async def _show_area(
                     highlighted = None
                     await _render_and_advance_cursor(page, highlighted=highlighted)
                 elif choice.lower() in ("u", "/upload") and can_write:
-                    await _handle_upload(session, lane, area, user)
+                    await _handle_upload(session, lane, area, user, link_context=link_context)
                     return
                 elif choice.lower().startswith("/describe ") or (
                     choice.lower() in ("e", "/describe") and _can_describe(page)
@@ -813,6 +836,7 @@ async def _show_area(
                     page = await _handle_describe(
                         session, lane, area, user, page,
                         highlighted=highlighted, target=argument, can_edit_any_file=can_edit_any_file,
+                        area_linked=area_linked,
                     )
                     await _render_and_advance_cursor(page, highlighted=highlighted)
                 elif choice.lower() == "/remote" and show_remote_hint:
@@ -860,16 +884,23 @@ async def _show_area(
                     await session.write("\a")
         return
 
-    if not can_write and not show_remote_hint:
-        return
-
     # This screen has no listing to act on, so [E] resolves its target
     # from what the caller has waiting instead (Codex review): a
     # moderated area holding only their own pending upload renders
     # empty, since `list_files_page` shows nothing unapproved -- and
     # that upload is exactly the one they are most likely to want to
     # describe while it waits.
-    describable = await lane.run(list_pending_files, area, requesting_user=user) if can_write else []
+    #
+    # Asked regardless of `can_write` (Codex review): describing your
+    # own upload is not writing to the area, and a SysOp who raises the
+    # write level after it lands must not strand the file's own
+    # uploader with no way to describe it. `list_pending_files` shows a
+    # caller nothing but their own pending uploads unless they hold
+    # APPROVE, so this offers nothing it shouldn't.
+    describable = await lane.run(list_pending_files, area, requesting_user=user)
+
+    if not can_write and not show_remote_hint and not describable:
+        return
 
     hints = []
     if can_write:
@@ -889,8 +920,8 @@ async def _show_area(
     if not command:
         return
     elif command.lower() in ("u", "/upload") and can_write:
-        await _handle_upload(session, lane, area, user)
-    elif (command.lower().startswith("/describe ") and can_write) or (
+        await _handle_upload(session, lane, area, user, link_context=link_context)
+    elif command.lower().startswith("/describe ") or (
         command.lower() in ("e", "/describe") and describable
     ):
         # A named file is looked up area-wide; the bare key picks from
@@ -901,7 +932,7 @@ async def _show_area(
             session, lane, area, user,
             FileEntryPage(entries=[] if named else describable, has_older=False, has_newer=False),
             highlighted=None, target=named,
-            can_edit_any_file=can_edit_any_file,
+            can_edit_any_file=can_edit_any_file, area_linked=area_linked,
         )
     elif command.lower() == "/remote" and show_remote_hint:
         await _browse_remote_files(session, lane, area, user, link_context)
@@ -1305,6 +1336,7 @@ async def _handle_describe(
     highlighted: int | None,
     target: str | None,
     can_edit_any_file: bool,
+    area_linked: bool = False,
 ) -> FileEntryPage:
     """
     Edit one file's description (issue #463) and hand back the page to
@@ -1321,6 +1353,19 @@ async def _handle_describe(
     answer comes from the domain (`set_file_description`); the check
     here only decides whether to open an editor at all, so nobody types
     out a description that was never going to be saved.
+
+    `area_linked` only changes what is *said* after a successful save
+    (issue #464): in a Linked area an approved upload's catalogue entry
+    is already signed and pushed by the time anyone edits it, and a
+    `file_descriptor` cannot be revised, so the caller is told their
+    change is local rather than left to assume otherwise. Whether this
+    particular file actually has one is asked of the file itself, since
+    an area can be Linked long after some of its files were approved.
+
+    Exactly one editor session per invocation. A save the domain
+    rejects leaves the text on disk as a draft and says so, rather than
+    looping straight back into an editor that would then ask its own
+    recovery question about text typed seconds ago.
     """
     entry: FileEntry | None = None
     if target is None and highlighted is not None and 0 <= highlighted < len(page.entries):
@@ -1363,12 +1408,24 @@ async def _handle_describe(
         return page
 
     # A typed filename bypasses the on-screen gate above, so this is
-    # where a caller who named someone else's file is told so.
+    # where a caller who named a file they may not describe is told so.
     if not can_edit_any_file and entry.uploader_user_id != user.id:
         await session.write_line(
             colored(
                 f"\r\n{sanitize_text(entry.filename)!r} was uploaded by someone else — only its "
                 "uploader or a moderator of this area can describe it.",
+                fg_color=ERROR_COLOR,
+            )
+        )
+        return page
+    if not can_edit_any_file and area.moderated and entry.status == "approved":
+        # Refused before an editor opens, not after it is filled in
+        # (Codex review) -- the domain would reject this save, and the
+        # honest place to say so is here.
+        await session.write_line(
+            colored(
+                f"\r\n{sanitize_text(entry.filename)!r} has already been approved in a moderated "
+                "area — ask a moderator to change its description.",
                 fg_color=ERROR_COLOR,
             )
         )
@@ -1432,9 +1489,22 @@ async def _handle_describe(
             # directory, so its return says nothing (Codex review) --
             # and promising a caller their text is safe when it isn't
             # is the one outcome worse than losing it silently.
+            #
+            # Read back and compared, not merely checked for existence
+            # (Codex review again): a full disk or a short write leaves
+            # a file that exists and is wrong, and "kept as a draft" has
+            # to mean the whole thing.
             path = _description_draft_path(db, entry, user)
             save_draft(path, text)
-            return path.exists()
+            try:
+                return path.read_text(encoding="utf-8") == text
+            except (OSError, UnicodeDecodeError):
+                # A short write can leave a truncated multi-byte
+                # sequence, and `UnicodeDecodeError` is a `ValueError`
+                # (Codex review) -- letting it escape would replace
+                # "your text was not kept" with a crash at exactly the
+                # moment the caller most needs to be told.
+                return False
 
         kept = await lane.run(_persist)
         await session.write_line(colored(f"\r\nNot saved: {exc}", fg_color=ERROR_COLOR))
@@ -1458,12 +1528,32 @@ async def _handle_describe(
     await session.write_line(
         colored(f"\r\nDescription saved for {sanitize_text(entry.filename)!r}.", fg_color=SUCCESS_COLOR)
     )
+    if area_linked and await lane.run(has_queued_file_descriptor, entry):
+        # Said out loud rather than left as a surprise (issues #463 and
+        # #464 together): now that an approved upload's catalogue entry
+        # is signed and queued the moment it lands, every later edit
+        # amends something peers have already been told about, and a
+        # `file_descriptor` is immutable.
+        #
+        # Asked of the file, not of the area (Codex review): one
+        # approved before its area was Linked has no descriptor and
+        # never will, so telling its describer that peers hold an older
+        # wording would simply be false.
+        await session.write_line(
+            colored(
+                "This area is Linked — peers keep the description they were already sent.",
+                fg_color=MUTED_COLOR,
+            )
+        )
     return replace(
         page, entries=[updated if e.file_id == updated.file_id else e for e in page.entries]
     )
 
 
-async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, user: User) -> None:
+async def _handle_upload(
+    session: Session, lane: DatabaseLane, area: FileArea, user: User, *,
+    link_context: LinkContext | None = None,
+) -> None:
     """
     `receive_file` (GitHub issue #34, reopened a second time) now
     streams straight to a temp file under `netbbs.files.storage`'s own
@@ -1482,6 +1572,18 @@ async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, u
     no unpacker installed for that format, a corrupt member — is
     reported as "no description yet" and pointed at `[E]`, never as a
     failed upload.
+
+    `link_context` (issue #464) is what lets a finished upload actually
+    reach this area's Link peers: `queue_file_descriptor_if_linked`
+    builds and signs the catalogue entry `netbbs.link.sync` then pushes.
+    This is the file-area counterpart of `netbbs.net.board_flow`'s own
+    `queue_board_post_if_linked` call right after `create_post`, and
+    exists for the same reason — nothing else in the system ever queues
+    one. A pending upload in a moderated area is deliberately not
+    queued here at all; `netbbs.net.admin_flow`'s approval screen queues
+    it once it is approved, the same split `board_post` already has, so
+    a moderation queue never leaks onto the network (design doc
+    §9.2/§11.2).
     """
     heading = screen_title(
         "Upload",
@@ -1523,11 +1625,24 @@ async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, u
             except OSError as cleanup_error:
                 _logger.warning("could not remove staging file %s: %s", temp_path, cleanup_error)
             raise
-        entry = await lane.run(
-            upload_file_from_temp, area, user, received.filename,
-            temp_path=temp_path, sha256=received.sha256, size_bytes=received.size_bytes,
-            description=description,
-        )
+        def _store_and_announce(db: Database) -> FileEntry:
+            # One database job, not two (Codex review): a cancellation
+            # between them would leave a committed, approved upload that
+            # nothing ever announces -- `DatabaseLane` lets a running
+            # worker finish, so the row would exist while the queueing
+            # call never ran, and no later pass revisits it.
+            stored = upload_file_from_temp(
+                db, area, user, received.filename,
+                temp_path=temp_path, sha256=received.sha256, size_bytes=received.size_bytes,
+                description=description,
+            )
+            if link_context is not None:
+                queue_file_descriptor_if_linked(
+                    db, stored, area, node_identity=link_context.node_identity
+                )
+            return stored
+
+        entry = await lane.run(_store_and_announce)
     except (zmodem.ZmodemError, NotImplementedError) as exc:
         # NotImplementedError: some transports (netbbs.net.web) can't
         # carry raw bytes at all -- see WebSession's docstring. Handled

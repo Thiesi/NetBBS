@@ -192,7 +192,12 @@ from netbbs.link.diagnostics import (
     list_diagnostic_log_entries,
     list_diagnostic_log_entries_since,
 )
-from netbbs.link.files import LinkFilesError, is_area_linked, link_file_area
+from netbbs.link.files import (
+    LinkFilesError,
+    is_area_linked,
+    link_file_area,
+    queue_file_descriptor_if_linked,
+)
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.node_profiles import (
     dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
@@ -12574,7 +12579,7 @@ async def _area_detail_screen(
             await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
         elif choice == "p":
             await session.write_line("")
-            await _pending_files_screen(session, lane, actor, area)
+            await _pending_files_screen(session, lane, actor, area, link_context=link_context)
             await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
         elif choice == "l" and link_context is not None and not linked:
             await session.write_line("")
@@ -12779,7 +12784,10 @@ async def _delete_area_screen(session: Session, lane: DatabaseLane, actor: User,
     return True
 
 
-async def _pending_files_screen(session: Session, lane: DatabaseLane, actor: User, area: FileArea) -> None:
+async def _pending_files_screen(
+    session: Session, lane: DatabaseLane, actor: User, area: FileArea, *,
+    link_context: LinkContext | None = None,
+) -> None:
     while True:
         files = await lane.run(list_pending_files, area, requesting_user=actor)
         selected = await pick_item(
@@ -12797,7 +12805,7 @@ async def _pending_files_screen(session: Session, lane: DatabaseLane, actor: Use
         )
         if selected is None:
             return
-        await _file_action_screen(session, lane, actor, selected)
+        await _file_action_screen(session, lane, actor, selected, area, link_context=link_context)
 
 
 async def _draw_file_action(
@@ -12838,7 +12846,16 @@ async def _draw_file_action(
     await session.write("Choice: ")
 
 
-async def _file_action_screen(session: Session, lane: DatabaseLane, actor: User, entry: FileEntry) -> None:
+async def _file_action_screen(
+    session: Session, lane: DatabaseLane, actor: User, entry: FileEntry, area: FileArea, *,
+    link_context: LinkContext | None = None,
+) -> None:
+    """Act on one pending upload. Approving it is where a Linked area's
+    catalogue entry is signed and queued (issue #464) -- the file-area
+    counterpart of `_post_action_screen`'s own
+    `queue_board_post_if_linked` call, and the moderated half of the
+    split `netbbs.net.file_flow._handle_upload` documents: a pending
+    upload is never announced, an approved one always is."""
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
@@ -12854,7 +12871,12 @@ async def _file_action_screen(session: Session, lane: DatabaseLane, actor: User,
             return
         elif choice == "a":
             await session.write_line("")
-            await lane.run(approve_file, entry, approved_by=actor)
+            approved = await lane.run(approve_file, entry, approved_by=actor)
+            if link_context is not None:
+                await lane.run(
+                    queue_file_descriptor_if_linked, approved, area,
+                    node_identity=link_context.node_identity,
+                )
             await session.write_line("Approved.")
             return
         elif choice == "r":

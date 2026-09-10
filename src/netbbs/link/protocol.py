@@ -148,7 +148,13 @@ _MAX_CANDIDATE_DESCRIPTORS = 500
 # had no per-request cap at all, unlike `handle_peer_list` above -- a
 # single push could carry an unbounded event list. Same "reject the
 # whole batch" idiom as `_MAX_PEER_LIST_ENTRIES_PER_REQUEST`.
-_MAX_EVENTS_PER_REQUEST = 200
+MAX_EVENTS_PER_REQUEST = 200
+"""Public because a sender has to respect it too (Codex review of issue
+#464): `netbbs.link.sync` slices its own originated events into
+requests of this size, since a peer refuses an oversized one outright
+and a node that keeps resending the same too-large list never pushes
+anything again."""
+_MAX_EVENTS_PER_REQUEST = MAX_EVENTS_PER_REQUEST
 
 # Issue #124: inventory is a potentially expensive enumeration route,
 # so a captured signed request must not remain reusable. Five minutes
@@ -274,13 +280,19 @@ def _parse_aware_timestamp(value: str, *, field_name: str) -> datetime:
 # protocol layer, for the same "a peer could otherwise push an
 # arbitrarily large/malformed claim and this node would accept it"
 # reasoning §13.9 already applies to board_post/board_post_edit.
-_MAX_FILE_DESCRIPTOR_FILENAME_BYTES = 255
+MAX_FILE_DESCRIPTOR_FILENAME_BYTES = 255
+"""Public because a sender must not build what a receiver refuses
+(Codex review of issue #464) -- see `netbbs.link.files.
+_peer_acceptable`."""
+_MAX_FILE_DESCRIPTOR_FILENAME_BYTES = MAX_FILE_DESCRIPTOR_FILENAME_BYTES
 _MAX_FILE_DESCRIPTOR_DESCRIPTION_BYTES = 4096
 # A single catalogued file's claimed size, in bytes -- 10 GiB. Generous
 # enough for any real file-area use case, small enough that a forged
 # claim can't be used to make this node commit to an absurd multi-chunk
 # fetch before ever seeing a single byte.
-_MAX_CATALOGUED_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024
+MAX_CATALOGUED_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024
+"""Public for the same reason as `MAX_FILE_DESCRIPTOR_FILENAME_BYTES`."""
+_MAX_CATALOGUED_FILE_SIZE_BYTES = MAX_CATALOGUED_FILE_SIZE_BYTES
 
 
 class LinkProtocolError(Exception):
