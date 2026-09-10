@@ -5,7 +5,9 @@ environments. The bundled games remain available without a legacy profile.
 
 ## War Dialer installed-package rehearsal
 
-**MANUAL - outside NetBBS:** build a wheel with `python -m build --wheel`, then
+**MANUAL - outside NetBBS:** in the development Python environment, install the
+wheel frontend with `python -m pip install build` if it is not already available
+(the `dev` extra alone does not include it). Build with `python -m build --wheel`, then
 install that local wheel into a fresh disposable directory with
 `python -m pip install --no-deps --target <installed-root> <wheel-path>`.
 Use a Python environment with the project's existing dependencies available.

@@ -9,12 +9,19 @@ import sys
 import tempfile
 
 
+def require(condition: bool, message: object) -> None:
+    if not condition:
+        raise RuntimeError(str(message))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--installed-root', type=Path, required=True,
                         help='repository-local pip --target directory containing the wheel install')
     args = parser.parse_args()
     installed = args.installed_root.resolve()
+    if not (installed / 'netbbs' / '__init__.py').is_file():
+        parser.error('Installed root must contain the selected NetBBS wheel package.')
     sys.path.insert(0, str(installed))
     import netbbs
     from netbbs.auth.users import create_user
@@ -27,12 +34,12 @@ def main() -> None:
     from netbbs.storage.database import Database
     from netbbs.storage.execution import DatabaseLane
 
-    assert Path(netbbs.__file__).resolve().is_relative_to(installed), 'Imported checkout instead of wheel'
+    require(Path(netbbs.__file__).resolve().is_relative_to(installed), 'Imported checkout instead of wheel')
     catalog = [(item, path) for item, path in available_bundled_doors() if item.key == 'war_dialer']
-    assert len(catalog) == 1, 'Installed gallery is missing War Dialer'
+    require(len(catalog) == 1, 'Installed gallery is missing War Dialer')
     item, script = catalog[0]
-    assert script.resolve().is_relative_to(installed)
-    assert Path(wd.__file__).resolve() == script.resolve()
+    require(script.resolve().is_relative_to(installed), 'Gallery resolved outside the installation')
+    require(Path(wd.__file__).resolve() == script.resolve(), 'Imported a different game than the gallery entry')
 
     class RehearsalSession(Session):
         def __init__(self, mode):
@@ -82,7 +89,7 @@ def main() -> None:
                 set_config(db, 'war_dialer_owner', 'a' * 32)
                 door = create_door(db, item.name, sys.executable, args=(script.as_posix(),),
                                    description=item.description, creator=player)
-                assert get_door_by_name(db, item.name) == door
+                require(get_door_by_name(db, item.name) == door, 'Registered door did not round trip')
                 world = war_dialer_world_path(db, door)
                 conn = wd.connect(world)
                 try:
@@ -102,11 +109,11 @@ def main() -> None:
                         session = RehearsalSession(mode)
                         result = await run_door(session, lane, door, player,
                                                 wall_time_limit_seconds=3 if mode == 'timeout' else 10)
-                        assert session.ready, (mode, result)
-                        assert result.reason == expected, (mode, result)
-                        assert not result.diagnostic, (mode, result)
+                        require(session.ready, (mode, 'switchboard not reached', result))
+                        require(result.reason == expected, (mode, result))
+                        require(not result.diagnostic, (mode, result))
                         if mode == 'quit':
-                            assert result.exit_code == 0
+                            require(result.exit_code == 0, ('quit failed', result))
                         print_wrapped(f'Installed War Dialer {mode}: {result.reason}')
                 asyncio.run(exercise())
                 with wd.world_session(world, maintenance=True):
