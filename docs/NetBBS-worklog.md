@@ -4801,6 +4801,10 @@ tracking must name the actual displayed connection key, including uncharted legs
 Later same-target bounties budget earlier contracts and their re-entry legs.
 Contract list pages reserve the actual wrapped footer/header height and split
 oversized entries into selectable continuations; row-count tests include 20x10.
+A wrapped entry shows its hotkey once: `keyed_rows` prefixes the first row and
+indents continuation rows by the prefix width (a continuation that opens a new
+page carries the key again so that page stays selectable); do not re-key every
+row, which reads as duplicate entries (issue #411).
 Scripted acceptance tests must navigate the details pages before pressing A;
 otherwise they no longer exercise acceptance. Test compact screens by counting
 display columns and physical rows between successive input requests.
