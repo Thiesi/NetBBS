@@ -1550,7 +1550,7 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
     path = _populate_war_dialer(db_path)
     held = wd.connect(path)
     held.execute("PRAGMA wal_autocheckpoint=0")
-    held.execute("UPDATE players SET cash=98765")
+    held.execute("UPDATE players SET cash=98765, specialty='fixers', support='stash'")
     try:
         assert Path(str(path) + "-wal").stat().st_size > 0
         source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
@@ -1568,6 +1568,7 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
     assert _war_cash(target) == 98765
     with contextlib.closing(sqlite3.connect(target)) as conn:
         assert conn.execute("SELECT income_remainder FROM players").fetchone()[0] == 9876
+        assert conn.execute("SELECT specialty,support FROM players").fetchone() == ("fixers", "stash")
         assert conn.execute("SELECT summary_text FROM events").fetchone()[0] == "A retained receipt"
     backup_module._validate_backup_source(source, allow_migrate=False)
 
@@ -1705,7 +1706,7 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
     path = _populate_war_dialer(db_path)
     with contextlib.closing(sqlite3.connect(path)) as conn:
         before_identity = conn.execute("SELECT user_id,handle,created_at FROM players").fetchall()
-        conn.execute("UPDATE players SET crew=40, crew_recruited_total=40, turns_used=8")
+        conn.execute("UPDATE players SET crew=40, crew_recruited_total=40, turns_used=8, specialty='lookouts', support='burner'")
         conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=30")
         conn.commit()
     admin.set_maintenance(db_path, path, True)
@@ -1718,6 +1719,7 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
         assert conn.execute("SELECT user_id,handle,created_at FROM players").fetchall() == before_identity
         cash, crew, turns, rank_count = conn.execute("SELECT cash,crew,turns_used,crew_recruited_total FROM players").fetchone()
         assert (cash, crew, turns, rank_count) == (300, 3, 0, 0)
+        assert conn.execute("SELECT specialty,support FROM players").fetchone() == ("", "")
         assert conn.execute("SELECT COUNT(*) FROM exchanges WHERE controller_user_id IS NOT NULL").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == (0 if reset else 1)
     audit = result["recent_operations"][-1]

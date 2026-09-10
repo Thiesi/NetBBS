@@ -282,6 +282,26 @@ payout range and losses before Act. Cautious does not prevent a Heat bust: its
 possible cash and crew losses are shown separately. Offers stay fixed across
 browsing, cancellation and reconnect. You can inspect them with no turns left.
 
+`[S]Kit` opens crew development; `[C]rew` still recruits directly. Train or switch
+one specialty for $150 and one turn: Phreakers reduce contract Heat by 3, Fixers
+recover $20 on a failed contract before any bust (no Rank), and Lookouts reduce
+raid/root Heat by 3. Ordinary crew losses do not erase training.
+
+The single support slot can hold a $40 Burner Kit or $75 Cash Stash, each costing
+one turn to buy. An occupied slot cannot be replaced or stacked. The Burner Kit
+removes up to 10 added Heat after specialty reductions on your next committed
+job/raid/root attempt, then disappears, win or lose. Existing Heat can still cause
+a bust even when the kit removes all new Heat. Trade and free browsing preserve
+the kit. The Cash Stash waits for your next bust, then reduces its cash loss to
+10% instead of 25%; crew losses remain unchanged. Purchases and support earn no
+Rank. Both training and support reset at the season boundary.
+
+Read effects and prices, choose an item, then inspect the purchase preview before
+Act. A rejected stale preview retains your selection. Schema 5 starts both slots
+empty and preserves existing resources and identity. **Manual SysOp upgrade:**
+stop active War Dialer sessions and make a verified backup before activating this
+version, using the maintenance procedure above; old binaries refuse schema 5.
+
 Target pickers use digits 1-9/0, with Next/Prev and Back. Only fully displayed,
 eligible entries have active selection keys; protected rivals and your own exchanges
 show why they cannot be selected. Raid selection reaches every crew through batches
