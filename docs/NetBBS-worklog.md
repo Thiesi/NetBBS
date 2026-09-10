@@ -444,6 +444,15 @@ stored rates before replacing them and awards no control Rank for pre-upgrade
 time. Schema 1 and 2 migrations remain immutable; their shared helpers must still
 work before schema 3 columns exist.
 
+Exchange security is derived defense, never a stored crew assignment. Use the
+same effective defense in previews and capture resolution; return only real
+stationed defenders on transfer. Neighbor ownership affects price without changing
+the target row: re-read the ring under the action lock and compare the selected
+discount separately from target identity. Owner services use the same action lock
+and fresh ownership check. Schema 7 preserves the ten exchange IDs/order and their
+stored rates; roles survive competition reset. Do not edit older migrations or
+require role columns in helpers used before version 7 exists.
+
 `python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
 against disposable SQLite worlds through the actual action resolvers. The default
 is fourteen days and seeds 362/363/364; use `--scenario NAME`, `--days 1..21`, and

@@ -1570,6 +1570,7 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
     with contextlib.closing(sqlite3.connect(target)) as conn:
         assert conn.execute("SELECT income_remainder FROM players").fetchone()[0] == 9876
         assert conn.execute("SELECT specialty,support FROM players").fetchone() == ("fixers", "stash")
+        assert conn.execute("SELECT role FROM exchanges ORDER BY id LIMIT 1").fetchone() == ("carrier",)
         assert conn.execute("SELECT operation_contract,operation_approach,operation_stage,successful_operations FROM players").fetchone() == (4, 2, 2, 3)
         assert conn.execute("SELECT cash,crew FROM recon WHERE viewer=1 AND target=2").fetchone() == (1234, 7)
         assert conn.execute("SELECT summary_text FROM events").fetchone()[0] == "A retained receipt"
@@ -1725,6 +1726,7 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
         assert (cash, crew, turns, rank_count) == (300, 3, 0, 0)
         assert conn.execute("SELECT specialty,support FROM players").fetchone() == ("", "")
         assert conn.execute("SELECT operation_stage,successful_operations FROM players").fetchone() == (0, 0)
+        assert conn.execute("SELECT role FROM exchanges ORDER BY id LIMIT 1").fetchone() == ("carrier",)
         assert conn.execute("SELECT COUNT(*) FROM recon").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM exchanges WHERE controller_user_id IS NOT NULL").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == (0 if reset else 1)

@@ -1788,3 +1788,124 @@ def test_operations_hub_does_not_advertise_an_inactive_ops_hotkey(tmp_path, monk
     assert '[O]Ops' not in ''.join(output)
     assert '3 turns and $50' in ''.join(output)
     conn.close()
+
+
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('role', ['pbx', 'carrier', 'hub'])
+def test_owner_services_reachable_through_garrison_at_compact_sizes(tmp_path, monkeypatch, width, height, role):
+    conn = wd.connect(tmp_path / 'services.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'Owner', now, 1)
+    exchange = next(e for e in wd.list_exchanges(conn) if e.role == role)
+    conn.execute('UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=? WHERE id=?', (wd.to_iso(now), exchange.id))
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    monkeypatch.setattr(wd, 'read_input_key', lambda: ' ')
+    stage, calls = 0, 0
+    service_key = wd.PICK_KEYS[len(wd.garrison_options(actor, next(e for e in wd.list_exchanges(conn) if e.id == exchange.id)))]
+    def select(valid):
+        nonlocal stage, calls
+        calls += 1
+        assert calls < 200 and wd.read_player(conn, 1).turns_used == 0
+        key = '1' if stage == 0 else service_key if stage == 1 else 'A'
+        if key in valid:
+            stage += 1
+            return key
+        assert 'N' in valid
+        return 'N'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
+    assert wd.do_garrison(wd.Palette(False), conn, actor, width, height, rng=__import__('random').Random(1))
+    assert actor.turns_used == 1 and stage == 3
+    assert (actor.cash == 235) if role == 'carrier' else (actor.cash >= 300)
+    assert wd.assigned_crew(conn, 1) == 1
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()
+
+
+@pytest.mark.parametrize('commit', [False, True])
+def test_real_process_owner_service_cancel_or_commit(tmp_path, commit):
+    with _running_door(tmp_path) as (process, path, wait_for, send, output):
+        wait_for(b'>\x1b[0m ')
+        conn = wd.connect(path)
+        conn.execute('UPDATE exchanges SET controller_user_id=0, garrison=1, controlled_since=? WHERE id=1', (wd.to_iso(wd.now_utc()),))
+        actor = wd.read_player(conn, 0)
+        exchange = wd.list_exchanges(conn)[0]
+        service_key = wd.PICK_KEYS[len(wd.garrison_options(actor, exchange))].encode()
+        conn.close()
+        send(b'g')
+        wait_for(b'cancel')
+        send(b'1')
+        wait_for(b'cancel')
+        send(service_key)
+        wait_for(b'[A]Act')
+        send(b'a' if commit else b'b')
+        if commit:
+            wait_for(b'Carrier recruitment:')
+            send(b' ')
+        wait_for(b'>\x1b[0m ')
+        send(b'q')
+        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        conn = wd.connect(path)
+        actor = wd.read_player(conn, 0)
+        assert (actor.cash, actor.crew, actor.turns_used) == ((235, 4, 1) if commit else (300, 3, 0))
+        conn.close()
+
+
+def test_exchange_map_shows_actual_ring_security_services_and_viewer_price(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / 'map.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 1, 'Owner', now, 1)
+    conn.execute('UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=? WHERE id=10', (wd.to_iso(now),))
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    captured = []
+    monkeypatch.setattr(wd, 'show_text_pages', lambda p, title, lines, *args: captured.extend(lines))
+    wd.show_territory(wd.Palette(False), conn, 80, 24, viewer_id=1)
+    text = '\n'.join(captured)
+    assert 'Ring links: #1 -- #2' in text and '#10 -- #1' in text
+    assert 'Links: #10, #2' in text and 'Capture $40 (discount $10)' in text
+    assert 'garrison 1; security +2; total defense 3' in text
+    assert all(role in text for role in ('Public PBX', 'Carrier Switch', 'Warez Hub', 'Lay Low', 'Recruit:', 'Warez outlet'))
+    conn.close()
+
+
+
+def test_small_cash_balance_can_reach_affordable_pbx_capture(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / 'cheap-capture.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    actor = wd.load_or_create_player(conn, 1, 'Caller', now, 1)
+    conn.execute('UPDATE players SET cash=25 WHERE user_id=1')
+    target_index = next(i for i, e in enumerate(wd.list_exchanges(conn)) if e.role == 'pbx')
+    target_key = wd.PICK_KEYS[target_index]
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', 80)
+    monkeypatch.setattr(wd, 'read_input_key', lambda: ' ')
+    monkeypatch.setattr(wd, 'out', lambda text: None)
+    selected, calls = False, 0
+    def select(valid):
+        nonlocal selected, calls
+        calls += 1
+        assert calls < 100 and wd.read_player(conn, 1).turns_used == 0
+        if selected: return 'A' if 'A' in valid else 'N'
+        if target_key in valid:
+            selected = True
+            return target_key
+        assert 'N' in valid
+        return 'N'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
+    assert wd.do_root_exchange(wd.Palette(False), conn, actor, now, __import__('random').Random(1), 80, 24)
+    assert (actor.cash, actor.turns_used, actor.crew, actor.heat) == (0, 1, 2, 4)
+    conn.close()

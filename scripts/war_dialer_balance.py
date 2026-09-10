@@ -137,12 +137,12 @@ def run_scenario(name: str, *, days: int = 14, seed: int = 362) -> dict:
                     player = login(uid, now) if turn == 0 else wd.refresh_player(conn, uid, now)
                     if player.turns_used >= wd.TURNS_PER_DAY:
                         continue
-                    exchanges = wd.list_exchanges(conn)
+                    exchanges = wd.list_exchanges(conn, uid)
                     action, target = "trade", None
                     if name == "repeated_victim":
                         action, target = "raid", 3
                     elif name == "capture_trading":
-                        if exchanges[0].controller_user_id != uid and player.crew >= 2 and player.cash >= wd.ROOT_EXCHANGE_COST:
+                        if exchanges[0].controller_user_id != uid and player.crew >= 2 and player.cash >= wd.capture_cost(exchanges[0]):
                             action, target = "root", exchanges[0].id
                         elif player.cash >= wd.RECRUIT_COST:
                             action = "recruit"
@@ -164,10 +164,11 @@ def run_scenario(name: str, *, days: int = 14, seed: int = 362) -> dict:
                             action, target = "root", exchanges[0].id
                     elif name != "trade_only":
                         available = [e for e in exchanges if e.controller_user_id != uid]
-                        if available and player.crew >= 2 and player.cash >= wd.ROOT_EXCHANGE_COST:
-                            chosen = min(available, key=lambda e: (e.controller_user_id is not None, e.garrison,
+                        if available and player.crew >= 2:
+                            chosen = min(available, key=lambda e: (e.controller_user_id is not None, wd.exchange_defense(e),
                                                                   -e.income_per_hour, e.id))
-                            action, target = "root", chosen.id
+                            if player.cash >= wd.capture_cost(chosen):
+                                action, target = "root", chosen.id
                         elif player.cash >= wd.RECRUIT_COST:
                             action = "recruit"
                     delta = wd.ActionDelta()

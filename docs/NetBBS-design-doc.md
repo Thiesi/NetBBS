@@ -6786,8 +6786,9 @@ playtests remain required.
 
 The ten hourly rates are $2, $2, $2, $3, $1, $2, $3, $2, $1 and $2 in map order:
 $480/day for the entire map versus $600 expected gross from fifteen trades. A
-capture attempt costs $50 and one turn, win or lose; success additionally commits
-one available member. Recruitment remains $75/turn. Expansion competes with
+capture attempt costs one turn and the role-specific cash price below, win or lose;
+success additionally commits one available member. Ordinary recruitment costs
+$75/turn; an owned Carrier Switch offers the service below. Expansion competes with
 recruitment and defense for the same cash budget. Trade remains $20-$60 without
 a cash prerequisite; after a bust resets Heat, even minimum trade payouts fund
 recovery from one to three available crew within ten turns.
@@ -6810,6 +6811,37 @@ therefore receive no additional capture awards until next season, when all ten
 become available again. A history receipt explains this transition. Cash, real
 crew assignments, identities and account age survive, subject to ordinary overdue
 season reset. All changes and the version marker commit together.
+
+**Exchange identities (issue #362, slice 7; maintainer approved).** The existing
+ten exchanges form a fixed ring in stable ID order, including the last-to-first
+link. Every exchange remains attackable regardless of adjacency, tier or raid
+shield. Owning either linked neighbor discounts a capture attempt by $10;
+owning both does not stack. Ownership and the selected price are checked again
+inside the capture transaction. The map shows real links, current owners,
+assigned crew, security, effective defense, income, prices and services.
+
+| Role | Sites / income | Capture cash / base Heat | Owner-only service |
+| --- | --- | --- | --- |
+| Public PBX | Two, $1/hour each | $25 / +4 | Lay Low: one turn removes up to 15 Heat, floor zero |
+| Carrier Switch | Six, $2/hour each | $50 / +8 | Recruit one available member for $65 and one turn; +10 Rank |
+| Warez Hub | Two, $3/hour each | $75 / +12 | Warez outlet: one turn, $30-$70 gross payout, +4 Heat; no Rank |
+
+Owned Carrier Switches add two visible security points to capture defense.
+Security is not living crew: it cannot be withdrawn, does not return to a
+displaced owner and does not multiply the shared crew pool. Unclaimed sites
+retain guaranteed capture; defended contests retain the 10% chance floor.
+Capture Heat still applies Lookouts/Burner benefits. Services require ownership
+at Act and preview their stakes. Lay Low and recruitment have no bust roll or
+support consumption. The outlet uses ordinary trade bust rules: Burner and
+specialty benefits do not apply; Cash Stash applies and is consumed only on a
+bust. No additional passive bonus is introduced. Cash, turns, Heat, crew, Rank
+and support changes share the existing action transaction.
+
+Schema 7 assigns roles in original map order, retaining IDs, names, hourly rates,
+ownership, crew, earned resources and receipts. It rejects a nonempty map with
+other than ten sites without mutation. Roles and ring identity survive season
+reset; ownership and competitive resources reset as before. The version marker
+and role assignment commit together; shipped migrations remain unchanged.
 
 **Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
 living crew is the available crew plus the members assigned across their owned

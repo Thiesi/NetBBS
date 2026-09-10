@@ -48,11 +48,12 @@ refuses to silently create a replacement. Choose an explicit override or complet
 the migration. An explicit path for a new independent node deliberately selects
 its own world; it does not adopt the old world's users or records.
 
-War Dialer records schema version 4 in SQLite `user_version`. A complete older
+War Dialer records schema version 7 in SQLite `user_version`. A complete older
 world upgrades automatically in one transaction: version 1 adopts the original
 layout and latest 500 events per player; version 2 converts copied garrisons to
 shared crew assignments; version 3 adds the capture/control economy described
-below; version 4 adds raid recovery. A failed upgrade rolls
+below; version 4 adds raid recovery; version 5 adds crew/support; version 6 adds
+recon/operations; version 7 adds exchange roles. A failed upgrade rolls
 back its schema/data changes and version marker. Newer versions, incomplete or
 unrelated schemas, and corrupt files are refused with a caller-facing error;
 startup does not replace them with an empty world. Existing zero-byte files are
@@ -213,17 +214,18 @@ eligible members, followed by an exact preview. Each transfer costs one turn, no
 cash or Heat, and gives no Rank. Keep one member available for recovery. The last
 withdrawal abandons the exchange after paying earned income. Displaced defenders
 return to their owner's available pool when a rival captures their exchange.
-Each capture attempt costs $50, win or lose. A first capture earns 50 Rank per
+Each capture attempt costs $25/$50/$75 by role, less $10 when you own a linked
+neighbor, win or lose. A first capture earns 50 Rank per
 exchange per season; recaptures earn none, even after another owner. Holding an
 exchange earns one Rank per six hours, with partial time retained. Rates are
-$1-$3/hour per exchange, $480/day for the whole map. Recruitment remains $75;
-trade earns $20-$60. The same cash budget funds expansion and recruitment.
+$1-$3/hour per exchange, $480/day for the whole map. Ordinary recruitment costs $75;
+ordinary trade earns $20-$60. Owned exchanges offer the services below. The same cash budget funds expansion and recruitment.
 Jobs, raids, attacks and busts use available crew; stationed members defend only
 their exchange. The switchboard and results show the two pools separately.
 
 **MANUAL — outside NetBBS, before activating shared-crew rules:** stop all old
 War Dialer processes and create/verify a node backup with its world component.
-The first permitted launch upgrades the world to schema 4 transactionally.
+The first permitted launch upgrades the world to schema 7 transactionally.
 When upgrading from copied defenses, schema 2 conversion runs first.
 After normal overdue season settlement, it reserves one available member per
 owner, keeps holdings by descending hourly income then ID within the real crew
@@ -231,7 +233,7 @@ budget, and distributes the remaining members evenly across those holdings.
 Unstaffable holdings become unclaimed after paying income; a receipt explains
 the conversion. IDs, handles, account age, cash and Rank are retained. Review
 the receipt and use Garrison to adjust assignments. Never mix old and new game
-processes; older versions refuse schema 4. Restore the verified backup with a
+processes; older versions refuse schema 7. Restore the verified backup with a
 matching game version if the operator chooses to undo the upgrade.
 
 Schema 3 pays already-earned income at the previous rates before applying the
@@ -257,8 +259,32 @@ upgrade time, since the previous format stored no raid timestamp. An offline
 receipt explains this. The same manual stop-sessions/verified-backup procedure
 above applies; repeated startup does not renew the migration shield.
 
+The two $1/hour Public PBXs cost $25 and +4 base Heat to capture. Owners can
+Lay Low for one turn to remove up to 15 Heat. The six $2/hour Carrier Switches
+cost $50 and +8 Heat; while owned they add two visible security defense points,
+in addition to assigned crew. Their owners recruit one available member for $65
+and one turn (+10 Rank). The two $3/hour Warez Hubs cost $75 and +12 Heat;
+owners use the Warez outlet for one turn, $30-$70 gross payout and +4 Heat.
+
+The ring links neighboring IDs, including the last and first. Owning either
+neighbor saves $10 per capture attempt; owning both still saves only $10. Every
+site is attackable without an owned neighbor. Open `[G]arrison`, choose your
+exchange, then Owner service to inspect its stakes before Act. Back spends
+nothing. Losing ownership or the selected discount before Act rejects the action.
+Security is not crew and never returns to a displaced owner. Lay Low and carrier
+recruitment do not roll for busts or consume support; the outlet follows ordinary
+trade bust rules, including Cash Stash, and preserves Burner Kit.
+
+**MANUAL ? outside NetBBS, before activating exchange roles:** use the stopped-
+sessions and verified-backup procedure above. Schema 7 retains the existing ten
+IDs, owners, garrisons, income and resources while assigning roles in map order.
+Inspect the map after upgrade. Do not mix old and new game processes; old binaries
+refuse schema 7. A world with an unexpected exchange count remains unchanged for
+SysOp diagnosis. Reset clears ownership but retains the map and its roles.
+
 Free screens: `[B]Rank` shows season standings and your position; ties use account
-ID order. `[E]Map` shows all exchanges, owners, garrisons and hourly income.
+ID order. `[E]Map` shows the fixed ring, exchange roles, owners, garrisons, security,
+actual capture prices, hourly income and owner services.
 `[V]Rivals` shows other crews' Rank/tier and why they are eligible or protected.
 `[H]Log` replays receipts; `[?]Help` explains the rules. Next/Prev traverses terminal
 pages and batches of ten crews; Back leaves each view without an action. Standings
