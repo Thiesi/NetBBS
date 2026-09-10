@@ -2242,6 +2242,10 @@ def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, mo
     text = ' '.join(wd.dashboard_lines(state, after))
     assert 'Fresh competition: $300, 3 available crew and 15 turns' in text
     assert 'medals give no resource or protection bonus' in text
+    wd.load_or_create_player(conn, 2, 'FirstVisitInSeasonTwo', after, 2)
+    first_visit = ' '.join(wd.dashboard_lines(wd.dashboard_state(conn, 2, after), after))
+    assert 'any retained results' in first_visit and 'Past results remain' not in first_visit
+    assert conn.execute('SELECT COUNT(*) FROM season_results WHERE user_id=2').fetchone()[0] == 0
     monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
     written = []
     monkeypatch.setattr(wd, 'out', written.append)
