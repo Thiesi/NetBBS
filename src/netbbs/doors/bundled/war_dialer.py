@@ -576,6 +576,9 @@ BUST_CASH_LOSS_FRACTION = 0.25
 BUST_CREW_LOSS_FRACTION = 0.20
 
 RECRUIT_COST = 75
+ROOT_EXCHANGE_COST = 50
+CAPTURE_RANK = 50
+CONTROL_RANK_HOURS = 6
 TRADE_WAREZ_RANGE = (20, 60)
 TRADE_WAREZ_HEAT = 2
 ROOT_EXCHANGE_HEAT = 8
@@ -587,11 +590,11 @@ RAID_FAIL_CASH_LOSS_FRACTION = 0.05
 
 RANK_TIERS: tuple[tuple[int, str], ...] = (
     (0, "Newbie"),
-    (200, "Wannabe"),
-    (1000, "Script Kiddie"),
-    (3000, "Hacker"),
-    (8000, "Elite"),
-    (20000, "Legend"),
+    (100, "Wannabe"),
+    (300, "Script Kiddie"),
+    (700, "Hacker"),
+    (1400, "Elite"),
+    (2800, "Legend"),
 )
 
 # (description, difficulty (a defender-crew-equivalent), payout range)
@@ -605,16 +608,16 @@ JOBS: tuple[tuple[str, int, tuple[int, int]], ...] = (
 
 # (name, income per real hour controlled)
 EXCHANGE_SEEDS: tuple[tuple[str, int], ...] = (
-    ("212-555 Uptown Exchange", 40),
-    ("213-555 Sunset Exchange", 45),
-    ("312-555 Loop Exchange", 42),
-    ("415-555 Bay Exchange", 50),
-    ("512-555 Hill County Exchange", 35),
-    ("617-555 Harbor Exchange", 38),
-    ("702-555 Neon Exchange", 48),
-    ("770-555 Peachtree Exchange", 36),
-    ("813-555 Gulf Exchange", 33),
-    ("206-555 Rain City Exchange", 44),
+    ("212-555 Uptown Exchange", 2),
+    ("213-555 Sunset Exchange", 2),
+    ("312-555 Loop Exchange", 2),
+    ("415-555 Bay Exchange", 3),
+    ("512-555 Hill County Exchange", 1),
+    ("617-555 Harbor Exchange", 2),
+    ("702-555 Neon Exchange", 3),
+    ("770-555 Peachtree Exchange", 2),
+    ("813-555 Gulf Exchange", 1),
+    ("206-555 Rain City Exchange", 2),
 )
 
 
@@ -664,6 +667,10 @@ class Player:
     season_number: int
     created_at: str
     income_remainder: int = 0
+    legacy_rank: int = 0
+    control_rank: int = 0
+    control_remainder: int = 0
+    captured_exchanges: tuple[int, ...] = ()
 
 
 @dataclass
@@ -704,7 +711,8 @@ EVENT_HISTORY_LIMIT = 500
 def rank_score(player: Player) -> int:
     return (
         player.crew_recruited_total * 10
-        + player.exchanges_taken_total * 500
+        + player.exchanges_taken_total * CAPTURE_RANK
+        + player.legacy_rank + player.control_rank
         + player.successful_raids * 25
         + player.successful_jobs * 15
     )
@@ -759,6 +767,10 @@ def reset_player_for_season(player: Player, season_number: int, now: datetime) -
     player.crew = STARTING_CREW
     player.crew_recruited_total = 0
     player.exchanges_taken_total = 0
+    player.legacy_rank = 0
+    player.control_rank = 0
+    player.control_remainder = 0
+    player.captured_exchanges = ()
     player.successful_raids = 0
     player.successful_jobs = 0
     player.heat = 0.0
@@ -856,12 +868,15 @@ def action_raid(attacker: Player, target: Player, rng: random.Random) -> tuple[b
 
 
 def capture_rank_award(attacker: Player, exchange: Exchange) -> int:
-    return 0 if exchange.controller_user_id is None and exchange.withdrawn_by == attacker.user_id else 500
+    return 0 if exchange.id in attacker.captured_exchanges else CAPTURE_RANK
 
 
 def action_root_exchange(attacker: Player, exchange: Exchange, now: datetime, rng: random.Random) -> tuple[bool, bool]:
     if attacker.crew < 2:
         raise ActionRejected("Need 2 available crew: one to hold the exchange and one to remain available. Recruit or withdraw defenders.")
+    if attacker.cash < ROOT_EXCHANGE_COST:
+        raise ActionRejected(f"Need ${ROOT_EXCHANGE_COST} for a capture attempt. Trade to fund it; nothing spent.")
+    attacker.cash -= ROOT_EXCHANGE_COST
     if exchange.controller_user_id is None:
         success = True
     else:
@@ -875,6 +890,8 @@ def action_root_exchange(attacker: Player, exchange: Exchange, now: datetime, rn
         exchange.controlled_since = to_iso(now)
         exchange.income_collected_at = to_iso(now)
         attacker.exchanges_taken_total += int(award > 0)
+        if award:
+            attacker.captured_exchanges += (exchange.id,)
     else:
         attacker.crew = max(1, attacker.crew - 1)
     busted = apply_heat(attacker, ROOT_EXCHANGE_HEAT, rng)
@@ -897,7 +914,7 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
-WORLD_SCHEMA_VERSION = 2
+WORLD_SCHEMA_VERSION = 3
 
 # Versioned schema contract: future additions need a new numbered migration.
 _WORLD_COLUMNS_V1 = {
@@ -909,6 +926,7 @@ _WORLD_COLUMNS_V1 = {
                   "income_collected_at", "season_number"},
     "events": {"id", "target_user_id", "actor_handle", "summary_text", "created_at", "seen_at"},
 }
+_ECONOMY_COLUMNS = {"legacy_rank", "control_rank", "control_remainder", "captured_exchanges"}
 
 
 def _world_schema_version(conn: sqlite3.Connection) -> int:
@@ -926,6 +944,8 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
     for table, required in _WORLD_COLUMNS_V1.items():
         columns = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         expected = required - {"income_remainder"} if version == 0 and table == "players" else required
+        if version >= 3 and table == "players":
+            expected = expected | _ECONOMY_COLUMNS
         if not expected <= columns:
             raise WorldStateError(f"War Dialer {table} schema is incomplete. Preserve it for SysOp recovery; no replacement was created.")
 
@@ -984,7 +1004,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
                 with _write_transaction(fresh):
                     _migrate_world_v1(fresh)
                     _migrate_world_v2(fresh)
-                    fresh.execute("PRAGMA user_version=2")
+                    _migrate_world_v3(fresh)
+                    fresh.execute("PRAGMA user_version=3")
             finally:
                 fresh.close()
             try:
@@ -1031,6 +1052,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if version < 2:
             _migrate_world_v2(conn)
             conn.execute("PRAGMA user_version=2")
+        if version < 3:
+            _migrate_world_v3(conn)
+            conn.execute("PRAGMA user_version=3")
         _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
 
 
@@ -1141,6 +1165,33 @@ def _migrate_world_v2(conn: sqlite3.Connection) -> None:
                      f"Shared crew upgrade: {budget if retained else 0} assigned across {retained} holdings; "
                      f"{len(holdings) - retained} unstaffed holdings released. Available crew: {player.crew}. "
                      "Earned income paid. Use [G]arrison to reinforce or withdraw.", effective_now)
+
+
+def _migrate_world_v3(conn: sqlite3.Connection) -> None:
+    """Pay old rates before introducing the bounded capture/control economy."""
+    now = now_utc()
+    exchanges = conn.execute("SELECT id FROM exchanges ORDER BY id").fetchall()
+    if exchanges:
+        _settle_world(conn, now)
+        for row in conn.execute("SELECT DISTINCT controller_user_id FROM exchanges WHERE controller_user_id IS NOT NULL").fetchall():
+            player = read_player(conn, row[0])
+            player.cash += _collect_exchange_income(conn, player, max(now, from_iso(player.heat_updated_at)))
+            _save_player(conn, player)
+    for name in ("legacy_rank", "control_rank", "control_remainder"):
+        conn.execute(f"ALTER TABLE players ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE players ADD COLUMN captured_exchanges TEXT NOT NULL DEFAULT '[]'")
+    # Old counters cannot identify all previously captured exchanges. Preserve
+    # their full earned Rank and retire capture awards for this season instead
+    # of treating an incomplete retained event history as an exhaustive ledger.
+    conn.execute("UPDATE players SET legacy_rank=exchanges_taken_total*?, captured_exchanges=? WHERE exchanges_taken_total>0",
+                 (500 - CAPTURE_RANK, json.dumps([r[0] for r in exchanges])))
+    for row in conn.execute("SELECT user_id FROM players WHERE exchanges_taken_total>0").fetchall():
+        record_event(conn, row[0], None,
+                     "Economy upgrade: earned Rank preserved. Old capture records cannot identify every exchange; "
+                     "your capture awards resume next season. Holding territory now earns control Rank; "
+                     "capture attempts cost $50 and exchange income is $1-$3/hour. See Help for the new rules.", now)
+    for row, (_, rate) in zip(exchanges, EXCHANGE_SEEDS):
+        conn.execute("UPDATE exchanges SET income_per_hour=? WHERE id=?", (rate, row[0]))
 
 
 def get_or_create_season_anchor(conn: sqlite3.Connection, now: datetime) -> datetime:
@@ -1270,6 +1321,10 @@ def _row_to_player(row: sqlite3.Row) -> Player:
         turn_day_start=row["turn_day_start"], last_raided_by=row["last_raided_by"],
         season_number=row["season_number"], created_at=row["created_at"],
         income_remainder=row["income_remainder"],
+        legacy_rank=row["legacy_rank"] if "legacy_rank" in row.keys() else 0,
+        control_rank=row["control_rank"] if "control_rank" in row.keys() else 0,
+        control_remainder=row["control_remainder"] if "control_remainder" in row.keys() else 0,
+        captured_exchanges=tuple(json.loads(row["captured_exchanges"])) if "captured_exchanges" in row.keys() else (),
     )
 
 
@@ -1291,6 +1346,11 @@ def _save_player(conn: sqlite3.Connection, player: Player) -> None:
             player.last_raided_by, player.season_number, player.income_remainder, player.user_id,
         ),
     )
+    # Older migrations call this helper before the new columns exist.
+    if _world_schema_version(conn) >= 3:
+        conn.execute("UPDATE players SET legacy_rank=?, control_rank=?, control_remainder=?, captured_exchanges=? WHERE user_id=?",
+                     (player.legacy_rank, player.control_rank, player.control_remainder,
+                      json.dumps(player.captured_exchanges), player.user_id))
 
 
 _INCOME_UNITS_PER_DOLLAR = 3_600_000_000  # microseconds per hour
@@ -1306,16 +1366,23 @@ def _collect_exchange_income(conn: sqlite3.Connection, player: Player, now: date
         raise RuntimeError("Income collection requires a write transaction")
     rows = conn.execute("SELECT * FROM exchanges WHERE controller_user_id=?", (player.user_id,)).fetchall()
     units = player.income_remainder
+    control_units = player.control_remainder
+    control_enabled = _world_schema_version(conn) >= 3
     for row in rows:
         collected_at = from_iso(row["income_collected_at"])
         earned_until = max(now, collected_at)
         elapsed_us = (earned_until - collected_at) // timedelta(microseconds=1)
         units += row["income_per_hour"] * elapsed_us
+        if control_enabled:
+            control_units += elapsed_us
         conn.execute(
             "UPDATE exchanges SET income_collected_at=? WHERE id=?",
             (to_iso(earned_until), row["id"]),
         )
     total, player.income_remainder = divmod(units, _INCOME_UNITS_PER_DOLLAR)
+    if control_enabled:
+        earned, player.control_remainder = divmod(control_units, CONTROL_RANK_HOURS * _INCOME_UNITS_PER_DOLLAR)
+        player.control_rank += earned
     return total
 
 
@@ -1482,7 +1549,7 @@ def list_exchanges(conn: sqlite3.Connection) -> list[Exchange]:
 
 
 # Keep the standings expression aligned with rank_score; ties use stable account IDs.
-_RANK_SQL = "(crew_recruited_total*10 + exchanges_taken_total*500 + successful_raids*25 + successful_jobs*15)"
+_RANK_SQL = f"(crew_recruited_total*10 + exchanges_taken_total*{CAPTURE_RANK} + legacy_rank + control_rank + successful_raids*25 + successful_jobs*15)"
 PLAYER_PAGE_SIZE = 10
 
 
@@ -1499,6 +1566,8 @@ def read_player_page(conn: sqlite3.Connection, user_id: int, now: datetime, offs
                      *, standings: bool = False) -> PlayerPage:
     """Read a bounded current-season directory/standings page without login effects."""
     with _write_transaction(conn):
+        _settle_world(conn, now)
+        _settle_rank_owners(conn, now)
         player = _refresh_player(conn, user_id, now)
         where = "season_number=?" + (" AND user_id != ?" if not standings else "")
         parameters = [player.season_number] + ([] if standings else [user_id])
@@ -1518,9 +1587,19 @@ def read_player_page(conn: sqlite3.Connection, user_id: int, now: datetime, offs
         return PlayerPage(player, [_row_to_player(row) for row in rows], offset, total, position)
 
 
+def _settle_rank_owners(conn: sqlite3.Connection, now: datetime) -> None:
+    """At most ten owners; standings and brackets include offline control Rank."""
+    owners = conn.execute("SELECT DISTINCT controller_user_id FROM exchanges WHERE controller_user_id IS NOT NULL").fetchall()
+    for row in owners:
+        player = read_player(conn, row[0])
+        player.cash += _collect_exchange_income(conn, player, max(now, from_iso(player.heat_updated_at)))
+        _save_player(conn, player)
+
+
 def list_raid_targets(conn: sqlite3.Connection, attacker: Player, now: datetime, limit: int = 5) -> list[Player]:
     with _write_transaction(conn):
         season = _settle_world(conn, now)
+        _settle_rank_owners(conn, now)
         actor = read_player(conn, attacker.user_id)
         rows = conn.execute(
             "SELECT * FROM players WHERE user_id != ? AND season_number = ? ORDER BY RANDOM() LIMIT 50",
@@ -1609,6 +1688,9 @@ def resolve_raid(
             raise ActionRejected("Rival is no longer eligible. No resources spent.")
         if expected_target is not None and raid_selection_state(target) != raid_selection_state(expected_target):
             raise ActionRejected("Rival changed while you were choosing. Inspect the rivals again.")
+        target.cash += _collect_exchange_income(conn, target, max(now, from_iso(target.heat_updated_at)))
+        if not is_eligible_raid_target(actor, target, now):
+            raise ActionRejected("Rival is no longer eligible after control Rank settlement. No resources spent.")
         success, amount, busted = action_raid(actor, target, rng)
         _save_player(conn, target)
         if success:
@@ -1959,7 +2041,8 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "[J]ob: risky payout. [R]aid: steal rival cash. [X]Root: take an exchange for hourly income.",
         "Capture commits one available member to its garrison. Assigned crew defend only that exchange; jobs, raids and attacks use available crew.",
         "[G]arrison: reinforce or withdraw crew for one turn, with no Heat or Rank reward. One crew member must stay available. Withdrawing the last defender abandons the exchange and stops income.",
-        "Reclaiming your own abandoned exchange earns no capture Rank. Another crew taking control or a new season ends that restriction.",
+        f"Each capture attempt costs ${ROOT_EXCHANGE_COST}, win or lose. Each exchange earns +{CAPTURE_RANK} capture Rank only on your first success this season; recaptures earn none.",
+        f"Hold territory for +1 Rank per {CONTROL_RANK_HOURS} exchange-hours. Partial time combines across holdings and survives transfers. Income is $1-$3/hour per exchange; all ten earn $480/day.",
         "Displaced defenders return to their owner's available crew after capture. Busts and failed attacks affect available crew, not stationed defenders.",
         f"Past {HEAT_BUST_THRESHOLD:g} Heat, each extra point adds a bust chance; busts cost cash/crew and reset Heat. Heat decays over time.",
         f"Rank only climbs during a season. Every {SEASON.days} days, cash, crew, Heat, turns, exchanges and Rank totals reset.",
@@ -2029,11 +2112,13 @@ def action_block_reason(action: str, player: Player) -> str | None:
         reasons.append(f"Need ${RECRUIT_COST - player.cash} more cash to recruit. Trade needs no cash; preview its Heat risk first.")
     if action == "root" and player.crew < 2:
         reasons.append("Need 2 available crew: one to hold the exchange and one to remain available. Recruit or use [G]arrison to withdraw defenders.")
+    if action == "root" and player.cash < ROOT_EXCHANGE_COST:
+        reasons.append(f"Need ${ROOT_EXCHANGE_COST - player.cash} more cash for a capture attempt. Trade to fund it.")
     return " ".join(reasons) or None
 
 
 def action_preview_lines(action: str, player: Player, target: Player | Exchange | None = None) -> list[str]:
-    cost = RECRUIT_COST if action == "recruit" else 0
+    cost = RECRUIT_COST if action == "recruit" else ROOT_EXCHANGE_COST if action == "root" else 0
     lines = [f"Season {player.season_number}; turns {TURNS_PER_DAY - player.turns_used}/{TURNS_PER_DAY}; cash ${player.cash:,}",
              f"Cost: 1 turn, ${cost} cash. Back spends nothing."]
     if reason := action_block_reason(action, player):
@@ -2060,6 +2145,7 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
         chance = 1.0 if target.controller_user_id is None else success_chance(player.crew, target.garrison)
         lines += [f"Exchange: {target.name}", f"Success: {chance:.0%}; garrison {target.garrison}.",
                   f"Success earns +{capture_rank_award(player, target)} Rank and ${target.income_per_hour}/hour until lost or season reset.",
+                  f"Capture Rank is once per exchange per season. Holding earns +1 Rank per {CONTROL_RANK_HOURS} exchange-hours; the ${ROOT_EXCHANGE_COST} attempt cost applies win or lose.",
                   f"Success assigns 1 crew to defense, leaving {player.crew - 1} available before any bust. [G]arrison manages defenders.",
                   f"Failure loses {min(1, player.crew - 1)} crew before any bust."]
     if heat:

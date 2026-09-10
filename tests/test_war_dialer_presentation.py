@@ -947,14 +947,14 @@ def test_dashboard_explains_unstarted_and_running_turn_windows(tmp_path):
     state = wd.dashboard_state(conn, 1, now)
     text = "\n".join(wd.dashboard_lines(state, now))
     assert "Turn window starts with your next action" in text
-    assert "Next: Wannabe in 200 Rank" in text
+    assert "Next: Wannabe in 100 Rank" in text
     assert "newcomer, 2d 0h 0m remaining" in text
     wd.resolve_recruit(conn, player, now)
     state = wd.dashboard_state(conn, 1, now + timedelta(hours=1))
     text = "\n".join(wd.dashboard_lines(state, now + timedelta(hours=1)))
     assert "Turns left: 14/15" in text
     assert "Turn refill in 23h 0m" in text
-    assert "Next: Wannabe in 190 Rank" in text
+    assert "Next: Wannabe in 90 Rank" in text
     conn.close()
 
 

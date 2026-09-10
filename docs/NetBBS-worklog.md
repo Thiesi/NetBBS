@@ -397,9 +397,22 @@ marker must roll back together. Validate host ownership before this conversion.
 Capture must return the previous garrison exactly once under the same action lock;
 otherwise a stale session can lose or duplicate defenders. Action deltas report
 available and assigned changes separately so reinforcement is not narrated as death.
-An abandonment marker per exchange survives reconnects and is included in preview
-validation, preventing withdrawal/reclaim loops from awarding solo capture Rank.
-Clear it only on capture or season change, atomically with the relevant action.
+Version 2 abandonment markers remain compatible migration data; schema 3 uses
+the player capture ledger for the stronger once-per-season award rule.
+
+Economy schema 3 keeps an explicit bounded list of rewarded exchange IDs per
+player: aggregate capture counts or the latest 500 receipts cannot reconstruct
+all previous ownership. Legacy captures retain their old Rank through a season
+credit and exhaust capture awards until rollover. Do not infer missing history
+as evidence that an exchange was never captured.
+
+Control Rank uses the same integer microsecond boundary as cash settlement, with
+a separate per-player remainder. Transfer/withdrawal must save both before
+changing ownership; standings settle the at-most-ten owners, including absent
+ones, before SQL ordering. Keep SQL Rank aligned with Python. Migration pays old
+stored rates before replacing them and awards no control Rank for pre-upgrade
+time. Schema 1 and 2 migrations remain immutable; their shared helpers must still
+work before schema 3 columns exist.
 
 `python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
 against disposable SQLite worlds through the actual action resolvers. The default

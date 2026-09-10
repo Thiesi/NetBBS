@@ -6392,20 +6392,15 @@ district's defense is the controller's committed garrison rather than
 their full Rank, keeping territory contestable by newcomers even
 against a top-bracket controller.
 
-**Corrected at implementation time:** this decision was originally
-recorded as `crew×10 + exchanges_controlled×500 + successful_raids×25 +
-successful_jobs×15` — but `crew` and `exchanges_controlled` there meant
-*current* holdings, which can both go down (a bust, a rival rooting
-your exchange), silently reintroducing the exact sandbagging hole this
-decision exists to close. The shipped formula instead sums four
-lifetime counters that only ever increment — crew *ever* recruited,
-exchanges *ever* successfully taken, successful raids, successful jobs
-— `crew_recruited_total×10 + exchanges_taken_total×500 +
-successful_raids×25 + successful_jobs×15`
-(`netbbs.doors.bundled.war_dialer.rank_score`). Current crew and
-current exchange-control remain separate, ordinary fluctuating fields
-used only for combat odds and territory defense — never inputs to
-Rank.
+Rank sums season achievements, never current cash, available crew or holdings:
+`crew_recruited_total*10 + exchanges_taken_total*50 + successful_raids*25 +
+successful_jobs*15 + control_rank + legacy_rank`. The capture counter records
+rewarded first captures; control Rank is earned time, retained after losing a
+holding. `legacy_rank` preserves previously earned capture points during upgrade
+and resets with the season. Python and SQL standings scores must agree. Tiers
+begin at 0, 100, 300, 700, 1,400 and 2,800 points, scaled to a four-week season
+without capture farming. Rank never decreases within a season; the existing raid
+bracket rule and ungated territory contests remain.
 
 **Decision 5 (locked in) — seasons (4 weeks), separate from Rank
 brackets, because they solve a different problem.** Brackets prevent
@@ -6596,6 +6591,41 @@ Recruit previews show the actual cash shortfall; empty rival worlds explain the
 available non-PvP alternatives. Advice does not grant resources, spend turns,
 change protection, or imply a waiting caller's snapshot updates continuously.
 
+**Economy targets and rules (issue #362, slice 5; maintainer approved).**
+The full map must earn no more passive cash per day than fifteen average trades;
+a player cannot receive repeat capture Rank from one exchange within a season;
+recovery from a bust to three available members fits within fifteen low-risk
+turns; defended territory retains the 10% minimum capture chance. These are
+measurable constraints, not proof of fun or fair balance. Human multi-day
+playtests remain required.
+
+The ten hourly rates are $2, $2, $2, $3, $1, $2, $3, $2, $1 and $2 in map order:
+$480/day for the entire map versus $600 expected gross from fifteen trades. A
+capture attempt costs $50 and one turn, win or lose; success additionally commits
+one available member. Recruitment remains $75/turn. Expansion competes with
+recruitment and defense for the same cash budget. Trade remains $20-$60 without
+a cash prerequisite; after a bust resets Heat, even minimum trade payouts fund
+recovery from one to three available crew within ten turns.
+
+A first successful capture awards 50 Rank per player/exchange/season. Holding
+territory earns one Rank per six exchange-hours, combining fractional time across
+holdings and visits. Transfers pay the prior owner's earned cash/control Rank in
+the same transaction and retain fractional credit. Losing, withdrawing or busting
+does not remove earned Rank. Offline owners are settled before standings and raid
+brackets are presented; commit checks settled raid eligibility. Cash settlement
+and control time share the ownership timestamp, so inspection cannot multiply
+rewards. Normal season reset clears the new counters and capture IDs.
+
+Schema 3 pays accrued income at the old stored rates before installing new rates;
+control Rank starts at that boundary, without retroactive awards. Existing capture
+Rank is preserved with a legacy credit of 450 points per old rewarded capture.
+The old aggregate counter cannot identify every previously captured exchange and
+retained receipts are not a complete ledger: players with prior capture awards
+therefore receive no additional capture awards until next season, when all ten
+become available again. A history receipt explains this transition. Cash, real
+crew assignments, identities and account age survive, subject to ordinary overdue
+season reset. All changes and the version marker commit together.
+
 **Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
 living crew is the available crew plus the members assigned across their owned
 exchanges. Capture requires at least two available members and commits one to the
@@ -6609,11 +6639,11 @@ offline loser a recovery resource without duplicating members or raising Rank.
 transfer choices and an explicit action preview. Reinforcement/withdrawal costs
 one ordinary turn, no cash or Heat, and earns no Rank. One member must remain
 available. Withdrawing the last defender abandons ownership after paying earned
-income; it cannot leave a free, unstaffed income source. Reclaiming one's own
-abandoned exchange earns no capture Rank until another crew controls it or the
-season changes. A persisted marker per exchange prevents reconnect farming;
-the capture counter records rewarded captures. Migration-released holdings use
-the same guard. Previews show the actual Rank award, both pools,
+income; it cannot leave a free, unstaffed income source. Capture awards are once
+per player/exchange per season, including recaptures
+after another owner or voluntary abandonment. The persistent per-player list has
+at most ten exchange IDs; only a successful first capture adds an ID.
+Previews show the actual Rank award, both pools,
 the resulting defense and abandonment. Commit rechecks resources, season and
 ownership. Back/disconnect spends nothing. The dashboard shows available and
 assigned crew separately; action results distinguish transfers from losses.
@@ -6630,8 +6660,8 @@ receipt with assigned/available and released counts. Cash, monotonic Rank, IDs,
 handles and account age survive conversion; no copied garrison becomes a recruit.
 The version marker and all conversion changes share one transaction. Old processes
 must be stopped and a verified backup taken before activation. Host ownership and
-maintenance checks precede conversion. Economy and raid-rule tuning remain later
-slice 5 bullets; this defense change does not claim the existing payouts balanced.
+maintenance checks precede conversion. Raid-rule tuning remains a later
+slice 5 bullet; defense alone does not establish balanced play.
 
 **World paths (issue #362, slice 4).** The native runtime supplies the bundled
 War Dialer with `<resolved-node-db-filename>.doors/war-dialer.db` beside that node
@@ -6688,7 +6718,8 @@ before world creation; it never falls back to Guest. Caller messages remain clea
 and SysOp diagnostics are bounded. Commands do not activate or redeploy services.
 
 **World schema compatibility.** SQLite `user_version=1` identifies the original
-War Dialer schema; `user_version=2` adds shared-crew resource semantics without
+War Dialer schema; the current version is 3. `user_version=2` added shared-crew
+resource semantics without
 changing its column layout. A complete unversioned world is adopted through a
 numbered migration; its additive fields, retained history and version marker
 commit together or roll back together. New empty worlds use the same migration.
