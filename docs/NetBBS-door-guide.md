@@ -586,9 +586,11 @@ any saved encounter resumes first; the rest of a route never runs unattended.
 
 ### Planning other journeys
 
-Choose **[G]eneral route planner** on the chart, then **[D]estination** to pick a
-charted system by name. The picker paginates all known destinations. Selection
-only changes the preview; Back from the picker keeps the previous selection.
+Choose **[G]eneral route planner** on the chart. It opens the destination picker
+straight away, because a planner with no destination has nothing to show; the
+picker paginates all known destinations, and Back from it leaves the planner
+without planning anything. Inside the planner, **[D]estination** reopens the
+picker to change the route, and Back from *that* keeps the previous selection.
 Inspect each leg, fuel and wage cash, manual refuelling stops, and active-contract
 deadline estimates before choosing **[J]ump next**. Unknown intermediate stations
 retain unknown names and danger. Contract destinations can be previewed through
