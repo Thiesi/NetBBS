@@ -481,8 +481,10 @@ rule used by live standings. NPCs have no player row and cannot receive medals.
 Archive, income settlement, reset and active marker share one transaction. Keep
 at most twelve headers and their result rows; skip replay of unretained inactive
 seasons after long absences. Snapshot handles/insignia rather than joining live
-identity fields when rendering old results. SysOp advance/reset changes the anchor
-before settlement, so its outgoing cutoff is the confirmed operator boundary.
+identity fields when rendering old results. SysOp advance/reset settles overdue
+natural seasons before changing the anchor, then closes the current season at
+the confirmed operator boundary. Moving the anchor first changes past cutoffs
+and permanently miscounts territory Rank in a quiet world.
 
 `python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
 against disposable SQLite worlds through the actual action resolvers. The default

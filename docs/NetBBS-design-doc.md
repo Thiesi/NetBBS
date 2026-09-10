@@ -6933,7 +6933,8 @@ Schema 10 creates the archive tables. The current standings and dashboard publis
 awards in advance; `[I]Scene / Season results` shows retained season status, cutoff,
 podium and the viewing caller's placement. Archive records are snapshots, never
 updated by ordinary play. Existing stop-sessions/verified-backup procedures apply.
-SysOp advance/reset closes the outgoing season at the operator-selected boundary
+SysOp advance/reset first settles overdue seasons at their published natural
+cutoffs, then closes the current season at the operator-selected boundary
 and retains cosmetic archive recognition while resetting competitive resources.
 Older worlds remain operable before upgrade; unknown past results are not backfilled.
 

@@ -87,6 +87,10 @@ def change_competition(db_path: Path, world: Path, *, identity_dir: Path, backup
             if conn.execute("SELECT value FROM meta WHERE key='maintenance'").fetchone()[0] != "on":
                 raise backup.BackupError("Maintenance was disabled; no season was changed.")
             now = wd.now_utc()
+            # Honor already-published natural cutoffs before moving the anchor.
+            # Otherwise an overdue active marker would use the new calendar
+            # to archive old territory earnings and permanently change awards.
+            wd._settle_world(conn, now)
             before = wd.current_world_season(conn, now)
             season = before + 1
             anchor = wd.to_iso(now - (season - 1) * wd.SEASON)

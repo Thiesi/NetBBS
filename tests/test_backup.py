@@ -1765,6 +1765,37 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
     assert admin.world_status(db_path, path)["maintenance"] == "off"
 
 
+@pytest.mark.parametrize("elapsed_days", [7, 70])
+@pytest.mark.parametrize("reset", [False, True])
+def test_war_dialer_sysop_archives_due_seasons_before_moving_cutoff(
+        tmp_path, db_path, identity_dir, monkeypatch, elapsed_days, reset):
+    from datetime import timedelta
+    from netbbs.doors import war_dialer_admin as admin
+    from netbbs.doors.bundled import war_dialer as wd
+    start = wd.now_utc()
+    monkeypatch.setattr(wd, "now_utc", lambda: start)
+    bootstrap_node_identity("test-node").save(identity_dir)
+    path = _populate_war_dialer(db_path)
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=?, income_collected_at=? WHERE id=1",
+                     (wd.to_iso(start), wd.to_iso(start)))
+        conn.commit()
+    now = start + timedelta(days=elapsed_days)
+    monkeypatch.setattr(wd, "now_utc", lambda: now)
+    admin.set_maintenance(db_path, path, True)
+    result = admin.change_competition(db_path, path, identity_dir=identity_dir,
+        backup_to=tmp_path / "cutoff-backup", confirm=path.name, reason="fresh competition", reset=reset)
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        cutoff = min(now, start + wd.SEASON)
+        assert conn.execute("SELECT ended_at FROM seasons WHERE number=1").fetchone() == (wd.to_iso(cutoff),)
+        assert conn.execute("SELECT rank,medal FROM season_results WHERE season=1").fetchone() == (min(elapsed_days, 28) * 4, "Gold")
+        if elapsed_days == 70:
+            assert conn.execute("SELECT status,players FROM seasons WHERE number=2").fetchone() == ("inactive", 0)
+            assert conn.execute("SELECT ended_at FROM seasons WHERE number=3").fetchone() == (wd.to_iso(now),)
+            assert conn.execute("SELECT rank,medal FROM season_results WHERE season=3").fetchone() == (0, "")
+    assert result["stored_season"] == ("4" if elapsed_days == 70 else "2")
+
+
 @pytest.mark.parametrize("blocker", ["confirmation", "maintenance", "active", "backup", "running_node"])
 def test_war_dialer_sysop_change_rejects_before_reset(tmp_path, db_path, identity_dir, blocker):
     from netbbs.doors import war_dialer_admin as admin
