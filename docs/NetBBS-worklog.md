@@ -4809,6 +4809,10 @@ Scripted acceptance tests must navigate the details pages before pressing A;
 otherwise they no longer exercise acceptance. Test compact screens by counting
 display columns and physical rows between successive input requests.
 
+One-page screens strip the Prev/Next tokens through `single_page_footer` but keep
+the `N/M` page counter: dozens of scripted tests (and readers) page by that
+counter, so it is not decoration to remove (issue #412).
+
 The detail action bar labels each command and Back explicitly, including when
 its available commands vary by stage (A means Accept before a faction case and
 Aid after investigation). Reserve the complete wrapped action bar in page

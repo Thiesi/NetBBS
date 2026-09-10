@@ -562,6 +562,10 @@ trading or contracts. The normal risks of travel still apply.
 
 ### Navigating contracts
 
+Contract details show only the notes that apply to that job; on a multi-page
+offer, the first page says which page holds **[A]ccept**. Screens that fit one
+page show no Prev/Next keys.
+
 Open a contract's details and choose **[R]oute** to inspect every leg to its named
 target, even when the target is uncharted. Names of uncharted intermediate
 stations and their danger remain hidden. The preview shows fuel, wages, manual

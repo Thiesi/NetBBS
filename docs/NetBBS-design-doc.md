@@ -4746,6 +4746,14 @@ destination's danger (or unknown) and that a day passes; No retains the chart
 with a cancelled-departure result and writes nothing. Contract and route jumps
 keep their existing preview screens and deliberate Jump actions.
 
+Contract details state only the notes that apply (issue #412): the cargo-basis
+note when cargo of that commodity is already aboard, the crew-wage note when crew
+is aboard, the survey note for survey contracts, and the unknown-danger note when
+a leg is uncharted; the general reminders live in the Pilot Guide. An offer's
+earlier pages say where Accept is instead of hiding it. One-page screens drop
+Prev/Next from their action bar but keep the page counter. Market rows carry no
+filler status word, and the exchange reminder appears once in the catalog.
+
 A hop's narration is retained for the next deck page (issue #410): departure
 costs and events, discoveries, encounter and combat outcomes, customs results,
 settlements and mission completions appear as `Result:` lines on the first
