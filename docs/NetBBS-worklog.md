@@ -4725,8 +4725,8 @@ safe; dropping the recorded step is not, because a smaller step would re-award
 gains that were already paid for.
 
 `single_page_footer` matches paging tokens by shape (`_PAGING_PATTERN`), not by a
-table of literal strings: footers spell them `[<]Prev [>]Next`, `[<>]Page` and
-`[N]ext [P]rev`, and end with a space, the prompt's colon or `" > "`, so a
+table of literal strings: footers spell them `[<] Prev [>] Next`, `[<>] Page` and
+`[N] Next [P] Prev`, and end with a space, the prompt's colon or `" > "`, so a
 literal table silently missed most callers. A screen is also paginated twice
 when it does not fit: once with the full footer and once with the shortened one,
 because dropping the tokens can buy the row that makes it a single page. Any new
@@ -4807,6 +4807,16 @@ maintenance reporting busy without creating a career.
 
 `departed` is not a travel phase. It appears in fixtures as an *invalid* phase for
 fault injection; the real phases are `primary`, `escorts`, `arrival` and `customs`.
+
+Voidrunner prints every hotkey as `[K] Label`, without exception (issue #400).
+A test must not tell an action bar from a body row by its hotkey style -- there
+is only one -- and must not assume a phrase lands on a given page at 20 columns,
+because the spaced bar can take a row the glued one did not. The bar is what
+`out_prompt` writes: it ends the frame, unterminated, and wraps into as many rows
+as the width needs, so its last row is no longer the whole of it. The
+`without_action_bar` fixture asks the writer how many rows it took instead of
+guessing, and is the right tool whenever a test reassembles a screen's body
+across pages.
 
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen
@@ -5672,7 +5682,7 @@ is validation coverage, not a substitute for that domain outcome.
 Tactical combat metadata is optional only for already-started legacy fights.
 Absence keeps legacy fire/retaliation and RNG order; explicit null or unknown
 versions are preserving-recovery errors. Never fill missing tactics during load.
-Versioned pattern/step/Brace readiness commits with HP/result before narration;
+Versioned pattern/step/Guard readiness commits with HP/result before narration;
 no presentation call selects a new intent or advances it. Future changes to a
 version's combat math must preserve that version for pending fights. Pattern
 selection uses no RNG and step wraps at the profile length, keeping state bounded.
@@ -5712,7 +5722,7 @@ a cached encounter. The ordered source opponents and combat target must agree;
 Target changes both, resets only an unengaged target's fresh tactics, and consumes
 no encounter RNG. Reject contradictory targets or pre-engagement advancement.
 Cover derives from the remaining partner while index is zero, after shield damage
-and before Brace reduction. Advance the index and clear combat together before
+and before Guard reduction. Advance the index and clear combat together before
 checkpointing; cover then disappears for the final duel. Seeded target-order
 probes demonstrate profile-dependent mechanical tradeoffs, not human engagement.
 

@@ -465,7 +465,7 @@ def test_the_real_space_trading_door_plays_a_full_opening_loop_through_run_door(
         await asyncio.sleep(0.2)
         # Accept the default callsign, confirm career start, buy 3 Food
         # in the market, back out, check the status screen, then quit. The
-        # status screen leaves on [B]ack: whitespace is absorbed at every
+        # status screen leaves on [B] Back: whitespace is absorbed at every
         # action bar now (issue #416).
         session.type_in("\rYMAP3\rQSBQ")
         return await task
