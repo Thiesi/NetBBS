@@ -4790,6 +4790,15 @@ A validator is named `_validate_*`. `_load_*` reads and returns; the three save
 validators named that way returned a coerced value only incidentally and were
 read as loaders.
 
+Proving Voidrunner's pilot/maintenance gate needs a second real process: the lock
+is a file lease held for the life of a door, so an in-process fixture cannot
+observe it. Hold a live door with `_live_voidrunner` and assert both directions --
+`maintenance_session` refusing while a pilot is aboard, and a launch during
+maintenance reporting busy without creating a career.
+
+`departed` is not a travel phase. It appears in fixtures as an *invalid* phase for
+fault injection; the real phases are `primary`, `escorts`, `arrival` and `customs`.
+
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen
 reserves its own hotkeys in its letter map (`MARKET_LETTERS`, `YARD_LETTERS`,
