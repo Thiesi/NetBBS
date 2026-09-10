@@ -394,9 +394,12 @@ def test_a_legacy_overlength_blocklist_entry_is_dropped_on_load(db):
     from netbbs.mrc.settings import OPEN_ROOMS_BLOCKLIST_KEY, OpenRoomSettings, load_open_room_settings, save_open_room_settings
     from netbbs.config import get_config, set_config
 
-    set_config(db, OPEN_ROOMS_BLOCKLIST_KEY, json.dumps(["spam", "x" * 25, "#" + "y" * 20]))
+    set_config(db, OPEN_ROOMS_BLOCKLIST_KEY, json.dumps(["spam", "x" * 25, "#" + "y" * 20, "X" * 21]))
     loaded = load_open_room_settings(db)
-    assert loaded.blocklist == ("spam", "#" + "y" * 20)  # loaded as stored; save normalises
+    # The overlength entries are cut to the room they can still name (the
+    # one the migration gave a caller-opened room of that name), once.
+    assert loaded.blocklist == ("spam", "x" * 20, "#" + "y" * 20)
+    assert loaded.blocks("x" * 20)
     saved = save_open_room_settings(db, OpenRoomSettings(enabled=loaded.enabled, blocklist=loaded.blocklist, cap=16))
     assert saved.cap == 16
     assert "x" * 25 not in get_config(db, OPEN_ROOMS_BLOCKLIST_KEY)

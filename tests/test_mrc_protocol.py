@@ -96,6 +96,13 @@ def test_room_names_are_twenty_characters_and_a_typed_name_is_refused_not_cut():
     assert room_name_error("#" + "x" * 20) is None
     assert room_name_error("x" * 21) == "MRC room names are at most 20 characters; " + repr("x" * 21) + " has 21."
     assert room_name_error("|12") == "Room name must contain at least one printable ASCII character."
+    # Inbound room fields are cut at the parser too, so a packet from a
+    # client that still emits longer names matches a shortened mapping.
+    from netbbs.mrc.protocol import parse_line
+    packet = parse_line("bob~Other~" + "r" * 25 + "~~~" + "r" * 25 + "~hello~")
+    assert packet.from_room == "r" * 20 and packet.to_room == "r" * 20
+    control = parse_line("CLIENT~Other~" + "ab" * 32 + "~SERVER~~~CAPABILITIES:MCI~")
+    assert control.from_room == "ab" * 32
 
 
 def test_sanitize_body_rules():

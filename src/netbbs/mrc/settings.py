@@ -329,14 +329,21 @@ def _load_blocklist(db: Database) -> tuple[str, ...]:
         return ()
     if not isinstance(entries, list):
         return ()
-    # An entry the wire could never name (stored before the 20-character
-    # limit, issue #376) can block no room and would only make every later
-    # save fail validation; it is dropped on load, so the next save writes
-    # the list without it.
-    return tuple(
-        entry for entry in entries
-        if isinstance(entry, str) and entry and room_name_error(entry) is None
-    )
+    # An entry stored before the 20-character limit (issue #376) is cut to
+    # the room it can still name -- the same first 20 characters the upgrade
+    # migration gave a caller-opened room of that name -- so a block set
+    # then still holds, and every later save validates. Duplicates the cut
+    # produces collapse.
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str) or not entry:
+            continue
+        room = sanitize_room(entry) if room_name_error(entry) is not None else entry
+        if room and room.lower() not in seen:
+            seen.add(room.lower())
+            cleaned.append(room)
+    return tuple(cleaned)
 
 
 def validate_open_room_settings(settings: OpenRoomSettings) -> OpenRoomSettings:

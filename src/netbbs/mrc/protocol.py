@@ -344,7 +344,12 @@ def parse_line(line: str) -> MrcPacket | None:
     # store, rendered or stripped per viewer -- and loses every other
     # pipe token (Mystic MCI variables) right here.
     cleaned = [sanitize_text(strip_ansi(field)).strip() for field in fields]
-    names = [strip_pipe_codes(value)[:MAX_NAME] for value in cleaned[:6]]
+    # Rooms (fields 3 and 6) are `string[20]` (issue #376); every other
+    # name field is `string[30]`. Field 3 of a control packet is a pid or
+    # a script hash (`string[128]`), not a room.
+    is_control = strip_pipe_codes(cleaned[0]).strip().upper() in (SERVER, CLIENT)
+    limits = [MAX_NAME, MAX_NAME, 128 if is_control else MAX_ROOM, MAX_NAME, MAX_NAME, MAX_ROOM]
+    names = [strip_pipe_codes(value)[:limit] for value, limit in zip(cleaned[:6], limits)]
     return MrcPacket(
         from_user=names[0], from_site=names[1], from_room=names[2],
         to_user=names[3], msg_ext=names[4], to_room=names[5],
