@@ -5268,10 +5268,15 @@ never live remote availability; a route cannot promise sale of a load exceeding
 observed demand. First Flight must quote immediately available procurement.
 
 Futures remain separately scheduled wholesale consignments with their existing
-fee, term, issuing-station pickup and hold-space requirements. They do not consume
-spot stock; unloading collected goods still uses the destination's buying demand.
-Contract deliveries consume their contracted cargo independently of spot demand.
-These distinctions preserve already-signed orders and delivery commitments.
+fee, term, issuing-station pickup and hold-space requirements. A new order
+reserves its quantity from the issuing station's spot stock pool at signing and
+applies the ordinary purchase price nudge (issue #401): an order larger than the
+available stock is rejected before any change, cancellation returns the
+reservation to that station's pool bounded by its ceiling, and settlement does
+not consume stock again. Orders signed before this rule carry no reservation and
+keep their terms, as do legacy remote-delivery orders. Unloading collected goods
+still uses the destination's buying demand. Contract deliveries consume their
+contracted cargo independently of spot demand.
 
 New economy events affect a bounded region: an anchor station plus up to two
 same-economy stations within two jumps. A deterministic selection from the
@@ -5310,7 +5315,8 @@ Up to eight orders may be active; insufficient hold space leaves a ready order
 waiting. Orders can be cancelled remotely for their recorded goods principal;
 the 8% brokerage fee (rounded up per unit, at least one credit) is never refunded.
 Splitting orders cannot reduce that per-unit fee. Purchase screens show quantity,
-term, pickup station, principal and fee before signing, with Back writing nothing.
+term, pickup station, principal, fee and the station stock remaining after the
+order before signing, with Back writing nothing.
 Mature goods settle on arrival or station entry before mission completion checks.
 Legacy orders without pickup/principal metadata retain their original remote
 settlement/full-refund terms, explicitly labelled as legacy, until consumed.
