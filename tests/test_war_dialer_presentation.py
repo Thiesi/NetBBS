@@ -2049,3 +2049,65 @@ def test_real_process_scene_disconnect_preserves_only_selected_insignia(tmp_path
         assert actor.insignia == ('archive' if stage == 'committed' else 'modem')
         assert (actor.cash, actor.turns_used, actor.crew) == (300, 0, 3)
         conn.close()
+
+
+@pytest.mark.parametrize('population', [1, 3, 80])
+@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+def test_complete_visit_stays_productive_without_pvp_at_every_world_size(tmp_path, monkeypatch, population, width, height):
+    conn = wd.connect(tmp_path / 'world-size.db')
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    for uid in range(1, population + 1):
+        wd.load_or_create_player(conn, uid, 'Caller' + str(uid), now, 1)
+    actor = wd.read_player(conn, 1)
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
+    monkeypatch.setattr(wd, 'read_input_key', lambda: ' ')
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    # Newcomer rivals are protected; the visit must never require a raid.
+    monkeypatch.setattr(wd, 'read_menu_choice', lambda valid: 'B')
+    assert wd.choose_rival(wd.Palette(False), conn, actor, width, height) is None
+    if population == 1:
+        # At minimum width guidance can span pages; inspect its content directly.
+        lines = []
+        with monkeypatch.context() as scoped:
+            scoped.setattr(wd, 'show_text_pages', lambda p, title, content, *args, **kw: lines.extend(content))
+            assert wd.choose_rival(wd.Palette(False), conn, actor, width, height) is None
+        assert '[J]Jobs and [O]Operations need no rival' in ' '.join(lines)
+    class Success:
+        def random(self): return .01
+        def randint(self, low, high): return low
+    for step in range(3):
+        calls = 0
+        def select(valid):
+            nonlocal calls
+            calls += 1
+            assert calls < 100 and wd.read_player(conn, 1).turns_used == step
+            if 'A' in valid: return 'A'
+            return '1' if '1' in valid else 'N'
+        monkeypatch.setattr(wd, 'read_menu_choice', select)
+        assert wd.do_operations_hub(wd.Palette(False), conn, actor, Success(), width, height)
+    assert (actor.turns_used, actor.successful_operations, wd.rank_score(actor), actor.cash) == (3, 1, 30, 334)
+    for _ in range(12): wd.resolve_trade_warez(conn, actor, now, Success())
+    assert actor.turns_used == 15
+    before = list(conn.iterdump())
+    monkeypatch.setattr(wd, 'read_menu_choice', lambda valid: 'B')
+    wd.do_scene(wd.Palette(False), conn, actor, width, height)
+    wd.show_territory(wd.Palette(False), conn, width, height, viewer_id=1)
+    wd.show_player_directory(wd.Palette(False), conn, 1, width, height, standings=True)
+    assert list(conn.iterdump()) == before
+    standings = wd.read_player_page(conn, 1, now, offset=70, standings=True)
+    assert standings.total == population
+    assert all(p.handle.startswith('Caller') for p in standings.entries)
+    if population == 80: assert standings.entries[-1].user_id == 80
+    assert conn.execute('SELECT SUM(successful_raids) FROM players').fetchone()[0] == 0
+    assert conn.execute('SELECT COUNT(*) FROM players').fetchone()[0] == population
+    assert len(wd.read_scene(conn)) == 3 and all(r['kind'] == 'neutral' for r in wd.read_scene(conn))
+    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
+        lines = _ANSI_RE.sub('', screen).split('\r\n')
+        assert len(lines) <= height
+        assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
+    conn.close()

@@ -323,6 +323,15 @@ insignia and the scene ledger without recreating past activity. Verify insignia,
 NPC home status and public bulletins after upgrade/restore. Old binaries refuse
 schema 9; do not mix game versions. No additional service is required.
 
+On a quiet node, `[J]Job` and `[O]Operations` provide repeatable progression
+without a human raid target. NPC home contests remain available on the map;
+`[I]Scene` identifies neutral crews explicitly. Protected or absent human rivals
+do not block jobs, preparation or execution. After spending the visit's fifteen
+turns, Rank, Map, Scene, history and saved-operation inspection remain free.
+Larger worlds use the same paginated directories; NPCs never inflate human
+standings. Automated complete-visit checks cover 1, 3 and 80 callers at all three
+supported test sizes; human satisfaction and transport usability remain manual.
+
 Free screens: `[B]Rank` shows season standings and your position; ties use account
 ID order. `[E]Map` shows the fixed ring, exchange roles, owners, garrisons, security,
 actual capture prices, hourly income and owner services.
