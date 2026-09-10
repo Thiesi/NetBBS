@@ -684,11 +684,27 @@ async def _show_area(
         unicode_style, collapsed, truecolor, can_edit_any_file,
     ) = await lane.run(_load)
 
+    def _may_describe(entry: FileEntry) -> bool:
+        """Whether this caller's save would actually be accepted for
+        `entry` -- the same question `netbbs.files.entries.
+        set_file_description` answers, asked before an editor is
+        offered rather than after the caller has typed into one (Codex
+        review).
+
+        The moderated-area rule is the subtle half: an uploader owns
+        their own file's description until a moderator approves it, and
+        from then on only an EDIT holder may change what everyone is
+        already reading."""
+        if can_edit_any_file:
+            return True
+        if entry.uploader_user_id != user.id:
+            return False
+        return not (area.moderated and entry.status == "approved")
+
     def _can_describe(current_page: FileEntryPage) -> bool:
         """`[E]dit description` is only offered when this caller could
-        actually use it on something currently on screen -- a moderator
-        holding EDIT, or an uploader looking at their own upload."""
-        return can_edit_any_file or any(entry.uploader_user_id == user.id for entry in current_page.entries)
+        actually use it on something currently on screen."""
+        return any(_may_describe(entry) for entry in current_page.entries)
 
     show_remote_hint = link_context is not None and area_linked
 
@@ -1392,12 +1408,24 @@ async def _handle_describe(
         return page
 
     # A typed filename bypasses the on-screen gate above, so this is
-    # where a caller who named someone else's file is told so.
+    # where a caller who named a file they may not describe is told so.
     if not can_edit_any_file and entry.uploader_user_id != user.id:
         await session.write_line(
             colored(
                 f"\r\n{sanitize_text(entry.filename)!r} was uploaded by someone else — only its "
                 "uploader or a moderator of this area can describe it.",
+                fg_color=ERROR_COLOR,
+            )
+        )
+        return page
+    if not can_edit_any_file and area.moderated and entry.status == "approved":
+        # Refused before an editor opens, not after it is filled in
+        # (Codex review) -- the domain would reject this save, and the
+        # honest place to say so is here.
+        await session.write_line(
+            colored(
+                f"\r\n{sanitize_text(entry.filename)!r} has already been approved in a moderated "
+                "area — ask a moderator to change its description.",
                 fg_color=ERROR_COLOR,
             )
         )
@@ -1470,7 +1498,12 @@ async def _handle_describe(
             save_draft(path, text)
             try:
                 return path.read_text(encoding="utf-8") == text
-            except OSError:
+            except (OSError, UnicodeDecodeError):
+                # A short write can leave a truncated multi-byte
+                # sequence, and `UnicodeDecodeError` is a `ValueError`
+                # (Codex review) -- letting it escape would replace
+                # "your text was not kept" with a crash at exactly the
+                # moment the caller most needs to be told.
                 return False
 
         kept = await lane.run(_persist)

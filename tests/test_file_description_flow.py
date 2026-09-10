@@ -533,3 +533,42 @@ def test_a_file_predating_the_link_is_not_described_as_already_sent(db, lane, al
 
     assert get_file(db, entry.file_id).description == "a better description"
     assert "peers keep" not in session.visible_output
+
+
+def test_an_approved_file_in_a_moderated_area_offers_its_uploader_no_editor(db, lane, alice, bob):
+    """Codex review: the domain refuses this save, so advertising `[E]`
+    and opening an editor would take the caller's text only to throw it
+    back at them."""
+    area = create_file_area(db, "downloads", creator=bob, moderated=True)
+    grant_permissions(
+        db, bob, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.APPROVE, granted_by=bob,
+    )
+    entry = upload_file(db, area, alice, "game.zip", b"payload", description="honest")
+    from netbbs.files.entries import approve_file
+
+    approve_file(db, entry, approved_by=bob)
+
+    session = FakeSession(editor_keys=[_key("e")], lines=["spam", ""])
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert "dit description" not in session.visible_output
+    assert get_file(db, entry.file_id).description == "honest"
+
+
+def test_naming_an_approved_file_in_a_moderated_area_says_why_not(db, lane, alice, bob):
+    area = create_file_area(db, "downloads", creator=bob, moderated=True)
+    grant_permissions(
+        db, bob, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.APPROVE, granted_by=bob,
+    )
+    entry = upload_file(db, area, alice, "game.zip", b"payload", description="honest")
+    from netbbs.files.entries import approve_file
+
+    approve_file(db, entry, approved_by=bob)
+
+    session = FakeLineSession(lines=["/describe game.zip", "b"])
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert "already been approved in a moderated area" in session.visible_output
+    assert get_file(db, entry.file_id).description == "honest"
