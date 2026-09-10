@@ -329,7 +329,14 @@ def _load_blocklist(db: Database) -> tuple[str, ...]:
         return ()
     if not isinstance(entries, list):
         return ()
-    return tuple(entry for entry in entries if isinstance(entry, str) and entry)
+    # An entry the wire could never name (stored before the 20-character
+    # limit, issue #376) can block no room and would only make every later
+    # save fail validation; it is dropped on load, so the next save writes
+    # the list without it.
+    return tuple(
+        entry for entry in entries
+        if isinstance(entry, str) and entry and room_name_error(entry) is None
+    )
 
 
 def validate_open_room_settings(settings: OpenRoomSettings) -> OpenRoomSettings:

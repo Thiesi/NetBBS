@@ -383,3 +383,20 @@ def test_blocklist_entries_are_refused_past_the_wire_limit(db):
     validate_open_room_settings(OpenRoomSettings(blocklist=["#" + "a" * 20]))
     with pytest.raises(MrcSettingsError, match="at most 20 characters"):
         validate_open_room_settings(OpenRoomSettings(blocklist=["a" * 21]))
+
+
+def test_a_legacy_overlength_blocklist_entry_is_dropped_on_load(db):
+    """A blocklist stored before the 20-character limit may hold an entry
+    the wire could never name; loading drops it so the SysOp can still
+    save the screen, and the next save writes the list without it."""
+    import json
+
+    from netbbs.mrc.settings import OPEN_ROOMS_BLOCKLIST_KEY, OpenRoomSettings, load_open_room_settings, save_open_room_settings
+    from netbbs.config import get_config, set_config
+
+    set_config(db, OPEN_ROOMS_BLOCKLIST_KEY, json.dumps(["spam", "x" * 25, "#" + "y" * 20]))
+    loaded = load_open_room_settings(db)
+    assert loaded.blocklist == ("spam", "#" + "y" * 20)  # loaded as stored; save normalises
+    saved = save_open_room_settings(db, OpenRoomSettings(enabled=loaded.enabled, blocklist=loaded.blocklist, cap=16))
+    assert saved.cap == 16
+    assert "x" * 25 not in get_config(db, OPEN_ROOMS_BLOCKLIST_KEY)
