@@ -4654,6 +4654,11 @@ before that timeout, then retain their payload across subsequent delays.
 OSC accepts BEL or ST; other control strings require ST, and bracketed paste
 recognizes both CSI encodings of its terminator.
 
+`salvage_fee` must exceed a full repair from zero for every hull class and tier
+(`hull_hp_max * 4` plus a base); `destroy_ship` takes `patrol=` from the combat
+session and only that path clears notoriety. Any new destruction path must pass
+the flag explicitly rather than clearing notoriety itself.
+
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen
 reserves its own hotkeys in its letter map (`MARKET_LETTERS`, `YARD_LETTERS`,
