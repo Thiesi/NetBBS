@@ -1486,7 +1486,7 @@ def test_refresh_rolls_dormant_players_and_exchanges_together(db_path):
     assert dormant.last_raided_by is None
     assert (dormant.user_id, dormant.handle, dormant.created_at) == (b.user_id, b.handle, b.created_at)
     assert not wd.is_in_grace(dormant, later)
-    assert all(e.season_number == 2 and e.controller_user_id is None and e.garrison == 0 for e in wd.list_exchanges(conn))
+    assert all(e.season_number == 2 and e.controller_user_id is None and (e.garrison == 0 or e.npc_key) for e in wd.list_exchanges(conn))
     conn.close()
 
 
@@ -2316,6 +2316,9 @@ def test_specialty_switch_replaces_training_and_purchase_failure_rolls_back(db_p
 
 
 def _downgrade_operations_fixture(conn):
+    conn.execute("UPDATE exchanges SET garrison=0, controlled_since=NULL WHERE controller_user_id IS NULL")
+    conn.execute("ALTER TABLE exchanges DROP COLUMN npc_key")
+    conn.execute("ALTER TABLE exchanges DROP COLUMN npc_return_at")
     conn.execute("ALTER TABLE exchanges DROP COLUMN role")
     for column in wd._OPERATION_COLUMNS:
         conn.execute(f'ALTER TABLE players DROP COLUMN {column}')
@@ -2585,13 +2588,16 @@ def test_service_rejection_and_rollback_spend_nothing(db_path, problem):
     conn.close()
 
 
-def test_exchange_role_upgrade_preserves_world_and_rolls_back_version_failure(db_path):
+def test_exchange_role_upgrade_preserves_world_and_rolls_back_version_failure(db_path, monkeypatch):
     conn, now, actor, _ = _rivals(db_path)
     _give_exchange(conn, 2, now)
+    conn.execute('ALTER TABLE exchanges DROP COLUMN npc_key')
+    conn.execute('ALTER TABLE exchanges DROP COLUMN npc_return_at')
     conn.execute('ALTER TABLE exchanges DROP COLUMN role')
     conn.execute('PRAGMA user_version=6')
     before = list(conn.iterdump())
     original = [tuple(row) for row in conn.execute('SELECT * FROM exchanges')]
+    monkeypatch.setattr(wd, 'now_utc', lambda: now)
     def deny_version(action, name, value, *args):
         return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == 'user_version' and value == '7' else sqlite3.SQLITE_OK
     conn.set_authorizer(deny_version)
@@ -2599,7 +2605,7 @@ def test_exchange_role_upgrade_preserves_world_and_rolls_back_version_failure(db
     conn.set_authorizer(None)
     assert list(conn.iterdump()) == before
     wd.ensure_schema(conn)
-    assert [tuple(row)[:-1] for row in conn.execute('SELECT * FROM exchanges')] == original
+    assert [tuple(row)[:-3] for row in conn.execute('SELECT * FROM exchanges')] == original
     assert wd.read_player(conn, 1) == actor
     roles = [e.role for e in wd.list_exchanges(conn)]
     assert roles.count('pbx') == 2 and roles.count('carrier') == 6 and roles.count('hub') == 2
@@ -2612,6 +2618,8 @@ def test_exchange_role_upgrade_preserves_world_and_rolls_back_version_failure(db
 @pytest.mark.parametrize('count', [9, 20])
 def test_exchange_role_upgrade_rejects_unexpected_map_without_mutation(db_path, count):
     conn, now, actor, _ = _rivals(db_path)
+    conn.execute('ALTER TABLE exchanges DROP COLUMN npc_key')
+    conn.execute('ALTER TABLE exchanges DROP COLUMN npc_return_at')
     conn.execute('ALTER TABLE exchanges DROP COLUMN role')
     conn.execute('PRAGMA user_version=6')
     if count == 9: conn.execute('DELETE FROM exchanges WHERE id=10')
@@ -2620,4 +2628,113 @@ def test_exchange_role_upgrade_rejects_unexpected_map_without_mutation(db_path, 
     before = list(conn.iterdump())
     with pytest.raises(wd.WorldStateError, match='exchange count'): wd.ensure_schema(conn)
     assert list(conn.iterdump()) == before
+    conn.close()
+
+
+
+def test_neutral_homes_are_labeled_defended_and_never_human_accounts(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    homes = [e for e in wd.list_exchanges(conn) if e.npc_key]
+    assert [(e.id, e.npc_key, e.garrison, wd.exchange_defense(e)) for e in homes] == [(5, 'patch', 2, 2), (6, 'relay', 4, 6), (7, 'spool', 6, 6)]
+    assert all(wd.exchange_owner(e).startswith('NPC: ') and e.controller_user_id is None for e in homes)
+    assert conn.execute('SELECT COUNT(*) FROM players').fetchone()[0] == 2
+    before = [tuple(r) for r in conn.execute('SELECT * FROM players ORDER BY user_id')]
+    wd.settle_world(conn, now + timedelta(days=2))
+    assert [tuple(r) for r in conn.execute('SELECT * FROM players ORDER BY user_id')] == before
+    assert [e.garrison for e in wd.list_exchanges(conn) if e.npc_key] == [2, 4, 6]
+    assert wd.assigned_crew(conn, 1) == 0
+    conn.close()
+
+
+def test_neutral_capture_uses_real_defense_and_never_returns_npc_crew_to_player(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    target = wd.list_exchanges(conn, 1)[4]
+    text = '\n'.join(wd.action_preview_lines('root', actor, target))
+    assert 'NPC: Patch Panel Society' in text and 'Success: 60%' in text
+    assert not wd.resolve_root_exchange(conn, actor, target.id, now, FixedRandom(.99))[0]
+    assert (actor.crew, actor.cash, actor.turns_used) == (2, 975, 1)
+    assert wd.list_exchanges(conn)[4].npc_key == 'patch'
+    assert wd.resolve_root_exchange(conn, actor, target.id, now, FixedRandom())[0]
+    assert (actor.crew, actor.cash, actor.turns_used, wd.assigned_crew(conn, 1)) == (1, 950, 2, 1)
+    assert wd.rank_score(actor) == 50
+    assert wd.list_exchanges(conn)[4].npc_key == ''
+    assert conn.execute('SELECT COUNT(*) FROM players').fetchone()[0] == 2
+    conn.close()
+
+
+def test_neutral_return_deadline_survives_restart_and_rejects_stale_unclaimed_preview(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 5, now, FixedRandom())
+    wd.resolve_garrison(conn, actor, 5, -1, now)
+    target = wd.list_exchanges(conn, 1)[4]
+    assert not wd.exchange_occupied(target) and wd.from_iso(target.npc_return_at) == now + wd.DAY
+    conn.close()
+    conn = wd.connect(db_path)
+    wd.settle_world(conn, now + wd.DAY - timedelta(microseconds=1))
+    assert not wd.exchange_occupied(wd.list_exchanges(conn)[4])
+    before = list(conn.iterdump())
+    with pytest.raises(wd.ActionRejected, match='Exchange changed'):
+        wd.resolve_root_exchange(conn, actor, 5, now + wd.DAY, FixedRandom(), expected_exchange=target)
+    assert list(conn.iterdump()) == before
+    wd.settle_world(conn, now + wd.DAY)
+    assert wd.list_exchanges(conn)[4].npc_key == 'patch'
+    before = list(conn.iterdump())
+    wd.settle_world(conn, now + wd.DAY)
+    assert list(conn.iterdump()) == before
+    wd.resolve_root_exchange(conn, actor, 5, now + wd.DAY, FixedRandom())
+    assert wd.rank_score(actor) == 50  # second capture gives no new award
+    conn.close()
+
+
+def test_neutrals_never_take_human_homes_and_reset_repopulates_only_home_sites(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 5, now, FixedRandom())
+    wd.settle_world(conn, now + timedelta(days=20))
+    target = wd.list_exchanges(conn)[4]
+    assert target.controller_user_id == 1 and target.npc_key == ''
+    assert not any(e.npc_key for e in wd.list_exchanges(conn) if e.id not in (6, 7))
+    wd.settle_world(conn, now + wd.SEASON)
+    assert [(e.id, e.npc_key) for e in wd.list_exchanges(conn) if e.npc_key] == [(5, 'patch'), (6, 'relay'), (7, 'spool')]
+    assert wd.read_player(conn, 1).created_at == actor.created_at
+    conn.close()
+
+
+def test_neutral_upgrade_preserves_human_ownership_and_rolls_back_marker_failure(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 5, now, FixedRandom())
+    conn.execute("UPDATE exchanges SET garrison=0, controlled_since=NULL WHERE npc_key != ''")
+    conn.execute('ALTER TABLE exchanges DROP COLUMN npc_key')
+    conn.execute('ALTER TABLE exchanges DROP COLUMN npc_return_at')
+    conn.execute('PRAGMA user_version=7')
+    before = list(conn.iterdump())
+    def deny_version(action, name, value, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == 'user_version' and value == '8' else sqlite3.SQLITE_OK
+    conn.set_authorizer(deny_version)
+    with pytest.raises(sqlite3.DatabaseError): wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert list(conn.iterdump()) == before
+    wd.ensure_schema(conn)
+    assert wd.read_player(conn, 1) == actor
+    assert wd.list_exchanges(conn)[4].controller_user_id == 1
+    assert [e.id for e in wd.list_exchanges(conn) if e.npc_key] == [6, 7]
+    before = list(conn.iterdump())
+    wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def test_racing_neutral_returns_do_not_duplicate_defenders(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_root_exchange(conn, actor, 5, now, FixedRandom())
+    wd.resolve_garrison(conn, actor, 5, -1, now)
+    barrier = threading.Barrier(2)
+    def settle(_):
+        connection = wd.connect(db_path)
+        try:
+            barrier.wait(timeout=5)
+            wd.settle_world(connection, now + wd.DAY)
+        finally: connection.close()
+    with ThreadPoolExecutor(2) as pool: list(pool.map(settle, range(2)))
+    assert wd.list_exchanges(conn)[4].garrison == 2
+    assert wd.read_player(conn, 1).crew == 3
     conn.close()

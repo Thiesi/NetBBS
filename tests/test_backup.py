@@ -1550,6 +1550,7 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
     path = _populate_war_dialer(db_path)
     held = wd.connect(path)
     held.execute("PRAGMA wal_autocheckpoint=0")
+    held.execute("UPDATE exchanges SET npc_key='', npc_return_at='2026-09-11T08:00:00+00:00', garrison=0 WHERE id=5")
     held.execute("UPDATE players SET cash=98765, specialty='fixers', support='stash', operation_contract=4, operation_approach=2, operation_stage=2, successful_operations=3")
     held.execute("INSERT INTO recon VALUES (1,2,'Historical Rival',1234,7,'2026-09-10T00:00:00+00:00','2026-09-11T00:00:00+00:00',1)")
     try:
@@ -1571,8 +1572,10 @@ def test_war_dialer_backup_round_trip_includes_committed_wal(tmp_path, db_path, 
         assert conn.execute("SELECT income_remainder FROM players").fetchone()[0] == 9876
         assert conn.execute("SELECT specialty,support FROM players").fetchone() == ("fixers", "stash")
         assert conn.execute("SELECT role FROM exchanges ORDER BY id LIMIT 1").fetchone() == ("carrier",)
+        assert conn.execute("SELECT npc_key,garrison FROM exchanges WHERE id=6").fetchone() == ("relay", 4)
         assert conn.execute("SELECT operation_contract,operation_approach,operation_stage,successful_operations FROM players").fetchone() == (4, 2, 2, 3)
         assert conn.execute("SELECT cash,crew FROM recon WHERE viewer=1 AND target=2").fetchone() == (1234, 7)
+        assert conn.execute("SELECT npc_key,npc_return_at FROM exchanges WHERE id=5").fetchone() == ("", "2026-09-11T08:00:00+00:00")
         assert conn.execute("SELECT summary_text FROM events").fetchone()[0] == "A retained receipt"
     backup_module._validate_backup_source(source, allow_migrate=False)
 
@@ -1727,6 +1730,7 @@ def test_war_dialer_sysop_competition_change_has_backup_and_preserves_identity(t
         assert conn.execute("SELECT specialty,support FROM players").fetchone() == ("", "")
         assert conn.execute("SELECT operation_stage,successful_operations FROM players").fetchone() == (0, 0)
         assert conn.execute("SELECT role FROM exchanges ORDER BY id LIMIT 1").fetchone() == ("carrier",)
+        assert conn.execute("SELECT npc_key,garrison FROM exchanges WHERE id=6").fetchone() == ("relay", 4)
         assert conn.execute("SELECT COUNT(*) FROM recon").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM exchanges WHERE controller_user_id IS NOT NULL").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == (0 if reset else 1)

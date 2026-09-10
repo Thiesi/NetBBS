@@ -631,6 +631,14 @@ EXCHANGE_ROLES = {
     "hub": ("Warez Hub", 75, 12, 0, "Warez outlet: 1 turn, $30-$70 payout, +4 Heat"),
 }
 
+# Zero-based home position: stable key, display name, stationed NPC defenders.
+NEUTRAL_OPERATORS = {
+    4: ("patch", "Patch Panel Society", 2),
+    5: ("relay", "Night Relay Union", 4),
+    6: ("spool", "Spool Archive Collective", 6),
+}
+NPC_NAMES = {key: name for key, name, _ in NEUTRAL_OPERATORS.values()}
+
 # (name, income per real hour controlled)
 EXCHANGE_SEEDS: tuple[tuple[str, int], ...] = (
     ("212-555 Uptown Exchange", 2),
@@ -720,6 +728,9 @@ class Exchange:
     role: str = ""
     linked_ids: tuple[int, ...] = ()
     capture_discount: int = 0
+    npc_key: str = ""
+    npc_return_at: str = ""
+    npc_home: str = ""
 
 
 @dataclass
@@ -955,8 +966,16 @@ def exchange_terms(exchange: Exchange) -> tuple[str, int, int, int, str]:
     return EXCHANGE_ROLES.get(exchange.role, ("Exchange", ROOT_EXCHANGE_COST, ROOT_EXCHANGE_HEAT, 0, "No service"))
 
 
+def exchange_occupied(exchange: Exchange) -> bool:
+    return exchange.controller_user_id is not None or bool(exchange.npc_key)
+
+
+def exchange_owner(exchange: Exchange) -> str:
+    return exchange.controller_handle or ("NPC: " + NPC_NAMES[exchange.npc_key] if exchange.npc_key else "unclaimed")
+
+
 def exchange_defense(exchange: Exchange) -> int:
-    return exchange.garrison + (exchange_terms(exchange)[3] if exchange.controller_user_id is not None else 0)
+    return exchange.garrison + (exchange_terms(exchange)[3] if exchange_occupied(exchange) else 0)
 
 
 def capture_cost(exchange: Exchange) -> int:
@@ -970,7 +989,7 @@ def action_root_exchange(attacker: Player, exchange: Exchange, now: datetime, rn
     if attacker.cash < cost:
         raise ActionRejected(f"Need ${cost} for this capture attempt. Trade to fund it; nothing spent.")
     attacker.cash -= cost
-    if exchange.controller_user_id is None:
+    if not exchange_occupied(exchange):
         success = True
     else:
         success = rng.random() < success_chance(attacker.crew, exchange_defense(exchange))
@@ -978,6 +997,7 @@ def action_root_exchange(attacker: Player, exchange: Exchange, now: datetime, rn
         award = capture_rank_award(attacker, exchange)
         exchange.controller_user_id = attacker.user_id
         exchange.controller_handle = attacker.handle
+        exchange.npc_key = exchange.npc_return_at = ""
         exchange.garrison = 1
         attacker.crew -= 1
         exchange.controlled_since = to_iso(now)
@@ -1007,7 +1027,7 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
-WORLD_SCHEMA_VERSION = 7
+WORLD_SCHEMA_VERSION = 8
 _OPERATION_COLUMNS = {"operation_contract", "operation_approach", "operation_stage", "successful_operations"}
 
 # Versioned schema contract: future additions need a new numbered migration.
@@ -1051,6 +1071,8 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
             expected = expected | _OPERATION_COLUMNS
         if version >= 7 and table == "exchanges":
             expected = expected | {"role"}
+        if version >= 8 and table == "exchanges":
+            expected = expected | {"npc_key", "npc_return_at"}
         if not expected <= columns:
             raise WorldStateError(f"War Dialer {table} schema is incomplete. Preserve it for SysOp recovery; no replacement was created.")
 
@@ -1118,6 +1140,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     fresh.execute("PRAGMA user_version=6")
                     _migrate_world_v7(fresh)
                     fresh.execute("PRAGMA user_version=7")
+                    _migrate_world_v8(fresh)
+                    fresh.execute("PRAGMA user_version=8")
             finally:
                 fresh.close()
             try:
@@ -1179,6 +1203,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if version < 7:
             _migrate_world_v7(conn)
             conn.execute("PRAGMA user_version=7")
+        if version < 8:
+            _migrate_world_v8(conn)
+            conn.execute("PRAGMA user_version=8")
         _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
 
 
@@ -1320,6 +1347,28 @@ def _migrate_world_v3(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE exchanges SET income_per_hour=? WHERE id=?", (rate, row[0]))
 
 
+def _migrate_world_v8(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE exchanges ADD COLUMN npc_key TEXT NOT NULL DEFAULT '' CHECK (npc_key IN ('', 'patch', 'relay', 'spool'))")
+    conn.execute("ALTER TABLE exchanges ADD COLUMN npc_return_at TEXT NOT NULL DEFAULT ''")
+    _settle_neutral_operators(conn, now_utc())
+
+
+def _settle_neutral_operators(conn: sqlite3.Connection, now: datetime) -> None:
+    """At most three deterministic returns; no human account, income or attacks."""
+    rows = conn.execute("SELECT id,controller_user_id,npc_key,npc_return_at FROM exchanges ORDER BY id").fetchall()
+    for position, (key, _, defenders) in NEUTRAL_OPERATORS.items():
+        if position >= len(rows):
+            continue
+        exchange = rows[position]
+        if exchange["controller_user_id"] is not None or exchange["npc_key"]:
+            continue
+        deadline = exchange["npc_return_at"]
+        if deadline and from_iso(deadline) > now:
+            continue
+        conn.execute("UPDATE exchanges SET npc_key=?, npc_return_at='', garrison=?, controlled_since=?, income_collected_at=? WHERE id=?",
+                     (key, defenders, to_iso(now), to_iso(now), exchange["id"]))
+
+
 def _migrate_world_v7(conn: sqlite3.Connection) -> None:
     ids = [row[0] for row in conn.execute("SELECT id FROM exchanges ORDER BY id")]
     if ids and len(ids) != len(EXCHANGE_SEEDS):
@@ -1426,6 +1475,8 @@ def ensure_exchanges_seeded(conn: sqlite3.Connection, season_number: int, now: d
             )
             if _world_schema_version(conn) >= 7:
                 conn.execute("UPDATE exchanges SET role=? WHERE id=last_insert_rowid()", ({1: "pbx", 2: "carrier", 3: "hub"}[income],))
+        if _world_schema_version(conn) >= 8:
+            _settle_neutral_operators(conn, now)
 
 
 def _settle_world(conn: sqlite3.Connection, now: datetime) -> int:
@@ -1443,8 +1494,12 @@ def _settle_world(conn: sqlite3.Connection, now: datetime) -> int:
         latest_player = conn.execute("SELECT MAX(season_number) FROM players").fetchone()[0]
         season = max(season, latest_player or 1)
     elif int(marker["value"]) == season:
+        if _world_schema_version(conn) >= 8:
+            _settle_neutral_operators(conn, now)
         return season
 
+    if _world_schema_version(conn) >= 8:
+        conn.execute("UPDATE exchanges SET npc_key='', npc_return_at='' WHERE season_number < ?", (season,))
     rows = conn.execute("SELECT * FROM players WHERE season_number < ? ORDER BY user_id", (season,))
     for row in rows:
         player = _row_to_player(row)
@@ -1468,6 +1523,8 @@ def _settle_world(conn: sqlite3.Connection, now: datetime) -> int:
     conn.execute("DELETE FROM meta WHERE key LIKE 'exchange_withdrawal:%'")
     if _world_schema_version(conn) >= 6:
         conn.execute("DELETE FROM recon WHERE season < ?", (season,))
+    if _world_schema_version(conn) >= 8:
+        _settle_neutral_operators(conn, now)
     return season
 
 
@@ -1846,10 +1903,13 @@ def list_exchanges(conn: sqlite3.Connection, viewer_id: int | None = None) -> li
             income_collected_at=r["income_collected_at"], season_number=r["season_number"],
             withdrawn_by=int(r["withdrawn_by"]) if r["withdrawn_by"] is not None else None,
             role=r["role"] if "role" in r.keys() else "",
+            npc_key=r["npc_key"] if "npc_key" in r.keys() else "",
+            npc_return_at=r["npc_return_at"] if "npc_return_at" in r.keys() else "",
         )
         for r in rows
     ]
     for index, exchange in enumerate(exchanges):
+        exchange.npc_home = NEUTRAL_OPERATORS[index][0] if index in NEUTRAL_OPERATORS else ""
         neighbors = (exchanges[(index - 1) % len(exchanges)], exchanges[(index + 1) % len(exchanges)])
         exchange.linked_ids = tuple(neighbor.id for neighbor in neighbors)
         if viewer_id is not None and any(neighbor.controller_user_id == viewer_id for neighbor in neighbors):
@@ -2016,7 +2076,7 @@ def exchange_selection_state(exchange: Exchange) -> tuple:
         exchange.id, exchange.name, exchange.income_per_hour,
         exchange.controller_user_id, exchange.controller_handle, exchange.garrison,
         exchange.controlled_since, exchange.season_number,
-        exchange.withdrawn_by, exchange.role,
+        exchange.withdrawn_by, exchange.role, exchange.npc_key, exchange.npc_return_at,
     )
 
 
@@ -2052,6 +2112,7 @@ def resolve_root_exchange(
             _save_player(conn, prior)
         if success:
             conn.execute("DELETE FROM meta WHERE key=?", (f"exchange_withdrawal:{exchange.id}",))
+            conn.execute("UPDATE exchanges SET npc_key='', npc_return_at='' WHERE id=?", (exchange.id,))
         conn.execute(
             "UPDATE exchanges SET controller_user_id=?, garrison=?, controlled_since=?, income_collected_at=? WHERE id=?",
             (exchange.controller_user_id, exchange.garrison, exchange.controlled_since, exchange.income_collected_at, exchange.id),
@@ -2124,6 +2185,9 @@ def resolve_garrison(conn: sqlite3.Connection, player: Player, exchange_id: int,
             _mark_withdrawal(conn, exchange.id, actor.user_id)
             conn.execute("UPDATE exchanges SET controller_user_id=NULL, garrison=0, controlled_since=NULL WHERE id=?",
                          (exchange.id,))
+            if exchange.npc_home:
+                conn.execute("UPDATE exchanges SET npc_key='', npc_return_at=? WHERE id=?",
+                             (to_iso(now + DAY), exchange.id))
         verb = f"Reinforced {exchange.name} with {change}" if change > 0 else f"Withdrew {-change} from {exchange.name}"
         record_event(conn, actor.user_id, actor.handle,
                      verb + (f"; garrison now {remaining}." if remaining else "; exchange abandoned and income stopped. Reclaiming it earns no capture Rank."), now, seen=True)
@@ -2410,6 +2474,7 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         "Rival Rank, shield reasons and expiry times are public. Available crew and cash stay private; raid odds and payout remain explicitly uncertain. Exchange garrisons are public and territory stays ungated.",
         "Capture commits one available member to its garrison. Assigned crew defend only that exchange; jobs, raids and attacks use available crew.",
         "[E]Map shows the fixed ring, roles, crew/security defense, capture prices and owner services. [G]arrison opens Lay Low at a PBX, discounted recruits at a Carrier Switch, or the Warez outlet at a Hub. Services cost one turn and require ownership at Act.",
+        "NPC crews are labeled on [E]Map: three fixed home exchanges, 2/4/6 defenders. They never attack callers or take human holdings and earn no income or Rank. An abandoned home returns to its NPC after 24 hours. Jobs and operations remain available with no human rivals.",
         "[G]arrison: reinforce or withdraw crew for one turn, with no Heat or Rank reward. One crew member must stay available. Withdrawing the last defender abandons the exchange and stops income.",
         f"Capture costs $25/$50/$75 by exchange role, less $10 with an owned linked neighbor, win or lose. Each exchange earns +{CAPTURE_RANK} capture Rank only on your first success this season; recaptures earn none.",
         f"Hold territory for +1 Rank per {CONTROL_RANK_HOURS} exchange-hours. Partial time combines across holdings and survives transfers. Income is $1-$3/hour per exchange; all ten earn $480/day.",
@@ -2462,12 +2527,16 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
              "Ring links: " + " -- ".join(f"#{e.id}" for e in ring),
              "Owning either linked neighbor discounts a capture attempt by $10. All sites remain attackable. [G]arrison opens owner services."]
     for exchange in exchanges:
-        owner = exchange.controller_handle or "unclaimed"
+        owner = exchange_owner(exchange)
         lines += [f"#{exchange.id} {exchange.name} - {exchange_terms(exchange)[0]}",
                   f"Owner: {owner}; garrison {exchange.garrison}; security +{exchange_defense(exchange)-exchange.garrison}; total defense {exchange_defense(exchange)}; ${exchange.income_per_hour}/hour",
                   "Links: " + ", ".join(f"#{link}" for link in exchange.linked_ids),
                   f"Capture ${capture_cost(exchange)} (discount ${exchange.capture_discount}); base Heat +{exchange_terms(exchange)[2]}.",
                   "Owner service: " + exchange_terms(exchange)[4]]
+        if exchange.npc_home:
+            lines.append("NPC home: " + NPC_NAMES[exchange.npc_home] + "; no human account, income or Rank. Never attacks callers.")
+            if exchange.npc_return_at and exchange.controller_user_id is None:
+                lines.append("NPC returns at " + from_iso(exchange.npc_return_at).strftime("%Y-%m-%d %H:%M UTC") + " if still unclaimed.")
     show_text_pages(p, "EXCHANGE TERRITORY", lines, width, height)
 
 
@@ -2547,8 +2616,8 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
                   f"{RAID_FAIL_CASH_LOSS_FRACTION:.0%} cash before any bust.",
                   "Win or lose, the target gets a 24-hour shield against every attacker. Login and reading receipts do not clear it."]
     elif action == "root":
-        chance = 1.0 if target.controller_user_id is None else success_chance(player.crew, exchange_defense(target))
-        lines += [f"Exchange: {target.name} - {exchange_terms(target)[0]}",
+        chance = 1.0 if not exchange_occupied(target) else success_chance(player.crew, exchange_defense(target))
+        lines += [f"Exchange: {target.name} - {exchange_terms(target)[0]}", f"Owner: {exchange_owner(target)}",
                   f"Base capture price ${exchange_terms(target)[1]}; linked-neighbor discount ${target.capture_discount}.",
                   f"Success: {chance:.0%}; garrison {target.garrison}, total defense {exchange_defense(target)}.",
                   f"Owner service: {exchange_terms(target)[4]}. Use [G]arrison after capture.",
@@ -2883,7 +2952,7 @@ def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: 
         show_text_pages(p, "ROOT UNAVAILABLE", [reason], w, height)
         return False
     exchanges = list_exchanges(conn, player.user_id)
-    records = [([e.name, f"Owner: {e.controller_handle or 'unclaimed'}; garrison {e.garrison}; defense {exchange_defense(e)}; ${e.income_per_hour}/hour",
+    records = [([e.name, f"Owner: {exchange_owner(e)}; garrison {e.garrison}; defense {exchange_defense(e)}; ${e.income_per_hour}/hour",
                  f"{exchange_terms(e)[0]}; capture ${capture_cost(e)}; base Heat +{exchange_terms(e)[2]}; links {e.linked_ids}.",
                  "Already yours" if e.controller_user_id == player.user_id else "Available to contest"],
                 e.controller_user_id != player.user_id) for e in exchanges]
@@ -2912,12 +2981,15 @@ def garrison_options(player: Player, exchange: Exchange) -> list[int]:
 
 def garrison_preview_lines(player: Player, exchange: Exchange, change: int) -> list[str]:
     remaining = exchange.garrison + change
-    return [exchange.name, f"Cost: 1 turn, $0. No Heat or Rank reward. Back spends nothing.",
+    lines = [exchange.name, f"Cost: 1 turn, $0. No Heat or Rank reward. Back spends nothing.",
             f"Available crew: {player.crew} -> {player.crew - change}",
             f"Assigned here: {exchange.garrison} -> {remaining}",
             "Only available crew take jobs, raid or attack. Assigned crew defend this exchange alone.",
             (f"Income remains ${exchange.income_per_hour}/hour; one available member is reserved."
              if remaining else "Last defenders withdrawn: exchange becomes unclaimed; earned income is paid and future income stops. Reclaiming it earns no capture Rank.")]
+    if not remaining and exchange.npc_home:
+        lines.append("This NPC home returns to " + NPC_NAMES[exchange.npc_home] + " after 24 hours if still unclaimed.")
+    return lines
 
 
 def do_garrison(p: Palette, conn: sqlite3.Connection, player: Player, width: int, height: int,

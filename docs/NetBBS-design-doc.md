@@ -6788,6 +6788,39 @@ other than ten sites without mutation. Roles and ring identity survive season
 reset; ownership and competitive resources reset as before. The version marker
 and role assignment commit together; shipped migrations remain unchanged.
 
+**Neutral operators (issue #362, slice 7; maintainer approved).** Three fixed,
+explicitly labeled NPC crews defend home sites at season start: Patch Panel
+Society at #5 Public PBX (2 defenders), Night Relay Union at #6 Carrier Switch
+(4 defenders plus its ordinary 2 security), and Spool Archive Collective at #7
+Warez Hub (6 defenders). Home positions follow original stable map order. NPCs
+use exchange state, never synthetic player accounts: they have no cash, income,
+Rank, human standings entry, raid eligibility or available crew pool. They never
+attack callers and never take a human-owned exchange.
+
+Capturing an NPC home uses the ordinary role price, neighbor discount, Heat,
+crew losses and once-per-player/exchange/season Rank award. Defense is public and
+previews show exact odds, including the ordinary 10% floor. Displaced NPC guards
+leave the scene; they cannot become human recruits. A captured home is an ordinary
+human holding with its income and service. Withdrawing its final defender leaves
+it unclaimed for 24 hours; the map shows the return deadline. If still unclaimed,
+its fixed NPC crew returns with its original defenders. A human capture cancels
+the pending return. Homes start defended again at season reset. Non-home sites
+never receive neutral crews.
+
+At each normal world boundary, at most three home rows are checked under the
+existing write transaction. Returns require no background task, random draw or
+per-missed-day replay, and cannot reroll a defense through browsing/reconnect.
+A return between preview and Act rejects stale capture terms without spending.
+Fixed repeatable jobs and operations remain available with no humans to raid or
+unclaimed sites to take. These rules provide bounded PvE contention without
+inventing human activity; they do not establish whole-season balance.
+
+Schema 8 adds neutral occupancy and a return deadline. Upgrade places NPCs only
+in their unclaimed homes, preserving every human holding, identity and resource.
+Fresh worlds and rollover populate the same three homes. Deadline, occupancy,
+defenders and version marker commit atomically; backups preserve them and SysOp
+competition reset uses the same season boundary. Older migrations stay immutable.
+
 **Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
 living crew is the available crew plus the members assigned across their owned
 exchanges. Capture requires at least two available members and commits one to the

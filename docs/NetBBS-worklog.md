@@ -453,6 +453,16 @@ and fresh ownership check. Schema 7 preserves the ten exchange IDs/order and the
 stored rates; roles survive competition reset. Do not edit older migrations or
 require role columns in helpers used before version 7 exists.
 
+Neutral occupancy is separate from `controller_user_id`; a null human owner is
+not sufficient to infer guaranteed capture. Use `exchange_occupied` for contest
+odds and `exchange_owner` for presentation. NPC garrisons never feed player income,
+Rank, standings or released-defender credit. Capture clears neutral occupancy and
+its return deadline atomically; last-defender withdrawal starts the 24-hour return.
+World settlement checks only the three fixed homes and never overwrites human
+ownership. Schema 8 helpers must not run before its columns exist; legacy upgrade
+fixtures must remove those columns when reconstructing older layouts. Exercise
+restart, simultaneous returns and a return between preview and Act with real SQLite.
+
 `python scripts/war_dialer_balance.py` runs bounded deterministic policy probes
 against disposable SQLite worlds through the actual action resolvers. The default
 is fourteen days and seeds 362/363/364; use `--scenario NAME`, `--days 1..21`, and
