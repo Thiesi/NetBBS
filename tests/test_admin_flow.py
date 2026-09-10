@@ -208,6 +208,34 @@ def test_sysop_lands_on_an_operations_overview(db, lane, sysop):
     assert "QUICK" in text
 
 
+def test_sysop_status_panels_format_backup_time_to_configured_seconds(db, lane, sysop):
+    from netbbs.backup import create_backup
+    from netbbs.timeutil import set_display_format
+
+    set_display_format(db, "%Y/%m/%d %H:%M:%S")
+    identity_dir = db.path.parent / "netbbs_identity"
+    create_backup(
+        db_path=db.path,
+        identity_dir=identity_dir,
+        destination=db.path.parent / "backup1",
+    )
+
+    session = FakeSession(["o", "b", "b"])
+    _run(session, lane, sysop)
+    backup_lines = [
+        line
+        for line in _visible(_written_text(session)).split("\r\n")
+        if "Backup:" in line
+    ]
+
+    assert len(backup_lines) >= 2  # landing page and Operations panel
+    assert all(
+        re.search(r"Backup: \d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}", line)
+        for line in backup_lines
+    )
+    assert all("T" not in line and "Z" not in line for line in backup_lines)
+
+
 def test_console_shows_descriptions_by_default(db, lane, sysop):
     # GitHub issue #160 pilot: descriptions on by default.
     session = FakeSession(["b"])

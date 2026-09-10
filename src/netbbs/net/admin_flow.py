@@ -600,6 +600,15 @@ async def _write_panel(
             await session.write_line(line)
 
 
+def _get_display_backup_summary(db: Database) -> tuple[str | None, str | None]:
+    """Return backup state with its timestamp ready for human display."""
+    backup_at, backup_path = get_last_backup_summary(db)
+    return (
+        format_for_display(backup_at, db) if backup_at else None,
+        backup_path,
+    )
+
+
 async def _load_condensed_status_line(lane: DatabaseLane, *, unicode_style: bool, terminal_width: int) -> str:
     """DB-only backup context (GitHub issue #206) for every screen in this
     module that doesn't already show the richer full panel Users/Content/
@@ -614,13 +623,12 @@ async def _load_condensed_status_line(lane: DatabaseLane, *, unicode_style: bool
     Content/Operations/Settings/Node keep their own richer panels instead of
     calling this."""
     def _load(db: Database) -> str | None:
-        backup_at, _backup_path = get_last_backup_summary(db)
+        backup_display, _backup_path = _get_display_backup_summary(db)
         # Code review follow-up (PR #216): format_for_display resolves the
         # node's configured format/timezone from this same `db` handle --
         # without it, this was the one place in the module still showing
         # the raw stored UTC value (with microseconds) instead of matching
         # the Backup status screen and everywhere else a timestamp appears.
-        backup_display = format_for_display(backup_at, db) if backup_at else None
         return backup_display
 
     backup_display = await lane.run(_load)
@@ -814,7 +822,7 @@ async def _draw_admin_menu(
             "total_areas": len(all_areas),
             "total_files": sum(count_visible_files(db, area)[0] for area in all_areas),
             **_link_health_snapshot(db, link_context),
-            "backup": get_last_backup_summary(db),
+            "backup": _get_display_backup_summary(db),
             "update": get_display_check_summary(db),
             "description_level": menu_description_level(db, actor),
             "redraw_in_place": redraw_in_place_enabled(db, actor),
@@ -1228,7 +1236,7 @@ async def _operations_menu(
     def _load_ops(db: Database) -> dict[str, Any]:
         return {
             **_link_health_snapshot(db, link_context),
-            "backup": get_last_backup_summary(db),
+            "backup": _get_display_backup_summary(db),
             "description_level": menu_description_level(db, actor),
             "unicode_style": unicode_style_enabled(db, actor),
             "collapsed": breadcrumb_collapsed_enabled(db, actor),

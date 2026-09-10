@@ -350,6 +350,25 @@ _BUNDLED_DOORS_DIR = Path(__file__).resolve().parent.parent / "src" / "netbbs" /
 _RETRO_TRIVIA_PATH = _BUNDLED_DOORS_DIR / "retro_trivia.py"
 
 
+def test_retro_trivia_has_a_large_well_formed_question_bank():
+    name = "retro_trivia_questions_under_test"
+    spec = importlib.util.spec_from_file_location(name, _RETRO_TRIVIA_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(name, None)
+
+    prompts = [question for question, _choices, _correct in module.QUESTIONS]
+    assert len(prompts) >= 100
+    assert len(prompts) == len(set(prompts))
+    assert all(len(choices) == 4 for _question, choices, _correct in module.QUESTIONS)
+    assert all(len(set(choices)) == 4 for _question, choices, _correct in module.QUESTIONS)
+    assert all(0 <= correct < 4 for _question, _choices, correct in module.QUESTIONS)
+
+
 @pytest.mark.parametrize(
     "path",
     (

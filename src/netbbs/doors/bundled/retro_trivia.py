@@ -314,6 +314,95 @@ QUESTIONS = [
     ("In FidoNet network addressing (e.g. 1:105/42), what does the 1 indicate?", ["Zone", "Net", "Node", "Point"], 0),
     ("Which famous fantasy RPG door game was created by Seth Robinson?", ["Legend of the Red Dragon", "TradeWars 2002", "Barren Realms Elite", "Solar Realms"], 0),
     ("Which file transfer protocol used 1024-byte blocks and CRC checking?", ["Ymodem-1K", "Xmodem-Checksum", "Kermit", "ASCII"], 0),
+    # Modems, terminals, and the practical business of dialing in.
+    ("Which Hayes command dials a number using touch tones?", ["ATDT", "ATH0", "ATA", "ATZ"], 0),
+    ("Which Hayes command tells a modem to answer an incoming call?", ["ATA", "ATDP", "ATH0", "AT&F"], 0),
+    ("What did an acoustic coupler hold against a telephone handset?", ["Rubber cups", "A paper tape", "A punch card", "A light pen"], 0),
+    ("What does the modem signal DCD stand for?", ["Data Carrier Detect", "Digital Call Dialing", "Duplex Carrier Data", "Direct Cable Driver"], 0),
+    ("Which interface standard commonly connected early external PC modems?", ["RS-232", "SCSI", "MIDI", "VGA"], 0),
+    ("What does a null-modem cable connect without using modems?", ["Two serial devices", "Two phone lines", "Two monitors", "Two floppy drives"], 0),
+    ("In the common serial setting 8-N-1, what does the N mean?", ["No parity", "No carrier", "Network mode", "Nine data bits"], 0),
+    ("What does full-duplex communication allow?", ["Sending and receiving at once", "Two phone numbers", "Twice the screen width", "Two files per packet"], 0),
+    ("Which chip function converts parallel computer data to serial data and back?", ["UART", "GPU", "MMU", "DAC"], 0),
+    ("Which pair of RS-232 signals is commonly used for hardware flow control?", ["RTS and CTS", "RGB and HSync", "IRQ and DMA", "MOSI and MISO"], 0),
+    ("What speed did the Bell 103 modem standard provide?", ["300 bps", "1200 bps", "9600 bps", "56 kbps"], 0),
+    ("What maximum speed is associated with the V.32 modem standard?", ["9600 bps", "2400 bps", "14.4 kbps", "33.6 kbps"], 0),
+    ("What maximum speed is associated with the V.34 modem standard?", ["33.6 kbps", "56 kbps", "9600 bps", "1200 bps"], 0),
+    ("What was V.42bis used for on dial-up modem links?", ["Data compression", "Color graphics", "Caller ID", "Voice mail"], 0),
+    ("What usually happened when every line on a multi-node BBS was occupied?", ["The caller heard a busy signal", "The BBS sent email", "The modem doubled its speed", "The screen turned monochrome"], 0),
+    # BBS networks, software, art, and door culture.
+    ("Who created FidoNet in 1984?", ["Tom Jennings", "Ward Christensen", "Phil Katz", "Jarkko Oikarinen"], 0),
+    ("What did a FidoNet nodelist primarily contain?", ["Node addresses and phone numbers", "ANSI color palettes", "Door-game scores", "Modem firmware"], 0),
+    ("What is FidoNet netmail?", ["A private message between addresses", "A public echo conference", "A modem command", "A file-transfer checksum"], 0),
+    ("What is a FidoNet echomail area?", ["A shared public discussion area", "A private file directory", "A voice channel", "A local printer queue"], 0),
+    ("In classic FTN mail processing, what does a tosser do?", ["Imports and routes message packets", "Draws ANSI art", "Answers the modem", "Compresses executable files"], 0),
+    ("Which format let callers download mail, read it offline, and upload replies?", ["QWK", "GIF", "WAV", "CSV"], 0),
+    ("Which program was a well-known offline mail reader for BBS packets?", ["Blue Wave", "Lotus 1-2-3", "Deluxe Paint", "Norton Commander"], 0),
+    ("On a multi-line BBS, what did a 'node' usually mean?", ["One simultaneous caller connection", "One message board", "One ANSI color", "One ZIP archive"], 0),
+    ("What does a co-SysOp help do?", ["Administer the BBS", "Manufacture modems", "Route internet packets", "Design CPU instructions"], 0),
+    ("Which BBS software was originally written by Clark Development?", ["PCBoard", "C-News", "Minix", "HyperCard"], 0),
+    ("Which BBS package shares its name with an untamed cat?", ["Wildcat!", "PCBoard", "RemoteAccess", "Maximus"], 0),
+    ("Which BBS software is still developed as an open-source project?", ["Synchronet", "MS-DOS Editor", "MacPaint", "Lotus Agenda"], 0),
+    ("Which art group is associated with the classic ANSI art scene?", ["ACiD Productions", "The Apache Group", "Khronos Group", "Xiph.Org"], 0),
+    ("What does SAUCE add to an ANSI artwork file?", ["Metadata", "Audio samples", "A modem driver", "Executable code"], 0),
+    ("Which DOS program became a popular ANSI and ASCII art editor?", ["TheDraw", "Telix", "PKUNZIP", "Qmodem"], 0),
+    ("What kind of game is TradeWars 2002?", ["Space trading and combat", "Fantasy football", "Chess", "Pinball"], 0),
+    ("What kind of door game is Barren Realms Elite?", ["Inter-BBS strategy", "Text adventure parser", "Card solitaire", "Flight simulator"], 0),
+    ("What does an inter-BBS league let door-game players do?", ["Compete across multiple BBSes", "Share one modem cable", "Edit ANSI locally", "Bypass login"], 0),
+    ("Which drop file became common for 32-bit BBS doors?", ["DOOR32.SYS", "AUTOEXEC.BAT", "CONFIG.NT", "WIN.INI"], 0),
+    ("What was a FOSSIL driver used for in DOS BBS software?", ["A standard serial I/O interface", "A bitmap font format", "A disk compressor", "A network game map"], 0),
+    # Home computers, operating systems, and hardware.
+    ("Which computer appeared on the January 1975 cover of Popular Electronics?", ["Altair 8800", "Apple Macintosh", "Commodore Amiga", "IBM PCjr"], 0),
+    ("Which trio of computers is often called the 1977 home-computer trinity?", ["Apple II, PET, and TRS-80", "Amiga, ST, and Macintosh", "PC, XT, and AT", "NES, SNES, and Genesis"], 0),
+    ("How much RAM gave the Commodore 64 its name?", ["64 KB", "64 MB", "16 KB", "128 KB"], 0),
+    ("What is the Commodore 64's sound chip called?", ["SID", "VIC-II", "ANTIC", "Paula"], 0),
+    ("What is the Commodore 64's main video chip called?", ["VIC-II", "SID", "Agnus", "TIA"], 0),
+    ("Which company made the ZX Spectrum?", ["Sinclair Research", "Acorn", "Commodore", "Tandy"], 0),
+    ("Which company made the BBC Micro?", ["Acorn Computers", "Atari", "Amstrad", "Texas Instruments"], 0),
+    ("Where was the TRS-80 famously sold?", ["Radio Shack", "Sears only", "Apple Stores", "Arcades"], 0),
+    ("Who created the CP/M operating system?", ["Gary Kildall", "Steve Wozniak", "Linus Torvalds", "Tim Paterson"], 0),
+    ("Which processor powered many CP/M computers and the ZX Spectrum?", ["Zilog Z80", "MOS 6502", "Motorola 68000", "Intel 80386"], 0),
+    ("Which processor family powered the Apple II and Commodore 64?", ["MOS 6502 family", "Motorola 68000", "Zilog Z80", "Intel 8088"], 0),
+    ("Which processor powered the original IBM PC?", ["Intel 8088", "MOS 6502", "Zilog Z80", "Motorola 68000"], 0),
+    ("What filename limit is associated with classic DOS 8.3 names?", ["Eight characters plus a three-character extension", "Eight folders and three files", "Eleven words", "Three drives with eight partitions"], 0),
+    ("How much conventional memory could DOS address in its familiar base-memory area?", ["640 KB", "64 KB", "1 MB", "16 MB"], 0),
+    ("Which display standard arrived with IBM's PS/2 line in 1987?", ["VGA", "CGA", "MDA", "Hercules"], 0),
+    ("How many bits are used by standard ASCII?", ["7", "8", "16", "32"], 0),
+    ("What is PETSCII?", ["Commodore's character set", "An Atari disk format", "An IBM printer port", "A modem protocol"], 0),
+    ("What capacity was commonly printed on a high-density 3.5-inch PC floppy?", ["1.44 MB", "360 KB", "10 MB", "650 MB"], 0),
+    ("Which storage medium uses a flexible magnetic disk inside a square shell?", ["Floppy disk", "CD-ROM", "Punch card", "Bubble memory"], 0),
+    ("What did a dot-matrix printer strike against paper?", ["An ink ribbon", "A laser drum", "A thermal stylus", "A wax block"], 0),
+    ("Which port was commonly used for PC printers?", ["Parallel port", "Game port", "VGA port", "PS/2 mouse port"], 0),
+    ("What does SCSI stand for?", ["Small Computer System Interface", "Serial Computer Storage Interconnect", "System Control Software Integration", "Small Cable Signal Interface"], 0),
+    ("What happens during a computer's POST?", ["Hardware is checked at startup", "Email is sent", "A disk is formatted", "A file is compressed"], 0),
+    ("What does a motherboard's CMOS battery traditionally preserve?", ["Clock and firmware settings", "CPU instructions", "Monitor colors", "Printer fonts"], 0),
+    ("Which kind of memory normally loses its contents when power is removed?", ["RAM", "ROM", "EPROM", "CD-ROM"], 0),
+    ("What does CRT stand for?", ["Cathode-ray tube", "Computer raster terminal", "Color response timing", "Central relay transformer"], 0),
+    ("What does BASIC stand for?", ["Beginner's All-purpose Symbolic Instruction Code", "Binary Assembly System Interface Code", "Basic Algorithmic Syntax for Integrated Computers", "Beginner's Automatic System Input Console"], 0),
+    ("Which BASIC commands directly read and write memory addresses?", ["PEEK and POKE", "LIST and RUN", "LOAD and SAVE", "GOTO and GOSUB"], 0),
+    ("What number base does hexadecimal use?", ["16", "2", "8", "10"], 0),
+    ("How many bits make one byte on the systems covered by this game?", ["8", "4", "10", "16"], 0),
+    # Networks, online services, and file transfer.
+    ("Which network carried discussion groups called newsgroups?", ["Usenet", "FidoNet netmail", "CompuServe CB Simulator", "Minitel videotex"], 0),
+    ("Which protocol presented internet resources as hierarchical menus?", ["Gopher", "SMTP", "NTP", "SNMP"], 0),
+    ("What did Archie help internet users search?", ["Anonymous FTP archives", "IRC nicknames", "DNS zones", "Usenet signatures"], 0),
+    ("Which protocol is chiefly used to send email between servers?", ["SMTP", "POP3", "NNTP", "Telnet"], 0),
+    ("Which protocol is commonly used to retrieve mail from a server?", ["POP3", "SMTP", "FTP", "IRC"], 0),
+    ("Who created Internet Relay Chat in 1988?", ["Jarkko Oikarinen", "Tim Berners-Lee", "Vint Cerf", "Tom Jennings"], 0),
+    ("On what date did ARPANET officially switch to TCP/IP?", ["January 1, 1983", "July 4, 1976", "August 6, 1991", "January 1, 2000"], 0),
+    ("What is the main job of DNS?", ["Map names to network addresses", "Compress files", "Encrypt terminal sessions", "Synchronize modem speeds"], 0),
+    ("How many bits are in an IPv4 address?", ["32", "16", "64", "128"], 0),
+    ("What is Telnet's conventional TCP port?", ["23", "21", "22", "80"], 0),
+    ("What is SSH's conventional TCP port?", ["22", "23", "25", "110"], 0),
+    ("Who created XMODEM?", ["Ward Christensen", "Phil Katz", "Dennis Ritchie", "Gary Kildall"], 0),
+    ("What feature did YMODEM add beyond transferring one named file at a time?", ["Batch transfers", "ANSI graphics", "Public-key encryption", "Voice chat"], 0),
+    ("Which transfer protocol streams data without waiting for an ACK after every block?", ["Zmodem", "Xmodem", "ASCII capture", "Kermit in image mode"], 0),
+    ("At which university was the Kermit file-transfer protocol developed?", ["Columbia University", "MIT", "Stanford University", "Carnegie Mellon University"], 0),
+    ("What is a CRC used to detect during file transfer?", ["Transmission errors", "Duplicate usernames", "Busy phone lines", "ANSI color depth"], 0),
+    ("Which filename extension identifies archives created by PKZIP?", [".ZIP", ".ARC", ".LZH", ".TAR"], 0),
+    ("Who created the ARJ compression utility?", ["Robert Jung", "Phil Katz", "Eugene Roshal", "Thom Henderson"], 0),
+    ("Whose surname supplied the name in RAR archives?", ["Eugene Roshal", "Phil Katz", "Tom Jennings", "Ward Christensen"], 0),
+    ("What does downloading mean from a caller's point of view?", ["Receiving a file from the BBS", "Sending a file to the BBS", "Reading a local file", "Deleting a remote file"], 0),
 ]
 
 QUESTIONS_PER_ROUND = 8
@@ -477,11 +566,22 @@ def main() -> int:
     score = 0
     try:
         for i, (question, choices, correct_index) in enumerate(round_questions, start=1):
-            chosen = ask_question(palette, i, len(round_questions), question, choices, width=w)
-            correct = chosen == correct_index
+            correct_answer = choices[correct_index]
+            display_choices = choices.copy()
+            random.shuffle(display_choices)
+            display_correct_index = display_choices.index(correct_answer)
+            chosen = ask_question(
+                palette, i, len(round_questions), question, display_choices, width=w
+            )
+            correct = chosen == display_correct_index
             if correct:
                 score += 1
-            draw_result(palette, correct, f"{LETTERS[correct_index]}) {choices[correct_index]}", width=w)
+            draw_result(
+                palette,
+                correct,
+                f"{LETTERS[display_correct_index]}) {correct_answer}",
+                width=w,
+            )
 
         draw_final_score(palette, score, len(round_questions), info=info, width=w)
         read_key()
