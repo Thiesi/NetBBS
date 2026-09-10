@@ -359,6 +359,15 @@ bound to a committed job/raid/root attempt. Purchase rejection retains the draft
 selection. Upgrade fixtures must remove later columns when reconstructing an old
 schema, so tests exercise real shipped layouts rather than impossible hybrids.
 
+Operation progress belongs in the actor preview conflict token. Case/Prepare
+must not draw RNG; Execute consumes preparation, effects and its turn atomically.
+Keep operation success Rank separate from ordinary job counts and align SQL
+standings. Recon settles target income and commits its private snapshot with the
+actor's turn; rollback must restore both. Re-observation replaces a rival's row
+before applying the per-viewer ten-record cap, including equal timestamp ties.
+Read snapshots through viewer, season and strict expiry filters; never substitute
+live rival resources when rendering an earned dossier or raid preview.
+
 Target selection binds digit keys only to complete visible entries. Keep those
 keys separate from Back/Next/Prev and carry database-batch direction through local
 row pagination. Regression coverage must drive the composed picker beyond fifty

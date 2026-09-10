@@ -6394,7 +6394,7 @@ against a top-bracket controller.
 
 Rank sums season achievements, never current cash, available crew or holdings:
 `crew_recruited_total*10 + exchanges_taken_total*50 + successful_raids*25 +
-successful_jobs*15 + control_rank + legacy_rank`. The capture counter records
+successful_jobs*15 + successful_operations*30 + control_rank + legacy_rank`. The capture counter records
 rewarded first captures; control Rank is earned time, retained after losing a
 holding. `legacy_rank` preserves previously earned capture points during upgrade
 and resets with the season. Python and SQL standings scores must agree. Tiers
@@ -6620,6 +6620,42 @@ choice columns, initially empty, without changing existing player resources or
 identity. Upgrades and the version marker are atomic; earlier migrations remain
 unchanged. Manual stop-session and verified-backup upgrade guidance applies.
 
+**Recon and persistent operations (issue #362, slice 6; maintainer approved).**
+`[O]Ops` opens the operation slot, rival recon and private dossiers. Rival recon
+costs one turn, no cash or Heat, with no bust roll or support consumption. It
+settles the observed rival's elapsed resources and saves their cash and available
+crew at commitment. Newcomer/raid protection does not prohibit recon and is not
+removed by it. Only the observing caller can read the snapshot; its timestamp,
+24-hour expiry and last-known status are always visible. This is not a live view
+or a guarantee of current raid odds. Keep the latest ten distinct rival dossiers
+per caller; another paid observation replaces that rival's prior snapshot. Free
+inspection and raid previews use only unexpired earned intelligence. Season reset
+clears dossiers, including dormant callers' data.
+
+One PvE operation slot binds an existing fixed contract and approach when Case
+commits. Case costs one turn, no cash or Heat; Prepare costs one turn and $50,
+without Heat. Neither rolls outcomes nor consumes support. Execute costs one
+turn and uses the ordinary approach's Heat/failure rules, including specialties,
+Burner Kits and Cash Stashes. Success odds gain 15 percentage points, capped at
+90%; success payout range endpoints double and success earns 30 Rank through a
+separate monotonic operation counter. Fixer recovery on failure remains $20.
+
+Success clears the slot. Failure returns it to cased: progress is useful, but
+another Prepare ($50 and one turn) is required before retrying Execute. Abandon
+is free, forfeits progress without refund, and requires its own final Act. Case,
+Prepare and Execute each have a content-first preview and Act. Progress survives
+visits and reconnects without forced waiting; browsing performs no random draws.
+The slot and paid steps share the action transaction and stale-preview checks,
+so racing sessions cannot use one preparation twice. Ordinary contract jobs remain
+available independently. Season reset clears operation progress and its Rank.
+
+Schema 6 adds operation progress/counters and a bounded indexed dossier table.
+New state defaults empty; upgrades preserve existing identities, age, resources
+and purchased crew/support state. Failed upgrades roll back the version and data
+together. Backup/restore includes progress and dossiers; SysOp competition reset
+and season advance clear them. The manual stop-sessions/verified-backup upgrade
+procedure applies before activating this version.
+
 **Compact action screens (issue #362, slice 3).** Target pickers, results,
 rejections and season notices use terminal-height pagination as well as width
 wrapping. Digits 1-9/0 choose a complete visible target entry and open its preview;
@@ -6659,8 +6695,9 @@ Public intelligence is handle, season Rank/tier, protection reasons and exact
 UTC expiry. The dashboard also shows remaining recovery time. Available crew and
 cash remain private, so raid previews explicitly describe uncertain odds and
 percentage stakes. Exchange ownership, garrison and income remain public;
-raid recovery does not block territory contests. Later recon must explicitly
-define earned intelligence before revealing additional private resources.
+raid recovery does not block territory contests. Paid recon grants only the
+private, timestamped and expiring snapshots defined above; public directories
+continue to withhold cash and available crew.
 
 Schema 4 adds the recovery deadline. An old last-attacker marker has no attempt
 timestamp, so upgrade preserves its protection for 24 hours from upgrade against
