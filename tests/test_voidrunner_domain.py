@@ -12295,3 +12295,48 @@ def test_retiring_with_active_contracts_records_them_as_abandoned():
     assert any("Abandoned at retirement: Escort a convoy (forfeited 800cr)" in entry for entry in fresh.pilot.log)
     assert world.save.to_dict() == before  # a cancelled retirement leaves the live career untouched
     assert vr.finish_career(world.save, "combat").retired_careers[-1]["failed"] == 2  # and repeating does not inflate it
+    assert any("Abandoned at retirement: Escort a convoy (forfeited 800cr)" in entry for entry in world.save.pilot.log)
+# --- #404: title and registration boxes at every width, with wide-character handles ----
+
+
+def _box_rows(text: str) -> list[str]:
+    rows = [vr._ANSI_RE.sub("", line) for line in text.split("\r\n")]
+    return [row for row in rows if row and row[0] in "╔║╠╚╭│├╰+|"]
+
+
+@pytest.mark.parametrize("style", ["auto", "plain"])
+@pytest.mark.parametrize("handle", ["Thiesi", "船長", "Ægir Ól"])
+@pytest.mark.parametrize("width", [80, 40, 20])
+def test_title_box_rows_share_one_display_width_at_every_width(monkeypatch, width, handle, style):
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width); monkeypatch.setattr(vr, "_OUTPUT_STYLE", style)
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        vr.screen_title(vr.Palette(False), {"node_name": "ReLink", "handle": handle})
+    rows = _box_rows(output.getvalue())
+    assert rows and {vr._visible_width(row) for row in rows} == {vr._box_outer_width()}
+    plain = " ".join(" ".join(rows).split())
+    assert ("V O I D R U N N E R" if width >= 21 else "VOIDRUNNER") in plain
+    assert "PILOT:" in plain and handle in plain and "NODE: ReLink" in plain
+    if width == 80:
+        assert len(rows) == 11 and "Tactical Deep-Space Trading & Exploration" in plain and "48 Star Systems" in plain
+    if width < 51:
+        assert "█" not in plain and "#" not in plain  # no partial logo; the compact composition is complete
+
+
+def test_title_large_composition_is_unchanged_at_eighty_columns(monkeypatch):
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80)
+    rows = vr.title_rows({"node_name": "Central BBS", "handle": "Alice"}, vr._box_inner_width())
+    assert [kind for kind, _, _ in rows] == ["blank", "logo", "logo", "wordmark", "blank", "sub", "blank", "rule", "meta"]
+    assert rows[-1][1] == "  NODE: Central BBS  │  PILOT: Alice  │  GALAXY: 48 Star Systems"
+
+
+@pytest.mark.parametrize("handle", ["SixteenCharHandl", "船長"])
+@pytest.mark.parametrize("width", [80, 40, 20])
+def test_registration_box_fits_its_width_and_keeps_the_handle(monkeypatch, width, handle):
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(vr, "read_line_raw", lambda max_len=16, allowed=None: "")
+    monkeypatch.setattr(vr, "confirm", lambda prompt, p: False)
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        assert vr.create_career(vr.Palette(False), {"handle": handle}) is None
+    rows = _box_rows(output.getvalue())
+    assert rows and {vr._visible_width(row) for row in rows} == {vr._box_outer_width()}
+    assert handle in " ".join(" ".join(rows).split())

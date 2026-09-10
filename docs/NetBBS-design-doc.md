@@ -5220,6 +5220,12 @@ level, because it costs the fine alone and keeps the cargo. The combat page
 names the fee beside its low-hull warning, the Info view states both rules and
 the fine a patrol will collect, and the deck's critical-hull line names the fee.
 
+The title splash and the registration box follow the portraits' rule (issue
+#404): the large composition with the block logo appears only when it fits the
+negotiated width; otherwise a complete compact composition (wordmark, wrapped
+subtitle, stacked node/pilot/galaxy fields) is shown, and every box row has one
+display width, including for callsigns with wide characters.
+
 Voidrunner offers saved display presets from station Display Options: full palette
 using the existing terminal color depth, basic 16-color, monochrome Unicode, and
 plain text with ASCII artwork. Monochrome/plain suppress ANSI styling; plain maps
