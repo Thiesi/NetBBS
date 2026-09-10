@@ -4721,6 +4721,15 @@ the count on load. Any future change to `CONTRABAND_STANDING_STEP` is therefore
 safe; dropping the recorded step is not, because a smaller step would re-award
 gains that were already paid for.
 
+`single_page_footer` matches paging tokens by shape (`_PAGING_PATTERN`), not by a
+table of literal strings: footers spell them `[<]Prev [>]Next`, `[<>]Page` and
+`[N]ext [P]rev`, and end with a space, the prompt's colon or `" > "`, so a
+literal table silently missed most callers. A screen is also paginated twice
+when it does not fit: once with the full footer and once with the shortened one,
+because dropping the tokens can buy the row that makes it a single page. Any new
+action bar that offers paging must be built so that removing the tokens leaves a
+valid prompt.
+
 Voidrunner selection letters come from `choice_letters`, never bare `LETTERS`:
 `B` is Back on every screen and must not be a live action, and each list screen
 reserves its own hotkeys in its letter map (`MARKET_LETTERS`, `YARD_LETTERS`,
