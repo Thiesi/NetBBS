@@ -4665,9 +4665,18 @@ longer need active membership; requiring it would reject legitimate restarts.
 The storage boundary also validates career structure and gameplay ranges before
 loading or writing, as described below.
 
+`confirm` reads `read_key` directly so it can see the multi-character
+`ESCAPE_KEY` sentinel that `read_command` would fold into `IGNORED_KEY`; keep
+that when touching either prompt (issue #413).
+
 Voidrunner's menu commands case-fold ASCII only; Unicode remains text input,
 so Unicode case aliases cannot surrender cargo or dispatch another hotkey.
 Acknowledgement pauses ignore both incomplete Escape and unsupported keys.
+Because Escape cancels quantity fields and confirmations, the decoder reserves a
+second `_INPUT_TIMEOUT` for a delayed CSI/SS3 introducer before reporting
+`ESCAPE_KEY`; a lone Escape costs two timeouts, and a fragmented arrow key over
+a slow transport no longer cancels what the caller was typing. Any new consumer
+of `ESCAPE_KEY` that acts destructively depends on this window.
 After standalone Escape times out, only CSI/SS3 introducers are reserved for
 delayed arrow suffixes; P/X are independent hotkeys. Control strings must begin
 before that timeout, then retain their payload across subsequent delays.
