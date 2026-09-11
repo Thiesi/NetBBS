@@ -2248,7 +2248,7 @@ async def request_inventory(
     inventory_request: InventoryRequest,
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> tuple[list[dict], bool, list[str] | None]:
+) -> tuple[list[dict], bool, list[str]]:
     """
     Design doc §8.8, issue #85: ask a peer at `base_url` what it has for
     `inventory_request.boards` that this node doesn't already. Returns
@@ -2259,10 +2259,14 @@ async def request_inventory(
     #478) which of the `content_id`s this request declared the peer is
     itself missing -- the list the caller's own push then sends.
 
-    That third element is `None`, not `[]`, when the peer's response
-    carries no `wanted` key at all: a peer predating issue #478 cannot
-    say what it lacks, which is a different thing from saying it lacks
-    nothing, and the caller degrades differently for each.
+    `wanted` is **required**. A response without it is malformed and
+    refused like any other: every node on this mesh runs the same
+    release, so there is no such peer to accommodate, and treating a
+    missing key as "cannot say" would silently turn a broken responder
+    into a degraded-but-accepted one. The only way a caller ends up
+    without a `wanted` list is this whole call failing, which is a
+    different condition with a different answer (see `netbbs.link.sync.
+    _push_own_events`).
 
     Deliberately returns the raw dicts rather than applying them itself
     -- unlike `push_events` (whose sender already trusts its own
@@ -2290,15 +2294,14 @@ async def request_inventory(
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
 
     try:
-        wanted = body.get("wanted")
-        if wanted is not None:
-            if not isinstance(wanted, list) or not all(isinstance(i, str) for i in wanted):
-                raise LinkTransportError(f"malformed inventory response from {url}: bad wanted list")
-            if len(wanted) > _MAX_WANTED_CONTENT_IDS:
-                raise LinkTransportError(
-                    f"inventory response from {url} claims to want {len(wanted)} content ids, more "
-                    f"than the {_MAX_WANTED_CONTENT_IDS} any request this node sends could declare"
-                )
+        wanted = body["wanted"]
+        if not isinstance(wanted, list) or not all(isinstance(i, str) for i in wanted):
+            raise LinkTransportError(f"malformed inventory response from {url}: bad wanted list")
+        if len(wanted) > _MAX_WANTED_CONTENT_IDS:
+            raise LinkTransportError(
+                f"inventory response from {url} claims to want {len(wanted)} content ids, more "
+                f"than the {_MAX_WANTED_CONTENT_IDS} any request this node sends could declare"
+            )
         return body["events"], bool(body["more_available"]), wanted
     except (KeyError, TypeError, AttributeError) as exc:
         raise LinkTransportError(f"malformed inventory response from {url}: {exc}") from exc

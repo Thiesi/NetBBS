@@ -1971,10 +1971,21 @@ content — a `wanted` entry the requester merely carries is skipped, preserving
 the "no relay from a stranger" scope note; the responder reaches that content
 through its own inventory pull, which is what the multi-hop diff exists for.
 
-A peer that answers with no `wanted` key at all (one predating this, or
-an inventory request that failed outright) gets one request's worth of
-own events — enough to hand a first-contact peer this node's genesis
-events, and bounded either way.
+`wanted` is required, not optional: a 200 response without it is malformed
+and refused. Every node on this mesh runs the same release, so there is no
+older peer to accommodate, and accepting a missing key would quietly turn a
+broken responder into a degraded-but-working exchange.
+
+That leaves exactly one way to finish a pass without a `wanted` list — the
+inventory exchange itself failing, e.g. a peer whose `/inventory` route errors
+while `/events` still accepts a push. Such a peer still gets pushed to, from a
+rotating starting point held in memory for the lifetime of one sync loop, so
+successive passes walk the originated history instead of re-offering its head.
+Without that, a node with more than one page of own events would never deliver
+the rest to a peer whose inventory route stayed broken — and in an asymmetric
+topology, where that peer never dials back, its own pull cannot make up the
+difference. The offset is deliberately not persisted: a restart simply begins
+the walk again, which dedup makes free.
 
 **What this replaced, and why it was a real defect.** The push previously
 sent every locally originated event to every seed every pass, sliced into

@@ -31,7 +31,7 @@ from netbbs.link.protocol import MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode,
 from netbbs.link.onboarding import Participation, set_participation
 from netbbs.link.reliable_nodes import ReliableNode, set_cached_reliable_nodes
 from netbbs.link.sync import run_link_sync
-from netbbs.link.transport import LinkServer
+from netbbs.link.transport import LinkServer, LinkTransportError
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -1901,12 +1901,12 @@ def test_sync_eventually_pushes_the_tail_of_a_large_own_event_list(tmp_path):
         seed.close()
 
 
-def test_sync_still_pushes_to_a_seed_whose_response_carries_no_wanted_list(tmp_path, monkeypatch):
-    """A peer predating issue #478 cannot say what it lacks, and a
-    failed inventory request says nothing either. Neither may silence
+def test_sync_still_pushes_when_a_seeds_inventory_route_fails(tmp_path, monkeypatch):
+    """A seed whose `/inventory` route errors while `/events` still
+    accepts a push cannot say what it lacks, and that must not silence
     the push -- a first-contact peer still has to receive this node's
     genesis events."""
-    import netbbs.link.transport as transport_module
+    import netbbs.link.sync as sync_module
 
     dialer_identity = bootstrap_node_identity("dialer")
     seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
@@ -1918,15 +1918,10 @@ def test_sync_still_pushes_to_a_seed_whose_response_carries_no_wanted_list(tmp_p
     board = create_board(dialer.db, "general", creator=creator)
     genesis = link_board(dialer.db, board, node_identity=dialer_identity)
 
-    real_request_inventory = transport_module.request_inventory
+    async def broken_inventory_route(*args, **kwargs):
+        raise LinkTransportError("inventory route is down")
 
-    async def pre_478_response(*args, **kwargs):
-        events, more_available, _wanted = await real_request_inventory(*args, **kwargs)
-        return events, more_available, None
-
-    import netbbs.link.sync as sync_module
-
-    monkeypatch.setattr(sync_module, "request_inventory", pre_478_response)
+    monkeypatch.setattr(sync_module, "request_inventory", broken_inventory_route)
 
     async def scenario():
         seed_server = await _run_server(seed_node, seed.lane)
@@ -1945,6 +1940,73 @@ def test_sync_still_pushes_to_a_seed_whose_response_carries_no_wanted_list(tmp_p
     try:
         asyncio.run(scenario())
         assert genesis.content_id in seed_node.known_event_ids
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_walks_its_own_events_while_a_seeds_inventory_route_stays_broken(tmp_path, monkeypatch):
+    """Codex review of #498, on the one reading of it that survives:
+    every node here runs the same release, so a peer that cannot say what
+    it lacks is a peer whose inventory route is *failing*, not an old
+    one. Re-offering the same leading page every pass would never deliver
+    the rest to such a seed -- and in an asymmetric topology it never
+    dials this node, so its own pull cannot make up the difference.
+
+    `MAX_EVENTS_PER_REQUEST` is lowered so more than one page exists
+    without needing hundreds of posts."""
+    import netbbs.link.sync as sync_module
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    genesis = link_board(dialer.db, board, node_identity=dialer_identity)
+    posts = [
+        queue_board_post_if_linked(
+            dialer.db, create_post(dialer.db, board, creator, f"post {i}", "body"), board,
+            node_identity=dialer_identity,
+        )
+        for i in range(11)
+    ]
+    expected = {genesis.content_id} | {post.content_id for post in posts}
+
+    monkeypatch.setattr(sync_module, "MAX_EVENTS_PER_REQUEST", 4)
+
+    async def broken_inventory_route(*args, **kwargs):
+        raise LinkTransportError("inventory route is down")
+
+    monkeypatch.setattr(sync_module, "request_inventory", broken_inventory_route)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=0.05,
+                    )
+                )
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 30.0
+                while not expected <= seed_node.known_event_ids and loop.time() < deadline:
+                    await asyncio.sleep(0.05)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert expected <= seed_node.known_event_ids
     finally:
         dialer.close()
         seed.close()
