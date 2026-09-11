@@ -315,7 +315,12 @@ def profile_advisories(profile) -> list[str]:
         notes.append(f"Wall-clock limit is {profile.time_limit} seconds, above the {3600}-second default; "
                      "one caller can hold a node lease for that long.")
     if not profile.cpu_seconds:
-        notes.append("No CPU-seconds limit: a runaway door is bounded only by the wall-clock limit above.")
+        # Naming the wall-clock limit as the remaining bound is false when it
+        # has been removed too, which is exactly the riskiest configuration.
+        notes.append("No CPU-seconds limit: a runaway door is bounded only by the wall-clock limit above."
+                     if profile.time_limit else
+                     "No CPU-seconds limit either: with both ceilings removed, nothing bounds this door "
+                     "except the caller disconnecting or the node stopping.")
     # A resize opt-out which silently never fires is worth saying out loud;
     # it looks configured on this screen and does nothing at runtime.
     if profile.resize_signal:

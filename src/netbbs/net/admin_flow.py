@@ -13425,6 +13425,11 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
             updated = await _door_screen(session, lane, actor, existing=door)
             if updated is not None:
                 door = updated
+                # The basic edit can change the executable a service launches,
+                # so it reconciles for the same reason the Compatibility save
+                # does; otherwise the old one runs on until a caller arrives.
+                if door_services is not None:
+                    await door_services.adopt(door)
             await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice == "d":
             await session.write_line("")
@@ -13519,7 +13524,7 @@ async def _door_service_action(session: Session, lane: DatabaseLane, actor: User
         return
     try:
         if choice == "s":
-            service.start()
+            await service.start()
         elif choice == "h":
             await service.stop()
         else:

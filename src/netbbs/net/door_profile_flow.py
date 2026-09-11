@@ -123,7 +123,9 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
         if candidate.profile is not None and candidate.profile.service:
             from netbbs.doors.services import launch_identity, service_spec
             running = door_services.get(door.id) if door_services is not None else None
-            if running is None or running.identity != launch_identity(candidate, service_spec(candidate.profile)):
+            ready = running is not None and running.identity == launch_identity(
+                candidate, service_spec(candidate.profile)) and await running.wait_until_running(2)
+            if not ready:
                 await session.write_line(
                     "This draft's companion service is not the one running. Save, then start or restart "
                     "the service from the door detail screen before testing.")

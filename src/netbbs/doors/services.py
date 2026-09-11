@@ -130,16 +130,37 @@ class DoorService:
         self._stopping = False
         self._tail = bytearray()
         self._failures: deque[float] = deque()
+        #: Serialises start/stop/restart. The manager's adoption lock does not
+        #: cover these: a SysOp's Halt racing a caller's lazy start would
+        #: otherwise let one kill the other's process, or leave a replacement
+        #: running that nobody is stopping.
+        self._lifecycle = asyncio.Lock()
 
     # -- lifecycle ---------------------------------------------------------
 
-    def start(self) -> None:
-        """Begin supervising. Returns at once; the process starts in the task."""
+    async def start(self) -> None:
+        """Begin supervising. Returns once the supervisor task exists."""
+        async with self._lifecycle:
+            self._start_locked()
+
+    def _start_locked(self) -> None:
         if self._task is not None and not self._task.done():
             return
         self._stopping = False
         self._failures.clear()
         self._task = asyncio.create_task(self._supervise(), name=f"door-service-{self.door_id}")
+        self._task.add_done_callback(self._supervisor_finished)
+
+    def _supervisor_finished(self, task) -> None:
+        """Never let a supervisor die with its failure unretrieved."""
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is None:
+            return
+        self.status.state = FAILED
+        self._note(f"supervisor failed: {exception}")
+        _logger.error("door service %r supervisor failed", self.door_name, exc_info=exception)
 
     async def wait_until_running(self, timeout: float) -> bool:
         """Wait for the process to be up, giving up early once it cannot be.
@@ -164,6 +185,27 @@ class DoorService:
 
     async def stop(self) -> None:
         """Stop supervising and the process, within a bounded deadline."""
+        async with self._lifecycle:
+            await self._protected(self._stop_locked())
+
+    async def restart(self) -> None:
+        """Stop then start again, under one lock so nothing interleaves."""
+        async with self._lifecycle:
+            await self._protected(self._restart_locked())
+
+    async def _protected(self, coroutine) -> None:
+        """Run a lifecycle transition to completion even while cancelled.
+
+        The whole sequence, not only the termination at its end: a cancel
+        landing on the supervisor-cancellation gather would otherwise leave
+        `stop()` with the process still live, and by then the manager may
+        already have dropped this service, so nothing could reach it again.
+        """
+        _, cancelled = await _finish_owned(asyncio.create_task(coroutine))
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _stop_locked(self) -> None:
         self._stopping = True
         task, self._task = self._task, None
         if task is not None and not task.done():
@@ -171,19 +213,14 @@ class DoorService:
             # still ours to end, below.
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        # Termination finishes even while this coroutine is being cancelled --
-        # a SysOp halting a service whose session then drops, or a shutdown
-        # cancelling the halt, must not leave the process group alive.
-        _, cancelled = await _finish_owned(asyncio.create_task(self._terminate()))
+        await self._terminate()
         self.status.state = STOPPED
         self.status.since = None
-        if cancelled:
-            raise asyncio.CancelledError
 
-    async def restart(self) -> None:
-        await self.stop()
+    async def _restart_locked(self) -> None:
+        await self._stop_locked()
         self.status.restarts = 0
-        self.start()
+        self._start_locked()
 
     # -- supervision -------------------------------------------------------
 
@@ -208,9 +245,15 @@ class DoorService:
             if self._stopping:
                 return
             now = time.monotonic()
+            aged_out = bool(self._failures) and now - self._failures[0] > _CIRCUIT_WINDOW_SECONDS
             self._failures.append(now)
             while self._failures and now - self._failures[0] > _CIRCUIT_WINDOW_SECONDS:
                 self._failures.popleft()
+            if aged_out:
+                # A service which ran stably for the whole window is not
+                # respawning rapidly, so it should not inherit the previous
+                # incident's minute-long wait for one isolated crash.
+                delay = _BACKOFF_START_SECONDS
             if len(self._failures) >= _CIRCUIT_FAILURES:
                 self.status.state = FAILED
                 _logger.error("door service %r failed %d times in %d seconds; not restarting it again",
@@ -311,42 +354,43 @@ class DoorService:
         self._proc = None
 
     async def _terminate(self) -> None:
-        reader, self._diagnostics = self._diagnostics, None
-        if reader is not None and not reader.done():
-            reader.cancel()
-            await asyncio.gather(reader, return_exceptions=True)
-        # Ownership is released only once the process is actually gone. Clearing
-        # it before the cancellable wait below would mean a cancel during the
-        # grace period skips the SIGKILL *and* leaves the later node-level
-        # stop_all with nothing to terminate, so the service outlives shutdown.
+        # Ownership is released only once the process is actually gone, and the
+        # stderr reader stays alive until then: a service writing more than a
+        # pipe holds while handling SIGTERM would otherwise block in that write,
+        # never finish its graceful flush, and be SIGKILLed with its own game
+        # state half-written.
         proc = self._proc
         if proc is None:
+            self._stop_reader()
             return
-        if proc.returncode is not None:
-            # The leader is already reaped, but its group may still hold
-            # descendants -- including ones a cancelled `_reap_group` never
-            # got to SIGKILL.
-            await self._reap_group()
-            return
-        try:
+        if proc.returncode is None:
             self._signal(proc, signal.SIGTERM if os.name == "posix" else None)
             try:
                 await asyncio.wait_for(self._wait(proc), timeout=self.spec.stop_grace_seconds)
-                return
             except asyncio.TimeoutError:
                 _logger.warning("door service %r ignored SIGTERM for %ds; killing it",
                                 self.door_name, self.spec.stop_grace_seconds)
-            self._signal(proc, signal.SIGKILL if os.name == "posix" else None, kill=True)
-            try:
-                await asyncio.wait_for(self._wait(proc), timeout=_KILL_DEADLINE_SECONDS)
-            except asyncio.TimeoutError:
-                # Unkillable means stuck in the kernel. Leaving it behind is
-                # worse than a stalled shutdown is; say so loudly and carry on.
-                _logger.error("door service %r survived SIGKILL; abandoning it so shutdown can finish",
-                              self.door_name)
-        finally:
-            if proc.returncode is not None:
-                self._proc = None
+                self._signal(proc, signal.SIGKILL if os.name == "posix" else None, kill=True)
+                try:
+                    await asyncio.wait_for(self._wait(proc), timeout=_KILL_DEADLINE_SECONDS)
+                except asyncio.TimeoutError:
+                    # Unkillable means stuck in the kernel. Leaving it behind is
+                    # worse than a stalled shutdown is; say so loudly, keep
+                    # ownership so a later attempt can still find it, and go on.
+                    _logger.error("door service %r survived SIGKILL; abandoning it so shutdown can finish",
+                                  self.door_name)
+                    self._stop_reader()
+                    return
+        # The leader is gone, gracefully or not. Its group may still hold
+        # descendants which ignored the same SIGTERM, so they are always reaped
+        # -- including any a cancelled `_reap_group` never got to SIGKILL.
+        await self._reap_group()
+        self._stop_reader()
+
+    def _stop_reader(self) -> None:
+        reader, self._diagnostics = self._diagnostics, None
+        if reader is not None and not reader.done():
+            reader.cancel()
 
     def _signal(self, proc, number, *, kill=False) -> None:
         try:
@@ -367,12 +411,16 @@ class DoorService:
             return False
         if self.spec.health_kind != "socket":
             return True
-        if not hasattr(asyncio, "open_unix_connection"):
-            return True  # Windows development; the pid check above is all there is.
         try:
             _, writer = await asyncio.wait_for(
                 asyncio.open_unix_connection(self.spec.health_path), timeout=_HEALTH_TIMEOUT_SECONDS)
-        except (OSError, asyncio.TimeoutError, NotImplementedError):
+        except NotImplementedError:
+            # The platform has no Unix sockets at all -- Windows development.
+            # `asyncio.open_unix_connection` still exists there, so this is
+            # where that is actually discovered; fall back to the pid check,
+            # rather than reporting every live service as unhealthy.
+            return True
+        except (OSError, asyncio.TimeoutError):
             return False
         writer.close()
         try:
@@ -428,7 +476,7 @@ class DoorServiceManager:
         for door in doors:
             service = await self.adopt(door)
             if service is not None and service.spec.start == "with_node":
-                service.start()
+                await service.start()
 
     async def ensure_running(self, door, *, wait_seconds: float = 10.0) -> str | None:
         """Make a door's service available, returning a caller-facing problem.
@@ -447,7 +495,7 @@ class DoorServiceManager:
             problem = f"{door.name}'s service has stopped after repeated failures. Ask the SysOp to check it."
         else:
             if service.spec.start == "on_first_caller" and service.status.state == STOPPED:
-                service.start()
+                await service.start()
             deadline = time.monotonic() + wait_seconds
             if not await service.wait_until_running(wait_seconds):
                 problem = f"{door.name}'s service is not running. Ask the SysOp to start it."

@@ -105,7 +105,7 @@ def test_service_starts_and_is_reported_running(db, lane, player, tmp_path):
 
     async def scenario():
         service = DoorService(door, service_spec(door.profile))
-        service.start()
+        await service.start()
         try:
             assert await service.wait_until_running(20)
             assert service.status.state == RUNNING
@@ -123,7 +123,7 @@ def test_stopping_actually_ends_the_process(db, lane, player, tmp_path):
 
     async def scenario():
         service = DoorService(door, service_spec(door.profile))
-        service.start()
+        await service.start()
         assert await service.wait_until_running(20)
         proc = service._proc
         await service.stop()
@@ -143,7 +143,7 @@ def test_a_service_which_keeps_exiting_is_restarted_then_given_up_on(db, lane, p
         original = services_module._BACKOFF_START_SECONDS
         services_module._BACKOFF_START_SECONDS = 0.01
         try:
-            service.start()
+            await service.start()
             deadline = time.monotonic() + 30
             while service.status.state != FAILED and time.monotonic() < deadline:
                 await asyncio.sleep(0.05)
@@ -173,7 +173,7 @@ def test_stop_is_bounded_even_when_the_process_ignores_sigterm(db, lane, player,
 
     async def scenario():
         service = DoorService(door, service_spec(door.profile))
-        service.start()
+        await service.start()
         assert await service.wait_until_running(20)
         proc = service._proc
         started = time.monotonic()
@@ -416,5 +416,32 @@ def test_forgetting_a_deleted_door_stops_its_service(db, lane, player, tmp_path)
             assert manager.get(door.id) is None
         finally:
             await manager.stop_all()
+
+    asyncio.run(scenario())
+
+
+def test_both_ceilings_removed_is_reported_as_such():
+    from netbbs.doors.profiles import profile_advisories
+    notes = " ".join(profile_advisories(DoorProfile(time_limit=0, cpu_seconds=0)))
+    assert "bounded only by the wall-clock limit" not in notes, "claimed a ceiling which is gone"
+    assert "both ceilings removed" in notes
+
+
+def test_start_and_stop_do_not_interleave(db, lane, player, tmp_path):
+    """A Halt racing a lazy start must not leave a process nobody stops."""
+    door = _door(db, player, tmp_path)
+
+    async def scenario():
+        service = DoorService(door, service_spec(door.profile))
+        await service.start()
+        assert await service.wait_until_running(20)
+        proc = service._proc
+
+        await asyncio.gather(service.stop(), service.start(), service.stop())
+
+        assert proc.returncode is not None, "the original process was abandoned"
+        if service._proc is not None:
+            await service.stop()
+            assert service._proc is None
 
     asyncio.run(scenario())
