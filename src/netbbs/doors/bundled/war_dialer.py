@@ -3497,7 +3497,7 @@ def main() -> int:
         out_line(f"War Dialer needs at least {MINIMUM_WIDTH} columns by {MINIMUM_HEIGHT} rows.")
         out_line(f"This terminal reports {_OUTPUT_WIDTH}x{height}. Resize it, or reconnect with a "
                  "larger window, and dial again. Nothing in the world was changed.")
-        return 1
+        return 0  # a size refusal is an outcome; nonzero would be reported as a crash
 
     conn = None
     leases = ExitStack()

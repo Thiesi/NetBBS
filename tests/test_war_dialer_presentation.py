@@ -661,6 +661,32 @@ def test_linux_console_function_key_never_leaks_an_action(tmp_path, stage):
         assert process.stderr.read() == b""
 
 
+@pytest.mark.parametrize("width,height", [(39, 24), (80, 11), (20, 10)])
+def test_a_terminal_below_the_floor_is_refused_without_touching_the_world(
+    tmp_path, monkeypatch, width, height
+):
+    """One layout, one floor (issue #495).
+
+    Below 40x12 the door says so and stops, before the world database is
+    opened -- and it stops with a *zero* exit, because the supervisor reads
+    every nonzero exit as a crash and would tell the caller the door died.
+    """
+    class Output(io.StringIO):
+        def reconfigure(self, **kwargs):
+            pass
+
+    out = Output()
+    monkeypatch.setattr(wd.sys, "stdout", out)
+    monkeypatch.setattr(wd, "_load_door_info", lambda: {
+        "user_id": 0, "handle": "Guest", "terminal_width": width, "terminal_height": height})
+    monkeypatch.setattr(wd, "_resolve_db_path",
+                        lambda: pytest.fail("a refused launch opened the world"))
+    assert wd.main() == 0
+    said = " ".join(_ANSI_RE.sub("", out.getvalue()).split())
+    assert "needs at least 40 columns by 12 rows" in said
+    assert f"{width}x{height}" in said, "the caller is told what their terminal reports"
+
+
 def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
     path = tmp_path / "idle-world.db"
     now = wd.now_utc()

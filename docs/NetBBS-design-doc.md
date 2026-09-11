@@ -4919,12 +4919,12 @@ combat detail line used. The bar's label is the word the detail line leads with,
 so no action is named twice; that is what renamed the combat verbs Brace to
 Guard and Bribe to Pay bribe, and it is why Guard rather than Brace, since `B`
 is Back everywhere and a stray Back must never spend a combat turn. The saved
-field stays `brace_ready`. The style costs the narrowest terminals one row: at
-20 columns a bar of four hotkeys wraps to three rows where the glued spelling
-took two, so a page holds one row less and the wrap can fall between a key and
-its label. That is paid for by the paginator, which measures the bar it will
-actually show, and it is worth one row not to make the player learn two
-spellings of the same thing.
+field stays `brace_ready`. The style costs a narrow terminal a row: at the 40x12
+floor a bar of five hotkeys wraps to two rows where the glued spelling took one,
+so a page holds one row less and the wrap can fall between a key and its label.
+That is paid for by the paginator, which measures the bar it will actually show,
+and it is worth one row not to make the player learn two spellings of the same
+thing.
 
 At every action bar -- service pages, the chart, the mission board, the star
 map, the route planner and the draft editors alike -- whitespace and unsupported
@@ -5068,7 +5068,8 @@ connections; it does not change galaxy generation or save state. It opens in the
 current sector with next/previous sector navigation and a galaxy overview. Known
 stations, the current position, tracked objective and an explicitly plotted route
 have distinct ASCII markers, with a paginated list alternative and exact-coordinate
-station inspection. Narrow terminals below 40 columns or 12 rows use the list.
+station inspection. The list is always available; the spatial map needs the room
+the 40x12 floor guarantees.
 Projected cell collisions are labelled; the exact list/inspection remains authoritative.
 Only discovered station details are public, except a contract's named target.
 Uncharted route points show bearings and unknown danger. Ordinary connection lines
@@ -5476,10 +5477,9 @@ browsing preserves encounter RNG and resumable state. The combat action bar
 labels every verb like the other detail screens (`[F] Fire [G] Guard [E] Evade
 [D] Dump [P] Pay bribe ... [I] Info`) instead of a bare letter list, and Dump appears
 only with cargo aboard; with an empty hold `D` is not a displayed action and
-does nothing (issue #414). Below 40 columns the bar keeps the compact letter
-list, as the pilot record already does for its view keys: the labels wrap to
-four rows there and would leave a ten-row page a single row for the fight
-itself, and on that terminal the fight is what the caller needs to see.
+does nothing (issue #414). Every verb is named at every supported size: the
+compact letter list this kept below 40 columns went with those terminals
+(issue #495).
 
 Every path that ends an active contract without payment records it (issue #403):
 failed escort or bounty fights and abandonment count as failed, deadline expiry
@@ -6975,7 +6975,8 @@ indexes and fetch at most 500 records.
 
 The login summary shows unread events oldest first; free `[H]istory` replays
 retained events newest first with UTC timestamps and NEW/READ labels. Both views
-paginate for terminal width and height down to 20x10 and show the retention limit.
+paginate for terminal width and height down to the 40x12 floor and show the
+retention limit.
 Smaller terminals receive a size diagnostic without acknowledging anything.
 Continuing a summary page accepts only records whose final line was displayed;
 Back and disconnect leave that page unread. History navigation does not acknowledge
@@ -6991,7 +6992,7 @@ world transaction and never clears raid protection or acknowledges events.
 The countdowns are snapshots refreshed when navigating or returning from an action.
 
 Next/Prev pages keep action and free-browsing keys visible at 80x24, 40x12 and
-20x10. Smaller terminals receive an explicit minimum-size response before opening
+40x12. Smaller terminals receive an explicit minimum-size response before opening
 the world. Action outcomes, rejected actions and season-change notices wait for
 acknowledgement before the dashboard clears them. Cancelling a target selection
 returns directly. Detailed action previews remain a subsequent slice 3 bullet.
@@ -7139,7 +7140,7 @@ rivals show their reason and have no active selection key.
 Raid selection uses the same stable, bounded directory batches as browsing, so all
 eligible crews are reachable beyond the former random fifty-row sample. Result
 pages retain every net resource change until continued or left with Back. These
-paths support 80x24, 40x12 and 20x10, including long names, wide/combining text and
+paths support 80x24, 48x14 and 40x12, including long names, wide/combining text and
 large resource values; manual terminal/transport validation remains slice 9.
 
 **First visit and recovery (issue #362, slice 3).** New callers receive a short,

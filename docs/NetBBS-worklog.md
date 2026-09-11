@@ -4957,7 +4957,8 @@ every launch.
 
 Voidrunner prints every hotkey as `[K] Label`, without exception (issue #400).
 A test must not tell an action bar from a body row by its hotkey style -- there
-is only one -- and must not assume a phrase lands on a given page at 20 columns,
+is only one -- and must not assume a phrase lands on a given page at the 40x12
+floor,
 because the spaced bar can take a row the glued one did not. The bar is what
 `out_prompt` writes: it ends the frame, unterminated, and wraps into as many rows
 as the width needs, so its last row is no longer the whole of it. The
@@ -5063,7 +5064,7 @@ to trigger again; its budget and chart hint must use that same route. Chart
 tracking must name the actual displayed connection key, including uncharted legs.
 Later same-target bounties budget earlier contracts and their re-entry legs.
 Contract list pages reserve the actual wrapped footer/header height and split
-oversized entries into selectable continuations; row-count tests include 20x10.
+oversized entries into selectable continuations; row-count tests run at the 40x12 floor.
 A wrapped entry shows its hotkey once: `keyed_rows` prefixes the first row and
 indents continuation rows by the prefix width (a continuation that opens a new
 page carries the key again so that page stays selectable); do not re-key every
@@ -5102,7 +5103,7 @@ strip: a callsign may contain East Asian wide characters, which are two columns
 each. `title_rows` yields the large composition only when the 49-column logo
 fits and otherwise a complete compact one (wordmark, wrapped subtitle, stacked
 meta fields); no row may exceed `_box_inner_width()`, and tests assert one
-display width across every box row at 80, 40 and 20 columns.
+display width across every box row at 80, 48 and 40 columns.
 
 Voidrunner portraits paginate an entire authored composition as one group.
 Choose a complete compact version when either width or height rules out the
@@ -5788,7 +5789,7 @@ writes; scalar cargo usage must not share the health gauge's color semantics.
 
 Retained station outcomes belong exclusively inside the page budget. Printing
 settlement messages before the paging loop duplicates acknowledgements and can
-overflow even the first 20x10 frame; validate pending one-order and multi-order
+overflow even the first 40x12 frame; validate pending one-order and multi-order
 settlements between actual input requests, not only an idle command deck.
 
 Pilot-record pagination caches wrapped pages separately for each read-only view.

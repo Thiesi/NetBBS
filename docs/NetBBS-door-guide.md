@@ -219,7 +219,7 @@ beyond 500; there is no age expiry. The login summary is paginated: continuing
 accepts complete receipts on that page, while Back or disconnect leaves them
 unread. In history, use Next/Prev to browse, Ack page to acknowledge, and Back to
 return. New events arriving while you read remain unread. These screens fit down
-to 20x10; smaller terminals show a size diagnostic and preserve unread state.
+to the 40x12 floor; smaller terminals show a size diagnostic and preserve unread state.
 
 The main switchboard shows your resources, holdings and income, Rank progress,
 new events, raid protection, turn refill and the season deadline. Next/Prev pages
