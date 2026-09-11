@@ -3898,7 +3898,7 @@ class _PinnedUIState:
         channel: Channel,
         user: User,
         live_buffer: LiveInputBuffer,
-    ) -> bool:
+    ) -> int | None:
         height = session.terminal_height
         now_active = height >= _PINNED_UI_MIN_HEIGHT
         resized_in_place = now_active and self.active and height != self.last_height
@@ -3919,7 +3919,11 @@ class _PinnedUIState:
                 await session.write(reset_scroll_region() + clear_screen())
             self.active = now_active
         self.last_height = height
-        return self.active
+        # Return the same validated height used for this state transition.
+        # A transport resize may update ``session.terminal_height`` while the
+        # repaint above is awaiting database-backed status data; callers must
+        # not combine this decision with that newer, unchecked value.
+        return height if self.active else None
 
 
 def _seconds_until_next_minute(current: datetime.datetime) -> float:
@@ -4144,21 +4148,22 @@ async def _chat_loop(
     # hub.leave() cleanup as one landing in the wait() below (that
     pinned_ui: _PinnedUIState | None = None
     try:
-        pinned_ui_enabled = session.terminal_height >= _PINNED_UI_MIN_HEIGHT
         live_buffer = LiveInputBuffer()
         lock = asyncio.Lock()
         unicode_style = await lane.run(unicode_style_enabled, user)
         truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
         accent_color = await lane.run(effective_accent_color_256)
+        initial_height = session.terminal_height
+        pinned_ui_enabled = initial_height >= _PINNED_UI_MIN_HEIGHT
         pinned_ui = _PinnedUIState(
             active=pinned_ui_enabled,
-            last_height=session.terminal_height,
+            last_height=initial_height,
             accent_color=accent_color,
             unicode_style=unicode_style,
             truecolor=truecolor,
         )
         if pinned_ui_enabled:
-            await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - _PINNED_ROWS))
+            await session.write(clear_screen() + set_scroll_region(1, initial_height - _PINNED_ROWS))
 
         safe_channel_name = sanitize_text(channel.name)
         channel_label = colored(f"#{safe_channel_name}", fg_color=accent_color, bold=True)
@@ -4238,7 +4243,7 @@ async def _chat_loop(
             # this initial setup completes) -- no concurrent writer exists
             # at this exact point, so this first paint needs no lock.
             await _repaint_input_row(
-                session, live_buffer, session.terminal_height,
+                session, live_buffer, initial_height,
                 accent_color=accent_color, unicode_style=unicode_style,
             )
 
@@ -4248,11 +4253,12 @@ async def _chat_loop(
             when the pinned UI is active.
             """
             async with lock:
-                if not await pinned_ui.sync(session, lane, hub, presence, channel, user, live_buffer):
+                height = await pinned_ui.sync(session, lane, hub, presence, channel, user, live_buffer)
+                if height is None:
                     await session.write_line(text)
                     return
                 await _print_and_redraw_input(
-                    session, text, live_buffer, session.terminal_height,
+                    session, text, live_buffer, height,
                     accent_color=pinned_ui.accent_color, unicode_style=pinned_ui.unicode_style,
                 )
                 if repaint_status:
@@ -4376,11 +4382,11 @@ async def _chat_loop(
                 # session, not just decide it once up front.
                 try:
                     async with lock:
-                        pinned_ui_enabled = await pinned_ui.sync(
+                        pinned_height = await pinned_ui.sync(
                             session, lane, hub, presence, channel, user, live_buffer
                         )
-                        if pinned_ui_enabled:
-                            await _enter_content_region(session, session.terminal_height)
+                        if pinned_height is not None:
+                            await _enter_content_region(session, pinned_height)
 
                         if not await lane.run(account_still_active, user):
                             # GitHub issue #29 (reopened): the same cross-process
@@ -4615,9 +4621,12 @@ async def _chat_loop(
                     # decides whether the final per-iteration repaint below
                     # is even valid to attempt.
                     async with lock:
-                        if await pinned_ui.sync(session, lane, hub, presence, channel, user, live_buffer):
+                        pinned_height = await pinned_ui.sync(
+                            session, lane, hub, presence, channel, user, live_buffer
+                        )
+                        if pinned_height is not None:
                             await _repaint_input_row(
-                                session, live_buffer, session.terminal_height,
+                                session, live_buffer, pinned_height,
                                 accent_color=pinned_ui.accent_color, unicode_style=pinned_ui.unicode_style,
                             )
 
@@ -5013,7 +5022,7 @@ class _DirectChatPinnedUIState:
 
     async def sync(
         self, session: Session, user: User, other_user: User, presence: PresenceRegistry, live_buffer: LiveInputBuffer
-    ) -> bool:
+    ) -> int | None:
         height = session.terminal_height
         now_active = height >= _PINNED_UI_MIN_HEIGHT
         resized_in_place = now_active and self.active and height != self.last_height
@@ -5035,7 +5044,7 @@ class _DirectChatPinnedUIState:
                 await session.write(reset_scroll_region() + clear_screen())
             self.active = now_active
         self.last_height = height
-        return self.active
+        return height if self.active else None
 
 
 async def run_direct_chat_loop(
@@ -5063,18 +5072,19 @@ async def run_direct_chat_loop(
     queue = hub.join(room, participant_id)
     pinned_ui: _DirectChatPinnedUIState | None = None
     try:
-        pinned_ui_enabled = session.terminal_height >= _PINNED_UI_MIN_HEIGHT
+        initial_height = session.terminal_height
+        pinned_ui_enabled = initial_height >= _PINNED_UI_MIN_HEIGHT
         live_buffer = LiveInputBuffer()
         lock = asyncio.Lock()
         pinned_ui = _DirectChatPinnedUIState(
             active=pinned_ui_enabled,
-            last_height=session.terminal_height,
+            last_height=initial_height,
             accent_color=accent_color,
             unicode_style=unicode_style,
             truecolor=effective_tc,
         )
         if pinned_ui_enabled:
-            await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - _PINNED_ROWS))
+            await session.write(clear_screen() + set_scroll_region(1, initial_height - _PINNED_ROWS))
 
         close_hint = menu_key("/close", " to leave")
         heading = screen_title(
@@ -5099,7 +5109,7 @@ async def run_direct_chat_loop(
             # concurrent writer exists at this exact point, so this first
             # paint needs no lock, matching _chat_loop's own entry.
             await _repaint_input_row(
-                session, live_buffer, session.terminal_height,
+                session, live_buffer, initial_height,
                 accent_color=accent_color,
                 unicode_style=unicode_style,
             )
@@ -5107,11 +5117,12 @@ async def run_direct_chat_loop(
         async def deliver(text: str) -> None:
             """Same shape as `_chat_loop`'s own `deliver` closure."""
             async with lock:
-                if not await pinned_ui.sync(session, user, other_user, presence, live_buffer):
+                height = await pinned_ui.sync(session, user, other_user, presence, live_buffer)
+                if height is None:
                     await session.write_line(text)
                     return
                 await _print_and_redraw_input(
-                    session, text, live_buffer, session.terminal_height,
+                    session, text, live_buffer, height,
                     accent_color=pinned_ui.accent_color,
                     unicode_style=pinned_ui.unicode_style,
                 )
@@ -5151,18 +5162,18 @@ async def run_direct_chat_loop(
                 line = (await session.read_line(live_buffer=live_buffer, lock=lock)).strip()
 
                 async with lock:
-                    pinned_ui_enabled_now = await pinned_ui.sync(session, user, other_user, presence, live_buffer)
-                    if pinned_ui_enabled_now:
+                    pinned_height = await pinned_ui.sync(session, user, other_user, presence, live_buffer)
+                    if pinned_height is not None:
                         # `read_line` has atomically cleared live_buffer
                         # after echoing Enter. Paint that empty state
                         # before the committed line is rendered in the
                         # content region, otherwise the old input remains
                         # visible below an identical `you:` line.
                         await _repaint_input_row(
-                            session, live_buffer, session.terminal_height,
+                            session, live_buffer, pinned_height,
                             accent_color=pinned_ui.accent_color, unicode_style=pinned_ui.unicode_style,
                         )
-                        await _enter_content_region(session, session.terminal_height)
+                        await _enter_content_region(session, pinned_height)
 
                     if not line:
                         continue
