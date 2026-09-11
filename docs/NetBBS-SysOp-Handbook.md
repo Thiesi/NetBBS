@@ -273,6 +273,14 @@ File bytes are node-local. Over Link, only catalogue/descriptor metadata
 is distributed — files are fetched on demand in bounded chunks, not
 mirrored to every node automatically.
 
+**Transfers.** Zmodem needs a terminal that implements it, which most callers'
+clients do not (PuTTY has never had it, and neither has a browser tab). With the
+web listener enabled and `[web] public_url` set, the file screen offers a
+single-use HTTP link instead: `[W]eb transfer` on any terminal, and on the web
+client the page itself opens a drop target or starts the download. Links expire
+in ten minutes, work once, and re-check every permission when they are redeemed —
+see the operator guide for the reverse-proxy and TLS shape.
+
 **Descriptions and `FILE_ID.DIZ`.** An uploaded archive is read for a
 `FILE_ID.DIZ` member; when it has one, that text becomes the file's
 description with no work from whoever uploaded it. ZIP works out of the

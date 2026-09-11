@@ -1677,6 +1677,30 @@ async def _offer_transfer_link(
         if direction == UPLOAD
         else f"download of {sanitize_text(entry.filename)!r}"
     )
+
+    # A caller who is already in a browser should not have to select a
+    # URL off a terminal and open it by hand (issue #475): the page is
+    # told about the transfer and opens a file picker or starts the
+    # download itself. The URL is still printed when that fails or when
+    # the transport has no such notion -- which is every terminal.
+    offer_transfer = getattr(session, "offer_transfer", None)
+    handled = False
+    if offer_transfer is not None:
+        handled = await offer_transfer(
+            direction=direction, url=url,
+            filename=entry.filename if entry is not None else None,
+        )
+    if handled:
+        await session.write_line(
+            colored(
+                f"\r\nYour browser is handling the {what}."
+                if direction == DOWNLOAD
+                else "\r\nPick a file in your browser to upload it.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return
+
     await session.write_line(colored(f"\r\nOpen this in a browser to {what}:", fg_color=MUTED_COLOR))
     await session.write_line(f"  {colored(url, fg_color=VALUE_COLOR)}")
     await session.write_line(

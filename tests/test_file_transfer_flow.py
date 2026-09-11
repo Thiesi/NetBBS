@@ -273,3 +273,57 @@ def test_minting_a_link_does_not_touch_the_database_lane(db, lane, alice, grants
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
     assert issued_on == ["MainThread"]
+
+
+class PageSession(BrowserSession):
+    """A browser session whose page can act on a transfer itself."""
+
+    def __init__(self, *args, accepts=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.offered: list[dict] = []
+        self._accepts = accepts
+
+    async def offer_transfer(self, *, direction, url, filename=None):
+        self.offered.append({"direction": direction, "url": url, "filename": filename})
+        return self._accepts
+
+
+def test_a_browser_page_is_handed_the_transfer_rather_than_the_url(db, lane, alice, grants):
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+    session = PageSession(editor_keys=[_key("u")])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    assert len(session.offered) == 1
+    assert session.offered[0]["direction"] == "upload"
+    assert session.offered[0]["url"].startswith("https://bbs.example.org/transfer/")
+    # ... and the terminal says what is happening rather than printing a
+    # URL the caller would have to copy.
+    assert "Pick a file in your browser" in session.visible_output
+    assert _url_in(session) is None
+
+
+def test_a_download_offered_to_the_page_names_the_file(db, lane, alice, grants):
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+    session = PageSession(editor_keys=[_key("1")])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    assert session.offered[0]["direction"] == "download"
+    assert session.offered[0]["filename"] == "game.zip"
+    assert "Your browser is handling" in session.visible_output
+
+
+def test_a_page_that_cannot_take_it_still_gets_the_url(db, lane, alice, grants):
+    """A closed socket, an older client, a page that ignores the frame:
+    the caller must still end up with something they can use."""
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+    session = PageSession(editor_keys=[_key("u")], accepts=False)
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    assert _url_in(session) is not None
+    assert "works once" in session.visible_output

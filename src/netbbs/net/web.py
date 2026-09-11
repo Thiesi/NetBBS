@@ -380,6 +380,32 @@ class WebSession(Session):
         except (ConnectionResetError, RuntimeError) as exc:
             raise SessionClosedError("client disconnected entering door mode") from exc
 
+    async def offer_transfer(
+        self, *, direction: str, url: str, filename: str | None = None
+    ) -> bool:
+        """Hand this browser a transfer to perform (issue #475).
+
+        The caller is already in a browser, so a URL printed on the
+        terminal is a URL they would have to select and open by hand.
+        This tells the page instead: an upload opens a drop target with
+        a file picker in it, a download starts straight away. Returns
+        whether the frame went out, so the file screen can print the URL
+        as a fallback rather than leaving the caller with nothing.
+
+        Deliberately *offers* rather than acts: the page decides how to
+        present it, and a page that ignores the frame (an older client,
+        a stripped-down one) leaves the caller exactly where they were.
+        """
+        if self._ws.closed:
+            return False
+        try:
+            await self._ws.send_json({
+                "type": "transfer", "direction": direction, "url": url, "filename": filename,
+            })
+        except (ConnectionResetError, RuntimeError):
+            return False
+        return True
+
     async def leave_door_mode(self) -> None:
         was_active = self._door_active
         self._door_active = False

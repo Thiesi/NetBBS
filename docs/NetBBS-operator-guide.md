@@ -225,6 +225,52 @@ operating system's own multi-minute TCP timeout. Give your supervisor's own stop
 timeout enough headroom above `graceful_delay_seconds` plus that
 worst case (the example systemd unit sets `TimeoutStopSec=90`).
 
+## 3a. Web transport and file transfer links
+
+The web listener serves two things: the browser terminal, and the file-transfer
+endpoint (`/transfer/<token>`) that lets callers move files without a
+Zmodem-capable terminal. Most clients have none — PuTTY, Windows Terminal and an
+ordinary OpenSSH client included — so on a node without the web listener those
+callers cannot upload or download at all.
+
+Tell the node how it is reached:
+
+```toml
+[web]
+enabled = true
+host = "127.0.0.1"     # behind a proxy; bind publicly only if there is none
+port = 8080
+public_url = "https://bbs.example.org"
+```
+
+`public_url` is what goes into the links printed on the terminal. Without it a
+node bound to `0.0.0.0` has no way to know its own external address and will say
+it cannot hand out links rather than printing one that fails in a browser. A node
+bound to a specific address falls back to that address and port.
+
+**Put TLS in front of a public node.** A transfer link carries a bearer token in
+its URL: single-use and valid for ten minutes, which bounds the damage, but over
+plain HTTP it crosses the network in the clear along with the file itself. A
+reverse proxy terminating TLS and forwarding to the loopback listener is the
+supported shape, and it is also how you get the standard ports without running
+NetBBS as root:
+
+```
+# nginx, sketched
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;      # the terminal's websocket
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    client_max_body_size 128M;                   # at least the node's upload cap
+}
+```
+
+`client_max_body_size` matters: a proxy's own body limit is applied before
+NetBBS sees the request, so an upload cap the SysOp raised in the BBS is still
+enforced by whatever sits in front of it.
+
 ## 4. Persistent state
 
 Everything NetBBS writes to disk, all derived from the database path

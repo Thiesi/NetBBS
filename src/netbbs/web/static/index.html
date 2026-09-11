@@ -8,6 +8,20 @@
   <style>
     html, body { height: 100%; margin: 0; background: #0c0d10; overflow: hidden; }
     #terminal { height: 100%; padding: 4px; box-sizing: border-box; }
+    /* Issue #475: the file-transfer panel the BBS opens over the
+       terminal. Plain and small on purpose -- the terminal is the
+       interface, this is a file picker that visits. */
+    .transfer-panel { position: fixed; inset: 0; display: grid; place-items: center;
+                      background: rgba(12, 13, 16, 0.82); z-index: 10; }
+    .transfer-card { background: #14161b; color: #e2e8f0; border: 1px solid #2d3748;
+                     border-radius: 6px; padding: 1.25rem 1.5rem; min-width: 20rem;
+                     font-family: system-ui, sans-serif; }
+    .transfer-card h2 { margin: 0 0 .75rem; font-size: 1.1rem; }
+    .transfer-drop { border: 1px dashed #4a5568; border-radius: 4px; padding: 1.5rem;
+                     text-align: center; color: #a0aec0; }
+    .transfer-drop.is-over { border-color: #f6ad55; color: #f6ad55; }
+    .transfer-status { color: #a0aec0; font-size: .9rem; }
+    .transfer-card button { font: inherit; padding: .3rem .9rem; }
   </style>
 </head>
 <body>
