@@ -214,6 +214,26 @@ def test_table_columns_start_and_end_where_the_column_above_them_did():
     assert len(tails) == 1, f"third column starts in three places: {tails}"
 
 
+def test_a_tables_headings_are_on_every_page_of_that_table(monkeypatch):
+    """A caller who pages into the second half of the market is reading
+    unlabelled numbers otherwise -- and the marks that say which rows are a
+    table's are zero-width control characters, so anything sweeping controls off
+    a row has to leave them alone."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 12)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
+    world = _world_with_seed(493)
+    lines = vr.market_catalog_lines(world, vr.LEGAL_COMMODITIES)
+    pages = vr._service_pages(lines, "Market: 1,200cr", "[<] Prev [>] Next [B] Back: ")
+    assert len(pages) > 1, "the market did not page at 40x12"
+    for rows in pages:
+        text = " ".join(plain(row) for row in rows)
+        if not re.search(r"\[[A-Z]\] \w", text):
+            continue  # a page of footnotes is not a page of the table
+        assert "COMMODITY" in text and "BUY" in text, text
+
+
 @pytest.mark.parametrize("width,height", SIZES)
 def test_the_market_prices_line_up_on_every_row(monkeypatch, width, height):
     frame = render("market", monkeypatch, width, height)

@@ -5081,7 +5081,9 @@ _CREDIT_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?\s?cr\b")
 _FOREIGN_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-ln-zA-Z]"
                              r"|\x1b\([AB0-2]|\x1b[78HDM]"
                              r"|\x1b(?!\[[0-9;]*m)"
-                             r"|[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]")
+                             # \x01-\x03 are this file's own row marks,
+                             # stripped by `draw_page` as it prints.
+                             r"|[\x00\x04-\x08\x0b-\x1a\x1c-\x1f\x7f]")
 _KEY_RE = re.compile(r"\[[^\[\]]{1,9}\]")
 _GAUGE_RE = re.compile(r"[▀-▐░-▓■]{2,}")
 
