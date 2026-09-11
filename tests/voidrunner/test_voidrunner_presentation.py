@@ -451,7 +451,7 @@ def test_navigation_chart_pages_preserve_all_connections_and_career(monkeypatch,
     def choose():
         frame=output.getvalue();frames.append(frame);output.seek(0);output.truncate(0)
         plain=page_text(frame)
-        match=re.search(r"Navigation: Fuel 24/24 (\d+)/(\d+)",plain);assert match and len(frames)<300
+        match=re.search(r"Navigation: Fuel 24/24 (\d+)/(\d+)",page_title(frame));assert match and len(frames)<300
         assert "[B] Back" in plain
         return "Q" if match[1]==match[2] else ">"
     monkeypatch.setattr(vr,"read_key",choose)

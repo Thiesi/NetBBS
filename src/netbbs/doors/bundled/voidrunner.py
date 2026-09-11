@@ -4341,6 +4341,13 @@ def _box_title(p: "Palette", text: str, width: int | None = None, border_color: 
     return f"{col}{BOLD}╭{head}{dashes}╮{RESET}"
 
 
+def _box_top(p: "Palette", width: int | None = None, border_color: str | None = None) -> str:
+    """An untitled top border, for a page whose header goes in its body."""
+    width = _box_inner_width() if width is None else min(width, _box_inner_width())
+    col = border_color if border_color is not None else p.accent
+    return f"{col}{BOLD}╭{'─' * width}╮{RESET}"
+
+
 def _box_divider(p: "Palette", width: int | None = None, border_color: str | None = None) -> str:
     width = _box_inner_width() if width is None else min(width, _box_inner_width())
     col = border_color if border_color is not None else p.accent
@@ -5327,10 +5334,9 @@ def page_capacity(lines: list[str], title: str, footer: str) -> int:
     width = _page_content_width()
     bar_width = max(1, _OUTPUT_WIDTH - 1)
     max_pages = max(1, sum(len(_wrap_output(_mission_plain(line), width).split("\r\n")) for line in lines))
-    # A framed page spends exactly one row on its title, because the title is
-    # drawn into the top border; the action bar stays outside the box.
-    header_rows = (1 if _page_framed()
-                   else len(_wrap_output(title + f" {max_pages}/{max_pages}", bar_width).split("\r\n")))
+    # The header is one row when it fits the top border, and a border plus its
+    # wrapped rows when it does not; the action bar stays outside the box.
+    header_rows = _page_header_rows(f"{title} {max_pages}/{max_pages}")
     overhead = (len(_wrap_output(footer, bar_width).split("\r\n"))
                 + header_rows + _page_frame_rows() + 3)
     return max(1, _OUTPUT_HEIGHT - overhead)
@@ -6075,18 +6081,28 @@ def single_page_footer(footer: str, count: int) -> str:
 
 
 def _page_header(title: str, page: int, count: int) -> str:
-    """`Title n/m` for a page, trimmed to the border where it will not fit.
+    """`Title n/m` for a page. Never trimmed: a title says which contract, order
+    or station the page is about, and half of one is worse than a second row."""
+    return f"{title} {page + 1}/{count}"
 
-    The counter always survives the trim: it is the paging oracle for a reader
-    and for every scripted test.
+
+def _header_fits_border(header: str) -> bool:
+    """Whether a page's header can be drawn into its top border.
+
+    `_box_title` needs five columns for the corners, the leading dashes and the
+    spaces around the text. A header that wants more is drawn as the page's
+    first row under a plain border, and `page_capacity` charges that row.
     """
-    counter = f"{page + 1}/{count}"
+    return _page_framed() and _visible_width(header) <= max(1, _box_inner_width() - 5)
+
+
+def _page_header_rows(header: str) -> int:
+    """Rows a page spends on its header, frame included."""
     if not _page_framed():
-        return f"{title} {counter}"
-    budget = max(1, _box_inner_width() - 5)
-    if _visible_width(f"{title} {counter}") <= budget:
-        return f"{title} {counter}"
-    return f"{_fit_text(title, max(1, budget - _visible_width(counter) - 1))} {counter}"
+        return len(_wrap_output(header, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
+    if _header_fits_border(header):
+        return 1
+    return 1 + len(_wrap_output(header, _page_content_width()).split("\r\n"))
 
 
 def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) -> None:
@@ -6103,7 +6119,11 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
         for row in rows: out_line(row)
         return
     inner = _box_inner_width()
-    out_line(_box_title(p, header))
+    if _header_fits_border(header):
+        out_line(_box_title(p, header))
+    else:
+        out_line(_box_top(p))
+        rows = _wrap_output(header, _page_content_width()).split("\r\n") + list(rows)
     for row in rows:
         out_line(f"{p.accent}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.accent}│{RESET}")
     out_line(_box_bottom(p))
@@ -7184,7 +7204,14 @@ def screen_hall_of_fame(p: Palette, world: World, save_dir: Path, user_id: int) 
     footer = "[1-5] View [N] Next [P] Prev [B] Back: "
     category, page, cache = "wealth", 0, {}
     while True:
+        # The same rule the registration box follows: a screen whose title will
+        # not fit its border names itself more briefly, rather than spending one
+        # of the caller's body rows on a header -- at forty columns that row is
+        # a ranked pilot. Measured against the widest counter the screen can
+        # show, so the title cannot change under the caller as pages are added.
         title = "Hall of Fame: " + SCORE_CATEGORIES[category]
+        if _page_framed() and not _header_fits_border(f"{title} 99/99"):
+            title = "Fame: " + SCORE_CATEGORIES[category]
         if category not in cache:
             lines = achievement_lines(entries, category, user_id)
             lines += ["Views: [1] Wealth, [2] Trading, [3] Exploration, [4] Combat, [5] Completed careers.",
@@ -7271,8 +7298,7 @@ def screen_chart(p: Palette, world: World) -> int | None:
         title = f"Navigation: Fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}"
         pages = _chart_pages(world, title, footer, result)
         page = min(page, len(pages) - 1)
-        out_line(); out_line(f"{p.gold}{title} {page + 1}/{len(pages)}{RESET}")
-        for row in pages[page][0]: out_line(row)
+        draw_page(p, title, pages[page][0], page, len(pages))
         out_prompt(single_page_footer(footer, len(pages))); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return None
         if (moved := page_step(key, page, len(pages))) is not None: page = moved; continue
