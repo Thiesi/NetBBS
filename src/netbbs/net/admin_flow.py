@@ -13408,9 +13408,14 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
             await session.write_line("")
             return
         elif choice == "c":
-            updated = await edit_door_profile(session, lane, actor, door)
+            updated = await edit_door_profile(session, lane, actor, door, door_services=door_services)
             if updated is not None:
                 door = updated
+                # Reconcile straight away. Waiting for the next caller would
+                # leave an edited service's old process running, and removing
+                # a service hides the very controls which could stop it.
+                if door_services is not None:
+                    await door_services.adopt(door)
             await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice == "l":
             await show_door_diagnostic(session, lane, door)

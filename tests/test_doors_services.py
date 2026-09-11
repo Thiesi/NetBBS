@@ -308,6 +308,30 @@ def test_changing_only_the_executable_still_replaces_the_supervisor(db, lane, pl
     asyncio.run(scenario())
 
 
+def test_concurrent_reconciliation_installs_exactly_one_supervisor(db, lane, player, tmp_path):
+    """Two callers racing across adopt's stop await must not each install one."""
+    door = _door(db, player, tmp_path)
+
+    async def scenario():
+        manager = DoorServiceManager()
+        await manager.start_node_services([door])
+        try:
+            first = manager.get(door.id)
+            assert await first.wait_until_running(20)
+
+            edited = replace(door, profile=_profile(tmp_path, argv=["-c", "import time; time.sleep(90)"]))
+            both = await asyncio.gather(manager.adopt(edited), manager.adopt(edited))
+
+            assert both[0] is both[1], "each caller installed its own supervisor"
+            assert manager.get(door.id) is both[0], "a supervisor was left untracked"
+            running = [s for s in both if s._proc is not None and s._proc.returncode is None]
+            assert len(set(id(s) for s in running)) <= 1, "two companions ran against one game state"
+        finally:
+            await manager.stop_all()
+
+    asyncio.run(scenario())
+
+
 def test_changing_only_the_environment_also_replaces_the_supervisor(db, lane, player, tmp_path):
     door = _door(db, player, tmp_path)
 

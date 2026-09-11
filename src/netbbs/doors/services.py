@@ -63,13 +63,19 @@ def service_spec(profile) -> ServiceSpec | None:
     install = str(Path(profile.install_dir).resolve())
     substitutions = {"install_dir": install}
     health = service.get("health", {})
+    path = health.get("path", "").format_map(substitutions) if health else ""
+    if path and not Path(path).is_absolute():
+        # The service creates it relative to its own cwd, which is the
+        # installation directory -- not NetBBS's working directory, which is
+        # where `healthy()` would otherwise look and never find it.
+        path = str(Path(install) / path)
     return ServiceSpec(
         argv=tuple(argument.format_map(substitutions) for argument in service["argv"]),
         start=service.get("start", "with_node"),
         stop_grace_seconds=service.get("stop_grace_seconds", 10),
         memory_mb=service.get("service_memory_mb", 512),
         health_kind=health.get("kind", "pid") if health else "pid",
-        health_path=health.get("path", "").format_map(substitutions) if health else "",
+        health_path=path,
     )
 
 
@@ -165,9 +171,14 @@ class DoorService:
             # still ours to end, below.
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        await self._terminate()
+        # Termination finishes even while this coroutine is being cancelled --
+        # a SysOp halting a service whose session then drops, or a shutdown
+        # cancelling the halt, must not leave the process group alive.
+        _, cancelled = await _finish_owned(asyncio.create_task(self._terminate()))
         self.status.state = STOPPED
         self.status.since = None
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def restart(self) -> None:
         await self.stop()
@@ -296,24 +307,33 @@ class DoorService:
         if reader is not None and not reader.done():
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
-        proc, self._proc = self._proc, None
+        # Ownership is released only once the process is actually gone. Clearing
+        # it before the cancellable wait below would mean a cancel during the
+        # grace period skips the SIGKILL *and* leaves the later node-level
+        # stop_all with nothing to terminate, so the service outlives shutdown.
+        proc = self._proc
         if proc is None or proc.returncode is not None:
+            self._proc = None
             return
-        self._signal(proc, signal.SIGTERM if os.name == "posix" else None)
         try:
-            await asyncio.wait_for(self._wait(proc), timeout=self.spec.stop_grace_seconds)
-            return
-        except asyncio.TimeoutError:
-            _logger.warning("door service %r ignored SIGTERM for %ds; killing it",
-                            self.door_name, self.spec.stop_grace_seconds)
-        self._signal(proc, signal.SIGKILL if os.name == "posix" else None, kill=True)
-        try:
-            await asyncio.wait_for(self._wait(proc), timeout=_KILL_DEADLINE_SECONDS)
-        except asyncio.TimeoutError:
-            # Unkillable means stuck in the kernel. Leaving it behind is worse
-            # than a stalled shutdown is; say so loudly and carry on.
-            _logger.error("door service %r survived SIGKILL; abandoning it so shutdown can finish",
-                          self.door_name)
+            self._signal(proc, signal.SIGTERM if os.name == "posix" else None)
+            try:
+                await asyncio.wait_for(self._wait(proc), timeout=self.spec.stop_grace_seconds)
+                return
+            except asyncio.TimeoutError:
+                _logger.warning("door service %r ignored SIGTERM for %ds; killing it",
+                                self.door_name, self.spec.stop_grace_seconds)
+            self._signal(proc, signal.SIGKILL if os.name == "posix" else None, kill=True)
+            try:
+                await asyncio.wait_for(self._wait(proc), timeout=_KILL_DEADLINE_SECONDS)
+            except asyncio.TimeoutError:
+                # Unkillable means stuck in the kernel. Leaving it behind is
+                # worse than a stalled shutdown is; say so loudly and carry on.
+                _logger.error("door service %r survived SIGKILL; abandoning it so shutdown can finish",
+                              self.door_name)
+        finally:
+            if proc.returncode is not None:
+                self._proc = None
 
     def _signal(self, proc, number, *, kill=False) -> None:
         try:
@@ -354,6 +374,11 @@ class DoorServiceManager:
 
     def __init__(self):
         self._services: dict[int, DoorService] = {}
+        #: One per door. `adopt` awaits a stop in the middle of replacing a
+        #: supervisor, and two callers reconciling the same edited profile
+        #: across that await would otherwise each install one -- leaving a
+        #: companion nobody tracks, and two servers on one game's state.
+        self._locks: dict[int, asyncio.Lock] = {}
 
     def get(self, door_id: int) -> DoorService | None:
         return self._services.get(door_id)
@@ -370,18 +395,20 @@ class DoorServiceManager:
         from the map alone would leave its process running with nothing owning
         it and nothing able to stop it again.
         """
-        spec = service_spec(door.profile)
-        existing = self._services.get(door.id)
-        if existing is not None and existing.identity == launch_identity(door, spec):
-            return existing
-        if existing is not None:
-            del self._services[door.id]
-            await existing.stop()
-        if spec is None:
-            return None
-        service = DoorService(door, spec)
-        self._services[door.id] = service
-        return service
+        lock = self._locks.setdefault(door.id, asyncio.Lock())
+        async with lock:
+            spec = service_spec(door.profile)
+            existing = self._services.get(door.id)
+            if existing is not None and existing.identity == launch_identity(door, spec):
+                return existing
+            if existing is not None:
+                del self._services[door.id]
+                await existing.stop()
+            if spec is None:
+                return None
+            service = DoorService(door, spec)
+            self._services[door.id] = service
+            return service
 
     async def start_node_services(self, doors) -> None:
         """Start everything declared `with_node`; a failure never blocks startup."""
@@ -408,10 +435,18 @@ class DoorServiceManager:
         else:
             if service.spec.start == "on_first_caller" and service.status.state == STOPPED:
                 service.start()
+            deadline = time.monotonic() + wait_seconds
             if not await service.wait_until_running(wait_seconds):
                 problem = f"{door.name}'s service is not running. Ask the SysOp to start it."
-            elif not await service.healthy():
-                problem = f"{door.name}'s service is not answering. Ask the SysOp to check it."
+            else:
+                # Health gets the rest of the same readiness budget, not one
+                # probe: a server which binds its socket a second after it
+                # starts is starting normally, not failing.
+                while not await service.healthy():
+                    if time.monotonic() >= deadline:
+                        problem = f"{door.name}'s service is not answering. Ask the SysOp to check it."
+                        break
+                    await asyncio.sleep(0.1)
         if problem is not None:
             _logger.warning("refused to launch door %r: service state %s", door.name, service.status.state)
         return problem

@@ -51,7 +51,7 @@ def _draft(door):
     return value
 
 
-async def edit_door_profile(session, lane, actor, door):
+async def edit_door_profile(session, lane, actor, door, *, door_services=None):
     draft = _draft(door)
 
     async def original_api_prompt(session, lane, draft):
@@ -116,6 +116,20 @@ async def edit_door_profile(session, lane, actor, door):
         except ProfileError as exc:
             await session.write_line(sanitize_text(str(exc)))
             return
+        # A door with a companion service is only meaningfully testable against
+        # the service its own draft describes. The supervised one belongs to the
+        # saved profile, so testing an edited draft against it would report a
+        # result about a configuration nobody is editing.
+        if candidate.profile is not None and candidate.profile.service:
+            from netbbs.doors.services import launch_identity, service_spec
+            running = door_services.get(door.id) if door_services is not None else None
+            if running is None or running.identity != launch_identity(candidate, service_spec(candidate.profile)):
+                await session.write_line(
+                    "This draft's companion service is not the one running. Save, then start or restart "
+                    "the service from the door detail screen before testing.")
+                await session.write_line("Press any key to return to the draft.")
+                await session.read_any_key()
+                return
         await session.write_line("A test runs the configured program/service and can change its game data.")
         if not await prompt_yes_no(session, "Launch this test now?", default=False):
             return
