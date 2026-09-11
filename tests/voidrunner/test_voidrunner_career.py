@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from .support import page_title, plain as plainly, _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
+from .support import page_source, page_title, plain as plainly, _Sys, _VOIDRUNNER_PATH, _add_cargo, _box_rows, _door_stopped_at, _escort_world, _finale_world, _set_cargo, _world_with_named_crew, _world_with_pending_fight, _world_with_seed, page_text, vr
 
 
 def test_retire_pilot_increments_retirements_and_grants_cumulative_bonus():
@@ -2597,7 +2597,7 @@ def test_career_finale_complete_terms_fit_every_page_without_writes(monkeypatch,
         bodies.append(page_text(body.split("[1-4] Choose")[0])); return "B" if page==count else ">"
     monkeypatch.setattr(vr,"read_key",choose)
     with contextlib.redirect_stdout(output):assert vr.screen_career_finale(vr.Palette(False),world) is None
-    assert " ".join(" ".join(bodies).split())==" ".join(" ".join(vr.career_finale_lines(world.save,finale)).split())
+    assert " ".join(" ".join(bodies).split())==page_source(vr.career_finale_lines(world.save,finale))
     assert world.save.to_dict()==before and world.event_rng.getstate()==rng
 
 

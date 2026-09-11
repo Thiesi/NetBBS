@@ -746,8 +746,11 @@ def test_screen_crew_and_galaxy_map_boxes_match_79_columns(monkeypatch):
     monkeypatch.setattr(vr, "read_key", lambda: "B")
     with contextlib.redirect_stdout(io.StringIO()) as output:
         vr.screen_galaxy_map(p, world)
-    borders = [line for line in output.getvalue().splitlines() if line.startswith("+-")]
-    assert len(borders) == 2 and {len(line) for line in borders} == {79}
+    # The grid is coloured as it is printed (issue #493), so its border rows
+    # open with an escape; the width they have to match is the visible one.
+    borders = [plain(line) for line in output.getvalue().splitlines()
+               if plain(line).startswith("+-")]
+    assert len(borders) == 2 and {vr._visible_width(line) for line in borders} == {79}
 
 
 def test_empty_mission_board_renders_clean_notice_and_back(monkeypatch):

@@ -3817,11 +3817,32 @@ def career_path_lines(save: SaveData) -> list[str]:
               "explorer": ((12,30,GALAXY_SYSTEM_COUNT), ("Local","Scout","Pathfinder","Cartographer")),
               "combat": ((5,20,50), ("Unproven","Escort","Defender","Ace"))}
     labels = {key:names[sum(progress[key] >= mark for mark in marks)] for key,(marks,names) in stages.items()}
-    return [f"Trader ({labels['trader']}): {progress['trader']:+,}cr known-cost market margin; stages 5,000 / 20,000 / 50,000cr.",
-            "Market margin excludes deliveries, unknown-cost receipts and other income. It is before operating costs, not total career profit.",
-            f"Explorer ({labels['explorer']}): {progress['explorer']}/{GALAXY_SYSTEM_COUNT} systems charted; stages 12 / 30 / all systems.",
-            f"Combat ({labels['combat']}): {progress['combat']} combat victories; stages 5 / 20 / 50.",
-            "Paths are independent. Reach a final stage for its career conclusion and starting equipment; [R] Finale shows the terms."]
+    p = pal()
+    # A narrower bar than the cockpit's: three of them share a row with a
+    # reading and a target, and the bar is the least precise of the three.
+    cells = max(6, min(12, _page_content_width() // 5))
+    rows, styles = [], []
+    for key, (marks, _names) in stages.items():
+        reached = sum(progress[key] >= mark for mark in marks)
+        # The bar runs to the next stage the path can reach, or is full at the
+        # last one: three paths on one screen only compare if they share a scale.
+        floor = 0 if not reached else marks[reached - 1]
+        ceiling = marks[reached] if reached < len(marks) else marks[-1]
+        done = reached >= len(marks)
+        value = f"{progress[key]:+,}cr" if key == "trader" else f"{progress[key]}"
+        rows.append([f"{key.title()} ({labels[key]}):",
+                     gauge(1 if done else progress[key] - floor, 1 if done else max(1, ceiling - floor),
+                           cells, tone="brand" if done else None),
+                     value,
+                     badge("final", "good") if done
+                     else f"{p.slate}of{RESET} {p.ink}{ceiling:,}{RESET}"])
+        styles.append(["label", "value", "value", "value"])
+    lines = table(["", "", "", ""], rows, "llrl", styles=styles, repeat_header=False)[1:]
+    lines += ["Progress is market margin, systems charted and combat victories.",
+              "Stages: trader 5,000 / 20,000 / 50,000cr, explorer 12 / 30 / all systems, combat 5 / 20 / 50 victories.",
+              "Market margin excludes deliveries, unknown-cost receipts and other income. It is before operating costs, not total career profit.",
+              "Paths are independent. Reach a final stage for its career conclusion and starting equipment; [R] Finale shows the terms."]
+    return lines
 
 
 def career_finale_blocker(save: SaveData, finale: str) -> str | None:
@@ -3877,9 +3898,28 @@ def career_dossier_lines(save: SaveData) -> list[str]:
 
 
 def career_finale_lines(save: SaveData, selected: str) -> list[str]:
-    lines = ["Choose how this career ends. Selection alone changes nothing."] + career_path_lines(save)
+    p = pal()
+    lines = [f"{p.plasma}{BOLD}{_mission_plain(save.pilot.handle)}{RESET}  "
+             f"{p.slate}{career_rank(save.pilot)}{RESET}  {p.gold}{glyph('credits')} {save.pilot.credits:,}cr{RESET}  "
+             + "  ".join([chip("day", str(save.turn)), chip("careers", str(save.pilot.retirements + 1))]),
+             "Choose how this career ends. Selection alone changes nothing.",
+             section("PATHS")]
+    lines += career_path_lines(save)
+    lines.append(section("ENDINGS"))
+    endings, styles, blockers = [], [], []
     for index, (finale, info) in enumerate(CAREER_FINALES.items(), 1):
-        lines.append(f"[{index}] {info['label']}{' [SELECTED]' if finale == selected else ''}: {career_finale_blocker(save, finale) or 'Available.'}")
+        blocker = career_finale_blocker(save, finale)
+        endings.append([key_label(str(index), info["label"], tone="value" if not blocker else "label"),
+                        badge("[SELECTED]", "brand") if finale == selected else ""])
+        styles.append(["value", "value"])
+        blockers.append(blocker)
+    # The requirement is a sentence, not a column: it is longer than the two
+    # things beside it put together, and it belongs under its own ending.
+    _, records = table_records(["", ""], endings, "ll", styles=styles)
+    for record, blocker in zip(records, blockers):
+        lines.append("\n".join(record + [
+            f"  {p.slate}{blocker}{RESET}" if blocker else f"  {badge('Available', 'good')}"]))
+    lines.append(section("NEW GAME+"))
     info = CAREER_FINALES[selected]
     credits = 1200 + (save.pilot.retirements+1)*RETIREMENT_STARTING_CREDITS_BONUS
     gear = f"{info['tier'].title()} tier 1" if info["tier"] else "ordinary starting modules"
@@ -7619,11 +7659,31 @@ def mission_bearing(world: World, mission: Mission) -> str:
 
 def mission_details(world: World, mission: Mission) -> list[str]:
     """Read-only terms and explicit estimates; never reveal remote market state."""
+    p = pal()
     path = mission_route(world, mission)
     reward = mission_reward_for(world.save, mission.kind, mission.reward)
     target = world.by_id[mission.target_system]
-    lines = [mission.description, f"Destination: {mission_bearing(world, mission)}",
-             f"Target danger: {target.danger}" if target.discovered else "Target danger: uncharted"]
+    kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
+    risk, tone = MISSION_RISK.get(mission.kind, ("CONTRACT", "info"))
+    # The terms first, as terms: what it is, what it pays, and how far away the
+    # job is, on two rows the caller can read without reading a paragraph.
+    lines = [f"{chip(kind, None)} {p.ink}{_mission_plain(target.name)}{RESET}  {badge(risk, tone)}"
+             f"   {p.gold}+{reward:,}cr{RESET}"]
+    terms = [f"{p.slate}route{RESET} " + f" {p.deep}{glyph('arrow')}{RESET} ".join(
+        f"{p.ink}{_mission_plain(world.by_id[sid].name) if world.by_id[sid].discovered else '?'}{RESET}"
+        for sid in ([world.save.current_system] + list(path))[:5])]
+    if mission.deadline_turn is not None:
+        left = mission.deadline_turn - world.save.turn
+        terms.append(f"{p.slate}due{RESET} {p.ink}day {mission.deadline_turn}{RESET} "
+                     + (badge("EXPIRED", "danger") if left < 0 else
+                        f"{gauge(left, max(1, MISSION_BOARD_DAYS * 2), 6, tone='danger' if left <= 1 else 'caution' if left <= 3 else 'good')}"
+                        f" {p.ink}{left}{RESET} {p.slate}left{RESET}"))
+    else:
+        terms.append(f"{p.slate}no deadline{RESET}")
+    lines.append("   ".join(terms))
+    lines.append(section("TERMS"))
+    lines += [mission.description, f"Destination: {mission_bearing(world, mission)}",
+              f"Target danger: {target.danger}" if target.discovered else "Target danger: uncharted"]
     ahead = preceding_bounties(world, mission)
     if ahead:
         lines.append(f"Queued bounties: {ahead} earlier contract(s) at this target resolve first. Budget includes re-entry after each, assuming they remain active and you win.")
@@ -7702,7 +7762,10 @@ def mission_details(world: World, mission: Mission) -> list[str]:
         lines.append("WARNING: a shortest-route jump exceeds tank capacity; upgrade or find another route.")
     if outlay > world.save.pilot.credits:
         lines.append("WARNING: current credits do not cover the estimated remaining outlay.")
-    return [_mission_plain(line) for line in lines]
+    # Sanitize the rows built out of save data; never a completed styled row,
+    # whose own untrusted segments were sanitized before they were styled.
+    return [line if (ANSI_ESCAPE_RE.search(line) or line.startswith(SECTION_MARK))
+            else _mission_plain(line) for line in lines]
 
 
 def _mission_text_pages(lines: list[str], *, overhead: int = 7) -> list[list[str]]:
@@ -8665,6 +8728,46 @@ def spatial_map_grid(world: World, path: list[int], *, public_target: int | None
     return [border] + ["|" + "".join(row) + "|" for row in grid] + [border]
 
 
+# What each mark on the star map means, and therefore what colour it is. The
+# grid itself stays plain -- it is a projection, and the exact links live in
+# Info -- so the colour is put on as it is printed.
+MAP_MARK_TONES = {"@": "brand", "!": "danger", "X": "caution", "+": "info",
+                  "*": "brand", "o": "value", "?": "label", ":": "brand"}
+
+
+def style_map_row(p: "Palette", row: str) -> str:
+    """One grid row, each mark in the tone its legend gives it."""
+    pieces, run, tone = [], "", None
+    for character in row:
+        if character in "+-|" and (row[0] in "+" or character == "|"):
+            mark = "frame"
+        else:
+            mark = MAP_MARK_TONES.get(character, "chrome" if character == "." else None)
+        if mark != tone and run:
+            pieces.append(_map_run(p, run, tone))
+            run = ""
+        tone, run = mark, run + character
+    pieces.append(_map_run(p, run, tone))
+    return "".join(pieces)
+
+
+def _map_run(p: "Palette", run: str, tone: str | None) -> str:
+    if not run or tone is None:
+        return run
+    colour = p.hull if tone == "frame" else (p.deep if tone == "chrome" else p.tone(tone))
+    return f"{colour}{run}{RESET}"
+
+
+def map_legend(p: "Palette") -> str:
+    """The legend as chips, in the same tones the grid draws the marks in."""
+    marks = [("@", "here"), ("!", "goal"), ("X", "end"), ("*", "route"),
+             ("o", "known"), ("?", "new"), ("+", "many")]
+    return " ".join(
+        f"{p.deep}{glyph('chip_l')}{RESET}{p.tone(MAP_MARK_TONES[mark])}{mark}{RESET}"
+        f" {p.slate}{label}{RESET}{p.deep}{glyph('chip_r')}{RESET}"
+        for mark, label in marks) + f" {p.deep}.{RESET}{p.slate}link{RESET} {p.plasma}:{RESET}{p.slate}route{RESET}"
+
+
 def map_list_lines(world: World, path: list[int], public_target: int | None) -> list[str]:
     ids = map_system_ids(world, path, public_target)
     hops = bfs_hops(world.by_id, world.here.id)
@@ -8744,12 +8847,13 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
             heading = "Star Map: " + (SECTOR_NAMES[sector] if sector is not None else "Galaxy")
             xmin, xmax, ymin, ymax = map_bounds(sector)
             bounds = f"X {xmin}-{xmax}; Y {ymin}-{ymax}"
-            legend = "@ Here ! Goal X End * Route o Known + Cluster; . link : route"
+            legend = map_legend(p)
             footer = "[N/P] Sector [O] Overview [L] List [I] Info [B] Back: "
             overhead = 2 + sum(len(_wrap_output(text, max(1, _OUTPUT_WIDTH - 1)).split("\r\n")) for text in (heading, bounds, legend, footer))
-            out_line(heading); out_line(bounds)
+            out_line(f"{p.hull}{BOLD}{heading}{RESET}"); out_line(f"{p.slate}{bounds}{RESET}")
             for row in spatial_map_grid(world, path, public_target=public_target, sector=sector,
-                                        columns=_OUTPUT_WIDTH - 1, rows=_OUTPUT_HEIGHT - overhead): out_line(row)
+                                        columns=_OUTPUT_WIDTH - 1, rows=_OUTPUT_HEIGHT - overhead):
+                out_line(style_map_row(p, row))
             out_line(legend)
         out_prompt(footer); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return
@@ -9457,6 +9561,34 @@ COMBAT_LABELS = {"F": "Fire", "G": "Guard", "E": "Evade", "D": "Dump", "P": "Pay
                  "S": "Surrender", "V": "Verify", "R": "Report", "W": "Withdraw", "T": "Target"}
 
 
+COMBAT_DRAIN_STEPS = 8
+
+
+def drain_gauge(label: str, start: int, end: int, maximum: int, *, tone: str | None = None) -> None:
+    """Walk one bar from its old reading to its new one, on its own row.
+
+    Redrawn in place with a carriage return and nothing else -- no cursor
+    addressing, which is the one movement every terminal a BBS meets can do.
+    Any keypress ends it at the final reading, and the row is left showing that
+    reading either way, so a skipped effect and a watched one end identically.
+    """
+    if start == end or motion_interrupted():
+        return
+    p = pal()
+    cells = _gauge_cells()
+    width = max(1, _OUTPUT_WIDTH - 1)
+    for step in range(1, COMBAT_DRAIN_STEPS + 1):
+        value = round(start + (end - start) * step / COMBAT_DRAIN_STEPS)
+        row = (f"  {p.slate}{label}{RESET} {gauge(value, maximum, cells, tone=tone)} "
+               f"{p.ink}{value}/{maximum}{RESET}")
+        out("\r" + _fit_text(row, width))
+        if not motion_pause(0.05):
+            break
+    row = (f"  {p.slate}{label}{RESET} {gauge(end, maximum, cells, tone=tone)} "
+           f"{p.ink}{end}/{maximum}{RESET}")
+    out("\r" + _fit_text(row, width) + "\r\n")
+
+
 def combat_action_bar(actions: str) -> str:
     """Every combat verb labelled like the other detail screens; Info and paging follow.
     There is no Back in a fight, so this does not reuse `_detail_action_bar`.
@@ -9534,6 +9666,9 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             continue
         lines = []
         outcome = None
+        # What the two hulls read before the exchange, so the bars can be walked
+        # to their new readings afterwards -- after the commit, never before it.
+        opened_at = (pirate.hp, ship.hull_hp)
         engaging = (action in ("F", "E") or (action == "G" and tactics["brace_ready"])
                     or (action == "D" and not patrol and cargo_aboard) or (action == "P" and not patrol and can_pay))
         if warrant is not None and engaging: warrant["engaged"] = True
@@ -9602,6 +9737,8 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             outcome = "destroyed"
         combat.update(pirate=dataclasses.asdict(pirate), outcome=outcome, lines=lines)
         world.commit()
+        drain_gauge(_mission_plain(pirate.name), opened_at[0], max(0, pirate.hp), pirate.hp_max, tone="danger")
+        drain_gauge("Your hull", opened_at[1], max(0, ship.hull_hp), hull_hp_max(ship))
         page = 0
         if outcome is not None:
             report_hop(world, lines)

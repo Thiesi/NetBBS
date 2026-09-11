@@ -116,6 +116,17 @@ def plain(text: str) -> str:
     return stripped
 
 
+def page_source(lines) -> str:
+    """A screen's own rows as `page_text` will show them back.
+
+    A screen names its groups with rules drawn across the page frame, and
+    `page_rows` drops border rows -- so a test comparing what a builder returned
+    against what the caller read has to drop them here too.
+    """
+    return " ".join(plain(" ".join(
+        line for line in lines if not line.startswith(vr.SECTION_MARK))).split())
+
+
 _ANSI_BYTES = re.compile(rb"\x1b\[[0-9;]*[a-zA-Z]")
 
 
