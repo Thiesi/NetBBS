@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pathlib
 import sys
 import time
 from dataclasses import replace
@@ -60,6 +61,8 @@ def test_install_dir_substitution_reaches_argv_and_health_path(tmp_path):
     ({"argv": ["ok"], "service_memory_mb": 8}, "service_memory_mb"),
     ({"argv": ["ok"], "health": {"kind": "http"}}, "pid or socket"),
     ({"argv": ["ok"], "health": {"kind": "socket"}}, "socket health needs a path"),
+    ({"argv": ["ok"], "health": {"kind": "pid", "path": 123}}, "pid health takes no path"),
+    ({"argv": ["ok"], "health": {"kind": "pid", "path": "{unknown}"}}, "pid health takes no path"),
     ({"argv": ["ok"], "nonsense": 1}, "unknown service fields"),
     ({"argv": ["{node_dir}"]}, "install_dir"),
 ])
@@ -382,6 +385,34 @@ def test_removing_a_service_from_a_profile_stops_it(db, lane, player, tmp_path):
             assert await manager.adopt(plain) is None
 
             assert old_proc.returncode is not None
+            assert manager.get(door.id) is None
+        finally:
+            await manager.stop_all()
+
+    asyncio.run(scenario())
+
+
+def test_a_relative_health_socket_anchors_to_the_installation_directory(tmp_path):
+    spec = service_spec(DoorProfile(install_dir=str(tmp_path), service={
+        "argv": ["-m", "game"], "health": {"kind": "socket", "path": "run/game.sock"}}))
+    # The service creates it against its own cwd; healthy() must look there,
+    # not relative to wherever the NetBBS process happens to be running.
+    assert spec.health_path == str(pathlib.Path(tmp_path) / "run/game.sock")
+
+
+def test_forgetting_a_deleted_door_stops_its_service(db, lane, player, tmp_path):
+    door = _door(db, player, tmp_path)
+
+    async def scenario():
+        manager = DoorServiceManager()
+        await manager.start_node_services([door])
+        try:
+            assert await manager.get(door.id).wait_until_running(20)
+            proc = manager.get(door.id)._proc
+
+            await manager.forget(door.id)
+
+            assert proc.returncode is not None, "the deleted door's companion kept running"
             assert manager.get(door.id) is None
         finally:
             await manager.stop_all()

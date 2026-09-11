@@ -847,8 +847,11 @@ async def run(
         # rather than holding up node startup.
         try:
             await door_services.start_node_services(list_doors(db))
-        except (OSError, ValueError) as exc:
-            _logger.error("could not start door services: %s", exc)
+        except Exception as exc:
+            # Deliberately broad. A door profile is operator-authored data
+            # parsed here, and no malformed stored profile may be able to stop
+            # the node from starting; the door simply has no service.
+            _logger.error("could not start door services: %s", exc, exc_info=exc)
         # Design doc §13.10, issue #75: this node's own PID, so a later
         # `netbbs.backup restore` can reliably refuse against an idle-
         # but-running node (the write-lock probe it also uses only ever

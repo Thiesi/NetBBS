@@ -13430,6 +13430,11 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
             await session.write_line("")
             deleted = await _delete_door_screen(session, lane, actor, door)
             if deleted:
+                # The registration is gone, so nothing could reach its service
+                # again; without this the companion and its restart loop run
+                # on until the node stops, with no control left to halt it.
+                if door_services is not None:
+                    await door_services.forget(door.id)
                 return
             await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice in {"s", "h", "r", "v"} and door_services is not None and door.profile and door.profile.service:
@@ -13504,7 +13509,9 @@ async def _door_service_action(session: Session, lane: DatabaseLane, actor: User
         await session.read_any_key()
         return
     verb = {"s": "Start", "h": "Halt", "r": "Restart"}[choice]
-    if not await prompt_yes_no(session, f"{verb} {door.name}'s service now?", default=False):
+    # A door name is not restricted to terminal-safe characters, and this
+    # prompt combines it with its own styled confirmation hint.
+    if not await prompt_yes_no(session, f"{verb} {sanitize_text(door.name)}'s service now?", default=False):
         return
     service = await door_services.adopt(door)
     if service is None:

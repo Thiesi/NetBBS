@@ -189,6 +189,12 @@ class DoorProfile:
                 if not isinstance(path, str) or not path or "\x00" in path:
                     raise ProfileError("service socket health needs a path")
                 _check_substitutions(path, ("install_dir",), "service health path accepts only {install_dir}")
+            elif "path" in health:
+                # A pid check has nothing to open. Left unvalidated, a saved
+                # non-string or unknown substitution here would only fail when
+                # the service is next parsed -- which happens during node
+                # startup, so a stored profile could stop the node booting.
+                raise ProfileError("service pid health takes no path")
         # The service runs in the door's installation directory, so there has
         # to be one; without it there is no defined working directory or place
         # for a health socket to live.

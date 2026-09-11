@@ -295,12 +295,20 @@ class DoorService:
         once the leader is reaped, so this is a bounded signal pair rather than
         a wait: anything still running was never supervised in its own right.
         """
-        proc, self._proc = self._proc, None
+        proc = self._proc
         if proc is None or os.name != "posix":
+            self._proc = None
             return
         self._signal(proc, signal.SIGTERM)
-        await asyncio.sleep(min(self.spec.stop_grace_seconds, 1))
+        try:
+            await asyncio.sleep(min(self.spec.stop_grace_seconds, 1))
+        except asyncio.CancelledError:
+            # Ownership is kept on purpose: `_terminate` still owes this group
+            # the SIGKILL the cancel just skipped, and it can only send it
+            # while `_proc` still names the group.
+            raise
         self._signal(proc, signal.SIGKILL, kill=True)
+        self._proc = None
 
     async def _terminate(self) -> None:
         reader, self._diagnostics = self._diagnostics, None
@@ -312,8 +320,13 @@ class DoorService:
         # grace period skips the SIGKILL *and* leaves the later node-level
         # stop_all with nothing to terminate, so the service outlives shutdown.
         proc = self._proc
-        if proc is None or proc.returncode is not None:
-            self._proc = None
+        if proc is None:
+            return
+        if proc.returncode is not None:
+            # The leader is already reaped, but its group may still hold
+            # descendants -- including ones a cancelled `_reap_group` never
+            # got to SIGKILL.
+            await self._reap_group()
             return
         try:
             self._signal(proc, signal.SIGTERM if os.name == "posix" else None)
@@ -450,6 +463,14 @@ class DoorServiceManager:
         if problem is not None:
             _logger.warning("refused to launch door %r: service state %s", door.name, service.status.state)
         return problem
+
+    async def forget(self, door_id: int) -> None:
+        """Stop and drop one door's service, for a door which no longer exists."""
+        lock = self._locks.setdefault(door_id, asyncio.Lock())
+        async with lock:
+            service = self._services.pop(door_id, None)
+        if service is not None:
+            await service.stop()
 
     async def stop_all(self) -> None:
         """Stop every service concurrently, each within its own deadline."""
