@@ -523,6 +523,7 @@ async def _read_file_choice(
       ('download', filename, None) - direct file download
       ('upload', None, highlighted) - start a Zmodem upload
       ('describe', None, highlighted) - edit a description (issue #463)
+      ('refresh', None, highlighted) - re-query and redraw (Ctrl-L)
       ('highlight', None, new_index) - arrow key highlight change
       ('command', full_cmd, None) - multi-character command line
       ('none', None, highlighted) - no-op / rejected key
@@ -602,6 +603,13 @@ async def _read_file_choice(
                 await session.write(char)
                 rest = await session.read_line()
                 return ("command", (char + rest).strip(), highlighted)
+            elif key.kind == EditorKeyKind.CTRL and key.char == "l":
+                # Ctrl-L redraws with fresh data, which is also what the
+                # browser page sends once an upload it is handling
+                # finishes (Codex review): without a signal this loop
+                # acts on, the file the caller just sent stays invisible
+                # until they leave the area and come back.
+                return ("refresh", None, highlighted)
             else:
                 await session.write("\a")
                 return ("none", None, highlighted)
@@ -785,9 +793,14 @@ async def _show_area(
                     continue
                 if await _handle_upload(
                     session, lane, area, user, link_context=link_context, transfers=transfers
-                ):
+                ) is not False:
                     return
                 # The browser is uploading; the caller is still here.
+                await _render_and_advance_cursor(page, highlighted=highlighted)
+                continue
+            elif kind == "refresh":
+                page = await lane.run(list_files_page, area, user)
+                highlighted = None
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "weblink":
@@ -866,7 +879,7 @@ async def _show_area(
                 elif choice.lower() in ("u", "/upload") and can_write:
                     if await _handle_upload(
                         session, lane, area, user, link_context=link_context, transfers=transfers
-                    ):
+                    ) is not False:
                         return
                     await _render_and_advance_cursor(page, highlighted=highlighted)
                 elif choice.lower().startswith("/describe ") or (
@@ -984,7 +997,15 @@ async def _show_area(
     if not command:
         return
     elif command.lower() in ("u", "/upload") and can_write:
-        await _handle_upload(session, lane, area, user, link_context=link_context, transfers=transfers)
+        if await _handle_upload(
+            session, lane, area, user, link_context=link_context, transfers=transfers
+        ) is False:
+            # The browser is uploading the area's first file; staying
+            # here is the whole point, since this is the screen it will
+            # appear on (Codex review).
+            await _show_area(
+                session, lane, area, user, link_context=link_context, transfers=transfers,
+            )
     elif command.lower() in ("w", "/weblink") and transfers is not None:
         await _transfer_link_screen(
             session, lane, user, area,
@@ -1660,6 +1681,22 @@ async def _offer_transfer_link(
     caller has to understand, so both facts are stated every time
     rather than documented somewhere they will not look.
     """
+    # Decided before anything is minted (Codex review): a grant issued
+    # on a node that cannot express a URL, to a session with no page to
+    # hand a relative one to, is a token nobody can redeem -- and 128 of
+    # them fill the table for ten minutes, crowding out transfers that
+    # would have worked.
+    offers_to_page = getattr(session, "offer_transfer", None) is not None
+    if transfers.base_url is None and not offers_to_page:
+        await session.write_line(
+            colored(
+                "\r\nThis node has no public web address configured, so it cannot hand out "
+                "transfer links. Ask the SysOp to set the web transport's public URL.",
+                fg_color=ERROR_COLOR,
+            )
+        )
+        return
+
     try:
         # Called straight, not through the lane (Codex review):
         # `TransferGrants` is event-loop state that touches no database,
@@ -1866,6 +1903,13 @@ async def _handle_upload(
     # as it always was; a browser upload happens somewhere else entirely
     # and the caller is still sitting in the file area, which is where
     # the file they are about to send should appear.
+    #
+    # Call sites test `is False`, not truthiness: only an explicit
+    # "I did not use the session" keeps the screen open. A stand-in
+    # that returns `None` -- a test double written before this contract,
+    # or a future caller that forgets -- therefore behaves the way every
+    # caller did before it existed, rather than looping on a screen
+    # whose input source has nothing left to give.
     if not _supports_zmodem(session):
         # This transport could never carry the transfer (issue #475),
         # so it is not started: a browser link is the whole of what
@@ -2003,6 +2047,7 @@ async def _handle_download(
     # as it always was; a browser upload happens somewhere else entirely
     # and the caller is still sitting in the file area, which is where
     # the file they are about to send should appear.
+
     if not _supports_zmodem(session):
         # Issue #475: same reasoning as the upload side -- this
         # transport cannot carry the transfer, so the browser link is

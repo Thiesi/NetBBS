@@ -57,6 +57,7 @@ from netbbs.files.areas import FileArea, get_file_area_by_area_id
 from netbbs.files.diz import read_archive_description
 from netbbs.files.entries import FileEntry, get_file, upload_file_from_temp
 from netbbs.moderation import BoardPermission, has_permission
+from netbbs.moderation.blocklist import is_blocked
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.link.files import queue_file_descriptor_if_linked
 from netbbs.net.zmodem import safe_filename
@@ -83,8 +84,9 @@ handler -- but a slow client still holds a socket and a descriptor for
 as long as it likes, so the same ceiling applies to both. Refused
 visibly, with the caller told to retry."""
 
-UPLOAD_TIMEOUT_SECONDS = 900
-"""Wall-clock ceiling on one upload, start to finish. Generous for a
+TRANSFER_TIMEOUT_SECONDS = 900
+"""Wall-clock ceiling on one transfer, start to finish, in either
+direction. Generous for a
 large file on a slow line, and finite -- which is the point: without it
 a caller can hold a request, a staging file and a handler task open for
 as long as they care to."""
@@ -272,21 +274,35 @@ def resolve(db: Database, grant: TransferGrant) -> RedeemedTransfer:
     if area is None:
         raise TransferError("that file area no longer exists")
 
+    if is_blocked(db, user):
+        # An administrative lockout revokes live sessions; an
+        # outstanding link must not quietly outlive it (Codex review).
+        raise TransferError("this account can no longer transfer files")
+
     if not meets_age(db, user, get_effective_min_age(db, area)):
         raise TransferError("this file area has an age requirement your account no longer meets")
-    if not meets_name_requirement(db, user, get_effective_name_requirement(db, area)):
-        raise TransferError("this file area has a name requirement your account no longer meets")
+
+    # Reading the area is required either way: a link is issued from
+    # inside it, and an upload grant redeemed after the read level rose
+    # would let a caller contribute to an area they can no longer enter
+    # (Codex review).
+    if not meets_level(user, get_effective_min_read_level(db, area)):
+        raise TransferError("you may no longer read this file area")
 
     if grant.direction == UPLOAD:
         if not meets_level(user, get_effective_min_write_level(db, area)):
             raise TransferError("you may no longer upload to this file area")
+        # The name requirement gates *contributing*, not reading -- the
+        # terminal applies it to `can_write` alone, and applying it to
+        # downloads here would refuse over HTTP what Zmodem allows
+        # (Codex review).
+        if not meets_name_requirement(db, user, get_effective_name_requirement(db, area)):
+            raise TransferError("this file area has a name requirement your account no longer meets")
         return RedeemedTransfer(
             grant=grant, user=user, area=area, entry=None,
             max_upload_bytes=get_max_upload_bytes(db),
         )
 
-    if not meets_level(user, get_effective_min_read_level(db, area)):
-        raise TransferError("you may no longer read this file area")
     entry = _visible_file(db, grant, area, user)
     return RedeemedTransfer(
         grant=grant, user=user, area=area, entry=entry, max_upload_bytes=get_max_upload_bytes(db),
@@ -438,6 +454,10 @@ class TransferGateway:
                 headers={"Cache-Control": "no-store"},
             )
 
+        # Reserved before anything is awaited (Codex review): several
+        # GETs can otherwise pass this check while each waits on the
+        # database lane, and every one of them then takes a slot that
+        # was never counted.
         if self._downloads_in_flight >= self._max_concurrent_uploads:
             # A download costs less than an upload -- nothing staged, no
             # long-running handler -- but a slow client still holds a
@@ -446,6 +466,14 @@ class TransferGateway:
             raise web.HTTPTooManyRequests(
                 text="This node is already busy sending files. Try again in a moment."
             )
+        self._downloads_in_flight += 1
+        try:
+            return await self._send_file(request)
+        finally:
+            self._downloads_in_flight -= 1
+
+    async def _send_file(self, request):
+        from aiohttp import web
 
         resolved = await self._redeem(request)
         entry = resolved.entry
@@ -476,40 +504,40 @@ class TransferGateway:
             },
         )
         response.content_length = entry.size_bytes
-        self._downloads_in_flight += 1
+        await response.prepare(request)
         try:
-            await response.prepare(request)
-            with Path(entry.storage_path).open("rb") as handle:
-                while True:
-                    chunk = await asyncio.to_thread(handle.read, 64 * 1024)
-                    if not chunk:
-                        break
-                    await response.write(chunk)
-            await response.write_eof()
-        finally:
-            self._downloads_in_flight -= 1
+            # Bounded in time as well as in count (Codex review): four
+            # clients consuming at a trickle would otherwise hold every
+            # slot for as long as they cared to, which is the same
+            # denial the upload deadline exists to prevent.
+            await asyncio.wait_for(_stream_file(response, Path(entry.storage_path)),
+                                   timeout=TRANSFER_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            _logger.warning(
+                "transfer: download of %r by %r exceeded %ss; dropping it",
+                entry.filename, resolved.user.username, TRANSFER_TIMEOUT_SECONDS,
+            )
         return response
 
     async def handle_upload(self, request):
         from aiohttp import web
 
-        resolved = await self._redeem(request)
-        if resolved.entry is not None:  # a download grant used with POST
-            raise web.HTTPMethodNotAllowed(method="POST", allowed_methods=["GET"])
-
         if self._uploads_in_flight >= self._max_concurrent_uploads:
             raise web.HTTPTooManyRequests(
                 text="This node is already busy receiving files. Try again in a moment."
             )
-
         self._uploads_in_flight += 1
         try:
-            return await self._receive_and_store(request, resolved)
+            return await self._receive_and_store(request)
         finally:
             self._uploads_in_flight -= 1
 
-    async def _receive_and_store(self, request, resolved):
+    async def _receive_and_store(self, request):
         from aiohttp import web
+
+        resolved = await self._redeem(request)
+        if resolved.entry is not None:  # a download grant used with POST
+            raise web.HTTPMethodNotAllowed(method="POST", allowed_methods=["GET"])
 
         temp_path = await self._lane.run(new_incoming_temp_path)
         try:
@@ -521,13 +549,13 @@ class TransferGateway:
             # trickle is refused as surely as a stall.
             filename, received = await asyncio.wait_for(
                 _receive_upload(request, temp_path, max_bytes=resolved.max_upload_bytes),
-                timeout=UPLOAD_TIMEOUT_SECONDS,
+                timeout=TRANSFER_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
             temp_path.unlink(missing_ok=True)
             _logger.warning(
                 "transfer: upload by %r timed out after %ss",
-                resolved.user.username, UPLOAD_TIMEOUT_SECONDS,
+                resolved.user.username, TRANSFER_TIMEOUT_SECONDS,
             )
             raise web.HTTPRequestTimeout(text="That upload took too long. Ask the BBS for a new link.")
         except OSError as exc:
@@ -576,6 +604,18 @@ class TransferGateway:
             "status": entry.status,
             "description": entry.description,
         })
+
+
+async def _stream_file(response, path: Path) -> None:
+    """Write one stored file to an already-prepared response, in bounded
+    chunks read off the event loop."""
+    with path.open("rb") as handle:
+        while True:
+            chunk = await asyncio.to_thread(handle.read, 64 * 1024)
+            if not chunk:
+                break
+            await response.write(chunk)
+    await response.write_eof()
 
 
 def _store_upload(

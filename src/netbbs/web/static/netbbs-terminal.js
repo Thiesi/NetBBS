@@ -164,7 +164,17 @@
       inFlight = typeof AbortController === "function" ? new AbortController() : null;
       fetch(url, { method: "POST", body: body, signal: inFlight ? inFlight.signal : undefined })
         .then(function (response) {
-          if (!response.ok) return response.text().then(function (text) { throw new Error(text); });
+          if (!response.ok) {
+            return response.text().then(function (text) {
+              var rejection = new Error(text || ("HTTP " + response.status));
+              // The server has already spent the single-use token by the
+              // time it rejects, so a retry here can only ever 404
+              // (issue #475 review). Marked so the catch below does not
+              // invite one.
+              rejection.spent = true;
+              throw rejection;
+            });
+          }
           return response.json();
         })
         .then(function (stored) {
@@ -179,9 +189,18 @@
         })
         .catch(function (error) {
           if (error && error.name === "AbortError") return;  // the caller cancelled
-          done = false;
           inFlight = null;
-          status.textContent = "Upload failed: " + (error && error.message ? error.message : error);
+          var detail = error && error.message ? error.message : error;
+          if (error && error.spent) {
+            // Nothing to retry with: tell them how to get another link.
+            status.textContent = detail + " Ask the BBS for a new link.";
+            input.disabled = true;
+            return;
+          }
+          // A network failure never reached the server, so the token is
+          // still good and another attempt is worth offering.
+          done = false;
+          status.textContent = "Upload failed: " + detail + " You can try again.";
         });
     }
 

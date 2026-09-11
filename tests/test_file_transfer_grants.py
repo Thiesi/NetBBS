@@ -15,7 +15,7 @@ import pytest
 
 from netbbs.attestation import attest_name, set_birthdate
 from netbbs.auth.users import create_user, set_user_disabled
-from netbbs.files.areas import create_file_area
+from netbbs.files.areas import create_file_area, get_file_area_by_area_id
 from netbbs.files.entries import approve_file, delete_file, upload_file
 from netbbs.moderation.roles import BoardPermission, grant_permissions
 from netbbs.net.file_transfer import (
@@ -244,23 +244,61 @@ def test_an_age_requirement_is_re_checked(db, alice):
         resolve(db, grant)
 
 
-def test_a_name_requirement_is_re_checked(db, alice):
+def test_a_name_requirement_gates_uploads_but_not_downloads(db, alice):
+    """The terminal treats `name_requirement` as a contribution gate --
+    `_show_area` folds it into `can_write` alone -- so applying it to
+    downloads would refuse over HTTP what Zmodem allows (Codex
+    review)."""
     grants = TransferGrants()
     area = create_file_area(db, "named", creator=alice)
     entry = upload_file(db, area, alice, "game.zip", b"payload")
-    grant = _download_grant(db, grants, alice, area, entry)
 
     db.connection.execute(
         "UPDATE file_areas SET name_requirement = 'verified' WHERE id = ?", (area.id,)
     )
     db.connection.commit()
+    area = get_file_area_by_area_id(db, area.area_id)
+
+    # Downloading is still allowed...
+    assert resolve(db, _download_grant(db, grants, alice, area, entry)).entry is not None
+    # ... uploading is not.
+    with pytest.raises(TransferError):
+        resolve(db, grants.issue(direction=UPLOAD, user=alice, area=area))
+
+    verifier = create_user(db, "verifier", password="hunter2", user_level=255)
+    attest_name(db, alice, "Alice Example", verifier=verifier)
+    assert resolve(db, grants.issue(direction=UPLOAD, user=alice, area=area)).area.id == area.id
+
+
+def test_a_blocklisted_account_cannot_redeem(db, alice):
+    """An administrative lockout revokes live sessions; an outstanding
+    link must not outlive it (Codex review)."""
+    from netbbs.moderation.blocklist import block_user
+
+    grants = TransferGrants()
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    area = create_file_area(db, "docs", creator=alice)
+    grant = grants.issue(direction=UPLOAD, user=alice, area=area)
+
+    block_user(db, alice, blocked_by=sysop, reason="spam")
 
     with pytest.raises(TransferError):
         resolve(db, grant)
 
-    verifier = create_user(db, "verifier", password="hunter2", user_level=255)
-    attest_name(db, alice, "Alice Example", verifier=verifier)
-    assert resolve(db, _download_grant(db, grants, alice, area, entry)).entry is not None
+
+def test_an_upload_grant_rechecks_read_access(db, alice):
+    """A link is issued from inside an area the caller may read; if that
+    stops being true while the write level stays put, the upload must
+    stop too (Codex review)."""
+    grants = TransferGrants()
+    area = create_file_area(db, "docs", creator=alice)
+    grant = grants.issue(direction=UPLOAD, user=alice, area=area)
+
+    db.connection.execute("UPDATE file_areas SET min_read_level = 250 WHERE id = ?", (area.id,))
+    db.connection.commit()
+
+    with pytest.raises(TransferError):
+        resolve(db, grant)
 
 
 def test_a_file_whose_content_is_gone_is_refused(db, alice, tmp_path):

@@ -21,6 +21,7 @@ from netbbs.files.areas import create_file_area
 from netbbs.files.entries import upload_file
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.file_transfer import TransferGrants
+from netbbs.net import file_flow
 from netbbs.net.file_flow import _show_area
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -71,6 +72,14 @@ class BrowserSession(FakeSession):
     own answer."""
 
     supports_zmodem = False
+
+
+class FakeLineSession(FakeSession):
+    """A transport with no editor-key support: `_read_file_choice`
+    falls back to reading whole command lines."""
+
+    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False):
+        raise NotImplementedError
 
 
 @pytest.fixture
@@ -371,3 +380,65 @@ def test_a_terminal_caller_still_needs_a_public_url(db, lane, alice):
     asyncio.run(_show_area(session, lane, area, alice, transfers=TransferGrants()))
 
     assert "no public web address configured" in session.visible_output
+
+
+def test_ctrl_l_requeries_the_listing(db, lane, alice, grants):
+    """The browser page sends this once an upload it is handling
+    finishes. Without a signal the loop acts on, the file stays
+    invisible until the caller leaves the area and comes back (Codex
+    review)."""
+    from netbbs.net.char_input import EditorKey, EditorKeyKind
+
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "first.zip", b"payload")
+    session = FakeSession(editor_keys=[EditorKey(EditorKeyKind.CTRL, char="l")])
+
+    # A file arrives between the first render and the refresh, exactly
+    # as a browser upload does.
+    async def scenario():
+        task = asyncio.ensure_future(_show_area(session, lane, area, alice, transfers=grants))
+        await asyncio.sleep(0)
+        upload_file(db, area, alice, "arrived.zip", b"payload")
+        await task
+
+    asyncio.run(scenario())
+
+    assert "arrived.zip" in session.visible_output
+
+
+def test_no_grant_is_minted_when_nobody_could_redeem_it(db, lane, alice):
+    """A node that cannot express a URL, and a session with no page to
+    hand a relative one to: minting there fills the table with tokens
+    nobody can use (Codex review)."""
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+    grants = TransferGrants()
+    session = FakeSession(editor_keys=[_key("w")], lines=["u"])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    assert "no public web address configured" in session.visible_output
+    assert len(grants) == 0
+
+
+def test_an_upload_helper_that_reports_nothing_still_closes_the_screen(db, lane, alice, grants, monkeypatch):
+    """A regression with teeth: while `[U]` was continuing the loop on
+    any falsy result, a stand-in returning `None` sent `_show_area`
+    round forever against an input source with nothing left -- one such
+    run reached 19 GB before it was noticed. Only an explicit "I did not
+    use the session" keeps the screen open."""
+
+    async def silent_upload(session, lane_, area_, user_, **kwargs):
+        return None
+
+    monkeypatch.setattr(file_flow, "_handle_upload", silent_upload)
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+
+    async def scenario():
+        await asyncio.wait_for(
+            _show_area(FakeLineSession(lines=["/upload"]), lane, area, alice, transfers=grants),
+            timeout=5,
+        )
+
+    asyncio.run(scenario())  # returns rather than spinning
