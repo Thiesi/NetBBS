@@ -819,6 +819,10 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
                     enabled=current.enabled if enabled is None else enabled,
                     host=current.host if host is None else host,
                     port=current.port if port is None else port,
+                    # Carried, not dropped (Codex review): a flag like
+                    # --web-port must not silently unset the public URL
+                    # a proxied node depends on for transfer links.
+                    public_url=current.public_url,
                 )
             },
         )

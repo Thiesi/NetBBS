@@ -958,6 +958,13 @@ async def _show_area(
         hints.append(
             MenuEntry(label=menu_key("E", "dit description"), brief="Describe an upload awaiting approval")
         )
+    if transfers is not None and _supports_zmodem(session):
+        # The same key the listing offers (Codex review): an empty area
+        # is exactly where a caller whose emulator has no Zmodem needs
+        # to put the first file.
+        hints.append(
+            MenuEntry(label=menu_key("W", "eb transfer"), brief="Get a browser upload link")
+        )
     if show_remote_hint:
         hints.append(MenuEntry(label=menu_key("/remote", " — browse/fetch this file area's remote catalogue")))
     await session.write_line(
@@ -970,6 +977,12 @@ async def _show_area(
         return
     elif command.lower() in ("u", "/upload") and can_write:
         await _handle_upload(session, lane, area, user, link_context=link_context, transfers=transfers)
+    elif command.lower() in ("w", "/weblink") and transfers is not None:
+        await _transfer_link_screen(
+            session, lane, user, area,
+            FileEntryPage(entries=[], has_older=False, has_newer=False),
+            highlighted=None, can_write=can_write, transfers=transfers,
+        )
     elif command.lower().startswith("/describe ") or (
         command.lower() in ("e", "/describe") and describable
     ):
@@ -1632,11 +1645,14 @@ async def _offer_transfer_link(
     rather than documented somewhere they will not look.
     """
     try:
-        grant = await lane.run(
-            lambda db: transfers.issue(
-                direction=direction, user_id=user.id, area_id=area.id,
-                file_id=entry.file_id if entry is not None else None,
-            )
+        # Called straight, not through the lane (Codex review):
+        # `TransferGrants` is event-loop state that touches no database,
+        # and running `issue()` on a worker thread while an HTTP request
+        # redeems on the loop is two threads mutating the same dict --
+        # including while `_sweep` iterates it.
+        grant = transfers.issue(
+            direction=direction, user=user, area=area,
+            file_id=entry.file_id if entry is not None else None,
         )
     except TransferError as exc:
         await session.write_line(colored(f"\r\n{exc}", fg_color=ERROR_COLOR))

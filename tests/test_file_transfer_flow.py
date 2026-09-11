@@ -215,7 +215,7 @@ def test_a_minted_link_is_the_one_the_gateway_will_honour(db, lane, alice, grant
     redeemed = grants.redeem(token)
     assert redeemed is not None
     assert redeemed.user_id == alice.id
-    assert redeemed.area_id == area.id
+    assert redeemed.area_id == area.area_id
 
 
 def test_the_hints_describe_what_this_transport_can_actually_do(db, lane, alice, grants):
@@ -238,3 +238,38 @@ def test_the_hints_describe_what_this_transport_can_actually_do(db, lane, alice,
     assert "Send a file from your browser" in browser.visible_output
     # ... and no second key for what [U] and the numbers already do.
     assert "eb transfer" not in browser.visible_output
+
+
+def test_an_empty_area_still_offers_a_browser_upload_link(db, lane, alice, grants):
+    """An empty area is exactly where a caller whose emulator has no
+    Zmodem needs to put the first file (Codex review)."""
+    area = create_file_area(db, "downloads", creator=alice)
+    session = FakeSession(lines=["w", "u"])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    assert "eb transfer" in session.visible_output
+    assert _url_in(session) is not None
+
+
+def test_minting_a_link_does_not_touch_the_database_lane(db, lane, alice, grants, monkeypatch):
+    """`TransferGrants` is event-loop state that touches no database, so
+    issuing must not run on the lane's worker thread while an HTTP
+    request redeems on the loop (Codex review)."""
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+    issued_on: list[str] = []
+    real_issue = grants.issue
+
+    def watching_issue(**kwargs):
+        import threading
+
+        issued_on.append(threading.current_thread().name)
+        return real_issue(**kwargs)
+
+    monkeypatch.setattr(grants, "issue", watching_issue)
+    session = FakeSession(editor_keys=[_key("w")], lines=["u"])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    assert issued_on == ["MainThread"]

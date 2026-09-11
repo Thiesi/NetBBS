@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import logging
 import secrets
 import time
@@ -52,9 +53,10 @@ from netbbs.communities import (
     get_effective_name_requirement,
 )
 from netbbs.config import get_max_upload_bytes
-from netbbs.files.areas import FileArea, get_file_area_by_id
+from netbbs.files.areas import FileArea, get_file_area_by_area_id
 from netbbs.files.diz import read_archive_description
 from netbbs.files.entries import FileEntry, get_file, upload_file_from_temp
+from netbbs.moderation import BoardPermission, has_permission
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.link.files import queue_file_descriptor_if_linked
 from netbbs.net.zmodem import safe_filename
@@ -67,6 +69,12 @@ DEFAULT_GRANT_TTL_SECONDS = 600
 """Ten minutes: long enough to switch to a browser, paste a URL and pick
 a file; short enough that a URL shoulder-surfed off a terminal is worth
 little by the time anyone acts on it."""
+
+UPLOAD_TIMEOUT_SECONDS = 900
+"""Wall-clock ceiling on one upload, start to finish. Generous for a
+large file on a slow line, and finite -- which is the point: without it
+a caller can hold a request, a staging file and a handler task open for
+as long as they care to."""
 
 DEFAULT_MAX_OUTSTANDING_GRANTS = 128
 """A ceiling on unredeemed grants across the whole node. Every caller
@@ -99,7 +107,13 @@ class TransferGrant:
     token: str
     direction: str
     user_id: int
-    area_id: int
+    #: Checked against the account `user_id` resolves to, because a
+    #: SQLite rowid is reusable and a username is at least the thing the
+    #: caller would recognise (Codex review).
+    username: str
+    #: The *content-addressed* area id, not the row id: see
+    #: `netbbs.files.areas.get_file_area_by_area_id`.
+    area_id: str
     file_id: str | None
     expires_at: float
 
@@ -139,7 +153,9 @@ class TransferGrants:
         and the interface says so rather than inventing one."""
         return self._base_url
 
-    def issue(self, *, direction: str, user_id: int, area_id: int, file_id: str | None = None) -> TransferGrant:
+    def issue(
+        self, *, direction: str, user: User, area: FileArea, file_id: str | None = None
+    ) -> TransferGrant:
         self._sweep()
         if len(self._grants) >= self._max_outstanding:
             raise TransferError(
@@ -153,13 +169,26 @@ class TransferGrants:
             # counter or a hash of the file.
             token=secrets.token_urlsafe(32),
             direction=direction,
-            user_id=user_id,
-            area_id=area_id,
+            user_id=user.id,
+            username=user.username,
+            area_id=area.area_id,
             file_id=file_id,
             expires_at=self._clock() + self._ttl_seconds,
         )
         self._grants[grant.token] = grant
         return grant
+
+    def peek(self, token: str) -> TransferGrant | None:
+        """Look a grant up *without* spending it (Codex review).
+
+        The upload flow needs this: opening the printed URL in a browser
+        is a GET, and that GET has to serve a page with a file input on
+        it. Redeeming there would consume the caller's one use before
+        they had chosen a file, which is precisely the flow the screen
+        tells them to follow."""
+        self._sweep()
+        grant = self._grants.get(token)
+        return grant if grant is not None and grant.is_live(now=self._clock()) else None
 
     def redeem(self, token: str) -> TransferGrant | None:
         """Take a grant out of the table, or `None` if it was never
@@ -211,9 +240,12 @@ def resolve(db: Database, grant: TransferGrant) -> RedeemedTransfer:
     here decides how to say it.
     """
     user = get_user_by_id(db, grant.user_id)
-    if user is None or user.disabled_at is not None:
+    if user is None or user.disabled_at is not None or user.username != grant.username:
+        # The username check is what makes a reused rowid harmless: a
+        # deleted account's id can come back attached to somebody else,
+        # and a live grant must not follow it (Codex review).
         raise TransferError("this account can no longer transfer files")
-    area = get_file_area_by_id(db, grant.area_id)
+    area = get_file_area_by_area_id(db, grant.area_id)
     if area is None:
         raise TransferError("that file area no longer exists")
 
@@ -232,28 +264,43 @@ def resolve(db: Database, grant: TransferGrant) -> RedeemedTransfer:
 
     if not meets_level(user, get_effective_min_read_level(db, area)):
         raise TransferError("you may no longer read this file area")
-    entry = _visible_file(db, grant, user)
+    entry = _visible_file(db, grant, area, user)
     return RedeemedTransfer(
         grant=grant, user=user, area=area, entry=entry, max_upload_bytes=get_max_upload_bytes(db),
     )
 
 
-def _visible_file(db: Database, grant: TransferGrant, user: User) -> FileEntry:
+def _visible_file(db: Database, grant: TransferGrant, area: FileArea, user: User) -> FileEntry:
     assert grant.file_id is not None
     try:
         entry = get_file(db, grant.file_id)
     except Exception as exc:  # netbbs.files.entries raises its own error type
         raise TransferError("that file is no longer in this area") from exc
-    if entry.area_id != grant.area_id:
-        # Nothing should be able to produce this, which is exactly why
-        # it is checked: a grant names an area, and the file it hands
-        # over must still be in it.
+    if entry.area_id != area.id:
+        # Compared against the resolved area's row id, since that is
+        # what a `FileEntry` carries, while the grant names the area by
+        # its content-addressed id. Nothing should be able to produce a
+        # mismatch, which is exactly why it is checked: a grant names an
+        # area, and the file it hands over must still be in it.
         raise TransferError("that file is no longer in this area")
-    if entry.status == "pending" and entry.uploader_user_id != user.id:
+    if entry.status == "pending" and not _may_see_pending(db, entry, user):
         raise TransferError("that file has not been approved yet")
     if not Path(entry.storage_path).exists():
         raise TransferError("this node no longer has that file's content")
     return entry
+
+
+def _may_see_pending(db: Database, entry: FileEntry, user: User) -> bool:
+    """The same answer `netbbs.files.entries.get_file_by_name` gives a
+    terminal caller: its own uploader, or a moderator holding APPROVE
+    on the area (Codex review -- a moderator who could ask for the file
+    by name was being handed a link that always refused)."""
+    if entry.uploader_user_id == user.id:
+        return True
+    return has_permission(
+        db, user, object_type="file_area", object_id=entry.area_id,
+        permission=BoardPermission.APPROVE,
+    )
 
 
 def hash_and_measure(path: Path, *, chunk_size: int = 64 * 1024) -> tuple[str, int]:
@@ -305,8 +352,23 @@ class TransferGateway:
         )
 
     def add_routes(self, app) -> None:
-        app.router.add_get("/transfer/{token}", self.handle_download)
+        # `add_get` would register HEAD alongside GET, and a HEAD from a
+        # link scanner, proxy or download manager would spend the
+        # caller's one use without ever delivering a byte (Codex
+        # review). HEAD gets its own handler, which answers without
+        # touching the grant table.
+        app.router.add_get("/transfer/{token}", self.handle_download, allow_head=False)
+        app.router.add_route("HEAD", "/transfer/{token}", self.handle_head)
         app.router.add_post("/transfer/{token}", self.handle_upload)
+
+    async def handle_head(self, request):
+        """Answer a probe without spending anything. Deliberately says
+        nothing about whether the token is real: a HEAD that 404s for
+        unknown tokens and 200s for live ones is an oracle for guessing
+        them."""
+        from aiohttp import web
+
+        return web.Response(status=204)
 
     async def _redeem(self, request):
         """Take the grant named by the URL and resolve it against live
@@ -332,9 +394,24 @@ class TransferGateway:
     async def handle_download(self, request):
         from aiohttp import web
 
+        # An upload grant opened in a browser is the *advertised* flow
+        # ("Open this in a browser to upload"), and a GET is how a
+        # browser opens anything -- so it serves the form and leaves the
+        # grant alone (Codex review: redeeming here spent the caller's
+        # one use before they had chosen a file, which made the printed
+        # instruction impossible to follow). The POST that follows is
+        # what spends it.
+        peeked = self._grants.peek(request.match_info["token"])
+        if peeked is not None and peeked.direction == UPLOAD:
+            return web.Response(
+                text=_upload_form(request.path, peeked),
+                content_type="text/html",
+                headers={"Cache-Control": "no-store"},
+            )
+
         resolved = await self._redeem(request)
         entry = resolved.entry
-        if entry is None:  # an upload grant fetched with GET
+        if entry is None:  # an upload grant that expired between peek and redeem
             raise web.HTTPMethodNotAllowed(method="GET", allowed_methods=["POST"])
         _logger.info(
             "transfer: %r downloading %r from area %r",
@@ -360,9 +437,23 @@ class TransferGateway:
 
         temp_path = await self._lane.run(new_incoming_temp_path)
         try:
-            filename, received = await _receive_upload(
-                request, temp_path, max_bytes=resolved.max_upload_bytes
+            # Bounded in time, not only in bytes (Codex review): an
+            # authenticated caller could otherwise hold a POST open
+            # indefinitely, keeping a staging file, a socket and a
+            # handler task for as long as they liked. The deadline
+            # covers the whole receive rather than each read, so a
+            # trickle is refused as surely as a stall.
+            filename, received = await asyncio.wait_for(
+                _receive_upload(request, temp_path, max_bytes=resolved.max_upload_bytes),
+                timeout=UPLOAD_TIMEOUT_SECONDS,
             )
+        except asyncio.TimeoutError:
+            temp_path.unlink(missing_ok=True)
+            _logger.warning(
+                "transfer: upload by %r timed out after %ss",
+                resolved.user.username, UPLOAD_TIMEOUT_SECONDS,
+            )
+            raise web.HTTPRequestTimeout(text="That upload took too long. Ask the BBS for a new link.")
         except BaseException:
             temp_path.unlink(missing_ok=True)
             raise
@@ -370,18 +461,25 @@ class TransferGateway:
             temp_path.unlink(missing_ok=True)
             raise web.HTTPBadRequest(text="No file was sent.")
 
-        sha256, size_bytes = await asyncio.to_thread(hash_and_measure, temp_path)
         try:
+            sha256, size_bytes = await asyncio.to_thread(hash_and_measure, temp_path)
+            description = await read_archive_description(temp_path, filename)
             entry = await self._lane.run(
                 _store_upload, resolved.area, resolved.user, filename,
                 temp_path=temp_path, sha256=sha256, size_bytes=size_bytes,
-                description=await read_archive_description(temp_path, filename),
+                description=description,
                 announce_identity=self._announce_identity(),
             )
-        except Exception as exc:
+        except BaseException as exc:
+            # `BaseException`, so a cancelled request takes its staging
+            # file with it (Codex review): `CancelledError` is not an
+            # `Exception`, and until the move into storage this handler
+            # is the only thing that owns the file.
             temp_path.unlink(missing_ok=True)
-            _logger.warning("transfer: upload by %r failed: %s", resolved.user.username, exc)
-            raise web.HTTPBadRequest(text=f"The upload could not be stored: {exc}") from exc
+            if isinstance(exc, Exception):
+                _logger.warning("transfer: upload by %r failed: %s", resolved.user.username, exc)
+                raise web.HTTPBadRequest(text=f"The upload could not be stored: {exc}") from exc
+            raise
 
         _logger.info(
             "transfer: %r uploaded %r (%d bytes) to area %r",
@@ -458,3 +556,32 @@ def _content_disposition(filename: str) -> str:
     ascii_name = filename.encode("ascii", errors="replace").decode("ascii").replace('"', "_")
     quoted = quote(filename, safe="")
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
+
+def _upload_form(action: str, grant: TransferGrant) -> str:
+    """The page a caller lands on when they open an upload link.
+
+    Deliberately one self-contained page with no scripts, no styling
+    beyond a few lines, and no requests anywhere but back to this node:
+    it is served to someone who followed a URL off a terminal, and the
+    less it does the less there is to go wrong or to trust. A browser
+    caller who wants drag-and-drop gets it in the terminal page itself,
+    which is a different surface with a different job.
+    """
+    minutes = max(1, int((grant.expires_at - time.monotonic()) // 60))
+    return (
+        "<!doctype html>"
+        "<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>Upload to NetBBS</title>"
+        "<style>body{font-family:system-ui,sans-serif;margin:2rem auto;max-width:32rem;"
+        "line-height:1.5}p{color:#555}button{font:inherit;padding:.4rem 1rem}</style>"
+        "</head><body>"
+        "<h1>Upload a file</h1>"
+        f"<form method=\"post\" action=\"{html.escape(action)}\" enctype=\"multipart/form-data\">"
+        "<p><input type=\"file\" name=\"file\" required></p>"
+        "<p><button type=\"submit\">Upload</button></p>"
+        "</form>"
+        f"<p>This link works once, and expires in about {minutes} minute"
+        f"{'' if minutes == 1 else 's'}.</p>"
+        "</body></html>"
+    )

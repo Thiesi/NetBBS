@@ -92,9 +92,7 @@ def test_a_download_link_serves_the_stored_bytes(node):
 
     async def scenario():
         async with node:
-            grant = node.grants.issue(
-                direction=DOWNLOAD, user_id=alice.id, area_id=area.id, file_id=entry.file_id
-            )
+            grant = node.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
             async with aiohttp.ClientSession() as client:
                 async with client.get(f"{node.base}/transfer/{grant.token}") as response:
                     assert response.status == 200
@@ -111,9 +109,7 @@ def test_a_download_link_works_only_once(node):
 
     async def scenario():
         async with node:
-            grant = node.grants.issue(
-                direction=DOWNLOAD, user_id=alice.id, area_id=area.id, file_id=entry.file_id
-            )
+            grant = node.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
             url = f"{node.base}/transfer/{grant.token}"
             async with aiohttp.ClientSession() as client:
                 async with client.get(url) as first:
@@ -146,9 +142,7 @@ def test_a_non_ascii_filename_survives_the_content_disposition(node):
 
     async def scenario():
         async with node:
-            grant = node.grants.issue(
-                direction=DOWNLOAD, user_id=alice.id, area_id=area.id, file_id=entry.file_id
-            )
+            grant = node.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
             async with aiohttp.ClientSession() as client:
                 async with client.get(f"{node.base}/transfer/{grant.token}") as response:
                     return response.headers["Content-Disposition"]
@@ -165,9 +159,7 @@ def test_a_download_grant_refused_at_redemption_says_so(node):
 
     async def scenario():
         async with node:
-            grant = node.grants.issue(
-                direction=DOWNLOAD, user_id=alice.id, area_id=area.id, file_id=entry.file_id
-            )
+            grant = node.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
             node.db.connection.execute(
                 "UPDATE file_areas SET min_read_level = 250 WHERE id = ?", (area.id,)
             )
@@ -199,7 +191,7 @@ def test_an_upload_link_stores_the_file_and_reads_its_diz(node):
 
     async def scenario():
         async with node:
-            grant = node.grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+            grant = node.grants.issue(direction=UPLOAD, user=alice, area=area)
             form = aiohttp.FormData()
             form.add_field("file", payload, filename="game.zip")
             async with aiohttp.ClientSession() as client:
@@ -224,7 +216,7 @@ def test_a_raw_body_upload_names_the_file_from_the_query(node):
 
     async def scenario():
         async with node:
-            grant = node.grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+            grant = node.grants.issue(direction=UPLOAD, user=alice, area=area)
             async with aiohttp.ClientSession() as client:
                 url = f"{node.base}/transfer/{grant.token}?filename=notes.txt"
                 async with client.post(url, data=b"plain bytes") as response:
@@ -243,7 +235,7 @@ def test_an_upload_over_the_node_limit_is_refused_and_stores_nothing(node):
 
     async def scenario():
         async with node:
-            grant = node.grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+            grant = node.grants.issue(direction=UPLOAD, user=alice, area=area)
             form = aiohttp.FormData()
             form.add_field("file", b"x" * 4096, filename="big.bin")
             async with aiohttp.ClientSession() as client:
@@ -254,18 +246,56 @@ def test_an_upload_over_the_node_limit_is_refused_and_stores_nothing(node):
     assert list_files_page(node.db, area, alice).entries == []
 
 
-def test_an_upload_link_cannot_be_used_to_download(node):
+def test_opening_an_upload_link_serves_a_form_without_spending_it(node):
+    """The printed instruction is "open this in a browser to upload",
+    and a browser opens things with GET. Redeeming there would consume
+    the caller's one use before they had chosen a file -- which made the
+    advertised flow impossible to follow."""
     alice = create_user(node.db, "alice", password="hunter2", user_level=10)
     area = create_file_area(node.db, "docs", creator=alice)
 
     async def scenario():
         async with node:
-            grant = node.grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+            grant = node.grants.issue(direction=UPLOAD, user=alice, area=area)
+            url = f"{node.base}/transfer/{grant.token}"
             async with aiohttp.ClientSession() as client:
-                async with client.get(f"{node.base}/transfer/{grant.token}") as response:
-                    return response.status
+                async with client.get(url) as page:
+                    body = await page.text()
+                    status = page.status
+                # ... and the grant is still there to be used.
+                form = aiohttp.FormData()
+                form.add_field("file", b"payload", filename="game.zip")
+                async with client.post(url, data=form) as upload:
+                    return status, body, upload.status
 
-    assert _run(scenario) == 405
+    status, body, upload_status = _run(scenario)
+    assert status == 200
+    assert 'type="file"' in body
+    assert upload_status == 200
+    assert list_files_page(node.db, area, alice).entries[0].filename == "game.zip"
+
+
+def test_a_head_probe_does_not_spend_a_grant(node):
+    """A link scanner, proxy or download manager probing the URL must
+    not burn the caller's one use."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    entry = upload_file(node.db, area, alice, "game.zip", b"payload")
+
+    async def scenario():
+        async with node:
+            grant = node.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
+            url = f"{node.base}/transfer/{grant.token}"
+            async with aiohttp.ClientSession() as client:
+                async with client.head(url) as probe:
+                    probed = probe.status
+                async with client.get(url) as response:
+                    return probed, response.status, await response.read()
+
+    probed, status, body = _run(scenario)
+    assert probed == 204
+    assert status == 200
+    assert body == b"payload"
 
 
 def test_a_download_link_cannot_be_used_to_upload(node):
@@ -275,9 +305,7 @@ def test_a_download_link_cannot_be_used_to_upload(node):
 
     async def scenario():
         async with node:
-            grant = node.grants.issue(
-                direction=DOWNLOAD, user_id=alice.id, area_id=area.id, file_id=entry.file_id
-            )
+            grant = node.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
             async with aiohttp.ClientSession() as client:
                 async with client.post(f"{node.base}/transfer/{grant.token}", data=b"nope") as response:
                     return response.status
@@ -292,7 +320,7 @@ def test_an_upload_into_a_moderated_area_lands_pending(node):
 
     async def scenario():
         async with node:
-            grant = node.grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+            grant = node.grants.issue(direction=UPLOAD, user=alice, area=area)
             form = aiohttp.FormData()
             form.add_field("file", b"payload", filename="game.zip")
             async with aiohttp.ClientSession() as client:
@@ -308,7 +336,7 @@ def test_an_empty_upload_is_refused(node):
 
     async def scenario():
         async with node:
-            grant = node.grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+            grant = node.grants.issue(direction=UPLOAD, user=alice, area=area)
             async with aiohttp.ClientSession() as client:
                 async with client.post(f"{node.base}/transfer/{grant.token}", data=b"") as response:
                     return response.status

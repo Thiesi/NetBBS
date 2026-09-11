@@ -537,7 +537,8 @@ async def _main_menu(
             if lane is not None:
                 await _new_scan_screen(
                     session, db, lane, hub, presence, mailbox, history, user, link_context=link_context,
-                    mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None
+                    mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
+                    transfers=node_controls.transfers if node_controls is not None else None,
                 )
             else:
                 await session.write_line(
@@ -549,7 +550,8 @@ async def _main_menu(
             if lane is not None:
                 await _find_screen(
                     session, db, lane, hub, presence, mailbox, history, user, link_context=link_context,
-                    mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None
+                    mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
+                    transfers=node_controls.transfers if node_controls is not None else None,
                 )
             else:
                 await session.write_line(

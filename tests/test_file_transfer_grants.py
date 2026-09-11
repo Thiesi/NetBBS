@@ -55,7 +55,7 @@ class _Clock:
 def test_a_grant_is_single_use(db, alice):
     grants = TransferGrants()
     area = create_file_area(db, "docs", creator=alice)
-    grant = grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+    grant = grants.issue(direction=UPLOAD, user=alice, area=area)
 
     assert grants.redeem(grant.token) is not None
     assert grants.redeem(grant.token) is None
@@ -65,7 +65,7 @@ def test_a_grant_expires(db, alice):
     clock = _Clock()
     grants = TransferGrants(ttl_seconds=60, clock=clock)
     area = create_file_area(db, "docs", creator=alice)
-    grant = grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+    grant = grants.issue(direction=UPLOAD, user=alice, area=area)
 
     clock.now += 61
     assert grants.redeem(grant.token) is None
@@ -80,7 +80,7 @@ def test_tokens_are_unguessable_and_distinct(db, alice):
     grants = TransferGrants()
     area = create_file_area(db, "docs", creator=alice)
     tokens = {
-        grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id).token
+        grants.issue(direction=UPLOAD, user=alice, area=area).token
         for _ in range(20)
     }
     assert len(tokens) == 20
@@ -91,31 +91,31 @@ def test_outstanding_grants_are_bounded(db, alice):
     grants = TransferGrants(max_outstanding=3)
     area = create_file_area(db, "docs", creator=alice)
     for _ in range(3):
-        grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+        grants.issue(direction=UPLOAD, user=alice, area=area)
 
     with pytest.raises(TransferError):
-        grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+        grants.issue(direction=UPLOAD, user=alice, area=area)
 
 
 def test_expired_grants_make_room_for_new_ones(db, alice):
     clock = _Clock()
     grants = TransferGrants(max_outstanding=2, ttl_seconds=60, clock=clock)
     area = create_file_area(db, "docs", creator=alice)
-    grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
-    grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+    grants.issue(direction=UPLOAD, user=alice, area=area)
+    grants.issue(direction=UPLOAD, user=alice, area=area)
 
     clock.now += 61
-    assert grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id) is not None
+    assert grants.issue(direction=UPLOAD, user=alice, area=area) is not None
 
 
 def test_a_node_with_no_public_url_prints_none(db, alice):
     grants = TransferGrants()
     area = create_file_area(db, "docs", creator=alice)
-    grant = grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+    grant = grants.issue(direction=UPLOAD, user=alice, area=area)
     assert grants.url_for(grant) is None
 
     addressed = TransferGrants(base_url="https://bbs.example.org/")
-    grant = addressed.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+    grant = addressed.issue(direction=UPLOAD, user=alice, area=area)
     assert addressed.url_for(grant) == f"https://bbs.example.org/transfer/{grant.token}"
 
 
@@ -123,7 +123,7 @@ def test_a_node_with_no_public_url_prints_none(db, alice):
 
 
 def _download_grant(db, grants, user, area, entry):
-    return grants.issue(direction=DOWNLOAD, user_id=user.id, area_id=area.id, file_id=entry.file_id)
+    return grants.issue(direction=DOWNLOAD, user=user, area=area, file_id=entry.file_id)
 
 
 def test_a_download_grant_resolves_to_its_file(db, alice):
@@ -165,7 +165,7 @@ def test_a_raised_read_level_stops_a_live_download_grant(db, alice):
 def test_a_raised_write_level_stops_a_live_upload_grant(db, alice):
     grants = TransferGrants()
     area = create_file_area(db, "docs", creator=alice)
-    grant = grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+    grant = grants.issue(direction=UPLOAD, user=alice, area=area)
 
     db.connection.execute("UPDATE file_areas SET min_write_level = 250 WHERE id = ?", (area.id,))
     db.connection.commit()
@@ -192,7 +192,7 @@ def test_a_deleted_file_stops_its_grant(db, alice):
 def test_a_deleted_area_stops_its_grant(db, alice):
     grants = TransferGrants()
     area = create_file_area(db, "docs", creator=alice)
-    grant = grants.issue(direction=UPLOAD, user_id=alice.id, area_id=area.id)
+    grant = grants.issue(direction=UPLOAD, user=alice, area=area)
     db.connection.execute("DELETE FROM file_areas WHERE id = ?", (area.id,))
     db.connection.commit()
 
@@ -289,3 +289,64 @@ def test_hash_and_measure_matches_a_stored_upload(db, alice, tmp_path):
 
     assert digest == entry.sha256
     assert size == len(payload)
+
+
+def test_a_reused_account_row_id_does_not_inherit_a_live_grant(db, alice):
+    """Codex review: `users.id` is a SQLite rowid, so deleting the
+    highest-numbered account lets the next one reuse that number. A
+    grant issued to the old account must not follow the id to whoever
+    now holds it."""
+    grants = TransferGrants()
+    area = create_file_area(db, "docs", creator=alice)
+    grant = grants.issue(direction=UPLOAD, user=alice, area=area)
+
+    db.connection.execute("UPDATE users SET username = 'someone_else' WHERE id = ?", (alice.id,))
+    db.connection.commit()
+
+    with pytest.raises(TransferError):
+        resolve(db, grant)
+
+
+def test_a_grant_names_its_area_by_a_content_addressed_id(db, alice):
+    grants = TransferGrants()
+    area = create_file_area(db, "docs", creator=alice)
+    grant = grants.issue(direction=UPLOAD, user=alice, area=area)
+
+    assert grant.area_id == area.area_id
+    assert grant.area_id != area.id  # not the reusable rowid
+
+
+def test_a_moderator_may_redeem_a_link_for_a_pending_file(db, alice):
+    """The terminal lookup authorises a pending file for its uploader or
+    an APPROVE holder; redemption has to agree, or a moderator who asked
+    for the file by name gets a link that always refuses (Codex
+    review)."""
+    grants = TransferGrants()
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    area = create_file_area(db, "docs", creator=sysop, moderated=True)
+    grant_permissions(
+        db, sysop, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.APPROVE, granted_by=sysop,
+    )
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+
+    resolved = resolve(
+        db, grants.issue(direction=DOWNLOAD, user=sysop, area=area, file_id=entry.file_id)
+    )
+    assert resolved.entry.file_id == entry.file_id
+
+    # ... and an ordinary caller still cannot.
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    with pytest.raises(TransferError):
+        resolve(db, grants.issue(direction=DOWNLOAD, user=bob, area=area, file_id=entry.file_id))
+
+
+def test_peeking_does_not_spend_a_grant(db, alice):
+    grants = TransferGrants()
+    area = create_file_area(db, "docs", creator=alice)
+    grant = grants.issue(direction=UPLOAD, user=alice, area=area)
+
+    assert grants.peek(grant.token) is not None
+    assert grants.peek(grant.token) is not None
+    assert grants.redeem(grant.token) is not None
+    assert grants.peek(grant.token) is None

@@ -797,6 +797,7 @@ async def run(
             direct_invites=direct_invites,
             mrc_bridge=mrc_bridge,
             backup_identity_dir=config.identity_dir,
+            transfers=transfer_grants,
         )
 
     servers: list = []
@@ -1128,6 +1129,10 @@ async def run(
             config, db, session_handler, ssh_session_handler, throttle, link_node, background_lane,
             link_realtime_registry, link_realtime_bridge, link_realtime_relay, _live_relays_provider,
             own_hello_provider,
+            # Issue #475: without this the web listener registers no
+            # /transfer route and every link printed from the grant
+            # table above answers 404 (Codex review).
+            transfer_gateway,
         )
 
         # Design doc: the piece that makes this node
@@ -1492,10 +1497,6 @@ async def main() -> None:
         raise SystemExit(1) from exc
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
-
-
 def _transfer_base_url(config) -> str | None:
     """Where a file-transfer link should point (issue #475).
 
@@ -1509,10 +1510,15 @@ def _transfer_base_url(config) -> str | None:
     """
     if config.web.public_url:
         return config.web.public_url
-    if config.web.host in {"127.0.0.1", "::1", "localhost"}:
-        # Loopback is honest for a single-machine node: the caller's
-        # browser really is on this machine.
-        return f"http://{config.web.host}:{config.web.port}"
     if config.web.host in {"0.0.0.0", "::", ""}:
         return None
-    return f"http://{config.web.host}:{config.web.port}"
+    # An IPv6 literal has to be bracketed in a URL authority (Codex
+    # review) -- `http://::1:8080` is not a URL a browser will open.
+    host = config.web.host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{config.web.port}"
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

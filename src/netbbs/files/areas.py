@@ -166,16 +166,21 @@ def get_file_area_by_name(db: Database, name: str) -> FileArea:
     return _row_to_file_area(row)
 
 
-def get_file_area_by_id(db: Database, area_id: int) -> FileArea | None:
-    """Look one area up by its local row id, or `None` if it is gone.
+def get_file_area_by_area_id(db: Database, area_id: str) -> FileArea | None:
+    """Look one area up by its content-addressed `area_id`, or `None` if
+    it is gone.
 
-    By row id rather than by name (issue #475): an HTTP transfer grant
-    names an area it was issued for and is redeemed later, in another
-    task, and a name is exactly the thing a SysOp may have changed in
-    between. `None` rather than raising, because "the area went away
-    while a caller had a link open" is an ordinary outcome for that
-    caller, not an error in the lookup."""
-    row = db.connection.execute("SELECT * FROM file_areas WHERE id = ?", (area_id,)).fetchone()
+    Neither by name nor by row id (issue #475, Codex review): an HTTP
+    transfer grant names an area it was issued for and is redeemed
+    later, in another task. A name is exactly what a SysOp may have
+    changed in between, and `files_areas.id` is a plain SQLite rowid
+    that a later area can reuse once the highest-numbered one is
+    deleted -- which would resolve a live grant against a different
+    area than the one it was issued for. `area_id` is content-addressed
+    and never repeats. `None` rather than raising, because "the area
+    went away while a caller had a link open" is an ordinary outcome
+    for that caller, not an error in the lookup."""
+    row = db.connection.execute("SELECT * FROM file_areas WHERE area_id = ?", (area_id,)).fetchone()
     return _row_to_file_area(row) if row is not None else None
 
 
