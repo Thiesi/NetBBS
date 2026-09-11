@@ -1425,8 +1425,20 @@ screens return to browser-fit geometry after play. Telnet/SSH terminals must
 already be at least the configured size; a smaller browser viewport is allowed
 because web door mode sets the requested terminal geometry. NetBBS does not
 resize Telnet/SSH windows.
-PTY geometry is set at launch; dynamic terminal resizing inside local games
-is not currently forwarded.
+A caller who resizes their terminal mid-game is followed, on POSIX hosts,
+for native doors whose profile leaves columns and rows at 0. A PTY door's
+own terminal is resized and its process group gets `SIGWINCH`, which is what
+a full-screen program already expects. A stdio or socket door is told only if
+its profile enables **Signal door on terminal resize**: NetBBS then rewrites
+`door_info.json` with the new `terminal_width`/`terminal_height` and sends
+`SIGUSR1`. Leave that off unless the door's own documentation says it handles
+`SIGUSR1` — the default action for that signal is to terminate the process,
+so enabling it for a door which ignores it kills the caller's game.
+
+A profile which pins columns and rows asked for a fixed screen and is never
+resized; neither are DOS doors, whose geometry is fixed by design, nor remote
+services, which negotiate their own window size. Resizes are followed within
+about half a second, not instantly.
 
 ## Native doors
 

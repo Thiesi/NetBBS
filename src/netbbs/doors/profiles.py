@@ -49,6 +49,11 @@ class DoorProfile:
     memory_mb: int = 256
     max_sessions: int = 1
     multinode_certified: bool = False
+    #: Wake a stdio/socket door with SIGUSR1 when the caller's terminal is
+    #: resized. Opt-in because SIGUSR1 terminates a process which does not
+    #: handle it; PTY doors never need this and are resized through the
+    #: terminal itself.
+    resize_signal: bool = False
     environment: dict[str, str] = field(default_factory=dict)
     runner: tuple[str, ...] = ()
     options: dict = field(default_factory=dict)
@@ -75,6 +80,8 @@ class DoorProfile:
             raise ProfileError("set both terminal width and height, or leave both zero")
         if type(self.multinode_certified) is not bool:
             raise ProfileError("multinode_certified must be a boolean")
+        if type(self.resize_signal) is not bool:
+            raise ProfileError("resize_signal must be a boolean")
         if self.max_sessions > 1 and not self.multinode_certified:
             raise ProfileError("multiple sessions require explicit multi-node certification")
         if not isinstance(self.install_dir, str) or any(c in self.install_dir for c in '\r\n\x00"'):
@@ -230,8 +237,8 @@ def preflight(door, session=None) -> list[str]:
     return problems
 
 
-def limit_advisories(profile) -> list[str]:
-    """Consequences of ceilings the SysOp deliberately raised or removed.
+def profile_advisories(profile) -> list[str]:
+    """Consequences of settings which are deliberate rather than mistaken.
 
     Separate from `preflight` on purpose: preflight returns problems which
     refuse the launch, and an unbounded door is a deliberate configuration,
@@ -248,4 +255,14 @@ def limit_advisories(profile) -> list[str]:
                      "one caller can hold a node lease for that long.")
     if not profile.cpu_seconds:
         notes.append("No CPU-seconds limit: a runaway door is bounded only by the wall-clock limit above.")
+    # A resize opt-out which silently never fires is worth saying out loud;
+    # it looks configured on this screen and does nothing at runtime.
+    if profile.resize_signal:
+        if profile.adapter != "native":
+            notes.append(f"Resize signal is ignored for the {profile.adapter} adapter; only native doors are signalled.")
+        elif profile.endpoint == "pty":
+            notes.append("Resize signal is unnecessary for a PTY door: its terminal is resized directly instead.")
+        elif profile.width:
+            notes.append("Resize signal never fires while this profile pins the terminal size; "
+                         "set columns and rows to 0 to follow the caller's terminal.")
     return notes

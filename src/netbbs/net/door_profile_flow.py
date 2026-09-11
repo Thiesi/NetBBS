@@ -7,7 +7,7 @@ import shlex
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from netbbs.doors.profiles import (DoorProfile, ProfileError, limit_advisories, preflight,
+from netbbs.doors.profiles import (DoorProfile, ProfileError, preflight, profile_advisories,
                                     read_profile_file)
 from netbbs.doors.registry import DoorError, update_door
 from netbbs.doors.runtime import run_door, war_dialer_world_path, war_dialer_path_problem
@@ -103,7 +103,7 @@ async def edit_door_profile(session, lane, actor, door):
                 await session.write_line(sanitize_text(line))
             # Consequences of ceilings the SysOp raised or removed. Reported
             # after the verdict because they never make a profile invalid.
-            for line in limit_advisories(candidate.profile):
+            for line in profile_advisories(candidate.profile):
                 await session.write_line(sanitize_text("Note: " + line))
         except (ProfileError, ValueError, OSError) as exc:
             await session.write_line(sanitize_text(str(exc)))
@@ -177,6 +177,10 @@ async def edit_door_profile(session, lane, actor, door):
     add("max_sessions", "n", "Maximum simultaneous callers", "Limits")
     add("memory_mb", "y", "Memory ceiling (MiB)", "Limits")
     add("multinode_certified", "z", "Multi-node certified by SysOp", "Limits", bool_field("multinode_certified", "Certified"))
+    add("resize_signal", "3", "Signal door on terminal resize", "Terminal", bool_field("resize_signal", "Signal"),
+        help="Native stdio/socket doors only, and only while columns and rows are 0. Rewrites door_info.json with "
+             "the new size and sends SIGUSR1. Leave off unless the door documents that it handles SIGUSR1: the "
+             "default action for that signal terminates a process. PTY doors are resized through their terminal.")
     add("environment", "x", "Custom environment (JSON)", "Advanced")
     add("runner", "r", "External runner argv (JSON)", "Advanced")
     add("options", "q", "Adapter options (JSON)", "Advanced")

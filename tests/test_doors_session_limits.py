@@ -14,7 +14,7 @@ import sys
 import pytest
 
 from netbbs.doors import create_door
-from netbbs.doors.profiles import DoorProfile, ProfileError, limit_advisories
+from netbbs.doors.profiles import DoorProfile, ProfileError, profile_advisories
 from netbbs.doors.runtime import (DOOR_CPU_LIMIT_SECONDS, WALL_TIME_LIMIT_SECONDS,
                                   effective_wall_limit, run_door)
 from tests.test_doors_runtime import FakeSession, _run, _write_script, db, lane, player
@@ -63,11 +63,11 @@ def test_cpu_seconds_survives_a_json_round_trip():
 
 
 def test_advisories_explain_removed_ceilings_and_stay_quiet_by_default():
-    assert limit_advisories(DoorProfile()) == []
-    assert limit_advisories(None) == []
-    assert any("node lease" in note for note in limit_advisories(DoorProfile(time_limit=0)))
-    assert any("CPU-seconds" in note for note in limit_advisories(DoorProfile(cpu_seconds=0)))
-    assert any("7200" in note for note in limit_advisories(DoorProfile(time_limit=7200)))
+    assert profile_advisories(DoorProfile()) == []
+    assert profile_advisories(None) == []
+    assert any("node lease" in note for note in profile_advisories(DoorProfile(time_limit=0)))
+    assert any("CPU-seconds" in note for note in profile_advisories(DoorProfile(cpu_seconds=0)))
+    assert any("7200" in note for note in profile_advisories(DoorProfile(time_limit=7200)))
 
 
 def test_door_with_no_wall_limit_runs_to_its_own_exit(db, lane, player, tmp_path):

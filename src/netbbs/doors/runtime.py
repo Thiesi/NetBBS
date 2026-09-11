@@ -37,6 +37,9 @@ DOOR_MAX_PROCESSES = 16
 WALL_TIME_LIMIT_SECONDS = 3600
 _TERMINATE_GRACE_SECONDS = 0.5
 _DIAGNOSTIC_BYTES = 8192
+# A human dragging a window edge; fine-grained enough to feel immediate
+# without waking the event loop for a size which almost never changes.
+_RESIZE_POLL_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -214,6 +217,75 @@ async def _relay(session, endpoint, proc=None):
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def resize_mode(profile, endpoint_kind):
+    """How a running door is told the caller resized, or None for not at all.
+
+    Policy only, so it can be checked without a POSIX host; the caller adds
+    the platform gate. A profile which pins width/height asked for a fixed
+    screen, and DOS geometry is fixed by design, so only a native door
+    following the caller's own terminal is ever notified.
+    """
+    if profile is None or profile.adapter != "native" or profile.width:
+        return None
+    if endpoint_kind == "pty":
+        return "pty"
+    if profile.resize_signal and endpoint_kind in ("stdio", "socketpair"):
+        return "signal"
+    return None
+
+
+def _republish_terminal_size(info_path, info, width, height):
+    """Rewrite the door's metadata with the caller's current geometry.
+
+    Through a temporary file in the same directory: a door woken by the
+    signal below may read this the instant it is notified, and must never
+    catch a half-written file.
+    """
+    info = dict(info, terminal_width=width, terminal_height=height)
+    temporary = info_path.parent / (info_path.name + ".new")
+    temporary.write_text(json.dumps(info), encoding="utf-8")
+    os.replace(temporary, info_path)
+    return info
+
+
+async def _forward_resize(session, proc, info_path, info, *, pty_fd=None, signal_door=False,
+                          interval=_RESIZE_POLL_SECONDS):
+    """Follow the caller's terminal size while the door runs (issue #468).
+
+    Polled rather than pushed. Telnet NAWS, SSH's window-change message and
+    the web client's resize event each update `Session.terminal_width`/
+    `terminal_height` in place, with no notification in common, so one bounded
+    poll here covers every transport — including any later one — instead of
+    each transport growing a hook it must remember to call. `RemoteEndpoint.
+    _urgent_loop` already reads its own out-of-band channel the same way.
+    """
+    last = (session.terminal_width, session.terminal_height)
+    while True:
+        await asyncio.sleep(interval)
+        current = (session.terminal_width, session.terminal_height)
+        if current == last or not all(current):
+            continue
+        last = current
+        width, height = current
+        try:
+            info = _republish_terminal_size(info_path, info, width, height)
+            if pty_fd is not None:
+                import fcntl
+                import struct
+                import termios
+                fcntl.ioctl(pty_fd, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
+                # The kernel signals the terminal's foreground group itself;
+                # this also reaches a door which never made the PTY its
+                # controlling terminal.
+                os.killpg(proc.pid, signal.SIGWINCH)
+            elif signal_door:
+                os.killpg(proc.pid, signal.SIGUSR1)
+        except OSError:
+            # The door or its terminal is gone. Ending the run is the relay's
+            # job, not this task's; stop following rather than report.
+            return
+
+
 async def _diagnostics(reader, tail):
     while chunk := await reader.read(4096):
         tail.extend(chunk)
@@ -289,6 +361,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
     proc = endpoint = lease = child_socket = None
     slave = workdir = None
     diagnostic_tasks = []
+    resize_task = None
     tail = bytearray()
     reason, exit_code = "failed_to_start", None
     mode_entered = False
@@ -384,6 +457,11 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             elif kind == "socketpair":
                 diagnostic_tasks.append(asyncio.create_task(_diagnostics(proc.stdout, tail)))
             diagnostic_tasks.append(asyncio.create_task(_diagnostics(proc.stderr, tail)))
+            mode = resize_mode(profile, kind)
+            if os.name == "posix" and mode is not None:
+                resize_task = asyncio.create_task(_forward_resize(
+                    session, proc, info_path, info,
+                    pty_fd=endpoint.fd if mode == "pty" else None, signal_door=mode == "signal"))
         try:
             reason = await asyncio.wait_for(_relay(terminal, endpoint, proc),
                                             timeout=effective_wall_limit(profile, wall_time_limit_seconds))
@@ -431,6 +509,12 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
         async def cleanup():
             nonlocal exit_code
             errors = []
+            # First, before the endpoint below is closed: the resize follower
+            # captured the PTY master descriptor by number, and a descriptor
+            # number is reused. It must never ioctl one this run no longer owns.
+            if resize_task is not None:
+                resize_task.cancel()
+                await asyncio.gather(resize_task, return_exceptions=True)
             # A full StreamReader can pause the underlying pipe. After timeout
             # or disconnect the terminal pump is gone; drain without forwarding
             # so process reaping/pipe closure cannot depend on that slow caller.
