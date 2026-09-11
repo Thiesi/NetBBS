@@ -7507,12 +7507,13 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
     if compact: lines.insert(0, "Spatial map needs 40 columns and 12 rows; exact list is available here.")
     pages = _trade_pages(lines, title, list_footer)
     while True:
-        out_line()
         if list_mode:
-            out_line(f"{title} {page + 1}/{len(pages)}")
-            for line in pages[page]: out_line(line)
+            # The exact list is a list screen; only the spatial grid below is
+            # full-bleed, and only it is measured unframed.
+            draw_page(p, title, pages[page], page, len(pages))
             footer = list_footer
         else:
+            out_line()
             heading = "Star Map: " + (SECTOR_NAMES[sector] if sector is not None else "Galaxy")
             xmin, xmax, ymin, ymax = map_bounds(sector)
             bounds = f"X {xmin}-{xmax}; Y {ymin}-{ymax}"

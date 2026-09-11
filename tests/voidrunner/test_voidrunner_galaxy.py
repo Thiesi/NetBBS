@@ -207,7 +207,7 @@ def test_spatial_map_and_exact_list_fit_terminal_and_preserve_career(monkeypatch
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
         assert len(frames) < 200
         if "Star Map:" in frame: return next(map_keys)
-        match = re.search(r"Charted Systems (\d+)/(\d+)", page_text(frame))
+        match = re.search(r"Charted Systems (\d+)/(\d+)", page_title(frame))
         assert match
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr, "read_key", choose)
