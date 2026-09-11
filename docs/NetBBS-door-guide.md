@@ -1556,7 +1556,15 @@ copied into each backup. Understand what changes before enabling it:
   backup**, naming that door. Silently omitting data you asked to keep would
   be worse. Fix the directory, correct the door, or turn the option back off;
 - these directories are recorded by file count and size rather than
-  per-file checksums, unlike node state.
+  per-file checksums, unlike node state;
+- **the copy is not quiesced.** A door being played, or a companion service
+  running, can be writing to its installation while it is copied, and the
+  result may be a torn generation — a database and its write-ahead log from
+  different moments, or game files from opposite sides of an update. Halt the
+  door's service and wait for callers to leave first, the same discipline the
+  Voidrunner and War Dialer notes above already ask for. A backup which
+  reports success is not a promise that a live game's state inside it is
+  self-consistent.
 
 **Restore never writes them back.** They are captured as a copy so you have
 one; putting a game installation back is an ordinary file-copy operation you

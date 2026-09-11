@@ -4793,7 +4793,9 @@ async def _backup_status_screen(
             if not installs_on else
             "Every registered door's game installation is copied into each backup. "
             "Backups will be larger and slower; restore never writes these back over a live "
-            "installation, so recover them with ordinary file tools."
+            "installation, so recover them with ordinary file tools. The copy is not quiesced: "
+            "halt a door's service and let its callers leave before backing up, or its game "
+            "state may be captured mid-write."
         )
 
         if not can_create:

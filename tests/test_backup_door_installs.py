@@ -18,7 +18,10 @@ from netbbs.backup import (BackupError, create_backup, door_installs_included,
 from netbbs.doors import create_door
 from netbbs.doors.profiles import DoorProfile
 from netbbs.storage.database import Database
-from tests.test_backup import db_path, identity_dir
+# `isolated_voidrunner_backup_directory` is autouse: without it these
+# tests capture this machine's real Voidrunner save directory.
+from tests.test_backup import (db_path, identity_dir,  # noqa: F401
+                              isolated_voidrunner_backup_directory)
 
 
 def _install(tmp_path, name, *, files=(("scores.dat", "top: 42"),)):
@@ -174,3 +177,51 @@ def test_a_database_named_door_installs_does_not_collide(tmp_path, identity_dir)
     assert (backup / "door-installs").is_dir()
     assert (backup / "netbbs.db").is_file()
     assert manifest["door_installs"] is not None
+
+
+def test_restore_does_not_write_installations_back(tmp_path, db_path, identity_dir):
+    """They are capture-only; the archive keeps them for manual recovery."""
+    from netbbs.backup import restore_backup
+
+    _register(db_path, "Game", _install(tmp_path, "game", files=(("scores.dat", "keep me"),)))
+    _enable(db_path)
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir,
+                           destination=tmp_path / "backup")
+    assert (backup / "door-installs").is_dir(), "precondition: the archive holds installations"
+
+    target = tmp_path / "restored" / "netbbs.db"
+    target.parent.mkdir()
+    restore_backup(source=backup, db_path=target, identity_dir=tmp_path / "restored-identity")
+
+    assert target.is_file(), "the node itself restored"
+    assert not (target.parent / "door-installs").exists(), "capture-only data was written back"
+    # Still present in the archive for the operator to copy back by hand.
+    assert (backup / "door-installs" / "1" / "scores.dat").read_text(encoding="utf-8") == "keep me"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks")
+def test_a_dangling_link_in_an_installation_cannot_break_a_node_restore(
+        tmp_path, db_path, identity_dir):
+    """The regression this guards, and why the tree is excluded from staging.
+
+    The archive stores symlinks as symlinks; restore stages the whole archive
+    with copytree, which follows them by default. A link whose target is gone
+    by recovery time -- the normal case on a fresh disaster-recovery host --
+    would then abort a node restore over data restore does not even use.
+    """
+    from netbbs.backup import restore_backup
+
+    directory = _install(tmp_path, "linky")
+    (directory / "elsewhere").symlink_to(tmp_path / "target-that-will-vanish",
+                                         target_is_directory=True)
+    _register(db_path, "Linky", directory)
+    _enable(db_path)
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir,
+                           destination=tmp_path / "backup")
+    assert (backup / "door-installs" / "1" / "elsewhere").is_symlink()
+
+    target = tmp_path / "restored" / "netbbs.db"
+    target.parent.mkdir()
+    restore_backup(source=backup, db_path=target, identity_dir=tmp_path / "restored-identity")
+
+    assert target.is_file()

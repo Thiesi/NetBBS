@@ -1313,7 +1313,17 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
             leases.enter_context(_voidrunner_maintenance(target))
         staging_dir.mkdir(parents=True)
         try:
-            shutil.copytree(source, staging_dir, dirs_exist_ok=True)
+            # `door-installs` is capture-only: restore never writes it back,
+            # so staging it buys nothing and costs plenty. It also actively
+            # breaks restore -- the archive stores symlinks as symlinks, and
+            # this copy follows them by default, so one dangling absolute link
+            # inside a game installation would fail an otherwise valid node
+            # restore, and a live one would drag unrelated host data into
+            # staging. Excluded at the archive root only.
+            shutil.copytree(source, staging_dir, dirs_exist_ok=True,
+                            ignore=lambda directory, names:
+                            {_DOOR_INSTALLS_DIRNAME}
+                            if Path(directory).resolve() == source.resolve() else set())
             staged_manifest = _validate_backup_source(staging_dir, allow_migrate=True)
             plan = _restore_switch_plan(staging_dir, db_path, identity_dir,
                                         _database_filename_from_manifest(staged_manifest))
