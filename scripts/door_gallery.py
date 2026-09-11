@@ -89,6 +89,8 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Command Deck, expanded", b"X"),
         ("Commodity Market", b"M"),
         ("Engineering Yard", b"Y"),
+        # The crew roster is behind the yard, not the deck: `K` from `Y`.
+        ("Crew Roster", b"YK"),
         ("Mission Board", b"B"),
         ("Contract Details", b"B1"),
         ("Navigation Chart", b"C"),

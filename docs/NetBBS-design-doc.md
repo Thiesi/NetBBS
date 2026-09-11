@@ -5615,12 +5615,14 @@ flattening all of them.
 **Tables are tables.** A column starts on the same display column on every row
 (right-aligned columns end on one), asserted by measuring the rendered rows.
 When a table will not fit, it drops the columns the screen has named as
-droppable, worst first; when dropping all of them is still not enough it
-*stacks* -- each record's first column on a row of its own, the rest aligned and
-indented beneath -- rather than overflowing and wrapping into rubble. Stacking
-restores the dropped columns: it is a change of shape, not a loss of content, so
-a 40-column caller reads the same facts in two rows that an 80-column caller
-reads in one. A stacked record stays one paginator entry and moves between pages
+droppable, worst first -- so a narrow table can carry fewer facts than a wide
+one, and a screen naming a column droppable is saying that figure is available
+elsewhere (the market's depth figures are on the commodity's own trade screen).
+When dropping all of them is still not enough it *stacks* -- each record's first
+column on a row of its own, the rest aligned and indented beneath -- rather than
+overflowing and wrapping into rubble. Stacking restores every dropped column: it
+is a change of shape, not a smaller table, so a stacked 40-column caller reads
+the same facts in two rows that an 80-column caller reads in one. A stacked record stays one paginator entry and moves between pages
 whole. A table's column headings are repeated at the top of every later page
 that carries one of its rows, and only there.
 

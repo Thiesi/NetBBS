@@ -291,6 +291,23 @@ def test_a_keypress_already_waiting_ends_the_effect(monkeypatch):
     assert time.monotonic() - started < 1.0, "a skipped effect still waited"
 
 
+def test_the_next_rank_follows_the_rank_the_career_kept(monkeypatch):
+    """Rank is permanent here, and the record says so two rows further down. A
+    progress row chosen from the *balance* told a Void Baron who had spent down
+    to 1,200cr that they needed 3,800cr to become an Independent Trader, which
+    is a rank they already hold (issue #493 review)."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    world = _world_with_seed(493)
+    world.save.pilot.highest_rank_seen = 3          # Void Baron
+    world.save.pilot.credits = 1_200                # spent down to a rookie balance
+    text = plain(" ".join(vr.pilot_record_lines(world)))
+    assert "Rank Void Baron" in text
+    assert f"to {vr.RANKS[4][1]}" in text, text
+    for lower in vr.RANKS[1:4]:
+        assert f"to {lower[1]}" not in text
+
+
 def test_drawing_a_page_twice_over_reveals_it_once(monkeypatch):
     """A reveal belongs to arriving somewhere. A key that changed nothing
     redraws the same page, and must cost the caller nothing."""

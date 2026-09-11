@@ -1278,10 +1278,16 @@ def test_hop_report_is_bounded_and_the_deck_still_fits(monkeypatch, terminal):
         vr.report_hop(world, [f"line {i}" for i in range(20)])
 
 
-def test_keyed_rows_prefix_only_the_first_row():
-    assert vr.keyed_rows("B", ["Mirrorfall (76,4); Industrial;", "Danger 1; 1 fuel TRACKED NEXT."]) == \
-        ["[B] Mirrorfall (76,4); Industrial;", "    Danger 1; 1 fuel TRACKED NEXT."]
-    assert vr.keyed_rows("3", ["single"]) == ["[3] single"] and vr.keyed_rows("A", []) == []
+def test_keyed_rows_prefix_only_the_first_row_and_style_the_key():
+    """The selection key is a hotkey, so it is gold like every other one: a
+    keyed entry's row is usually styled already, and `style_body_line` leaves a
+    styled row alone, so a raw prefix would be the one colourless key on the
+    page (issue #493 review)."""
+    rows = vr.keyed_rows("B", ["Mirrorfall (76,4); Industrial;", "Danger 1; 1 fuel."])
+    assert [plain(row) for row in rows] ==         ["[B] Mirrorfall (76,4); Industrial;", "    Danger 1; 1 fuel."]
+    assert vr.Palette(truecolor=False).gold in rows[0] and vr.BOLD in rows[0]
+    assert [plain(row) for row in vr.keyed_rows("3", ["single"])] == ["[3] single"]
+    assert vr.keyed_rows("A", []) == []
 
 
 def test_chart_continuations_are_indented_and_still_selectable(monkeypatch, terminal):

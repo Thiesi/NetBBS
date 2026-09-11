@@ -1730,7 +1730,7 @@ def test_picker_footer_only_offers_present_choices(monkeypatch, terminal,count,n
     terminal(80, 24)
     output=io.StringIO();frames=[]
     def choose():
-        frame=output.getvalue();output.seek(0);output.truncate(0);frames.append(frame)
+        frame=plain(output.getvalue());output.seek(0);output.truncate(0);frames.append(frame)
         choices=[line for line in frame.splitlines() if re.match(r"\[\d\] Item",line)]
         if not choices:assert "Select" not in frame
         else:

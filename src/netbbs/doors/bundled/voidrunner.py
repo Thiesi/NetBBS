@@ -6299,7 +6299,19 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
     heading: str | None = None
 
     def open_page() -> None:
-        pages.append(([], {}))
+        # A section rule left at the foot of a page names the page after it, so
+        # it travels with it: a rule with nothing under it is a rule about
+        # nothing. It is moved before the new page is filled, so the rows it
+        # takes are charged to that page's own room (issue #493 review).
+        closing = pages[-1][0]
+        stranded = 0
+        while stranded < len(closing) and closing[len(closing) - 1 - stranded].startswith(SECTION_MARK):
+            stranded += 1
+        carried = []
+        if stranded < len(closing):  # a page of nothing but rules has nowhere to send them
+            carried = closing[len(closing) - stranded:]
+            del closing[len(closing) - stranded:]
+        pages.append((carried, {}))
         page_heading.append(None)
 
     def room_on(page_index: int) -> int:
@@ -8170,7 +8182,10 @@ def screen_missions(p: Palette, world: World) -> None:
                     choice = len(choices)
                     choices.append((mission, active))
                     part = 0  # a continuation that opens a new page carries its key again
-                body.append(f"[{choice + 1}] {row}" if part == 0 else " " * len(f"[{choice + 1}] ") + row)
+                # Through `keyed_rows`, so the selection key is a gold hotkey
+                # like every other, and its continuations line up under it.
+                body.append(keyed_rows(str(choice + 1), [row])[0] if part == 0
+                            else " " * _visible_width(f"[{choice + 1}] ") + row)
         page = min(page, len(pages) - 1)
         body = list(pages[page][0])
         if not entries:
@@ -8218,12 +8233,16 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
     lines.append(f"{p.plasma}{BOLD}{_mission_plain(pilot.handle)}{RESET}  "
                  f"{p.slate}Rank{RESET} {p.plasma}{career_rank(pilot)}{RESET}  "
                  f"{p.gold}{glyph('credits')} {pilot.credits:,}cr{RESET}")
-    following = next(((threshold, label) for threshold, label in RANKS if threshold > pilot.credits), None)
+    # From the rank the career has kept, not from the balance: rank is permanent
+    # here, so a Void Baron who has spent down to 1,200cr is not working toward
+    # Independent Trader again (issue #493 review).
+    earned = career_rank_index(pilot)
+    following = RANKS[earned + 1] if earned + 1 < len(RANKS) else None
     if following is not None:
-        previous = max(threshold for threshold, _ in RANKS if threshold <= pilot.credits)
+        previous = RANKS[earned][0]
         lines.append(f"{p.slate}next rank{RESET} "
-                     f"{gauge(pilot.credits - previous, max(1, following[0] - previous), cells, tone='brand')} "
-                     f"{p.ink}{following[0] - pilot.credits:,}cr{RESET} {p.slate}to {following[1]}{RESET}")
+                     f"{gauge(max(0, pilot.credits - previous), max(1, following[0] - previous), cells, tone='brand')} "
+                     f"{p.ink}{max(0, following[0] - pilot.credits):,}cr{RESET} {p.slate}to {following[1]}{RESET}")
     event = world.save.active_event
     if event:
         lines.append(alert("caution", "Economy event",
@@ -8507,9 +8526,19 @@ def chart_entries(world: World, result: str | None = None) -> list[tuple[int | N
 def keyed_rows(key: str, rows: list[str]) -> list[str]:
     """One hotkey per entry: the first row carries `[K] `, continuation rows are
     indented by the same width so a wrapped entry never reads as two entries
-    (issue #411). Selection still maps the key on every page the entry spans."""
-    prefix = f"[{key}] "
-    return [prefix + rows[0]] + [" " * len(prefix) + row for row in rows[1:]] if rows else []
+    (issue #411). Selection still maps the key on every page the entry spans.
+
+    The prefix is styled here, not left plain. A keyed entry's row is usually
+    already styled by the screen that built it, and `style_body_line` leaves a
+    styled row alone -- so a raw prefix would be the one hotkey on the page
+    drawn in the terminal's default colour (issue #493).
+    """
+    if not rows:
+        return []
+    p = pal()
+    prefix = f"{p.gold}{BOLD}[{key}]{RESET} "
+    pad = " " * _visible_width(f"[{key}] ")
+    return [prefix + rows[0]] + [pad + row for row in rows[1:]]
 
 
 def _chart_pages(world: World, title: str, footer: str, result: str | None):
