@@ -1947,3 +1947,132 @@ def test_sync_still_pushes_to_a_seed_whose_response_carries_no_wanted_list(tmp_p
     finally:
         dialer.close()
         seed.close()
+
+def test_sync_pushes_own_events_even_behind_a_wall_of_carried_ones(tmp_path):
+    """The asymmetric topology the Codex review of issue #478 named. The
+    dialer carries more events originated *elsewhere* than one request
+    holds, and the seed lacks all of them -- but the dialer may not push
+    carried content ("no relay from a stranger"), and the seed never
+    dials the dialer, so its own pull cannot resolve this either.
+
+    While the seed's `wanted` list was prefix-capped, those unsendable
+    IDs filled it, the filter dropped every one of them, the seed's
+    state never changed, and the identical page came back every pass:
+    the dialer's own file descriptor was never offered at all. The
+    carried board events are walked before file areas, so this ordering
+    is deterministic rather than incidental.
+    """
+    from netbbs.files.areas import create_file_area, get_file_area_by_name
+    from netbbs.files.entries import upload_file
+    from netbbs.link.boards import materialize_carried_board, materialize_carried_post
+    from netbbs.link.events import build_board_genesis, build_board_post
+    from netbbs.link.files import link_file_area, list_remote_files, queue_file_descriptor_if_linked
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    elsewhere_identity = bootstrap_node_identity("elsewhere")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    carried_genesis = build_board_genesis(
+        signing_identity=elsewhere_identity.signing_key,
+        origin_fingerprint=elsewhere_identity.fingerprint,
+        board_id="carried-board-id", name="Somebody Else's Board",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    materialize_carried_board(dialer.db, carried_genesis)
+    for i in range(MAX_EVENTS_PER_REQUEST + 10):
+        materialize_carried_post(
+            dialer.db,
+            build_board_post(
+                signing_identity=elsewhere_identity.signing_key,
+                home_node_fingerprint=elsewhere_identity.fingerprint,
+                local_user_id="wanderer", board_id="carried-board-id",
+                subject=f"post {i}", body="body", created_at="2026-01-01T00:00:00Z",
+                nonce=f"nonce-{i}",
+            ),
+            sender_fingerprint=elsewhere_identity.fingerprint,
+        )
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(dialer.db, "downloads", creator=creator)
+    entry = upload_file(dialer.db, area, creator, "game.bin", b"contents")
+    link_file_area(dialer.db, area, node_identity=dialer_identity)
+    own_descriptor = queue_file_descriptor_if_linked(
+        dialer.db, entry, area, node_identity=dialer_identity
+    )
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task, settle=2.0)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert own_descriptor.content_id in seed_node.known_event_ids
+        carried_area = get_file_area_by_name(seed.db, "downloads")
+        assert [f.filename for f in list_remote_files(seed.db, carried_area)] == ["game.bin"]
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_push_keeps_room_for_resource_events_behind_a_long_rotation_history(
+    tmp_path, monkeypatch,
+):
+    """A node's `key_transition` history is append-only and rides along
+    with every push. Spending the whole request budget on it would leave
+    resource events permanently unsent (Codex review of issue #478);
+    they keep at least half a request whatever the history looks like.
+    `MAX_EVENTS_PER_REQUEST` is lowered here so the condition is reached
+    with a handful of rotations instead of a hundred."""
+    import netbbs.link.sync as sync_module
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    genesis = link_board(dialer.db, board, node_identity=dialer_identity)
+
+    monkeypatch.setattr(sync_module, "MAX_EVENTS_PER_REQUEST", 10)
+    while len(dialer_identity.transitions) <= 12:
+        dialer_identity = rotate_operational_key(dialer_identity, purpose="signing")
+    dialer_node = LinkNode(identity=dialer_identity)
+
+    calls = _recording_push(monkeypatch)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task, settle=1.0)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        pushed = {content_id for call in calls for content_id in call}
+        assert genesis.content_id in pushed
+    finally:
+        dialer.close()
+        seed.close()

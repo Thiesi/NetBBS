@@ -227,6 +227,15 @@ _DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS_PER_PEER = 4
 # protocol._MAX_EVENTS_PER_REQUEST` (200) worth of events.
 _LINK_CLIENT_MAX_SIZE_BYTES = 2 * 1024 * 1024
 
+# Issue #478: a peer's `wanted` list is a subset of the content IDs this
+# node's own `InventoryRequest` just declared, so it is already bounded
+# by the body size that request had to fit -- roughly 30,000 IDs at 2 MiB.
+# This is the backstop for a peer that answers with something else
+# entirely; it is not a page size, and must stay well above any legitimate
+# value (truncating `wanted` is what the Codex review of #478 showed pins
+# the same unsendable page forever).
+_MAX_WANTED_CONTENT_IDS = 50_000
+
 # Design doc §11.3, issue #89: `file_transfer.build_chunk_for_serving`
 # already clamps to its own internal ceiling, but the server also refuses
 # a request naming an obviously abusive max_chunk_size outright, the same
@@ -1821,15 +1830,16 @@ class LinkServer:
         # "and here is what *I* am missing from that" costs no extra
         # round trip and lets the requester's push send exactly those
         # events instead of re-offering its whole originated history
-        # every pass. Capped by the same response budget the event list
-        # obeys, so it can never provoke a push burst larger than one
-        # request.
+        # every pass. Not capped by `response_limit`: this can never
+        # exceed the IDs the requester itself just declared, which
+        # `client_max_size` already bounds, and truncating it to a page
+        # would pin that page forever -- see `inventory_wanted_ids`. The
+        # push it provokes is capped on the requester's own side.
         wanted = await self._lane.run(
             inventory_wanted_ids,
             requested_boards=inventory_request.boards,
             requested_channels=inventory_request.channels,
             requested_file_areas=inventory_request.file_areas,
-            limit=response_limit,
         )
         return web.json_response(
             {"events": events, "more_available": more_available, "wanted": wanted}
@@ -2283,7 +2293,11 @@ async def request_inventory(
         if wanted is not None:
             if not isinstance(wanted, list) or not all(isinstance(i, str) for i in wanted):
                 raise LinkTransportError(f"malformed inventory response from {url}: bad wanted list")
-            wanted = wanted[:_MAX_EVENTS_PER_REQUEST]
+            if len(wanted) > _MAX_WANTED_CONTENT_IDS:
+                raise LinkTransportError(
+                    f"inventory response from {url} claims to want {len(wanted)} content ids, more "
+                    f"than the {_MAX_WANTED_CONTENT_IDS} any request this node sends could declare"
+                )
         return body["events"], bool(body["more_available"]), wanted
     except (KeyError, TypeError, AttributeError) as exc:
         raise LinkTransportError(f"malformed inventory response from {url}: {exc}") from exc

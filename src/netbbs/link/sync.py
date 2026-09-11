@@ -519,7 +519,12 @@ async def _push_own_events(
     inventory scope (§8.8's Scope paragraph -- they are gossiped to
     every seed every pass by §12 and are far too few for that to
     matter), so a peer has no way to ask for one, and dedup makes a
-    re-send a no-op.
+    re-send a no-op. They ride *alongside* the selected events rather
+    than out of their budget, so a node with a long rotation history
+    sends a second request rather than starving its resource push of
+    capacity (Codex review of issue #478); the loop below is what splits
+    the two, since a peer refuses any single request carrying more than
+    `MAX_EVENTS_PER_REQUEST`.
 
     `wanted is None` means the seed never answered with a list -- an
     inventory request that failed, or a peer predating this exchange.
@@ -542,14 +547,22 @@ async def _push_own_events(
         by_content_id = {event.content_id: event for event in resource_events}
         selected = [by_content_id[cid] for cid in wanted if cid in by_content_id]
 
-    # One request, not one per `MAX_EVENTS_PER_REQUEST` slice: the
-    # transitions share the same budget the selected events do, so the
-    # whole push is a single hit against the peer's per-source request
-    # allowance (§13.9) however much this node has originated. The loop
-    # below stays only because a node with more key transitions than one
-    # request can hold would otherwise send a request its peer refuses
-    # outright.
-    to_push = transitions + selected[:max(0, MAX_EVENTS_PER_REQUEST - len(transitions))]
+    # The cap belongs *here*, after the filter, not on the `wanted` list
+    # the peer sent (Codex review of issue #478). Truncating what the
+    # peer asked for would prefix-cap a list this node cannot fully
+    # send -- IDs it merely carries are dropped by the filter above, so
+    # a page full of them would come back unchanged forever. Capping
+    # what survives the filter instead truncates only events this node
+    # can actually push, which the peer then has, so the next pass's
+    # list is strictly shorter.
+    #
+    # Transitions come out of the same request while there is room, so
+    # an ordinary node's whole push is one request; past that they get
+    # their own, because resource push must never be squeezed to
+    # nothing by a long rotation history (Codex review of #478 again:
+    # 99 rotations would otherwise have starved it permanently).
+    resource_budget = max(MAX_EVENTS_PER_REQUEST - len(transitions), MAX_EVENTS_PER_REQUEST // 2)
+    to_push = transitions + selected[:resource_budget]
     if not to_push:
         return
     for index in range(0, len(to_push), MAX_EVENTS_PER_REQUEST):

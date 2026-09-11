@@ -1946,20 +1946,30 @@ The requester then pushes exactly the `wanted` events it originated. No
 second round trip, no new request field, and no per-peer push cursor to
 persist.
 
-`wanted` obeys the same `_MAX_EVENTS_PER_REQUEST` cap the event list does,
-so one inventory exchange can provoke at most one push request. The
-remainder needs no cursor for the same reason the pull direction needs
-none: once those events arrive, the next pass's declaration covers them,
-so each pass asks for a strictly shrinking remainder.
+**The cap goes on the push, not on `wanted`.** `wanted` is returned whole:
+it can never exceed the content IDs the requester itself just declared, which
+the responder's `client_max_size` already bounds, and prefix-capping a list the
+*responder* orders is the one thing that must not happen here. A requester
+carrying more events originated elsewhere than the cap allows would see those
+unsendable IDs fill the page, drop every one of them at the filter below, leave
+the responder's state unchanged, and get the identical page back next pass —
+its own events never offered at all. The requester caps instead, after
+filtering `wanted` down to what it originated: that truncation only ever drops
+events it can actually send, so the responder has them next pass and the list
+strictly shrinks. No cursor is needed for the remainder, for the same reason the
+pull direction needs none.
 
 Two things stay outside this. `key_transition`s are pushed
 unconditionally every pass, because identity events are outside inventory
 scope (the Scope paragraph above) and a peer has no way to ask for one;
-they are few and dedup makes a re-send a no-op. And the push still only
-ever carries *self-originated* content — a `wanted` entry the requester
-merely carries is skipped, preserving the "no relay from a stranger"
-scope note; the responder reaches that content through its own inventory
-pull, which is what the multi-hop diff exists for.
+they are few and dedup makes a re-send a no-op. They ride in the same request
+while there is room, so an ordinary node's whole push is one request — but
+resource events keep at least half a request's capacity whatever the rotation
+history looks like, and a long history simply costs a second request rather
+than starving them. And the push still only ever carries *self-originated*
+content — a `wanted` entry the requester merely carries is skipped, preserving
+the "no relay from a stranger" scope note; the responder reaches that content
+through its own inventory pull, which is what the multi-hop diff exists for.
 
 A peer that answers with no `wanted` key at all (one predating this, or
 an inventory request that failed outright) gets one request's worth of

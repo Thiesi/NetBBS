@@ -957,7 +957,6 @@ def inventory_wanted_ids(
     requested_boards: dict[str, list[str]],
     requested_channels: dict[str, list[str]],
     requested_file_areas: dict[str, list[str]],
-    limit: int,
 ) -> list[str]:
     """
     The *reverse* of the three `*_event_diff` functions above, and the
@@ -986,13 +985,20 @@ def inventory_wanted_ids(
     undelivered by push and reaches this node through its own inventory
     pull instead.
 
-    Bounded by `limit` -- the same `_MAX_EVENTS_PER_REQUEST` the
-    response's event list obeys, so the push it provokes is one request,
-    not a burst that exhausts this node's own per-source request budget
-    (§13.9). No cursor is needed for the remainder for the same reason
-    §8.8 already gives for the pull direction: once those events arrive
-    the next pass's declaration covers them, so each pass asks for a
-    strictly shrinking remainder.
+    **Not truncated to a page, deliberately** (Codex review of issue
+    #478). An earlier shape capped this at `_MAX_EVENTS_PER_REQUEST` the
+    way the event list is capped, and a fixed prefix of a list the
+    *responder* orders is exactly the wrong thing to truncate: a
+    requester carrying that many events originated by *other* nodes
+    would fill the page with IDs it is not allowed to push (see the
+    scope note above), the responder would still lack them next pass,
+    and the identical page would come back forever -- the requester's
+    own events never offered at all. The bound instead comes from the
+    request: this can never exceed the IDs the requester itself just
+    declared, which the responder's own `client_max_size` already
+    bounds. The *push* is what gets capped, on the requester's side,
+    after filtering to events it can actually send -- a truncation that
+    shrinks every pass instead of pinning.
 
     Re-reads the same per-resource event sets `*_event_diff` just built
     for the forward direction rather than threading them through three
@@ -1007,14 +1013,10 @@ def inventory_wanted_ids(
         (requested_file_areas, _all_file_area_events),
     ):
         for resource_id in sorted(requested):
-            if len(wanted) >= limit:
-                return wanted
             held = set(all_events(db, resource_id))
             for content_id in requested[resource_id]:
                 if content_id in held or content_id in seen:
                     continue
-                if len(wanted) >= limit:
-                    return wanted
                 seen.add(content_id)
                 wanted.append(content_id)
     return wanted

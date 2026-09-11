@@ -1250,7 +1250,6 @@ def test_inventory_wanted_ids_returns_only_declared_ids_this_node_lacks(tmp_path
         requested_boards={"remote-board-id": [genesis.content_id, absent_post.content_id]},
         requested_channels={},
         requested_file_areas={},
-        limit=200,
     )
 
     assert wanted == [absent_post.content_id]
@@ -1273,24 +1272,27 @@ def test_inventory_wanted_ids_asks_for_everything_in_a_resource_this_node_does_n
         requested_boards={"remote-board-id": [genesis.content_id]},
         requested_channels={},
         requested_file_areas={},
-        limit=200,
     )
 
     assert wanted == [genesis.content_id]
     db.close()
 
 
-def test_inventory_wanted_ids_respects_the_limit(tmp_path):
-    """Capped by the same `_MAX_EVENTS_PER_REQUEST` budget the event
-    list obeys, so one exchange can never provoke a push burst larger
-    than a single request (design doc §8.8, issue #478)."""
+def test_inventory_wanted_ids_is_not_truncated_to_a_page(tmp_path):
+    """Deliberately not prefix-capped (Codex review of issue #478):
+    truncating a list the *responder* orders would let IDs the requester
+    is not allowed to push fill the page and pin it forever. The bound
+    is the request itself -- this can never exceed what the requester
+    declared. The push is capped instead, after filtering to what the
+    requester can actually send."""
+    from netbbs.link.protocol import MAX_EVENTS_PER_REQUEST
     from netbbs.link.store import inventory_wanted_ids
 
     db = Database(tmp_path / "node.db")
     remote_identity = bootstrap_node_identity("elsewhere")
     declared = [
         _remote_post_for_store_tests(remote_identity, subject=f"post {i}", nonce=f"nonce-{i}").content_id
-        for i in range(5)
+        for i in range(MAX_EVENTS_PER_REQUEST + 25)
     ]
 
     wanted = inventory_wanted_ids(
@@ -1298,10 +1300,9 @@ def test_inventory_wanted_ids_respects_the_limit(tmp_path):
         requested_boards={"remote-board-id": declared},
         requested_channels={},
         requested_file_areas={},
-        limit=2,
     )
 
-    assert wanted == declared[:2]
+    assert wanted == declared
     db.close()
 
 
@@ -1333,7 +1334,6 @@ def test_inventory_wanted_ids_spans_channels_and_file_areas_too(tmp_path):
         requested_boards={},
         requested_channels={"remote-channel-id": [channel_genesis.content_id]},
         requested_file_areas={"remote-area-id": [area_genesis.content_id]},
-        limit=200,
     )
 
     assert wanted == [channel_genesis.content_id, area_genesis.content_id]

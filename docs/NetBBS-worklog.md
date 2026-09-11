@@ -2237,6 +2237,22 @@ declared IDs it lacks — and the push sends exactly those. One request per pass
 shrinking to nothing as the peer catches up, no persisted per-peer cursor, no
 extra round trip.
 
+**Cap the push, never `wanted`.** The two are not interchangeable, and getting
+it backwards reintroduces the same starvation in a quieter form. `wanted` is
+ordered by the *responder*; prefix-capping it lets IDs the requester is not
+allowed to push (content it merely carries) fill the page, get dropped by the
+requester's own filter, leave the responder unchanged, and come back identical
+forever. Capping after that filter truncates only events the requester can
+actually send, so the responder has them next pass and the list strictly
+shrinks. `wanted` needs no cap of its own: it is a subset of the IDs the
+requester just declared, which `client_max_size` already bounds.
+
+**Anything that rides along with a budgeted push must not eat the budget.**
+`key_transition`s are append-only and sent unconditionally; deriving the
+resource capacity as `cap - len(transitions)` reaches zero after ~99 rotations
+and stays there. Reserve a floor (half a request) and let a long history cost a
+second request instead.
+
 Two things do not fit that model and are stated rather than assumed.
 `key_transition`s are outside inventory scope, so a peer cannot ask for one;
 they stay unconditionally pushed every pass, which is affordable only because
