@@ -344,3 +344,54 @@ def test_build_chunk_for_serving_marks_the_final_chunk(origin_db, puller_db, ori
     assert chunk_bytes == b"x" * 10
     assert total_size == 10
     assert is_last is True
+
+
+def test_applying_a_chunk_after_the_transfer_was_withdrawn_fails_cleanly(
+    origin_db, puller_db, origin_identity, puller_identity, tmp_path
+):
+    """Design doc §11.2, issue #479 (Codex review of #500): two local
+    sessions fetching the same remote file share one deterministic
+    transfer row, and their network requests happen outside the database
+    lane. If the origin withdraws the file between them, the withdrawal
+    deletes that row -- and its staging file -- while the other chunk is
+    still in flight.
+
+    That chunk must fail the way every other chunk failure does, through
+    `FileTransferError`, and must not recreate the staging file on its
+    way to a foreign-key violation nobody catches."""
+    from netbbs.link.files import withdraw_remote_file
+
+    content = os.urandom(200_000)
+    _entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=content
+    )
+    transfer = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint,
+        chunk_size=100_000,
+    )
+    chunk_bytes, _size, _total, is_last = build_chunk_for_serving(
+        origin_db, file_id=remote_file.file_id, chunk_index=0, max_chunk_size=transfer.chunk_size,
+    )
+    transfer = apply_received_chunk(
+        puller_db, transfer, chunk_index=0, chunk_bytes=chunk_bytes,
+        claimed_chunk_sha256=hashlib.sha256(chunk_bytes).hexdigest(), is_last=is_last,
+        remote_file=remote_file,
+    )
+    staging_path = transfer.temp_path
+    assert staging_path is not None and os.path.exists(staging_path)
+
+    # The other session's fetch gets the withdrawal and acts on it first.
+    assert withdraw_remote_file(puller_db, remote_file) is True
+    assert not os.path.exists(staging_path)
+
+    # This session's chunk, already in flight, lands afterwards.
+    next_bytes, _size, _total, next_is_last = build_chunk_for_serving(
+        origin_db, file_id=remote_file.file_id, chunk_index=1, max_chunk_size=transfer.chunk_size,
+    )
+    with pytest.raises(FileTransferError, match="no longer exists"):
+        apply_received_chunk(
+            puller_db, transfer, chunk_index=1, chunk_bytes=next_bytes,
+            claimed_chunk_sha256=hashlib.sha256(next_bytes).hexdigest(), is_last=next_is_last,
+            remote_file=remote_file,
+        )
+    assert not os.path.exists(staging_path)

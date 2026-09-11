@@ -2840,14 +2840,37 @@ catalogue knows.
 
 The origin says so when asked. A chunk request (§11.3) for a `file_id` this
 node holds no row for is answered **HTTP 410 with a signed `file_withdrawal`**
-— `file_id`, `created_at`, `nonce`, signed by the origin's current signing
-key, the same key that signed the `file_descriptor` being withdrawn. The
-requester verifies that signature against the origin's current key and checks
-the named `file_id` before acting; a withdrawal that fails either check is
-refused and changes nothing. It then deletes its own `remote_files` row along
-with the fetch state that existed only to serve it (`link_file_transfers`, its
-chunk records, and any staging file), and tells the caller the origin no
-longer has the file rather than reporting a generic transfer error.
+— `file_id`, `requester_fingerprint`, `transfer_id`, `created_at`, `nonce`,
+signed by the origin's current signing key, the same key that signed the
+`file_descriptor` being withdrawn.
+
+Acting on one is irreversible in a way discarding a bad chunk is not: once the
+`remote_files` row is gone, the `file_descriptor` still in `link_events` means
+ordinary redelivery will not bring it back. So the requester checks four things,
+all of them before deleting anything:
+
+- **the envelope is a `file_withdrawal`.** The descriptor being withdrawn is
+  gossiped to the whole mesh, signed by the very same key, and carries the very
+  same `file_id` — so "signed by the origin, names this file" describes a
+  document any interceptor already holds, and `object_type` is the only thing
+  separating the two. It is a precondition of the signature check, not a
+  formality;
+- **`requester_fingerprint` is this node and `transfer_id` is the request just
+  sent**, so a withdrawal recorded off the wire is useless anywhere else;
+- **`created_at` is fresh**, on the same five-minute window and for the same
+  reason `InventoryRequest` has one: a signature is durable, and without
+  freshness a recorded 410 stays usable indefinitely — including after the
+  origin restores the file from backup, when the entry it deletes would describe
+  bytes the origin is serving again;
+- **the signature verifies** against the origin's current signing key.
+
+Any failure refuses the withdrawal and changes nothing. On success the requester
+deletes its `remote_files` row along with the fetch state that existed only to
+serve it (`link_file_transfers`, its chunk records, and any staging file), and
+tells the caller the origin no longer has the file rather than reporting a
+generic transfer error. A chunk still in flight for a transfer withdrawn this
+way fails as an ordinary `FileTransferError` rather than writing into a row that
+no longer exists.
 
 A withdrawal is **not** a gossiped tombstone, and deliberately so. A
 `file_descriptor_tombstone` mirroring `board_post_tombstone` would have to be

@@ -890,19 +890,40 @@ one per swept file indefinitely. That grows the own-events list without bound,
 in the same place issue #478 had just finished bounding. The point-to-point
 answer covers deletion and expiry together with no retained state at all.
 
-**Sign anything that deletes remote state.** A bare 410 would have been enough
-to make a peer drop a catalogue row, and anything that intercepted or
-misdirected the request could produce one. Verification uses the origin's
-current signing key, exactly as every chunk descriptor already does, and a
-withdrawal that fails to verify — or names a different `file_id` — is refused
-without touching local state. The 410 body carrying no usable withdrawal is an
-ordinary failed fetch.
+**Sign anything that deletes remote state — and then check more than the
+signature.** A bare 410 would have been enough to make a peer drop a catalogue
+row, and anything that intercepted or misdirected the request could produce one.
+But a signature alone is a weak check here for two reasons worth remembering
+whenever a signed object authorizes a deletion:
+
+- **another signed object may satisfy the same predicate.** The `file_descriptor`
+  being withdrawn is gossiped mesh-wide, signed by the same key, and names the
+  same `file_id`; only `object_type` tells it from a withdrawal. Validate the
+  envelope — protocol version, object type, payload shape — before the signature
+  is worth anything. The gossiped event classes get this for free because
+  `handle_events` dispatches on `object_type`; anything parsed outside that
+  dispatch does not, and `from_dict` is where it belongs.
+- **a signature is durable, so it replays.** Bind the object to the exchange it
+  answers (`requester_fingerprint`, `transfer_id`) and check `created_at`
+  freshness, the way `InventoryRequest` does. Without it a recorded 410 stays
+  usable forever, including after a backup restore puts the file back.
+
+The 410 body carrying no usable withdrawal is an ordinary failed fetch.
 
 **Deleting a `remote_files` row is not a bare DELETE.** `link_file_transfers`
 holds a foreign key to it, and a partial transfer owns a staging file nothing
 else would ever return for. Remove the chunk records, the transfer rows and the
 row itself in one transaction, then the staging files — never the other way
 round, or a failed commit strands a transfer that still believes it has one.
+
+**A deletion that races in-flight work has to be handled where the work lands.**
+Two local sessions fetching the same remote file share one deterministic
+transfer row, and their network requests happen outside the database lane, so a
+withdrawal answering one can delete that row and its staging file while the
+other's chunk is still in the air. `apply_received_chunk` checks the row still
+exists before writing anything — otherwise it recreates the staging file on the
+way to a foreign-key violation, leaking the file and surfacing a raw
+`sqlite3.IntegrityError` to a caller that only handles `FileTransferError`.
 
 **The trade-off is deliberate and belongs in the docs, not in a comment.** A
 stale entry stays listed until somebody tries to fetch it. Listing reports what

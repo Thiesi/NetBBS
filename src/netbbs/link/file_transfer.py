@@ -163,7 +163,9 @@ def apply_received_chunk(
     transfer's current state unchanged -- the exact-dedup mechanism the
     design doc names for a duplicate/resent chunk request.
 
-    Raises `FileTransferError` if the received bytes don't hash to
+    Raises `FileTransferError` if the transfer row has gone while this
+    chunk was in flight (its origin withdrew the file -- see below), if
+    the received bytes don't hash to
     `claimed_chunk_sha256` (the requester's own integrity check,
     independent of the signature covering the *claim*), if `chunk_index`
     doesn't match what this transfer actually expects next (out-of-order
@@ -172,6 +174,22 @@ def apply_received_chunk(
     already applies), or if the reassembled whole-file content doesn't
     match `remote_file.sha256` once the last chunk lands.
     """
+    # The transfer may have been withdrawn while this chunk was in
+    # flight (design doc 11.2, issue #479; Codex review of #500): two
+    # local sessions fetching the same remote file share this one
+    # deterministic row, and a withdrawal answering one of them deletes
+    # it -- along with the staging file -- before the other's response
+    # gets here. Checked first, so nothing below recreates that staging
+    # file only to fail its own insert on a foreign key that no longer
+    # has a parent, leaking the file and surfacing a raw SQLite error to
+    # a caller. FileTransferError is what every caller of this function
+    # already handles.
+    if get_transfer(db, transfer.transfer_id) is None:
+        raise FileTransferError(
+            f"transfer {transfer.transfer_id!r} no longer exists -- the file's origin withdrew it "
+            "while this chunk was in flight"
+        )
+
     already_applied = db.connection.execute(
         "SELECT 1 FROM link_file_transfer_chunks WHERE transfer_id = ? AND chunk_index = ?",
         (transfer.transfer_id, chunk_index),

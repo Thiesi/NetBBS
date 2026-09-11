@@ -314,6 +314,8 @@ def test_fetch_reports_a_withdrawn_file_instead_of_a_generic_transfer_error(
     withdrawal = build_file_withdrawal(
         signing_identity=remote_node_identity.signing_key,
         file_id=remote_file.file_id,
+        requester_fingerprint=node_identity.fingerprint,
+        transfer_id="irrelevant-here",
         created_at="2026-09-04T09:31:00+00:00",
     )
 

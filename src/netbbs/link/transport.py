@@ -97,6 +97,7 @@ from netbbs.link.events import (
     ChannelGenesis,
     ChannelMessage,
     FileAreaGenesis,
+    EventError,
     FileChunkDescriptor,
     FileWithdrawal,
     FileDescriptor,
@@ -144,6 +145,7 @@ from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_
 from netbbs.identity.encryption import derive_encryption_private_key
 from netbbs.link.protocol import (
     _MAX_EVENTS_PER_REQUEST,
+    _parse_aware_timestamp,
     FileChunkRequest,
     HelloMessage,
     InventoryRequest,
@@ -237,6 +239,14 @@ _LINK_CLIENT_MAX_SIZE_BYTES = 2 * 1024 * 1024
 # "reject the whole request" idiom other malformed-input rejection in
 # this module already uses.
 _MAX_ALLOWED_CHUNK_SIZE_BYTES = 1024 * 1024
+
+# Design doc §11.2, issue #479: a `file_withdrawal` deletes catalogue
+# state, and a signature alone is durable -- a recorded 410 would stay
+# usable indefinitely. Same five minutes `_INVENTORY_REQUEST_FRESHNESS_
+# SECONDS` allows, for the same "ordinary clock skew, not durable
+# authority" reason; no nonce cache is needed on top, because the
+# withdrawal is already bound to one requester and one transfer_id.
+_FILE_WITHDRAWAL_FRESHNESS_SECONDS = 5 * 60
 # fetch_next_file_chunk's own default -- matches netbbs.link.file_
 # transfer's internal default exactly (kept as a separate constant
 # rather than importing that module's private one across module
@@ -1935,6 +1945,8 @@ class LinkServer:
             withdrawal = build_file_withdrawal(
                 signing_identity=self._node.identity.signing_key,
                 file_id=chunk_request.file_id,
+                requester_fingerprint=fingerprint,
+                transfer_id=chunk_request.transfer_id,
                 created_at=utc_now_iso(),
             )
             return web.json_response(
@@ -2361,7 +2373,7 @@ def _parse_withdrawal_body(text: str, url: str) -> FileWithdrawal:
     here."""
     try:
         return FileWithdrawal.from_dict(strict_json_loads(text)["withdrawal"])
-    except (KeyError, ValueError, TypeError) as exc:
+    except (EventError, KeyError, ValueError, TypeError) as exc:
         raise LinkTransportError(
             f"origin at {url} refused a chunk request as gone but sent no usable withdrawal: {exc}"
         ) from exc
@@ -2508,7 +2520,9 @@ async def fetch_next_file_chunk(
             node, session, base_url, chunk_request, timeout=timeout
         )
     except RemoteFileWithdrawnError as exc:
-        await _withdraw_if_the_origin_really_said_so(node, lane, remote_file, exc)
+        await _withdraw_if_the_origin_really_said_so(
+            node, lane, remote_file, transfer.transfer_id, exc
+        )
         raise
 
     if descriptor.payload.get("file_id") != remote_file.file_id or descriptor.payload.get("chunk_index") != chunk_index:
@@ -2543,28 +2557,64 @@ async def fetch_next_file_chunk(
 
 
 async def _withdraw_if_the_origin_really_said_so(
-    node: LinkNode, lane: DatabaseLane, remote_file: RemoteFile, exc: "RemoteFileWithdrawnError",
+    node: LinkNode, lane: DatabaseLane, remote_file: RemoteFile, transfer_id: str,
+    exc: "RemoteFileWithdrawnError",
 ) -> None:
     """Design doc §11.2, issue #479: drop `remote_file`'s catalogue entry
     -- but only once the withdrawal proves it came from the file's own
-    origin, naming that file.
+    origin, answering *this* request, now.
 
-    The signature is checked against the origin's *current* signing key,
-    exactly as `fetch_next_file_chunk` already checks every chunk
-    descriptor, and for a stronger reason: a chunk that fails
-    verification is merely discarded, while acting on this deletes local
-    state. A withdrawal naming a different `file_id`, or one that does
-    not verify, raises `LinkProtocolError` and changes nothing -- a peer
-    claiming a withdrawal it cannot sign is misbehaving, not
-    authoritative.
+    Four things are checked, and all of them before the deletion, because
+    acting on this is irreversible in a way discarding a bad chunk is
+    not: once the row is gone, the `file_descriptor` still sitting in
+    `link_events` means ordinary redelivery will not bring it back.
+
+    `FileWithdrawal.from_dict` has already refused anything that is not a
+    `file_withdrawal` envelope -- without that, the file's own gossiped
+    `file_descriptor`, signed by the same key and naming the same
+    `file_id`, would pass every check here (Codex review of #500).
+
+    `requester_fingerprint` and `transfer_id` must match this node and
+    the request just sent, so a withdrawal recorded off the wire is
+    useless anywhere else. `created_at` must be fresh, on the same
+    five-minute window and for the same reason `InventoryRequest` has
+    one: a signature is durable, and without freshness a recorded 410
+    stays usable forever -- including after the origin restores the file
+    from backup, when it would delete a catalogue entry for bytes the
+    origin is serving again.
+
+    Only then the signature, against the origin's *current* signing key.
+    Any failure raises `LinkProtocolError` and changes nothing.
     """
     origin_peer = node.peers.get(remote_file.origin_fingerprint)
     if origin_peer is None:
         return
-    if exc.withdrawal.payload.get("file_id") != remote_file.file_id:
+    payload = exc.withdrawal.payload
+    if payload.get("file_id") != remote_file.file_id:
         raise LinkProtocolError(
             f"file_withdrawal from {remote_file.origin_fingerprint} names a different file than "
             f"{remote_file.file_id!r} -- refusing"
+        )
+    if payload.get("requester_fingerprint") != node.identity.fingerprint:
+        raise LinkProtocolError(
+            f"file_withdrawal from {remote_file.origin_fingerprint} was issued to "
+            f"{payload.get('requester_fingerprint')!r}, not this node -- refusing"
+        )
+    if payload.get("transfer_id") != transfer_id:
+        raise LinkProtocolError(
+            f"file_withdrawal from {remote_file.origin_fingerprint} answers transfer "
+            f"{payload.get('transfer_id')!r}, not the one just requested -- refusing"
+        )
+    age_seconds = abs(
+        (
+            _parse_aware_timestamp(utc_now_iso(), field_name="current time")
+            - _parse_aware_timestamp(payload["created_at"], field_name="file_withdrawal.created_at")
+        ).total_seconds()
+    )
+    if age_seconds > _FILE_WITHDRAWAL_FRESHNESS_SECONDS:
+        raise LinkProtocolError(
+            f"file_withdrawal from {remote_file.origin_fingerprint} is outside the "
+            f"{_FILE_WITHDRAWAL_FRESHNESS_SECONDS}-second freshness window -- refusing"
         )
     signing_key_b64 = resolve_current_operational_key(
         origin_peer.transitions,

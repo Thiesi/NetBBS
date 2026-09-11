@@ -39,6 +39,7 @@ duplicate the identical helpers between themselves).
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 
 import aiohttp
@@ -63,7 +64,12 @@ from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import FileChunkRequest, LinkNode
 from netbbs.link.store import load_link_node
 from netbbs.link.sync import run_link_sync
-from netbbs.link.transport import LinkServer, fetch_next_file_chunk, request_file_chunk
+from netbbs.link.transport import (
+    LinkServer,
+    LinkTransportError,
+    fetch_next_file_chunk,
+    request_file_chunk,
+)
 from netbbs.net import chat_flow, file_flow
 from netbbs.net.char_input import InputHistory
 from tests.test_chat_flow_moderation import FakeSession
@@ -78,6 +84,7 @@ from netbbs.mail import list_inbox, list_sent
 from netbbs.search import search_channel_messages, search_posts
 from netbbs.activity import board_read_cursor, record_board_seen, record_channel_seen, unread_channel_count, unread_post_count
 from netbbs.storage.database import Database
+from netbbs.timeutil import utc_now_iso
 from netbbs.storage.execution import DatabaseLane
 
 
@@ -1452,7 +1459,11 @@ def test_remote_file_withdrawal_signed_by_anyone_but_the_origin_changes_nothing(
                 forged = build_file_withdrawal(
                     signing_identity=impostor_identity.signing_key,
                     file_id=entry.file_id,
-                    created_at="2026-01-01T00:00:00+00:00",
+                    requester_fingerprint=seed_node.identity.fingerprint,
+                    transfer_id=compute_transfer_id(
+                        entry.file_id, seed_node.identity.fingerprint
+                    ),
+                    created_at=utc_now_iso(),
                 )
 
                 async def refuse_as_gone(*args, **kwargs):
@@ -1590,6 +1601,165 @@ def test_remote_file_already_fetched_survives_its_origin_dropping_its_own_copy(t
         assert withdraw_remote_file(seed.db, fetched) is False
         assert get_remote_file(seed.db, entry.file_id) is not None
         assert download_file(get_file(seed.db, entry.file_id)) == content
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_remote_file_withdrawal_cannot_be_spoofed_with_the_files_own_descriptor(tmp_path):
+    """The sharpest form of the problem (Codex review of #500): the
+    `file_descriptor` being withdrawn is gossiped to the whole mesh,
+    signed by the very same origin key, and names the very same
+    `file_id`. "Signed by the origin, names this file" therefore
+    describes a document any interceptor already holds, and only
+    `object_type` tells the two apart -- so it is checked before the
+    signature ever matters, not after."""
+    from netbbs.link.transport import RemoteFileWithdrawnError
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    content = os.urandom(4096)
+    creator, area, entry = _catalogued_remote_file(
+        tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content
+    )
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+
+                # The genuine, already-published descriptor for this very
+                # file, replayed into the `withdrawal` slot of a 410.
+                descriptor = json.loads(
+                    dialer.db.connection.execute(
+                        "SELECT link_event_json FROM files WHERE file_id = ?", (entry.file_id,)
+                    ).fetchone()["link_event_json"]
+                )
+                assert descriptor["envelope"]["object_type"] == "file_descriptor"
+                assert descriptor["envelope"]["payload"]["file_id"] == remote_file.file_id
+
+                import netbbs.link.transport as transport_module
+
+                async def serve_the_descriptor_as_a_withdrawal(*args, **kwargs):
+                    return transport_module._parse_withdrawal_body(
+                        json.dumps({"error": "gone", "withdrawal": descriptor}), "http://spoofed"
+                    )
+
+                original = transport_module.request_file_chunk
+                transport_module.request_file_chunk = serve_the_descriptor_as_a_withdrawal
+                try:
+                    # Refused while still being parsed, so it never even
+                    # reaches the withdrawal path -- an ordinary failed
+                    # fetch, not a RemoteFileWithdrawnError.
+                    with pytest.raises(LinkTransportError) as raised:
+                        await fetch_next_file_chunk(
+                            seed_node, session, f"http://127.0.0.1:{dialer_server.port}",
+                            seed.lane, remote_file,
+                        )
+                    assert not isinstance(raised.value, RemoteFileWithdrawnError)
+                finally:
+                    transport_module.request_file_chunk = original
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert get_remote_file(seed.db, entry.file_id) is not None
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_remote_file_withdrawal_issued_to_another_node_or_gone_stale_changes_nothing(tmp_path):
+    """A signature is durable; a recorded 410 must not be. The withdrawal
+    is bound to one requester and one transfer, and checked for freshness
+    on the same five-minute window `InventoryRequest` uses -- otherwise a
+    withdrawal captured off the wire stays usable forever, including
+    after the origin restores the file from backup, when the entry it
+    deletes describes bytes the origin is serving again."""
+    from netbbs.link.events import build_file_withdrawal
+    from netbbs.link.protocol import LinkProtocolError
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    content = os.urandom(4096)
+    creator, area, entry = _catalogued_remote_file(
+        tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content
+    )
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+                transfer_id = compute_transfer_id(
+                    entry.file_id, seed_node.identity.fingerprint
+                )
+
+                import netbbs.link.transport as transport_module
+
+                # Genuine origin signature every time; each of these is
+                # wrong in exactly one other way.
+                issued_elsewhere = build_file_withdrawal(
+                    signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
+                    requester_fingerprint="somebody-else", transfer_id=transfer_id,
+                    created_at=utc_now_iso(),
+                )
+                other_transfer = build_file_withdrawal(
+                    signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
+                    requester_fingerprint=seed_node.identity.fingerprint,
+                    transfer_id="some-other-transfer", created_at=utc_now_iso(),
+                )
+                stale = build_file_withdrawal(
+                    signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
+                    requester_fingerprint=seed_node.identity.fingerprint,
+                    transfer_id=transfer_id, created_at="2026-01-01T00:00:00+00:00",
+                )
+
+                original = transport_module.request_file_chunk
+                try:
+                    for withdrawal in (issued_elsewhere, other_transfer, stale):
+                        async def refuse(*args, _w=withdrawal, **kwargs):
+                            raise transport_module.RemoteFileWithdrawnError("gone", _w)
+
+                        transport_module.request_file_chunk = refuse
+                        with pytest.raises(LinkProtocolError):
+                            await fetch_next_file_chunk(
+                                seed_node, session, f"http://127.0.0.1:{dialer_server.port}",
+                                seed.lane, remote_file,
+                            )
+                        assert get_remote_file(seed.db, entry.file_id) is not None
+                finally:
+                    transport_module.request_file_chunk = original
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert get_remote_file(seed.db, entry.file_id) is not None
     finally:
         dialer.close()
         seed.close()

@@ -1388,6 +1388,23 @@ class FileWithdrawal:
     requester verifies it against the origin's current signing key -- the
     same key that signed the `file_descriptor` being withdrawn -- and
     changes nothing if it does not verify.
+
+    **A valid signature is necessary and nowhere near sufficient here,**
+    and `from_dict` enforces the rest (Codex review of #500). The
+    `file_descriptor` this withdrawal is about is gossiped to the whole
+    mesh, signed by the very same key, and carries the very same
+    `file_id` -- so "signed by the origin, names this file" describes a
+    document any interceptor already holds. Only `object_type` separates
+    the two, which makes checking it a precondition of the signature
+    check rather than a formality.
+
+    The payload binds the withdrawal to the one request it answers:
+    `requester_fingerprint` and `transfer_id` make it useless when
+    replayed at anybody else, and `created_at` is checked for freshness
+    the way `InventoryRequest`'s is, so a recorded 410 cannot be
+    re-presented later -- after the origin restored the file from
+    backup, say, at which point the catalogue entry it deletes describes
+    bytes the origin is serving again.
     """
 
     envelope: dict
@@ -1409,21 +1426,54 @@ class FileWithdrawal:
 
     @classmethod
     def from_dict(cls, data: dict) -> "FileWithdrawal":
-        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+        """Parses *and* validates the envelope, unlike the gossiped event
+        classes whose object_type `handle_events` dispatches on: nothing
+        downstream of this would otherwise notice a `file_descriptor`
+        presented in a withdrawal's place. Raises `EventError`, which the
+        transport turns into an ordinary failed fetch."""
+        envelope = data["envelope"]
+        if not isinstance(envelope, dict):
+            raise EventError("file_withdrawal envelope is not an object")
+        if envelope.get("netbbs_protocol") != NETBBS_PROTOCOL_VERSION:
+            raise EventError(
+                f"file_withdrawal declares netbbs_protocol "
+                f"{envelope.get('netbbs_protocol')!r}, not {NETBBS_PROTOCOL_VERSION}"
+            )
+        if envelope.get("object_type") != FILE_WITHDRAWAL_OBJECT_TYPE:
+            raise EventError(
+                f"expected a {FILE_WITHDRAWAL_OBJECT_TYPE}, got "
+                f"{envelope.get('object_type')!r} -- refusing"
+            )
+        payload = envelope.get("payload")
+        if not isinstance(payload, dict):
+            raise EventError("file_withdrawal envelope carries no payload object")
+        for field in ("file_id", "requester_fingerprint", "transfer_id", "created_at", "nonce"):
+            if not isinstance(payload.get(field), str) or not payload[field]:
+                raise EventError(f"file_withdrawal payload is missing a usable {field}")
+        return cls(envelope=envelope, signature=base64.b64decode(data["signature"]))
 
 
 def build_file_withdrawal(
     *,
     signing_identity: Identity,
     file_id: str,
+    requester_fingerprint: str,
+    transfer_id: str,
     created_at: str,
     nonce: str | None = None,
 ) -> FileWithdrawal:
     """Build and sign one `file_withdrawal`, per design doc §11.2. Always
     signed by `signing_identity` -- the origin's current signing key, the
-    same key that signed the file's own `file_descriptor`."""
+    same key that signed the file's own `file_descriptor`.
+
+    `requester_fingerprint` and `transfer_id` come from the chunk request
+    being answered, and bind this withdrawal to it: replayed at any other
+    node, or for any other transfer, it no longer matches what the
+    recipient asked for."""
     payload = {
         "file_id": file_id,
+        "requester_fingerprint": requester_fingerprint,
+        "transfer_id": transfer_id,
         "created_at": created_at,
         "nonce": nonce if nonce is not None else secrets.token_hex(16),
     }
@@ -1437,7 +1487,8 @@ def verify_file_withdrawal(
 ) -> bool:
     """Verify `withdrawal`'s signature against the claimed origin's
     *current signing key* -- same division of responsibility as
-    `verify_file_chunk_descriptor`."""
+    `verify_file_chunk_descriptor`. The envelope's own shape is already
+    settled by `from_dict`; this is only the signature."""
     return verify_signature(signing_verify_key, canonical_bytes(withdrawal.envelope), withdrawal.signature)
 
 
