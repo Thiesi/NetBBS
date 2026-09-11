@@ -5535,12 +5535,29 @@ and that row is charged to the capacity like any other. A screen whose title
 will not fit a 40-column border names itself more briefly rather than spend a
 body row on a header -- the Hall of Fame's `Completed careers` becomes `Fame:
 Completed careers` -- measured against the widest counter it can reach, so the
-title cannot change under the caller. Below forty columns or twelve rows the
-page keeps the flat
-layout the responsive work introduced: four columns is a fifth of a 20-column
-caller's screen. The deck's hull/fuel/hold gauges and the fight screen's
-opponent and hull gauges are back with the frame, and give way to plain numbers
--- never the other way round -- on a row too narrow for both.
+title cannot change under the caller. The deck's hull/fuel/hold gauges and the
+fight screen's opponent and hull gauges are back with the frame, and give way to
+plain numbers -- never the other way round -- on a row too narrow for both.
+
+**Both bundled games require a terminal of at least 40 columns by 12 rows, and
+have exactly one layout above it (issue #495).** A launch on anything smaller is
+refused, by name and with the size the terminal reported, before any save or
+world is opened. The doors used to carry a second, stripped presentation for
+terminals down to 20 columns, and that is what flattened them: art, gauges and
+rules were dropped so content would fit a caller nobody dials in from, and the
+stripped result was then what an 80-column caller saw as well. A narrow case may
+never set the ceiling again -- which is why there is no second layout to leak
+upward, and why a screen that will not fit 40 columns is redesigned rather than
+given a compact variant. Nothing in the host has ever supported below 40 either:
+the prose editor already clamps to 40, and the menu layout's only thresholds are
+72 and 120 for *wide* screens.
+
+Door presentation is reviewed by looking at rendered screens. `scripts/
+door_gallery.py <door>` drives every screen in a subprocess at 80, 64 and 40
+columns in each display preset and writes an HTML page through the website's own
+ANSI emulator; a change to a screen comes with that page. The test suite can only
+assert that a screen fits -- never that it looks like anything -- which is how an
+entire visual design was lost with every slice passing review.
 
 Voidrunner offers saved display presets from station Display Options: full palette
 using the existing terminal color depth, basic 16-color, monochrome Unicode, and

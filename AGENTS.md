@@ -99,6 +99,10 @@ The standing principle is:
   `db`-first. Async network/UI flows dispatch through `DatabaseLane` where
   required. Rendering, storage, protocol, and transport concerns stay
   separated.
+- **Review door presentation by looking at it.** A change to a bundled door's
+  screens comes with `scripts/door_gallery.py <door>` output attached to the PR.
+  Tests can only assert that a screen fits its terminal; they cannot fail because
+  it is ugly, and both games lost their visual design to slices that all passed.
 - **Treat migrations as immutable.** Never edit a shipped migration. Test
   migrations against realistic related data, especially before rebuilding a
   table which is a foreign-key parent.

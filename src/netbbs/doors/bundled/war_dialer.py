@@ -2345,17 +2345,18 @@ def resolve_garrison(conn: sqlite3.Connection, player: Player, exchange_id: int,
 # ---------------------------------------------------------------------------
 
 
+MINIMUM_WIDTH, MINIMUM_HEIGHT = 40, 12
+
+
 def _panel_framed(p: "Palette", width: int) -> bool:
     """Whether a screen draws its body inside the door's frame.
 
-    The switchboard overhaul left the masthead framed and nothing else, so
-    every screen under it became an unindented wall of rows (issue #487).
-    Fast mode is a deliberate text-only presentation and keeps its flat rows,
-    and below forty columns the four columns a frame costs are better spent on
-    the words. `width` is the column the screen draws in, one narrower than the
-    terminal, so this is the same forty-column floor Voidrunner's pages use.
+    Only Fast mode says no. There is one layout otherwise (issue #495): the
+    stripped second one the door carried for terminals down to twenty columns
+    is gone, along with the terminals it was for, because designing for that
+    caller is what flattened the game for everyone else (issue #494).
     """
-    return not p.fast and width >= 39
+    return not p.fast
 
 
 def _panel_width(p: "Palette", width: int) -> int:
@@ -2445,8 +2446,9 @@ def show_event_history(
     events = unseen_events(conn, user_id) if unseen_only else history_events(conn, user_id)
     if unseen_only and not events:
         return
-    if width < 20 or height < 10:
-        out_line("History needs a terminal of at least 20 columns by 10 rows. Events remain unread.")
+    if width < MINIMUM_WIDTH or height < MINIMUM_HEIGHT:
+        out_line(f"History needs a terminal of at least {MINIMUM_WIDTH} columns by "
+                 f"{MINIMUM_HEIGHT} rows. Events remain unread.")
         press_any_key(p)
         return
     width -= 1  # Leave room for the prompt cursor at the right edge.
@@ -2619,28 +2621,13 @@ def switchboard_bar(width: int, budget: int) -> list[str]:
     """Every action key, packed into the rows the screen can spare.
 
     Hand-typed rows were tuned for `[K]Label`; one spelling per hotkey (issue
-    #400's rule, adopted here) is wider, and at twenty columns the bar grew
-    past the bottom of the terminal. Packing it to the width keeps every key
-    reachable, and the short labels are the last thing spent -- never a key.
+    #400's rule, adopted here) is wider, so the bar is packed to the width it
+    has. Short labels are the only thing ever spent -- never a key, and never
+    a label entirely: the bare-key strip this used below forty columns went
+    with those terminals (issue #495).
     """
-    for short in (False, True):
-        rows = _packed_bar(width, short=short)
-        if len(rows) <= budget:
-            return rows
-    # Twenty columns cannot hold fifteen labelled entries in the rows a page can
-    # spare, whatever the labels say. The keys stay -- all of them, and reachable
-    # -- and [?] Help is where their names are.
-    keys, rows, row = [f"[{key}]" for key, _, _ in SWITCHBOARD_KEYS], [], ""
-    for entry in keys:
-        candidate = f"{row} {entry}" if row else entry
-        if row and _dlen(candidate) > width:
-            rows.append(row)
-            row = entry
-        else:
-            row = candidate
-    if row:
-        rows.append(row)
-    return rows
+    rows = _packed_bar(width, short=False)
+    return rows if len(rows) <= budget else _packed_bar(width, short=True)
 
 
 def draw_dashboard(p: Palette, state: DashboardState, now: datetime, width: int,
@@ -3506,8 +3493,10 @@ def main() -> int:
     except (TypeError, ValueError):
         height = 24
 
-    if _OUTPUT_WIDTH < 20 or height < 10:
-        out_line("War Dialer needs at least 20 columns by 10 rows. Resize and reconnect.")
+    if _OUTPUT_WIDTH < MINIMUM_WIDTH or height < MINIMUM_HEIGHT:
+        out_line(f"War Dialer needs at least {MINIMUM_WIDTH} columns by {MINIMUM_HEIGHT} rows.")
+        out_line(f"This terminal reports {_OUTPUT_WIDTH}x{height}. Resize it, or reconnect with a "
+                 "larger window, and dial again. Nothing in the world was changed.")
         return 1
 
     conn = None

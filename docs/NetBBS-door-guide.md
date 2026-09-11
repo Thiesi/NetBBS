@@ -225,8 +225,9 @@ The main switchboard shows your resources, holdings and income, Rank progress,
 new events, raid protection, turn refill and the season deadline. Next/Prev pages
 are free and refresh these snapshots; action keys stay available on each page.
 Outcomes and rejection messages wait for acknowledgement before returning to the
-switchboard. The game requires at least 20 columns by 10 rows; resize and reconnect
-if the launch reports a smaller terminal.
+switchboard. The game requires at least 40 columns by 12 rows; a smaller terminal
+is refused by name, with the size it reported, and nothing in the shared world is
+touched -- resize or reconnect with a larger window and dial again.
 
 Your crew is shared across active play and exchange defense. Capture needs two
 available members and assigns one to the new garrison. `[G]arrison` shows owned
@@ -628,7 +629,7 @@ The chart's **[V] View spatial map / list** opens the current sector. **[N/P]** 
 between the six named sectors, **[O] Overview** shows the galaxy, and **[L] List** opens
 a paginated list with exact positions. **[I] Info** selects a station for its known
 connections and details. **[B] Back** returns without changing the career. Terminals
-below 40 columns or 12 rows start in the list; larger terminals can return to the
+below the 40x12 minimum are refused at launch; a terminal that meets it can return to the
 map with **[M] Map**.
 
 Markers distinguish **@** current position, **!** contract objective, **X** route
@@ -983,7 +984,7 @@ repeat-Guard input spends no turn or randomness.
 
 **[F] Fire** exchanges one round, **[E] Evade** attempts escape, and pirates also
 allow **[D] Dump** (one random cargo unit; shown only with cargo aboard) and
-an affordable **[P] Pay bribe**. The action bar names every verb at 40 columns or wider, and keeps the compact
+an affordable **[P] Pay bribe**. The action bar names every verb, and keeps the compact
 letter list below that so the page still shows the fight.
 While escorting, the Evade, Dump and Pay bribe lines say that leaving fails the
 convoy. Failed, abandoned and expired contracts are counted on the Pilot Status

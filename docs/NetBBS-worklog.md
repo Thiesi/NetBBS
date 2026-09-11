@@ -4843,6 +4843,16 @@ other call site commits only. A new caller that changes the day or the station
 must call `checkpoint()`; one that finishes an ordinary action must call
 `commit()`, or the board rerolls under the caller.
 
+Both bundled games require 40x12 and have one layout above it (issue #495). The
+second, stripped presentation they carried for terminals down to 20 columns is
+what flattened them -- every "make it fit" decision was taken for a caller nobody
+has, and the stripped result was what everybody saw. There is no compact variant
+to add to a new screen: a screen that will not fit 40 columns is redesigned. The
+refusal happens before a save directory or world is opened, so a caller who
+resizes loses nothing. `scripts/door_gallery.py` renders every screen at every
+supported size into one page, and is how a presentation change is reviewed --
+the suite can assert that a screen fits, never that it looks like anything.
+
 Paged Voidrunner screens measure their capacity with `page_capacity` -- the
 content column is `_page_content_width()`, which is the box interior less its
 indent and gutter on a framed page and `_OUTPUT_WIDTH - 1` on a flat one, and
