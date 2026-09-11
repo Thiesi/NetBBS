@@ -8056,7 +8056,9 @@ def mission_card(world: World, mission: Mission, active: bool, width: int) -> li
     head = (f"{chip(kind, None)} {p.ink}{_mission_plain(target.name)}{RESET}  "
             f"{badge(state, 'brand' if state == 'TRACKED' else 'info' if active else 'label')}")
     pay = f"{p.gold}+{reward:,}cr{RESET}"
-    rows = [_pad(head, max(1, width - _visible_width(pay))) + pay]
+    # The payout is pushed to the right edge, but never joined to the title: a
+    # head row too long for the width keeps one space before its own figure.
+    rows = [_pad(head, max(_visible_width(head) + 1, width - _visible_width(pay))) + pay]
     facts = [f"{p.slate}danger{RESET} {p.ink}{target.danger if target.discovered else '?'}{RESET}",
              f"{p.ink}{len(mission_route(world, mission))}{RESET} {p.slate}jumps{RESET}"]
     if mission.deadline_turn is None:
