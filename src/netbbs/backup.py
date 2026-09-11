@@ -733,7 +733,8 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
                               "Remove it manually before retrying.") from exc
         raise
     if ((game_metadata is not None and database_filename.casefold() == _VOIDRUNNER_DIRNAME)
-            or (war_metadata is not None and database_filename.casefold() == _WAR_DIALER_DIRNAME)):
+            or (war_metadata is not None and database_filename.casefold() == _WAR_DIALER_DIRNAME)
+            or (door_metadata is not None and database_filename.casefold() == _DOOR_INSTALLS_DIRNAME)):
         # The live custom filename remains valid. Only its archive name changes;
         # the manifest and explicit restore --db already separate those paths.
         database_filename = _LEGACY_DB_FILENAME

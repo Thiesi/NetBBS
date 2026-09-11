@@ -157,3 +157,20 @@ def test_symlinks_are_copied_as_links_not_followed(tmp_path, db_path, identity_d
     link = backup / "door-installs" / "1" / "elsewhere"
     assert link.is_symlink(), "the link was followed and its target copied in"
     assert not (link / "keys").exists() or link.readlink() == outside
+
+
+def test_a_database_named_door_installs_does_not_collide(tmp_path, identity_dir):
+    """The same archive-name fallback voidrunner and war-dialer already get."""
+    db_path = tmp_path / "door-installs"
+    Database(db_path).close()
+    _register(db_path, "Game", _install(tmp_path, "game"))
+    _enable(db_path)
+
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir,
+                           destination=tmp_path / "backup")
+
+    manifest = _manifest(backup)
+    assert manifest["database_filename"] == "netbbs.db", "the snapshot kept a colliding name"
+    assert (backup / "door-installs").is_dir()
+    assert (backup / "netbbs.db").is_file()
+    assert manifest["door_installs"] is not None

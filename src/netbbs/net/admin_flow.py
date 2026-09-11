@@ -4786,7 +4786,10 @@ async def _backup_status_screen(
         await session.write_line(
             "Each door's own game installation, which NetBBS otherwise leaves to you. "
             "Off by default: these are operator-owned and can be far larger than node state. "
-            "Captured as a copy only -- restore never writes back over a live installation."
+            "Including them makes every backup that much larger and slower, so check you have "
+            "the space and that nothing in those directories links to host data you would not "
+            "want copied. Captured as a copy only -- restore never writes back over a live "
+            "installation."
             if not installs_on else
             "Every registered door's game installation is copied into each backup. "
             "Backups will be larger and slower; restore never writes these back over a live "
@@ -4822,28 +4825,19 @@ async def _backup_status_screen(
             await session.write_line("")
             return
         if choice == "d":
+            # A toggle toggles (AGENTS.md, design doc §3.5). The setting is
+            # reversible and changes nothing until the next backup runs, so it
+            # gets no confirmation; the consequences are screen content above,
+            # read before the hotkey, and the new state shows on redraw.
             await session.write_line("")
             wanted = not installs_on
-            await session.write_line(
-                "Including them copies every registered door's whole game installation into each "
-                "backup. Check you have the space, and that nothing in those directories is a "
-                "symlink to host data you would not want copied."
-                if wanted else
-                "Excluding them returns to backing up node state only. Existing backups are "
-                "unchanged; keep your own copies of door installations."
-            )
-            if await prompt_yes_no(
-                session,
-                f"{'Include' if wanted else 'Exclude'} door installation directories in backups?",
-                default=False,
-            ):
-                await lane.run(set_door_installs_included, wanted)
-                await lane.run(
-                    lambda db: record_action(
-                        db, actor=actor, action="backup_door_installs",
-                        detail=f"door installation directories {'included' if wanted else 'excluded'}",
-                    )
+            await lane.run(set_door_installs_included, wanted)
+            await lane.run(
+                lambda db: record_action(
+                    db, actor=actor, action="backup_door_installs",
+                    detail=f"door installation directories {'included' if wanted else 'excluded'}",
                 )
+            )
             continue
         if choice != "c":
             await session.write(reject_unhandled_key(choice))
