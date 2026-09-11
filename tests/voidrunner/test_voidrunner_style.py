@@ -234,6 +234,50 @@ def test_a_tables_headings_are_on_every_page_of_that_table(monkeypatch):
         assert "COMMODITY" in text and "BUY" in text, text
 
 
+def test_a_heading_or_a_rule_is_never_the_last_row_of_a_page(monkeypatch):
+    """A rule or a set of column headings names what follows it, so it is never
+    left at the foot of a page with the rows it names on the next one."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 12)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
+    world = _world_with_seed(493)
+    world.save.pilot.credits = 18_420
+    for lines, title in ((vr.shipyard_lines(world), "Engineering Yard"),
+                         (vr.station_deck_lines(world), "Command Deck"),
+                         (vr.crew_roster_lines(world), "Crew Roster")):
+        pages = vr._service_pages(lines, title, "[<] Prev [>] Next [B] Back: ")
+        for number, rows in enumerate(pages[:-1], 1):
+            assert rows, f"{title}: empty page {number}"
+            assert rows[-1][:1] not in (vr.SECTION_MARK, vr.STICKY_MARK), \
+                f"{title} page {number} ends on a heading: {[plain(row) for row in rows]}"
+        for rows in pages:
+            assert len(rows) == len(set(rows)) or not any(
+                row[:1] == vr.STICKY_MARK for row in rows), "a heading was drawn twice"
+
+
+def test_every_key_the_deck_advertises_is_a_key_the_deck_answers(monkeypatch):
+    """The dispatch is the authority on a hotkey, not the row that names it: an
+    advertised key the deck does not accept only redraws (issue #493 review)."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
+    world = _world_with_seed(493)
+    world.save.ship.has_gunner = True          # a crew alert, so `[K]` is offered
+    world.save.ship.hull_hp = 1                # a repair alert, so `[Y]` is
+    from .support import _set_cargo
+    _set_cargo(world, {"weapons": 2})          # contraband, so `[D]` is
+    advertised = set(re.findall(r"\[([A-Z])\]", plain(" ".join(vr.station_deck_lines(world)))))
+    assert {"K", "Y", "D"} <= advertised
+    for key in sorted(advertised):
+        keys = iter([key, "Q"])
+        monkeypatch.setattr(vr, "read_key", lambda: next(keys))
+        with contextlib.redirect_stdout(io.StringIO()):
+            answered = vr.screen_station_menu(vr.Palette(truecolor=False), world)
+        assert answered == key, f"the deck advertises [{key}] and does not answer it"
+
+
 @pytest.mark.parametrize("width,height", SIZES)
 def test_the_market_prices_line_up_on_every_row(monkeypatch, width, height):
     frame = render("market", monkeypatch, width, height)

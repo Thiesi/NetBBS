@@ -5449,7 +5449,9 @@ def screen_station_menu(p: Palette, world: World) -> str:
         choice, page, count = _draw_service_page(p, f"Command Deck: {world.save.pilot.credits:,}cr", lines, footer, page)
         if (moved := page_step(choice, page, count)) is not None: page = moved
         elif choice == "X": expanded, page = not expanded, 0
-        elif choice in "MYBCSHGTQLDPWONV" and len(choice) == 1:
+        # Every key the deck advertises is a key the deck answers -- `K` opens
+        # the roster the crew alert names, rather than redrawing (#493 review).
+        elif choice in "MYBCSHGTQKLDPWONV" and len(choice) == 1:
             return choice
 
 
@@ -6318,13 +6320,13 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
     heading: str | None = None
 
     def open_page() -> None:
-        # A section rule left at the foot of a page names the page after it, so
-        # it travels with it: a rule with nothing under it is a rule about
-        # nothing. It is moved before the new page is filled, so the rows it
-        # takes are charged to that page's own room (issue #493 review).
+        # A rule or a table's headings left at the foot of a page name the page
+        # after it, so they travel with it: a heading with nothing under it is a
+        # heading about nothing. They are moved before the new page is filled,
+        # so the rows they take are charged to that page's own room (#493 review).
         closing = pages[-1][0]
         stranded = 0
-        while stranded < len(closing) and closing[len(closing) - 1 - stranded].startswith(SECTION_MARK):
+        while stranded < len(closing) and closing[len(closing) - 1 - stranded][:1] in (SECTION_MARK, STICKY_MARK):
             stranded += 1
         carried = []
         if stranded < len(closing):  # a page of nothing but rules has nowhere to send them
@@ -6335,8 +6337,15 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
 
     def room_on(page_index: int) -> int:
         # The first page carries its heading in the flow, where the screen put
-        # it; every later page is given one back, and pays a row for it.
-        return capacity if page_index == 0 or not any_sticky else max(1, capacity - 1)
+        # it; every later page is given one back, and pays a row for it -- but
+        # only if it has not already been handed one by `open_page`, or the row
+        # is charged twice and a two-row record is split down the middle.
+        if page_index == 0 or not any_sticky:
+            return capacity
+        rows = pages[page_index][0]
+        if any(row[:1] == STICKY_MARK for row in rows):
+            return capacity
+        return max(1, capacity - 1)
 
     for index, rows in enumerate(groups):
         key, value = keys[index] if keys is not None else (None, None)
@@ -6367,8 +6376,10 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
     for page_index in range(1, len(pages)):
         owner = page_heading[page_index]
         rows, choices = pages[page_index]
-        # No table rows on this page means its headings would be a lie.
-        if owner is None or (rows and rows[0] == owner):
+        # No table rows on this page means its headings would be a lie -- and a
+        # heading the page already carries, because it was stranded at the foot
+        # of the page before and travelled here, is not added twice.
+        if owner is None or owner in rows:
             continue
         pages[page_index] = ([owner] + rows, choices)
     return pages if keys is not None else [rows for rows, _ in pages]
@@ -10082,6 +10093,8 @@ def main() -> int:
                 screen_market(p, world)
             elif choice == "Y":
                 screen_shipyard(p, world)
+            elif choice == "K":
+                screen_crew(p, world)
             elif choice == "B":
                 screen_missions(p, world)
                 continue  # Browsing is read-only; acceptance checkpoints itself.
