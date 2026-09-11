@@ -5531,7 +5531,7 @@ def _pick_trade_field(title: str, options: list[tuple[object, str]], *, max_choi
                 return current["choices"][int(key) - 1]
 
 
-def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
+def edit_door_draft(p: "Palette", *, title: str, initial: dict, fields: list[tuple],
                     apply: Callable[[dict], object], error_type: type[Exception]) -> object | None:
     """Standalone synchronous draft editor: scalar fields, apply/back, retained errors.
 
@@ -5548,10 +5548,7 @@ def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
             lines.insert(0, "Cannot apply: " + error)
         pages = _trade_pages(lines, title, footer)
         page = min(page, len(pages) - 1)
-        out_line()
-        out_line(f"{title} {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, f"{title}", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)
@@ -5576,7 +5573,7 @@ def edit_door_draft(*, title: str, initial: dict, fields: list[tuple],
                     break
 
 
-def _edit_trade_route(world: World, initial: dict) -> dict | None:
+def _edit_trade_route(p: Palette, world: World, initial: dict) -> dict | None:
     destinations = [(sid, world.by_id[sid].name) for sid in world.save.market_memory if sid != world.here.id]
     destinations.sort(key=lambda item: item[1])
 
@@ -5607,7 +5604,7 @@ def _edit_trade_route(world: World, initial: dict) -> dict | None:
         ("H", "Hold source", lambda d: "existing hold cargo" if d['use_hold'] else "buy new cargo here",
          lambda d: d.update(use_hold=not d['use_hold'])),
     ]
-    return edit_door_draft(title="Route Draft", initial=initial, fields=fields, apply=apply, error_type=TradeError)
+    return edit_door_draft(p, title="Route Draft", initial=initial, fields=fields, apply=apply, error_type=TradeError)
 
 
 def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None) -> None:
@@ -5624,10 +5621,7 @@ def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None)
     while True:
         pages = _trade_pages(trade_route_lines(world, **parameters), "Trade Route", footer)
         page = min(page, len(pages) - 1)
-        out_line()
-        out_line(f"Trade Route {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Trade Route", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)
@@ -5636,7 +5630,7 @@ def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None)
         if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
             page = moved
         elif key == "E":
-            edited = _edit_trade_route(world, parameters)
+            edited = _edit_trade_route(p, world, parameters)
             if edited is not None:
                 parameters, page = edited, 0
 
@@ -5646,10 +5640,7 @@ def screen_remembered_markets(p: Palette, world: World) -> None:
     pages = _trade_pages(remembered_market_lines(world), "Market Memory", footer)
     page = 0
     while True:
-        out_line()
-        out_line(f"Market Memory {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Market Memory", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)
@@ -5747,10 +5738,7 @@ def screen_economy_opportunities(p: Palette, world: World) -> None:
     pages = _trade_pages(economy_opportunity_lines(world, candidates), "Opportunities", footer)
     page = 0
     while True:
-        out_line()
-        out_line(f"Opportunities {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Opportunities", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)
@@ -5769,10 +5757,7 @@ def screen_trading_ledger(p: Palette, world: World) -> None:
     pages = _trade_pages(trading_ledger_lines(world), "Trading Ledger", footer)
     page = 0
     while True:
-        out_line()
-        out_line(f"Trading Ledger {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Trading Ledger", pages[page], page, len(pages))
         out_prompt(footer)
         action = read_command_at_prompt()
         out_line(action)
@@ -5803,10 +5788,7 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
     pages = _trade_pages(lines, title, footer)
     page = 0
     while True:
-        out_line()
-        out_line(f"{title} {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, f"{title}", pages[page], page, len(pages))
         out_prompt(footer)
         action = read_command_at_prompt()
         out_line(action)
@@ -6746,10 +6728,7 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
     pages = _mission_text_pages(lines, overhead=6)  # one row reserved for the acceptance pointer
     page = 0
     while True:
-        out_line()
-        out_line(f"First Flight {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "First Flight", pages[page], page, len(pages))
         # The first screen of the game must not hide its one action (issue #412 review).
         out_line("[A] Accept contract" if page == len(pages) - 1 else "[A] on last page.")
         out_prompt(single_page_footer(("[A] Accept " if page == len(pages) - 1 else "") + "[N] Next [P] Prev [B] Back: ", len(pages)))
@@ -6773,13 +6752,10 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
 def screen_pilot_guide(p: Palette, world: World) -> None:
     page = 0
     while True:
-        pages = _mission_text_pages(pilot_guide_lines(world), overhead=5)
+        pages = _mission_text_pages(pilot_guide_lines(world), overhead=5 + _page_frame_rows())
         page = min(page, len(pages) - 1)
         offer = opening_assignment_offer(world)
-        out_line()
-        out_line(f"Pilot Guide {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Pilot Guide", pages[page], page, len(pages))
         out_prompt(("[O] Offer " if offer is not None else "") + "[N] Next [P] Prev [B] Back: ")
         key = read_command_at_prompt()
         if key in ("B", "Q"):
@@ -6907,10 +6883,7 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
                 lines.insert(0, result)
             pages = _trade_pages(lines, f"Contract Route #{mission.id}", footer)
         page = min(page, len(pages) - 1)
-        out_line()
-        out_line(f"Contract Route #{mission.id} {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, f"Contract Route #{mission.id}", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)
@@ -7504,13 +7477,12 @@ def map_inspection_lines(world: World, sid: int, path: list[int], public_target:
     return lines
 
 
-def _screen_map_info(world: World, sid: int, path: list[int], public_target: int | None) -> None:
+def _screen_map_info(p: Palette, world: World, sid: int, path: list[int], public_target: int | None) -> None:
     title, footer = "Station Info", "[N] Next [P] Prev [B] Back: "
     pages = _trade_pages(map_inspection_lines(world, sid, path, public_target), title, footer)
     page = 0
     while True:
-        out_line(); out_line(f"{title} {page + 1}/{len(pages)}")
-        for line in pages[page]: out_line(line)
+        draw_page(p, f"{title}", pages[page], page, len(pages))
         out_prompt(footer); key = read_command_at_prompt(); out_line(key)
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
@@ -7559,7 +7531,7 @@ def screen_galaxy_map(p: Palette, world: World, *, path: list[int] | None = None
                 ids = {sid for sid in ids if sector_for(world.by_id[sid]) == SECTOR_NAMES[sector]}
             options = sorted(((sid, map_label(world, sid, public_target)) for sid in ids), key=lambda item: item[1])
             selected = _pick_trade_field("Inspect Station", options)
-            if selected is not None: _screen_map_info(world, selected, path, public_target)
+            if selected is not None: _screen_map_info(p, world, selected, path, public_target)
         elif list_mode:
             if (moved := page_step(key, page, len(pages), keys=NEXT_PREV_PAGING_KEYS)) is not None:
                 page = moved
@@ -7690,10 +7662,7 @@ def screen_auto_route(p: Palette, world: World, *, destination: int | None = Non
                 lines.insert(0, result)
             pages = _trade_pages(lines, "Route Planner", footer)
         page = min(page, len(pages) - 1)
-        out_line()
-        out_line(f"Route Planner {page + 1}/{len(pages)}")
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, "Route Planner", pages[page], page, len(pages))
         out_prompt(footer)
         key = read_command_at_prompt()
         out_line(key)

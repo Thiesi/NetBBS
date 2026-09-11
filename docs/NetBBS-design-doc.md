@@ -5508,9 +5508,14 @@ page-capacity measurement -- one row for the bottom border, and four columns for
 the sides, the indent and a right-hand gutter -- so a framed page still fits the
 height it was negotiated for, and a keyed entry is wrapped narrower again to
 leave room for its `[K] ` prefix. The title is drawn into the top border with the
-page counter; where the border cannot hold both, the title is trimmed and the
-counter survives, because the counter is what tells a caller (and a test) which
-page they are on. Below forty columns or twelve rows the page keeps the flat
+page counter. A title is never cut: where the border cannot hold the header, the
+page draws a plain border and puts the whole header in its first row instead,
+and that row is charged to the capacity like any other. A screen whose title
+will not fit a 40-column border names itself more briefly rather than spend a
+body row on a header -- the Hall of Fame's `Completed careers` becomes `Fame:
+Completed careers` -- measured against the widest counter it can reach, so the
+title cannot change under the caller. Below forty columns or twelve rows the
+page keeps the flat
 layout the responsive work introduced: four columns is a fifth of a 20-column
 caller's screen. The deck's hull/fuel/hold gauges and the fight screen's
 opponent and hull gauges are back with the frame, and give way to plain numbers

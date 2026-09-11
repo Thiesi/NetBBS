@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from .support import _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _escort_world, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_pending_fight, _world_with_seed, page_rows, page_text, vr
+from .support import _VOIDRUNNER_PATH, _add_cargo, _door_stopped_at, _escort_world, _mission_details_world, _post_and_accept_test_mission, _set_cargo, _world_with_pending_fight, _world_with_seed, page_rows, page_text, page_title, vr
 
 
 @pytest.mark.parametrize("active", [False, True])
@@ -31,7 +31,7 @@ def test_mission_navigation_pages_preserve_chart_and_career(monkeypatch, termina
     output = io.StringIO(); frames=[]
     def choose():
         frame=output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        match=re.search(r"Contract Route #1 (\d+)/(\d+)", page_text(frame))
+        match=re.search(r"Contract Route #1 (\d+)/(\d+)", page_title(frame))
         assert match and len(frames) < 200
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr,"read_key",choose)

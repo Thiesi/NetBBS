@@ -660,12 +660,12 @@ def test_trade_route_draft_cancel_retains_original_and_fits_pages(monkeypatch, t
     output = io.StringIO(); frames = []
     def choose():
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        match = re.search(r"Route Draft (\d+)/(\d+)", page_text(frame))
+        match = re.search(r"Route Draft (\d+)/(\d+)", page_title(frame))
         assert match and len(frames) < 100
         if len(frames) == 1: return "H"
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr, "read_key", choose)
-    with contextlib.redirect_stdout(output): assert vr._edit_trade_route(world, initial) is None
+    with contextlib.redirect_stdout(output): assert vr._edit_trade_route(vr.Palette(False), world, initial) is None
     assert initial["use_hold"] is False and initial["quantity"] == 1
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
     assert all(len(frame.splitlines()) <= height for frame in frames)
@@ -680,7 +680,7 @@ def test_trade_route_draft_rejection_keeps_edits_until_apply(monkeypatch):
     keys = iter("UHSHS")
     monkeypatch.setattr(vr, "read_key", lambda: next(keys))
     monkeypatch.setattr(vr, "read_line_raw", lambda **kwargs: "3")
-    with contextlib.redirect_stdout(io.StringIO()) as output: result = vr._edit_trade_route(world, initial)
+    with contextlib.redirect_stdout(io.StringIO()) as output: result = vr._edit_trade_route(vr.Palette(False), world, initial)
     assert result == {**initial, "quantity": 3} and initial["quantity"] == 1
     assert "Cannot apply" in output.getvalue() and "Quantity: 3" in output.getvalue()
     assert world.save.to_dict() == before and world.event_rng.getstate() == rng
@@ -837,7 +837,7 @@ def test_market_depth_commodity_details_fit_every_page_without_replenishing(monk
     output = io.StringIO(); frames = []
     def choose():
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        match = re.search(r"Refined Metals Exchange (\d+)/(\d+)", page_text(frame))
+        match = re.search(r"Refined Metals Exchange (\d+)/(\d+)", page_title(frame))
         assert match and len(frames) < 100
         return "Q" if match[1] == match[2] else ">"
     monkeypatch.setattr(vr, "read_key", choose)
@@ -1038,7 +1038,7 @@ def test_economy_opportunity_pages_reach_all_candidates_within_terminal_size(mon
     output = io.StringIO(); frames = []
     def choose():
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        match = re.search(r"Opportunities (\d+)/(\d+)", page_text(frame))
+        match = re.search(r"Opportunities (\d+)/(\d+)", page_title(frame))
         assert match and len(frames) < 300
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr, "read_key", choose)

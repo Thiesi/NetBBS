@@ -849,7 +849,7 @@ def test_general_route_pages_are_read_only_and_hide_unknown_details(monkeypatch,
     output = io.StringIO(); frames = []
     def choose():
         frame = output.getvalue(); frames.append(frame); output.seek(0); output.truncate(0)
-        match = re.search(r"Route Planner (\d+)/(\d+)", page_text(frame))
+        match = re.search(r"Route Planner (\d+)/(\d+)", page_title(frame))
         assert match and len(frames) < 200
         return "B" if match[1] == match[2] else "N"
     monkeypatch.setattr(vr, "read_key", choose)
