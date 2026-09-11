@@ -3494,9 +3494,22 @@ def main() -> int:
         height = 24
 
     if _OUTPUT_WIDTH < MINIMUM_WIDTH or height < MINIMUM_HEIGHT:
-        out_line(f"War Dialer needs at least {MINIMUM_WIDTH} columns by {MINIMUM_HEIGHT} rows.")
-        out_line(f"This terminal reports {_OUTPUT_WIDTH}x{height}. Resize it, or reconnect with a "
-                 "larger window, and dial again. Nothing in the world was changed.")
+        # The reason has to survive the terminal it is about: these are the
+        # smallest screens there are, so the message shrinks with the height and
+        # its last line carries no newline to scroll itself away with.
+        size, need = f"{_OUTPUT_WIDTH}x{height}", f"{MINIMUM_WIDTH}x{MINIMUM_HEIGHT}"
+        if height >= 8:
+            lines = [f"War Dialer needs at least {MINIMUM_WIDTH} columns by {MINIMUM_HEIGHT} rows.",
+                     f"This terminal reports {size}. Resize it, or reconnect with a "
+                     "larger window, and dial again. Nothing in the world was changed."]
+        elif height >= 4:
+            lines = [f"War Dialer needs {need}.", f"This terminal reports {size}.",
+                     "Resize and dial again."]
+        else:
+            lines = [f"War Dialer needs {need}; this is {size}."]
+        for line in lines[:-1]:
+            out_line(line)
+        out(lines[-1])
         return 0  # a size refusal is an outcome; nonzero would be reported as a crash
 
     conn = None

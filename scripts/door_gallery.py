@@ -42,6 +42,7 @@ import os
 import pathlib
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -118,13 +119,23 @@ ONBOARDING: dict[str, bytes] = {"voidrunner": b"\rY", "war_dialer": b"\r\r"}
 PRESETS: dict[str, dict[str, dict]] = {
     "voidrunner": {style: {"display_style": style} for style in
                    ("auto", "basic", "mono", "plain")},
-    "war_dialer": {"auto": {"unicode_style": True}, "plain": {"unicode_style": False}},
+    # War Dialer splits its presentation in two: `unicode_style` arrives in the
+    # drop file, while the caller's own display switches live in the world's
+    # `meta` table, which is where Fast mode -- the one deliberately unframed
+    # layout -- is read from.
+    "war_dialer": {"auto": {"unicode_style": True},
+                   "plain": {"unicode_style": False},
+                   "mono": {"unicode_style": True, "display": {"monochrome": True}},
+                   "fast": {"unicode_style": True, "display": {"fast": True}}},
 }
+
+
+DROP_USER_ID = 1  # the caller every panel is drawn for; display rows are keyed by it
 
 
 def drop_file(work: pathlib.Path, width: int, height: int, info_extra: dict) -> pathlib.Path:
     info = {
-        "handle": "Thiesi", "user_id": 1, "terminal_width": width, "terminal_height": height,
+        "handle": "Thiesi", "user_id": DROP_USER_ID, "terminal_width": width, "terminal_height": height,
         "color_depth": "truecolor", "node_name": "ReLink",
         # War Dialer refuses to launch without a host world owner.
         "war_dialer_owner": "0123456789abcdef0123456789abcdef",
@@ -215,6 +226,16 @@ class Door:
         with self.lock:
             return bytes(self.out).decode("utf-8", "replace")
 
+    def kill(self) -> None:
+        """Leave nothing running behind a failed capture."""
+        self.proc.kill()
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        for reader in self.readers:
+            reader.join(timeout=5)
+
     def finish(self) -> None:
         """Close stdin, let the door exit, and refuse to publish a crash.
 
@@ -241,10 +262,16 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
             info_extra: dict) -> str:
     """Drive a walk and return the screen it is looking at when it is done."""
     running = Door(door, state, width, height, info_extra)
-    running.settle(require=True)  # the opening screen is owed, however slow the boot
-    for index in range(len(keys)):
-        running.press(keys[index:index + 1])
-    screen = running.read()
+    try:
+        running.settle(require=True)  # the opening screen is owed, however slow the boot
+        for index in range(len(keys)):
+            running.press(keys[index:index + 1])
+        screen = running.read()
+    except BaseException:
+        # A door that hung or crashed the build must not outlive it, or a failed
+        # gallery leaves a process per panel behind.
+        running.kill()
+        raise
     running.finish()
     return screen
 
@@ -259,7 +286,15 @@ def apply_preset(state: pathlib.Path, extra: dict) -> dict:
             data = json.loads(save.read_text(encoding="utf-8"))
             data["display_style"] = style
             save.write_text(json.dumps(data), encoding="utf-8")
-    return {key: value for key, value in extra.items() if key != "display_style"}
+    display = extra.get("display")
+    if display:
+        # Exactly what the door's own display screen writes: one JSON row keyed
+        # by the caller, read back by `read_display()`.
+        with sqlite3.connect(state / "war-dialer.db") as conn:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                         (f"display:{DROP_USER_ID}", json.dumps(display)))
+    return {key: value for key, value in extra.items()
+            if key not in ("display_style", "display")}
 
 
 def base_fixture(door_name: str, door: pathlib.Path, root_dir: pathlib.Path,

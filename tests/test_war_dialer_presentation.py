@@ -661,7 +661,7 @@ def test_linux_console_function_key_never_leaks_an_action(tmp_path, stage):
         assert process.stderr.read() == b""
 
 
-@pytest.mark.parametrize("width,height", [(39, 24), (80, 11), (20, 10)])
+@pytest.mark.parametrize("width,height", [(39, 24), (80, 11), (20, 10), (40, 5), (40, 1)])
 def test_a_terminal_below_the_floor_is_refused_without_touching_the_world(
     tmp_path, monkeypatch, width, height
 ):
@@ -682,9 +682,12 @@ def test_a_terminal_below_the_floor_is_refused_without_touching_the_world(
     monkeypatch.setattr(wd, "_resolve_db_path",
                         lambda: pytest.fail("a refused launch opened the world"))
     assert wd.main() == 0
-    said = " ".join(_ANSI_RE.sub("", out.getvalue()).split())
-    assert "needs at least 40 columns by 12 rows" in said
+    raw = _ANSI_RE.sub("", out.getvalue())
+    said = " ".join(raw.split())
+    assert "needs at least 40 columns by 12 rows" in said or "needs 40x12" in said
     assert f"{width}x{height}" in said, "the caller is told what their terminal reports"
+    # The reason has to survive the terminal it is about (issue #495 review).
+    assert raw.count("\n") <= max(0, height - 1), f"the refusal scrolls itself off: {raw!r}"
 
 
 def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
