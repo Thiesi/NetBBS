@@ -361,3 +361,61 @@ def test_a_node_without_a_gateway_serves_no_transfer_routes(tmp_path):
             await server.stop()
 
     assert _run(scenario) == 404
+
+
+def test_concurrent_uploads_are_bounded(node):
+    """Codex review: redeeming frees the grant slot before a byte of the
+    body arrives, so the outstanding-grant ceiling does not bound work
+    in flight. Without a second limit a caller can mint, POST, mint,
+    POST and hold arbitrarily many long handlers and staging files."""
+    from netbbs.net.file_transfer import TransferGateway
+
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    node.server._transfers = TransferGateway(node.grants, node.lane, max_concurrent_uploads=1)
+
+    async def scenario():
+        async with node:
+            first = node.grants.issue(direction=UPLOAD, user=alice, area=area)
+            second = node.grants.issue(direction=UPLOAD, user=alice, area=area)
+
+            async with aiohttp.ClientSession() as client:
+                # A body the server will wait on, so the first upload is
+                # genuinely still in flight when the second arrives.
+                async def slow_body():
+                    yield b"x" * 16
+                    await asyncio.sleep(0.4)
+                    yield b"y" * 16
+
+                held = asyncio.create_task(
+                    client.post(
+                        f"{node.base}/transfer/{first.token}?filename=slow.bin", data=slow_body()
+                    ).__aenter__()
+                )
+                await asyncio.sleep(0.1)
+                async with client.post(
+                    f"{node.base}/transfer/{second.token}?filename=quick.bin", data=b"payload"
+                ) as refused:
+                    status = refused.status
+                response = await held
+                await response.release()
+                return status
+
+    assert _run(scenario) == 429
+
+
+def test_a_download_response_is_not_cacheable(node):
+    """A single-use URL a browser or shared proxy can replay from cache
+    is not single-use (Codex review)."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    entry = upload_file(node.db, area, alice, "game.zip", b"payload")
+
+    async def scenario():
+        async with node:
+            grant = node.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
+            async with aiohttp.ClientSession() as client:
+                async with client.get(f"{node.base}/transfer/{grant.token}") as response:
+                    return response.headers.get("Cache-Control", "")
+
+    assert "no-store" in _run(scenario)

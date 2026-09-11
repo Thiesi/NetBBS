@@ -1113,17 +1113,29 @@ async def run(
         transfer_grants = None
         transfer_gateway = None
         if config.web.enabled:
-            from netbbs.net.file_transfer import TransferGateway, TransferGrants
+            try:
+                import aiohttp  # noqa: F401  -- the endpoint's own dependency
+            except ImportError:
+                # The web listener will be skipped below for the same
+                # reason, and a node that advertises transfer links with
+                # nothing serving them is worse than one that never
+                # mentions them (Codex review).
+                _logger.warning(
+                    "web is enabled in configuration but aiohttp is not installed -- "
+                    "file transfer links are unavailable"
+                )
+            else:
+                from netbbs.net.file_transfer import TransferGateway, TransferGrants
 
-            transfer_grants = TransferGrants(base_url=_transfer_base_url(config))
-            transfer_gateway = TransferGateway(
-                transfer_grants, foreground_lane,
-                # Signs a Link announcement for anything uploaded this
-                # way, exactly as the Zmodem path does (#464); `None`
-                # when Link is off, which makes queueing a no-op rather
-                # than a special case.
-                announce_identity=lambda: node_identity if link_node is not None else None,
-            )
+                transfer_grants = TransferGrants(base_url=_transfer_base_url(config))
+                transfer_gateway = TransferGateway(
+                    transfer_grants, foreground_lane,
+                    # Signs a Link announcement for anything uploaded
+                    # this way, exactly as the Zmodem path does (#464);
+                    # `None` when Link is off, which makes queueing a
+                    # no-op rather than a special case.
+                    announce_identity=lambda: node_identity if link_node is not None else None,
+                )
 
         servers = await _start_servers(
             config, db, session_handler, ssh_session_handler, throttle, link_node, background_lane,
@@ -1510,7 +1522,12 @@ def _transfer_base_url(config) -> str | None:
     """
     if config.web.public_url:
         return config.web.public_url
-    if config.web.host in {"0.0.0.0", "::", ""}:
+    if config.web.host in {"0.0.0.0", "::", "", "127.0.0.1", "::1", "localhost"}:
+        # A wildcard bind says nothing about how this node is reached,
+        # and a loopback one is worse than saying nothing: handed to a
+        # remote Telnet or SSH caller -- the callers this feature is for
+        # -- it points at their own machine (Codex review). Both mean
+        # "the operator has to tell us", which `public_url` is for.
         return None
     # An IPv6 literal has to be bracketed in a URL authority (Codex
     # review) -- `http://::1:8080` is not a URL a browser will open.

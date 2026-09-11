@@ -298,10 +298,13 @@ def test_a_browser_page_is_handed_the_transfer_rather_than_the_url(db, lane, ali
     assert len(session.offered) == 1
     assert session.offered[0]["direction"] == "upload"
     assert session.offered[0]["url"].startswith("https://bbs.example.org/transfer/")
-    # ... and the terminal says what is happening rather than printing a
-    # URL the caller would have to copy.
+    # ... and the terminal says what is happening. The URL is still
+    # there underneath, quieter (Codex review): a queued frame is not an
+    # acted-on frame, and a page that ignored it must not leave the
+    # caller with nothing.
     assert "Pick a file in your browser" in session.visible_output
-    assert _url_in(session) is None
+    assert "If nothing happened" in session.visible_output
+    assert _url_in(session) is not None
 
 
 def test_a_download_offered_to_the_page_names_the_file(db, lane, alice, grants):

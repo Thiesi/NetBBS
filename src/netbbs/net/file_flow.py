@@ -1691,6 +1691,11 @@ async def _offer_transfer_link(
             filename=entry.filename if entry is not None else None,
         )
     if handled:
+        # The frame reaching the socket is not the page acting on it
+        # (Codex review): an older cached page, or any other client
+        # speaking this protocol, may ignore a message type it does not
+        # know. So the URL is printed underneath either way -- quieter,
+        # and phrased for someone whose browser did nothing.
         await session.write_line(
             colored(
                 f"\r\nYour browser is handling the {what}."
@@ -1699,6 +1704,8 @@ async def _offer_transfer_link(
                 fg_color=MUTED_COLOR,
             )
         )
+        await session.write_line(colored("If nothing happened, open this instead:", fg_color=MUTED_COLOR))
+        await session.write_line(f"  {colored(url, fg_color=VALUE_COLOR)}")
         return
 
     await session.write_line(colored(f"\r\nOpen this in a browser to {what}:", fg_color=MUTED_COLOR))

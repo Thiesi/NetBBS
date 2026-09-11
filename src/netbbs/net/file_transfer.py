@@ -70,6 +70,15 @@ DEFAULT_GRANT_TTL_SECONDS = 600
 a file; short enough that a URL shoulder-surfed off a terminal is worth
 little by the time anyone acts on it."""
 
+MAX_CONCURRENT_UPLOADS = 4
+"""How many uploads may be *in flight* across the node at once.
+
+Distinct from the outstanding-grant ceiling, and needed alongside it
+(Codex review): redeeming frees the grant slot before a single byte of
+the body arrives, so without this a caller could mint, POST, mint, POST
+and hold arbitrarily many long-running handlers, sockets and staging
+files at once. Refused visibly, with the caller told to retry."""
+
 UPLOAD_TIMEOUT_SECONDS = 900
 """Wall-clock ceiling on one upload, start to finish. Generous for a
 large file on a slow line, and finite -- which is the point: without it
@@ -107,10 +116,13 @@ class TransferGrant:
     token: str
     direction: str
     user_id: int
-    #: Checked against the account `user_id` resolves to, because a
-    #: SQLite rowid is reusable and a username is at least the thing the
-    #: caller would recognise (Codex review).
+    #: Checked against the account `user_id` resolves to. Both halves
+    #: are needed (Codex review, twice): a SQLite rowid is reusable, and
+    #: so is a username once the account holding it is deleted -- but an
+    #: account's creation timestamp is not, so the two together name one
+    #: account and no successor to it.
     username: str
+    user_created_at: str
     #: The *content-addressed* area id, not the row id: see
     #: `netbbs.files.areas.get_file_area_by_area_id`.
     area_id: str
@@ -171,6 +183,7 @@ class TransferGrants:
             direction=direction,
             user_id=user.id,
             username=user.username,
+            user_created_at=user.created_at,
             area_id=area.area_id,
             file_id=file_id,
             expires_at=self._clock() + self._ttl_seconds,
@@ -240,10 +253,16 @@ def resolve(db: Database, grant: TransferGrant) -> RedeemedTransfer:
     here decides how to say it.
     """
     user = get_user_by_id(db, grant.user_id)
-    if user is None or user.disabled_at is not None or user.username != grant.username:
-        # The username check is what makes a reused rowid harmless: a
-        # deleted account's id can come back attached to somebody else,
-        # and a live grant must not follow it (Codex review).
+    if (
+        user is None
+        or user.disabled_at is not None
+        or user.username != grant.username
+        or user.created_at != grant.user_created_at
+    ):
+        # Name, id *and* creation time: a deleted account can hand its
+        # rowid and even its username to a new one, but not the instant
+        # it was created, so the three together are an identity no
+        # recreation can inherit (Codex review).
         raise TransferError("this account can no longer transfer files")
     area = get_file_area_by_area_id(db, grant.area_id)
     if area is None:
@@ -338,9 +357,14 @@ class TransferGateway:
     must not do their SQLite work there.
     """
 
-    def __init__(self, grants: "TransferGrants", lane, *, announce_identity=None) -> None:
+    def __init__(
+        self, grants: "TransferGrants", lane, *, announce_identity=None,
+        max_concurrent_uploads: int = MAX_CONCURRENT_UPLOADS,
+    ) -> None:
         self._grants = grants
         self._lane = lane
+        self._uploads_in_flight = 0
+        self._max_concurrent_uploads = max_concurrent_uploads
         # A callable, not a value: a node builds its listeners before it
         # loads its Link identity, so asking at construction time would
         # be asking too early. Called once per upload, which is late
@@ -425,6 +449,10 @@ class TransferGateway:
                 # the ASCII fallback for anything that still cares.
                 "Content-Disposition": _content_disposition(entry.filename),
                 "Content-Type": "application/octet-stream",
+                # A single-use URL that a browser or shared proxy can
+                # replay from cache is not single-use (Codex review).
+                "Cache-Control": "no-store, no-cache, must-revalidate, private",
+                "Pragma": "no-cache",
             },
         )
 
@@ -434,6 +462,20 @@ class TransferGateway:
         resolved = await self._redeem(request)
         if resolved.entry is not None:  # a download grant used with POST
             raise web.HTTPMethodNotAllowed(method="POST", allowed_methods=["GET"])
+
+        if self._uploads_in_flight >= self._max_concurrent_uploads:
+            raise web.HTTPTooManyRequests(
+                text="This node is already busy receiving files. Try again in a moment."
+            )
+
+        self._uploads_in_flight += 1
+        try:
+            return await self._receive_and_store(request, resolved)
+        finally:
+            self._uploads_in_flight -= 1
+
+    async def _receive_and_store(self, request, resolved):
+        from aiohttp import web
 
         temp_path = await self._lane.run(new_incoming_temp_path)
         try:

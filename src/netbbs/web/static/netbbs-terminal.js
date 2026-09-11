@@ -144,8 +144,13 @@
     var input = panel.querySelector("#transfer-input");
     var status = panel.querySelector("#transfer-status");
     var done = false;
+    var inFlight = null;
 
     function close() {
+      // Cancel means cancel (issue #475 review): without this the panel
+      // disappears while the browser keeps sending the file, and the
+      // caller believes they stopped it.
+      if (inFlight) inFlight.abort();
       panel.remove();
       term.focus();
     }
@@ -156,7 +161,8 @@
       status.textContent = "Uploading " + file.name + "...";
       var body = new FormData();
       body.append("file", file, file.name);
-      fetch(url, { method: "POST", body: body })
+      inFlight = typeof AbortController === "function" ? new AbortController() : null;
+      fetch(url, { method: "POST", body: body, signal: inFlight ? inFlight.signal : undefined })
         .then(function (response) {
           if (!response.ok) return response.text().then(function (text) { throw new Error(text); });
           return response.json();
@@ -172,7 +178,9 @@
           setTimeout(close, 1200);
         })
         .catch(function (error) {
+          if (error && error.name === "AbortError") return;  // the caller cancelled
           done = false;
+          inFlight = null;
           status.textContent = "Upload failed: " + (error && error.message ? error.message : error);
         });
     }
