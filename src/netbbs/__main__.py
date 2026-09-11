@@ -30,6 +30,8 @@ from netbbs.session_history import reconcile_interrupted_sessions
 from netbbs.link.boards import LinkConfigSnapshot, LinkContext
 from netbbs import __version__
 from netbbs.link.diagnostics import LINK_LOGGER_NAME, LinkDiagnosticLogHandler
+from netbbs.doors.registry import list_doors
+from netbbs.doors.services import DoorServiceManager
 from netbbs.mrc.bridge import MRC_LOGGER_NAME, MrcBridge
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.onboarding import participation_accepted
@@ -78,6 +80,11 @@ _LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 # 5 backups (50 MiB worst case) is a conservative, hardcoded default,
 # deliberately not (yet) config-exposed -- dogfood can motivate a real
 # tunable later, but there's no evidence of a need for one yet.
+#: Issue #466: a backstop over the whole door-service stop step, above the
+#: largest single grace (60s) plus its kill deadline. `stop_all` is already
+#: bounded per service and runs them concurrently; this only guards against
+#: that bound itself failing, so shutdown can never wait on a door.
+_DOOR_SERVICE_SHUTDOWN_CEILING_SECONDS = 75.0
 _LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 5
 
@@ -635,6 +642,15 @@ async def run(
     # the hub is a DB-backed SysOp decision (`netbbs.mrc.settings`),
     # read by `start()` below once the node is otherwise up.
     mrc_bridge = MrcBridge(hub=hub, lane=background_lane, version=__version__, presence=presence)
+    # Issue #466: every door service this node owns. Started before any
+    # listener, so a `with_node` service is already up for the first caller;
+    # a service which cannot start backs off in its own supervisor rather
+    # than holding up node startup.
+    door_services = DoorServiceManager()
+    try:
+        await door_services.start_node_services(list_doors(db))
+    except (OSError, ValueError) as exc:
+        _logger.error("could not start door services: %s", exc)
     throttle = _build_throttle(config)
     throttle_config = config.throttle
     if session_registry is None:
@@ -772,6 +788,7 @@ async def run(
             mrc_bridge=mrc_bridge,
             backup_identity_dir=config.identity_dir,
             transfers=transfer_grants,
+            door_services=door_services,
         )
 
     async def ssh_session_handler(session):
@@ -798,6 +815,7 @@ async def run(
             mrc_bridge=mrc_bridge,
             backup_identity_dir=config.identity_dir,
             transfers=transfer_grants,
+            door_services=door_services,
         )
 
     servers: list = []
@@ -1329,6 +1347,20 @@ async def run(
                 return
             task.cancel()
             await _swallow_after(task)
+
+        # Issue #466: stop the door services first, before the listeners and
+        # background tasks below. Each one is SIGTERM, its own configured
+        # grace, then SIGKILL, and `stop_all` runs them concurrently, so the
+        # whole step is bounded by the largest single grace rather than their
+        # sum -- this block's opening comment explains why an unbounded wait
+        # here would be a third instance of the same nine-minute bug.
+        try:
+            await asyncio.wait_for(door_services.stop_all(),
+                                   timeout=_DOOR_SERVICE_SHUTDOWN_CEILING_SECONDS)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _logger.error("door services did not all stop in time; continuing shutdown")
+        except Exception:
+            _logger.exception("stopping door services failed; continuing shutdown")
 
         await _drain_immediately(daybreak_task)
         await _drain_immediately(update_check_task)

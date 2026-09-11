@@ -15,6 +15,16 @@ class ProfileError(ValueError):
     pass
 
 
+def _check_substitutions(value: str, allowed: tuple[str, ...], message: str) -> None:
+    """Reject any placeholder the caller cannot actually substitute."""
+    try:
+        for _, name, spec, conversion in string.Formatter().parse(value):
+            if name is not None and (name not in allowed or spec or conversion):
+                raise ProfileError(message)
+    except ValueError as exc:
+        raise ProfileError(str(exc)) from exc
+
+
 def read_profile_file(path: str) -> bytes:
     """Read a bounded regular file; a mistaken FIFO must not hang the server."""
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
@@ -56,6 +66,10 @@ class DoorProfile:
     resize_signal: bool = False
     environment: dict[str, str] = field(default_factory=dict)
     runner: tuple[str, ...] = ()
+    #: At most one long-lived companion process for this door (issue #466):
+    #: `argv`, `start`, `stop_grace_seconds`, `service_memory_mb`, `health`.
+    #: Empty for the overwhelming majority of doors, which need none.
+    service: dict = field(default_factory=dict)
     options: dict = field(default_factory=dict)
 
     def validate(self) -> DoorProfile:
@@ -114,6 +128,7 @@ class DoorProfile:
             raise ProfileError("external runner executable must be absolute")
         if not isinstance(self.options, dict):
             raise ProfileError("adapter options must be an object")
+        self._validate_service()
         if self.adapter == "dosbox":
             if self.endpoint != "socketpair" or self.encoding != "cp437" or not self.install_dir:
                 raise ProfileError("DOSBox requires socketpair, cp437, and an installation directory")
@@ -139,6 +154,46 @@ class DoorProfile:
             except (ValueError, OSError) as exc:
                 raise ProfileError(str(exc)) from exc
         return self
+
+    def _validate_service(self) -> None:
+        """One optional long-lived companion process, or nothing at all."""
+        if not isinstance(self.service, dict):
+            raise ProfileError("service must be an object")
+        if not self.service:
+            return
+        if unknown := set(self.service) - {"argv", "start", "stop_grace_seconds",
+                                           "service_memory_mb", "health"}:
+            raise ProfileError(f"unknown service fields: {', '.join(sorted(unknown))}")
+        argv = self.service.get("argv")
+        if not isinstance(argv, list) or not 1 <= len(argv) <= 32:
+            raise ProfileError("service argv must be an array of 1-32 arguments")
+        for argument in argv:
+            if not isinstance(argument, str) or "\x00" in argument or len(argument) > 2048:
+                raise ProfileError("invalid service argument")
+            _check_substitutions(argument, ("install_dir",), "service argv accepts only {install_dir}")
+        if self.service.get("start", "with_node") not in ("with_node", "on_first_caller"):
+            raise ProfileError("service start must be with_node or on_first_caller")
+        for name, low, high, default in (("stop_grace_seconds", 1, 60, 10),
+                                         ("service_memory_mb", 64, 4096, 512)):
+            value = self.service.get(name, default)
+            if type(value) is not int or not low <= value <= high:
+                raise ProfileError(f"service {name} must be between {low} and {high}")
+        health = self.service.get("health", {})
+        if not isinstance(health, dict):
+            raise ProfileError("service health must be an object")
+        if health:
+            if set(health) - {"kind", "path"} or health.get("kind") not in ("pid", "socket"):
+                raise ProfileError("service health kind must be pid or socket")
+            if health["kind"] == "socket":
+                path = health.get("path")
+                if not isinstance(path, str) or not path or "\x00" in path:
+                    raise ProfileError("service socket health needs a path")
+                _check_substitutions(path, ("install_dir",), "service health path accepts only {install_dir}")
+        # The service runs in the door's installation directory, so there has
+        # to be one; without it there is no defined working directory or place
+        # for a health socket to live.
+        if not self.install_dir:
+            raise ProfileError("a door service requires an installation directory")
 
     def to_json(self) -> str:
         self.validate()

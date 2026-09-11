@@ -747,6 +747,7 @@ async def admin_menu(
                 session, lane, user, link_context=link_context,
                 mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
                 chat_hub=node_controls.chat_hub if node_controls is not None else None,
+                door_services=node_controls.door_services if node_controls is not None else None,
             )
             dashboard_state = await _draw_admin_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
@@ -10228,6 +10229,7 @@ async def _content_menu(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None,
     mrc_bridge: MrcBridge | None = None,
     chat_hub: ChatHub | None = None,
+    door_services: Any = None,
 ) -> None:
     def _load_stats(db: Database) -> dict[str, Any]:
         all_boards = list_boards(db)
@@ -10276,7 +10278,7 @@ async def _content_menu(
             await _draw_content_menu(session, stats=stats)
         elif choice == "d":
             await session.write_line("")
-            await _door_menu(session, lane, actor)
+            await _door_menu(session, lane, actor, door_services=door_services)
             stats = await lane.run(_load_stats)
             await _draw_content_menu(session, stats=stats)
         elif choice == "n":
@@ -12905,7 +12907,7 @@ async def _file_action_screen(
 # than boards'/areas' own.
 
 
-async def _door_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_services: Any = None) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
@@ -12936,7 +12938,7 @@ async def _door_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "l":
             await session.write_line("")
-            await _list_doors_screen(session, lane, actor)
+            await _list_doors_screen(session, lane, actor, door_services=door_services)
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         else:
@@ -13372,7 +13374,7 @@ async def _door_filesystem_screen(
         await _door_screen(session, lane, actor, prefill=prefill)
 
 
-async def _list_doors_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _list_doors_screen(session: Session, lane: DatabaseLane, actor: User, *, door_services: Any = None) -> None:
     doors = await lane.run(list_doors)
     selected = await pick_item(
         session, doors,
@@ -13388,16 +13390,17 @@ async def _list_doors_screen(session: Session, lane: DatabaseLane, actor: User) 
         header_color=await lane.run(effective_header_color_256),
     )
     if selected is not None:
-        await _door_detail_screen(session, lane, actor, selected)
+        await _door_detail_screen(session, lane, actor, selected, door_services=door_services)
 
 
-async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User, door: Door) -> None:
+async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User, door: Door, *,
+                              door_services: Any = None) -> None:
     from netbbs.net.door_profile_flow import edit_door_profile, show_door_diagnostic
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+    await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -13408,22 +13411,26 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
             updated = await edit_door_profile(session, lane, actor, door)
             if updated is not None:
                 door = updated
-            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice == "l":
             await show_door_diagnostic(session, lane, door)
-            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice == "e":
             await session.write_line("")
             updated = await _door_screen(session, lane, actor, existing=door)
             if updated is not None:
                 door = updated
-            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_door_screen(session, lane, actor, door)
             if deleted:
                 return
-            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
+        elif choice in {"s", "h", "r", "v"} and door_services is not None and door.profile and door.profile.service:
+            await session.write_line("")
+            await _door_service_action(session, lane, actor, door, choice, door_services)
+            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -13431,6 +13438,7 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
 async def _draw_door_detail(
     session: Session, lane: DatabaseLane, door: Door, *,
     description_level: str = "off", redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False,
+    door_services: Any = None,
 ) -> None:
     await session.write_line(
         "\r\n" + screen_title(sanitize_text(door.name),
@@ -13453,10 +13461,65 @@ async def _draw_door_detail(
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this door"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),
     ]
+    # Issue #466: only a door which actually declares a service says anything
+    # about one, so the overwhelming majority of doors look exactly as before.
+    if door.profile and door.profile.service:
+        status = door_services.status(door.id) if door_services is not None else None
+        await session.write_line("")
+        await session.write_line("Service: " + (status.summary() if status is not None
+                                                else "not supervised by this process"))
+        if status is not None and status.last_exit_code is not None:
+            await session.write_line(f"Last service exit code: {status.last_exit_code}")
+        if door_services is not None:
+            options[4:4] = [
+                MenuEntry(label=menu_key("S", "tart service"), brief="Start this door's companion process"),
+                MenuEntry(label=menu_key("H", "alt service"), brief="Stop this door's companion process"),
+                MenuEntry(label=menu_key("R", "estart service"), brief="Stop then start it again"),
+                MenuEntry(label=menu_key("V", "iew service log"), brief="Recent service stderr"),
+            ]
     await session.write_line(
         "\r\n" + _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
     )
     await session.write("Choice: ")
+
+
+async def _door_service_action(session: Session, lane: DatabaseLane, actor: User, door: Door,
+                               choice: str, door_services: Any) -> None:
+    """Start, halt, restart or inspect one door's companion process.
+
+    Each action that changes the process asks for one confirmation keystroke
+    and is audit-logged like every other door action; viewing the log changes
+    nothing and asks nothing.
+    """
+    if choice == "v":
+        status = door_services.status(door.id)
+        await session.write_line(sanitize_text((status.diagnostic if status else "")
+                                               or "No output from this door's service."))
+        await session.write_line("Press any key to return.")
+        await session.read_any_key()
+        return
+    verb = {"s": "Start", "h": "Halt", "r": "Restart"}[choice]
+    if not await prompt_yes_no(session, f"{verb} {door.name}'s service now?", default=False):
+        return
+    service = await door_services.adopt(door)
+    if service is None:
+        await session.write_line("This door no longer declares a service.")
+        return
+    try:
+        if choice == "s":
+            service.start()
+        elif choice == "h":
+            await service.stop()
+        else:
+            await service.restart()
+    except OSError as exc:
+        await session.write_line(sanitize_text(f"Could not {verb.lower()} the service: {exc}"))
+        return
+    await lane.run(record_action, actor=actor, action="door_service", object_type="door",
+                   object_id=door.id, detail=f"door={door.name!r} action={verb.lower()}")
+    await session.write_line(f"{verb} requested. Current state: {door_services.status(door.id).summary()}")
+    await session.write_line("Press any key to return.")
+    await session.read_any_key()
 
 
 async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User, door: Door) -> bool:

@@ -2005,6 +2005,24 @@ other kind of cleanup (stdio flushes, other `atexit` handlers, any other
 still-pending async work) along with it, a real tradeoff that needs a
 deliberate decision, not a reflexive fix.
 
+Door services (issue #466) are subprocesses, not network tasks, so their stop
+step is bounded by construction rather than by trusting cancellation:
+`SIGTERM`, the profile's `stop_grace_seconds`, `SIGKILL`, then a short deadline
+after which an unkillable process is abandoned with a logged error. Cancelling
+the supervising task only unblocks its own await; the child is ended
+separately and explicitly, because a cancelled `await proc.wait()` leaves the
+process running. `stop_all` runs every service's stop concurrently, so the
+step costs the longest single grace rather than their sum. Services stop
+before listeners and other background tasks, and `__main__` still wraps the
+whole step in its own ceiling — the per-service bounds are the mechanism, that
+ceiling only guards against the mechanism itself failing.
+
+A service which exits during startup passes briefly through a running state on
+every restart. Liveness alone is therefore not enough to admit a caller: a
+freshly started service must stay up for a short settle window first, or a
+caller arriving inside that window is let through to a door whose companion
+process is already gone.
+
 ---
 
 ## 9. Link protocol invariants
@@ -4669,6 +4687,27 @@ NetBSD/Linux node enforces; only the async wall-time watchdog (pure
 `asyncio`, cross-platform) applies unconditionally. Real verification of
 the `resource.setrlimit` ceilings themselves needs to happen on an
 actual POSIX target, not this Windows dev box.
+
+A door profile's `time_limit` and `cpu_seconds` treat 0 as the SysOp's
+explicit "no ceiling" rather than as a value. Neither may be folded into the
+obvious expression: `min(call_site, profile.time_limit)` makes the opt-out the
+tightest bound and times the door out immediately, and an `RLIMIT_CPU` of zero
+kills the door on its first scheduler tick. `effective_wall_limit` filters
+opt-outs before taking the minimum, and the `RLIMIT_CPU` key is omitted
+entirely rather than set to zero, leaving the inherited soft limit. A
+call-site bound must still win when it is tighter, because the DOSBox
+capability probe depends on its own 12-second limit.
+
+Terminal resize is followed by polling `Session.terminal_width`/
+`terminal_height` rather than by a transport callback: Telnet NAWS, SSH's
+window-change message and the web client's resize event all update those
+attributes in place with no notification in common, so one poll covers every
+transport including future ones. The follower captures the PTY master
+descriptor by number, so it must be cancelled *before* the endpoint closes
+that descriptor — descriptor numbers are reused, and an `ioctl` on a reused
+one reaches an unrelated file. `SIGUSR1` notification for stdio/socket doors
+is opt-in because that signal's default action terminates a process, so
+signalling every door would kill exactly the doors which never asked for it.
 
 `netbbs.doors.runtime.run_door` builds a deliberately minimal child
 environment and passes it straight to `asyncio.create_subprocess_exec`'s

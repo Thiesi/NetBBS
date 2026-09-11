@@ -34,7 +34,7 @@ def _candidate(door, draft):
             value[key] = int(value[key])
         except (TypeError, ValueError) as exc:
             raise ProfileError(f"{key} needs a whole number") from exc
-    for key in ("drop_files", "runner", "environment", "options"):
+    for key in ("drop_files", "runner", "environment", "options", "service"):
         try:
             value[key] = json.loads(value[key]) if isinstance(value[key], str) else value[key]
         except ValueError as exc:
@@ -45,7 +45,7 @@ def _candidate(door, draft):
 
 def _draft(door):
     value = asdict(door.profile or DoorProfile())
-    for key in ("drop_files", "runner", "environment", "options"):
+    for key in ("drop_files", "runner", "environment", "options", "service"):
         value[key] = json.dumps(value[key])
     value.update(executable_path=door.executable_path, args_line=shlex.join(door.args), original_api=False)
     return value
@@ -184,6 +184,9 @@ async def edit_door_profile(session, lane, actor, door):
     add("environment", "x", "Custom environment (JSON)", "Advanced")
     add("runner", "r", "External runner argv (JSON)", "Advanced")
     add("options", "q", "Adapter options (JSON)", "Advanced")
+    add("service", "4", "Companion service (JSON)", "Advanced",
+        help="Optional long-lived process for this door: argv, start (with_node/on_first_caller), "
+             "stop_grace_seconds, service_memory_mb and health. Empty for doors which need none.")
     add("preflight", "k", "Check setup", "Validation", check_prompt)
     add("test", "t", "Test as SysOp", "Validation", test_prompt)
     add("probe", "0", "Emulator capability probe", "Validation", probe_prompt)

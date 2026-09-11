@@ -61,6 +61,7 @@ async def browse_doors(
     community_id: int | None = None,
     community_scoped: bool = False,
     title_prefix: str | None = None,
+    door_services=None,
 ) -> None:
     """Pick a door and play it, looping back to the picker afterward so a
     caller can play another without re-entering the menu -- same
@@ -110,6 +111,15 @@ async def browse_doors(
         if door.profile and door.profile.adapter == "rlogin":
             await session.write_line("Remote service: " + sanitize_text(door.profile.options["service_name"]) +
                                      ". Its operator receives your game identity and controls game data and availability.")
+        # A door whose companion process is not up cannot be played, and
+        # learning that from the game's own connection error is a worse
+        # experience than one line here and a return to the picker.
+        if door_services is not None:
+            if problem := await door_services.ensure_running(door):
+                await session.write_line(colored(sanitize_text(problem), fg_color=MUTED_COLOR))
+                await session.write_line("Press any key to return to the door list.")
+                await session.read_any_key()
+                continue
         await session.write_line(colored(f"\r\nLaunching {door.name}...", fg_color=MUTED_COLOR))
         result = await run_door(session, lane, door, user)
         if not await _report_door_result(session, door, result):

@@ -1470,6 +1470,67 @@ descriptors, path mappings and process ownership; validate disconnects.
 No privileged helper, containment tool or universal container recipe is
 installed by NetBBS. Wine/Win32 remains experimental and untested.
 
+## Doors with a companion service
+
+Most doors are one process per caller, started when the caller enters and
+reaped when they leave. A door which keeps a world running while nobody is
+connected — a real-time multiplayer game, for instance — needs a process that
+outlives any single caller. A profile may declare **one** such service, and
+NetBBS supervises it:
+
+```json
+"service": {
+  "argv": ["-m", "yourgame.server", "--install-dir", "{install_dir}"],
+  "start": "with_node",
+  "stop_grace_seconds": 10,
+  "service_memory_mb": 512,
+  "health": {"kind": "socket", "path": "{install_dir}/run/game.sock"}
+}
+```
+
+The program is the door's own **executable path**, so a door and its service
+share one interpreter; `argv` is everything after it, and `{install_dir}` is
+the only substitution. The service runs under the service account, in the
+installation directory, with the same narrow environment rules as a door
+launch — never the full parent environment. A service therefore requires an
+installation directory.
+
+`start` is `with_node` (started before the node accepts callers) or
+`on_first_caller` (started lazily by the first caller who opens the door).
+`service_memory_mb` is its own address-space ceiling; unlike a caller's run
+it gets no CPU-seconds limit, because a long-lived process legitimately
+accumulates CPU time.
+
+**Restarts and giving up.** A service which exits is restarted with a
+lengthening delay — 1, 2, 4 seconds and so on to a minute. Five failures
+within five minutes and NetBBS stops trying and reports the door's service as
+failed, rather than respawning a misconfigured program forever. Starting or
+restarting it from the SysOp screen clears that.
+
+**Health.** `kind: "pid"` (the default) means the process is alive.
+`kind: "socket"` also connects to a Unix socket the service listens on, which
+catches a process that is running but wedged. A caller who opens a door whose
+service is not up gets one line and returns to the door list; the refusal is
+logged with the door's name. A freshly started service must stay up briefly
+before callers are let in, so a service which exits during startup is never
+mistaken for a working one.
+
+**SysOp control.** The door's detail screen grows a Service line showing
+state, uptime and restart count, with **[S]tart**, **[H]alt**,
+**[R]estart** and **[V]iew service log** (the most recent 8 KiB of its
+standard error). Each action that changes the process asks for one
+confirmation and is audit-logged like every other door action.
+
+**Shutdown.** Services are stopped first, before listeners and background
+tasks: `SIGTERM`, the configured `stop_grace_seconds`, then `SIGKILL`. All
+services stop concurrently, so the step costs the longest single grace rather
+than their sum, and it can never delay node shutdown indefinitely.
+
+**MANUAL — outside NetBBS:** installing the service's program and its
+runtime, and everything about its own persistent data. NetBBS supervises the
+process; it does not install, update or back up what that process owns. Back
+up a door's installation directory yourself, as with any other door.
+
 ## DOS prerequisites
 
 **MANUAL — outside NetBBS, NetBSD:** install DOSBox-X from pkgsrc (binary
