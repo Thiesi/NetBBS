@@ -137,6 +137,14 @@ FILE_DESCRIPTOR_OBJECT_TYPE = "file_descriptor"
 # own docstring.
 FILE_CHUNK_DESCRIPTOR_OBJECT_TYPE = "file_chunk_descriptor"
 
+# Design doc §11.2, issue #479: the origin's signed answer to a chunk
+# request for a file it no longer holds -- deleted, or swept past its
+# area's expiry grace period. Same never-gossiped, never-through-
+# handle_events shape as file_chunk_descriptor above, and returned on
+# the same route; it is the one thing that lets a peer's catalogue stop
+# outliving the file it describes. See FileWithdrawal's own docstring.
+FILE_WITHDRAWAL_OBJECT_TYPE = "file_withdrawal"
+
 # Design doc: Link's extension of local mail. A signed message
 # to one specific recipient node, and the two acknowledgement shapes the
 # recipient's node sends back toward the sender's. `link_message_expired`
@@ -1352,6 +1360,85 @@ def verify_file_descriptor(descriptor: FileDescriptor, signing_verify_key: nacl.
     *current signing key* -- same division of responsibility as
     `verify_board_post`."""
     return verify_signature(signing_verify_key, canonical_bytes(descriptor.envelope), descriptor.signature)
+
+
+@dataclass(frozen=True)
+class FileWithdrawal:
+    """
+    One signed `file_withdrawal` (design doc §11.2, issue #479): a file's
+    own origin stating that it no longer holds the file a peer just asked
+    for, so that peer can drop the catalogue entry describing it instead
+    of listing a phantom and failing the fetch again on every attempt.
+
+    Deliberately **not** a gossiped tombstone. §11.2 makes a `file_
+    descriptor` immutable and single-shot, and a withdrawal event would
+    have to be retained and re-pushed forever -- one per deleted file,
+    and one per file every expiry sweep purges, growing without bound in
+    exactly the place issue #478 had just finished bounding. This is the
+    point-to-point answer to a point-to-point request instead, on the
+    same route and in the same never-through-`handle_events` shape as
+    `FileChunkDescriptor`. The cost is that a stale entry survives until
+    somebody actually tries to fetch it; the benefit is that it then
+    disappears for good, for deletion and expiry alike, with no new
+    retained state anywhere.
+
+    Signed for the same reason every chunk descriptor is: this deletes a
+    peer's local catalogue row, and an unsigned HTTP status could be
+    produced by anything that intercepted or misdirected the request. The
+    requester verifies it against the origin's current signing key -- the
+    same key that signed the `file_descriptor` being withdrawn -- and
+    changes nothing if it does not verify.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FileWithdrawal":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_file_withdrawal(
+    *,
+    signing_identity: Identity,
+    file_id: str,
+    created_at: str,
+    nonce: str | None = None,
+) -> FileWithdrawal:
+    """Build and sign one `file_withdrawal`, per design doc §11.2. Always
+    signed by `signing_identity` -- the origin's current signing key, the
+    same key that signed the file's own `file_descriptor`."""
+    payload = {
+        "file_id": file_id,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+    envelope = build_envelope(FILE_WITHDRAWAL_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return FileWithdrawal(envelope=envelope, signature=signature)
+
+
+def verify_file_withdrawal(
+    withdrawal: FileWithdrawal, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `withdrawal`'s signature against the claimed origin's
+    *current signing key* -- same division of responsibility as
+    `verify_file_chunk_descriptor`."""
+    return verify_signature(signing_verify_key, canonical_bytes(withdrawal.envelope), withdrawal.signature)
 
 
 @dataclass(frozen=True)

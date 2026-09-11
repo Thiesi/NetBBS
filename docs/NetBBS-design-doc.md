@@ -2798,7 +2798,8 @@ carries no bearing on whether a peer should fetch the bytes. Only an
 `file_descriptor` — the identical "never leak a moderation queue onto the
 network" rule §9.2 already states for `board_post`. Immutable, single-shot,
 like `board_post`/`channel_message` — no edit chain; a changed file is a new
-upload with its own new `file_id`, not a revision of an old one.
+upload with its own new `file_id`, not a revision of an old one. Immutable is
+not the same as permanent: see *Withdrawal* below.
 
 Queued from exactly two places, mirroring `board_post`'s own pair (issue #464,
 which fixed a period where neither existed and a Linked area consequently
@@ -2829,6 +2830,44 @@ criterion's own "discover and list... without fetching any file content"),
 with `fetched_file_id` set only once §11.3's transfer completes and
 verifies, at which point the content is promoted into a genuine `files` row
 indistinguishable from a local upload for browsing/download purposes.
+
+**Withdrawal — a catalogue entry may outlive its file, and stops when it is
+asked to (issue #479).** Once an area announces its uploads, a peer's
+catalogue can describe a file its origin no longer has: the SysOp deleted it,
+or `_sweep_expired_files` purged it past the area's grace period. Either way
+the only origin row that could serve the bytes is gone, and nothing in the
+catalogue knows.
+
+The origin says so when asked. A chunk request (§11.3) for a `file_id` this
+node holds no row for is answered **HTTP 410 with a signed `file_withdrawal`**
+— `file_id`, `created_at`, `nonce`, signed by the origin's current signing
+key, the same key that signed the `file_descriptor` being withdrawn. The
+requester verifies that signature against the origin's current key and checks
+the named `file_id` before acting; a withdrawal that fails either check is
+refused and changes nothing. It then deletes its own `remote_files` row along
+with the fetch state that existed only to serve it (`link_file_transfers`, its
+chunk records, and any staging file), and tells the caller the origin no
+longer has the file rather than reporting a generic transfer error.
+
+A withdrawal is **not** a gossiped tombstone, and deliberately so. A
+`file_descriptor_tombstone` mirroring `board_post_tombstone` would have to be
+retained and re-offered forever — one per deleted file, and one per file every
+expiry sweep purges, growing without bound in exactly the place §8.8's push
+direction had just finished bounding. A point-to-point answer to a
+point-to-point request covers deletion and expiry alike with no retained state
+anywhere, in the same never-gossiped, never-through-`handle_events` shape
+`file_chunk_descriptor` already uses.
+
+The cost is stated rather than hidden: **a stale entry survives until somebody
+tries to fetch it.** Listing is honest about what the origin last announced,
+not about what it still holds; the first attempt is what reconciles them, and
+it reconciles them permanently. The event dedup that makes `handle_events`
+idempotent is what keeps a re-delivered `file_descriptor` from resurrecting a
+withdrawn row.
+
+An entry whose `fetched_file_id` is already set is never withdrawn. Those
+bytes are local, verified and promoted into a real `files` row; the origin
+dropping its own copy is not a reason to un-list this node's.
 
 ### 11.3 On-demand chunk transfer
 

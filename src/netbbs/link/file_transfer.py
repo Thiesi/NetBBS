@@ -44,6 +44,22 @@ class FileTransferError(Exception):
     catalogued hash."""
 
 
+class FileNoLongerHeldError(FileTransferError):
+    """Raised by `build_chunk_for_serving` when this node has no `files`
+    row for the requested `file_id` at all -- design doc §11.2, issue
+    #479.
+
+    Deliberately its own type rather than the generic message it used to
+    share with an out-of-range `chunk_index`. "This file is gone" is the
+    one serving-side failure a requester can act on: it means that
+    requester's catalogue entry has outlived the file it describes (the
+    origin deleted it, or `netbbs.files.entries._sweep_expired_files`
+    purged it past its area's grace period), and nothing else tells it
+    so. Every other failure here is a bad request, where the requester's
+    own state is fine.
+    """
+
+
 def compute_transfer_id(file_id: str, requester_fingerprint: str) -> str:
     """Deterministic `transfer_id` (design doc §11.3) -- a resumed or
     retried fetch of the same file by the same requester always
@@ -273,13 +289,17 @@ def build_chunk_for_serving(
     requested chunk's raw bytes plus `(chunk_size, total_size, is_last)`
     for the caller to sign into a `FileChunkDescriptor`.
 
-    Raises `FileTransferError` for an unknown `file_id` or an
-    out-of-range `chunk_index` -- a malformed/abusive request is refused
-    outright, never silently served a truncated or empty chunk.
+    Raises `FileNoLongerHeldError` for a `file_id` this node holds no row
+    for at all -- the one failure the requester can act on (issue #479:
+    its catalogue entry has outlived the file, so the caller signs a
+    `file_withdrawal` in reply) -- and a plain `FileTransferError` for an
+    out-of-range `chunk_index`. A malformed/abusive request is refused
+    outright either way, never silently served a truncated or empty
+    chunk.
     """
     row = db.connection.execute("SELECT * FROM files WHERE file_id = ?", (file_id,)).fetchone()
     if row is None:
-        raise FileTransferError(f"no such file_id known to this node: {file_id!r}")
+        raise FileNoLongerHeldError(f"no such file_id known to this node: {file_id!r}")
 
     total_size = row["size_bytes"]
     chunk_size = max(1, min(max_chunk_size, _DEFAULT_CHUNK_SIZE))

@@ -975,7 +975,14 @@ def test_real_transport_enforces_probation_quarantine_block_explains_and_recover
                     chunk_index=0, max_chunk_size=1024, authorization=authorization,
                 )
                 async with session.post(chunk_url, json=authenticated_chunk.to_dict()) as response:
-                    assert response.status == 400
+                    # 410, not a generic 400 (design doc §11.2, issue
+                    # #479): "this node holds no row for that file_id" is
+                    # the one serving-side refusal the requester can act
+                    # on, and it now comes with a signed file_withdrawal.
+                    # What this step is proving is unchanged -- a peer
+                    # restored to ESTABLISHED reaches the route and gets
+                    # a real answer naming the file it asked for.
+                    assert response.status == 410
                     assert "missing-file" in await response.text()
                 assert await push_events(alice_node, session, base_url, [first]) == [first.content_id]
                 assert await push_events(
@@ -2763,3 +2770,42 @@ def test_rate_limit_middleware_is_a_no_op_when_no_throttle_is_configured(tmp_pat
         assert asyncio.run(scenario()) == [200] * 5
     finally:
         bob.close()
+
+
+def test_file_chunk_410_without_a_usable_withdrawal_is_an_ordinary_transport_error(tmp_path):
+    """Design doc §11.2, issue #479: a 410 is only actionable because it
+    carries a signed `file_withdrawal`. A peer that refuses a chunk as
+    gone but sends no usable one is an ordinary failed fetch -- never a
+    silent "well, delete the entry anyway" path, which is precisely what
+    an unsigned status code would have been."""
+    from netbbs.link.protocol import FileChunkRequest
+    from netbbs.link.transport import RemoteFileWithdrawnError, request_file_chunk
+
+    alice_identity = bootstrap_node_identity("alice")
+    alice_node = LinkNode(identity=alice_identity)
+
+    async def _gone_without_proof(request: web.Request) -> web.Response:
+        return web.json_response({"error": "no such file_id known to this node"}, status=410)
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/link/v1/file-chunk/{fingerprint}", _gone_without_proof)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await request_file_chunk(
+                    alice_node, session, f"http://127.0.0.1:{site.port}",
+                    FileChunkRequest(
+                        transfer_id="t", file_id="f", chunk_index=0, max_chunk_size=1024,
+                        authorization=None,
+                    ),
+                )
+        finally:
+            await runner.cleanup()
+
+    with pytest.raises(LinkTransportError) as raised:
+        asyncio.run(scenario())
+    assert not isinstance(raised.value, RemoteFileWithdrawnError)

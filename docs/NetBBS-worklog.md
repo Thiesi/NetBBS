@@ -878,6 +878,37 @@ themselves prove propagation while proving nothing about whether anything calls
 it. Drive the flow and assert against `load_own_file_area_events`, which is
 what `netbbs.link.sync` actually pushes.
 
+### A catalogue entry outliving its file (issue #479)
+
+Publishing descriptors made a peer's catalogue able to describe a file the
+origin has since deleted or swept. The fix is the origin's signed 410 answer to
+a chunk request — `file_withdrawal` — not a gossiped tombstone.
+
+Why not the tombstone the boards side has: a `file_descriptor_tombstone` is
+retained and re-offered forever, and an area with `max_file_age_days` produces
+one per swept file indefinitely. That grows the own-events list without bound,
+in the same place issue #478 had just finished bounding. The point-to-point
+answer covers deletion and expiry together with no retained state at all.
+
+**Sign anything that deletes remote state.** A bare 410 would have been enough
+to make a peer drop a catalogue row, and anything that intercepted or
+misdirected the request could produce one. Verification uses the origin's
+current signing key, exactly as every chunk descriptor already does, and a
+withdrawal that fails to verify — or names a different `file_id` — is refused
+without touching local state. The 410 body carrying no usable withdrawal is an
+ordinary failed fetch.
+
+**Deleting a `remote_files` row is not a bare DELETE.** `link_file_transfers`
+holds a foreign key to it, and a partial transfer owns a staging file nothing
+else would ever return for. Remove the chunk records, the transfer rows and the
+row itself in one transaction, then the staging files — never the other way
+round, or a failed commit strands a transfer that still believes it has one.
+
+**The trade-off is deliberate and belongs in the docs, not in a comment.** A
+stale entry stays listed until somebody tries to fetch it. Listing reports what
+the origin last announced; the first fetch attempt reconciles that with what it
+still holds, permanently.
+
 ### Local mail
 
 Local asynchronous mail is distinct from real-time `/msg` and future Link
