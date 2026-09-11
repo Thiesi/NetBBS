@@ -73,6 +73,14 @@ def service_spec(profile) -> ServiceSpec | None:
     )
 
 
+def launch_identity(door, spec: ServiceSpec | None):
+    """Everything which decides how a service is launched, comparable as a key."""
+    if spec is None:
+        return None
+    return (spec, door.executable_path, door.profile.install_dir,
+            tuple(sorted(door.profile.environment.items())))
+
+
 @dataclass
 class ServiceStatus:
     """What the SysOp screens show; a snapshot, never the live object."""
@@ -104,6 +112,11 @@ class DoorService:
         self.executable = door.executable_path
         self.install_dir = Path(door.profile.install_dir)
         self.environment = dict(door.profile.environment)
+        #: Everything this supervisor captured at construction. The service
+        #: block alone is not the identity: a SysOp who changes only the
+        #: executable, installation directory or environment would otherwise
+        #: keep a supervisor which relaunches the old ones, even on Restart.
+        self.identity = launch_identity(door, spec)
         self.status = ServiceStatus()
         self._proc = None
         self._task = None
@@ -176,6 +189,11 @@ class DoorService:
                 exit_code = await started
                 self.status.last_exit_code = exit_code
                 self._note(f"exited with code {exit_code}")
+                # The leader is reaped, but anything it left in its own process
+                # group is not. Without this, every crash strands another group
+                # which the next spawn's `_proc` can no longer reach and which
+                # `stop_all` would never see.
+                await self._reap_group()
             if self._stopping:
                 return
             now = time.monotonic()
@@ -198,11 +216,14 @@ class DoorService:
         """Launch the process; returns an awaitable for its exit code."""
         argv = [self.executable, *self.spec.argv]
         if os.name == "posix":
+            # RLIMIT_CPU is explicitly removed rather than left unset: a service
+            # is long-lived by definition, so accrued CPU seconds are not the
+            # runaway signal they are for one caller's run -- and omitting the
+            # key would inherit whatever soft limit NetBBS itself runs under,
+            # eventually killing the service and tripping its circuit breaker.
             setup = {"pty": False, "limits": {"RLIMIT_AS": self.spec.memory_mb * 1024 * 1024,
-                                              "RLIMIT_NPROC": DOOR_MAX_PROCESSES}}
-            # No RLIMIT_CPU: a service is long-lived by definition, so accrued
-            # CPU seconds are not a runaway signal the way they are for one
-            # caller's run.
+                                              "RLIMIT_NPROC": DOOR_MAX_PROCESSES,
+                                              "RLIMIT_CPU": None}}
             argv = [sys.executable, "-I", str(Path(__file__).with_name("launcher.py")), json.dumps(setup), *argv]
         # Cancellation between fork and assignment would leave a live process
         # nobody owns, so the spawn is finished even while being cancelled.
@@ -241,13 +262,34 @@ class DoorService:
             while chunk := await proc.stderr.read(4096):
                 self._tail.extend(chunk)
                 del self._tail[:-_DIAGNOSTIC_BYTES]
+                # Published as it arrives, not only on exit: a service which is
+                # running but wedged is exactly when a SysOp opens its log.
+                self._publish()
         except (OSError, ValueError):
             pass
+
+    def _publish(self) -> None:
+        self.status.diagnostic = bytes(self._tail).decode("utf-8", errors="replace")
 
     def _note(self, text: str) -> None:
         self._tail.extend(f"[netbbs] {text}\n".encode("utf-8", errors="replace"))
         del self._tail[:-_DIAGNOSTIC_BYTES]
-        self.status.diagnostic = bytes(self._tail).decode("utf-8", errors="replace")
+        self._publish()
+
+    async def _reap_group(self) -> None:
+        """End whatever the exited leader left behind in its process group.
+
+        Only meaningful on POSIX, where the service was given its own session,
+        so the group id is the leader's pid. There is nothing left to wait on
+        once the leader is reaped, so this is a bounded signal pair rather than
+        a wait: anything still running was never supervised in its own right.
+        """
+        proc, self._proc = self._proc, None
+        if proc is None or os.name != "posix":
+            return
+        self._signal(proc, signal.SIGTERM)
+        await asyncio.sleep(min(self.spec.stop_grace_seconds, 1))
+        self._signal(proc, signal.SIGKILL, kill=True)
 
     async def _terminate(self) -> None:
         reader, self._diagnostics = self._diagnostics, None
@@ -330,7 +372,7 @@ class DoorServiceManager:
         """
         spec = service_spec(door.profile)
         existing = self._services.get(door.id)
-        if existing is not None and existing.spec == spec:
+        if existing is not None and existing.identity == launch_identity(door, spec):
             return existing
         if existing is not None:
             del self._services[door.id]
@@ -354,7 +396,10 @@ class DoorServiceManager:
         `on_first_caller` services are started here; a `with_node` one which
         died is not silently revived, because its supervisor already decided.
         """
-        service = self._services.get(door.id) or await self.adopt(door)
+        # Always reconcile against the door as it is now. Trusting a cached
+        # entry would gate callers on a profile the SysOp has since edited, and
+        # a service they removed would keep running with its controls hidden.
+        service = await self.adopt(door)
         if service is None:
             return None
         problem = None

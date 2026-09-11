@@ -4693,10 +4693,13 @@ explicit "no ceiling" rather than as a value. Neither may be folded into the
 obvious expression: `min(call_site, profile.time_limit)` makes the opt-out the
 tightest bound and times the door out immediately, and an `RLIMIT_CPU` of zero
 kills the door on its first scheduler tick. `effective_wall_limit` filters
-opt-outs before taking the minimum, and the `RLIMIT_CPU` key is omitted
-entirely rather than set to zero, leaving the inherited soft limit. A
-call-site bound must still win when it is tighter, because the DOSBox
-capability probe depends on its own 12-second limit.
+opt-outs before taking the minimum. Removing a CPU ceiling is sent to the
+launcher as `None`, which raises the soft limit to the inherited hard limit:
+omitting the key instead would leave whatever soft limit NetBBS itself runs
+under, so a service started from a login class with a CPU limit would still
+cap a door which asked for none. Door services pass the same `None` for the
+same reason. A call-site bound must still win when it is tighter, because the
+DOSBox capability probe depends on its own 12-second limit.
 
 Terminal resize is followed by polling `Session.terminal_width`/
 `terminal_height` rather than by a transport callback: Telnet NAWS, SSH's

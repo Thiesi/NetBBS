@@ -287,6 +287,63 @@ def test_editing_a_profile_stops_the_superseded_service(db, lane, player, tmp_pa
     asyncio.run(scenario())
 
 
+def test_changing_only_the_executable_still_replaces_the_supervisor(db, lane, player, tmp_path):
+    """The service block is not the whole launch configuration."""
+    door = _door(db, player, tmp_path)
+
+    async def scenario():
+        manager = DoorServiceManager()
+        await manager.start_node_services([door])
+        try:
+            first = manager.get(door.id)
+            assert await first.wait_until_running(20)
+
+            moved = replace(door, executable_path=str(tmp_path / "other-python"))
+            second = await manager.adopt(moved)
+            assert second is not first, "Restart would have relaunched the old executable"
+            assert second.executable == moved.executable_path
+        finally:
+            await manager.stop_all()
+
+    asyncio.run(scenario())
+
+
+def test_changing_only_the_environment_also_replaces_the_supervisor(db, lane, player, tmp_path):
+    door = _door(db, player, tmp_path)
+
+    async def scenario():
+        manager = DoorServiceManager()
+        first = await manager.adopt(door)
+        retuned = replace(door, profile=replace(door.profile, environment={"TERM": "ansi"}))
+
+        assert await manager.adopt(retuned) is not first
+        assert manager.get(door.id).environment == {"TERM": "ansi"}
+
+        await manager.stop_all()
+
+    asyncio.run(scenario())
+
+
+def test_a_caller_is_gated_on_the_profile_as_it_is_now(db, lane, player, tmp_path):
+    """A cached entry must not gate callers on a profile the SysOp has edited."""
+    door = _door(db, player, tmp_path)
+
+    async def scenario():
+        manager = DoorServiceManager()
+        await manager.start_node_services([door])
+        try:
+            assert await manager.get(door.id).wait_until_running(20)
+            old_proc = manager.get(door.id)._proc
+
+            plain = replace(door, profile=DoorProfile(install_dir=str(tmp_path)))
+            assert await manager.ensure_running(plain) is None, "a door with no service is never gated"
+            assert old_proc.returncode is not None, "the removed service kept running"
+        finally:
+            await manager.stop_all()
+
+    asyncio.run(scenario())
+
+
 def test_removing_a_service_from_a_profile_stops_it(db, lane, player, tmp_path):
     door = _door(db, player, tmp_path)
 

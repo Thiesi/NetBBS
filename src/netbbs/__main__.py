@@ -642,15 +642,12 @@ async def run(
     # the hub is a DB-backed SysOp decision (`netbbs.mrc.settings`),
     # read by `start()` below once the node is otherwise up.
     mrc_bridge = MrcBridge(hub=hub, lane=background_lane, version=__version__, presence=presence)
-    # Issue #466: every door service this node owns. Started before any
-    # listener, so a `with_node` service is already up for the first caller;
-    # a service which cannot start backs off in its own supervisor rather
-    # than holding up node startup.
+    # Issue #466: every door service this node owns. Constructed here so the
+    # session handlers below can close over it, but nothing is *started* until
+    # inside the lifecycle try/finally -- a supervisor started before that
+    # guard would survive a failing startup step, because the `stop_all` which
+    # ends it lives in that finally.
     door_services = DoorServiceManager()
-    try:
-        await door_services.start_node_services(list_doors(db))
-    except (OSError, ValueError) as exc:
-        _logger.error("could not start door services: %s", exc)
     throttle = _build_throttle(config)
     throttle_config = config.throttle
     if session_registry is None:
@@ -843,6 +840,15 @@ async def run(
     own_hello_provider = None
     reliable_anchor_task: asyncio.Task | None = None
     try:
+        # Issue #466: inside this guard, before any listener, so a `with_node`
+        # service is already up for the first caller and the matching
+        # `stop_all` below always runs -- including when a later startup step
+        # raises. A service which cannot start backs off in its own supervisor
+        # rather than holding up node startup.
+        try:
+            await door_services.start_node_services(list_doors(db))
+        except (OSError, ValueError) as exc:
+            _logger.error("could not start door services: %s", exc)
         # Design doc §13.10, issue #75: this node's own PID, so a later
         # `netbbs.backup restore` can reliably refuse against an idle-
         # but-running node (the write-lock probe it also uses only ever

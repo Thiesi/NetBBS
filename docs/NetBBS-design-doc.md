@@ -4747,6 +4747,27 @@ here since #172 is self-contained):
   terminal-resize propagation" rule, which matched every classic door's
   static 80x24-era assumption; the metadata itself stays a file rather
   than becoming a live protocol;
+- a door may declare **one** long-lived companion service (issue #466), for
+  a game whose world must keep running while nobody is connected. This is
+  the single exception to "a door is one process per caller", and is
+  deliberately not a general process manager: one service per door, no
+  inter-session channel inside NetBBS (the service's own socket is the
+  channel), and no privilege separation beyond what native doors already
+  have. It starts with the node or on the first caller, under the service
+  account, in the door's installation directory, with the same narrow
+  environment rules as a door launch. Its own memory ceiling applies and no
+  CPU-seconds ceiling does, because a long-lived process legitimately
+  accumulates CPU time. Exits restart with lengthening backoff behind a
+  circuit breaker, after which NetBBS reports the door's service as failed
+  rather than respawning a misconfigured program indefinitely. A caller is
+  admitted only while the service is up, has been up long enough to mean it,
+  and passes its optional health check; otherwise they get one line and the
+  door list back. Stopping is bounded at every level — SIGTERM, the
+  configured grace, SIGKILL, then a deadline after which an unkillable
+  process is abandoned rather than delaying node shutdown — and services
+  stop before listeners and background tasks. NetBBS supervises the process
+  only; installing it, and everything it owns on disk, stays the operator's,
+  exactly as for the door itself;
 - door output (stdout) is trusted and relayed unmodified, like a SysOp's
   own welcome-banner file, not run through the chat/post sanitizer —
   NetBBS provides the interface and best-effort abuse prevention within

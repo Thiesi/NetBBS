@@ -248,7 +248,7 @@ def _republish_terminal_size(info_path, info, width, height):
     return info
 
 
-async def _forward_resize(session, proc, info_path, info, *, pty_fd=None, signal_door=False,
+async def _forward_resize(session, proc, info_path, info, *, published, pty_fd=None, signal_door=False,
                           interval=_RESIZE_POLL_SECONDS):
     """Follow the caller's terminal size while the door runs (issue #468).
 
@@ -259,7 +259,11 @@ async def _forward_resize(session, proc, info_path, info, *, pty_fd=None, signal
     each transport growing a hook it must remember to call. `RemoteEndpoint.
     _urgent_loop` already reads its own out-of-band channel the same way.
     """
-    last = (session.terminal_width, session.terminal_height)
+    # The baseline is what the door was actually told at launch, not the
+    # session's size now: a caller who resized during door-mode entry or the
+    # spawn would otherwise leave the door holding stale geometry until they
+    # happened to resize a second time.
+    last = published
     while True:
         await asyncio.sleep(interval)
         current = (session.terminal_width, session.terminal_height)
@@ -464,7 +468,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             mode = resize_mode(profile, kind)
             if os.name == "posix" and mode is not None:
                 resize_task = asyncio.create_task(_forward_resize(
-                    session, proc, info_path, info,
+                    session, proc, info_path, info, published=(width, height),
                     pty_fd=endpoint.fd if mode == "pty" else None, signal_door=mode == "signal"))
         try:
             reason = await asyncio.wait_for(_relay(terminal, endpoint, proc),
