@@ -5493,7 +5493,12 @@ The title splash and the registration box follow the portraits' rule (issue
 #404): the large composition with the block logo appears only when it fits the
 negotiated width; otherwise a complete compact composition (wordmark, wrapped
 subtitle, stacked node/pilot/galaxy fields) is shown, and every box row has one
-display width, including for callsigns with wide characters.
+display width, including for callsigns with wide characters. The registration
+greeting is drawn in one colour for the whole of its text, with the callsign the
+only part picked out: a sentence that wraps must not change colour between its
+rows, and body text inside a box is never left in the terminal's default
+foreground, which on a caller's client can be the colour the box border itself
+is drawn in.
 
 Voidrunner offers saved display presets from station Display Options: full palette
 using the existing terminal color depth, basic 16-color, monochrome Unicode, and
