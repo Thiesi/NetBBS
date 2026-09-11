@@ -1457,17 +1457,17 @@ def test_remote_file_withdrawal_signed_by_anyone_but_the_origin_changes_nothing(
                 # could produce.
                 import netbbs.link.transport as transport_module
 
-                forged = build_file_withdrawal(
-                    signing_identity=impostor_identity.signing_key,
-                    file_id=entry.file_id,
-                    requester_fingerprint=seed_node.identity.fingerprint,
-                    transfer_id=compute_transfer_id(
-                        entry.file_id, seed_node.identity.fingerprint
-                    ),
-                    created_at=utc_now_iso(),
-                )
-
-                async def refuse_as_gone(*args, **kwargs):
+                async def refuse_as_gone(node, session, base_url, chunk_request, **kwargs):
+                    # Built from the live request, so the only thing wrong
+                    # with it is who signed it.
+                    forged = build_file_withdrawal(
+                        signing_identity=impostor_identity.signing_key,
+                        file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at=utc_now_iso(),
+                    )
                     raise transport_module.RemoteFileWithdrawnError("gone", forged)
 
                 original = transport_module.request_file_chunk
@@ -1721,29 +1721,51 @@ def test_remote_file_withdrawal_issued_to_another_node_or_gone_stale_changes_not
 
                 import netbbs.link.transport as transport_module
 
-                # Genuine origin signature every time; each of these is
-                # wrong in exactly one other way.
-                issued_elsewhere = build_file_withdrawal(
-                    signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
-                    requester_fingerprint="somebody-else", transfer_id=transfer_id,
-                    created_at=utc_now_iso(),
-                )
-                other_transfer = build_file_withdrawal(
-                    signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
-                    requester_fingerprint=seed_node.identity.fingerprint,
-                    transfer_id="some-other-transfer", created_at=utc_now_iso(),
-                )
-                stale = build_file_withdrawal(
-                    signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
-                    requester_fingerprint=seed_node.identity.fingerprint,
-                    transfer_id=transfer_id, created_at="2026-01-01T00:00:00+00:00",
-                )
+                # Genuine origin signature every time, and every other
+                # field taken from the live request -- each of these is
+                # wrong in exactly one way, so each is refused by the
+                # check it is aimed at.
+                def issued_elsewhere(chunk_request):
+                    return build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
+                        requester_fingerprint="somebody-else",
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at=utc_now_iso(),
+                    )
+
+                def other_transfer(chunk_request):
+                    return build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id="some-other-transfer",
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at=utc_now_iso(),
+                    )
+
+                def replayed_nonce(chunk_request):
+                    return build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce="a-nonce-from-some-earlier-request",
+                        created_at=utc_now_iso(),
+                    )
+
+                def stale(chunk_request):
+                    return build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at="2026-01-01T00:00:00+00:00",
+                    )
 
                 original = transport_module.request_file_chunk
                 try:
-                    for withdrawal in (issued_elsewhere, other_transfer, stale):
-                        async def refuse(*args, _w=withdrawal, **kwargs):
-                            raise transport_module.RemoteFileWithdrawnError("gone", _w)
+                    for build in (issued_elsewhere, other_transfer, replayed_nonce, stale):
+                        async def refuse(node, session, base_url, chunk_request, _b=build, **kwargs):
+                            raise transport_module.RemoteFileWithdrawnError("gone", _b(chunk_request))
 
                         transport_module.request_file_chunk = refuse
                         with pytest.raises(LinkProtocolError):
@@ -1811,15 +1833,17 @@ def test_a_withdrawal_refused_because_the_fetch_won_reports_the_fetch(tmp_path):
 
                 import netbbs.link.transport as transport_module
 
-                withdrawal = build_file_withdrawal(
-                    signing_identity=dialer_identity.signing_key,
-                    file_id=entry.file_id,
-                    requester_fingerprint=seed_node.identity.fingerprint,
-                    transfer_id=transfer_id,
-                    created_at=utc_now_iso(),
-                )
-
-                async def another_session_finishes_then_gone(*args, **kwargs):
+                async def another_session_finishes_then_gone(
+                    node, session, base_url, chunk_request, **kwargs
+                ):
+                    withdrawal = build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key,
+                        file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at=utc_now_iso(),
+                    )
                     running = get_transfer(seed.db, transfer_id)
                     while running is not None and running.status == "in_progress":
                         index = running.next_chunk_index

@@ -2840,9 +2840,9 @@ catalogue knows.
 
 The origin says so when asked. A chunk request (§11.3) for a `file_id` this
 node holds no row for is answered **HTTP 410 with a signed `file_withdrawal`**
-— `file_id`, `requester_fingerprint`, `transfer_id`, `created_at`, `nonce`,
-signed by the origin's current signing key, the same key that signed the
-`file_descriptor` being withdrawn.
+— `file_id`, `requester_fingerprint`, `transfer_id`, `request_nonce`,
+`created_at`, `nonce`, signed by the origin's current signing key, the same key
+that signed the `file_descriptor` being withdrawn.
 
 Acting on one is irreversible in a way discarding a bad chunk is not: once the
 `remote_files` row is gone, the `file_descriptor` still in `link_events` means
@@ -2855,8 +2855,13 @@ all of them before deleting anything:
   document any interceptor already holds, and `object_type` is the only thing
   separating the two. It is a precondition of the signature check, not a
   formality;
-- **`requester_fingerprint` is this node and `transfer_id` is the request just
-  sent**, so a withdrawal recorded off the wire is useless anywhere else;
+- **`requester_fingerprint` is this node, `transfer_id` is this fetch, and
+  `request_nonce` echoes the chunk request's own authorization nonce.**
+  `transfer_id` is content-derived from `(file_id, requester)` and so is
+  identical across retries — it names the transfer, never the individual
+  request. `request_nonce` is what makes the answer single-use, so a withdrawal
+  captured off the wire cannot be replayed even at the same node for the same
+  file;
 - **`created_at` is fresh**, on the same five-minute window and for the same
   reason `InventoryRequest` has one: a signature is durable, and without
   freshness a recorded 410 stays usable indefinitely — including after the

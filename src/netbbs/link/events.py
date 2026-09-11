@@ -1398,13 +1398,19 @@ class FileWithdrawal:
     the two, which makes checking it a precondition of the signature
     check rather than a formality.
 
-    The payload binds the withdrawal to the one request it answers:
-    `requester_fingerprint` and `transfer_id` make it useless when
-    replayed at anybody else, and `created_at` is checked for freshness
-    the way `InventoryRequest`'s is, so a recorded 410 cannot be
-    re-presented later -- after the origin restored the file from
-    backup, say, at which point the catalogue entry it deletes describes
-    bytes the origin is serving again.
+    The payload binds the withdrawal to the one request it answers.
+    `requester_fingerprint` makes it useless when replayed at anybody
+    else, and `transfer_id` names the fetch -- but `transfer_id` is
+    content-derived from `(file_id, requester)` and is therefore the
+    *same* value for every fetch of that file by that node, so it
+    identifies the transfer, never the individual request (Codex review
+    of #500 -- an earlier version of this docstring claimed otherwise).
+
+    `request_nonce` is what makes it single-use: the chunk request's own
+    authorization carries a fresh random nonce, echoed here and checked
+    by the requester, so a withdrawal captured off the wire cannot be
+    replayed even at the same node for the same file. `created_at` is
+    checked for freshness besides, the way `InventoryRequest`'s is.
     """
 
     envelope: dict
@@ -1447,7 +1453,9 @@ class FileWithdrawal:
         payload = envelope.get("payload")
         if not isinstance(payload, dict):
             raise EventError("file_withdrawal envelope carries no payload object")
-        for field in ("file_id", "requester_fingerprint", "transfer_id", "created_at", "nonce"):
+        for field in (
+            "file_id", "requester_fingerprint", "transfer_id", "request_nonce", "created_at", "nonce",
+        ):
             if not isinstance(payload.get(field), str) or not payload[field]:
                 raise EventError(f"file_withdrawal payload is missing a usable {field}")
         return cls(envelope=envelope, signature=base64.b64decode(data["signature"]))
@@ -1459,6 +1467,7 @@ def build_file_withdrawal(
     file_id: str,
     requester_fingerprint: str,
     transfer_id: str,
+    request_nonce: str,
     created_at: str,
     nonce: str | None = None,
 ) -> FileWithdrawal:
@@ -1466,14 +1475,17 @@ def build_file_withdrawal(
     signed by `signing_identity` -- the origin's current signing key, the
     same key that signed the file's own `file_descriptor`.
 
-    `requester_fingerprint` and `transfer_id` come from the chunk request
-    being answered, and bind this withdrawal to it: replayed at any other
-    node, or for any other transfer, it no longer matches what the
-    recipient asked for."""
+    Every binding field comes from the chunk request being answered.
+    `request_nonce` is the one that makes the result single-use: it is
+    the fresh nonce on that request's own authorization, so the
+    withdrawal cannot be replayed even at the same node for the same
+    file. `requester_fingerprint` and `transfer_id` narrow it to that
+    node and that fetch, but neither varies between retries."""
     payload = {
         "file_id": file_id,
         "requester_fingerprint": requester_fingerprint,
         "transfer_id": transfer_id,
+        "request_nonce": request_nonce,
         "created_at": created_at,
         "nonce": nonce if nonce is not None else secrets.token_hex(16),
     }

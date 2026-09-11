@@ -1948,6 +1948,14 @@ class LinkServer:
                 file_id=chunk_request.file_id,
                 requester_fingerprint=fingerprint,
                 transfer_id=chunk_request.transfer_id,
+                # The requester's own per-request nonce, echoed so it can
+                # tell this answer from a replay of an earlier one. A
+                # request that carried no authorization has none to echo,
+                # and the requester refuses the result -- failing closed.
+                request_nonce=(
+                    chunk_request.authorization.nonce
+                    if chunk_request.authorization is not None else ""
+                ),
                 created_at=utc_now_iso(),
             )
             return web.json_response(
@@ -2522,7 +2530,7 @@ async def fetch_next_file_chunk(
         )
     except RemoteFileWithdrawnError as exc:
         withdrawn = await _withdraw_if_the_origin_really_said_so(
-            node, lane, remote_file, transfer.transfer_id, exc
+            node, lane, remote_file, transfer.transfer_id, authorization.nonce, exc
         )
         if not withdrawn:
             # The entry survived a verified withdrawal, which happens for
@@ -2569,7 +2577,7 @@ async def fetch_next_file_chunk(
 
 async def _withdraw_if_the_origin_really_said_so(
     node: LinkNode, lane: DatabaseLane, remote_file: RemoteFile, transfer_id: str,
-    exc: "RemoteFileWithdrawnError",
+    request_nonce: str, exc: "RemoteFileWithdrawnError",
 ) -> bool:
     """Design doc §11.2, issue #479: drop `remote_file`'s catalogue entry
     -- but only once the withdrawal proves it came from the file's own
@@ -2586,13 +2594,16 @@ async def _withdraw_if_the_origin_really_said_so(
     `file_id`, would pass every check here (Codex review of #500).
 
     `requester_fingerprint` and `transfer_id` must match this node and
-    the request just sent, so a withdrawal recorded off the wire is
-    useless anywhere else. `created_at` must be fresh, on the same
+    this fetch -- but `transfer_id` is content-derived from `(file_id,
+    requester)`, so it is identical across retries and narrows nothing
+    further. `request_nonce` is what pins the answer to the individual
+    request: it is the fresh nonce this node just put on the chunk
+    request's authorization, so a withdrawal captured off the wire
+    cannot be replayed even at this same node for this same file (Codex
+    review of #500). `created_at` must be fresh besides, on the same
     five-minute window and for the same reason `InventoryRequest` has
-    one: a signature is durable, and without freshness a recorded 410
-    stays usable forever -- including after the origin restores the file
-    from backup, when it would delete a catalogue entry for bytes the
-    origin is serving again.
+    one: a signature is durable, and a recorded 410 would otherwise stay
+    usable indefinitely.
 
     Only then the signature, against the origin's *current* signing key.
     Any failure raises `LinkProtocolError` and changes nothing.
@@ -2619,7 +2630,12 @@ async def _withdraw_if_the_origin_really_said_so(
     if payload.get("transfer_id") != transfer_id:
         raise LinkProtocolError(
             f"file_withdrawal from {remote_file.origin_fingerprint} answers transfer "
-            f"{payload.get('transfer_id')!r}, not the one just requested -- refusing"
+            f"{payload.get('transfer_id')!r}, not this node's fetch of that file -- refusing"
+        )
+    if not request_nonce or payload.get("request_nonce") != request_nonce:
+        raise LinkProtocolError(
+            f"file_withdrawal from {remote_file.origin_fingerprint} does not echo the nonce of "
+            "the chunk request it claims to answer -- refusing"
         )
     age_seconds = abs(
         (
