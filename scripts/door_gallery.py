@@ -14,13 +14,21 @@ use, on a canvas the size of the terminal being simulated -- so a panel is the
 final screen a caller sees, scrolling included, not a transcript of everything
 that was ever printed.
 
+**A door is typed at, not piped into.** Both doors treat bytes that arrive
+together as an unframed paste and discard them (War Dialer's burst window is
+20ms), and a screen is only on the terminal until the next keystroke redraws
+over it. So `Door` writes one key at a time, waits for the output to go quiet
+after each, and photographs the screen *before* anything is sent to leave it --
+a walk that piped its keys in at once photographed the switchboard nine times.
+
 **Panels must be comparable.** A door generates its world from a random seed, so
 a gallery built from fresh state would show different systems, names and missions
 in every panel and again on every run, and a before/after review would be
-meaningless. Each (door, preset) therefore gets a *fixture* -- one career or world
-created once, cached under the output directory, and copied for every capture, so
-only the size and the preset vary. `--fresh` rebuilds them; delete the directory
-and the next run makes new ones.
+meaningless. Each door therefore gets one *fixture* -- a single career or world
+created once, cached under the output directory and copied for every capture,
+with the display preset applied to the copy -- so only the size and the preset
+vary. `--fresh` rebuilds them; delete the directory and the next run makes new
+ones.
 
 A scripted walk is deliberately shallow: it opens a screen and comes back. Add a
 walk to `WALKS` when a door grows a screen the current keys do not reach.
@@ -37,6 +45,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import webbrowser
 
 SCRIPTS = pathlib.Path(__file__).resolve().parent
@@ -48,9 +58,18 @@ import website_ansi_to_html as term  # noqa: E402
 SPAN = re.compile(r'<span style="([^"]*)">(.*?)</span>')
 CLEAR = "\x1b[2J\x1b[H"
 
+# A keystroke is isolated by the silence around it: comfortably more than War
+# Dialer's 20ms burst window, and enough quiet afterwards for the door to have
+# finished drawing what the key asked for.
+QUIET = 0.15
+SETTLE = 0.75
+ANSWER = 6.0  # a keypress can take a second to redraw; past this it did nothing.
+PATIENCE = 30.0  # a door still drawing after this is hung, not slow.
+
 # Each walk is (label, keys), pressed in order against a door that already has a
 # career or world: registration and the first-visit guide belong to the fixture,
-# not to every panel.
+# not to every panel. The key is the one the door's own dispatch uses -- check it
+# there, not in the action bar, before adding a walk.
 WALKS: dict[str, list[tuple[str, bytes]]] = {
     "voidrunner": [
         ("Command Deck", b""),
@@ -68,13 +87,16 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
     ],
     "war_dialer": [
         ("Switchboard", b""),
-        ("The scene", b"E"),
+        ("The scene", b"I"),
+        ("Territory map", b"E"),
         ("Rank", b"B"),
         ("Rivals", b"V"),
+        ("Log", b"H"),
         ("Crew", b"C"),
         ("Trade preview", b"T"),
         ("Job preview", b"J"),
         ("Kit", b"S"),
+        ("Operations", b"O"),
         ("Help", b"?"),
     ],
 }
@@ -83,8 +105,9 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
 # asks, so a panel never opens on registration or the first-visit guide.
 ONBOARDING: dict[str, bytes] = {"voidrunner": b"\rY", "war_dialer": b"\r\r"}
 
-# Presets are applied to the fixture, not passed as flags: Voidrunner keeps its
-# display style in the career, War Dialer takes `unicode_style` from the drop file.
+# Presets are applied to the fixture's copy, not passed as flags: Voidrunner
+# keeps its display style in the career, War Dialer takes `unicode_style` from
+# the drop file.
 PRESETS: dict[str, dict[str, dict]] = {
     "voidrunner": {"auto": {"display_style": "auto"}, "plain": {"display_style": "plain"}},
     "war_dialer": {"auto": {"unicode_style": True}, "plain": {"unicode_style": False}},
@@ -104,41 +127,147 @@ def drop_file(work: pathlib.Path, width: int, height: int, info_extra: dict) -> 
     return path
 
 
-def run(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, height: int,
-        info_extra: dict) -> str:
-    """Run the door against a state directory and return everything it wrote."""
-    env = dict(os.environ)
-    env.update(NETBBS_DOOR_INFO=str(drop_file(state, width, height, info_extra)),
-               VOIDRUNNER_SAVE_DIR=str(state / "saves"),
-               WAR_DIALER_DB_PATH=str(state / "war-dialer.db"),
-               PYTHONIOENCODING="utf-8")
-    done = subprocess.run([sys.executable, str(door)], input=keys, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, env=env, timeout=180)
-    if done.returncode != 0:
-        # A gallery that certifies a broken walk is worse than no gallery: a door
-        # that exits nonzero has crashed, whatever it managed to print first.
-        raise SystemExit(f"{door.name} exited {done.returncode} for keys {keys!r} at "
-                         f"{width}x{height}:\n{done.stderr.decode('utf-8', 'replace')[-800:]}")
-    return done.stdout.decode("utf-8", "replace")
+class Door:
+    """A door in a subprocess, typed at one key at a time.
+
+    `read()` returns everything written so far, so a caller can photograph a
+    screen while the door is still sitting on it.
+    """
+
+    def __init__(self, door: pathlib.Path, state: pathlib.Path, width: int, height: int,
+                 info_extra: dict) -> None:
+        self.door = door
+        env = dict(os.environ)
+        env.update(NETBBS_DOOR_INFO=str(drop_file(state, width, height, info_extra)),
+                   VOIDRUNNER_SAVE_DIR=str(state / "saves"),
+                   WAR_DIALER_DB_PATH=str(state / "war-dialer.db"),
+                   PYTHONIOENCODING="utf-8")
+        self.proc = subprocess.Popen(
+            [sys.executable, str(door)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=env)
+        self.lock = threading.Lock()
+        self.out, self.err = bytearray(), bytearray()
+        self.spoke = time.monotonic()
+        self.readers = [self._reader(self.proc.stdout, self.out, True),
+                        self._reader(self.proc.stderr, self.err, False)]
+
+    def _reader(self, stream, sink: bytearray, is_stdout: bool) -> threading.Thread:
+        def pump() -> None:
+            while True:
+                chunk = stream.read(1)
+                if not chunk:
+                    return
+                with self.lock:
+                    sink.extend(chunk)
+                    if is_stdout:
+                        self.spoke = time.monotonic()
+        thread = threading.Thread(target=pump, daemon=True)
+        thread.start()
+        return thread
+
+    def settle(self, since: int | None = None) -> None:
+        """Wait for the door to answer and then stop drawing.
+
+        Silence alone does not mean the screen is ready: a door that has been
+        sitting at a prompt has been silent for as long as the caller took to
+        press a key, so a settle that only measured quiet returned before the
+        keypress had drawn anything and photographed the previous screen.
+        `since` is the output length before the key went in; the wait is over
+        only once the door has written past it and then gone quiet.
+        """
+        answer = time.monotonic() + ANSWER
+        deadline = time.monotonic() + PATIENCE
+        while time.monotonic() < deadline:
+            with self.lock:
+                quiet = time.monotonic() - self.spoke
+                answered = since is None or len(self.out) > since
+            if answered and quiet >= SETTLE:
+                return
+            if not answered and time.monotonic() >= answer:
+                return  # the key was read and changed nothing, which is an answer too
+            time.sleep(0.05)
+
+    def press(self, key: bytes) -> None:
+        time.sleep(QUIET)  # every key arrives alone; a burst is discarded as paste
+        with self.lock:
+            before = len(self.out)
+        self.proc.stdin.write(key)
+        self.proc.stdin.flush()
+        self.settle(before)
+
+    def read(self) -> str:
+        with self.lock:
+            return bytes(self.out).decode("utf-8", "replace")
+
+    def finish(self) -> None:
+        """Close stdin, let the door exit, and refuse to publish a crash.
+
+        A gallery that certifies a broken walk is worse than no gallery: a door
+        that exits nonzero has crashed, whatever it managed to print first.
+        """
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            code = self.proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            raise SystemExit(f"{self.door.name} never exited after its keys were pressed")
+        for reader in self.readers:
+            reader.join(timeout=5)
+        if code != 0:
+            raise SystemExit(f"{self.door.name} exited {code}:\n"
+                             f"{bytes(self.err).decode('utf-8', 'replace')[-800:]}")
 
 
-def make_fixture(door_name: str, door: pathlib.Path, preset: str, extra: dict,
-                 root_dir: pathlib.Path) -> pathlib.Path:
-    """One career or world per preset, created once and reused by every panel."""
-    fixture = root_dir / "fixtures" / f"{door_name}-{preset}"
-    if fixture.exists():
-        return fixture
-    fixture.mkdir(parents=True)
-    info_extra = {key: value for key, value in extra.items() if key != "display_style"}
-    run(door, fixture, ONBOARDING[door_name], 80, 24, info_extra)
+def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, height: int,
+            info_extra: dict) -> str:
+    """Drive a walk and return the screen it is looking at when it is done."""
+    running = Door(door, state, width, height, info_extra)
+    running.settle()
+    for index in range(len(keys)):
+        running.press(keys[index:index + 1])
+    screen = running.read()
+    running.finish()
+    return screen
+
+
+def apply_preset(state: pathlib.Path, extra: dict) -> dict:
+    """Put the preset where the door reads it; return what the drop file needs."""
     style = extra.get("display_style")
     if style:
-        for save in (fixture / "saves").glob("*.json"):
+        for save in (state / "saves").glob("*.json"):
             if save.name.endswith(".previous") or "recovery" in save.name:
                 continue
             data = json.loads(save.read_text(encoding="utf-8"))
             data["display_style"] = style
             save.write_text(json.dumps(data), encoding="utf-8")
+    return {key: value for key, value in extra.items() if key != "display_style"}
+
+
+def base_fixture(door_name: str, door: pathlib.Path, root_dir: pathlib.Path,
+                 fresh: bool = False) -> pathlib.Path:
+    """One career or world per door, created once and copied by every panel.
+
+    Built in a temporary directory and moved into place only once the door has
+    exited cleanly, so an interrupted run never leaves a half-made fixture that
+    the next run would accept simply because the directory exists.
+    """
+    fixture = root_dir / "fixtures" / door_name
+    if fresh:
+        shutil.rmtree(fixture, ignore_errors=True)
+    if fixture.exists():
+        return fixture
+    staging = pathlib.Path(tempfile.mkdtemp(prefix="gallery-fixture-"))
+    try:
+        state = staging / "state"
+        state.mkdir()
+        capture(door, state, ONBOARDING[door_name], 80, 24, {})
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(state), str(fixture))
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return fixture
 
 
@@ -177,23 +306,21 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
     if not door.exists():
         raise SystemExit(f"no such bundled door: {door}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    if fresh:
-        shutil.rmtree(out_dir / "fixtures", ignore_errors=True)
+    fixture = base_fixture(door_name, door, out_dir, fresh)
 
     styles: dict[str, str] = {}
     sections = []
     for label, keys in WALKS[door_name]:
         panels = []
         for preset, extra in PRESETS[door_name].items():
-            fixture = make_fixture(door_name, door, preset, extra, out_dir)
-            info_extra = {key: value for key, value in extra.items() if key != "display_style"}
             for width in widths:
                 height = heights.get(width, 24)
                 work = pathlib.Path(tempfile.mkdtemp(prefix="gallery-"))
                 try:
                     state = work / "state"
                     shutil.copytree(fixture, state)
-                    screen = last_screen(run(door, state, keys + b"\x1b\x1b", width, height, info_extra))
+                    info_extra = apply_preset(state, extra)
+                    screen = last_screen(capture(door, state, keys, width, height, info_extra))
                     painted = to_html(screen, width, height, styles)
                 finally:
                     shutil.rmtree(work, ignore_errors=True)
@@ -225,10 +352,10 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
 {css}
 </style></head><body>
 <h1>{html.escape(door_name)} — every screen, every size</h1>
-<p>Rendered from the real door in a subprocess and painted by
-<code>scripts/website_ansi_to_html.py</code> on a canvas the size of the terminal,
-from one cached career per preset so that panels differ only by size and preset.
-Attach this page to any pull request that changes a screen.</p>
+<p>Rendered from the real door in a subprocess, typed at one key at a time and
+painted by <code>scripts/website_ansi_to_html.py</code> on a canvas the size of
+the terminal, from one cached career so that panels differ only by size and
+preset. Attach this page to any pull request that changes a screen.</p>
 {"".join(sections)}
 </body></html>
 """
@@ -243,7 +370,7 @@ def main() -> None:
     parser.add_argument("--widths", type=int, nargs="+", default=[80, 64, 40],
                         help="terminal widths to render (the supported floor is 40)")
     parser.add_argument("--out", type=pathlib.Path, default=ROOT / "build" / "gallery")
-    parser.add_argument("--fresh", action="store_true", help="rebuild the cached fixtures first")
+    parser.add_argument("--fresh", action="store_true", help="rebuild the cached fixture first")
     parser.add_argument("--open", action="store_true", help="open the page when it is written")
     args = parser.parse_args()
 
