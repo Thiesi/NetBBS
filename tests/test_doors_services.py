@@ -231,16 +231,34 @@ def test_first_caller_starts_a_lazy_service_and_is_let_through(db, lane, player,
 
 
 def test_a_caller_is_refused_with_one_line_when_the_service_will_not_run(db, lane, player, tmp_path):
+    """Driven to the circuit breaker first, which is the only terminal state.
+
+    Asserting against a merely-restarting service would race its backoff: a
+    respawn which happens to survive the settle window is legitimately
+    admitted, so only the given-up state makes the refusal deterministic.
+    """
     door = _door(db, player, tmp_path, argv=["-c", "raise SystemExit(1)"], start="on_first_caller")
 
     async def scenario():
+        import netbbs.doors.services as services_module
+        original = services_module._BACKOFF_START_SECONDS
+        services_module._BACKOFF_START_SECONDS = 0.01
         manager = DoorServiceManager()
         try:
+            service = await manager.adopt(door)
+            await service.start()
+            deadline = time.monotonic() + 30
+            while service.status.state != FAILED and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            assert service.status.state == FAILED, service.status.summary()
+
             problem = await manager.ensure_running(door, wait_seconds=1.5)
+
             assert problem is not None
             assert door.name in problem and "SysOp" in problem
             assert "\n" not in problem, "the caller gets one line, not a stack of them"
         finally:
+            services_module._BACKOFF_START_SECONDS = original
             await manager.stop_all()
 
     asyncio.run(scenario())
