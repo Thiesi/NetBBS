@@ -138,7 +138,7 @@ def page_rows(frame: str, *, keep_indent: bool = False) -> list[str]:
         row = row.rstrip() if keep_indent else row.strip()
         if not row.strip():
             continue
-        if row.lstrip()[0] in "╭╰╔╚├╠" or re.match(r"\+[-=]{2,}", row.lstrip()):
+        if row.lstrip()[0] in "╭╰╔╚├╠" or re.match(r"\+[-=]", row.lstrip()):
             continue  # a border row, titled or not
         if all(character in _BORDER or character == " " for character in row):
             continue  # what is left of one after a test cuts the title out
@@ -170,11 +170,15 @@ def page_title(frame: str) -> str:
         row = row.strip()
         if not row or re.fullmatch(r"[A-Za-z0-9<>?]", row):
             continue
-        if row[0] in "╭╔" or re.match(r"\+[-=]{2,}", row):
+        if row[0] in "╭╔" or re.match(r"\+[-=]", row):
             row = row.strip("╭╮╔╗+ ").strip("─═- ")
-            # One box-drawing dash is already fill; an ASCII one needs two,
-            # because a title may legitimately contain a hyphen.
-            return " ".join(re.sub(r"[─═]+|-{2,}", " ", row).split())
+            # One box-drawing dash is already fill. An ASCII one is fill when
+            # it stands alone between spaces or runs; a hyphen inside a
+            # word (`Long-Range`) is part of the title.
+            title = " ".join(re.sub(r"[─═]+|(?<=\s)-+(?=\s)|-{2,}", " ", row).split())
+            if title:
+                return title
+            continue  # a plain top border: the header is the page's first row
         if all(character in _BORDER or character == " " for character in row):
             continue
         # Unframed, a long title wraps: it runs to the row the counter lands on,

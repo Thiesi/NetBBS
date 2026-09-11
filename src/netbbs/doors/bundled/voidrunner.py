@@ -469,11 +469,16 @@ def wrap_styled(text: str, width: int) -> list[str]:
     the colour the first half was, and each row is closed with a reset so the
     frame drawn after it is never tinted by the content.
     """
+    # A row that indents itself is a detail under something; its continuations
+    # belong under the same edge, or the card it belongs to stops reading as one.
+    indent = len(text) - len(text.lstrip(" "))
+    if indent >= max(1, width) // 2:
+        indent = 0
     rows, active = [], ""
-    for row in _wrap_output(text, max(1, width)).split("\r\n"):
+    for row in _wrap_output(text[indent:], max(1, width - indent)).split("\r\n"):
         carried = (active + row) if active else row
         active = _active_sgr_after(row, active)
-        rows.append(carried + RESET if ANSI_ESCAPE_RE.search(carried) else carried)
+        rows.append(" " * indent + (carried + RESET if ANSI_ESCAPE_RE.search(carried) else carried))
     return rows
 
 
@@ -7194,15 +7199,17 @@ def crew_roster_lines(world: World) -> list[str]:
             key_label(CREW_LETTERS[index], info["label"], tone="value" if hired else "label"),
             badge("HIRED", "good") if hired else badge("for hire", "label"),
             name, pips, CREW_SERVICE_LEVELS[level][1],
-            f"{p.gold}{info['wage']}cr/jump{RESET}" if hired
-            else f"{p.gold}{info['hire_cost']}cr{RESET} {p.slate}+{RESET} {p.gold}{info['wage']}cr/jump{RESET}",
         ])
-        styles.append(["value", "value", "value", "value", "label", "value"])
-        meta.append((index, role, hired, level, name, personality))
-    _, records = table_records(["", "", "", "", "", ""], heads, "llllll", styles=styles,
-                               optional=(4, 2))
+        styles.append(["value", "value", "value", "value", "label"])
+        price = (f"{p.gold}{info['wage']}cr/jump{RESET}" if hired
+                 else f"{p.gold}{info['hire_cost']}cr{RESET} {p.slate}+{RESET} {p.gold}{info['wage']}cr/jump{RESET}")
+        meta.append((index, role, hired, level, name, personality, price))
+    # Nothing on a specialist's head row is droppable: who they are, how far
+    # they have come and whether they are aboard are all the row is for. At
+    # forty columns it stacks instead, which keeps every one of them.
+    _, records = table_records(["", "", "", "", ""], heads, "lllll", styles=styles)
     lines: list[str] = []
-    for record, (index, role, hired, level, name, personality) in zip(records, meta):
+    for record, (index, role, hired, level, name, personality, price) in zip(records, meta):
         lines += record
         paid = world.save.ship.crew_records.get(role, {}).get("paid_jumps", 0)
         if level + 1 < len(CREW_SERVICE_LEVELS):
@@ -7211,7 +7218,8 @@ def crew_roster_lines(world: World) -> list[str]:
                         f"{p.slate}paid jumps to {target[1]}{RESET}")
         else:
             progress = badge("service mastery reached", "good")
-        lines.append(f"  {p.slate}{crew_effect(role, level)}{RESET}  {p.deep}{glyph('dot')}{RESET}  {progress}")
+        lines.append(f"  {price}  {p.deep}{glyph('dot')}{RESET}  {p.slate}{crew_effect(role, level)}{RESET}")
+        lines.append(f"  {progress}")
         lines.append(f"  {p.slate}{_mission_plain(personality)}{RESET}")
         task = crew_assignment_record(world, role)
         if task is not None:
@@ -8112,7 +8120,8 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
         return lines
     p = pal()
     cells = _gauge_cells()
-    lines.append(f"{p.plasma}{BOLD}{_mission_plain(pilot.handle)}{RESET}  {p.slate}{career_rank(pilot)}{RESET}  "
+    lines.append(f"{p.plasma}{BOLD}{_mission_plain(pilot.handle)}{RESET}  "
+                 f"{p.slate}Rank{RESET} {p.plasma}{career_rank(pilot)}{RESET}  "
                  f"{p.gold}{glyph('credits')} {pilot.credits:,}cr{RESET}")
     following = next(((threshold, label) for threshold, label in RANKS if threshold > pilot.credits), None)
     if following is not None:
@@ -8135,7 +8144,9 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                               if faction in FACTION_MEMBERSHIPS else ""])
     lines += table(["", "", "", "", ""], standing_rows, "llrll",
                    styles=[["label", "value", "value", "value", "label"] for _ in standing_rows],
-                   optional=(4,), repeat_header=False)[1:]
+                   # The word repeats the number and its tone; the membership
+                   # state is the only thing on the row nothing else says.
+                   optional=(4, 3), repeat_header=False)[1:]
     lines.append(f"{p.slate}Membership perks suspend at {p.ink}-50{p.slate} standing or below.{RESET}")
     lines.append(section("CAREER"))
     discovered = sum(system.discovered for system in world.galaxy)
