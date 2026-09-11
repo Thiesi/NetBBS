@@ -70,14 +70,18 @@ DEFAULT_GRANT_TTL_SECONDS = 600
 a file; short enough that a URL shoulder-surfed off a terminal is worth
 little by the time anyone acts on it."""
 
-MAX_CONCURRENT_UPLOADS = 4
-"""How many uploads may be *in flight* across the node at once.
+MAX_CONCURRENT_TRANSFERS = 4
+"""How many transfers may be *in flight* across the node at once, in
+each direction.
 
 Distinct from the outstanding-grant ceiling, and needed alongside it
 (Codex review): redeeming frees the grant slot before a single byte of
 the body arrives, so without this a caller could mint, POST, mint, POST
 and hold arbitrarily many long-running handlers, sockets and staging
-files at once. Refused visibly, with the caller told to retry."""
+files at once. A download is cheaper -- nothing staged, no long-running
+handler -- but a slow client still holds a socket and a descriptor for
+as long as it likes, so the same ceiling applies to both. Refused
+visibly, with the caller told to retry."""
 
 UPLOAD_TIMEOUT_SECONDS = 900
 """Wall-clock ceiling on one upload, start to finish. Generous for a
@@ -359,11 +363,12 @@ class TransferGateway:
 
     def __init__(
         self, grants: "TransferGrants", lane, *, announce_identity=None,
-        max_concurrent_uploads: int = MAX_CONCURRENT_UPLOADS,
+        max_concurrent_uploads: int = MAX_CONCURRENT_TRANSFERS,
     ) -> None:
         self._grants = grants
         self._lane = lane
         self._uploads_in_flight = 0
+        self._downloads_in_flight = 0
         self._max_concurrent_uploads = max_concurrent_uploads
         # A callable, not a value: a node builds its listeners before it
         # loads its Link identity, so asking at construction time would
@@ -433,6 +438,15 @@ class TransferGateway:
                 headers={"Cache-Control": "no-store"},
             )
 
+        if self._downloads_in_flight >= self._max_concurrent_uploads:
+            # A download costs less than an upload -- nothing staged, no
+            # long-running handler -- but a slow client still holds a
+            # socket and a descriptor, and a grant stops bounding
+            # anything the moment it is redeemed (Codex review).
+            raise web.HTTPTooManyRequests(
+                text="This node is already busy sending files. Try again in a moment."
+            )
+
         resolved = await self._redeem(request)
         entry = resolved.entry
         if entry is None:  # an upload grant that expired between peek and redeem
@@ -441,8 +455,14 @@ class TransferGateway:
             "transfer: %r downloading %r from area %r",
             resolved.user.username, entry.filename, resolved.area.name,
         )
-        return web.FileResponse(
-            Path(entry.storage_path),
+
+        # Streamed here rather than handed to `FileResponse`, so the
+        # in-flight count falls when the *transfer* ends rather than
+        # when this handler returns -- with `FileResponse` the body is
+        # written after the handler is gone, which is precisely the
+        # window the ceiling exists to bound. Range requests are no loss:
+        # a single-use token cannot be resumed anyway.
+        response = web.StreamResponse(
             headers={
                 # RFC 6266's `filename*` form, so a CP437-era name with
                 # non-ASCII characters survives the trip; `filename` is
@@ -455,6 +475,20 @@ class TransferGateway:
                 "Pragma": "no-cache",
             },
         )
+        response.content_length = entry.size_bytes
+        self._downloads_in_flight += 1
+        try:
+            await response.prepare(request)
+            with Path(entry.storage_path).open("rb") as handle:
+                while True:
+                    chunk = await asyncio.to_thread(handle.read, 64 * 1024)
+                    if not chunk:
+                        break
+                    await response.write(chunk)
+            await response.write_eof()
+        finally:
+            self._downloads_in_flight -= 1
+        return response
 
     async def handle_upload(self, request):
         from aiohttp import web
@@ -496,6 +530,15 @@ class TransferGateway:
                 resolved.user.username, UPLOAD_TIMEOUT_SECONDS,
             )
             raise web.HTTPRequestTimeout(text="That upload took too long. Ask the BBS for a new link.")
+        except OSError as exc:
+            # A staging filesystem that is full or unwritable is a
+            # resource failure the caller should see as one, not a bare
+            # 500 (Codex review).
+            temp_path.unlink(missing_ok=True)
+            _logger.error("transfer: could not stage an upload: %s", exc)
+            raise web.HTTPInsufficientStorage(
+                text="This node could not store that file right now. Tell the SysOp."
+            ) from exc
         except BaseException:
             temp_path.unlink(missing_ok=True)
             raise

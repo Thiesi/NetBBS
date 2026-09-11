@@ -1509,6 +1509,30 @@ async def main() -> None:
         raise SystemExit(1) from exc
 
 
+
+
+def _is_unroutable_bind(host: str) -> bool:
+    """Whether this bind address is one no remote caller could use.
+
+    Asked of the whole address space rather than of three spellings
+    (Codex review): `127.0.0.2`, `0:0:0:0:0:0:0:1` and `LOCALHOST` are
+    all loopback, and a URL built from any of them points at whoever
+    opens it. Anything that is not an IP literal at all -- a hostname
+    the operator bound by name -- is taken at its word, since they told
+    us what this node is called.
+    """
+    import ipaddress
+
+    stripped = host.strip().strip("[]")
+    if not stripped or stripped.lower() == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(stripped)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
 def _transfer_base_url(config) -> str | None:
     """Where a file-transfer link should point (issue #475).
 
@@ -1522,7 +1546,7 @@ def _transfer_base_url(config) -> str | None:
     """
     if config.web.public_url:
         return config.web.public_url
-    if config.web.host in {"0.0.0.0", "::", "", "127.0.0.1", "::1", "localhost"}:
+    if _is_unroutable_bind(config.web.host):
         # A wildcard bind says nothing about how this node is reached,
         # and a loopback one is worse than saying nothing: handed to a
         # remote Telnet or SSH caller -- the callers this feature is for

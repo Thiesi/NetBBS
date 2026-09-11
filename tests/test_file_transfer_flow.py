@@ -330,3 +330,44 @@ def test_a_page_that_cannot_take_it_still_gets_the_url(db, lane, alice, grants):
 
     assert _url_in(session) is not None
     assert "works once" in session.visible_output
+
+
+def test_a_browser_upload_leaves_the_caller_in_the_file_area(db, lane, alice, grants):
+    """Codex review: a Zmodem upload owns the byte stream and ends with
+    the screen gone, so dropping back to the menu is right. A browser
+    upload happens elsewhere -- the caller is still sitting in the area
+    where the file is about to appear, and should stay there."""
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+    session = PageSession(editor_keys=[_key("u"), _key("b")])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    # The listing is drawn again after the offer, rather than the screen
+    # unwinding to the menu.
+    assert session.visible_output.count("game.zip") >= 2
+
+
+def test_a_same_origin_page_is_offered_a_relative_url(db, lane, alice):
+    """A caller inside this node's own browser terminal is already at
+    the right origin, so a node that cannot name itself absolutely can
+    still hand them the transfer (Codex review)."""
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+    session = PageSession(editor_keys=[_key("u")])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=TransferGrants()))
+
+    assert session.offered[0]["url"].startswith("/transfer/")
+    assert "no public web address" not in session.visible_output
+
+
+def test_a_terminal_caller_still_needs_a_public_url(db, lane, alice):
+    """The same node, a caller whose transport has no page to tell."""
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "game.zip", b"payload")
+    session = FakeSession(editor_keys=[_key("w")], lines=["u"])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=TransferGrants()))
+
+    assert "no public web address configured" in session.visible_output

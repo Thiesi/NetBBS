@@ -783,8 +783,13 @@ async def _show_area(
                 if not can_write:
                     await session.write("\a")
                     continue
-                await _handle_upload(session, lane, area, user, link_context=link_context, transfers=transfers)
-                return
+                if await _handle_upload(
+                    session, lane, area, user, link_context=link_context, transfers=transfers
+                ):
+                    return
+                # The browser is uploading; the caller is still here.
+                await _render_and_advance_cursor(page, highlighted=highlighted)
+                continue
             elif kind == "weblink":
                 if transfers is None:
                     await session.write("\a")
@@ -859,8 +864,11 @@ async def _show_area(
                     )
                     await _render_and_advance_cursor(page, highlighted=highlighted)
                 elif choice.lower() in ("u", "/upload") and can_write:
-                    await _handle_upload(session, lane, area, user, link_context=link_context, transfers=transfers)
-                    return
+                    if await _handle_upload(
+                        session, lane, area, user, link_context=link_context, transfers=transfers
+                    ):
+                        return
+                    await _render_and_advance_cursor(page, highlighted=highlighted)
                 elif choice.lower().startswith("/describe ") or (
                     choice.lower() in ("e", "/describe") and _can_describe(page)
                 ):
@@ -1624,6 +1632,14 @@ def _supports_zmodem(session: Session) -> bool:
     return getattr(session, "supports_zmodem", True)
 
 
+def what_of(direction: str, area: FileArea, entry: FileEntry | None) -> str:
+    """How one transfer is described on screen, in both the
+    absolute-URL and same-origin paths."""
+    if direction == UPLOAD:
+        return f"upload to [{sanitize_text(area.name)}]"
+    return f"download of {sanitize_text(entry.filename)!r}" if entry is not None else "download"
+
+
 async def _offer_transfer_link(
     session: Session,
     lane: DatabaseLane,
@@ -1659,6 +1675,25 @@ async def _offer_transfer_link(
         return
 
     url = transfers.url_for(grant)
+    offer_transfer = getattr(session, "offer_transfer", None)
+    if url is None and offer_transfer is not None:
+        # A caller inside this node's own browser terminal is already at
+        # the right origin, so a relative path is all their page needs
+        # (Codex review) -- and it works on exactly the default
+        # loopback-bound node that cannot name itself absolutely.
+        if await offer_transfer(
+            direction=direction, url=f"/transfer/{grant.token}",
+            filename=entry.filename if entry is not None else None,
+        ):
+            await session.write_line(
+                colored(
+                    f"\r\nYour browser is handling the {what_of(direction, area, entry)}."
+                    if direction == DOWNLOAD
+                    else "\r\nPick a file in your browser to upload it.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
+            return
     if url is None:
         # A node whose SysOp never told it how it is reached cannot
         # print a URL that works. Saying which setting is missing beats
@@ -1672,18 +1707,13 @@ async def _offer_transfer_link(
         )
         return
 
-    what = (
-        f"upload to [{sanitize_text(area.name)}]"
-        if direction == UPLOAD
-        else f"download of {sanitize_text(entry.filename)!r}"
-    )
+    what = what_of(direction, area, entry)
 
     # A caller who is already in a browser should not have to select a
     # URL off a terminal and open it by hand (issue #475): the page is
     # told about the transfer and opens a file picker or starts the
     # download itself. The URL is still printed when that fails or when
     # the transport has no such notion -- which is every terminal.
-    offer_transfer = getattr(session, "offer_transfer", None)
     handled = False
     if offer_transfer is not None:
         handled = await offer_transfer(
@@ -1798,7 +1828,7 @@ async def _handle_upload(
     session: Session, lane: DatabaseLane, area: FileArea, user: User, *,
     link_context: LinkContext | None = None,
     transfers: TransferGrants | None = None,
-) -> None:
+) -> bool:
     """
     `receive_file` (GitHub issue #34, reopened a second time) now
     streams straight to a temp file under `netbbs.files.storage`'s own
@@ -1830,6 +1860,12 @@ async def _handle_upload(
     a moderation queue never leaks onto the network (design doc
     §9.2/§11.2).
     """
+    # Returns whether the session itself carried a transfer (Codex
+    # review). A Zmodem upload owns the byte stream and ends with the
+    # screen gone, so the caller is dropped back to the menu afterwards
+    # as it always was; a browser upload happens somewhere else entirely
+    # and the caller is still sitting in the file area, which is where
+    # the file they are about to send should appear.
     if not _supports_zmodem(session):
         # This transport could never carry the transfer (issue #475),
         # so it is not started: a browser link is the whole of what
@@ -1845,7 +1881,7 @@ async def _handle_upload(
                     fg_color=ERROR_COLOR,
                 )
             )
-        return
+        return False
 
     heading = screen_title(
         "Upload",
@@ -1913,7 +1949,7 @@ async def _handle_upload(
         # itself on any failure of its own; a NotImplementedError means
         # receive_file never even opened it.
         await session.write_line(colored(f"\r\nUpload failed: {exc}", fg_color=ERROR_COLOR))
-        return
+        return True
     await session.write_line(
         colored(
             f"\r\nUploaded {sanitize_text(entry.filename)!r} ({_format_size(entry.size_bytes)}) "
@@ -1937,6 +1973,7 @@ async def _handle_upload(
                 fg_color=MUTED_COLOR,
             )
         )
+    return True
 
 
 async def _handle_download(
@@ -1960,6 +1997,12 @@ async def _handle_download(
         )
         return
 
+    # Returns whether the session itself carried a transfer (Codex
+    # review). A Zmodem upload owns the byte stream and ends with the
+    # screen gone, so the caller is dropped back to the menu afterwards
+    # as it always was; a browser upload happens somewhere else entirely
+    # and the caller is still sitting in the file area, which is where
+    # the file they are about to send should appear.
     if not _supports_zmodem(session):
         # Issue #475: same reasoning as the upload side -- this
         # transport cannot carry the transfer, so the browser link is
