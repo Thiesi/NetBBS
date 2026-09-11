@@ -3640,9 +3640,17 @@ has to background it itself — `su`+`nohup`, its own pidfile, its own
 SIGTERM-and-wait stop. Since an unprivileged run-as user cannot write
 `/var/run`, that pidfile belongs in the node's state directory, which in turn
 means it survives a reboot: verify the pid still belongs to a NetBBS process
-(`ps -p <pid> -o command=`) before believing it, or a recycled pid reads as
+(`ps -ww -p <pid> -o command=`) before believing it, or a recycled pid reads as
 "already running" forever. Treat *empty* `ps` output as "still running" — the
 safe answer is never to start a second node against one database.
+
+The `-ww` is required on NetBSD, including when `ps` is not attached to a
+terminal: without it, `-o command=` is truncated to a fixed width. A long
+`netbbs_python` or `netbbs_config` path can therefore cut the command before
+the script's `-m netbbs --config <path>` identity match, causing start/status/
+stop to reject the correct live process and delete or ignore its service
+pidfile. Do not remove the wide-output flag while PID ownership is established
+from the full invocation string.
 
 `rc.subr`'s `run_rc_command` ends with `[ ! -x $command ] && return 0`. A
 `$command` that does not exist is therefore not an error: `service netbbs

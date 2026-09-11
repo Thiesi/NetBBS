@@ -167,8 +167,11 @@ netbbs_running()
 	# fix) and making `stop` signal a stranger. Only trusted when ps
 	# actually reports something: no output means ps could not tell us,
 	# and "still running" is the safe answer there -- never start a
-	# second node against the same database on a guess.
-	_cmd=$(ps -p "${_pid}" -o command= 2>/dev/null)
+	# second node against the same database on a guess. NetBSD truncates
+	# `command=` to a fixed display width unless `-ww` removes the limit;
+	# a long config path would otherwise make this exact process look like
+	# a mismatch and leave a healthy node running untracked (issue #492).
+	_cmd=$(ps -ww -p "${_pid}" -o command= 2>/dev/null)
 	case "${_cmd}" in
 	"")				return 0 ;;
 	*"-m netbbs --config ${netbbs_config}"*)	return 0 ;;
