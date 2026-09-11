@@ -938,6 +938,13 @@ The general rule: **a domain object that crossed a network call is stale by
 definition.** Re-read anything the decision actually turns on, inside the
 transaction that acts on it.
 
+**A status only one code path can produce must not be written anywhere else.**
+An empty file's transfer was marked `completed` at row creation, but `completed`
+is what `_finalize_transfer` produces -- so the row claimed an outcome that had
+never happened: no `files` row, no `fetched_file_id`, and a caller told the file
+was fetched and downloadable when it was neither. Empty files take the ordinary
+path for their one empty chunk instead.
+
 **Every remotely-supplied timestamp must fail as `LinkProtocolError`.**
 `_parse_aware_timestamp` is the single funnel for them, including on routes an
 unauthenticated peer can reach, and callers are written to catch that one type.

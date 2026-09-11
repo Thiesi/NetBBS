@@ -135,6 +135,10 @@ def get_or_create_transfer(
     already serves chunk 0 of a zero-byte file, so this needs nothing new
     on the serving side.
 
+    Nothing repairs a `'completed'` row left behind by the old
+    short-circuit: no database in existence has one (confirmed with the
+    SysOp), so a repair path would be code that can never run.
+
     Raises `FileTransferError` if `remote_file`'s catalogue row is gone
     (Codex review of #500). `remote_file` is a snapshot a caller picked
     out of a listing, and another session's verified `file_withdrawal`
