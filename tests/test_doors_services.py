@@ -463,3 +463,20 @@ def test_start_and_stop_do_not_interleave(db, lane, player, tmp_path):
             assert service._proc is None
 
     asyncio.run(scenario())
+
+
+def test_renaming_a_door_updates_its_supervisor_diagnostics(db, lane, player, tmp_path):
+    """A rename keeps the supervisor, but its log lines must follow the name."""
+    door = _door(db, player, tmp_path, name="Before")
+
+    async def scenario():
+        manager = DoorServiceManager()
+        first = await manager.adopt(door)
+        renamed = replace(door, name="After")
+
+        assert await manager.adopt(renamed) is first, "a rename should not relaunch anything"
+        assert first.door_name == "After"
+
+        await manager.stop_all()
+
+    asyncio.run(scenario())

@@ -18,7 +18,7 @@ forward the way file_flow.py/chat_flow.py had to.
 from __future__ import annotations
 
 from netbbs.auth.users import User
-from netbbs.doors import Door, list_doors
+from netbbs.doors import Door, get_door, list_doors
 from netbbs.doors.runtime import DoorRunResult, run_door
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.menu_description_preference import menu_description_level
@@ -97,11 +97,20 @@ async def browse_doors(
         if door is None:
             return
 
-        # Re-checked here, not just filtered into the list above -- same
-        # defense-in-depth precedent chat's own _authorize_channel_entry
-        # sets: a level could change between listing and picking (an
-        # admin demoting the caller mid-session), and this is cheap
-        # enough to just always re-verify.
+        # The picked door is a snapshot of the listing, so it is re-read here
+        # before anything acts on it. Partly the defense-in-depth precedent
+        # chat's own _authorize_channel_entry sets -- a level could change
+        # between listing and picking -- and partly because a SysOp editing or
+        # deleting the door meanwhile would otherwise make the stale profile
+        # authoritative: reconciliation would stop the newly correct
+        # supervisor and start the obsolete one, or resurrect a deleted door's
+        # service with no screen left to stop it.
+        door = await lane.run(get_door, door.id)
+        if door is None:
+            await session.write_line(
+                colored("That door is no longer available.", fg_color=MUTED_COLOR)
+            )
+            continue
         if not meets_level(user, door.min_play_level):
             await session.write_line(
                 colored("You no longer have permission to play that door.", fg_color=MUTED_COLOR)

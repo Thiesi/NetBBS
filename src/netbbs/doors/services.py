@@ -361,7 +361,7 @@ class DoorService:
         # state half-written.
         proc = self._proc
         if proc is None:
-            self._stop_reader()
+            await self._stop_reader()
             return
         if proc.returncode is None:
             self._signal(proc, signal.SIGTERM if os.name == "posix" else None)
@@ -379,18 +379,24 @@ class DoorService:
                     # ownership so a later attempt can still find it, and go on.
                     _logger.error("door service %r survived SIGKILL; abandoning it so shutdown can finish",
                                   self.door_name)
-                    self._stop_reader()
+                    await self._stop_reader()
                     return
         # The leader is gone, gracefully or not. Its group may still hold
         # descendants which ignored the same SIGTERM, so they are always reaped
         # -- including any a cancelled `_reap_group` never got to SIGKILL.
         await self._reap_group()
-        self._stop_reader()
+        await self._stop_reader()
 
-    def _stop_reader(self) -> None:
+    async def _stop_reader(self) -> None:
         reader, self._diagnostics = self._diagnostics, None
-        if reader is not None and not reader.done():
-            reader.cancel()
+        if reader is None:
+            return
+        reader.cancel()
+        # Gathered, not merely cancelled: an exception raised outside
+        # `_collect_diagnostics`' own narrow catches would otherwise go
+        # unretrieved, and stop/restart would report completion while the
+        # task it owned was still unwinding.
+        await asyncio.gather(reader, return_exceptions=True)
 
     def _signal(self, proc, number, *, kill=False) -> None:
         try:
@@ -461,6 +467,11 @@ class DoorServiceManager:
             spec = service_spec(door.profile)
             existing = self._services.get(door.id)
             if existing is not None and existing.identity == launch_identity(door, spec):
+                # A rename does not change how the service launches, so the
+                # supervisor is kept -- but every later exit, restart and
+                # shutdown diagnostic names the door, and that name may since
+                # have been given to a different one.
+                existing.door_name = door.name
                 return existing
             if existing is not None:
                 del self._services[door.id]
