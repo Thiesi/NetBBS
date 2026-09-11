@@ -108,7 +108,10 @@ The standing principle is:
   between launches (Retro Trivia, whose round is drawn fresh from an unseeded
   RNG) is not in it yet and is reviewed by running it. Add the screen you changed
   to `WALKS` if no walk reaches it -- the door's own dispatch is the authority on
-  which key opens what, not the action bar.
+  which key opens what, not the action bar. Voidrunner's presentation contract
+  (design doc, "The Voidrunner presentation contract") is normative for that
+  door: colour reaches every body row, roles are distinct, tables align, every
+  preset is deliberate, and motion is skippable and optional.
 - **Treat migrations as immutable.** Never edit a shipped migration. Test
   migrations against realistic related data, especially before rebuilding a
   table which is a foreign-key parent.

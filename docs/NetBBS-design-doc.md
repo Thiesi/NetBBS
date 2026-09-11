@@ -5177,8 +5177,10 @@ landmarks. Damage changes the hull's visual shading while explicit hull/fuel/car
 figures remain authoritative. Portraits use full and compact authored compositions,
 retaining an entire silhouette on one page at supported terminal dimensions; text
 and navigation paginate normally. Existing full/basic/mono/plain modes apply.
-The plain mode uses ASCII art without color. Artwork is static, with no animation,
-random draws, market observations or career writes. Station captions use actual
+The plain mode uses ASCII art without color. A portrait is a still composition --
+it may be revealed under the motion rules in the presentation contract, but it is
+never redrawn -- and viewing one makes no random draw, market observation or
+career write. Station captions use actual
 places, sectors and specialist contacts. A landmark portrait is available only at
 its station or after investigation, not merely through an accepted bearing.
 Ship commissioning previews and landmark inspection use these same portraits;
@@ -5559,16 +5561,100 @@ ANSI emulator; a change to a screen comes with that page. The test suite can onl
 assert that a screen fits -- never that it looks like anything -- which is how an
 entire visual design was lost with every slice passing review.
 
+### The Voidrunner presentation contract (issue #493)
+
+Voidrunner is the showcase for what a NetBBS door can look like, and after the
+#310 overhaul it was a sequence of grey text walls behind hotkeys. The
+presentation half of that overhaul is this contract. It is normative for the
+door; Retro Trivia is the floor it must clear, not the target.
+
+**Colour reaches the body.** Every body row of every paged screen carries
+styling. The single mechanism that deleted the game's colour was the shared
+paginator: `wrapped_group` wrapped each row through an ANSI-stripping helper
+before it was printed, so the frame was the only styled thing a page could
+have. It now wraps styled text, carrying the active colour across a break, and
+`draw_page` colours by role anything that still reaches it plain -- a screen
+that builds its own rows cannot opt out. This is asserted, at 80 and at 40
+columns, on the deck, market, yard, record, board, chart, crew, display,
+customs and combat screens.
+
+**Nine roles, not nine colours.** What a token *is* decides its colour.
+`hull` `#5fd7ff` frames, section headers and station names; `deep` `#1d3b57`
+frame shadow, gauge tracks and separators; `plasma` `#ff5abe` the brand, the
+rank and the cursor; `gold` `#ffc83c` hotkeys and credits and nothing else;
+`ink` `#e8f0ff` values -- the thing the caller reads off the row; `slate`
+`#7f8fae` labels, hints and units; and `mint` `#6cf2a0` / `amber` `#ffb347` /
+`alarm` `#ff5c6c` for good, caution and danger on gauges and severity glyphs.
+A hotkey is always gold and bold; a value is always ink; a label is always
+slate; chrome is never the colour of content; one accent carries the eye per
+screen. That the hotkey, label, value and frame colours differ, and that all
+four appear on a drawn screen, is asserted rather than eyeballed.
+
+**Truecolour is the design target**, degrading to 256, to 16 (`basic`), to
+monochrome, to plain ASCII, in that order, each deliberate rather than
+accidental. The only effect that truecolour buys outright is the title splash's
+gradient rule, which degrades to a single role colour rather than being
+approximated.
+
+**One glyph vocabulary, every glyph with an ASCII substitute.** `╭─╮ │ ╰─╯
+├─┤` frames; `█░` gauges; `▁▂▃▄▅▆▇█` sparklines; `⟦ ⟧` chips; `◈` credits;
+`▲ ◆ ●` severity; `◤` the brand; `●○` crew pips; `→` a delta. A screen asks for
+one by role -- `glyph("danger")` -- rather than typing the character, so the
+`plain` preset is a designed rendering and a new glyph cannot arrive without
+its substitute. No Unicode from the vocabulary may reach a `plain` terminal.
+
+**A component library, local to the door.** Voidrunner ships as a single
+self-contained file a SysOp can point straight at, so this is the game's own
+vocabulary rather than something shared: `gauge`, `sparkline`, `chip`, `badge`,
+`table`, `menu_grid`, `alert`, `status_band`, `portrait`, plus `section` for a
+named rule across the page frame. Every screen is built from them, which is what
+makes the contract enforceable -- a gauge is the same gauge on the deck, in the
+yard and in a fight, and a later slice cannot flatten one screen without
+flattening all of them.
+
+**Tables are tables.** A column starts on the same display column on every row
+(right-aligned columns end on one), asserted by measuring the rendered rows.
+When a table will not fit, it drops the columns the screen has named as
+droppable, worst first; when dropping all of them is still not enough it
+*stacks* -- each record's first column on a row of its own, the rest aligned and
+indented beneath -- rather than overflowing and wrapping into rubble. Stacking
+restores the dropped columns: it is a change of shape, not a loss of content, so
+a 40-column caller reads the same facts in two rows that an 80-column caller
+reads in one. A stacked record stays one paginator entry and moves between pages
+whole. A table's column headings are repeated at the top of every later page
+that carries one of its rows, and only there.
+
+**Layout.** Three menu columns at 72 or more usable columns, two at 52 or more,
+one below. Numbers right-aligned. One blank row between logical groups. The
+action bar outside the frame, where the cursor waits.
+
+**Motion is in, and it replaces the old "no animation delays" rule.** Reveals,
+gauge drains, counter ticks and rank climbs are permitted under three
+conditions, none of them negotiable: any keypress ends the effect immediately;
+no effect may delay a commit or hold up input; and every effect is absent from
+the presets that exist because a caller wants less -- `fast`, `mono` and
+`plain`. A reveal belongs to *arriving* at a screen, never to redrawing one: a
+key that changed nothing redraws the same page and costs the caller nothing. An
+effect with no live terminal on the other end -- a scripted session, a screen
+drawn before stdin is open -- is skipped rather than slept through, because an
+animation nobody is watching is only a delay. `fast` is a display preset beside
+`auto`: the same palette with every effect off.
+
 Voidrunner offers saved display presets from station Display Options: full palette
-using the existing terminal color depth, basic 16-color, monochrome Unicode, and
-plain text with ASCII artwork. Monochrome/plain suppress ANSI styling; plain maps
-box/block/star decorations to equal-width ASCII characters while retaining Unicode
-pilot text and input. This is an artwork fallback, not a change to the UTF-8 door
-transport. A chosen preset checkpoints before acknowledgement; browsing and
-reselecting the current preset write nothing. The validated additive preference
-defaults to full palette for older careers and survives retirement. Apply it after
-loading a valid career and before its normal title/welcome output; recovery uses
-the default presentation until a valid career is available. No animation is added.
+using the existing terminal color depth, the same palette with motion off
+(`fast`), basic 16-color, monochrome Unicode, and plain text with ASCII artwork.
+Monochrome/plain suppress ANSI styling; plain maps the whole glyph vocabulary to
+equal-width ASCII while retaining Unicode pilot text and input. This is an
+artwork fallback, not a change to the UTF-8 door transport. Each preset previews
+itself on the Display Options screen: the sample beside a preset's name is drawn
+the way that preset would draw it, so the choice is made by looking rather than
+by reading an adjective. A chosen preset checkpoints before acknowledgement;
+browsing and reselecting the current preset write nothing. The validated additive
+preference defaults to full palette for older careers and survives retirement.
+Apply it after loading a valid career and before its normal title/welcome output;
+recovery uses the default presentation until a valid career is available. Motion
+is on in `auto` and `basic` and off in the other three, under the conditions in
+the Voidrunner presentation contract above.
 
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 250-credit high-water milestone in cumulative contraband sales minus purchases

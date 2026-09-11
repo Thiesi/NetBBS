@@ -548,6 +548,45 @@ until every row is in. Scores are optional; a temporary score-write failure does
 not lose the career, and a later checkpoint retries publication from its saved
 high-water mark.
 
+### What Voidrunner looks like
+
+Voidrunner needs a terminal of at least **40 columns by 12 rows**. Below that it
+prints one short, unstyled refusal naming the size it needs and the size the
+terminal reported, and stops before any career is opened or changed. Above it
+there is one layout: a 40-column caller and an 80-column caller see the same
+screens, the same facts and the same artwork, sized for the room they have.
+
+Every screen is built from the same small vocabulary. Gauges (`████░░░░`) carry
+hull, fuel, hold, crew, standing and deadlines; chips (`⟦day 12⟧`) carry single
+facts; badges (`ILLEGAL`, `TRACKED`, `MAX`) carry states; tables carry anything
+with more than two columns; and a rule across the frame (`├─ SHIP ─────┤`) names
+each group of rows. Hotkeys are gold, values are bright, labels and prose are
+dim, and severity has its own colour: green good, amber caution, red danger.
+
+Tables narrow gracefully. A table that will not fit drops its least useful
+columns first -- the market's stock and demand figures before its prices -- and
+when that is not enough it *stacks*, putting each row's name on a line of its
+own with the rest aligned underneath. Nothing is truncated and nothing is lost:
+a 40-column caller reads the same figures in two rows that an 80-column caller
+reads in one. A table's column headings reappear at the top of every page of it.
+
+**Display presets** are chosen from the station deck's **[O] Display Options**,
+and each one previews itself on that screen:
+
+| preset | what it does |
+| --- | --- |
+| Full palette | the terminal's own colour depth, with motion |
+| Full palette, no motion | the same palette with every reveal and tick off |
+| 16-color | sixteen ANSI colours and Unicode artwork |
+| Monochrome | Unicode artwork, no ANSI styling |
+| Plain | ASCII artwork, no ANSI styling; letters and typed text stay UTF-8 |
+
+Motion -- rows revealing as a screen opens, and the effects that go with a
+result -- never blocks anything. Any keypress ends an effect immediately, no
+effect delays a save, and a screen redrawn unchanged does not replay one. If
+motion is not wanted at all, choose **Full palette, no motion**; monochrome and
+plain have none either.
+
 ### Starting and returning to Voidrunner
 
 Choose **[G] Pilot Guide** on the station deck for flight instructions and a recap
@@ -1032,8 +1071,9 @@ and specialist contact where present. A landmark portrait becomes viewable
 at its location and remains in the discovery view after investigation.
 
 Portraits use complete large or compact compositions according to terminal
-dimensions, with paginated details and the selected display preset. There is
-no animation. Landmark inspection keeps salvage status and action results
+dimensions, with paginated details and the selected display preset. A portrait
+is a still composition: it is never redrawn once it is on the screen.
+Landmark inspection keeps salvage status and action results
 before the artwork. A hull refit opens an illustrated preview: **[C] Commission**
 then final confirmation purchases it, while **[B] Back** leaves the ship alone.
 Commissioning restores hull health and keeps cargo and modules; it does not

@@ -4861,6 +4861,46 @@ resizes loses nothing. `scripts/door_gallery.py` renders every screen at every
 supported size into one page, and is how a presentation change is reviewed --
 the suite can assert that a screen fits, never that it looks like anything.
 
+Voidrunner's colour lived and died in one function (issue #493). `wrapped_group`
+wrapped every body row of every paged screen through `_mission_plain`, which is
+`ANSI.sub("")`, *before* it was printed; the frame restored in #486 was the only
+styled thing a page could have, because it is added afterwards. Two rules keep
+that from recurring, and both are asserted. First, the wrap is styled:
+`wrap_styled` carries the active SGR across a break -- `_wrap_output` is
+ANSI-aware about width but leaves a broken span's continuation in the terminal's
+default foreground -- and `style_body_line` colours by role anything that
+arrives plain. Second, `draw_page` applies that same styling to rows a screen
+built itself and handed straight to it, because a rule that held for most pages
+and not the rest is how the design was lost one slice at a time. A component's
+own styling always wins: `style_body_line` returns a row that already carries an
+escape untouched.
+
+Three zero-width control marks say what a Voidrunner row *is*, and the paginator
+acts on them: `SECTION_MARK` a named rule drawn across the page frame,
+`STICKY_MARK` a table's column headings, `MEMBER_MARK` a row of that table. They
+measure zero columns (`_char_width` returns 0 for category C), so a marked row
+costs exactly its text, and `draw_page` strips them as it prints -- they must
+never reach a terminal, and `plain()` in the test support strips them too.
+Headings are repeated at the top of every later page carrying one of their own
+rows and nowhere else, which is why the member mark exists: a screen may hold
+two tables, and a page of trailing footnotes is not a page of either.
+
+`table_records` is the responsive contract. It drops the columns a screen named
+as droppable, worst-priority first; if that is still too wide it *stacks*, first
+column alone on a row and the rest indented beneath, and stacking restores every
+dropped column -- shape changes, content does not. A stacked record is returned
+as its own list of rows and joined with `\n` into one paginator entry, so it
+moves between pages whole; `wrapped_group` splits on `\n` before wrapping. The
+gutter narrows from two spaces to one before a column is dropped.
+
+Motion (issue #493) asks `_StdioBytes.waiting()`, which *peeks* -- select with a
+zero timeout, `PeekNamedPipe`, `kbhit` -- and never reads. Reading a raw byte
+would cut a UTF-8 character or an escape sequence in half behind the decoder's
+back, and would eat the key that skipped the effect, which is usually the
+caller's next command. With no input reader at all, motion reports itself
+interrupted: a scripted caller is not watching, and the alternative is a
+`time.sleep` per page draw across the whole suite.
+
 Paged Voidrunner screens measure their capacity with `page_capacity` -- the
 content column is `_page_content_width()`, the box interior less its indent and
 gutter, and the overhead comes from `_page_header_rows` (one row when the header

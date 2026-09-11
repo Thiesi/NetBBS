@@ -97,6 +97,33 @@ def _add_cargo(world, commodity: str, quantity, *, unit_cost: int | None = None)
 _BORDER = "╭╮╰╯│─═║╔╗╚╝├┤╠╣+-=|"
 
 
+def plain(text: str) -> str:
+    """One screen's raw output with its styling taken off.
+
+    Page bodies are coloured now (issue #493), and colour lands *between*
+    tokens: a row reading `Promoted to Void Baron` carries an escape before
+    `Promoted` and another after it, so the sentence is no longer a substring
+    of what was written. A test that looks for words the caller read reads them
+    through here -- or through `page_text`, which already does this and takes
+    the frame off as well.
+    """
+    stripped = vr._ANSI_RE.sub("", text)
+    # The zero-width marks a screen uses to say what a row *is* -- a rule
+    # across the frame, a table heading, a row of that table -- never reach a
+    # terminal either; `draw_page` takes them off as it prints.
+    for mark in (vr.SECTION_MARK, vr.STICKY_MARK, vr.MEMBER_MARK):
+        stripped = stripped.replace(mark, "")
+    return stripped
+
+
+_ANSI_BYTES = re.compile(rb"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def plain_bytes(data: bytes) -> bytes:
+    """`plain` for what a door process actually wrote down its pipe."""
+    return _ANSI_BYTES.sub(b"", data)
+
+
 def page_rows(frame: str, *, keep_indent: bool = False) -> list[str]:
     """The body rows of a drawn page, with the HUD frame taken off.
 
@@ -131,6 +158,12 @@ def page_title(frame: str) -> str:
     A framed screen draws its title into the top border, which `page_rows`
     drops; an unframed one prints it as the first row. Tests that look for the
     page counter, or for the credits a screen puts in its title, read it here.
+
+    The border carries more than the title now (issue #493): the brand opens
+    it, the page counter is pushed to the right-hand corner, and a run of the
+    border's own fill sits between them. That fill is chrome, not text, so it
+    collapses to a single space here and a caller's `Title n/m` still reads as
+    `Title n/m`.
     """
     parts: list[str] = []
     for row in vr._ANSI_RE.sub("", frame).replace("\r\n", "\n").split("\n"):
@@ -138,7 +171,10 @@ def page_title(frame: str) -> str:
         if not row or re.fullmatch(r"[A-Za-z0-9<>?]", row):
             continue
         if row[0] in "╭╔" or re.match(r"\+[-=]{2,}", row):
-            return row.strip("╭╮╔╗+ ").strip("─═- ")
+            row = row.strip("╭╮╔╗+ ").strip("─═- ")
+            # One box-drawing dash is already fill; an ASCII one needs two,
+            # because a title may legitimately contain a hyphen.
+            return " ".join(re.sub(r"[─═]+|-{2,}", " ", row).split())
         if all(character in _BORDER or character == " " for character in row):
             continue
         # Unframed, a long title wraps: it runs to the row the counter lands on,
@@ -187,6 +223,12 @@ def _drain_until(stream, output: bytearray, markers, events) -> None:
     still seen as soon as the door writes it (issue #422). Markers are matched in
     order, which lets a caller wait for a prompt before it writes, instead of
     racing the door's startup (issue #416 review).
+
+    Markers are matched against the output with its styling taken off: page
+    bodies are coloured now (issue #493), so a phrase the caller reads as one
+    sentence is several runs of bytes with escapes between them, and a marker
+    that had to be contiguous in the raw stream would pin the game's colours in
+    place rather than its behaviour.
     """
     if isinstance(markers, bytes):
         markers, events = (markers,), (events,)
@@ -196,7 +238,8 @@ def _drain_until(stream, output: bytearray, markers, events) -> None:
         if not chunk:
             return
         output.extend(chunk)
-        while pending and pending[0][0] in output:
+        seen = plain_bytes(bytes(output))
+        while pending and pending[0][0] in seen:
             pending.pop(0)[1].set()
         if not pending:
             return

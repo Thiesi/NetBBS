@@ -95,7 +95,8 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
 _OUTPUT_WIDTH = 80
 _OUTPUT_HEIGHT = 24
 _OUTPUT_STYLE = "auto"
-DISPLAY_STYLES = {"auto": "Full palette", "basic": "16-color", "mono": "Monochrome", "plain": "Plain / ASCII artwork"}
+DISPLAY_STYLES = {"auto": "Full palette", "fast": "Full palette, no motion", "basic": "16-color",
+                  "mono": "Monochrome", "plain": "Plain / ASCII artwork"}
 _ASCII_ART_TRANSLATION = str.maketrans({
     **{chr(code): "|" for code in (0x2502, 0x2551)},
     **{chr(code): "+" for code in (0x251C, 0x2524, 0x2554, 0x2557, 0x255A, 0x255D, 0x2560, 0x2563, 0x256D, 0x256E, 0x256F, 0x2570)},
@@ -318,6 +319,23 @@ def apply_display_style(style: str) -> None:
     _OUTPUT_STYLE = style
 
 
+@contextlib.contextmanager
+def display_style(style: str):
+    """Build something as another preset would draw it, then put the preset back.
+
+    Only the Display Options screen needs this, and it needs it for a good
+    reason: a preset previews itself there, which means composing one row of a
+    screen in a palette the caller is not currently using.
+    """
+    global _OUTPUT_STYLE
+    previous = _OUTPUT_STYLE
+    _OUTPUT_STYLE = style
+    try:
+        yield
+    finally:
+        _OUTPUT_STYLE = previous
+
+
 def out(text: str = "") -> None:
     if _OUTPUT_STYLE in ("mono", "plain"):
         text = ANSI_ESCAPE_RE.sub("", text)
@@ -507,6 +525,39 @@ class _StdioBytes:
             ]
             self.kernel.PeekNamedPipe.restype = wintypes.BOOL
             self.handle = msvcrt.get_osfhandle(self.fd)
+
+    def waiting(self) -> bool:
+        """Whether a byte is already there, without taking it.
+
+        Motion asks this, and only this: a skip must not swallow the key that
+        skipped it, because that key is usually the caller's next command and
+        eating it would make an animation cost a keystroke. Peeking is also the
+        only safe question to ask here -- reading a raw byte would cut a UTF-8
+        character or an escape sequence in half behind the decoder's back.
+        """
+        if self.fd is None:
+            return False
+        try:
+            if self.kernel is None:
+                import select
+
+                return bool(select.select([self.fd], [], [], 0)[0])
+            import ctypes
+            import msvcrt
+            from ctypes import wintypes
+
+            kind = self.kernel.GetFileType(self.handle)
+            if kind == 2:
+                return bool(msvcrt.kbhit())
+            if kind != 3:
+                return False
+            available = wintypes.DWORD()
+            if not self.kernel.PeekNamedPipe(self.handle, None, 0, None,
+                                             ctypes.byref(available), None):
+                return True  # a broken pipe is not something to animate through
+            return bool(available.value)
+        except (OSError, ValueError):
+            return True
 
     def __call__(self, timeout: float | None) -> bytes | None:
         if self.fd is None:
@@ -719,6 +770,49 @@ def read_key() -> str:
         _INPUT_STREAM = stream
         _INPUT_READER = _DoorInput(_StdioBytes(stream))
     return _INPUT_READER.read_key()
+
+
+# ---------------------------------------------------------------------------
+# Motion (issue #493 §3). Reveals, ticks and drains, under three rules that are
+# not negotiable: any keypress ends the effect immediately; nothing an effect
+# does can delay a commit or hold up input; and every effect is absent from the
+# presets that exist because a caller wants less -- `fast`, `mono` and `plain`.
+#
+# The design doc's older "no animation delays" rule is replaced by these.
+# ---------------------------------------------------------------------------
+
+MOTION_REVEAL_BUDGET = 0.18  # seconds for a whole page, however tall it is
+MOTION_TICK = 0.045
+
+
+def motion_enabled() -> bool:
+    return _OUTPUT_STYLE in ("auto", "basic")
+
+
+def motion_interrupted() -> bool:
+    """True once the caller has typed anything, or when nothing is animating.
+
+    No input reader means there is no live terminal on the other end -- a
+    scripted test driving the screens directly, a screen drawn before the door
+    has opened stdin -- and an effect nobody is watching is only a delay, so it
+    is skipped rather than slept through.
+    """
+    if not motion_enabled():
+        return True
+    reader = _INPUT_READER
+    if reader is None or not isinstance(reader.read_byte, _StdioBytes):
+        return True
+    return reader.read_byte.waiting()
+
+
+def motion_pause(seconds: float) -> bool:
+    """Wait, unless the caller has already answered. Returns False if skipped."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if motion_interrupted():
+            return False
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    return True
 
 
 def read_command() -> str:
@@ -4691,49 +4785,107 @@ def _cell_style(role: str, text: str) -> str:
     return f"{p.tone(role)}{text}{RESET}" if text else ""
 
 
-def table(headers: list[str], rows: list[list[str]], aligns: str = "",
-          *, styles: list[list[str]] | None = None, optional: tuple[int, ...] = (),
-          gap: int = 2, width: int | None = None, repeat_header: bool = True) -> list[str]:
+def _fit_columns(headers, rows, keep, optional, gap, width):
+    """Drop optional columns, worst-priority first, until the set fits."""
+    keep = list(keep)
+    while True:
+        widths = [max([_visible_width(headers[index])] +
+                      [_visible_width(row[index]) for row in rows]) for index in keep]
+        if sum(widths) + gap * max(0, len(keep) - 1) <= width:
+            return keep, widths, True
+        droppable = [index for index in optional if index in keep]
+        if not droppable:
+            return keep, widths, False
+        keep.remove(droppable[-1])
+
+
+def table_records(headers: list[str], rows: list[list[str]], aligns: str = "",
+                  *, styles: list[list[str]] | None = None, optional: tuple[int, ...] = (),
+                  gap: int = 2, width: int | None = None) -> tuple[str, list[list[str]]]:
     """A real table: every column starts on the same display column on every row.
 
     `aligns` is one character per column (`l`/`r`/`c`). `styles` gives a role
-    name per cell, defaulting to a slate header and ink body. `optional` lists
+    name per cell, defaulting to a slate heading and ink body. `optional` lists
     column indices in the order they may be dropped when the table will not fit
-    the page -- a narrow terminal loses the least useful column rather than
-    letting every row wrap into an unreadable stack.
+    -- a narrow terminal loses the least useful column first.
+
+    When dropping every optional column still is not enough, the table does not
+    overflow and wrap into rubble: each record *stacks*, its first column on a
+    row of its own and the rest aligned and indented under it. That is the
+    40-column form of a table, and it is still a table -- every stacked column
+    starts on the same display column as its neighbours on every record.
+
+    Returns the heading and one list of display rows per record, because a
+    stacked record is two rows and the screens that key their rows need to know
+    which rows belong to which.
     """
     width = _page_content_width() if width is None else width
     columns = len(headers)
     aligns = (aligns + "l" * columns)[:columns]
-    keep = [index for index in range(columns)
-            if _visible_width(headers[index]) or any(_visible_width(row[index]) for row in rows)]
-    while True:
-        widths = [max([_visible_width(headers[index])] +
-                      [_visible_width(row[index]) for row in rows]) for index in keep]
-        if sum(widths) + gap * (len(keep) - 1) <= width or not optional:
+    present = [index for index in range(columns)
+               if _visible_width(headers[index]) or any(_visible_width(row[index]) for row in rows)]
+    keep, widths, fits = _fit_columns(headers, rows, present, optional, gap, width)
+
+    def cell(number: int, index: int, cell_width: int) -> str:
+        role = styles[number][index] if styles is not None else "value"
+        align = "right" if aligns[index] == "r" else ("center" if aligns[index] == "c" else "left")
+        text = rows[number][index]
+        return _pad(text if ANSI_ESCAPE_RE.search(text) else _cell_style(role, text), cell_width, align)
+
+    def heading_for(indices, column_widths) -> str:
+        return (" " * gap).join(
+            _pad(_cell_style("label", headers[index]), column_widths[position],
+                 "right" if aligns[index] == "r" else ("center" if aligns[index] == "c" else "left"))
+            for position, index in enumerate(indices)).rstrip()
+
+    if fits or len(keep) < 2:
+        heading = heading_for(keep, widths)
+        records = [[(" " * gap).join(cell(number, index, widths[position])
+                                     for position, index in enumerate(keep)).rstrip()]
+                   for number in range(len(rows))]
+        return heading, records
+
+    # Stacking is a change of shape, not a loss of content, so the columns
+    # dropped while trying to stay on one row come back: a 40-column caller
+    # reads the same facts as an 80-column one, in two rows instead of one.
+    lead, rest = present[0], present[1:]
+    indent = 2
+    # Tighten the gutter before dropping a column: one space between columns
+    # still reads as a table, and a lost column is a lost fact.
+    for tight in (gap, 1):
+        narrowed, rest_widths, stacked_fits = _fit_columns(
+            headers, rows, rest, (), tight, max(1, width - indent))
+        if stacked_fits:
+            rest, gap = narrowed, tight
             break
-        droppable = [index for index in optional if index in keep]
-        if not droppable:
-            break
-        keep.remove(droppable[-1])
-    separator = " " * gap
-    heading = separator.join(
-        _pad(_cell_style("label", headers[index]), widths[position],
-             "right" if aligns[index] == "r" else aligns[index] == "c" and "center" or "left")
-        for position, index in enumerate(keep)).rstrip()
+    else:
+        rest, rest_widths, _ = _fit_columns(headers, rows, rest, optional, 1, max(1, width - indent))
+        gap = 1
+    heading = " " * indent + heading_for(rest, rest_widths)
+    records = []
+    for number in range(len(rows)):
+        tail = (" " * gap).join(cell(number, index, rest_widths[position])
+                                for position, index in enumerate(rest)).rstrip()
+        records.append([cell(number, lead, 0).rstrip(), " " * indent + tail])
+    return heading, records
+
+
+def table(headers: list[str], rows: list[list[str]], aligns: str = "",
+          *, styles: list[list[str]] | None = None, optional: tuple[int, ...] = (),
+          gap: int = 2, width: int | None = None, repeat_header: bool = True) -> list[str]:
+    """`table_records` as one flat list of rows, heading first."""
+    heading, records = table_records(headers, rows, aligns, styles=styles, optional=optional,
+                                     gap=gap, width=width)
     # Column headings belong on every page of the table they head: a caller who
     # pages to the second half of the market is reading unlabelled numbers
     # otherwise. `sticky` is what tells the paginator so.
+    # A record is one entry, its rows joined: the paginator keeps a whole entry
+    # on one page where it fits, and a stacked record whose second row landed on
+    # the next page would be a price with nothing to buy.
     out_rows = [sticky(heading) if repeat_header else heading]
-    for number, row in enumerate(rows):
-        cells = []
-        for position, index in enumerate(keep):
-            role = styles[number][index] if styles is not None else "value"
-            align = "right" if aligns[index] == "r" else ("center" if aligns[index] == "c" else "left")
-            cells.append(_pad(row[index] if ANSI_ESCAPE_RE.search(row[index]) else _cell_style(role, row[index]),
-                              widths[position], align))
-        body = separator.join(cells).rstrip()
-        out_rows.append(table_member(body) if repeat_header else body)
+    for record in records:
+        joined = "\n".join(record)
+        out_rows.append(table_member(joined) if repeat_header else joined)
     return out_rows
 
 
@@ -4843,7 +4995,7 @@ def status_band(world: "World") -> list[str]:
     second = "  ".join([
         f"{p.slate}Day{RESET} {p.ink}{world.save.turn}{RESET}",
         f"{p.slate}Rank{RESET} {p.plasma}{career_rank(pilot)}{RESET}",
-        f"{p.gold}{glyph('credits')} {pilot.credits:,} cr{RESET}",
+        f"{p.gold}{glyph('credits')} {pilot.credits:,}cr{RESET}",
     ])
     return [first, second]
 
@@ -5295,19 +5447,43 @@ def screen_faction_story(p: Palette, world: World, faction: str) -> str | None:
 def screen_display_options(p: Palette, world: World) -> None:
     page, result = 0, None
     styles = list(DISPLAY_STYLES)
+    blurbs = {"auto": "the terminal's own colour depth, with motion",
+              "fast": "the same palette with every reveal, tick and drain off",
+              "basic": "sixteen ANSI colours and Unicode artwork",
+              "mono": "Unicode artwork, no ANSI styling",
+              "plain": "ASCII artwork, no ANSI styling; letters and typed text stay UTF-8"}
     while True:
-        lines = [f"Current: {DISPLAY_STYLES[world.save.display_style]}.",
-                 "Choose a preset to apply and save it. Back keeps the current preference.",
-                 "[1] Full palette: use the terminal's existing color depth.",
-                 "[2] 16-color: basic ANSI colors and Unicode artwork.",
-                 "[3] Monochrome: Unicode artwork without ANSI styling.",
-                 "[4] Plain: ASCII artwork without ANSI styling. Unicode letters and text input stay UTF-8.",
-                 "Sample: Hull 30/60; Fuel 8/24; Cargo 12/24 used. LOW FUEL / DANGER labels do not need color."]
+        p_ = pal()
+        lines = [f"{p_.slate}Choose a preset to apply and save it. "
+                 f"Back keeps the current preference.{RESET}", section("PRESETS")]
+        # Each preset previews itself: the sample row beside a name is drawn
+        # the way that preset would draw it, so the choice is made by looking
+        # rather than by reading an adjective (issue #493 §5).
+        rows, styles_for = [], []
+        for index, style in enumerate(styles, 1):
+            with display_style(style):
+                sample = (f"{gauge(30, 60, 8)} {pal().ink}30/60{RESET} "
+                          f"{badge('LOW FUEL', 'danger')} {chip('day', '12')}")
+                if _OUTPUT_STYLE in ("mono", "plain"):
+                    sample = ANSI_ESCAPE_RE.sub("", sample)
+                if _OUTPUT_STYLE == "plain":
+                    sample = sample.translate(_ASCII_ART_TRANSLATION)
+            rows.append([key_label(str(index), DISPLAY_STYLES[style]),
+                         badge("CURRENT", "brand") if style == world.save.display_style else "",
+                         sample])
+            styles_for.append(["value", "value", "value"])
+        _, records = table_records(["", "", ""], rows, "lll", styles=styles_for)
+        for record, style in zip(records, styles):
+            # The blurb is never a column: it is the widest thing on the screen
+            # and the first a table would give up, and it is what says what the
+            # preset actually does.
+            lines.append("\n".join(record + [f"  {p_.slate}{blurbs[style]}{RESET}"]))
         if result: lines.insert(0, result)
-        key, page, count = _draw_service_page(p, "Display Options", lines, "[1-4] Set [<] Prev [>] Next [B] Back: ", page)
+        key, page, count = _draw_service_page(p, "Display Options", lines,
+                                              f"[1-{len(styles)}] Set [<] Prev [>] Next [B] Back: ", page)
         if key in ("B", "Q"): return
         if (moved := page_step(key, page, count)) is not None: page = moved
-        elif len(key) == 1 and "1" <= key <= "4":
+        elif len(key) == 1 and "1" <= key <= str(len(styles)):
             style = styles[int(key) - 1]
             changed = select_display_style(world, style)
             if changed: world.commit()
@@ -5841,8 +6017,10 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         word, tone = price_standing(quote, ladder)
         held = world.save.cargo.get(commodity, 0)
         flag = ""
-        if illegal:
-            flag = badge("ILLEGAL", "danger")
+        if prohibited:
+            flag = badge("prohibited", "danger")
+        elif illegal:
+            flag = badge("Illegal", "danger")
         elif event and event["commodity"] == commodity and system.id in economy_event_system_ids(world, event):
             flag = badge("CRASH" if event["direction"] == "crash" else "BOOM",
                          "danger" if event["direction"] == "crash" else "good")
@@ -5858,7 +6036,10 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         ])
         styles.append(["value", "value", "value", "label", "label", "value", "value", "value"])
     lines += table(["COMMODITY", "BUY", "SELL", "STOCK", "DEMAND", "HELD", "SPREAD", ""],
-                   rows, "lrrrrrll", styles=styles, optional=(3, 4, 6, 7))
+                   # Drop order, last first: the spread is a nicety, the depth
+                   # figures have a screen of their own, and the price, the
+                   # hold and an ILLEGAL flag never go.
+                   rows, "lrrrrrll", styles=styles, optional=(3, 4, 6))
     lines.append(f"{p.slate}Prices per unit. Only jumps advance days; reopening does not replenish stock.{RESET}")
     if any(not COMMODITIES[c]["legal"] for c in goods):
         lines.append(f"{p.slate}Blackwake standing: {p.ink}+1{p.slate} per new {p.ink}{CONTRABAND_STANDING_STEP}cr"
@@ -6042,26 +6223,35 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
     its rows, and a selection letter therefore always means what the page it is
     printed on says it means.
     """
-    held = [row for rows in groups for row in rows if STICKY_MARK in row]
+    # A screen may carry more than one table; a heading is only repeated over
+    # the rows that belong to *it*, so `page_heading` records the heading in
+    # force when each page's first table row was placed.
+    any_sticky = any(STICKY_MARK in row for rows in groups for row in rows)
     pages: list[tuple[list[str], dict]] = [([], {})]
+    page_heading: list[str | None] = [None]
+    heading: str | None = None
+
+    def open_page() -> None:
+        pages.append(([], {}))
+        page_heading.append(None)
 
     def room_on(page_index: int) -> int:
-        # The first page carries its headings in the flow, where the screen put
-        # them; every later page is given them back, and pays for them.
-        return capacity if page_index == 0 else max(1, capacity - len(held))
+        # The first page carries its heading in the flow, where the screen put
+        # it; every later page is given one back, and pays a row for it.
+        return capacity if page_index == 0 or not any_sticky else max(1, capacity - 1)
 
     for index, rows in enumerate(groups):
         key, value = keys[index] if keys is not None else (None, None)
         current, choices = pages[-1]
         if current and (len(current) + len(rows) > room_on(len(pages) - 1)
                         or (key is not None and key in choices)):
-            pages.append(([], {}))
+            open_page()
         remaining = [render(row, index) for row in rows] if render is not None else list(rows)
         while remaining:
             current, choices = pages[-1]
             room = room_on(len(pages) - 1) - len(current)
             if room <= 0:
-                pages.append(([], {}))
+                open_page()
                 continue
             chunk, remaining = remaining[:room], remaining[room:]
             if key is not None:
@@ -6070,14 +6260,19 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
                 # page it reaches (issue #411 review).
                 choices[key] = value
                 chunk = keyed_rows(key, chunk)
+            for row in chunk:
+                if STICKY_MARK in row:
+                    heading = row
+                elif MEMBER_MARK in row and page_heading[len(pages) - 1] is None:
+                    page_heading[len(pages) - 1] = heading
             current.extend(chunk)
-    if held:
-        for page_index in range(1, len(pages)):
-            rows, choices = pages[page_index]
-            if not any(MEMBER_MARK in row for row in rows):
-                continue  # not a page of the table; its headings would be a lie
-            missing = [row for row in held if row not in rows[:len(held)]]
-            pages[page_index] = (missing + rows, choices)
+    for page_index in range(1, len(pages)):
+        owner = page_heading[page_index]
+        rows, choices = pages[page_index]
+        # No table rows on this page means its headings would be a lie.
+        if owner is None or (rows and rows[0] == owner):
+            continue
+        pages[page_index] = ([owner] + rows, choices)
     return pages if keys is not None else [rows for rows, _ in pages]
 
 
@@ -6095,7 +6290,11 @@ def wrapped_group(line: str) -> list[str]:
         # A rule is one row whatever its label: `draw_page` draws it across the
         # frame, and a wrapped rule is not a rule.
         return [SECTION_MARK + _fit_text(line[1:], max(1, _page_content_width() - 6))]
-    return wrap_styled(style_body_line(line), _page_content_width())
+    # A stacked table record arrives as its own rows, already measured; it is
+    # still one entry, so it stays one group and moves between pages whole.
+    lead = MEMBER_MARK if line.startswith(MEMBER_MARK) else ""
+    return [lead + row for part in line.lstrip(MEMBER_MARK).split("\n")
+            for row in wrap_styled(style_body_line(part), _page_content_width())]
 
 
 def _trade_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
@@ -6679,7 +6878,7 @@ def price_cell(cost: int, credits: int) -> str:
     """A price in gold, its affordability in tone. Credits are the only other
     thing in the game allowed to be gold, and this is a price."""
     p = pal()
-    return f"{p.gold}{cost:,} cr{RESET}" if cost <= credits else f"{p.alarm}{cost:,} cr{RESET}"
+    return f"{p.gold}{cost:,}cr{RESET}" if cost <= credits else f"{p.alarm}{cost:,}cr{RESET}"
 
 
 def shipyard_lines(world: World) -> list[str]:
@@ -6880,6 +7079,9 @@ def _page_header_rows(header: str) -> int:
     return 1 + len(_wrap_output(header, _page_content_width()).split("\r\n"))
 
 
+_LAST_PAGE_DRAWN: tuple | None = None
+
+
 def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) -> None:
     """Draw one page of a list screen: its frame, its rows, and nothing else.
 
@@ -6887,6 +7089,7 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     than thirty (issue #486). The action bar is deliberately left to the caller
     and printed outside the box, where the cursor waits.
     """
+    global _LAST_PAGE_DRAWN
     out_line()
     header = _page_header(title, page, count)
     inner = _box_inner_width()
@@ -6895,7 +7098,16 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     else:
         out_line(_box_top(p))
         rows = wrap_styled(style_body_line(header), _page_content_width()) + list(rows)
+    # A reveal belongs to arriving somewhere, not to every keypress: a screen
+    # redrawn unchanged (a key that did nothing, a prompt reprinted) must cost
+    # the caller nothing. Paging counts as arriving; pressing `X` twice does not.
+    signature = (title, page, count, len(rows))
+    revealing = signature != _LAST_PAGE_DRAWN and not motion_interrupted()
+    _LAST_PAGE_DRAWN = signature
+    pace = MOTION_REVEAL_BUDGET / max(1, len(rows)) if revealing else 0.0
     for row in rows:
+        if pace and not motion_pause(pace):
+            pace = 0.0
         if row.startswith(SECTION_MARK):
             out_line(_box_section(p, row[1:]))
             continue
@@ -6987,11 +7199,11 @@ def crew_roster_lines(world: World) -> list[str]:
         ])
         styles.append(["value", "value", "value", "value", "label", "value"])
         meta.append((index, role, hired, level, name, personality))
-    drawn = table(["", "", "", "", "", ""], heads, "llllll", styles=styles,
-                  optional=(4, 2), repeat_header=False)[1:]
+    _, records = table_records(["", "", "", "", "", ""], heads, "llllll", styles=styles,
+                               optional=(4, 2))
     lines: list[str] = []
-    for row, (index, role, hired, level, name, personality) in zip(drawn, meta):
-        lines.append(row)
+    for record, (index, role, hired, level, name, personality) in zip(records, meta):
+        lines += record
         paid = world.save.ship.crew_records.get(role, {}).get("paid_jumps", 0)
         if level + 1 < len(CREW_SERVICE_LEVELS):
             target = CREW_SERVICE_LEVELS[level + 1]
@@ -7805,7 +8017,7 @@ def mission_card(world: World, mission: Mission, active: bool, width: int) -> li
     reward = mission_reward_for(world.save, mission.kind, mission.reward)
     head = (f"{chip(kind, None)} {p.ink}{_mission_plain(target.name)}{RESET}  "
             f"{badge(state, 'brand' if state == 'TRACKED' else 'info' if active else 'label')}")
-    pay = f"{p.gold}+{reward:,} cr{RESET}"
+    pay = f"{p.gold}+{reward:,}cr{RESET}"
     rows = [_pad(head, max(1, width - _visible_width(pay))) + pay]
     facts = [f"{p.slate}danger{RESET} {p.ink}{target.danger if target.discovered else '?'}{RESET}",
              f"{p.ink}{len(mission_route(world, mission))}{RESET} {p.slate}jumps{RESET}"]
@@ -7901,13 +8113,13 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
     p = pal()
     cells = _gauge_cells()
     lines.append(f"{p.plasma}{BOLD}{_mission_plain(pilot.handle)}{RESET}  {p.slate}{career_rank(pilot)}{RESET}  "
-                 f"{p.gold}{glyph('credits')} {pilot.credits:,} cr{RESET}")
+                 f"{p.gold}{glyph('credits')} {pilot.credits:,}cr{RESET}")
     following = next(((threshold, label) for threshold, label in RANKS if threshold > pilot.credits), None)
     if following is not None:
         previous = max(threshold for threshold, _ in RANKS if threshold <= pilot.credits)
         lines.append(f"{p.slate}next rank{RESET} "
                      f"{gauge(pilot.credits - previous, max(1, following[0] - previous), cells, tone='brand')} "
-                     f"{p.ink}{following[0] - pilot.credits:,} cr{RESET} {p.slate}to {following[1]}{RESET}")
+                     f"{p.ink}{following[0] - pilot.credits:,}cr{RESET} {p.slate}to {following[1]}{RESET}")
     lines.append(section("SHIP"))
     lines += ship_gauge_rows(world)
     lines.append(section("STANDING"))
@@ -8021,6 +8233,10 @@ def hall_of_fame_lines(entries: list[dict], user_id: int) -> list[str]:
     if not entries:
         return [f"{p.slate}No pilots recorded yet -- be the first.{RESET}"]
     best = max(entry.get("best_credits", 0) for entry in entries) or 1
+    # Deliberately unstyled: it is a sentence, and `style_body_line` colours it
+    # by role on the way to the page like every other sentence in the game.
+    lines = [f"Top {plural(len(entries), 'pilot')} by best recorded credits. "
+             f"[YOU] marks your pilot when listed."]
     rows, styles = [], []
     for position, entry in enumerate(entries, 1):
         mine = entry.get("user_id") == user_id
@@ -8029,17 +8245,21 @@ def hall_of_fame_lines(entries: list[dict], user_id: int) -> list[str]:
             standing_cell(position),
             f"{p.plasma}{BOLD}{handle}{RESET}" if mine else f"{p.ink}{handle}{RESET}",
             str(entry.get("rank", "?")),
-            f"{p.gold}{entry.get('best_credits', 0):,}{RESET}",
+            f"{p.gold}{entry.get('best_credits', 0):,}cr{RESET}",
             gauge(entry.get("best_credits", 0), best, 8, tone="brand" if mine else "info"),
             str(entry.get("kills", 0)), str(entry.get("missions_completed", 0)),
             str(entry.get("retirements", 0)),
-            badge("YOU", "brand") if mine else "",
+            badge("[YOU]", "brand") if mine else "",
         ])
         styles.append(["value", "value", "label", "value", "value", "value", "value", "value", "value"])
-    lines = table(["", "PILOT", "RANK", "BEST CR", "", "WINS", "JOBS", "RUNS", ""],
-                  rows, "rllrlrrrl", styles=styles, optional=(2, 7, 6, 4))
-    lines.append(f"{p.slate}Best recorded credits. Wins are the latest career's combat victories; "
-                 f"jobs are missions completed; runs are retirements.{RESET}")
+    lines += table(["", "PILOT", "RANK", "BEST CR", "", "WINS", "JOBS", "RUNS", ""],
+                   rows, "rllrlrrrl", styles=styles,
+                   # Drop order, last first: the bar is decoration, the rank
+                   # is the widest column and follows from the credits, and
+                   # the three counts are what the board is a board of.
+                   optional=(6, 7, 2, 4))
+    lines.append(f"{p.slate}Wins are the latest career's combat victories; jobs are missions "
+                 f"completed; runs are retirements.{RESET}")
     return lines
 
 
@@ -8109,10 +8329,15 @@ CHART_CONNECTION_LETTERS = [c for c in LETTERS if c not in CHART_RESERVED_LETTER
 
 
 def danger_dots(level: int, *, known: bool = True) -> str:
-    """Danger as five pips in its own tone -- a rating reads faster than a digit."""
+    """Danger as five pips in its own tone -- a rating reads faster than a digit.
+
+    An uncharted destination shows a question mark rather than five empty pips:
+    the pips would read as "no danger", and the whole point of an uncharted
+    bearing is that nobody knows.
+    """
     p = pal()
     if not known:
-        return f"{p.slate}{glyph('crew_off') * 5}{RESET}"
+        return f"{p.slate}danger unknown{RESET}"
     tone = p.mint if level <= 1 else (p.amber if level <= 3 else p.alarm)
     return f"{tone}{glyph('crew_on') * level}{RESET}{p.deep}{glyph('crew_off') * (5 - level)}{RESET}"
 
@@ -8128,7 +8353,7 @@ def chart_entries(world: World, result: str | None = None) -> list[tuple[int | N
     here = world.here
     entries: list[tuple[int | None, str]] = []
     if result:
-        entries.append((None, alert("note", "Result", _mission_plain(result))))
+        entries.append((None, "Result: " + _mission_plain(result)))
     entries.append((None, f"{p.hull}{BOLD}{here.name.upper()}{RESET} {p.slate}({here.x},{here.y}){RESET}  "
                           f"{p.slate}{sector_for(here)}{RESET}  "
                           + "  ".join([chip("day", str(world.save.turn)),
@@ -8160,13 +8385,15 @@ def chart_entries(world: World, result: str | None = None) -> list[tuple[int | N
         ])
         styles.append(["value", "label", "label", "label", "value", "value", "value"])
         ids.append(sid)
-    drawn = table(["DESTINATION", "AT", "SECTOR", "ECONOMY", "DANGER", "FUEL", ""], rows,
-                  "lllllrl", styles=styles, optional=(1, 2, 3),
-                  width=max(1, _page_content_width() - 4))
+    heading, records = table_records(["DESTINATION", "AT", "SECTOR", "ECONOMY", "DANGER", "FUEL", ""],
+                                     rows, "lllllrl", styles=styles, optional=(1, 2, 3),
+                                     width=max(1, _page_content_width() - 4))
     # The heading sits under the same key prefix its rows will carry, and keeps
-    # its sticky mark so it is repeated on every page of the departures.
-    entries.append((None, STICKY_MARK + " " * 4 + drawn[0].replace(STICKY_MARK, "")))
-    entries += list(zip(ids, drawn[1:]))
+    # its sticky mark so it is repeated on every page of the departures. A
+    # record may be two rows at forty columns; `keyed_rows` indents the second
+    # by the prefix width, which is exactly where the stacked columns want it.
+    entries.append((None, STICKY_MARK + " " * 4 + heading))
+    entries += [(sid, MEMBER_MARK + "\n".join(record)) for sid, record in zip(ids, records)]
     return entries
 
 
@@ -8189,10 +8416,14 @@ def _chart_pages_for(world: World, title: str, footer: str, result: str | None):
     # A selectable row is wrapped narrower by the `[K] ` prefix `keyed_rows`
     # will put in front of it; an unkeyed one -- the heading, the status band --
     # is not prefixed, so wrapping it that narrow only threw a column away.
-    wrapped = [(sid, [SECTION_MARK + text[1:]] if text.startswith(SECTION_MARK)
-                else wrap_styled(style_body_line(text),
-                                 max(1, _page_content_width() - (4 if sid is not None else 0))))
-               for sid, text in entries]
+    def rows_for(sid, text):
+        if text.startswith(SECTION_MARK):
+            return [SECTION_MARK + text[1:]]
+        # A stacked departures record arrives as its own rows already measured.
+        width = max(1, _page_content_width() - (4 if sid is not None else 0))
+        return [row for part in text.split("\n") for row in wrap_styled(style_body_line(part), width)]
+
+    wrapped = [(sid, rows_for(sid, text)) for sid, text in entries]
     capacity = page_capacity(["[A] " + row for _, rows in wrapped for row in rows], title, footer)
     letters, groups, index = [], [], 0
     for sid, paragraph in wrapped:
@@ -9342,15 +9573,24 @@ def customs_quote(world: World) -> tuple[int, int, int]:
 
 
 def customs_display_lines(world: World) -> list[str]:
+    p = pal()
     quantity, cost, fine = customs_quote(world)
     credits = world.save.pilot.credits
     return [
-        f"Concord customs detects {quantity} units of unauthorized contraband.",
-        "[S] Surrender: lose all contraband, pay no fine. Concord standing improves by 1 up to its limit; notoriety stays unchanged.",
-        ("[P] Pay bribe: " if credits >= cost else "Bribe unavailable: ") +
-        f"offer {cost}cr; 60% acceptance. Pay only if accepted, keep all cargo, and leave standing/notoriety unchanged.",
-        f"If refused: all contraband is confiscated. Fine {fine}cr, capped at your credits ({min(credits, fine)}cr now); no debt.",
-        f"Refusal lowers Concord standing by 5 down to its limit and adds {NOTORIETY_PER_CUSTOMS_BUST} notoriety.",
+        alert("danger", "CONCORD CUSTOMS",
+              f"{quantity} units of unauthorised contraband detected"),
+        section("CHOICES"),
+        f"{key_label('S', 'Surrender')}  {p.slate}lose all contraband, pay no fine; "
+        f"Concord standing {RESET}{p.mint}+1{RESET}{p.slate}, notoriety unchanged.{RESET}",
+        (f"{key_label('P', 'Pay bribe')}  " if credits >= cost else f"{badge('Bribe unavailable', 'danger')}  ")
+        + f"{p.slate}offer{RESET} {p.gold}{cost}cr{RESET} {p.slate}at{RESET} "
+        f"{gauge(60, 100, 6, tone='caution')} {p.ink}60%{RESET} {p.slate}acceptance; paid only if accepted, "
+        f"all cargo kept, standing and notoriety unchanged.{RESET}",
+        section("IF THE BRIBE IS REFUSED"),
+        f"{p.slate}All contraband confiscated. Fine{RESET} {p.ink}{fine}cr{RESET}{p.slate}, capped at your "
+        f"credits ({RESET}{p.ink}{min(credits, fine)}cr{RESET}{p.slate} now); no debt.{RESET}",
+        f"{p.slate}Concord standing{RESET} {p.alarm}-5{RESET}{p.slate} down to its limit, "
+        f"notoriety{RESET} {p.alarm}+{NOTORIETY_PER_CUSTOMS_BUST}{RESET}{p.slate}.{RESET}",
     ]
 
 
