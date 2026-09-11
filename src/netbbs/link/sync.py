@@ -532,6 +532,14 @@ async def _push_own_events(
     single push has ever been allowed to carry: enough to hand a
     first-contact peer this node's genesis events, and bounded whether
     or not the peer can express what it needs.
+
+    It sends the same leading page each pass rather than walking the
+    list, so a node with more than one page of own events does not
+    deliver the remainder to a peer that cannot say what it lacks. That
+    is deliberate: every node on this mesh is upgraded together (SysOp's
+    call), so "a peer predating this exchange" describes a window that
+    closes rather than a topology to support, and a rotating or persisted
+    cursor would be real state maintained for it indefinitely.
     """
     transitions = list(node.identity.transitions)
     resource_events = (
