@@ -73,6 +73,13 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 # career or world: registration and the first-visit guide belong to the fixture,
 # not to every panel. The key is the one the door's own dispatch uses -- check it
 # there, not in the action bar, before adding a walk.
+#
+# A `*` after a key means "press it until the screen stops changing, then
+# photograph that". How many pages a screen has depends on the terminal -- War
+# Dialer's switchboard is two pages at 80x24 and eleven at 40x12 -- so a fixed
+# number of Next presses photographs page two twice at one size and never
+# reaches the feed, the orders or the season card at another. A walk that pages
+# to the end reaches the same *place* at every size.
 WALKS: dict[str, list[tuple[str, bytes]]] = {
     "voidrunner": [
         ("Command Deck", b""),
@@ -100,13 +107,14 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # The switchboard is a card stack paged with [N]: at forty columns the
         # scene and the feed are the pages after the gauges (issue #494).
         ("Switchboard, page 2", b"N"),
-        ("Switchboard, page 3", b"NN"),
+        ("Switchboard, last page", b"N*"),
         ("BBS scene", b"I"),
         ("Crew insignia", b"I1"),
         ("Neutral dossiers", b"I2"),
         ("Scene bulletins", b"I3"),
         ("Season results", b"I4"),
         ("Your season reports", b"I5"),
+        ("Hall of Fame", b"I6"),
         # `I7` is the caller's own display screen; no other walk opens it.
         ("Display options", b"I7"),
         ("The scene", b"E"),
@@ -280,6 +288,19 @@ class Door:
         self.proc.stdin.flush()
         self.settle(before, f"key {key!r}", expect=expect)
 
+    def press_to_end(self, key: bytes, *, limit: int = 24) -> None:
+        """Press `key` until the screen it redraws stops changing.
+
+        A paging key on the last page still redraws -- the door clears and draws
+        the same page again -- so "stopped changing" is the only signal for "this
+        is the end", and it is the same end at every terminal size.
+        """
+        for _ in range(limit):
+            before = last_screen(self.read())
+            self.press(key)
+            if last_screen(self.read()) == before:
+                return
+
     def read(self) -> str:
         with self.lock:
             return bytes(self.out).decode("utf-8", "replace")
@@ -322,8 +343,15 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
     running = Door(door, state, width, height, info_extra)
     try:
         running.settle()
-        for index in range(len(keys)):
-            running.press(keys[index:index + 1], expect=expect)
+        index = 0
+        while index < len(keys):
+            key = keys[index:index + 1]
+            if keys[index + 1:index + 2] == b"*":
+                running.press_to_end(key)
+                index += 2
+                continue
+            running.press(key, expect=expect)
+            index += 1
         screen = running.read()
     except BaseException:
         # A door that hung or crashed the build must not outlive it, or a failed

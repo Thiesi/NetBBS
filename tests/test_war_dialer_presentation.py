@@ -3204,3 +3204,147 @@ def test_the_switchboard_reads_at_a_glance_with_gauges_not_sentences(tmp_path, m
     assert wd.gl("link_h") * 2 in first and wd.gl("mine") in first
     assert _screen_titles(written).startswith("SWITCHBOARD")
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Defects the review of the rebuild found (PR #503). Each one is a screen saying
+# something that is not true of the action behind it, or a keystroke reaching a
+# screen the caller never pressed it on.
+# ---------------------------------------------------------------------------
+
+
+def test_a_key_that_skips_the_masthead_does_not_reach_the_next_screen(monkeypatch):
+    """The masthead's reveal has no reader of its own.
+
+    Handing its skip key on would acknowledge a page of unread receipts, or skip
+    a page of the first-visit guide, that the caller never pressed anything on.
+    A result screen's reveal is the opposite case: an acknowledgement follows it
+    immediately, so one press should do both.
+    """
+    palette = wd.Palette(True)
+    monkeypatch.setattr(wd, "out", lambda text: None)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(wd, "_read_key_with_timeout", lambda timeout: " ")
+    wd._PENDING_INPUT.clear()
+    wd.draw_title(palette, {"node_name": "ReLink", "handle": "Thiesi"}, 1, 78)
+    assert wd._PENDING_INPUT == [], "the masthead handed its skip key to the next screen"
+    wd.reveal(palette, ["one", "two"])
+    assert wd._PENDING_INPUT == [" "], "a result reveal must not eat the acknowledgement"
+    wd._PENDING_INPUT.clear()
+
+
+def test_the_log_tones_your_own_receipts_the_way_the_dashboard_does(tmp_path, monkeypatch):
+    conn, now = _painted_world(tmp_path, "tone.db")
+    palette = wd.Palette(True)
+    # A receipt the caller caused records their own handle; one a rival caused
+    # records the rival's. Both screens have to agree about which is which.
+    wd.record_event(conn, 1, "Thiesi", "Reinforced 212-555 Uptown Exchange with 1.", now,
+                    seen=True)
+    events = wd.history_events(conn, 1)
+    feed = wd.feed(palette, events, 72, own_handle="Thiesi")
+    own_feed = next(row for row in feed if "Reinforced" in row)
+    assert _colour_before(own_feed, wd.gl("bullet")) == palette.phosphor
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    wd.show_event_history(palette, conn, 1, 78, 24, own_handle="Thiesi")
+    own_log = next(row for row in "".join(written).split("\r\n") if "Reinforced" in row)
+    assert palette.magenta not in own_log, "your own receipt read as hostile in the log"
+    assert palette.ink in own_log
+    conn.close()
+
+
+def test_the_feed_wraps_wide_glyphs_without_losing_the_tail(tmp_path, monkeypatch):
+    conn, now = _painted_world(tmp_path, "wide.db")
+    palette = wd.Palette(True)
+    # A handle of CJK glyphs is twice as wide as it is long; a row measured in
+    # characters would be clipped by the frame and lose the end of the receipt.
+    wd.record_event(conn, 1, "界" * 12, "界" * 12 + " raided you and got away with $5.",
+                    now)
+    rows = wd.feed(palette, wd.history_events(conn, 1), 60, own_handle="Thiesi", limit=1)
+    assert len(rows) > 1, "a wide receipt has to carry onto another row"
+    for row in rows:
+        assert wd._dlen(row) <= 60, (wd._dlen(row), row)
+    assert "$5." in "".join(rows), "the tail of the receipt was dropped"
+    conn.close()
+
+
+@pytest.mark.parametrize("role,expect_roll", [("pbx", False), ("carrier", False), ("hub", True)])
+def test_an_owner_service_preview_shows_only_the_risk_that_service_takes(tmp_path, role,
+                                                                        expect_roll):
+    conn, now = _painted_world(tmp_path, f"service-{role}.db")
+    palette = wd.Palette(True)
+    exchange = next(e for e in wd.list_exchanges(conn, 1) if e.role == role)
+    conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=? "
+                 "WHERE id=?", (wd.to_iso(now), exchange.id))
+    conn.execute("UPDATE players SET heat=78 WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    exchange = next(e for e in wd.list_exchanges(conn, 1) if e.id == exchange.id)
+    cards = wd.stakes_cards(palette, "service", player, exchange, 72)
+    text = _ANSI_RE.sub("", " ".join(row for _, rows in cards for row in rows))
+    # Only a Warez Hub adds Heat and rolls for a bust. At 78 Heat the other two
+    # would otherwise advertise a bust chance directly above terms that say there
+    # is no roll. ("NO BUST ROLL" contains "BUST", so the badge is matched whole.)
+    assert ("NO BUST ROLL" in text) is not expect_roll, text
+    assert ("⟦BUST " in text) is expect_roll, text
+    assert (wd.preview_heat("service", player, exchange) > 0) is expect_roll
+    conn.close()
+
+
+@pytest.mark.parametrize("step,cost", [("case", "$0"), ("prepare", "$50"), ("execute", "$0")])
+def test_an_operation_step_previews_its_own_cost_and_its_own_risk(tmp_path, step, cost):
+    conn, now = _painted_world(tmp_path, f"step-{step}.db")
+    palette = wd.Palette(True)
+    # No specialty and no support, so the execution's Heat actually lands and its
+    # bust badge is the thing being compared against the other two steps.
+    conn.execute("UPDATE players SET heat=78, specialty='', support='' WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    cards = wd.operation_step_cards(palette, player, step, wd.JobChoice(1, 1), 72)
+    head = _ANSI_RE.sub("", " ".join(cards[1][1]))
+    stakes = _ANSI_RE.sub("", " ".join(rows for heading, rows in cards
+                                      if heading == "STAKES" for rows in rows))
+    assert f"cash {cost}" in head, head
+    # Casing and preparing roll for nothing and add no Heat; only executing does.
+    assert ("ODDS" in stakes) is (step == "execute"), stakes
+    assert ("NO BUST ROLL" in stakes) is (step != "execute"), stakes
+    assert wd.progress_chain(palette, list(wd.OPERATION_STAGES),
+                             wd.OPERATION_STAGES.index(step)) in cards[0][1][0]
+    conn.close()
+
+
+def test_your_own_garrisons_are_not_described_as_targets(tmp_path):
+    conn, now = _painted_world(tmp_path, "held.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    held = next(e for e in wd.list_exchanges(conn, 1) if e.controller_user_id == 1)
+    rows = _ANSI_RE.sub("", " ".join(wd.garrison_entry_rows(palette, held, player, 68)))
+    # A holding has posted crew, defence, income and a service; a capture price,
+    # root Heat or odds against its own defence would mean nothing here.
+    for absent in ("capture", "odds", "heat"):
+        assert absent not in rows.lower(), rows
+    for present in ("posted", "defence", "income", "Service:"):
+        assert present in rows, rows
+    conn.close()
+
+
+def test_the_scene_table_advertises_no_hotkey_the_screen_ignores(tmp_path):
+    conn, now = _painted_world(tmp_path, "verbs.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    exchanges = wd.list_exchanges(conn, 1)
+    table = wd.territory_cards(palette, exchanges, 1, player, 72)[1][1]
+    text = _ANSI_RE.sub("", " ".join(table))
+    # The scene screen inspects and never acts, so its table names the verb and
+    # the exchange's own card says where the key that does it lives.
+    for verb in ("garrison", "raid", "root"):
+        assert verb in text
+    for key in ("[G]", "[R]", "[X]"):
+        assert key not in text, f"{key} is printed on a screen whose dispatch ignores it"
+    card = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, exchanges[0], player, 72)
+        for row in rows))
+    assert "Back on the switchboard" in card and "[G] Garrison" in card
+    conn.close()

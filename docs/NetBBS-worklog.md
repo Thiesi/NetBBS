@@ -4904,6 +4904,22 @@ visible row is what follows the last `\r`, which is why each frame is padded to
 a constant width), and motion written *under* the screen the caller pressed a key
 at spends rows that screen's height budget already owns.
 
+**A skip key belongs to the screen behind it, or to nobody.** Handing the
+keystroke that interrupted motion to the next reader is right where an
+acknowledgement follows immediately -- a result screen -- and wrong where the
+reveal has no reader of its own. The masthead's reveal is followed by whatever
+screen the caller has not chosen yet, so handing its skip key on would
+acknowledge a page of unread receipts or skip a page of the first-visit guide
+that nobody pressed anything on. `reveal(..., hand_back=False)` marks that case.
+
+**A preview's prominent summary has to be the stakes of the step being
+committed, not of the flow it belongs to.** Two instances of the same mistake
+came out of one shared stakes builder: an owner service previewed a Warez Hub's
+Heat and bust roll at a Public PBX, whose service removes Heat and rolls for
+nothing; and a three-step operation previewed the execution's odds, Heat and bust
+above a Prepare step that has none and costs $50 the card showed as $0. A card
+this prominent contradicting the terms directly under it is worse than no card.
+
 **A test that drives the door by reading its own output has to read what a caller
 reads.** Once a bar is styled segment by segment, `[A] Act` is a hotkey in amber
 followed by a label in mint and is no longer a contiguous run of bytes on the

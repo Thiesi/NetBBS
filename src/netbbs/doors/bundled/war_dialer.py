@@ -2732,13 +2732,15 @@ def feed(p: Palette, events: list[GameEvent], width: int, *, own_handle: str = "
         bullet = sty((p.magenta if hostile else p.phosphor) + (BOLD if event.seen_at is None else ""),
                      gl("bullet"))
         stamp = from_iso(event.created_at).astimezone(timezone.utc).strftime("%H:%M")
-        summary = _event_plain(event.summary_text)
-        lead = f"{bullet} {sty(p.grey, stamp)} "
-        text_width = max(8, width - _dlen(f"{gl('bullet')} {stamp} "))
-        wrapped = _wrap(summary, text_width)
-        rows.append(lead + sty(p.magenta if hostile else p.ink, wrapped[0]))
-        indent = " " * _dlen(f"{gl('bullet')} {stamp} ")
-        rows.extend(indent + sty(p.magenta if hostile else p.ink, line) for line in wrapped[1:])
+        lead = f"{gl('bullet')} {stamp} "
+        # Wrapped by display columns, not by character count: a rival handle of
+        # CJK glyphs is twice as wide as it is long, and a row the frame has to
+        # clip loses the tail of the caller's own receipt.
+        wrapped = _wrap_output(_event_plain(event.summary_text),
+                               max(8, width - _dlen(lead))).split("\r\n")
+        tone = p.magenta if hostile else p.ink
+        rows.append(bullet + " " + sty(p.grey, stamp) + " " + sty(tone, wrapped[0]))
+        rows.extend(" " * _dlen(lead) + sty(tone, line) for line in wrapped[1:])
     return rows or [sty(p.grey, "No recorded events yet.")]
 
 
@@ -3048,30 +3050,36 @@ def motion_enabled(p: Palette) -> bool:
     return not (p.fast or p.monochrome or p.ascii_art)
 
 
-def _beat(seconds: float) -> bool:
+def _beat(seconds: float, *, hand_back: bool = True) -> bool:
     """Wait one frame unless a key arrives; True means the caller skipped.
 
-    The wait is a read, not a sleep, so motion never blocks input -- and the
-    keystroke that interrupted it is handed back for the next reader rather than
-    eaten, so one press both skips the reveal and acknowledges the screen it was
-    revealing.
+    The wait is a read, not a sleep, so motion never blocks input. With
+    `hand_back`, the keystroke that interrupted it waits for the next reader
+    instead of being eaten, so one press both skips a reveal and acknowledges
+    the screen it was revealing. A reveal with no reader behind it -- the
+    masthead, which is followed by whatever screen the caller has not chosen
+    yet -- consumes the key instead: handing it on would acknowledge a page of
+    unread receipts, or skip a page of the first-visit guide, that the caller
+    never pressed anything on.
     """
     try:
         key = _read_key_with_timeout(seconds)
     except (OSError, ValueError, EOFError):
         return True
-    if key and len(_PENDING_INPUT) < _MAX_PENDING_INPUT:
+    if key and hand_back and len(_PENDING_INPUT) < _MAX_PENDING_INPUT:
         _PENDING_INPUT.append(key)
     return key is not None
 
 
-def reveal(p: Palette, rows: list[str], *, frame: float = MOTION_FRAME_SECONDS) -> None:
+def reveal(p: Palette, rows: list[str], *, frame: float = MOTION_FRAME_SECONDS,
+           hand_back: bool = True) -> None:
     """Print rows one at a time. Any key prints the rest at once.
 
     Deliberately a forward-only reveal with no cursor repositioning: the screen
     a caller is left looking at is byte-identical to the one a skipped or
     motionless preset draws, so a test or a gallery panel photographs the same
-    thing either way.
+    thing either way. `hand_back` is `False` where no reader follows -- see
+    `_beat`.
     """
     if not motion_enabled(p) or not rows:
         for row in rows:
@@ -3082,7 +3090,7 @@ def reveal(p: Palette, rows: list[str], *, frame: float = MOTION_FRAME_SECONDS) 
     for row in rows:
         out_line(row)
         if not skipped:
-            skipped = _beat(frame)
+            skipped = _beat(frame, hand_back=hand_back)
 
 
 def draw_title(p: Palette, info: dict, season_number: int, w: int) -> None:
@@ -3101,7 +3109,7 @@ def draw_title(p: Palette, info: dict, season_number: int, w: int) -> None:
         center(sty(p.mint, _fit("Rival crews. Ten exchanges. One scene.", inner)), inner),
         scanline(p, inner, trailing=badge(p, f"SEASON {season_number}")),
     ]
-    reveal(p, frame_rows(p, w, [("", rows)]))
+    reveal(p, frame_rows(p, w, [("", rows)]), hand_back=False)
     out_line("  " + label_value(p, "node", _fit(node, max(8, inner // 3)), style=p.cyan)
              + "  " + sty(p.phosphor_dim, gl("sep")) + "  "
              + label_value(p, "handle", _fit(handle, max(8, inner // 3)), style=p.mint))
@@ -4020,12 +4028,18 @@ def owner_label(exchange: Exchange) -> str:
 
 
 def exchange_action(p: Palette, exchange: Exchange, viewer_id: int | None) -> str:
-    """The one key that does something about this exchange from where you sit."""
+    """What this exchange is for, from where you sit.
+
+    A verb, not a hotkey: the scene screen inspects exchanges and never acts on
+    them, and a bracketed key printed on a screen whose dispatch ignores it is
+    the exact lie the door takes apart elsewhere. The key that does it is named
+    on the exchange's own card, which says where to press it.
+    """
     if viewer_id is not None and exchange.controller_user_id == viewer_id:
-        return sty(p.amber + BOLD, "[G]") + sty(p.grey, " garrison")
+        return sty(p.grey, "garrison")
     if exchange.controller_user_id is not None:
-        return sty(p.amber + BOLD, "[R]") + sty(p.grey, " raid")
-    return sty(p.amber + BOLD, "[X]") + sty(p.grey, " root")
+        return sty(p.grey, "raid")
+    return sty(p.grey, "root")
 
 
 def territory_columns(width: int) -> tuple[list[str], str, list[str]]:
@@ -4125,6 +4139,12 @@ def exchange_detail_cards(p: Palette, exchange: Exchange, player: Player | None,
                                   f"+{capture_rank_award(player, exchange)}" if player else
                                   f"+{CAPTURE_RANK}", style=p.mint)], width)
     terms += prose_rows(p, "Owner service: " + service, width, style=p.grey)
+    mine = player is not None and exchange.controller_user_id == player.user_id
+    terms += prose_rows(p, "Back on the switchboard, "
+                        + ("[G] Garrison manages this holding and opens its service."
+                           if mine else "[R] Raid reaches its owner."
+                           if exchange.controller_user_id is not None else
+                           "[X] Root contests it."), width, style=p.grey)
     cards = [("", head), ("DEFENCE", defence_rows), ("TERMS", terms)]
     if exchange.npc_home:
         notes = [f"NPC home: {NPC_NAMES[exchange.npc_home]}. No human account, income or Rank; "
@@ -4168,13 +4188,23 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
     """
     if player is not None and viewer_id is None:
         viewer_id = player.user_id
+    # The rollover screen is a screen of its own, so it gets the terminal's own
+    # width; everything this function draws keeps a column for the cursor.
+    terminal_width = width
     width = max(1, width - 1)
     inner = _panel_width(p, width)
     detail: int | None = None
     while True:
         with _write_transaction(conn):
             _settle_world(conn, now_utc())
+            # The player comes out of the same settled snapshot as the exchanges:
+            # a season that rolls over while the caller is on this screen would
+            # otherwise leave the odds and the capture Rank on last season's crew.
+            refreshed = (_refresh_player(conn, player.user_id, now_utc())
+                         if player is not None else None)
             exchanges = list_exchanges(conn, viewer_id)
+        if refreshed is not None:
+            update_display_player(p, player, refreshed, terminal_width, height)
         keys = "" if detail is not None else "".join(PICK_KEYS[:len(exchanges)])
         if detail is not None and detail < len(exchanges):
             title = "THE SCENE"
@@ -4202,8 +4232,8 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
         index = 0
         while True:
             out(f"{ESC}[2J{ESC}[H")
-            note = page_note(index, len(pages), held)
-            draw_frame(p, width, pages[index], title=title, trailing=note)
+            draw_frame(p, width, pages[index], title=title,
+                       trailing=page_note(index, len(pages), held))
             for row in footer[:-1]:
                 out_line(row)
             out_prompt(footer[-1])
@@ -4365,13 +4395,20 @@ def action_odds(action: str, player: Player, target, *, operation: bool = False)
 
 
 def preview_heat(action: str, player: Player, target, *, operation: bool = False) -> float:
-    """The Heat this attempt would add, after specialty and support effects."""
+    """The Heat this attempt would add, after specialty and support effects.
+
+    An owner service is whichever service the exchange's role actually performs:
+    only a Warez Hub adds Heat and rolls for a bust, and a preview that showed
+    one above terms correctly saying there is no roll would be advertising a
+    risk the commit does not take.
+    """
     job = job_terms(target if isinstance(target, JobChoice) else JobChoice()) if action == "job" else None
     base = {"trade": TRADE_WAREZ_HEAT, "recruit": 0, "job": job[4] if job else JOB_HEAT,
             "raid": RAID_HEAT,
             "root": exchange_terms(target)[2] if action == "root" and isinstance(target, Exchange)
             else ROOT_EXCHANGE_HEAT,
-            "service": 4, "crew": 0, "recon": 0}.get(action, 0)
+            "service": 4 if isinstance(target, Exchange) and target.role == "hub" else 0,
+            "crew": 0, "recon": 0}.get(action, 0)
     return adjusted_heat(player, action, base)
 
 
@@ -4662,11 +4699,7 @@ def do_operation(p: Palette, conn: sqlite3.Connection, player: Player, rng: rand
             show_text_pages(p, "OPERATION ABANDONED", ["Slot clear. No turn spent."], width, height, onboarding=True)
             return True
     # Do not silently switch a selected step/contract when another session acts.
-    stage = OPERATION_STAGES.index(step)
-    cards = [("", compose([progress_chain(p, list(OPERATION_STAGES), stage),
-                           badge(p, step.upper(), style=p.amber)], inner))]
-    cards += stakes_cards(p, "job", player, choice, inner, operation=True,
-                          terms=operation_preview_lines(player, step, choice))
+    cards = operation_step_cards(p, player, step, choice, inner)
     if show_text_pages(p, step.upper() + " PREVIEW", [], width, height, cards=cards,
                        accept=operation_block_reason(player, step) is None) != "A":
         return False
@@ -4947,7 +4980,7 @@ def do_garrison(p: Palette, conn: sqlite3.Connection, player: Player, width: int
                        label_value(p, "POSTED", f"{sum(e.garrison for e in state.holdings)}",
                                    style=p.cyan),
                        label_value(p, "HOLDINGS", f"{len(state.holdings)}/10", style=p.mint)], inner)
-    rendered = [(exchange_entry_rows(p, exchange, player, inner - 4), True)
+    rendered = [(garrison_entry_rows(p, exchange, player, inner - 4), True)
                 for exchange in state.holdings]
     key = pick_record_page(p, "YOUR GARRISONS", [], width, height, rendered=rendered,
                            before=[("", summary)], heading="HELD")
@@ -4965,7 +4998,7 @@ def do_garrison(p: Palette, conn: sqlite3.Connection, player: Player, width: int
     if exchange.role in EXCHANGE_ROLES:
         records.append((["Owner service", exchange_terms(exchange)[4], "Preview before Act; requires continued ownership."], True))
     key = pick_record_page(p, "EXCHANGE CONTROL", records, width, height,
-                           before=[("", exchange_entry_rows(p, exchange, player, inner))])
+                           before=[("", garrison_entry_rows(p, exchange, player, inner))])
     if key in "BQ":
         return False
     if PICK_KEYS.index(key) == len(options):
@@ -5041,6 +5074,60 @@ def resolve_sweep(p: Palette, width: int, *, amount: int = 0) -> None:
         if _beat(MOTION_BUDGET_SECONDS / span):
             break
     out_line()
+
+
+def operation_step_cards(p: Palette, player: Player, step: str, choice: JobChoice,
+                         width: int) -> list[tuple[str, list[str]]]:
+    """The stakes of the step about to be committed, not of the whole operation.
+
+    Casing and preparing roll for nothing and add no Heat; preparing costs $50
+    and casing costs nothing. Showing the execution card above either one
+    advertised odds, Heat and a bust chance that step does not take, and a cost
+    of $0 for a step that deducts $50.
+    """
+    stage = OPERATION_STAGES.index(step)
+    chain = [("", compose([progress_chain(p, list(OPERATION_STAGES), stage),
+                           badge(p, step.upper(), style=p.amber)], width))]
+    terms = operation_preview_lines(player, step, choice)
+    if step == "execute":
+        return chain + stakes_cards(p, "job", player, choice, width, operation=True, terms=terms)
+    cost = 50 if step == "prepare" else 0
+    head = compose([label_value(p, "COST", "1 turn", style=p.ink),
+                    label_value(p, "cash", f"${cost}", style=p.amber if cost else p.grey),
+                    label_value(p, "you hold", f"${player.cash:,}", style=p.amber),
+                    label_value(p, "turns", f"{TURNS_PER_DAY - player.turns_used}"
+                                f"/{TURNS_PER_DAY}", style=p.ink)], width)
+    stakes = compose([label_value(p, "THIS STEP", step.title(), style=p.mint),
+                      badge(p, "NO BUST ROLL", style=p.phosphor),
+                      sty(p.grey, "no Heat, no support spent")], width)
+    cards = chain + [("", head), ("STAKES", stakes)]
+    if reason := operation_block_reason(player, step):
+        cards.append(("UNAVAILABLE", prose_rows(p, reason, width, style=p.alarm)))
+    cards.append(("TERMS", prose_card(p, terms, width)))
+    return cards
+
+
+def garrison_entry_rows(p: Palette, exchange: Exchange, player: Player,
+                        width: int) -> list[str]:
+    """One of your own holdings as a picker entry.
+
+    A holding is not a target: it has posted crew, defence, income and an owner
+    service, and none of the capture price, root Heat or attack odds the root
+    picker shows would mean anything here.
+    """
+    glyph, style, _ = owner_node(p, exchange, player.user_id)
+    role, _, _, _, service = exchange_terms(exchange)
+    defence = exchange_defense(exchange)
+    rows = compose([sty(style + BOLD, glyph + " " + _fit(exchange_short_name(exchange), 22)),
+                    badge(p, _fit(role.upper(), 16)),
+                    label_value(p, "income", f"${exchange.income_per_hour}/hr", style=p.amber)],
+                   width)
+    rows += compose([sty(p.grey, "posted") + " " + dots(p, exchange.garrison, 4, cap=4)
+                     + " " + sty(p.ink, str(exchange.garrison)),
+                     label_value(p, "defence", str(defence), style=p.ink),
+                     label_value(p, "security", f"+{max(0, defence - exchange.garrison)}",
+                                 style=p.cyan)], width)
+    return rows + prose_rows(p, "Service: " + service, width, style=p.grey)
 
 
 def main() -> int:
@@ -5132,7 +5219,8 @@ def main() -> int:
         draw_title(palette, info, player.season_number, w)
         if is_new_player:
             draw_help(palette, w, height, onboarding=True)
-        show_event_history(palette, conn, player.user_id, w, height, unseen_only=True)
+        show_event_history(palette, conn, player.user_id, w, height, unseen_only=True,
+                           own_handle=player.handle)
 
         page_index = 0
         while True:
@@ -5167,7 +5255,8 @@ def main() -> int:
                 elif choice == "V":
                     show_player_directory(palette, conn, user_id, w, height)
                 elif choice == "H":
-                    show_event_history(palette, conn, player.user_id, w, height)
+                    show_event_history(palette, conn, player.user_id, w, height,
+                                       own_handle=player.handle)
                 elif choice == "T":
                     do_trade_warez(palette, conn, player, action_now, rng, w, height)
                 elif choice == "C":
