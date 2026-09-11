@@ -8451,12 +8451,11 @@ def screen_outdated_career(p: Palette, error: OutdatedSave) -> bool:
              "path for them; your Hall of Fame ranking is kept either way.",
              "Beginning a new career takes the slot: the refused career is kept as a recovery "
              "copy, the same place a rollback puts the career it replaces."]
-    pages = _mission_text_pages(lines, overhead=4)
+    title, lines = lines[0], lines[1:]
+    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows())
     page = 0
     while True:
-        out_line()
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, title, pages[page], page, len(pages))
         offer = "[N] New career " if page == len(pages) - 1 else ""
         out_prompt(offer + "[<] Prev [>] Next [B] Back: ")
         try:
@@ -8508,12 +8507,11 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
         if preservation_problem is not None:
             lines += ["Automatic restoration is unavailable: " + preservation_problem,
                       "Please contact your SysOp for manual recovery."]
-    pages = _mission_text_pages(lines, overhead=4)
+    title, lines = lines[0], lines[1:]
+    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows())
     page = 0
     while True:
-        out_line()
-        for line in pages[page]:
-            out_line(line)
+        draw_page(p, title, pages[page], page, len(pages))
         can_restore = candidate is not None and preservation_problem is None and page == len(pages) - 1
         action = "[R] Restore  " if can_restore else ""
         out_prompt(action + "[N] Next [P] Previous [B] Back: ")
