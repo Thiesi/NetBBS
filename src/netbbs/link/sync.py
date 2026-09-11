@@ -659,17 +659,6 @@ async def _sync_one_seed(
         )
         return True
 
-    # Also ask this seed who else it knows -- feeds the
-    # candidate pool `_try_candidate_fallback` (below) draws from.
-    if peer_state == TrustState.ESTABLISHED:
-        try:
-            await request_peer_list(
-                node, session, seed_url, seed_peer.fingerprint, lane,
-                refresh_identity_claims=getattr(own_hello_provider, "refresh", None),
-            )
-        except LinkTransportError as exc:
-            _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
-
     # Design doc §8.8, issue #85 (§9.6, issue #87 for channels; §11,
     # issue #93 for file-area catalogues): pull-based catch-up, asked of
     # every seed this pass already reached (not one arbitrary "best"
@@ -750,6 +739,25 @@ async def _sync_one_seed(
             # pass has nothing to rotate against.
             fallback_offsets=fallback_offsets if fallback_offsets is not None else {},
         )
+
+    # Also ask this seed who else it knows -- feeds the candidate pool
+    # `_try_candidate_fallback` (below) draws from.
+    #
+    # Last of the three requests, after the inventory exchange and the
+    # push it feeds (Codex review of #498). All three share one
+    # per-source request budget at the seed (§13.9), and this is the only
+    # one whose failure costs nothing this pass: candidate discovery is a
+    # resilience path for a future pass, while hello/inventory/push are
+    # what this pass is *for*. Ordering them by what a scarce budget
+    # should buy first costs nothing when the budget is ample.
+    if peer_state == TrustState.ESTABLISHED:
+        try:
+            await request_peer_list(
+                node, session, seed_url, seed_peer.fingerprint, lane,
+                refresh_identity_claims=getattr(own_hello_provider, "refresh", None),
+            )
+        except LinkTransportError as exc:
+            _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
 
     configured_reporters = await lane.run(list_trusted_reporter_fingerprints)
     if peer_state == TrustState.ESTABLISHED and seed_peer.fingerprint in configured_reporters:

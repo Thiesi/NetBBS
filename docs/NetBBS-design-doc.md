@@ -1800,8 +1800,7 @@ JSON event-list shape `push_events`'s request body already uses:
 ```
 
 `wanted` is the push direction's half of the same exchange (issue #478,
-below); a response without the key is a peer predating it, which is
-different from a peer answering `[]`.
+below). It is required: a response omitting it is malformed.
 
 **Responder-side diff.** For each `board_id` this responder itself
 currently carries — whether or not it appears as a key in the request at
@@ -1927,7 +1926,10 @@ needed.
 completed receives one `InventoryRequest` covering every board this node
 carries, and the push to that seed (§12) then runs on the answer — issue
 #478 reversed the original order, because the response is now what tells
-the push what to send. Not sent to one arbitrary "best" peer — every seed
+the push what to send. The peer-list request comes last of the three: all
+three draw on one per-source request budget at the seed (§13.9), and
+candidate discovery is a resilience path for a later pass, while
+hello/inventory/push are what the pass exists for. Not sent to one arbitrary "best" peer — every seed
 already dialed that pass gets asked, since not every peer necessarily
 carries every board this node does, and the push runs against all of them
 regardless. A seed that carries none of the requested boards simply
@@ -1945,6 +1947,26 @@ above) and `wanted` (the declared content IDs the responder itself lacks).
 The requester then pushes exactly the `wanted` events it originated. No
 second round trip, no new request field, and no per-peer push cursor to
 persist.
+
+**Scope: a resource the requester declared, and nothing else.** `wanted`
+answers "do you hold this?" for every content ID the request lists, so what
+it may consult is a disclosure boundary, not an implementation detail. It is
+computed per declared resource — the materialized sources union whatever
+`link_events` holds under that same resource id — never against this node's
+global dedup set. That set spans `link_message`s, their acknowledgements and
+`key_transition`s, all of which this section deliberately excludes from
+inventory; consulting it would let any completed peer file a known content ID
+under a fabricated resource and read an exact membership answer off the
+response. A signed request identifies the asker; it does not make an ID belong
+to the resource it was filed under.
+
+A resource this node has **seen and declined** — persisted but not
+materialized, which is what a carry-quota refusal (§13.9) leaves behind —
+wants nothing further. Asking on would be asking for what this node already
+refused to keep, and would not terminate: a declined board's posts never reach
+`link_events` at all, so they would be wanted every pass forever and occupy the
+requester's whole push page. A resource never seen is the opposite case and
+still wants everything declared for it, which is how a genesis arrives by push.
 
 **The cap goes on the push, not on `wanted`.** `wanted` is returned whole:
 it can never exceed the content IDs the requester itself just declared, which

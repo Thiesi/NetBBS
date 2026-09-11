@@ -957,7 +957,6 @@ def inventory_wanted_ids(
     requested_boards: dict[str, list[str]],
     requested_channels: dict[str, list[str]],
     requested_file_areas: dict[str, list[str]],
-    already_accepted: set[str],
 ) -> list[str]:
     """
     The *reverse* of the three `*_event_diff` functions above, and the
@@ -976,19 +975,41 @@ def inventory_wanted_ids(
     `_all_board_events`/`_all_channel_events`/`_all_file_area_events`
     yields the answer directly.
 
-    `already_accepted` is `LinkNode.known_event_ids` -- the dedup set,
-    and the only complete answer to "would receiving this again be a
-    no-op?" (Codex review of #498). The three `_all_*_events` helpers
-    read *materialized* state and return nothing at all for a resource
-    whose local row is absent, which is not the same as not having the
-    events: this node accepts and persists a `board_genesis` whose
-    `materialize_carried_board` it then refuses on `max_carried_boards`
-    (§13.9), and the same for channels and file areas. Without this set,
-    every event in such a resource stays wanted forever, the requester
-    re-pushes the same page of them every pass, and anything sorted
-    after that resource -- its channels, its file areas -- is never
-    reached. A SysOp who deliberately sets a small carry quota hits this
-    on the next resource, not at some theoretical ceiling.
+    Membership is answered **per declared resource**, never globally.
+    Each resource's held set is the materialized sources union whatever
+    `link_events` holds under that same resource id -- the readers above
+    see only materialized state, and a resource can be accepted and
+    persisted without it: `materialize_carried_board` refuses on
+    `max_carried_boards` (§13.9) after the genesis is already saved, and
+    likewise for channels and file areas.
+
+    A resource this node has *seen and declined* wants nothing at all.
+    Persisted-but-not-materialized is exactly what a carry refusal looks
+    like, and the decision it records is "not this one" -- so continuing
+    to ask for its contents would be asking for what this node has
+    already refused to keep. It also would not end: a refused board's
+    posts never reach `link_events` at all (`materialize_carried_post`
+    returns early with no local board row), so they would be wanted on
+    every pass forever, occupy the requester's whole push page, and
+    starve everything sorted after them. A SysOp who sets a small carry
+    quota meets that on the next resource, not at some theoretical
+    ceiling.
+
+    A resource this node has never seen is the opposite case and still
+    wants everything declared for it -- that is how a peer's genesis
+    arrives by push at all.
+
+    Consulting `LinkNode.known_event_ids` instead would answer the same
+    question more completely and would be wrong (Codex review of #498).
+    The dedup set spans every object type this node has ever accepted,
+    including `link_message`s, their acknowledgements and `key_
+    transition`s -- all of which §8.8 deliberately keeps out of
+    inventory. A completed peer could then declare any content_id it
+    knows under a fabricated resource and read the answer off `wanted`
+    as an exact membership oracle: present means "this node holds it."
+    Signing the request identifies the asker; it does not make an id
+    belong to the resource it was filed under. Scoping the lookup is
+    what keeps the answer to what the requester actually declared.
 
     Declared resources this node does not carry at all are included, not
     skipped: that is how a peer which has never seen a board/channel/
@@ -1024,16 +1045,41 @@ def inventory_wanted_ids(
     """
     wanted: list[str] = []
     seen: set[str] = set()
-    for requested, all_events in (
-        (requested_boards, _all_board_events),
-        (requested_channels, _all_channel_events),
-        (requested_file_areas, _all_file_area_events),
+    for requested, all_events, scope_column in (
+        (requested_boards, _all_board_events, "board_id"),
+        (requested_channels, _all_channel_events, "channel_id"),
+        (requested_file_areas, _all_file_area_events, "file_area_id"),
     ):
         for resource_id in sorted(requested):
-            held = set(all_events(db, resource_id))
+            materialized = set(all_events(db, resource_id))
+            accepted = _accepted_ids_for_resource(db, scope_column, resource_id)
+            if accepted and not materialized:
+                # Seen and declined -- see this function's own docstring.
+                continue
+            held = materialized | accepted
             for content_id in requested[resource_id]:
-                if content_id in held or content_id in already_accepted or content_id in seen:
+                if content_id in held or content_id in seen:
                     continue
                 seen.add(content_id)
                 wanted.append(content_id)
     return wanted
+
+
+def _accepted_ids_for_resource(db: Database, scope_column: str, resource_id: str) -> set[str]:
+    """Every accepted event `link_events` holds *for this resource*.
+
+    The materialized readers above cannot answer for a resource with no
+    local row, which is exactly what a carry-quota refusal leaves behind
+    -- the event is accepted and persisted, only its projection is
+    declined. This closes that gap without widening the question beyond
+    the resource the requester declared.
+
+    `scope_column` is one of three literal column names chosen by the
+    caller, never anything reaching this from the wire.
+    """
+    return {
+        row["content_id"]
+        for row in db.connection.execute(
+            f"SELECT content_id FROM link_events WHERE {scope_column} = ?", (resource_id,)
+        )
+    }

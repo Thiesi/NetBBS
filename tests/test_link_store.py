@@ -1250,7 +1250,6 @@ def test_inventory_wanted_ids_returns_only_declared_ids_this_node_lacks(tmp_path
         requested_boards={"remote-board-id": [genesis.content_id, absent_post.content_id]},
         requested_channels={},
         requested_file_areas={},
-        already_accepted=set(),
     )
 
     assert wanted == [absent_post.content_id]
@@ -1273,7 +1272,6 @@ def test_inventory_wanted_ids_asks_for_everything_in_a_resource_this_node_does_n
         requested_boards={"remote-board-id": [genesis.content_id]},
         requested_channels={},
         requested_file_areas={},
-        already_accepted=set(),
     )
 
     assert wanted == [genesis.content_id]
@@ -1302,7 +1300,6 @@ def test_inventory_wanted_ids_is_not_truncated_to_a_page(tmp_path):
         requested_boards={"remote-board-id": declared},
         requested_channels={},
         requested_file_areas={},
-        already_accepted=set(),
     )
 
     assert wanted == declared
@@ -1337,21 +1334,21 @@ def test_inventory_wanted_ids_spans_channels_and_file_areas_too(tmp_path):
         requested_boards={},
         requested_channels={"remote-channel-id": [channel_genesis.content_id]},
         requested_file_areas={"remote-area-id": [area_genesis.content_id]},
-        already_accepted=set(),
     )
 
     assert wanted == [channel_genesis.content_id, area_genesis.content_id]
     db.close()
 
 
-def test_inventory_wanted_ids_skips_events_already_accepted_without_a_local_row(tmp_path):
+def test_inventory_wanted_ids_counts_accepted_events_with_no_local_row(tmp_path):
     """Codex review of #498: `_all_*_events` reads materialized state, so
     a resource whose local row was refused (`max_carried_boards` and its
     channel/file-area counterparts) looks like one this node has nothing
-    for -- even though the events were accepted and persisted. The dedup
-    set is what makes the answer honest; without it every event in such
-    a resource is wanted on every pass, forever."""
-    from netbbs.link.store import inventory_wanted_ids
+    for -- even though the events were accepted and persisted. Reading
+    `link_events` under the same resource id is what makes the answer
+    honest; without it every event in such a resource is wanted on every
+    pass, forever."""
+    from netbbs.link.store import inventory_wanted_ids, save_event
 
     db = Database(tmp_path / "node.db")
     remote_identity = bootstrap_node_identity("elsewhere")
@@ -1359,14 +1356,61 @@ def test_inventory_wanted_ids_skips_events_already_accepted_without_a_local_row(
     post = _remote_post_for_store_tests(remote_identity)
 
     # No `boards` row at all -- exactly what a carry-limit refusal leaves
-    # behind, with the events themselves already accepted.
+    # behind, with the events themselves accepted and persisted.
+    for event in (genesis, post):
+        save_event(
+            db,
+            sender_fingerprint=remote_identity.fingerprint,
+            content_id=event.content_id,
+            object_type=event.envelope["object_type"],
+            envelope=event.to_dict(),
+        )
+
     wanted = inventory_wanted_ids(
         db,
         requested_boards={"remote-board-id": [genesis.content_id, post.content_id]},
         requested_channels={},
         requested_file_areas={},
-        already_accepted={genesis.content_id, post.content_id},
     )
 
     assert wanted == []
+    db.close()
+
+
+def test_inventory_wanted_ids_is_not_a_membership_oracle_for_out_of_scope_events(tmp_path):
+    """Codex review of #498. `wanted` answers "do you have this?" for
+    every id the requester declares, so what it is allowed to consult
+    matters: reading the global dedup set would answer for
+    `link_message`s, their acknowledgements and `key_transition`s too --
+    types design doc §8.8 deliberately keeps out of inventory -- and any
+    completed peer could file a known id under a fabricated board and
+    read the answer straight off the response.
+
+    Scoped to the declared resource, an accepted event filed under a
+    resource it does not belong to is simply reported as wanted, which
+    tells the asker nothing it did not already know."""
+    from netbbs.link.store import inventory_wanted_ids, save_event
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    # A genuinely accepted event that is *not* inventory-scoped.
+    transition = remote_identity.transitions[0]
+    save_event(
+        db,
+        sender_fingerprint=remote_identity.fingerprint,
+        content_id=transition.content_id,
+        object_type=transition.envelope["object_type"],
+        envelope=transition.to_dict(),
+    )
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={"a-board-this-node-never-heard-of": [transition.content_id]},
+        requested_channels={},
+        requested_file_areas={},
+    )
+
+    # Reported as wanted: the answer carries no signal about whether this
+    # node actually holds that key_transition.
+    assert wanted == [transition.content_id]
     db.close()
