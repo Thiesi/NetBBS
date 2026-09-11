@@ -87,6 +87,12 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Trading Ledger", b"T"),
         ("Viewport", b"V"),
         ("Display Options", b"O"),
+        ("Archive Contacts", b"N"),
+        ("Concord Contacts", b"P"),
+        ("Blackwake Contacts", b"W"),
+        # The chart opens as a list; its own [V] is the spatial map, which is a
+        # different drawing and the one the 40x12 floor was argued over.
+        ("Navigation Chart, map", b"CV"),
     ],
     "war_dialer": [
         ("Switchboard", b""),
@@ -210,9 +216,11 @@ class Door:
             if not answered and not require and time.monotonic() >= answer:
                 return
             time.sleep(0.05)
-        if require:
-            raise SystemExit(f"{self.door.name} printed nothing in {PATIENCE:.0f}s:\n"
-                             f"{bytes(self.err).decode('utf-8', 'replace')[-800:]}")
+        # Reaching the deadline means the door printed nothing at all, or is
+        # still printing. Either way the screen is not what a caller would see.
+        raise SystemExit(
+            f"{self.door.name} {'never stopped drawing' if answered else 'printed nothing'} "
+            f"in {PATIENCE:.0f}s:\n{bytes(self.err).decode('utf-8', 'replace')[-800:]}")
 
     def press(self, key: bytes) -> None:
         time.sleep(QUIET)  # every key arrives alone; a burst is discarded as paste
@@ -249,7 +257,7 @@ class Door:
         try:
             code = self.proc.wait(timeout=60)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
+            self.kill()  # reap it, rather than leaving one child per panel behind
             raise SystemExit(f"{self.door.name} never exited after its keys were pressed")
         for reader in self.readers:
             reader.join(timeout=5)

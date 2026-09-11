@@ -3494,22 +3494,29 @@ def main() -> int:
         height = 24
 
     if _OUTPUT_WIDTH < MINIMUM_WIDTH or height < MINIMUM_HEIGHT:
-        # The reason has to survive the terminal it is about: these are the
-        # smallest screens there are, so the message shrinks with the height and
-        # its last line carries no newline to scroll itself away with.
+        # The reason has to survive the screen it is about, in both directions:
+        # these are the smallest terminals there are, so the message is chosen for
+        # the width as well as the height, wrapped rather than left to soft wrap,
+        # cut to the rows available, and ended without a newline to scroll itself
+        # away with. A brutal cut leaves the front of the first line, so the size
+        # the door needs comes before anything else.
         size, need = f"{_OUTPUT_WIDTH}x{height}", f"{MINIMUM_WIDTH}x{MINIMUM_HEIGHT}"
-        if height >= 8:
+        if height >= 8 and _OUTPUT_WIDTH >= 30:
             lines = [f"War Dialer needs at least {MINIMUM_WIDTH} columns by {MINIMUM_HEIGHT} rows.",
                      f"This terminal reports {size}. Resize it, or reconnect with a "
                      "larger window, and dial again. Nothing in the world was changed."]
         elif height >= 4:
-            lines = [f"War Dialer needs {need}.", f"This terminal reports {size}.",
+            lines = [f"War Dialer needs {need}.", f"This is {size}.",
                      "Resize and dial again."]
         else:
             lines = [f"War Dialer needs {need}; this is {size}."]
-        for line in lines[:-1]:
-            out_line(line)
-        out(lines[-1])
+        rows: list[str] = []
+        for line in lines:
+            rows.extend(_wrap_output(line, max(1, _OUTPUT_WIDTH)).split("\r\n"))
+        rows = rows[:max(1, height)]
+        for row in rows[:-1]:
+            out_line(row)
+        out(rows[-1])
         return 0  # a size refusal is an outcome; nonzero would be reported as a crash
 
     conn = None
