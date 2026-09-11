@@ -124,6 +124,18 @@ def plain_bytes(data: bytes) -> bytes:
     return _ANSI_BYTES.sub(b"", data)
 
 
+def shows_page(data, title: str) -> bool:
+    """Whether a door drew a page under `title`, its counter and all.
+
+    A framed page puts the title in its top border and the counter in the
+    far corner, with the border's own fill between them (issue #493), so a
+    literal `"Title 1/"` is no longer in the bytes a door wrote.
+    """
+    text = data.decode("utf-8", "replace") if isinstance(data, (bytes, bytearray)) else data
+    pattern = re.compile(re.escape(title) + r"[\s─═+\-]*\d+/\d+")
+    return any(pattern.search(row) for row in plain(text).splitlines())
+
+
 def page_rows(frame: str, *, keep_indent: bool = False) -> list[str]:
     """The body rows of a drawn page, with the HUD frame taken off.
 
@@ -233,6 +245,12 @@ def _drain_until(stream, output: bytearray, markers, events) -> None:
     sentence is several runs of bytes with escapes between them, and a marker
     that had to be contiguous in the raw stream would pin the game's colours in
     place rather than its behaviour.
+
+    Draining continues past the last marker, to the cap or the end of the
+    stream. Stopping at the marker left the door writing into a pipe nobody was
+    emptying, which was harmless only while a screen was smaller than the pipe
+    buffer: a coloured page is several times the bytes of a plain one, and the
+    door then blocked mid-screen and never reached its next keypress.
     """
     if isinstance(markers, bytes):
         markers, events = (markers,), (events,)
@@ -242,11 +260,10 @@ def _drain_until(stream, output: bytearray, markers, events) -> None:
         if not chunk:
             return
         output.extend(chunk)
-        seen = plain_bytes(bytes(output))
-        while pending and pending[0][0] in seen:
-            pending.pop(0)[1].set()
-        if not pending:
-            return
+        if pending:
+            seen = plain_bytes(bytes(output))
+            while pending and pending[0][0] in seen:
+                pending.pop(0)[1].set()
 
 
 @contextlib.contextmanager
@@ -312,7 +329,7 @@ def _mission_details_world(kind="delivery"):
 
 
 @contextlib.contextmanager
-def _live_voidrunner(tmp_path, user_id=77, commands=b"", acknowledgement=b"Station Services"):
+def _live_voidrunner(tmp_path, user_id=77, commands=b"", acknowledgement=b"STATION SERVICES"):
     """Own a real door process until the test exits, draining its output."""
     import json
     import os

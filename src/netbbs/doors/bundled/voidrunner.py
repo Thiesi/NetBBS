@@ -97,6 +97,9 @@ _OUTPUT_HEIGHT = 24
 _OUTPUT_STYLE = "auto"
 DISPLAY_STYLES = {"auto": "Full palette", "fast": "Full palette, no motion", "basic": "16-color",
                   "mono": "Monochrome", "plain": "Plain / ASCII artwork"}
+# How much of a terminal each preset asks for, so a preview is never drawn above
+# what the caller's own preset has said their terminal can do.
+PRESET_DEPTH = {"auto": 3, "fast": 3, "basic": 2, "mono": 1, "plain": 0}
 _ASCII_ART_TRANSLATION = str.maketrans({
     **{chr(code): "|" for code in (0x2502, 0x2551)},
     **{chr(code): "+" for code in (0x251C, 0x2524, 0x2554, 0x2557, 0x255A, 0x255D, 0x2560, 0x2563, 0x256D, 0x256E, 0x256F, 0x2570)},
@@ -459,7 +462,7 @@ def _visible_width(text: str) -> int:
     return sum(_char_width(ch) for ch in ANSI_ESCAPE_RE.sub("", text))
 
 
-def wrap_styled(text: str, width: int) -> list[str]:
+def wrap_styled(text: str, width: int, hang: int = 0) -> list[str]:
     """Wrap a styled row and keep its colour across the break.
 
     `_wrap_output` is ANSI-aware about *width*, but a row it breaks in the
@@ -475,10 +478,16 @@ def wrap_styled(text: str, width: int) -> list[str]:
     if indent >= max(1, width) // 2:
         indent = 0
     rows, active = [], ""
-    for row in _wrap_output(text[indent:], max(1, width - indent)).split("\r\n"):
+    # A hanging indent: the row opens at the margin and its continuations sit
+    # under its text, so a severity glyph keeps a column of its own. Every row
+    # is measured at the narrower width, which costs the first one two columns
+    # and keeps the wrap one pass instead of two.
+    head = _wrap_output(text[indent:], max(1, width - indent - hang)).split("\r\n")
+    for index, row in enumerate(head):
         carried = (active + row) if active else row
         active = _active_sgr_after(row, active)
-        rows.append(" " * indent + (carried + RESET if ANSI_ESCAPE_RE.search(carried) else carried))
+        lead = " " * (indent + (hang if index else 0))
+        rows.append(lead + (carried + RESET if ANSI_ESCAPE_RE.search(carried) else carried))
     return rows
 
 
@@ -4773,6 +4782,11 @@ def key_label(key: str, label: str, *, tone: str = "value") -> str:
     return f"{p.gold}{BOLD}[{key}]{RESET} {p.tone(tone)}{label}{RESET}"
 
 
+def alert_glyphs() -> str:
+    """The severity marks an alert row can open with, in this preset."""
+    return "".join(glyph(name) for name in ("danger", "note", "info"))
+
+
 def alert(tone: str, title: str, detail: str = "", action: str = "") -> str:
     """One severity row: glyph, what happened, and the key that answers it."""
     p = pal()
@@ -5466,7 +5480,12 @@ def screen_display_options(p: Palette, world: World) -> None:
         # rather than by reading an adjective (issue #493 §5).
         rows, styles_for = [], []
         for index, style in enumerate(styles, 1):
-            with display_style(style):
+            # A preview is drawn with the terminal's own capability, never above
+            # it: a 16-colour caller previewing the full palette must not be
+            # sent 256-colour escapes their terminal cannot read. What the
+            # sample shows them is the preset's shape; the blurb says the rest.
+            with display_style(style if PRESET_DEPTH[world.save.display_style] >= PRESET_DEPTH[style]
+                               else world.save.display_style):
                 sample = (f"{gauge(30, 60, 8)} {pal().ink}30/60{RESET} "
                           f"{badge('LOW FUEL', 'danger')} {chip('day', '12')}")
                 if _OUTPUT_STYLE in ("mono", "plain"):
@@ -6021,14 +6040,17 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         ladder = price_ladder(commodity)
         word, tone = price_standing(quote, ladder)
         held = world.save.cargo.get(commodity, 0)
-        flag = ""
+        # Legality and a running event are separate facts about the same row,
+        # and a contraband commodity in a crash is both.
+        marks = []
         if prohibited:
-            flag = badge("prohibited", "danger")
+            marks.append(badge("prohibited", "danger"))
         elif illegal:
-            flag = badge("Illegal", "danger")
-        elif event and event["commodity"] == commodity and system.id in economy_event_system_ids(world, event):
-            flag = badge("CRASH" if event["direction"] == "crash" else "BOOM",
-                         "danger" if event["direction"] == "crash" else "good")
+            marks.append(badge("Illegal", "danger"))
+        if event and event["commodity"] == commodity and system.id in economy_event_system_ids(world, event):
+            marks.append(badge("[CRASH]" if event["direction"] == "crash" else "[BOOM]",
+                               "danger" if event["direction"] == "crash" else "good"))
+        flag = " ".join(marks)
         rows.append([
             key_label(MARKET_LETTERS[index], COMMODITIES[commodity]["label"],
                       tone="danger" if illegal else "value"),
@@ -6298,8 +6320,11 @@ def wrapped_group(line: str) -> list[str]:
     # A stacked table record arrives as its own rows, already measured; it is
     # still one entry, so it stays one group and moves between pages whole.
     lead = MEMBER_MARK if line.startswith(MEMBER_MARK) else ""
+    # An alert opens with its severity glyph; a wrapped one keeps that column
+    # clear, so the glyphs still read as a column down the side of the group.
+    hang = 2 if ANSI_ESCAPE_RE.sub("", line)[:1] in alert_glyphs() else 0
     return [lead + row for part in line.lstrip(MEMBER_MARK).split("\n")
-            for row in wrap_styled(style_body_line(part), _page_content_width())]
+            for row in wrap_styled(style_body_line(part), _page_content_width(), hang)]
 
 
 def _trade_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
@@ -7210,7 +7235,7 @@ def crew_roster_lines(world: World) -> list[str]:
     _, records = table_records(["", "", "", "", ""], heads, "lllll", styles=styles)
     lines: list[str] = []
     for record, (index, role, hired, level, name, personality, price) in zip(records, meta):
-        lines += record
+        card = list(record)
         paid = world.save.ship.crew_records.get(role, {}).get("paid_jumps", 0)
         if level + 1 < len(CREW_SERVICE_LEVELS):
             target = CREW_SERVICE_LEVELS[level + 1]
@@ -7218,9 +7243,13 @@ def crew_roster_lines(world: World) -> list[str]:
                         f"{p.slate}paid jumps to {target[1]}{RESET}")
         else:
             progress = badge("service mastery reached", "good")
-        lines.append(f"  {price}  {p.deep}{glyph('dot')}{RESET}  {p.slate}{crew_effect(role, level)}{RESET}")
-        lines.append(f"  {progress}")
-        lines.append(f"  {p.slate}{_mission_plain(personality)}{RESET}")
+        card.append(f"  {price}  {p.deep}{glyph('dot')}{RESET}  {p.slate}{crew_effect(role, level)}{RESET}")
+        card.append(f"  {progress}")
+        # The terms are one entry and the person is another: at the 40x12 floor
+        # a whole card is taller than a page, and what a caller has to be able
+        # to read in one place is the name, the price and what it buys.
+        lines.append("\n".join(card))
+        card = [f"  {p.slate}{_mission_plain(personality)}{RESET}"]
         task = crew_assignment_record(world, role)
         if task is not None:
             state, tone = task["state"], "good"
@@ -7229,8 +7258,9 @@ def crew_roster_lines(world: World) -> list[str]:
             tone = "good" if hired else "label"
         else:
             state, tone = "unlocks after hiring and five paid jumps", "label"
-        lines.append(f"  {key_label(str(index + 1), 'Task')} "
-                     f"{p.ink}{CREW_ASSIGNMENTS[role]['title']}{RESET}  {badge(state, tone)}")
+        card.append(f"  {key_label(str(index + 1), 'Task')} "
+                    f"{p.ink}{CREW_ASSIGNMENTS[role]['title']}{RESET}  {badge(state, tone)}")
+        lines.append("\n".join(card))
     lines.append(f"{p.slate}Specialists earn wages on every jump, including detours. "
                  f"Promotions follow {p.ink}5{p.slate}, {p.ink}15{p.slate} and {p.ink}30{p.slate} paid jumps; "
                  f"rehiring keeps recorded experience. Engine promotions affect the following jump's fuel.{RESET}")
@@ -8129,6 +8159,11 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
         lines.append(f"{p.slate}next rank{RESET} "
                      f"{gauge(pilot.credits - previous, max(1, following[0] - previous), cells, tone='brand')} "
                      f"{p.ink}{following[0] - pilot.credits:,}cr{RESET} {p.slate}to {following[1]}{RESET}")
+    event = world.save.active_event
+    if event:
+        lines.append(alert("caution", "Economy event",
+                           f"{event['description']} "
+                           f"({event['turns_remaining']} day(s) left)"))
     lines.append(section("SHIP"))
     lines += ship_gauge_rows(world)
     lines.append(section("STANDING"))
@@ -8165,10 +8200,6 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                  + (f"{p.ink}" + ", ".join(crew) + RESET if crew else f"{p.slate}none{RESET}")
                  + f"  {p.slate}wages{RESET} {p.ink}{wages}cr/jump{RESET}")
     lines += career_rank_terms(pilot)
-    event = world.save.active_event
-    if event:
-        lines.append(alert("caution", event["description"],
-                           f"{plural(event['turns_remaining'], 'day')} left"))
     lines.append(f"[C] Jobs: {len(world.save.active_missions)} active. [H] Log: {len(pilot.highlights)} highlights, {len(pilot.log)} log entries.")
     lines.append("[R] Finale shows endings and New Game+ terms. [D] Dossiers shows archived careers.")
     lines += career_path_lines(world.save)
@@ -9595,11 +9626,11 @@ def customs_display_lines(world: World) -> list[str]:
         f"Concord standing {RESET}{p.mint}+1{RESET}{p.slate}, notoriety unchanged.{RESET}",
         (f"{key_label('P', 'Pay bribe')}  " if credits >= cost else f"{badge('Bribe unavailable', 'danger')}  ")
         + f"{p.slate}offer{RESET} {p.gold}{cost}cr{RESET} {p.slate}at{RESET} "
-        f"{gauge(60, 100, 6, tone='caution')} {p.ink}60%{RESET} {p.slate}acceptance; paid only if accepted, "
-        f"all cargo kept, standing and notoriety unchanged.{RESET}",
+        f"{gauge(60, 100, 6, tone='caution')} {p.ink}60%{RESET} {p.slate}acceptance. "
+        f"Pay only if accepted, keep all cargo, and leave standing and notoriety unchanged.{RESET}",
         section("IF THE BRIBE IS REFUSED"),
-        f"{p.slate}All contraband confiscated. Fine{RESET} {p.ink}{fine}cr{RESET}{p.slate}, capped at your "
-        f"credits ({RESET}{p.ink}{min(credits, fine)}cr{RESET}{p.slate} now); no debt.{RESET}",
+        f"{p.slate}If refused: all contraband is confiscated. Fine{RESET} {p.ink}{fine}cr{RESET}{p.slate}, "
+        f"capped at your credits ({RESET}{p.ink}{min(credits, fine)}cr{RESET}{p.slate} now); no debt.{RESET}",
         f"{p.slate}Concord standing{RESET} {p.alarm}-5{RESET}{p.slate} down to its limit, "
         f"notoriety{RESET} {p.alarm}+{NOTORIETY_PER_CUSTOMS_BUST}{RESET}{p.slate}.{RESET}",
     ]
