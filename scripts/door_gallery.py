@@ -139,6 +139,21 @@ PRESETS: dict[str, dict[str, dict]] = {
 DROP_USER_ID = 1  # the caller every panel is drawn for; display rows are keyed by it
 
 
+def remove(path: pathlib.Path) -> None:
+    """Delete a capture's directory, once the door has let go of it.
+
+    Windows keeps a deleted-but-open file alive, and the door's SQLite handle
+    outlives its process by a moment, so a single `rmtree(ignore_errors=True)`
+    quietly left the world file -- and its directory -- behind on every panel.
+    """
+    for _ in range(30):
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            return
+        time.sleep(0.1)
+    print(f"could not remove {path}", file=sys.stderr)
+
+
 def drop_file(work: pathlib.Path, width: int, height: int, info_extra: dict) -> pathlib.Path:
     info = {
         "handle": "Thiesi", "user_id": DROP_USER_ID, "terminal_width": width, "terminal_height": height,
@@ -162,6 +177,7 @@ class Door:
     def __init__(self, door: pathlib.Path, state: pathlib.Path, width: int, height: int,
                  info_extra: dict) -> None:
         self.door = door
+        self.size = f"{width}x{height}"
         env = dict(os.environ)
         env.update(NETBBS_DOOR_INFO=str(drop_file(state, width, height, info_extra)),
                    VOIDRUNNER_SAVE_DIR=str(state / "saves"),
@@ -190,7 +206,7 @@ class Door:
         thread.start()
         return thread
 
-    def settle(self, since: int = 0, *, require: bool = False) -> None:
+    def settle(self, since: int = 0, what: str = "startup", *, expect: bool = True) -> None:
         """Wait for the door to answer and then stop drawing.
 
         Silence alone does not mean the screen is ready: a door that has been
@@ -200,10 +216,13 @@ class Door:
         `since` is the output length before the key went in; the wait is over
         only once the door has written past it and then gone quiet.
 
-        A key that legitimately changes nothing is an answer too, so the wait
-        gives up after `ANSWER` -- except when `require` says the door owes us a
-        screen, as at startup: a door that is slow to boot (four of them share
-        this machine) would otherwise be photographed blank.
+        A screen is owed at startup and after every walk key, because a walk's
+        keys come from the door's own dispatch: silence means the key stopped
+        being accepted, and publishing the screen before it under the next
+        screen's name is the exact failure this script exists to catch. Only
+        `expect=False` tolerates silence, for the one case that earns it --
+        first-launch keys, where a door that asks one question fewer than the
+        next door leaves a key with nothing to answer.
         """
         answer = time.monotonic() + ANSWER
         deadline = time.monotonic() + PATIENCE
@@ -213,22 +232,32 @@ class Door:
                 answered = len(self.out) > since
             if answered and quiet >= SETTLE:
                 return
-            if not answered and not require and time.monotonic() >= answer:
-                return
+            if not answered and time.monotonic() >= answer:
+                if not expect:
+                    return
+                break  # nothing is coming; say so now rather than at the deadline
             time.sleep(0.05)
-        # Reaching the deadline means the door printed nothing at all, or is
-        # still printing. Either way the screen is not what a caller would see.
+        # Either the door printed nothing where a screen was owed, or it never
+        # stopped printing. Neither is what a caller would be looking at.
         raise SystemExit(
             f"{self.door.name} {'never stopped drawing' if answered else 'printed nothing'} "
-            f"in {PATIENCE:.0f}s:\n{bytes(self.err).decode('utf-8', 'replace')[-800:]}")
+            f"after {what} at {self.size}:\n"
+            f"{bytes(self.err).decode('utf-8', 'replace')[-800:]}")
 
-    def press(self, key: bytes) -> None:
+    def press(self, key: bytes, *, expect: bool = True) -> None:
+        """Press one key and wait for the screen it is supposed to open.
+
+        A walk's keys are chosen from the door's dispatch, so a key that draws
+        nothing has stopped being accepted -- and the panel would then publish
+        the screen before it under the next screen's name. That is the failure
+        this whole script exists to catch, so it is an error, not a shrug.
+        """
         time.sleep(QUIET)  # every key arrives alone; a burst is discarded as paste
         with self.lock:
             before = len(self.out)
         self.proc.stdin.write(key)
         self.proc.stdin.flush()
-        self.settle(before)
+        self.settle(before, f"key {key!r}", expect=expect)
 
     def read(self) -> str:
         with self.lock:
@@ -267,13 +296,13 @@ class Door:
 
 
 def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, height: int,
-            info_extra: dict) -> str:
+            info_extra: dict, *, expect: bool = True) -> str:
     """Drive a walk and return the screen it is looking at when it is done."""
     running = Door(door, state, width, height, info_extra)
     try:
-        running.settle(require=True)  # the opening screen is owed, however slow the boot
+        running.settle()
         for index in range(len(keys)):
-            running.press(keys[index:index + 1])
+            running.press(keys[index:index + 1], expect=expect)
         screen = running.read()
     except BaseException:
         # A door that hung or crashed the build must not outlive it, or a failed
@@ -297,10 +326,16 @@ def apply_preset(state: pathlib.Path, extra: dict) -> dict:
     display = extra.get("display")
     if display:
         # Exactly what the door's own display screen writes: one JSON row keyed
-        # by the caller, read back by `read_display()`.
-        with sqlite3.connect(state / "war-dialer.db") as conn:
-            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                         (f"display:{DROP_USER_ID}", json.dumps(display)))
+        # by the caller, read back by `read_display()`. The connection is closed
+        # by hand because `with sqlite3.connect(...)` commits without closing,
+        # and on Windows the open handle keeps the capture's directory alive.
+        conn = sqlite3.connect(state / "war-dialer.db")
+        try:
+            with conn:
+                conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                             (f"display:{DROP_USER_ID}", json.dumps(display)))
+        finally:
+            conn.close()
     return {key: value for key, value in extra.items()
             if key not in ("display_style", "display")}
 
@@ -322,11 +357,12 @@ def base_fixture(door_name: str, door: pathlib.Path, root_dir: pathlib.Path,
     try:
         state = staging / "state"
         state.mkdir()
-        capture(door, state, ONBOARDING[door_name], 80, 24, {})
+        # First-launch keys are the one place a key may find nothing to answer.
+        capture(door, state, ONBOARDING[door_name], 80, 24, {}, expect=False)
         fixture.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(state), str(fixture))
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        remove(staging)
     return fixture
 
 
@@ -372,21 +408,28 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
              for preset, extra in PRESETS[door_name].items()
              for width in widths]
 
+    run_dir = pathlib.Path(tempfile.mkdtemp(prefix="gallery-run-"))
+
     def shoot(shot) -> str:
         _, keys, _, extra, width, height = shot
-        work = pathlib.Path(tempfile.mkdtemp(prefix="gallery-"))
+        work = pathlib.Path(tempfile.mkdtemp(dir=run_dir))
         try:
             state = work / "state"
             shutil.copytree(fixture, state)
             info_extra = apply_preset(state, extra)
             return last_screen(capture(door, state, keys, width, height, info_extra))
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            remove(work)
 
     # Each panel is its own door in its own copy of the fixture, so they can be
-    # taken at once; the page is assembled from them in order afterwards.
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        screens = list(pool.map(shoot, shots))
+    # taken at once; the page is assembled from them in order afterwards. They
+    # all live under one directory, so a build that dies takes them with it
+    # rather than leaving a career per panel in the system temp directory.
+    try:
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            screens = list(pool.map(shoot, shots))
+    finally:
+        remove(run_dir)
 
     styles: dict[str, str] = {}
     sections, panels, current = [], [], shots[0][0]

@@ -3501,18 +3501,23 @@ def main() -> int:
         # away with. A brutal cut leaves the front of the first line, so the size
         # the door needs comes before anything else.
         size, need = f"{_OUTPUT_WIDTH}x{height}", f"{MINIMUM_WIDTH}x{MINIMUM_HEIGHT}"
-        if height >= 8 and _OUTPUT_WIDTH >= 30:
-            lines = [f"War Dialer needs at least {MINIMUM_WIDTH} columns by {MINIMUM_HEIGHT} rows.",
-                     f"This terminal reports {size}. Resize it, or reconnect with a "
-                     "larger window, and dial again. Nothing in the world was changed."]
-        elif height >= 4:
-            lines = [f"War Dialer needs {need}.", f"This is {size}.",
-                     "Resize and dial again."]
-        else:
-            lines = [f"War Dialer needs {need}; this is {size}."]
-        rows: list[str] = []
-        for line in lines:
-            rows.extend(_wrap_output(line, max(1, _OUTPUT_WIDTH)).split("\r\n"))
+        # Longest first; both sizes are what makes the message actionable, so a
+        # shorter wording always beats a longer one with its tail cut off.
+        wordings = [
+            [f"War Dialer needs at least {MINIMUM_WIDTH} columns by {MINIMUM_HEIGHT} rows.",
+             f"This terminal reports {size}. Resize it, or reconnect with a "
+             "larger window, and dial again. Nothing in the world was changed."],
+            [f"War Dialer needs {need}.", f"This is {size}.", "Resize and dial again."],
+            [f"War Dialer needs {need}; this is {size}."],
+            [f"Need {need}; is {size}."],
+            [f"{need}>{size}"],
+        ]
+        for lines in wordings:
+            rows: list[str] = []
+            for line in lines:
+                rows.extend(_wrap_output(line, max(1, _OUTPUT_WIDTH)).split("\r\n"))
+            if len(rows) <= max(1, height):
+                break
         rows = rows[:max(1, height)]
         for row in rows[:-1]:
             out_line(row)
