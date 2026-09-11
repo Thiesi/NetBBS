@@ -661,6 +661,35 @@ def test_linux_console_function_key_never_leaks_an_action(tmp_path, stage):
         assert process.stderr.read() == b""
 
 
+@pytest.mark.parametrize("width,height", [(39, 24), (80, 11), (20, 10), (40, 5), (40, 1)])
+def test_a_terminal_below_the_floor_is_refused_without_touching_the_world(
+    tmp_path, monkeypatch, width, height
+):
+    """One layout, one floor (issue #495).
+
+    Below 40x12 the door says so and stops, before the world database is
+    opened -- and it stops with a *zero* exit, because the supervisor reads
+    every nonzero exit as a crash and would tell the caller the door died.
+    """
+    class Output(io.StringIO):
+        def reconfigure(self, **kwargs):
+            pass
+
+    out = Output()
+    monkeypatch.setattr(wd.sys, "stdout", out)
+    monkeypatch.setattr(wd, "_load_door_info", lambda: {
+        "user_id": 0, "handle": "Guest", "terminal_width": width, "terminal_height": height})
+    monkeypatch.setattr(wd, "_resolve_db_path",
+                        lambda: pytest.fail("a refused launch opened the world"))
+    assert wd.main() == 0
+    raw = _ANSI_RE.sub("", out.getvalue())
+    said = " ".join(raw.split())
+    assert "needs at least 40 columns by 12 rows" in said or "needs 40x12" in said
+    assert f"{width}x{height}" in said, "the caller is told what their terminal reports"
+    # The reason has to survive the terminal it is about (issue #495 review).
+    assert raw.count("\n") <= max(0, height - 1), f"the refusal scrolls itself off: {raw!r}"
+
+
 def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
     path = tmp_path / "idle-world.db"
     now = wd.now_utc()
@@ -825,7 +854,7 @@ def test_board_read_rolls_world_before_displaying_ownership(tmp_path, monkeypatc
     conn.close()
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 @pytest.mark.parametrize("unseen_only", [False, True])
 def test_history_pages_fit_terminal_and_preserve_long_unicode_records(tmp_path, monkeypatch, width, height, unseen_only):
     conn = wd.connect(tmp_path / "history.db")
@@ -867,7 +896,7 @@ def test_history_ack_skips_partial_records_and_new_arrivals(tmp_path, monkeypatc
     monkeypatch.setattr(wd, "out", lambda text: None)
     choices = iter(["A", "B"])
     monkeypatch.setattr(wd, "read_menu_choice", lambda valid: next(choices))
-    wd.show_event_history(wd.Palette(False), conn, 1, 20, 10)
+    wd.show_event_history(wd.Palette(False), conn, 1, 40, 12)
     assert [e.id for e in wd.unseen_events(conn, 1)] == [original_id]
     conn.execute("DELETE FROM events")
     for index in range(10):
@@ -929,7 +958,7 @@ def test_offline_summary_disconnect_only_acknowledges_completed_pages(tmp_path, 
     conn.close()
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_dashboard_pages_fit_with_long_names_and_large_resources(tmp_path, monkeypatch, width, height):
     conn = wd.connect(tmp_path / "dashboard.db")
     wd.ensure_schema(conn)
@@ -1001,7 +1030,7 @@ def test_real_process_dashboard_keeps_action_result_until_acknowledged(tmp_path)
         assert process.stderr.read() == b""
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_garrison_flow_fits_and_commits_only_after_final_preview(tmp_path, monkeypatch, width, height):
     conn = wd.connect(tmp_path / "garrison.db")
     wd.ensure_schema(conn)
@@ -1064,7 +1093,7 @@ def test_real_process_garrison_preview_cancel_and_disconnect_preserve_assignment
         conn.close()
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_text_screen_pages_preserve_content_with_clear_back_path(monkeypatch, width, height):
     written = []
     monkeypatch.setattr(wd, "out", written.append)
@@ -1170,13 +1199,13 @@ def test_preview_requires_reading_to_last_page_before_act(monkeypatch):
         states.append(valid)
         return "A" if "A" in valid else "N"
     monkeypatch.setattr(wd, "read_menu_choice", choose)
-    result = wd.show_text_pages(wd.Palette(False), "PREVIEW", ["Risk details " * 40], 20, 10, accept=True)
+    result = wd.show_text_pages(wd.Palette(False), "PREVIEW", ["Risk details " * 40], 40, 12, accept=True)
     assert result == "A" and len(states) > 1
     assert all("A" not in state for state in states[:-1])
     assert "A" in states[-1]
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_picker_pages_fit_and_only_select_complete_visible_records(monkeypatch, width, height):
     written = []
     monkeypatch.setattr(wd, "out", written.append)
@@ -1198,7 +1227,7 @@ def test_picker_pages_fit_and_only_select_complete_visible_records(monkeypatch, 
     assert "".join(written).count("界") == 150
 
 
-@pytest.mark.parametrize("width,height", [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
 def test_result_pages_keep_all_net_changes_readable(monkeypatch, width, height):
     written = []
     monkeypatch.setattr(wd, "out", written.append)
@@ -1416,7 +1445,7 @@ def test_incomplete_host_owner_does_not_initialize_world(tmp_path, owner):
     assert not path.exists()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 def test_rival_shield_expiry_is_public_and_private_resources_stay_hidden(tmp_path, monkeypatch, width, height):
     conn = wd.connect(tmp_path / 'shield.db')
     wd.ensure_schema(conn)
@@ -1448,7 +1477,7 @@ def test_rival_shield_expiry_is_public_and_private_resources_stay_hidden(tmp_pat
     conn.close()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 @pytest.mark.parametrize('approach', [0, 1, 2])
 def test_contract_flow_reaches_chosen_job_and_commits_only_after_preview(tmp_path, monkeypatch, width, height, approach):
     conn = wd.connect(tmp_path / 'contracts.db')
@@ -1546,7 +1575,7 @@ def test_real_process_disconnect_from_contract_picker_spends_nothing(tmp_path, s
         conn.close()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 @pytest.mark.parametrize('index', range(5))
 def test_crew_screen_previews_every_purchase_before_committing(tmp_path, monkeypatch, width, height, index):
     conn = wd.connect(tmp_path / 'crew.db')
@@ -1635,7 +1664,7 @@ def test_real_process_crew_disconnect_boundaries(tmp_path, stage):
         conn.close()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 def test_operations_hub_completes_three_previewed_steps_at_compact_sizes(tmp_path, monkeypatch, width, height):
     conn = wd.connect(tmp_path / 'operations.db')
     wd.ensure_schema(conn)
@@ -1672,7 +1701,7 @@ def test_operations_hub_completes_three_previewed_steps_at_compact_sizes(tmp_pat
     conn.close()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 def test_recon_reaches_rival_beyond_fifty_without_disclosing_resources_before_act(tmp_path, monkeypatch, width, height):
     conn = wd.connect(tmp_path / 'recon.db')
     wd.ensure_schema(conn)
@@ -1811,7 +1840,7 @@ def test_operations_hub_does_not_advertise_an_inactive_ops_hotkey(tmp_path, monk
     conn.close()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 @pytest.mark.parametrize('role', ['pbx', 'carrier', 'hub'])
 def test_owner_services_reachable_through_garrison_at_compact_sizes(tmp_path, monkeypatch, width, height, role):
     conn = wd.connect(tmp_path / 'services.db')
@@ -1932,7 +1961,7 @@ def test_small_cash_balance_can_reach_affordable_pbx_capture(tmp_path, monkeypat
     conn.close()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 def test_neutral_map_paginates_names_defense_and_return_deadline(tmp_path, monkeypatch, width, height):
     conn = wd.connect(tmp_path / 'npc-map.db')
     wd.ensure_schema(conn)
@@ -2003,7 +2032,7 @@ def test_real_process_neutral_capture_preview_boundaries(tmp_path, stage):
         conn.close()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 @pytest.mark.parametrize('entry', ['1', '2', '3'])
 def test_scene_and_insignia_are_free_and_fit_small_terminals(tmp_path, monkeypatch, width, height, entry):
     conn = wd.connect(tmp_path / 'scene.db')
@@ -2073,7 +2102,7 @@ def test_real_process_scene_disconnect_preserves_only_selected_insignia(tmp_path
 
 
 @pytest.mark.parametrize('population', [1, 3, 80])
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 def test_complete_visit_stays_productive_without_pvp_at_every_world_size(tmp_path, monkeypatch, population, width, height):
     conn = wd.connect(tmp_path / 'world-size.db')
     wd.ensure_schema(conn)
@@ -2136,7 +2165,7 @@ def test_complete_visit_stays_productive_without_pvp_at_every_world_size(tmp_pat
     conn.close()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 def test_season_rules_and_archived_results_are_readable_and_free(tmp_path, monkeypatch, width, height):
     conn = wd.connect(tmp_path / 'season-view.db')
     wd.ensure_schema(conn)
@@ -2183,7 +2212,7 @@ def test_season_rules_and_archived_results_are_readable_and_free(tmp_path, monke
     conn.close()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 @pytest.mark.parametrize('choice', ['5', '6'])
 @pytest.mark.parametrize('played', [False, True])
 def test_season_recognition_from_scene_is_historical_free_and_bounded(tmp_path, monkeypatch, width, height, choice, played):
@@ -2245,7 +2274,7 @@ def test_season_recognition_from_scene_is_historical_free_and_bounded(tmp_path, 
     conn.close()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, monkeypatch, width, height):
     conn = wd.connect(tmp_path / 'late-join.db')
     wd.ensure_schema(conn)
@@ -2305,7 +2334,7 @@ def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, mo
     conn.close()
 
 
-@pytest.mark.parametrize('width,height', [(20, 10), (40, 12), (80, 24)])
+@pytest.mark.parametrize('width,height', [(40, 12), (80, 24)])
 @pytest.mark.parametrize('setting', ['1', '2', '3'])
 def test_display_toggles_are_free_paginated_and_survive_seasons(tmp_path, monkeypatch, width, height, setting):
     conn = wd.connect(tmp_path / 'display.db')

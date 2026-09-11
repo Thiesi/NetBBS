@@ -4919,12 +4919,12 @@ combat detail line used. The bar's label is the word the detail line leads with,
 so no action is named twice; that is what renamed the combat verbs Brace to
 Guard and Bribe to Pay bribe, and it is why Guard rather than Brace, since `B`
 is Back everywhere and a stray Back must never spend a combat turn. The saved
-field stays `brace_ready`. The style costs the narrowest terminals one row: at
-20 columns a bar of four hotkeys wraps to three rows where the glued spelling
-took two, so a page holds one row less and the wrap can fall between a key and
-its label. That is paid for by the paginator, which measures the bar it will
-actually show, and it is worth one row not to make the player learn two
-spellings of the same thing.
+field stays `brace_ready`. The style costs a narrow terminal a row: at the 40x12
+floor a bar of five hotkeys wraps to two rows where the glued spelling took one,
+so a page holds one row less and the wrap can fall between a key and its label.
+That is paid for by the paginator, which measures the bar it will actually show,
+and it is worth one row not to make the player learn two spellings of the same
+thing.
 
 At every action bar -- service pages, the chart, the mission board, the star
 map, the route planner and the draft editors alike -- whitespace and unsupported
@@ -5068,7 +5068,8 @@ connections; it does not change galaxy generation or save state. It opens in the
 current sector with next/previous sector navigation and a galaxy overview. Known
 stations, the current position, tracked objective and an explicitly plotted route
 have distinct ASCII markers, with a paginated list alternative and exact-coordinate
-station inspection. Narrow terminals below 40 columns or 12 rows use the list.
+station inspection. The list is always available; the spatial map needs the room
+the 40x12 floor guarantees.
 Projected cell collisions are labelled; the exact list/inspection remains authoritative.
 Only discovered station details are public, except a contract's named target.
 Uncharted route points show bearings and unknown danger. Ordinary connection lines
@@ -5476,10 +5477,9 @@ browsing preserves encounter RNG and resumable state. The combat action bar
 labels every verb like the other detail screens (`[F] Fire [G] Guard [E] Evade
 [D] Dump [P] Pay bribe ... [I] Info`) instead of a bare letter list, and Dump appears
 only with cargo aboard; with an empty hold `D` is not a displayed action and
-does nothing (issue #414). Below 40 columns the bar keeps the compact letter
-list, as the pilot record already does for its view keys: the labels wrap to
-four rows there and would leave a ten-row page a single row for the fight
-itself, and on that terminal the fight is what the caller needs to see.
+does nothing (issue #414). Every verb is named at every supported size: the
+compact letter list this kept below 40 columns went with those terminals
+(issue #495).
 
 Every path that ends an active contract without payment records it (issue #403):
 failed escort or bounty fights and abandonment count as failed, deadline expiry
@@ -5535,12 +5535,29 @@ and that row is charged to the capacity like any other. A screen whose title
 will not fit a 40-column border names itself more briefly rather than spend a
 body row on a header -- the Hall of Fame's `Completed careers` becomes `Fame:
 Completed careers` -- measured against the widest counter it can reach, so the
-title cannot change under the caller. Below forty columns or twelve rows the
-page keeps the flat
-layout the responsive work introduced: four columns is a fifth of a 20-column
-caller's screen. The deck's hull/fuel/hold gauges and the fight screen's
-opponent and hull gauges are back with the frame, and give way to plain numbers
--- never the other way round -- on a row too narrow for both.
+title cannot change under the caller. The deck's hull/fuel/hold gauges and the
+fight screen's opponent and hull gauges are back with the frame, and give way to
+plain numbers -- never the other way round -- on a row too narrow for both.
+
+**Both bundled games require a terminal of at least 40 columns by 12 rows, and
+have exactly one layout above it (issue #495).** A launch on anything smaller is
+refused, by name and with the size the terminal reported, before any save or
+world is opened. The doors used to carry a second, stripped presentation for
+terminals down to 20 columns, and that is what flattened them: art, gauges and
+rules were dropped so content would fit a caller nobody dials in from, and the
+stripped result was then what an 80-column caller saw as well. A narrow case may
+never set the ceiling again -- which is why there is no second layout to leak
+upward, and why a screen that will not fit 40 columns is redesigned rather than
+given a compact variant. Nothing in the host has ever supported below 40 either:
+the prose editor already clamps to 40, and the menu layout's only thresholds are
+72 and 120 for *wide* screens.
+
+Door presentation is reviewed by looking at rendered screens. `scripts/
+door_gallery.py <door>` drives every screen in a subprocess at 80, 64 and 40
+columns in each display preset and writes an HTML page through the website's own
+ANSI emulator; a change to a screen comes with that page. The test suite can only
+assert that a screen fits -- never that it looks like anything -- which is how an
+entire visual design was lost with every slice passing review.
 
 Voidrunner offers saved display presets from station Display Options: full palette
 using the existing terminal color depth, basic 16-color, monochrome Unicode, and
@@ -6958,7 +6975,8 @@ indexes and fetch at most 500 records.
 
 The login summary shows unread events oldest first; free `[H]istory` replays
 retained events newest first with UTC timestamps and NEW/READ labels. Both views
-paginate for terminal width and height down to 20x10 and show the retention limit.
+paginate for terminal width and height down to the 40x12 floor and show the
+retention limit.
 Smaller terminals receive a size diagnostic without acknowledging anything.
 Continuing a summary page accepts only records whose final line was displayed;
 Back and disconnect leave that page unread. History navigation does not acknowledge
@@ -6974,7 +6992,7 @@ world transaction and never clears raid protection or acknowledges events.
 The countdowns are snapshots refreshed when navigating or returning from an action.
 
 Next/Prev pages keep action and free-browsing keys visible at 80x24, 40x12 and
-20x10. Smaller terminals receive an explicit minimum-size response before opening
+40x12. Smaller terminals receive an explicit minimum-size response before opening
 the world. Action outcomes, rejected actions and season-change notices wait for
 acknowledgement before the dashboard clears them. Cancelling a target selection
 returns directly. Detailed action previews remain a subsequent slice 3 bullet.
@@ -7122,7 +7140,7 @@ rivals show their reason and have no active selection key.
 Raid selection uses the same stable, bounded directory batches as browsing, so all
 eligible crews are reachable beyond the former random fifty-row sample. Result
 pages retain every net resource change until continued or left with Back. These
-paths support 80x24, 40x12 and 20x10, including long names, wide/combining text and
+paths support 80x24, 48x14 and 40x12, including long names, wide/combining text and
 large resource values; manual terminal/transport validation remains slice 9.
 
 **First visit and recovery (issue #362, slice 3).** New callers receive a short,
@@ -7368,14 +7386,15 @@ record picker -- draws its body inside the door's frame, with its title in the t
 border and the action bar outside, below it. The switchboard overhaul had left
 the masthead framed and everything under it an unindented wall of rows. The frame
 costs one row and four columns, charged to each screen's own page budget, and is
-dropped below forty columns and in Fast mode, which is deliberately text-only.
+dropped only in Fast mode, which is deliberately text-only: there is no narrower
+terminal to drop it for, since 40x12 is the floor (issue #495).
 Hotkeys are written `[K] Label` everywhere the door prints, the rule Voidrunner
 adopted in issue #400: the key is not always the label's first letter
 (`[E] Map`, `[X] Root`), so that is the only spelling that carries every case.
 The switchboard's action bar is packed to the width it has rather than hand-typed:
 full labels first, short labels when the full ones would not leave the page a row
-to stand on, and -- only at the twenty-column floor, where fifteen labelled
-entries cannot fit -- the keys alone, with `[?] Help` naming them. A key is never
+to stand on. Every key keeps a name at every supported size; the keys-only tier
+below that went with the terminals it was for (issue #495). A key is never
 dropped. A bar written with `out_prompt` leaves its row unterminated on purpose,
 so whatever reads it has to close that row before the next screen draws; the
 first visit every caller saw had printed the Back bar and the switchboard's own
