@@ -2347,6 +2347,11 @@ def resolve_garrison(conn: sqlite3.Connection, player: Player, exchange_id: int,
 
 MINIMUM_WIDTH, MINIMUM_HEIGHT = 40, 12
 
+# What the host writes after any door exits (`net/door_flow.py`): a blank line,
+# "Left <door>.", and "Press any key to continue...". A refusal that fills the
+# screen is scrolled away by them, so the rows they will take are not ours.
+HOST_EPILOGUE_ROWS = 3
+
 
 def _panel_framed(p: "Palette", width: int) -> bool:
     """Whether a screen draws its body inside the door's frame.
@@ -3516,9 +3521,9 @@ def main() -> int:
             rows: list[str] = []
             for line in lines:
                 rows.extend(_wrap_output(line, max(1, _OUTPUT_WIDTH)).split("\r\n"))
-            if len(rows) <= max(1, height):
+            if len(rows) <= max(1, height - HOST_EPILOGUE_ROWS):
                 break
-        rows = rows[:max(1, height)]
+        rows = rows[:max(1, height - HOST_EPILOGUE_ROWS)]
         for row in rows[:-1]:
             out_line(row)
         out(rows[-1])

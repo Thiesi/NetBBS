@@ -80,6 +80,7 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Commodity Market", b"M"),
         ("Engineering Yard", b"Y"),
         ("Mission Board", b"B"),
+        ("Contract Details", b"B1"),
         ("Navigation Chart", b"C"),
         ("Pilot Record", b"S"),
         ("Hall of Fame", b"H"),

@@ -4854,11 +4854,10 @@ supported size into one page, and is how a presentation change is reviewed --
 the suite can assert that a screen fits, never that it looks like anything.
 
 Paged Voidrunner screens measure their capacity with `page_capacity` -- the
-content column is `_page_content_width()`, which is the box interior less its
-indent and gutter on a framed page and `_OUTPUT_WIDTH - 1` on a flat one, and
-the overhead comes from `_page_header_rows` (one row when the header fits the
-top border, a border plus the header's own wrapped rows when it does not, the
-wrapped title when the page is flat), the bottom border where there is one, and
+content column is `_page_content_width()`, the box interior less its indent and
+gutter, and the overhead comes from `_page_header_rows` (one row when the header
+fits the top border, a border plus the header's own wrapped rows when it does
+not), the bottom border, and
 the action bar the caller will see -- and fill pages with `paginate`
 (issue #418): one implementation that keeps a logical group whole where it fits
 and continues it on the next page where it does not. With `keys`, a page breaks

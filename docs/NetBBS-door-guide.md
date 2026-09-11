@@ -227,7 +227,10 @@ are free and refresh these snapshots; action keys stay available on each page.
 Outcomes and rejection messages wait for acknowledgement before returning to the
 switchboard. The game requires at least 40 columns by 12 rows; a smaller terminal
 is refused by name, with the size it reported, and nothing in the shared world is
-touched -- resize or reconnect with a larger window and dial again.
+touched -- resize or reconnect with a larger window and dial again. A door's last
+screen is not the last thing the caller sees: NetBBS follows every door with a
+blank line, `Left <door>.` and `Press any key to continue...`, so a message that
+has to survive -- a size refusal, a farewell -- leaves those three rows free.
 
 Your crew is shared across active play and exchange defense. Capture needs two
 available members and assigns one to the new garrison. `[G]arrison` shows owned
