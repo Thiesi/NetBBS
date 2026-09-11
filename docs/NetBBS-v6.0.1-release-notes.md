@@ -1,5 +1,10 @@
 # NetBBS v6.0.1
 
+**Superseded: 6.0.1 was never released.** It sat unreleased on `main` while
+the Voidrunner and War Dialer overhauls landed, and everything described here
+shipped in [v7.0.0](NetBBS-v7.0.0-release-notes.md) instead. This file is kept
+for the MRC detail it records; there is no 6.0.1 wheel or tag to install.
+
 A fix release for the MRC (Multi Relay Chat) bridge, the first from
 reading the hub operator's protocol specification (MRCDoc, revision 1.26),
 to which access was granted on 2026-09-09. One database migration, described
