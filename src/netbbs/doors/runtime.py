@@ -268,7 +268,20 @@ def _record_door_session(db, *, actor, door, duration_seconds, reason, exit_code
                   detail=f"door={door.name!r} duration={duration_seconds:.1f}s reason={reason} exit_code={exit_code}")
 
 
-async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_TIME_LIMIT_SECONDS,
+def effective_wall_limit(profile, call_site_limit=None):
+    """Tightest explicit wall-clock bound, or None when nothing bounds the run.
+
+    A profile's `time_limit` of 0 is the SysOp's explicit opt-out, so it must
+    not be folded in with `min()` as if it were the smallest bound. An
+    unprofiled door keeps the original fixed ceiling; a caller-supplied bound
+    (the capability probe's, say) still wins when it is tighter.
+    """
+    bounds = [value for value in (call_site_limit,
+                                  profile.time_limit if profile else WALL_TIME_LIMIT_SECONDS) if value]
+    return min(bounds) if bounds else None
+
+
+async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                    output_check=None):
     """Supervise and record one run; an optional synchronous probe check returns an error string."""
     profile = door.profile
@@ -343,9 +356,15 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
                 if profile.runner:
                     argv = [*profile.runner, *argv]
             if os.name == "posix":
-                setup = {"pty": kind == "pty", "limits": {"RLIMIT_CPU": DOOR_CPU_LIMIT_SECONDS,
-                         "RLIMIT_AS": profile.memory_mb * 1024 * 1024 if profile else DOOR_MEMORY_LIMIT_BYTES,
-                         "RLIMIT_NPROC": DOOR_MAX_PROCESSES}}
+                limits = {"RLIMIT_AS": profile.memory_mb * 1024 * 1024 if profile else DOOR_MEMORY_LIMIT_BYTES,
+                          "RLIMIT_NPROC": DOOR_MAX_PROCESSES}
+                # A profile may remove the CPU ceiling outright (0); omitting the
+                # key leaves the inherited soft limit rather than setting zero,
+                # which would kill the door on its first scheduler tick.
+                cpu_seconds = profile.cpu_seconds if profile else DOOR_CPU_LIMIT_SECONDS
+                if cpu_seconds:
+                    limits["RLIMIT_CPU"] = cpu_seconds
+                setup = {"pty": kind == "pty", "limits": limits}
                 argv = [sys.executable, "-I", str(Path(__file__).with_name("launcher.py")), json.dumps(setup), *argv]
             kwargs = {"start_new_session": True, "pass_fds": pass_fds} if os.name == "posix" else {}
             # Cancellation during spawn must not lose ownership of a live child.
@@ -367,7 +386,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
             diagnostic_tasks.append(asyncio.create_task(_diagnostics(proc.stderr, tail)))
         try:
             reason = await asyncio.wait_for(_relay(terminal, endpoint, proc),
-                            timeout=min(wall_time_limit_seconds, profile.time_limit if profile else WALL_TIME_LIMIT_SECONDS))
+                                            timeout=effective_wall_limit(profile, wall_time_limit_seconds))
             if reason == "door_exited":
                 if proc and proc.returncode is None:
                     try:

@@ -7,7 +7,8 @@ import shlex
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from netbbs.doors.profiles import DoorProfile, ProfileError, preflight, read_profile_file
+from netbbs.doors.profiles import (DoorProfile, ProfileError, limit_advisories, preflight,
+                                    read_profile_file)
 from netbbs.doors.registry import DoorError, update_door
 from netbbs.doors.runtime import run_door, war_dialer_world_path, war_dialer_path_problem
 from netbbs.net.confirm import prompt_yes_no
@@ -27,7 +28,8 @@ def _candidate(door, draft):
     if draft.get("original_api"):
         return replace(door, executable_path=draft["executable_path"], args=args, profile=None)
     value = {k: draft[k] for k in asdict(DoorProfile())}
-    for key in ("width", "height", "baud", "security_level", "time_limit", "max_sessions", "memory_mb"):
+    for key in ("width", "height", "baud", "security_level", "time_limit", "cpu_seconds",
+                "max_sessions", "memory_mb"):
         try:
             value[key] = int(value[key])
         except (TypeError, ValueError) as exc:
@@ -99,6 +101,10 @@ async def edit_door_profile(session, lane, actor, door):
                     problems.append(problem)
             for line in problems or ["Static checks passed. Use Test to verify the actual runtime and game."]:
                 await session.write_line(sanitize_text(line))
+            # Consequences of ceilings the SysOp raised or removed. Reported
+            # after the verdict because they never make a profile invalid.
+            for line in limit_advisories(candidate.profile):
+                await session.write_line(sanitize_text("Note: " + line))
         except (ProfileError, ValueError, OSError) as exc:
             await session.write_line(sanitize_text(str(exc)))
         await session.write_line("Press any key to return to the draft.")
@@ -162,7 +168,12 @@ async def edit_door_profile(session, lane, actor, door):
     add("height", "h", "Rows (0=caller)", "Terminal")
     add("baud", "v", "Nominal baud", "Terminal")
     add("security_level", "l", "Game security level", "Limits")
-    add("time_limit", "m", "Time limit (seconds)", "Limits")
+    add("time_limit", "m", "Time limit (seconds, 0=none)", "Limits",
+        help="Wall-clock ceiling for one caller's run. 0 removes it: the door then ends only when it exits, "
+             "the caller disconnects, or the node stops.")
+    add("cpu_seconds", "2", "CPU seconds (0=none)", "Limits",
+        help="RLIMIT_CPU for this door's caller processes. Raise it for a door which renders continuously; "
+             "0 removes it and leaves only the wall-clock limit.")
     add("max_sessions", "n", "Maximum simultaneous callers", "Limits")
     add("memory_mb", "y", "Memory ceiling (MiB)", "Limits")
     add("multinode_certified", "z", "Multi-node certified by SysOp", "Limits", bool_field("multinode_certified", "Certified"))

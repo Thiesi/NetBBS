@@ -1352,6 +1352,25 @@ the emulator, game and NetBBS itself must not run as root.
    the game. The DOS templates use CP437, COM1, 38400 baud, 80x25 and 1 GiB
    address-space ceiling. This ceiling includes the emulator's host shared
    libraries, not just its 16 MiB emulated RAM. Native default: 256 MiB.
+
+   **Time limit** (wall clock) and **CPU seconds** bound one caller's run.
+   The defaults, 3600 and 300, are what every door got before these were
+   configurable, so an existing profile behaves exactly as it did. Raise the
+   CPU ceiling for a door which renders continuously rather than waiting on
+   keystrokes — a classic door idles between keys and never approaches 300
+   CPU-seconds, while a real-time client can exhaust them inside a normal
+   session and be killed mid-play. Raise the time limit for a door a caller
+   should be able to stay in for an evening.
+
+   Setting either to `0` removes that ceiling entirely. This is a deliberate
+   SysOp decision, not a misconfiguration, so **Check setup** reports it as a
+   note rather than a problem — but understand what you are giving up. With no
+   wall-clock limit a door ends only when it exits, the caller disconnects, or
+   the node stops; until then it holds that caller's session and a node lease,
+   so a hung door with `max_sessions: 1` makes the door unavailable to everyone
+   else until you restart the node. With no CPU limit a runaway door is bounded
+   only by the wall-clock limit. Do not remove both at once on a door you have
+   not watched run.
 5. **Check setup** reports static problems. For DOS, run **Emulator capability
    probe** to verify headless startup, inherited COM1, CP437 echo and optional
    FOSSIL using NetBBS's own fixture, without launching the game. It requires

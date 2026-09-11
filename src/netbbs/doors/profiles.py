@@ -41,7 +41,11 @@ class DoorProfile:
     height: int = 0
     baud: int = 38400
     security_level: int = 10
+    #: Wall-clock and CPU ceilings for one caller's run. Zero means the SysOp
+    #: explicitly removed that ceiling; the defaults reproduce the original
+    #: fixed constants, so an existing profile is bounded exactly as before.
     time_limit: int = 3600
+    cpu_seconds: int = 300
     memory_mb: int = 256
     max_sessions: int = 1
     multinode_certified: bool = False
@@ -58,8 +62,11 @@ class DoorProfile:
             raise ProfileError("endpoint must be stdio, pty, or socketpair")
         if self.encoding not in ("utf-8", "cp437", "raw"):
             raise ProfileError("encoding must be utf-8, cp437, or raw")
+        # Zero is the explicit "no ceiling" opt-out for time_limit/cpu_seconds
+        # only; it is not a valid value for any other bound below.
         for name, low, high in (("width", 0, 500), ("height", 0, 200), ("baud", 300, 115200),
-                                ("security_level", 0, 255), ("time_limit", 1, 3600), ("max_sessions", 1, 36),
+                                ("security_level", 0, 255), ("time_limit", 0, 86400),
+                                ("cpu_seconds", 0, 86400), ("max_sessions", 1, 36),
                                 ("memory_mb", 64, 2048)):
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
@@ -221,3 +228,24 @@ def preflight(door, session=None) -> list[str]:
             if platform.system() == "NetBSD" and b"ld-linux" in header:
                 problems.append("Linux ELF loader detected on NetBSD; use a NetBSD build, not Linux emulation.")
     return problems
+
+
+def limit_advisories(profile) -> list[str]:
+    """Consequences of ceilings the SysOp deliberately raised or removed.
+
+    Separate from `preflight` on purpose: preflight returns problems which
+    refuse the launch, and an unbounded door is a deliberate configuration,
+    not a misconfiguration. These are shown by Check setup and never block.
+    """
+    if profile is None:
+        return []
+    notes = []
+    if not profile.time_limit:
+        notes.append("No wall-clock limit: this door ends only when it exits, the caller disconnects, "
+                     "or the node stops. It holds a caller session and a node lease until then.")
+    elif profile.time_limit > 3600:
+        notes.append(f"Wall-clock limit is {profile.time_limit} seconds, above the {3600}-second default; "
+                     "one caller can hold a node lease for that long.")
+    if not profile.cpu_seconds:
+        notes.append("No CPU-seconds limit: a runaway door is bounded only by the wall-clock limit above.")
+    return notes
