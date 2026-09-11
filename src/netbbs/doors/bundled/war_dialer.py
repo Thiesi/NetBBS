@@ -1375,7 +1375,7 @@ def _migrate_world_v2(conn: sqlite3.Connection) -> None:
         record_event(conn, player.user_id, None,
                      f"Shared crew upgrade: {budget if retained else 0} assigned across {retained} holdings; "
                      f"{len(holdings) - retained} unstaffed holdings released. Available crew: {player.crew}. "
-                     "Earned income paid. Use [G]arrison to reinforce or withdraw.", effective_now)
+                     "Earned income paid. Use [G] Garrison to reinforce or withdraw.", effective_now)
 
 
 def _migrate_world_v3(conn: sqlite3.Connection) -> None:
@@ -1433,7 +1433,7 @@ def _archive_season(conn: sqlite3.Connection, old: int, current: int, now: datet
                      (old, player['user_id'], _event_plain(player['handle'])[:80], player['rank'], place, medal, player['insignia']))
         record_event(conn, player['user_id'], None,
                      f"Crackdown closed season {old}. Final Rank {player['rank']}; place {place}/{len(players)}; {medal or 'no medal'}. "
-                     f"Fresh season {current}: competitive resources reset. Back on the switchboard, [I]Scene shows retained season results.", cutoff)
+                     f"Fresh season {current}: competitive resources reset. Back on the switchboard, [I] Scene shows retained season results.", cutoff)
     # Bounded by retained history, even after a very long absence.
     for number in range(max(old + 1, current - SEASON_ARCHIVE_LIMIT), current):
         conn.execute("INSERT INTO seasons(number,ended_at,status,players) VALUES (?,?,'inactive',0)",
@@ -2345,6 +2345,56 @@ def resolve_garrison(conn: sqlite3.Connection, player: Player, exchange_id: int,
 # ---------------------------------------------------------------------------
 
 
+def _panel_framed(p: "Palette", width: int) -> bool:
+    """Whether a screen draws its body inside the door's frame.
+
+    The switchboard overhaul left the masthead framed and nothing else, so
+    every screen under it became an unindented wall of rows (issue #487).
+    Fast mode is a deliberate text-only presentation and keeps its flat rows,
+    and below forty columns the four columns a frame costs are better spent on
+    the words. `width` is the column the screen draws in, one narrower than the
+    terminal, so this is the same forty-column floor Voidrunner's pages use.
+    """
+    return not p.fast and width >= 39
+
+
+def _panel_width(p: "Palette", width: int) -> int:
+    """Columns a framed screen's rows are wrapped to: the two borders, the
+    two-space indent and a column of gutter come off the top. A row that ends
+    flush against the border reads as if it had been cut off."""
+    return max(1, width - 5) if _panel_framed(p, width) else width
+
+
+def _panel_rows(p: "Palette", width: int) -> int:
+    """Rows the frame costs a screen. Its title is drawn into the top border,
+    so only the bottom border is new."""
+    return 1 if _panel_framed(p, width) else 0
+
+
+def draw_panel(p: "Palette", title: str, rows: list[str], width: int) -> None:
+    """Draw one screen's title and body inside the frame.
+
+    Action bars stay outside it, where the cursor waits. Rows are expected to
+    be wrapped to `_panel_width` already: a row wider than the frame would
+    push the border out of line, and the page budget has already been spent.
+    """
+    if not _panel_framed(p, width):
+        out_line(f"{p.accent}{BOLD}{title}{RESET}")
+        for row in rows:
+            out_line(f"{p.white}{row}{RESET}")
+        return
+    inner = max(1, width - 2)
+    while title and _dlen(f"═ {title} ") > inner - 1:
+        title = title[:-1]
+    head = f"═ {title} " if title else "═"
+    edge = f"{p.border}{BOLD}║{RESET}"
+    out_line(decor(f"{p.border}{BOLD}╔{head}{'═' * max(1, inner - _dlen(head))}╗{RESET}"))
+    for row in rows:
+        out_line(decor(edge) + f"  {p.white}{row}{RESET}"
+                 + " " * max(0, inner - 2 - _dlen(row)) + decor(edge))
+    out_line(decor(f"{p.border}{BOLD}╚{'═' * inner}╝{RESET}"))
+
+
 def draw_title(p: Palette, info: dict, season_number: int, w: int) -> None:
     if p.fast:
         out_line(f"WAR DIALER - Season {season_number}")
@@ -2402,22 +2452,18 @@ def show_event_history(
     width -= 1  # Leave room for the prompt cursor at the right edge.
     title = "WHILE YOU WERE AWAY" if unseen_only else "EVENT HISTORY"
     heading = _event_wrap(title, width) + _event_wrap(f"Latest {EVENT_HISTORY_LIMIT} events", width)
-    footer_text = ("Press any key to continue...", "[B]ack to game") if unseen_only else ("[N]ext [P]rev", "[A]ck page [B]ack")
+    footer_text = ("Press any key to continue...", "[B] Back to game") if unseen_only else ("[N] Next [P] Prev", "[A] Ack page [B] Back")
     footer = [line for text in footer_text for line in _event_wrap(text, width)]
     # A short page counter and blank line take two more rows.
-    body_rows = max(1, height - len(heading) - len(footer) - 2)
-    pages = event_pages(events, width, body_rows)
+    head_rows = 1 if _panel_framed(p, width) else len(heading)
+    body_rows = max(1, height - head_rows - _panel_rows(p, width) - len(footer) - 2)
+    pages = event_pages(events, _panel_width(p, width), body_rows)
     page_index = 0
     while True:
         page = pages[page_index]
         complete_ids = [event_id for _, event_id in page if event_id is not None]
         out(f"{ESC}[2J{ESC}[H")
-        for line in heading:
-            out_line(f"{p.accent}{line}{RESET}")
-        out_line(f"Page {page_index + 1}/{len(pages)}")
-        out_line()
-        for line, _ in page:
-            out_line(f"{p.white}{line}{RESET}")
+        draw_panel(p, title, [f"Page {page_index + 1}/{len(pages)}", ""] + [line for line, _ in page], width)
         for line in footer[:-1]:
             out_line(f"{p.muted}{line}{RESET}")
         out_prompt(f"{p.gold}{footer[-1]}{RESET}")
@@ -2444,7 +2490,7 @@ def show_event_history(
                 for event in events:
                     if event.id in complete_ids and event.seen_at is None:
                         event.seen_at = to_iso(acknowledged_at)
-                pages = event_pages(events, width, body_rows)
+                pages = event_pages(events, _panel_width(p, width), body_rows)
     out(f"{ESC}[2J{ESC}[H")
 
 
@@ -2462,7 +2508,7 @@ def operation_visit_budget(player: Player, *, in_hub: bool = False) -> str:
     remaining = TURNS_PER_DAY - player.turns_used
     label = "Saved operation" if player.operation_stage else "New operation"
     text = f"{label}: {turns} turn{'s' if turns != 1 else ''} and ${cash} to the next execution; {remaining} turns available."
-    text += " Select this entry to preview each step." if in_hub else " [O]Ops previews each step."
+    text += " Select this entry to preview each step." if in_hub else " [O] Ops previews each step."
     if player.cash < cash:
         text += f" Need ${cash - player.cash} more before Prepare."
     if remaining < turns or (player.operation_stage and player.cash < cash):
@@ -2474,16 +2520,16 @@ def next_steps(state: DashboardState, now: datetime) -> list[str]:
     player = state.player
     lines = [operation_visit_budget(player)]
     if player.turns_used >= TURNS_PER_DAY:
-        return lines + ["No turns: browse Rank, Map, Rivals, Log, contracts and [O]Ops/dossiers free; return when the refill is ready."]
+        return lines + ["No turns: browse Rank, Map, Rivals, Log, contracts and [O] Ops/dossiers free; return when the refill is ready."]
     if player.heat + TRADE_WAREZ_HEAT > HEAT_BUST_THRESHOLD:
         safe_at = from_iso(player.heat_updated_at) + timedelta(hours=(player.heat + TRADE_WAREZ_HEAT - HEAT_BUST_THRESHOLD) / HEAT_DECAY_PER_HOUR)
         lines.append(f"Trade without a bust roll in {countdown(safe_at - now)}. Recruitment adds no Heat.")
     if player.cash < RECRUIT_COST:
         lines.append(f"Need ${RECRUIT_COST - player.cash} more to recruit. Trade needs no cash; inspect its Heat risk first.")
     if player.crew == 1:
-        lines.append("Available crew is at the one-member floor. Recruit or use [G]arrison to withdraw defenders before another capture.")
+        lines.append("Available crew is at the one-member floor. Recruit or use [G] Garrison to withdraw defenders before another capture.")
     if rank_score(player) == 0 and not player.operation_stage and len(lines) == 1:
-        lines.append("First goals: [J]Job offers a one-turn Cautious contract; inspect Map or Trade to fund Crew recruitment.")
+        lines.append("First goals: [J] Job offers a one-turn Cautious contract; inspect Map or Trade to fund Crew recruitment.")
     elif not state.holdings:
         lines.append("No territory income yet. Back on the switchboard, inspect Map and compare Root previews.")
     return lines
@@ -2507,12 +2553,12 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
     if state.season_ends_at - now <= DAY * 2:
         lines = [f"Reset in {countdown(state.season_ends_at - now)}",
                   "Season end: " + state.season_ends_at.strftime("%Y-%m-%d %H:%M UTC"),
-                  "Joining late? Try a [J]Job with Cautious approach and inspect its odds/stakes before Act. No rival or territory is required.",
+                  "Joining late? Try a [J] Job with Cautious approach and inspect its odds/stakes before Act. No rival or territory is required.",
                   "Your final Rank is recorded even without a medal. All competitive progress and resources reset, including cash, available/assigned crew, exchanges, Rank, training, support and all saved operation progress (cased or prepared); spend only what you want to use this season."] + lines
     elif player.season_number > 1 and rank == 0 and player.turns_used == 0:
         lines += [f"Ready to play: ${player.cash}, {player.crew} available crew and {TURNS_PER_DAY - player.turns_used} turns. "
-                  "Start with [J]Job, or [T]rade to fund recruitment; previews show exact stakes.",
-                  "Identity, account age and insignia persist across seasons. [I]Scene shows any retained results; medals give no resource or protection bonus."]
+                  "Start with [J] Job, or [T] Trade to fund recruitment; previews show exact stakes.",
+                  "Identity, account age and insignia persist across seasons. [I] Scene shows any retained results; medals give no resource or protection bonus."]
     lines.append(f"Rank: {rank:,} - {tier_name(rank)}")
     tier = tier_index(rank)
     if tier + 1 < len(RANK_TIERS):
@@ -2523,7 +2569,7 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
     income = sum(e.income_per_hour for e in state.holdings)
     lines.append(f"Holdings: {len(state.holdings)}/10 exchanges - ${income:,}/hour")
     lines.append("Owned: " + (", ".join(e.name for e in state.holdings) or "none"))
-    lines.append(f"New events: {state.new_events} - [H]istory")
+    lines.append(f"New events: {state.new_events} - [H] History")
     effective_now = max(now, from_iso(player.heat_updated_at))
     if is_in_grace(player, effective_now):
         expires = from_iso(player.created_at) + GRACE
@@ -2536,31 +2582,81 @@ def dashboard_lines(state: DashboardState, now: datetime) -> list[str]:
         lines.append("Raid shield ends: " + expires.strftime("%Y-%m-%d %H:%M UTC"))
     lines.append("Exchange territory is always contestable.")
     lines.append(f"Season {player.season_number} ends in {countdown(state.season_ends_at - now)}")
-    lines.append(f"[O]Operations/recon: {'none active' if not player.operation_stage else JOBS[player.operation_contract][0] + (' - cased' if player.operation_stage == 1 else ' - prepared')}")
-    lines.append("[I]Scene: crew insignia, NPC dossiers and public bulletins.")
-    lines.append(f"[S]Skills/support: {player.specialty or 'untrained'}; {player.support or 'empty slot'}")
+    lines.append(f"[O] Operations/recon: {'none active' if not player.operation_stage else JOBS[player.operation_contract][0] + (' - cased' if player.operation_stage == 1 else ' - prepared')}")
+    lines.append("[I] Scene: crew insignia, NPC dossiers and public bulletins.")
+    lines.append(f"[S] Skills/support: {player.specialty or 'untrained'}; {player.support or 'empty slot'}")
     lines.append("Season end: " + state.season_ends_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
     lines.append(SEASON_AWARDS)
-    lines.append("[I]Scene / Season results: latest 12 completed seasons.")
+    lines.append("[I] Scene / Season results: latest 12 completed seasons.")
     return lines
+
+
+# key, label, and the label a narrow terminal gets instead.
+SWITCHBOARD_KEYS = (("T", "Trade", "Trade"), ("C", "Crew", "Crew"), ("J", "Job", "Job"),
+                    ("R", "Raid", "Raid"), ("X", "Root", "Root"), ("G", "Garrison", "Gar"),
+                    ("S", "Kit", "Kit"), ("O", "Ops", "Ops"), ("B", "Rank", "Rank"),
+                    ("E", "Map", "Map"), ("V", "Rivals", "Rival"), ("H", "Log", "Log"),
+                    ("I", "Scene", "Scene"), ("?", "Help", "Help"), ("Q", "Quit", "Quit"))
+
+
+def _packed_bar(width: int, short: bool) -> list[str]:
+    rows: list[str] = []
+    row = ""
+    for key, label, brief in SWITCHBOARD_KEYS:
+        entry = f"[{key}] {brief if short else label}"
+        candidate = f"{row} {entry}" if row else entry
+        if row and _dlen(candidate) > width:
+            rows.append(row)
+            row = entry
+        else:
+            row = candidate
+    if row:
+        rows.append(row)
+    return rows
+
+
+def switchboard_bar(width: int, budget: int) -> list[str]:
+    """Every action key, packed into the rows the screen can spare.
+
+    Hand-typed rows were tuned for `[K]Label`; one spelling per hotkey (issue
+    #400's rule, adopted here) is wider, and at twenty columns the bar grew
+    past the bottom of the terminal. Packing it to the width keeps every key
+    reachable, and the short labels are the last thing spent -- never a key.
+    """
+    for short in (False, True):
+        rows = _packed_bar(width, short=short)
+        if len(rows) <= budget:
+            return rows
+    # Twenty columns cannot hold fifteen labelled entries in the rows a page can
+    # spare, whatever the labels say. The keys stay -- all of them, and reachable
+    # -- and [?] Help is where their names are.
+    keys, rows, row = [f"[{key}]" for key, _, _ in SWITCHBOARD_KEYS], [], ""
+    for entry in keys:
+        candidate = f"{row} {entry}" if row else entry
+        if row and _dlen(candidate) > width:
+            rows.append(row)
+            row = entry
+        else:
+            row = candidate
+    if row:
+        rows.append(row)
+    return rows
 
 
 def draw_dashboard(p: Palette, state: DashboardState, now: datetime, width: int,
                    height: int, page_index: int = 0) -> tuple[int, int]:
     """Render one compact command-center page with the action keys always visible."""
     width = max(1, width - 1)
-    footer_text = (["[T]rade [C]rew [J]ob [R]aid [X]Root [G]arrison [S]Kit [O]Ops", "[B]Rank [E]Map [V]Rivals [H]Log [I]Scene [?]Help [Q]uit"]
-                   if width >= 39 else
-                   ["[T]rade [C]rew [Q]", "[J]ob [R]aid [S]Kit", "[X]Root [G]Defense", "[B]Rank [E]Map", "[V]Rivals [H]Log", "[I]Scene [O]Ops [?]"])
-    footer = [line for text in footer_text + ["[N]ext [P]rev"] for line in _event_wrap(text, width)]
-    body_rows = max(1, height - len(footer) - 2)  # heading and prompt
-    lines = [line for text in dashboard_lines(state, now) for line in _event_wrap(text, width)]
+    # Title, one body row and the prompt are what the bar has to leave behind.
+    footer_text = switchboard_bar(width, max(1, height - 4))
+    footer = [line for text in footer_text + ["[N] Next [P] Prev"] for line in _event_wrap(text, width)]
+    body_rows = max(1, height - len(footer) - 2 - _panel_rows(p, width))  # heading, prompt, frame
+    lines = [line for text in dashboard_lines(state, now) for line in _event_wrap(text, _panel_width(p, width))]
     page_count = max(1, (len(lines) + body_rows - 1) // body_rows)
     page_index = max(0, min(page_index, page_count - 1))
     out(f"{ESC}[2J{ESC}[H")
-    out_line(f"{p.accent}{BOLD}SWITCHBOARD {page_index + 1}/{page_count}{RESET}")
-    for line in lines[page_index * body_rows:(page_index + 1) * body_rows]:
-        out_line(f"{p.white}{line}{RESET}")
+    draw_panel(p, f"SWITCHBOARD {page_index + 1}/{page_count}",
+               lines[page_index * body_rows:(page_index + 1) * body_rows], width)
     for line in footer:
         out_line(f"{p.gold}{line}{RESET}")
     out_prompt(f"  {p.accent}>{RESET} ")
@@ -2573,25 +2669,30 @@ def show_text_pages(p: Palette, title: str, paragraphs: list[str], width: int, h
     """Content first, bounded terminal pages; return an edge key to fetch another batch."""
     width = max(1, width - 1)
     heading = _event_wrap(title, width)
-    footer_text = (["Press any key to continue...", "[B]ack"] if onboarding else
-                   ["[N]ext [P]rev", "[B]ack"])
+    footer_text = (["Press any key to continue...", "[B] Back"] if onboarding else
+                   ["[N] Next [P] Prev", "[B] Back"])
     footer = [line for text in footer_text for line in _event_wrap(text, width)]
-    body_rows = max(1, height - len(heading) - len(footer) - 1)
-    lines = [line for text in paragraphs for line in _event_wrap(text, width)] or ["Nothing to show yet."]
+    head_rows = 1 if _panel_framed(p, width) else len(heading)
+    body_rows = max(1, height - head_rows - _panel_rows(p, width) - len(footer) - 1)
+    lines = [line for text in paragraphs for line in _event_wrap(text, _panel_width(p, width))] or ["Nothing to show yet."]
     pages = [lines[i:i + body_rows] for i in range(0, len(lines), body_rows)]
     index = len(pages) - 1 if start_last else 0
     while True:
         out(f"{ESC}[2J{ESC}[H")
-        for line in heading:
-            out_line(f"{p.accent}{BOLD}{line}{RESET}")
-        out_line(f"Page {index + 1}/{len(pages)}")
-        for line in pages[index]:
-            out_line(f"{p.white}{line}{RESET}")
+        draw_panel(p, title, [f"Page {index + 1}/{len(pages)}"] + pages[index], width)
         for line in footer[:-1]:
             out_line(f"{p.muted}{line}{RESET}")
-        final_footer = "[A]Act [B]ack" if accept and index == len(pages) - 1 else footer[-1]
+        final_footer = "[A] Act [B] Back" if accept and index == len(pages) - 1 else footer[-1]
         out_prompt(f"{p.gold}{final_footer}{RESET}")
-        key = read_input_key().upper() if onboarding else read_menu_choice("NPBQ" + ("A" if accept and index == len(pages) - 1 else ""))
+        if onboarding:
+            key = read_input_key().upper()
+            # Any key continues, so there is nothing to echo -- but the bar's row
+            # still has to end here, or the next screen opens on it: the first
+            # visit every caller sees printed the Back bar and the switchboard's
+            # own title on one row (issue #487).
+            out_line()
+        else:
+            key = read_menu_choice("NPBQ" + ("A" if accept and index == len(pages) - 1 else ""))
         if key == "A":
             return "A"
         if key in ("B", "Q"):
@@ -2614,34 +2715,34 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
     if onboarding:
         show_text_pages(p, "FIRST VISIT", [
             f"Welcome to the shared BBS scene. Start with ${STARTING_CASH}, {STARTING_CREW} crew and {TURNS_PER_DAY} turns.",
-            "Inspect [E]Map first. [X]Root previews unclaimed territory; [T]rade earns cash for [C]rew recruitment.",
-            "Capture assigns one crew member to defense. [G]arrison reinforces or withdraws; keep one member available.",
+            "Inspect [E] Map first. [X] Root previews unclaimed territory; [T] Trade earns cash for [C] Crew recruitment.",
+            "Capture assigns one crew member to defense. [G] Garrison reinforces or withdraws; keep one member available.",
             "Every action shows costs and risk before Act. Back cancels for free. Jobs and defended contests are harder with a small crew.",
             "No turns? Browse Rank, Map, Rivals and Log free. The switchboard shows your refill and season deadline.",
             "High Heat? Wait for cooldown or recruit without a bust roll. No cash? Trade needs none; preview its Heat risk.",
-            "Use separate single keys. [?]Help has the full rules; [Q]uit leaves from the switchboard.",
+            "Use separate single keys. [?] Help has the full rules; [Q] Quit leaves from the switchboard.",
         ], w, height, onboarding=True)
         return
     show_text_pages(p, "HOW TO PLAY", [
         "Run a BBS-scene crew for cash, respect and control of ten shared exchanges.",
         "First visit: inspect Map, compare a Root preview for unclaimed territory, or Trade to fund Crew recruitment. Back always cancels a preview.",
         f"Each action costs one of {TURNS_PER_DAY} turns. The rolling 24-hour window starts with your first action.",
-        "[T]rade Warez: quick cash. [C]rew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
-        "Each completed season leaves a private crackdown receipt with your final Rank, placement and medal. Back on the switchboard, [I]Scene offers personal reports and Hall of Fame winners from the retained twelve seasons. Cosmetic recognition survives the competitive reset.",
-        "Season awards are cosmetic Gold/Silver/Bronze for the top three positive-Rank players. Ties use ascending account ID. [I]Scene / Season results retains the latest 12 completed seasons, with inactive skipped seasons labeled and no permanent power bonus.",
-        "[I]Scene / Display offers ASCII decorations, monochrome and Fast mode. Settings survive seasons; there are no animation delays. Fast skips optional art and flavor while keeping every result and stake.",
-        "[I]Scene is free: choose a cosmetic crew insignia, read NPC biographies/current homes, and browse the latest 500 public territory bulletins. Insignia survive season resets. Q leaves any screen or quits from the switchboard.",
-        "[O]Ops: resume one three-step operation, buy rival recon, or read your latest ten 24-hour dossiers. Steps cost turns; browsing and reconnecting never reroll outcomes.",
-        "[S]Kit: train one crew specialty or buy one consumable support item. Each costs cash and one turn; preview before Act. Both reset each season.",
-        "[J]obs: choose one of five repeatable contracts, then Cautious, Standard or Bold. Exact odds and stakes appear before Act. Offers stay fixed; browsing and reconnecting do not reroll them.",
+        "[T] Trade Warez: quick cash. [C] Crew Recruit: " + f"${RECRUIT_COST} buys +1 crew.",
+        "Each completed season leaves a private crackdown receipt with your final Rank, placement and medal. Back on the switchboard, [I] Scene offers personal reports and Hall of Fame winners from the retained twelve seasons. Cosmetic recognition survives the competitive reset.",
+        "Season awards are cosmetic Gold/Silver/Bronze for the top three positive-Rank players. Ties use ascending account ID. [I] Scene / Season results retains the latest 12 completed seasons, with inactive skipped seasons labeled and no permanent power bonus.",
+        "[I] Scene / Display offers ASCII decorations, monochrome and Fast mode. Settings survive seasons; there are no animation delays. Fast skips optional art and flavor while keeping every result and stake.",
+        "[I] Scene is free: choose a cosmetic crew insignia, read NPC biographies/current homes, and browse the latest 500 public territory bulletins. Insignia survive season resets. Q leaves any screen or quits from the switchboard.",
+        "[O] Ops: resume one three-step operation, buy rival recon, or read your latest ten 24-hour dossiers. Steps cost turns; browsing and reconnecting never reroll outcomes.",
+        "[S] Kit: train one crew specialty or buy one consumable support item. Each costs cash and one turn; preview before Act. Both reset each season.",
+        "[J] Jobs: choose one of five repeatable contracts, then Cautious, Standard or Bold. Exact odds and stakes appear before Act. Offers stay fixed; browsing and reconnecting do not reroll them.",
         "Cautious pays less with lower Heat and no ordinary failure crew loss. Bold pays more with higher Heat. A bust can still cost cash and available crew with any approach. Harder contracts pay more as your crew grows.",
-        "[R]aid: steal rival cash. [X]Root: take an exchange for hourly income.",
+        "[R] Raid: steal rival cash. [X] Root: take an exchange for hourly income.",
         "Raids respect a 48-hour newcomer shield and your tier +/-1. Any raid attempt gives its target 24 hours of protection from every attacker, win or lose. Login and reading receipts never clear it.",
         "Rival Rank, shield reasons and expiry times are public. Available crew and cash stay private; raid odds and payout remain explicitly uncertain. Exchange garrisons are public and territory stays ungated.",
         "Capture commits one available member to its garrison. Assigned crew defend only that exchange; jobs, raids and attacks use available crew.",
-        "[E]Map shows the fixed ring, roles, crew/security defense, capture prices and owner services. [G]arrison opens Lay Low at a PBX, discounted recruits at a Carrier Switch, or the Warez outlet at a Hub. Services cost one turn and require ownership at Act.",
-        "NPC crews are labeled on [E]Map: three fixed home exchanges, 2/4/6 defenders. They never attack callers or take human holdings and earn no income or Rank. An abandoned home returns to its NPC after 24 hours. Jobs and operations remain available with no human rivals.",
-        "[G]arrison: reinforce or withdraw crew for one turn, with no Heat or Rank reward. One crew member must stay available. Withdrawing the last defender abandons the exchange and stops income.",
+        "[E] Map shows the fixed ring, roles, crew/security defense, capture prices and owner services. [G] Garrison opens Lay Low at a PBX, discounted recruits at a Carrier Switch, or the Warez outlet at a Hub. Services cost one turn and require ownership at Act.",
+        "NPC crews are labeled on [E] Map: three fixed home exchanges, 2/4/6 defenders. They never attack callers or take human holdings and earn no income or Rank. An abandoned home returns to its NPC after 24 hours. Jobs and operations remain available with no human rivals.",
+        "[G] Garrison: reinforce or withdraw crew for one turn, with no Heat or Rank reward. One crew member must stay available. Withdrawing the last defender abandons the exchange and stops income.",
         f"Capture costs $25/$50/$75 by exchange role, less $10 with an owned linked neighbor, win or lose. Each exchange earns +{CAPTURE_RANK} capture Rank only on your first success this season; recaptures earn none.",
         f"Hold territory for +1 Rank per {CONTROL_RANK_HOURS} exchange-hours. Partial time combines across holdings and survives transfers. Income is $1-$3/hour per exchange; all ten earn $480/day.",
         "Displaced defenders return to their owner's available crew after capture. Busts and failed attacks affect available crew, not stationed defenders.",
@@ -2649,10 +2750,10 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
         f"Rank only climbs during a season. Every {SEASON.days} days, cash, crew, Heat, turns, exchanges and Rank totals reset.",
         "Joining near the deadline? Cautious jobs let you try the contract board without a rival or an exchange. Your final Rank is archived even without a medal. Training, support and all saved operation progress (cased or prepared) also reset; nothing purchased carries competitive power into the next season.",
         f"The next season starts everyone with ${STARTING_CASH}, {STARTING_CREW} available crew and {TURNS_PER_DAY} turns. Identity, account age, insignia and retained results survive. The newcomer shield follows account age and does not restart at rollover.",
-        "[B]Rank: standings. [E]Map: territory. [V]Rivals: eligibility. [H]Log: retained events. All browsing is free.",
+        "[B] Rank: standings. [E] Map: territory. [V] Rivals: eligibility. [H] Log: retained events. All browsing is free.",
         "No turns? Browse and plan until refill. No eligible rivals? Read their protection reasons, trade, recruit or inspect territory instead.",
         "No cash? Trade has no cash cost. One available crew left? Recruit or withdraw defenders before capturing again. Preview Heat risk before trading or fighting.",
-        "[N]ext/[P]rev page; [B]ack leaves a screen; [Q]uit leaves the game from the switchboard. Use separate single keys.",
+        "[N] Next/[P] Prev page; [B] Back leaves a screen; [Q] Quit leaves the game from the switchboard. Use separate single keys.",
     ], w, height, onboarding=onboarding)
 
 
@@ -2841,7 +2942,7 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
     ring = exchanges + exchanges[:1]
     lines = [f"Season {season}; ten shared exchanges. Territory is always contestable.",
              "Ring links: " + " -- ".join(f"#{e.id}" for e in ring),
-             "Owning either linked neighbor discounts a capture attempt by $10. All sites remain attackable. [G]arrison opens owner services."]
+             "Owning either linked neighbor discounts a capture attempt by $10. All sites remain attackable. [G] Garrison opens owner services."]
     for exchange in exchanges:
         if not p.fast:
             lines.append(f"#{exchange.id} " + ROLE_ART[exchange.role])
@@ -2859,6 +2960,13 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
 
 
 def read_menu_choice(valid: str) -> str:
+    """Read one key at an action bar, echoing it so the bar's row is ended.
+
+    A bar is written with `out_prompt`, which leaves the row unterminated on
+    purpose so the cursor waits on it. Every reader of a bar has to close that
+    row before the next screen draws; this one does it by echoing the key, and
+    a screen that reads its own key has to do it itself (issue #487).
+    """
     while True:
         key = read_input_key().upper()
         if key and key in valid:
@@ -2875,7 +2983,7 @@ def action_block_reason(action: str, player: Player, target: Exchange | Player |
     if action == "recruit" and player.cash < RECRUIT_COST:
         reasons.append(f"Need ${RECRUIT_COST - player.cash} more cash to recruit. Trade needs no cash; preview its Heat risk first.")
     if action == "root" and player.crew < 2:
-        reasons.append("Need 2 available crew: one to hold the exchange and one to remain available. Recruit or use [G]arrison to withdraw defenders.")
+        reasons.append("Need 2 available crew: one to hold the exchange and one to remain available. Recruit or use [G] Garrison to withdraw defenders.")
     if action == "root" and isinstance(target, Exchange) and player.cash < capture_cost(target):
         reasons.append(f"Need ${capture_cost(target) - player.cash} more cash for this capture attempt. Trade to fund it.")
     if action == "service":
@@ -2938,10 +3046,10 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
         lines += [f"Exchange: {target.name} - {exchange_terms(target)[0]}", f"Owner: {exchange_owner(target)}",
                   f"Base capture price ${exchange_terms(target)[1]}; linked-neighbor discount ${target.capture_discount}.",
                   f"Success: {chance:.0%}; garrison {target.garrison}, total defense {exchange_defense(target)}.",
-                  f"Owner service: {exchange_terms(target)[4]}. Use [G]arrison after capture.",
+                  f"Owner service: {exchange_terms(target)[4]}. Use [G] Garrison after capture.",
                   f"Success earns +{capture_rank_award(player, target)} Rank and ${target.income_per_hour}/hour until lost or season reset.",
                   f"Capture Rank is once per exchange per season. Holding earns +1 Rank per {CONTROL_RANK_HOURS} exchange-hours; the ${capture_cost(target)} attempt cost applies win or lose.",
-                  f"Success assigns 1 crew to defense, leaving {player.crew - 1} available before any bust. [G]arrison manages defenders.",
+                  f"Success assigns 1 crew to defense, leaving {player.crew - 1} available before any bust. [G] Garrison manages defenders.",
                   f"Failure loses {min(1, player.crew - 1)} crew before any bust."]
     if action == "job" and player.specialty == "fixers":
         lines.append("Fixers: ordinary failure recovers $20 before any bust, without Rank.")
@@ -3007,12 +3115,13 @@ def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool
     """Only complete visible entries accept a digit; selection opens a preview."""
     width = max(1, width - 1)
     heading = _event_wrap(title, width)
-    rows = max(1, height - len(heading) - 4)  # counter and three footer rows
+    head_rows = 1 if _panel_framed(p, width) else len(heading)
+    rows = max(1, height - head_rows - _panel_rows(p, width) - 4)  # counter and three footer rows
     lines = []
     for key, (paragraphs, selectable) in zip(PICK_KEYS, records):
         marker = f"[{key}]" if selectable else "[-]"
         wrapped = [line for text in [marker + " " + paragraphs[0]] + paragraphs[1:]
-                   for line in _event_wrap(text, width)]
+                   for line in _event_wrap(text, _panel_width(p, width))]
         lines.extend((line, key if selectable and i == len(wrapped) - 1 else "")
                      for i, line in enumerate(wrapped))
     lines = lines or [("No rivals yet.", "")]
@@ -3021,14 +3130,10 @@ def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool
     while True:
         keys = "".join(key for _, key in pages[index])
         out(f"{ESC}[2J{ESC}[H")
-        for line in heading:
-            out_line(f"{p.accent}{BOLD}{line}{RESET}")
-        out_line(f"Page {index + 1}/{len(pages)}")
-        for line, _ in pages[index]:
-            out_line(f"{p.white}{line}{RESET}")
-        out_line(f"[{keys}]Pick" if keys else "No choice this page")
-        out_line("[N]ext [P]rev")
-        out_prompt("[B]ack (Q cancel)")
+        draw_panel(p, title, [f"Page {index + 1}/{len(pages)}"] + [line for line, _ in pages[index]], width)
+        out_line(f"[{keys}] Pick" if keys else "No choice this page")
+        out_line("[N] Next [P] Prev")
+        out_prompt("[B] Back (Q cancel)")
         key = read_menu_choice("NPBQ" + keys)
         if key in keys or key in "BQ":
             return key
@@ -3054,7 +3159,7 @@ def choose_rival(p: Palette, conn: sqlite3.Connection, player: Player, width: in
             return None
         if not page.entries:
             show_text_pages(p, "NO RIVAL CREWS", ["No other crews have joined yet.",
-                            "First [B]ack to the switchboard. There, [J]Jobs and [O]Operations need no rival. [X]Root contests labeled NPC homes; [I]Scene shows operators and public activity. All browsing is free."], width, height)
+                            "First [B] Back to the switchboard. There, [J] Jobs and [O] Operations need no rival. [X] Root contests labeled NPC homes; [I] Scene shows operators and public activity. All browsing is free."], width, height)
             return None
         effective_now = max(now, from_iso(player.heat_updated_at))
         records = [([rival.handle, f"{tier_name(rank_score(rival))}; Rank {rank_score(rival):,}",
@@ -3319,7 +3424,7 @@ def do_garrison(p: Palette, conn: sqlite3.Connection, player: Player, width: int
     state = dashboard_state(conn, player.user_id, now_utc())
     update_display_player(p, player, state.player, width, height)
     if not state.holdings:
-        show_text_pages(p, "YOUR GARRISONS", ["No exchanges held. Inspect [E]Map and capture an exchange first.",
+        show_text_pages(p, "YOUR GARRISONS", ["No exchanges held. Inspect [E] Map and capture an exchange first.",
                         "Capture assigns one crew member; keep one available for recovery."], width, height)
         return False
     records = [([e.name, f"{e.garrison} assigned here; {exchange_defense(e)} total defense; ${e.income_per_hour}/hour",
@@ -3365,7 +3470,7 @@ def do_garrison(p: Palette, conn: sqlite3.Connection, player: Player, width: int
 def draw_season_change(p: Palette, season_number: int, width: int = 78, height: int = 24) -> None:
     show_text_pages(p, "FED CRACKDOWN", [f"Fed crackdown: season {season_number} has started.",
                     "Crews and exchanges have reset; review your fresh resources.",
-                    "Back on the switchboard, read [H]Log for your crackdown receipt or [I]Scene for retained reports and medals."], width, height, onboarding=True)
+                    "Back on the switchboard, read [H] Log for your crackdown receipt or [I] Scene for retained reports and medals."], width, height, onboarding=True)
 
 
 def draw_goodbye(p: Palette, player: Player, w: int) -> None:
