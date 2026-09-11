@@ -7362,32 +7362,95 @@ callers with unused turns see their current resources and actionable job/trade r
 Help explains that newcomer protection follows preserved account age and is not
 renewed by rollover. These cues change no payout, protection, award or reset rule.
 
-**Terminal presentation (issue #362, slice 9; maintainer approved).** Scene offers
-a free Display screen with immediate ASCII-decoration, monochrome and Fast-mode
-toggles. Back writes nothing. Store one bounded boolean preference object per
-caller in world metadata; preserve it across season and competition resets and
-include it in the world backup. No competitive state or archive row is modified.
-ASCII mode changes authored box decorations while preserving caller names;
-monochrome removes styling SGR while retaining the screen controls used by the
-existing terminal UI. Every status, stake and outcome is readable without color.
-Static, compact ASCII diagrams identify exchange roles and NPC operators beside
-their actual current state. Normal action results may add a short fictional
-vignette; Fast omits optional art/flavor and keeps all stakes and net deltas.
-There are no animation delays. War Dialer launch metadata includes the optional
-boolean `unicode_style`, copied from the caller's existing NetBBS preference.
-False defaults to ASCII decorations; true or omission preserves the rich default.
-An explicit in-game ASCII choice wins. Changing monochrome/Fast alone does not
-freeze the inherited Unicode default. Unrelated doors receive no new fields;
-the existing native-door JSON boundary and supervision remain unchanged.
+**The War Dialer presentation contract (issue #494; supersedes the issue #362
+slice 9 wording).** The door is a phosphor terminal, not a page of sentences.
 
-**Screen framing and one hotkey style (issue #487).** Every screen under the
-masthead -- the switchboard, the help and first-visit text, the event log and the
-record picker -- draws its body inside the door's frame, with its title in the top
-border and the action bar outside, below it. The switchboard overhaul had left
-the masthead framed and everything under it an unindented wall of rows. The frame
-costs one row and four columns, charged to each screen's own page budget, and is
-dropped only in Fast mode, which is deliberately text-only: there is no narrower
-terminal to drop it for, since 40x12 is the floor (issue #495).
+*Palette.* Nine roles, truecolour as the design target, each with a deliberate
+256-colour index beside it rather than whatever a converter would pick:
+`phosphor` `#39ff14` (frames, your holdings, positive deltas), `phosphor-dim`
+`#1f7a3f` (frame shadow, ring links, gauge tracks), `mint` `#7dffb0` (headings,
+your handle, the cursor), `amber` `#ffb000` (money and hotkeys), `cyan`
+`#38d6ff` (NPC operators and neutral data), `magenta` `#ff3caa` (rival crews and
+raids against you), `alarm` `#ff4d4d` (losses and bust risk), `ink` `#d7ffe9`
+(values) and `grey` `#7f9a8c` (labels). A hotkey is always amber and bold. An
+exchange's owner colour is the same on the ring, in the table and in the feed.
+Chrome never shares a colour with content.
+
+*Glyph vocabulary.* Frames `┏━┓ ┃ ┗━┛ ┣━┫`; owner nodes `◆ ◈ ◉ ◇`; crew `●○`;
+turns `▮▯`; meters `█░`; sparklines `▁▂▃`; insignia and badges `⟦ ⟧`; ring links
+`═ ║`; the brand `▚`; the prompt `›`. Every one has an ASCII substitute, and the
+`ascii_art`/`plain` preset is the one place that can prove none was forgotten.
+
+*Components.* The door carries its own copy, like every other helper in its one
+self-contained file: `meter`, `pips`, `dots`, `sparkline`, `label_value`/`chip`,
+`badge`, `progress_chain`, `owner_node`, `scene_map`, `table`, `feed`, `key_bar`,
+`compose` and `prose_rows`. Each returns *styled* rows. The frame leaves a row
+that already carries SGR exactly as its component built it; wrapping every row
+through a plain-text flattener and colouring the whole line from outside is what
+turned the game into one grey block inside a green box. Rows are composed at the
+frame's own inner width, because the rows a card produces are the rows its page
+budget is computed from.
+
+*Layout.* The switchboard is a card stack, not a paragraph list: an operator card
+with a rank gauge, a resources card of meters and chips, the ten exchanges as the
+ring they actually are, the latest receipts as a toned feed, then orders and the
+season's absolute deadlines. A card's opening rule costs a row of the same height
+budget as the rows under it. Numbers are right-aligned in their column and a
+table's columns start at the same display column on every row; a table chooses
+which columns it can carry at the width it has, and everything a narrow terminal
+gives up is on the record's own card one digit away. Action bars live outside the
+frame, where the cursor waits.
+
+*Motion.* This replaces "there are no animation delays". Reveals and the carrier
+sweep that plays while a committed result comes back are in, under three hard
+limits: any key skips whatever is playing, Fast mode and the monochrome/plain
+presets omit it entirely, and nothing animates between a caller's decision and
+the commit -- a result is written to the database first and only then revealed.
+Motion is forward-only except for one row it rewrites in place and owns, so the
+screen a caller is left looking at is identical whether motion played, was
+skipped, or was never enabled.
+
+*Presets.* Scene offers a free Display screen with immediate ASCII-decoration,
+monochrome and Fast-mode toggles. Back writes nothing. Store one bounded boolean
+preference object per caller in world metadata; preserve it across season and
+competition resets and include it in the world backup. No competitive state or
+archive row is modified. ASCII mode substitutes for every glyph in the vocabulary
+while preserving caller names; monochrome removes colour at the source -- a role
+returns no SGR at all -- while retaining the screen controls the terminal UI
+needs. Every status, stake and outcome is readable without colour. Fast mode is
+the one deliberately unframed layout: it omits optional art, flavour and motion
+and keeps every stake and net delta, and its title row carries the page counter
+the border would otherwise hold. Normal action results may add a short fictional
+vignette. War Dialer launch metadata includes the optional boolean
+`unicode_style`, copied from the caller's existing NetBBS preference. False
+defaults to ASCII decorations; true or omission preserves the rich default. An
+explicit in-game ASCII choice wins. Changing monochrome/Fast alone does not
+freeze the inherited Unicode default. Unrelated doors receive no new fields; the
+existing native-door JSON boundary and supervision remain unchanged.
+
+*Review.* A screen is reviewed by looking at it. `scripts/door_gallery.py
+war_dialer` renders every screen at 80x24, 64x20 and 40x12 in every preset, and
+a change to a screen comes with that page attached. The suite can assert that
+colour reaches every body row, that hotkey, label, value and frame are four
+different colours, that an exchange reads the same colour everywhere, and that a
+table's columns do not wander -- what it can never assert is that a screen is
+worth looking at, which is why the pictures are required.
+
+**Screen framing and one hotkey style (issue #487; extended by #494).** Every
+screen under the masthead -- the switchboard, the help and first-visit text, the
+event log and the record picker -- draws its body inside the door's frame, with
+its title in the top border and the action bar outside, below it. The switchboard
+overhaul had left the masthead framed and everything under it an unindented wall
+of rows. The frame costs two rows and four columns, charged to each screen's own
+page budget, and is dropped only in Fast mode, which is deliberately text-only:
+there is no narrower terminal to drop it for, since 40x12 is the floor (issue
+#495). One frame holds a stack of cards: the screen's title goes in the top
+border and each card after the first is opened by a `┣━ HEADING ━┫` rule, which
+costs a row of the same budget as the rows under it. The border's right-hand end
+carries the page counter first -- always spelled `page N/M`, and the handle a
+scripted walk uses to know whether there is another page -- and then whatever
+else the screen wants to say, for as long as it fits whole; a counter cut in half
+tells a caller nothing, so the screen's own name is the half that truncates.
 Hotkeys are written `[K] Label` everywhere the door prints, the rule Voidrunner
 adopted in issue #400: the key is not always the label's first letter
 (`[E] Map`, `[X] Root`), so that is the only spelling that carries every case.
@@ -7395,10 +7458,11 @@ The switchboard's action bar is packed to the width it has rather than hand-type
 full labels first, short labels when the full ones would not leave the page a row
 to stand on. Every key keeps a name at every supported size; the keys-only tier
 below that went with the terminals it was for (issue #495). A key is never
-dropped. A bar written with `out_prompt` leaves its row unterminated on purpose,
-so whatever reads it has to close that row before the next screen draws; the
-first visit every caller saw had printed the Back bar and the switchboard's own
-title on one row.
+dropped. Paging shares the switchboard's prompt row rather than its action bar,
+which is already four rows of a twelve-row terminal. A bar written with
+`out_prompt` leaves its row unterminated on purpose, so whatever reads it has to
+close that row before the next screen draws; the first visit every caller saw had
+printed the Back bar and the switchboard's own title on one row.
 
 **Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
 living crew is the available crew plus the members assigned across their owned

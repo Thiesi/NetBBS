@@ -97,8 +97,22 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
     ],
     "war_dialer": [
         ("Switchboard", b""),
-        ("The scene", b"I"),
-        ("Territory map", b"E"),
+        # The switchboard is a card stack paged with [N]: at forty columns the
+        # scene and the feed are the pages after the gauges (issue #494).
+        ("Switchboard, page 2", b"N"),
+        ("Switchboard, page 3", b"NN"),
+        ("BBS scene", b"I"),
+        ("Crew insignia", b"I1"),
+        ("Neutral dossiers", b"I2"),
+        ("Scene bulletins", b"I3"),
+        ("Season results", b"I4"),
+        ("Your season reports", b"I5"),
+        # `I7` is the caller's own display screen; no other walk opens it.
+        ("Display options", b"I7"),
+        ("The scene", b"E"),
+        # A digit on the scene screen is the exchange's own number, so it opens
+        # that exchange's card wherever the table has been paged to.
+        ("Exchange card", b"E1"),
         ("Rank", b"B"),
         ("Rivals", b"V"),
         ("Log", b"H"),
@@ -106,13 +120,19 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # An action's preview is two pickers deep: the board, the approach, and
         # only then the terms the player is actually asked to accept.
         ("Job preview", b"J11"),
+        ("Job preview, terms", b"J11N"),
         ("Trade preview", b"T"),
         ("Recruit preview", b"C"),
         ("Crew development", b"S"),
+        ("Crew preview", b"S1"),
         ("Root exchange", b"X"),
+        ("Root preview", b"X1"),
         ("Garrisons", b"G"),
         ("Operations", b"O"),
+        ("Case an operation", b"O1"),
+        ("Rival recon", b"O2"),
         ("Help", b"?"),
+        ("Help, later sections", b"?N"),
     ],
 }
 
@@ -351,17 +371,28 @@ def base_fixture(door_name: str, door: pathlib.Path, root_dir: pathlib.Path,
     """
     fixture = root_dir / "fixtures" / door_name
     if fresh:
-        shutil.rmtree(fixture, ignore_errors=True)
-    if fixture.exists():
+        remove(fixture)
+    # A directory is not a fixture; a world or a saves directory inside one is.
+    # `--fresh` deletes through a tree the door's SQLite handle may still be
+    # holding, and on Windows that can take the files and leave the directory
+    # behind -- after which a bare existence check accepted a world with no
+    # schema in it and failed every panel with `no such table: meta`.
+    if any(fixture.glob("*.db")) or any(fixture.glob("saves")):
         return fixture
+    remove(fixture)
     staging = pathlib.Path(tempfile.mkdtemp(prefix="gallery-fixture-"))
     try:
         state = staging / "state"
         state.mkdir()
         # First-launch keys are the one place a key may find nothing to answer.
         capture(door, state, ONBOARDING[door_name], 80, 24, {}, expect=False)
-        fixture.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(state), str(fixture))
+        # Move the state *into* the fixture directory entry by entry rather than
+        # moving the directory itself: if Windows would not let the old fixture
+        # go, `shutil.move` treats it as a destination and nests the staging
+        # directory inside it, and every panel then opens a world with no schema.
+        fixture.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(state.iterdir()):
+            shutil.move(str(entry), str(fixture / entry.name))
     finally:
         remove(staging)
     return fixture

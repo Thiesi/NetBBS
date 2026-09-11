@@ -4861,6 +4861,59 @@ resizes loses nothing. `scripts/door_gallery.py` renders every screen at every
 supported size into one page, and is how a presentation change is reviewed --
 the suite can assert that a screen fits, never that it looks like anything.
 
+**Colour has to reach the body row, and that is a structural property, not a
+coat of paint (issue #494).** War Dialer's screens used to be built as plain
+sentences, wrapped by a flattener that stripped ANSI by construction, and then
+coloured one colour per row from outside the frame -- so nothing inside a row
+could ever be a different colour from anything else, and the whole game read as
+one grey block inside a green box. The fix is that a component returns *styled*
+rows and the frame leaves a row that already carries SGR exactly as it arrived.
+Three invariants hold it in place, and each one is a test that can fail:
+
+- Every body row a screen prints carries at least one SGR sequence. Check the
+  row *between* the frame's sides: a screen that is grey inside a green box
+  passes any assertion that looks at the whole row.
+- A hotkey, a label, a value and the frame are four different colours, and an
+  exchange's owner colour is the same on the ring, in the table and in the feed,
+  because one function (`owner_node`) decides it for all three.
+- Segments are composed independently and each closes its own style. An SGR
+  reset does not restore an outer colour, so passing an already-styled value
+  into a helper that wraps it in another colour colours its head and then loses
+  the colour entirely at the first internal reset. `label_value` and `table`
+  detect an already-styled argument and leave it alone for exactly this reason;
+  a styled table cell also cannot be truncated (the cut would land inside an
+  escape sequence), so its own width is the floor its column can shrink to.
+
+**Rows are composed at the width the page budget was computed from.** A card
+builds its rows with `compose`, which breaks *between* styled chunks, never
+inside a gauge or a chip; `table` fits its columns; `prose_rows` wraps. The frame
+clips an over-wide row rather than wrapping it, deliberately: a row that silently
+became two would break the height budget already spent on it, and a frame with
+one side missing is the worse failure. A card's opening rule costs a row of the
+same budget as the rows under it -- a frame that draws rules nobody charged for
+overflows its terminal by exactly the number of cards on the screen.
+
+**Motion is allowed, under limits that keep it out of the way (issue #494).**
+It runs strictly after the commit, it is forward-only apart from one row it
+clears the screen for and owns, and any key skips it -- which means the beat
+between frames is a *read* with a timeout, not a sleep, so the keystroke that
+interrupts it is consumed as the skip instead of being left in the buffer to act
+as a hotkey on the screen underneath. Two traps: a carriage-return-rewritten row
+looks like one enormous row to anything that splits output on `\r\n` only (the
+visible row is what follows the last `\r`, which is why each frame is padded to
+a constant width), and motion written *under* the screen the caller pressed a key
+at spends rows that screen's height budget already owns.
+
+**A test that drives the door by reading its own output has to read what a caller
+reads.** Once a bar is styled segment by segment, `[A] Act` is a hotkey in amber
+followed by a label in mint and is no longer a contiguous run of bytes on the
+wire; a scripted walk that matched raw bytes silently stopped finding it and
+looped on the page it was already on. Both harnesses strip SGR before matching --
+the in-process one with `_last_screen`, the subprocess one with a byte-offset
+index so the raw bytes consumed are still tracked exactly -- and a walk that has
+to accept a preview presses Next until the Act bar appears rather than assuming
+the stakes fit on one page.
+
 Paged Voidrunner screens measure their capacity with `page_capacity` -- the
 content column is `_page_content_width()`, the box interior less its indent and
 gutter, and the overhead comes from `_page_header_rows` (one row when the header
