@@ -957,6 +957,7 @@ def inventory_wanted_ids(
     requested_boards: dict[str, list[str]],
     requested_channels: dict[str, list[str]],
     requested_file_areas: dict[str, list[str]],
+    already_accepted: set[str],
 ) -> list[str]:
     """
     The *reverse* of the three `*_event_diff` functions above, and the
@@ -975,10 +976,26 @@ def inventory_wanted_ids(
     `_all_board_events`/`_all_channel_events`/`_all_file_area_events`
     yields the answer directly.
 
+    `already_accepted` is `LinkNode.known_event_ids` -- the dedup set,
+    and the only complete answer to "would receiving this again be a
+    no-op?" (Codex review of #498). The three `_all_*_events` helpers
+    read *materialized* state and return nothing at all for a resource
+    whose local row is absent, which is not the same as not having the
+    events: this node accepts and persists a `board_genesis` whose
+    `materialize_carried_board` it then refuses on `max_carried_boards`
+    (§13.9), and the same for channels and file areas. Without this set,
+    every event in such a resource stays wanted forever, the requester
+    re-pushes the same page of them every pass, and anything sorted
+    after that resource -- its channels, its file areas -- is never
+    reached. A SysOp who deliberately sets a small carry quota hits this
+    on the next resource, not at some theoretical ceiling.
+
     Declared resources this node does not carry at all are included, not
     skipped: that is how a peer which has never seen a board/channel/
     file area still receives its genesis by push, the way the old
-    unbounded push loop delivered one. Nothing here decides whether the
+    unbounded push loop delivered one. That is a different case from the
+    one above -- there, nothing has been accepted yet, so wanting it is
+    correct. Nothing here decides whether the
     requester will actually send a given event -- the push side still
     only ever sends what it *originated* (§8.8's "no relay from a
     stranger" scope note), and anything else in this list simply goes
@@ -1015,7 +1032,7 @@ def inventory_wanted_ids(
         for resource_id in sorted(requested):
             held = set(all_events(db, resource_id))
             for content_id in requested[resource_id]:
-                if content_id in held or content_id in seen:
+                if content_id in held or content_id in already_accepted or content_id in seen:
                     continue
                 seen.add(content_id)
                 wanted.append(content_id)

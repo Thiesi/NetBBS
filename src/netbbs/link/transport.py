@@ -1840,6 +1840,7 @@ class LinkServer:
             requested_boards=inventory_request.boards,
             requested_channels=inventory_request.channels,
             requested_file_areas=inventory_request.file_areas,
+            already_accepted=self._node.known_event_ids,
         )
         return web.json_response(
             {"events": events, "more_available": more_available, "wanted": wanted}

@@ -1250,6 +1250,7 @@ def test_inventory_wanted_ids_returns_only_declared_ids_this_node_lacks(tmp_path
         requested_boards={"remote-board-id": [genesis.content_id, absent_post.content_id]},
         requested_channels={},
         requested_file_areas={},
+        already_accepted=set(),
     )
 
     assert wanted == [absent_post.content_id]
@@ -1272,6 +1273,7 @@ def test_inventory_wanted_ids_asks_for_everything_in_a_resource_this_node_does_n
         requested_boards={"remote-board-id": [genesis.content_id]},
         requested_channels={},
         requested_file_areas={},
+        already_accepted=set(),
     )
 
     assert wanted == [genesis.content_id]
@@ -1300,6 +1302,7 @@ def test_inventory_wanted_ids_is_not_truncated_to_a_page(tmp_path):
         requested_boards={"remote-board-id": declared},
         requested_channels={},
         requested_file_areas={},
+        already_accepted=set(),
     )
 
     assert wanted == declared
@@ -1334,7 +1337,36 @@ def test_inventory_wanted_ids_spans_channels_and_file_areas_too(tmp_path):
         requested_boards={},
         requested_channels={"remote-channel-id": [channel_genesis.content_id]},
         requested_file_areas={"remote-area-id": [area_genesis.content_id]},
+        already_accepted=set(),
     )
 
     assert wanted == [channel_genesis.content_id, area_genesis.content_id]
+    db.close()
+
+
+def test_inventory_wanted_ids_skips_events_already_accepted_without_a_local_row(tmp_path):
+    """Codex review of #498: `_all_*_events` reads materialized state, so
+    a resource whose local row was refused (`max_carried_boards` and its
+    channel/file-area counterparts) looks like one this node has nothing
+    for -- even though the events were accepted and persisted. The dedup
+    set is what makes the answer honest; without it every event in such
+    a resource is wanted on every pass, forever."""
+    from netbbs.link.store import inventory_wanted_ids
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_genesis_for_store_tests(remote_identity)
+    post = _remote_post_for_store_tests(remote_identity)
+
+    # No `boards` row at all -- exactly what a carry-limit refusal leaves
+    # behind, with the events themselves already accepted.
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={"remote-board-id": [genesis.content_id, post.content_id]},
+        requested_channels={},
+        requested_file_areas={},
+        already_accepted={genesis.content_id, post.content_id},
+    )
+
+    assert wanted == []
     db.close()

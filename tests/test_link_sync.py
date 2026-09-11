@@ -40,9 +40,10 @@ def _hello_for(node: LinkNode, *, created_at: str = "2026-01-01T00:00:00+00:00")
     return node.build_hello(addresses=None, outgoing_only=True, created_at=created_at)
 
 
-async def _run_server(node: LinkNode, lane: DatabaseLane) -> LinkServer:
+async def _run_server(node: LinkNode, lane: DatabaseLane, **kwargs) -> LinkServer:
     server = LinkServer(
-        host="127.0.0.1", port=0, node=node, own_hello_provider=lambda: _hello_for(node), lane=lane
+        host="127.0.0.1", port=0, node=node, own_hello_provider=lambda: _hello_for(node), lane=lane,
+        **kwargs,
     )
     await server.start()
     return server
@@ -2073,6 +2074,80 @@ def test_sync_push_keeps_room_for_resource_events_behind_a_long_rotation_history
         asyncio.run(scenario())
         pushed = {content_id for call in calls for content_id in call}
         assert genesis.content_id in pushed
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_push_is_not_pinned_by_a_resource_the_seed_refused_to_carry(tmp_path, monkeypatch):
+    """Codex review of #498, the end-to-end shape. The seed carries no
+    boards at all (`max_carried_boards=0`), so it accepts the dialer's
+    `board_genesis` and posts into protocol state and refuses only the
+    local materialization -- leaving no `boards` row for
+    `_all_board_events` to read.
+
+    Boards are walked before file areas, so while those accepted-but-
+    unmaterialized events stayed "wanted" they filled the push page on
+    every pass and the dialer's own file descriptor was never sent.
+    `MAX_EVENTS_PER_REQUEST` is lowered so one board's worth of posts
+    exceeds a page without needing hundreds of them."""
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import upload_file
+    from netbbs.link.files import link_file_area, queue_file_descriptor_if_linked
+    import netbbs.link.sync as sync_module
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    link_board(dialer.db, board, node_identity=dialer_identity)
+    for i in range(12):
+        queue_board_post_if_linked(
+            dialer.db, create_post(dialer.db, board, creator, f"post {i}", "body"), board,
+            node_identity=dialer_identity,
+        )
+
+    area = create_file_area(dialer.db, "downloads", creator=creator)
+    entry = upload_file(dialer.db, area, creator, "game.bin", b"contents")
+    link_file_area(dialer.db, area, node_identity=dialer_identity)
+    own_descriptor = queue_file_descriptor_if_linked(
+        dialer.db, entry, area, node_identity=dialer_identity
+    )
+
+    monkeypatch.setattr(sync_module, "MAX_EVENTS_PER_REQUEST", 5)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane, max_carried_boards=0)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=0.05,
+                    )
+                )
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 20.0
+                while (
+                    own_descriptor.content_id not in seed_node.known_event_ids
+                    and loop.time() < deadline
+                ):
+                    await asyncio.sleep(0.05)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert own_descriptor.content_id in seed_node.known_event_ids
     finally:
         dialer.close()
         seed.close()
