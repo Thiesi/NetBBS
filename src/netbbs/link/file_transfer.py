@@ -120,9 +120,20 @@ def get_or_create_transfer(
     The requester's own row tracking a fetch of `remote_file` -- created
     once, on first request, and found again (unchanged) on every
     subsequent call for the same `(remote_file, requester_fingerprint)`
-    pair, since `transfer_id` is deterministic. A file with `size_bytes
-    == 0` starts (and immediately reports) `'completed'` with no chunk
-    ever requested -- there is nothing to fetch.
+    pair, since `transfer_id` is deterministic.
+
+    An empty file is fetched like any other, one round trip for its one
+    empty chunk (Codex review of #500). Short-circuiting it to
+    `'completed'` at creation looked harmless -- there are no bytes to
+    move -- but `'completed'` is the state `_finalize_transfer` produces,
+    and nothing had produced it: no `files` row, no `fetched_file_id`, so
+    the caller was told the file was "fetched and verified, available via
+    /download now" when nothing had been fetched and nothing was
+    downloadable. It also meant an empty file never reached its origin at
+    all, so a withdrawal (§11.2) could not be delivered for one and its
+    catalogue entry stayed phantom forever. `build_chunk_for_serving`
+    already serves chunk 0 of a zero-byte file, so this needs nothing new
+    on the serving side.
 
     Raises `FileTransferError` if `remote_file`'s catalogue row is gone
     (Codex review of #500). `remote_file` is a snapshot a caller picked
@@ -150,7 +161,7 @@ def get_or_create_transfer(
         )
 
     now = utc_now_iso()
-    status = "completed" if remote_file.size_bytes == 0 else "in_progress"
+    status = "in_progress"
     db.connection.execute(
         """
         INSERT INTO link_file_transfers

@@ -130,6 +130,7 @@ from netbbs.link.file_transfer import (
     apply_received_chunk,
     build_chunk_for_serving,
     get_or_create_transfer,
+    get_transfer,
 )
 from netbbs.link.files import (
     FileAreaCarryLimitError,
@@ -2520,9 +2521,19 @@ async def fetch_next_file_chunk(
             node, session, base_url, chunk_request, timeout=timeout
         )
     except RemoteFileWithdrawnError as exc:
-        await _withdraw_if_the_origin_really_said_so(
+        withdrawn = await _withdraw_if_the_origin_really_said_so(
             node, lane, remote_file, transfer.transfer_id, exc
         )
+        if not withdrawn:
+            # The entry survived a verified withdrawal, which happens for
+            # exactly one reason: another session finished fetching this
+            # file while the withdrawal was in flight, so the bytes are
+            # local now (Codex review of #500). Re-raising here would tell
+            # the caller their fetch failed and the entry was removed, and
+            # both halves of that would be false.
+            completed = await lane.run(get_transfer, transfer.transfer_id)
+            if completed is not None and completed.status == "completed":
+                return completed
         raise
 
     if descriptor.payload.get("file_id") != remote_file.file_id or descriptor.payload.get("chunk_index") != chunk_index:
@@ -2559,7 +2570,7 @@ async def fetch_next_file_chunk(
 async def _withdraw_if_the_origin_really_said_so(
     node: LinkNode, lane: DatabaseLane, remote_file: RemoteFile, transfer_id: str,
     exc: "RemoteFileWithdrawnError",
-) -> None:
+) -> bool:
     """Design doc §11.2, issue #479: drop `remote_file`'s catalogue entry
     -- but only once the withdrawal proves it came from the file's own
     origin, answering *this* request, now.
@@ -2585,10 +2596,15 @@ async def _withdraw_if_the_origin_really_said_so(
 
     Only then the signature, against the origin's *current* signing key.
     Any failure raises `LinkProtocolError` and changes nothing.
+
+    Returns whether the catalogue entry was actually removed. `False`
+    means a verified withdrawal was deliberately not applied -- the entry
+    is already fetched, so the bytes are local and staying -- which the
+    caller has to tell apart from a removal before reporting anything.
     """
     origin_peer = node.peers.get(remote_file.origin_fingerprint)
     if origin_peer is None:
-        return
+        return False
     payload = exc.withdrawal.payload
     if payload.get("file_id") != remote_file.file_id:
         raise LinkProtocolError(
@@ -2632,7 +2648,7 @@ async def _withdraw_if_the_origin_really_said_so(
             f"file_withdrawal from origin {remote_file.origin_fingerprint} does not verify "
             "against its current signing key"
         )
-    await lane.run(withdraw_remote_file, remote_file)
+    return await lane.run(withdraw_remote_file, remote_file)
 
 
 def dialable_base_urls_for_peer(node: LinkNode, fingerprint: str) -> list[str]:

@@ -20,6 +20,7 @@ from netbbs.auth.users import create_user
 from netbbs.files.areas import create_file_area
 from netbbs.files.entries import upload_file
 from netbbs.link.file_transfer import (
+    FileNoLongerHeldError,
     FileTransferError,
     apply_received_chunk,
     build_chunk_for_serving,
@@ -125,11 +126,59 @@ def test_get_or_create_transfer_is_idempotent(origin_db, puller_db, origin_ident
     assert first.id == second.id
 
 
-def test_zero_byte_file_starts_completed(origin_db, puller_db, origin_identity, puller_identity):
+def test_zero_byte_file_is_fetched_rather_than_declared_complete(
+    origin_db, puller_db, origin_identity, puller_identity
+):
+    """Codex review of #500. An empty file used to be marked `completed`
+    the moment its transfer row was created -- no round trip, and
+    crucially no `_finalize_transfer`, so no `files` row and no
+    `fetched_file_id`. The caller was told the file had been fetched and
+    verified and was available via /download, and none of that was true.
+
+    It now takes the ordinary path for its one empty chunk, which is what
+    produces real local state -- and what lets an origin deliver a
+    withdrawal for an empty file at all (§11.2)."""
+    from netbbs.files.entries import download_file, get_file
+    from netbbs.link.files import get_remote_file
+
     entry, remote_file = _linked_remote_file(origin_db, puller_db, origin_identity, puller_identity, content=b"")
     transfer = get_or_create_transfer(puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint)
+    assert transfer.status == "in_progress"
+    assert transfer.next_chunk_index == 0
+
+    transfer = _drive_transfer(
+        origin_db, puller_db, remote_file,
+        requester_fingerprint=puller_identity.fingerprint, chunk_size=100_000,
+    )
     assert transfer.status == "completed"
-    assert transfer.next_chunk_index is None
+    assert get_remote_file(puller_db, remote_file.file_id).fetched_file_id == entry.file_id
+    assert download_file(get_file(puller_db, entry.file_id)) == b""
+
+
+def test_zero_byte_file_can_be_withdrawn_by_its_origin(
+    origin_db, puller_db, origin_identity, puller_identity
+):
+    """The half of the same defect this issue is actually about: an empty
+    file that never reached its origin could never be told the origin had
+    dropped it, so its catalogue entry stayed phantom permanently."""
+    from netbbs.files.entries import delete_file
+
+    _entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=b""
+    )
+    transfer = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint
+    )
+    assert transfer.status == "in_progress"
+
+    # The origin drops the file before the one chunk is asked for.
+    origin_db.connection.execute("DELETE FROM files WHERE file_id = ?", (remote_file.file_id,))
+    origin_db.connection.commit()
+
+    with pytest.raises(FileNoLongerHeldError):
+        build_chunk_for_serving(
+            origin_db, file_id=remote_file.file_id, chunk_index=0, max_chunk_size=transfer.chunk_size,
+        )
 
 
 def test_full_transfer_across_multiple_chunks_reassembles_correctly(
