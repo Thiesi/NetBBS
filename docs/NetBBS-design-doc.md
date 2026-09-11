@@ -4766,8 +4766,14 @@ here since #172 is self-contained):
   configured grace, SIGKILL, then a deadline after which an unkillable
   process is abandoned rather than delaying node shutdown — and services
   stop before listeners and background tasks. NetBBS supervises the process
-  only; installing it, and everything it owns on disk, stays the operator's,
-  exactly as for the door itself;
+  only; installing it stays the operator's, exactly as for the door itself.
+  A door's installation directory is outside the node's own state and is not
+  backed up by default, because it is operator-owned and unbounded in size; a
+  node-level setting includes every door's installation in each backup for an
+  operator who wants one artifact holding everything. Capture only — restore
+  never writes such a directory back, since putting a game installation back
+  over a live one is a deliberate operator action, not part of restoring node
+  state;
 - door output (stdout) is trusted and relayed unmodified, like a SysOp's
   own welcome-banner file, not run through the chat/post sanitizer —
   NetBBS provides the interface and best-effort abuse prevention within

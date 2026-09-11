@@ -81,6 +81,8 @@ from netbbs.backup import (
     BackupError,
     create_backup,
     default_backup_destination,
+    door_installs_included,
+    set_door_installs_included,
     voidrunner_save_directory,
     get_last_backup_summary,
 )
@@ -4776,6 +4778,20 @@ async def _backup_status_screen(
             "War Dialer: includes existing node-default and registered override worlds. "
             "Close War Dialer sessions before backup; restore requires explicit world destinations."
         )
+        installs_on = await lane.run(door_installs_included)
+        await session.write_line(
+            colored("Door installation directories: ", fg_color=LABEL_COLOR)
+            + colored("included" if installs_on else "not included", fg_color=METADATA_COLOR)
+        )
+        await session.write_line(
+            "Each door's own game installation, which NetBBS otherwise leaves to you. "
+            "Off by default: these are operator-owned and can be far larger than node state. "
+            "Captured as a copy only -- restore never writes back over a live installation."
+            if not installs_on else
+            "Every registered door's game installation is copied into each backup. "
+            "Backups will be larger and slower; restore never writes these back over a live "
+            "installation, so recover them with ordinary file tools."
+        )
 
         if not can_create:
             await session.write_line(
@@ -4794,7 +4810,9 @@ async def _backup_status_screen(
         await session.write_line(
             "\r\n"
             + action_bar(
-                [menu_key("C", "reate backup now"), menu_key("B", "ack")],
+                [menu_key("C", "reate backup now"),
+                 menu_key("D", "oor installations: " + ("on" if installs_on else "off")),
+                 menu_key("B", "ack")],
                 width=session.terminal_width,
             )
         )
@@ -4803,6 +4821,30 @@ async def _backup_status_screen(
         if choice == "b":
             await session.write_line("")
             return
+        if choice == "d":
+            await session.write_line("")
+            wanted = not installs_on
+            await session.write_line(
+                "Including them copies every registered door's whole game installation into each "
+                "backup. Check you have the space, and that nothing in those directories is a "
+                "symlink to host data you would not want copied."
+                if wanted else
+                "Excluding them returns to backing up node state only. Existing backups are "
+                "unchanged; keep your own copies of door installations."
+            )
+            if await prompt_yes_no(
+                session,
+                f"{'Include' if wanted else 'Exclude'} door installation directories in backups?",
+                default=False,
+            ):
+                await lane.run(set_door_installs_included, wanted)
+                await lane.run(
+                    lambda db: record_action(
+                        db, actor=actor, action="backup_door_installs",
+                        detail=f"door installation directories {'included' if wanted else 'excluded'}",
+                    )
+                )
+            continue
         if choice != "c":
             await session.write(reject_unhandled_key(choice))
             continue

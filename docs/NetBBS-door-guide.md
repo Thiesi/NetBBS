@@ -1532,9 +1532,37 @@ services stop concurrently, so the step costs the longest single grace rather
 than their sum, and it can never delay node shutdown indefinitely.
 
 **MANUAL — outside NetBBS:** installing the service's program and its
-runtime, and everything about its own persistent data. NetBBS supervises the
-process; it does not install, update or back up what that process owns. Back
-up a door's installation directory yourself, as with any other door.
+runtime. NetBBS supervises the process; it does not install or update what
+that process owns.
+
+### Backing up door installations
+
+By default a NetBBS backup covers the node's own state — database, identity,
+files, banners, and the bundled games' worlds — and leaves each door's
+installation directory to you, because that directory is an operator-owned
+game installation which can be far larger than everything else combined.
+
+**SysOp → Operations → Backup → [D]oor installations** turns that off or on
+for this node. With it on, every registered door's installation directory is
+copied into each backup. Understand what changes before enabling it:
+
+- backups get larger and slower, in proportion to your game installations;
+- a directory shared by two doors is copied once, and one nested inside
+  another already being copied is not copied again;
+- symlinks are copied as symlinks rather than followed, so a link pointing
+  out of the installation does not pull unrelated host data into the backup —
+  but check your installations for links you would rather not carry along;
+- a door whose installation directory is missing or unreadable **fails the
+  backup**, naming that door. Silently omitting data you asked to keep would
+  be worse. Fix the directory, correct the door, or turn the option back off;
+- these directories are recorded by file count and size rather than
+  per-file checksums, unlike node state.
+
+**Restore never writes them back.** They are captured as a copy so you have
+one; putting a game installation back is an ordinary file-copy operation you
+perform deliberately, not something a node restore should do over a live
+installation. Find them under `door-installs/` inside the backup, with each
+directory's original path recorded in `manifest.json`.
 
 ## DOS prerequisites
 

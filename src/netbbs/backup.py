@@ -116,6 +116,7 @@ _FILES_DIRNAME = "files"
 _IDENTITY_DIRNAME = "identity"
 _VOIDRUNNER_DIRNAME = "voidrunner"
 _WAR_DIALER_DIRNAME = "war-dialer"
+_DOOR_INSTALLS_DIRNAME = "door-installs"
 _WAR_DIALER_MAX_WORLDS = 64
 _WAR_DIALER_MAX_BYTES = 512 * 1024 * 1024
 _VOIDRUNNER_MAX_FILES = 10_000
@@ -470,6 +471,94 @@ def _validate_voidrunner_component(source: Path, manifest: dict) -> bool:
     return True
 
 
+#: Opt-in: whether a backup also copies each door's installation directory.
+#: Off by default and deliberately so -- those directories are operator-owned
+#: game installations outside NetBBS's own state, they can be arbitrarily
+#: large, and including them changes what a backup costs for every door.
+DOOR_INSTALLS_CONFIG_KEY = "backup_door_installs"
+
+
+def door_installs_included(db) -> bool:
+    from netbbs.config import get_config
+    return get_config(db, DOOR_INSTALLS_CONFIG_KEY, "0") == "1"
+
+
+def set_door_installs_included(db, included: bool) -> None:
+    from netbbs.config import set_config
+    set_config(db, DOOR_INSTALLS_CONFIG_KEY, "1" if included else "0")
+    db.connection.commit()
+
+
+def _door_install_sources(db_path: Path) -> list[tuple[str, Path]]:
+    """Each door's installation directory, read-only, when the SysOp opted in.
+
+    Returns (door name, directory) pairs. Directories are de-duplicated by
+    resolved path, and one nested inside another already being captured is
+    dropped rather than copied twice.
+    """
+    from netbbs.doors.registry import list_doors
+    node = db_path.resolve()
+    connection = sqlite3.connect(node.as_uri() + "?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        db = SimpleNamespace(path=node, connection=connection)
+        if not door_installs_included(db):
+            return []
+        found: list[tuple[str, Path]] = []
+        for door in list_doors(db):
+            if door.profile is None or not door.profile.install_dir:
+                continue
+            directory = Path(door.profile.install_dir).resolve()
+            if not directory.is_dir():
+                raise BackupError(
+                    f"Door {door.name!r} has installation directory {directory}, which does not exist. "
+                    "Create it, correct the door, or turn off backing up door installation directories.")
+            if not os.access(directory, os.R_OK | os.X_OK):
+                raise BackupError(
+                    f"Cannot read door {door.name!r}'s installation directory {directory}. "
+                    "Fix its permissions, or turn off backing up door installation directories.")
+            found.append((door.name, directory))
+    except (ValueError, OSError, RuntimeError, sqlite3.Error) as exc:
+        raise BackupError(f"Cannot discover door installation directories: {exc}") from exc
+    finally:
+        connection.close()
+    unique: list[tuple[str, Path]] = []
+    for name, directory in sorted(found, key=lambda pair: str(pair[1])):
+        if any(directory == kept or directory.is_relative_to(kept) for _, kept in unique):
+            continue
+        unique.append((name, directory))
+    return unique
+
+
+def _capture_door_installs(db_path: Path, destination: Path) -> dict | None:
+    """Copy opted-in door installations verbatim beside the node's own state.
+
+    Symlinks are copied as symlinks rather than followed: a game installation
+    is operator-owned content, and following a link out of it would pull
+    unrelated host data into the backup.
+
+    Recorded by file count and total size rather than per-file checksums --
+    these trees are not node state NetBBS can validate or restore, and a large
+    installation would otherwise bloat the manifest with thousands of entries.
+    """
+    sources = _door_install_sources(db_path)
+    if not sources:
+        return None
+    output = destination / _DOOR_INSTALLS_DIRNAME
+    output.mkdir()
+    captured = []
+    for index, (name, directory) in enumerate(sources, 1):
+        if destination.resolve() == directory or destination.resolve().is_relative_to(directory):
+            raise BackupError(
+                f"A backup destination cannot be inside door {name!r}'s installation directory {directory}.")
+        target = output / str(index)
+        shutil.copytree(directory, target, symlinks=True)
+        files = [path for path in target.rglob("*") if path.is_file() and not path.is_symlink()]
+        captured.append({"key": str(index), "door_name": name, "source_path": str(directory),
+                         "file_count": len(files), "total_bytes": sum(path.stat().st_size for path in files)})
+    return {"version": 1, "installations": captured}
+
+
 def _war_dialer_sources(db_path: Path) -> list[Path]:
     """Discover registered overrides plus a retained node-default world, read-only."""
     from netbbs.doors.registry import list_doors
@@ -633,6 +722,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
     try:
         game_metadata = _capture_voidrunner(game_source, destination, checksums)
         war_metadata = _capture_war_dialer(db_path, destination, checksums)
+        door_metadata = _capture_door_installs(db_path, destination)
     except BaseException as exc:
         # This call created the fresh destination; no prior backup is removed.
         # A rejected active session or bad file must allow retry at the same path.
@@ -685,6 +775,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         "checksums": checksums,
         "voidrunner": game_metadata,
         "war_dialer": war_metadata,
+        "door_installs": door_metadata,
     }
     _validate_war_dialer_component(destination, manifest)
     (destination / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2))
