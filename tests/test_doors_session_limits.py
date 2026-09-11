@@ -86,7 +86,7 @@ def test_door_with_no_wall_limit_runs_to_its_own_exit(db, lane, player, tmp_path
 @pytest.mark.parametrize("cpu_seconds", [77, 0])
 def test_profile_cpu_seconds_reaches_the_door_process(cpu_seconds, db, lane, player, tmp_path):
     script = _write_script(tmp_path, "report_cpu.py",
-                           "import resource,sys; sys.stdout.write(str(resource.getrlimit(resource.RLIMIT_CPU)[0]))")
+                           "import resource,sys; sys.stdout.write('%s %s' % resource.getrlimit(resource.RLIMIT_CPU))")
     door = create_door(db, f"CPU {cpu_seconds}", sys.executable, args=(str(script),), creator=player,
                        profile=DoorProfile(install_dir=str(tmp_path), cpu_seconds=cpu_seconds))
 
@@ -94,9 +94,11 @@ def test_profile_cpu_seconds_reaches_the_door_process(cpu_seconds, db, lane, pla
     result = asyncio.run(_run(session, lane, door, player, wall_time_limit_seconds=30))
 
     assert result.reason == "exited"
-    reported = session.written.decode()
+    soft, hard = (int(value) for value in session.written.decode().split())
     if cpu_seconds:
-        assert reported == "77"
+        assert soft == 77
     else:
-        # Zero must leave the inherited limit alone, not set a limit of zero.
-        assert reported != "0"
+        # Zero is an opt-out, so the soft limit is raised as far as permitted.
+        # Merely omitting the limit would inherit whatever this process runs
+        # under, which is not what the screen and the guide promise.
+        assert soft == hard

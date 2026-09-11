@@ -87,6 +87,8 @@ async def _play_until_resized(session, lane, door, player):
                 await asyncio.sleep(0.01)
             session.terminal_width, session.terminal_height = 132, 50
             while b"SIZE" not in session.written:
+                if b"NOSIGNAL" in session.written:
+                    pytest.fail("the door was never woken: the resize signal did not arrive")
                 if task.done():
                     pytest.fail(f"door never saw the resize: {bytes(session.written)!r}")
                 await asyncio.sleep(0.01)
@@ -108,6 +110,12 @@ def test_opted_in_stdio_door_is_woken_and_reads_the_new_size(db, lane, player, t
         deadline = time.time() + 20
         while not seen and time.time() < deadline:
             time.sleep(0.05)
+        if not seen:
+            # Never report a geometry we were not woken for. The metadata file
+            # is rewritten either way, so printing it regardless would let a
+            # removed SIGUSR1 send keep passing this test.
+            sys.stdout.write("NOSIGNAL\\n"); sys.stdout.flush()
+            raise SystemExit(9)
         info = json.load(open(os.environ["NETBBS_DOOR_INFO"]))
         sys.stdout.write("SIZE %s %s\\n" % (info["terminal_width"], info["terminal_height"]))
         sys.stdout.flush()
@@ -128,6 +136,11 @@ def test_pty_door_sees_the_new_window_size_on_its_own_terminal(db, lane, player,
         deadline = time.time() + 20
         while not seen and time.time() < deadline:
             time.sleep(0.05)
+        if not seen:
+            # A correct size read from the terminal proves nothing on its own;
+            # without the signal this test must fail, not report the geometry.
+            sys.stdout.write("NOSIGNAL\\n"); sys.stdout.flush()
+            raise SystemExit(9)
         rows, cols = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\\0" * 8))[:2]
         sys.stdout.write("SIZE %d %d\\n" % (cols, rows)); sys.stdout.flush()
     """)

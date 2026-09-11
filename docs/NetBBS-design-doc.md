@@ -4732,9 +4732,21 @@ here since #172 is self-contained):
   a live protocol: static session metadata (handle, stable numeric user
   ID, terminal width/height, color-depth capability, node name) written
   before spawn; stdio is pure raw passthrough for the session's
-  duration, with no framing or control messages interleaved; no live
-  terminal-resize propagation (matches every classic door's own static
-  80x24-era assumption); exit code is the only completion signal;
+  duration, with no framing or control messages interleaved; exit code
+  is the only completion signal;
+- terminal size is followed for the duration of a run (issue #468),
+  without interleaving anything into that passthrough stream. A PTY
+  door's own terminal is resized and its group signalled with
+  `SIGWINCH`, exactly as any full-screen program already expects. A
+  stdio or socket door is notified only if its profile opts in, by
+  republishing the same static metadata file with the new geometry and
+  signalling the door leader with `SIGUSR1`; opt-in because that
+  signal's default action terminates a process which does not handle
+  it. A profile which pins width/height, a DOS door and a remote
+  service are each left alone. This supersedes v1's original "no live
+  terminal-resize propagation" rule, which matched every classic door's
+  static 80x24-era assumption; the metadata itself stays a file rather
+  than becoming a live protocol;
 - door output (stdout) is trusted and relayed unmodified, like a SysOp's
   own welcome-banner file, not run through the chat/post sanitizer —
   NetBBS provides the interface and best-effort abuse prevention within

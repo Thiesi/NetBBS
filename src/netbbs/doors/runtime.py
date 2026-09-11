@@ -279,7 +279,11 @@ async def _forward_resize(session, proc, info_path, info, *, pty_fd=None, signal
                 # controlling terminal.
                 os.killpg(proc.pid, signal.SIGWINCH)
             elif signal_door:
-                os.killpg(proc.pid, signal.SIGUSR1)
+                # The leader only, never the process group: SIGUSR1 terminates
+                # a process which does not handle it, and only the door itself
+                # opted in. Helper processes it spawned did not, and killing
+                # them on the caller's first resize would break the game.
+                os.kill(proc.pid, signal.SIGUSR1)
         except OSError:
             # The door or its terminal is gone. Ending the run is the relay's
             # job, not this task's; stop following rather than report.
@@ -431,12 +435,12 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             if os.name == "posix":
                 limits = {"RLIMIT_AS": profile.memory_mb * 1024 * 1024 if profile else DOOR_MEMORY_LIMIT_BYTES,
                           "RLIMIT_NPROC": DOOR_MAX_PROCESSES}
-                # A profile may remove the CPU ceiling outright (0); omitting the
-                # key leaves the inherited soft limit rather than setting zero,
-                # which would kill the door on its first scheduler tick.
-                cpu_seconds = profile.cpu_seconds if profile else DOOR_CPU_LIMIT_SECONDS
-                if cpu_seconds:
-                    limits["RLIMIT_CPU"] = cpu_seconds
+                # A profile may remove the CPU ceiling outright (0). That is sent
+                # as null, not as zero -- a limit of zero would kill the door on
+                # its first scheduler tick, and simply omitting the key would
+                # leave whatever soft limit this service inherited, which is not
+                # what the screen and the guide promise.
+                limits["RLIMIT_CPU"] = (profile.cpu_seconds if profile else DOOR_CPU_LIMIT_SECONDS) or None
                 setup = {"pty": kind == "pty", "limits": limits}
                 argv = [sys.executable, "-I", str(Path(__file__).with_name("launcher.py")), json.dumps(setup), *argv]
             kwargs = {"start_new_session": True, "pass_fds": pass_fds} if os.name == "posix" else {}

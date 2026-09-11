@@ -1371,6 +1371,11 @@ the emulator, game and NetBBS itself must not run as root.
    else until you restart the node. With no CPU limit a runaway door is bounded
    only by the wall-clock limit. Do not remove both at once on a door you have
    not watched run.
+
+   Removing the CPU ceiling raises the door's soft limit to the hard limit the
+   service account is permitted, rather than simply leaving NetBBS's own. If
+   your service runs under a login class or unit file which sets a hard CPU
+   limit, that hard limit still applies and `0` cannot exceed it.
 5. **Check setup** reports static problems. For DOS, run **Emulator capability
    probe** to verify headless startup, inherited COM1, CP437 echo and optional
    FOSSIL using NetBBS's own fixture, without launching the game. It requires

@@ -18,7 +18,14 @@ def main():
     for name, value in setup["limits"].items():
         kind = getattr(resource, name)
         _, hard = resource.getrlimit(kind)
-        value = min(value, hard) if hard != resource.RLIM_INFINITY else value
+        if value is None:
+            # An explicit "no ceiling". The parent's own soft limit would
+            # otherwise be inherited, so a service started under one (a NetBSD
+            # login class, say) would still cap a door which asked for none.
+            # The hard limit is as far as an unprivileged process may raise it.
+            value = hard
+        else:
+            value = min(value, hard) if hard != resource.RLIM_INFINITY else value
         resource.setrlimit(kind, (value, value))
     argv = sys.argv[2:]
     os.execve(argv[0], argv, os.environ)
