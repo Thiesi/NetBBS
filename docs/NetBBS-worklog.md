@@ -4844,8 +4844,12 @@ must call `checkpoint()`; one that finishes an ordinary action must call
 `commit()`, or the board rerolls under the caller.
 
 Paged Voidrunner screens measure their capacity with `page_capacity` -- the
-content column is `_OUTPUT_WIDTH - 1` and the overhead comes from the wrapped
-title and the action bar the caller will see -- and fill pages with `paginate`
+content column is `_page_content_width()`, which is the box interior less its
+indent and gutter on a framed page and `_OUTPUT_WIDTH - 1` on a flat one, and
+the overhead comes from `_page_header_rows` (one row when the header fits the
+top border, a border plus the header's own wrapped rows when it does not, the
+wrapped title when the page is flat), the bottom border where there is one, and
+the action bar the caller will see -- and fill pages with `paginate`
 (issue #418): one implementation that keeps a logical group whole where it fits
 and continues it on the next page where it does not. With `keys`, a page breaks
 rather than repeat a selection letter, each page carries its own letter map, and
