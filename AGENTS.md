@@ -100,9 +100,15 @@ The standing principle is:
   required. Rendering, storage, protocol, and transport concerns stay
   separated.
 - **Review door presentation by looking at it.** A change to a bundled door's
-  screens comes with `scripts/door_gallery.py <door>` output attached to the PR.
-  Tests can only assert that a screen fits its terminal; they cannot fail because
-  it is ugly, and both games lost their visual design to slices that all passed.
+  screens comes with pictures attached to the PR. Tests can only assert that a
+  screen fits its terminal; they cannot fail because it is ugly, and both games
+  lost their visual design to slices that all passed. `scripts/door_gallery.py
+  <door>` renders every screen of Voidrunner and War Dialer at every supported
+  size and preset; it works from a cached career, so a door that keeps no state
+  between launches (Retro Trivia, whose round is drawn fresh from an unseeded
+  RNG) is not in it yet and is reviewed by running it. Add the screen you changed
+  to `WALKS` if no walk reaches it -- the door's own dispatch is the authority on
+  which key opens what, not the action bar.
 - **Treat migrations as immutable.** Never edit a shipped migration. Test
   migrations against realistic related data, especially before rebuilding a
   table which is a foreign-key parent.

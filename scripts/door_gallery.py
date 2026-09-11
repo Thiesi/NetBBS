@@ -48,6 +48,7 @@ import tempfile
 import threading
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 
 SCRIPTS = pathlib.Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
@@ -65,6 +66,7 @@ QUIET = 0.15
 SETTLE = 0.75
 ANSWER = 6.0  # a keypress can take a second to redraw; past this it did nothing.
 PATIENCE = 30.0  # a door still drawing after this is hung, not slow.
+WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 
 # Each walk is (label, keys), pressed in order against a door that already has a
 # career or world: registration and the first-visit guide belong to the fixture,
@@ -92,10 +94,15 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Rank", b"B"),
         ("Rivals", b"V"),
         ("Log", b"H"),
-        ("Crew", b"C"),
+        ("Contract board", b"J"),
+        # An action's preview is two pickers deep: the board, the approach, and
+        # only then the terms the player is actually asked to accept.
+        ("Job preview", b"J11"),
         ("Trade preview", b"T"),
-        ("Job preview", b"J"),
-        ("Kit", b"S"),
+        ("Recruit preview", b"C"),
+        ("Crew development", b"S"),
+        ("Root exchange", b"X"),
+        ("Garrisons", b"G"),
         ("Operations", b"O"),
         ("Help", b"?"),
     ],
@@ -105,11 +112,12 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
 # asks, so a panel never opens on registration or the first-visit guide.
 ONBOARDING: dict[str, bytes] = {"voidrunner": b"\rY", "war_dialer": b"\r\r"}
 
-# Presets are applied to the fixture's copy, not passed as flags: Voidrunner
-# keeps its display style in the career, War Dialer takes `unicode_style` from
-# the drop file.
+# Every preset a caller can choose, applied to the fixture's copy rather than
+# passed as a flag: Voidrunner keeps its display style in the career (all four of
+# `DISPLAY_STYLES`), War Dialer takes `unicode_style` from the drop file.
 PRESETS: dict[str, dict[str, dict]] = {
-    "voidrunner": {"auto": {"display_style": "auto"}, "plain": {"display_style": "plain"}},
+    "voidrunner": {style: {"display_style": style} for style in
+                   ("auto", "basic", "mono", "plain")},
     "war_dialer": {"auto": {"unicode_style": True}, "plain": {"unicode_style": False}},
 }
 
@@ -308,26 +316,39 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
     out_dir.mkdir(parents=True, exist_ok=True)
     fixture = base_fixture(door_name, door, out_dir, fresh)
 
+    shots = [(label, keys, preset, extra, width, heights.get(width, 24))
+             for label, keys in WALKS[door_name]
+             for preset, extra in PRESETS[door_name].items()
+             for width in widths]
+
+    def shoot(shot) -> str:
+        _, keys, _, extra, width, height = shot
+        work = pathlib.Path(tempfile.mkdtemp(prefix="gallery-"))
+        try:
+            state = work / "state"
+            shutil.copytree(fixture, state)
+            info_extra = apply_preset(state, extra)
+            return last_screen(capture(door, state, keys, width, height, info_extra))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    # Each panel is its own door in its own copy of the fixture, so they can be
+    # taken at once; the page is assembled from them in order afterwards.
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        screens = list(pool.map(shoot, shots))
+
     styles: dict[str, str] = {}
-    sections = []
-    for label, keys in WALKS[door_name]:
-        panels = []
-        for preset, extra in PRESETS[door_name].items():
-            for width in widths:
-                height = heights.get(width, 24)
-                work = pathlib.Path(tempfile.mkdtemp(prefix="gallery-"))
-                try:
-                    state = work / "state"
-                    shutil.copytree(fixture, state)
-                    info_extra = apply_preset(state, extra)
-                    screen = last_screen(capture(door, state, keys, width, height, info_extra))
-                    painted = to_html(screen, width, height, styles)
-                finally:
-                    shutil.rmtree(work, ignore_errors=True)
-                panels.append(
-                    f'<figure><figcaption>{html.escape(f"{width}x{height} · {preset}")}</figcaption>'
-                    f'<div class="screen"><pre>{painted}</pre></div></figure>')
-        sections.append(f'<section><h2>{html.escape(label)}</h2><div class="row">{"".join(panels)}</div></section>')
+    sections, panels, current = [], [], shots[0][0]
+    for (label, _, preset, _, width, height), screen in zip(shots, screens):
+        if label != current:
+            sections.append(f'<section><h2>{html.escape(current)}</h2>'
+                            f'<div class="row">{"".join(panels)}</div></section>')
+            panels, current = [], label
+        panels.append(
+            f'<figure><figcaption>{html.escape(f"{width}x{height} · {preset}")}</figcaption>'
+            f'<div class="screen"><pre>{to_html(screen, width, height, styles)}</pre></div></figure>')
+    sections.append(f'<section><h2>{html.escape(current)}</h2>'
+                    f'<div class="row">{"".join(panels)}</div></section>')
 
     css = "\n".join(f"i.{name}{{{style}}}" for style, name in styles.items() if style)
     page = f"""<!doctype html>

@@ -7386,14 +7386,15 @@ record picker -- draws its body inside the door's frame, with its title in the t
 border and the action bar outside, below it. The switchboard overhaul had left
 the masthead framed and everything under it an unindented wall of rows. The frame
 costs one row and four columns, charged to each screen's own page budget, and is
-dropped below forty columns and in Fast mode, which is deliberately text-only.
+dropped only in Fast mode, which is deliberately text-only: there is no narrower
+terminal to drop it for, since 40x12 is the floor (issue #495).
 Hotkeys are written `[K] Label` everywhere the door prints, the rule Voidrunner
 adopted in issue #400: the key is not always the label's first letter
 (`[E] Map`, `[X] Root`), so that is the only spelling that carries every case.
 The switchboard's action bar is packed to the width it has rather than hand-typed:
 full labels first, short labels when the full ones would not leave the page a row
-to stand on, and -- only at the twenty-column floor, where fifteen labelled
-entries cannot fit -- the keys alone, with `[?] Help` naming them. A key is never
+to stand on. Every key keeps a name at every supported size; the keys-only tier
+below that went with the terminals it was for (issue #495). A key is never
 dropped. A bar written with `out_prompt` leaves its row unterminated on purpose,
 so whatever reads it has to close that row before the next screen draws; the
 first visit every caller saw had printed the Back bar and the switchboard's own
