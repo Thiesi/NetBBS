@@ -984,8 +984,8 @@ repeat-Guard input spends no turn or randomness.
 
 **[F] Fire** exchanges one round, **[E] Evade** attempts escape, and pirates also
 allow **[D] Dump** (one random cargo unit; shown only with cargo aboard) and
-an affordable **[P] Pay bribe**. The action bar names every verb, and keeps the compact
-letter list below that so the page still shows the fight.
+an affordable **[P] Pay bribe**. The action bar names every verb at every
+supported size.
 While escorting, the Evade, Dump and Pay bribe lines say that leaving fails the
 convoy. Failed, abandoned and expired contracts are counted on the Pilot Status
 page and in retirement dossiers, and the log names the forfeited reward.

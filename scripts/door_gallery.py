@@ -173,7 +173,7 @@ class Door:
         thread.start()
         return thread
 
-    def settle(self, since: int | None = None) -> None:
+    def settle(self, since: int = 0, *, require: bool = False) -> None:
         """Wait for the door to answer and then stop drawing.
 
         Silence alone does not mean the screen is ready: a door that has been
@@ -182,18 +182,26 @@ class Door:
         keypress had drawn anything and photographed the previous screen.
         `since` is the output length before the key went in; the wait is over
         only once the door has written past it and then gone quiet.
+
+        A key that legitimately changes nothing is an answer too, so the wait
+        gives up after `ANSWER` -- except when `require` says the door owes us a
+        screen, as at startup: a door that is slow to boot (four of them share
+        this machine) would otherwise be photographed blank.
         """
         answer = time.monotonic() + ANSWER
         deadline = time.monotonic() + PATIENCE
         while time.monotonic() < deadline:
             with self.lock:
                 quiet = time.monotonic() - self.spoke
-                answered = since is None or len(self.out) > since
+                answered = len(self.out) > since
             if answered and quiet >= SETTLE:
                 return
-            if not answered and time.monotonic() >= answer:
-                return  # the key was read and changed nothing, which is an answer too
+            if not answered and not require and time.monotonic() >= answer:
+                return
             time.sleep(0.05)
+        if require:
+            raise SystemExit(f"{self.door.name} printed nothing in {PATIENCE:.0f}s:\n"
+                             f"{bytes(self.err).decode('utf-8', 'replace')[-800:]}")
 
     def press(self, key: bytes) -> None:
         time.sleep(QUIET)  # every key arrives alone; a burst is discarded as paste
@@ -233,7 +241,7 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
             info_extra: dict) -> str:
     """Drive a walk and return the screen it is looking at when it is done."""
     running = Door(door, state, width, height, info_extra)
-    running.settle()
+    running.settle(require=True)  # the opening screen is owed, however slow the boot
     for index in range(len(keys)):
         running.press(keys[index:index + 1])
     screen = running.read()
