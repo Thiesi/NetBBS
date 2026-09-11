@@ -5070,6 +5070,18 @@ _ROLE_TONES = (
 # A number, a credit figure, a ratio, a percentage, a signed delta: the values
 # a caller reads off a row.
 _VALUE_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?(?:\s?cr|%|/\d[\d,]*)?")
+# Gold is hotkeys and credits and nothing else, so a credit figure is claimed
+# before the generic value pass that would paint it as an ordinary number.
+_CREDIT_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?\s?cr\b")
+# Every escape this game writes is an SGR colour. Anything else on a body row
+# -- a cursor jump, a clear-screen -- arrived inside data: a score file's
+# callsign, a name out of a save. It is removed before the row is styled, so a
+# row cannot be taken for "already styled" because a caller put an escape in
+# their handle (issue #493 review).
+_FOREIGN_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-ln-zA-Z]"
+                             r"|\x1b\([AB0-2]|\x1b[78HDM]"
+                             r"|\x1b(?!\[[0-9;]*m)"
+                             r"|[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]")
 _KEY_RE = re.compile(r"\[[^\[\]]{1,9}\]")
 _GAUGE_RE = re.compile(r"[▀-▐░-▓■]{2,}")
 
@@ -5086,7 +5098,10 @@ def style_body_line(text: str) -> str:
     A row that styles itself is returned untouched -- a component's decision
     always beats a pattern's guess.
     """
-    if not text or text.startswith(SECTION_MARK) or ANSI_ESCAPE_RE.search(text):
+    if not text or text.startswith(SECTION_MARK):
+        return text
+    text = _FOREIGN_ESCAPE.sub("", text)
+    if ANSI_ESCAPE_RE.search(text):
         return text
     p = pal()
     spans: list[tuple[int, int, str]] = []
@@ -5106,6 +5121,8 @@ def style_body_line(text: str) -> str:
             claim(match.start(), match.end(), f"{p.tone(tone)}{match.group(0)}{RESET}")
     for match in _GAUGE_RE.finditer(text):
         claim(match.start(), match.end(), f"{p.hull}{match.group(0)}{RESET}")
+    for match in _CREDIT_RE.finditer(text):
+        claim(match.start(), match.end(), f"{p.gold}{match.group(0)}{RESET}")
     for match in _VALUE_RE.finditer(text):
         claim(match.start(), match.end(), f"{p.ink}{match.group(0)}{RESET}")
 
@@ -5275,7 +5292,7 @@ def ship_gauge_rows(world: World) -> list[str]:
             ["FUEL", gauge(ship.fuel, fuel_capacity(ship), cells), f"{ship.fuel}/{fuel_capacity(ship)}",
              f"{ship.hull_class}"],
             ["HOLD", gauge(used, hold, cells, tone="info"), f"{used}/{hold}",
-             plural(len(world.save.cargo), "lot")]]
+             plural(sum(1 for quantity in world.save.cargo.values() if quantity > 0), "lot")]]
     crew = [role for role in CREW_ROLES if getattr(ship, f"has_{role}")]
     if crew or world.save.pilot.notoriety:
         pips = "".join(glyph("crew_on") if role in crew else glyph("crew_off") for role in CREW_ROLES)
@@ -8407,7 +8424,10 @@ def achievement_lines(entries: list[dict], category: str, user_id: int) -> list[
         lines.append("No qualifying achievements recorded yet. Older score files gain career details at the pilot's next saved action.")
     for position, record in enumerate(ranked, 1):
         marker = " [YOU]" if record["user_id"] == user_id else ""
-        prefix = f"#{position}{marker} {record['handle']}"
+        # A score record's callsign is another pilot's text, and older score
+        # files were never validated for control characters: sanitize before it
+        # is styled, never after (issue #493 review).
+        prefix = f"#{position}{marker} {_mission_plain(record['handle'])}"
         if category == "careers":
             archived = record.get("achievements", {}).get("careers", [])
             endings = [item for item in archived if item["finale"] is not None]
@@ -9529,7 +9549,8 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
                ["Fuel", gauge(ship.fuel, fuel_capacity(ship), cells, tone="info"),
                 f"{ship.fuel}/{fuel_capacity(ship)}", f"day {world.save.turn}"],
                ["Hold", gauge(used, cargo_capacity(ship), cells, tone="info"),
-                f"{used}/{cargo_capacity(ship)}", plural(len(world.save.cargo), "lot")]]
+                f"{used}/{cargo_capacity(ship)}",
+                plural(sum(1 for quantity in world.save.cargo.values() if quantity > 0), "lot")]]
     lines += table(["", "", "", ""], contact, "llrl",
                    styles=[["label", "value", "value", "label"] for _ in contact],
                    optional=(3,), repeat_header=False)[1:]
@@ -9791,7 +9812,8 @@ def customs_display_lines(world: World) -> list[str]:
               f"{quantity} units of unauthorised contraband detected"),
         section("CHOICES"),
         f"{key_label('S', 'Surrender')}  {p.slate}lose all contraband, pay no fine; "
-        f"Concord standing {RESET}{p.mint}+1{RESET}{p.slate}, notoriety unchanged.{RESET}",
+        f"Concord standing {RESET}{p.mint}+1{RESET}{p.slate} up to its limit, "
+        f"notoriety unchanged.{RESET}",
         (f"{key_label('P', 'Pay bribe')}  " if credits >= cost else f"{badge('Bribe unavailable', 'danger')}  ")
         + f"{p.slate}offer{RESET} {p.gold}{cost}cr{RESET} {p.slate}at{RESET} "
         f"{gauge(60, 100, 6, tone='caution')} {p.ink}60%{RESET} {p.slate}acceptance. "

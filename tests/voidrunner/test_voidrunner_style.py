@@ -291,6 +291,29 @@ def test_a_keypress_already_waiting_ends_the_effect(monkeypatch):
     assert time.monotonic() - started < 1.0, "a skipped effect still waited"
 
 
+@pytest.mark.parametrize("intruder", ["\x1b[2J", "\x1b[10;10H", "\x1b(0", "\x07", "\x1b"])
+def test_an_escape_inside_data_never_reaches_the_terminal(monkeypatch, intruder):
+    """A row that carries an escape the game did not write is not "already
+    styled" -- it is data with a terminal control in it. A score file's callsign
+    is another pilot's text, and an accepted `\\x1b[2J` would clear the screen
+    (issue #493 review)."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
+    def leftovers(row: str) -> str:
+        """What is on the row once the game's own colour is taken off."""
+        return vr.ANSI_ESCAPE_RE.sub("", row)
+
+    styled = vr.style_body_line(f"Pilot {intruder}Nine: 12 victories")
+    # Every escape left is one of ours, and every one of ours is a colour.
+    assert all(sequence.endswith("m") for sequence in vr.ANSI_ESCAPE_RE.findall(styled))
+    assert "\x1b" not in leftovers(styled) and "\x07" not in leftovers(styled)
+    assert "Pilot Nine" in leftovers(styled)
+    for row in vr.wrapped_group(f"Pilot {intruder}Nine"):
+        assert all(sequence.endswith("m") for sequence in vr.ANSI_ESCAPE_RE.findall(row))
+        assert "\x1b" not in leftovers(row)
+
+
 def test_the_next_rank_follows_the_rank_the_career_kept(monkeypatch):
     """Rank is permanent here, and the record says so two rows further down. A
     progress row chosen from the *balance* told a Void Baron who had spent down
