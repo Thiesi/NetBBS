@@ -153,7 +153,7 @@ class ReceivedFile:
     size_bytes: int
 
 
-def _safe_filename(raw: str) -> str:
+def safe_filename(raw: str) -> str:
     """Extracts a safe basename from a remote-supplied filename (GitHub
     issue #34): strips any path component (a peer could otherwise claim
     a name like `../../etc/passwd` or an absolute path), drops NUL and
@@ -513,7 +513,7 @@ async def receive_file(session: Session, *, max_bytes: int, dest_path: Path) -> 
     # runs together space-separated -- take only the first token either
     # way, same as this code did before issue #34's filename hardening.
     raw_filename = parts[0].decode("ascii", errors="replace").split(" ")[0]
-    filename = _safe_filename(raw_filename) if raw_filename else "unnamed"
+    filename = safe_filename(raw_filename) if raw_filename else "unnamed"
 
     if len(parts) > 1:
         # ZFILE's metadata field is "{size} {mtime} {mode} {serial}

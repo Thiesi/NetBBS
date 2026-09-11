@@ -459,3 +459,34 @@ def test_server_port_property_before_start_raises():
     server = WebServer(host="127.0.0.1", port=0, session_handler=handler)
     with pytest.raises(RuntimeError):
         _ = server.port
+
+
+def test_offer_transfer_hands_the_browser_a_link(tmp_path):
+    """Issue #475: a caller already in a browser should not have to
+    select a URL off a terminal. The BBS tells the page instead, and the
+    page opens a file picker or starts the download."""
+    offered = []
+
+    async def handler(session: Session):
+        offered.append(
+            await session.offer_transfer(
+                direction="download", url="https://bbs.example.org/transfer/abc", filename="game.zip"
+            )
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws:
+                    return await ws.receive_json(timeout=2)
+        finally:
+            await server.stop()
+
+    assert asyncio.run(scenario()) == {
+        "type": "transfer",
+        "direction": "download",
+        "url": "https://bbs.example.org/transfer/abc",
+        "filename": "game.zip",
+    }
+    assert offered == [True]

@@ -128,6 +128,19 @@ class Session(ABC):
     #: `netbbs.net.color_depth_preference.effective_truecolor`.
     supports_truecolor: bool = False
 
+    #: Whether this transport can hand its raw byte stream to a Zmodem
+    #: transfer (issue #475). Zmodem is a protocol *inside* the
+    #: terminal stream, so this is a property of the client at the far
+    #: end as much as of the transport -- but the transport is the only
+    #: place the answer is ever knowable: `netbbs.net.web`'s browser
+    #: terminal cannot do it at all, while Telnet and SSH can, provided
+    #: the caller's own emulator implements the protocol (many do not,
+    #: which is why the HTTP path exists). `True` by default because
+    #: every transport but the web one carries bytes; a caller whose
+    #: *emulator* has no Zmodem is discovered the only way anyone can
+    #: discover it, by the transfer not starting.
+    supports_zmodem: bool = True
+
     #: Human-readable provenance for ``supports_truecolor``. Shown in the
     #: caller profile so a failed/missing capability report is diagnosable
     #: rather than inferred from appearance. Transport implementations replace

@@ -282,6 +282,10 @@ async def _start_servers(
     link_realtime_relay=None,
     live_relays_provider=None,
     own_hello_provider=None,
+    # Issue #475: the file-transfer gateway, built by `run()` (which
+    # is where the lane and the node identity it needs exist) and
+    # served on the web listener's own application.
+    transfers=None,
 ) -> list:
     """
     Start every enabled, available listener. On any failure partway
@@ -398,7 +402,10 @@ async def _start_servers(
         else:
             await _start_one(
                 "web",
-                WebServer(host=config.web.host, port=config.web.port, session_handler=session_handler),
+                WebServer(
+                    host=config.web.host, port=config.web.port,
+                    session_handler=session_handler, transfers=transfers,
+                ),
             )
             any_interactive_started = True
             _logger.info("NetBBS listening on %s:%d (web)", config.web.host, config.web.port)
@@ -764,6 +771,7 @@ async def run(
             direct_invites=direct_invites,
             mrc_bridge=mrc_bridge,
             backup_identity_dir=config.identity_dir,
+            transfers=transfer_grants,
         )
 
     async def ssh_session_handler(session):
@@ -789,6 +797,7 @@ async def run(
             direct_invites=direct_invites,
             mrc_bridge=mrc_bridge,
             backup_identity_dir=config.identity_dir,
+            transfers=transfer_grants,
         )
 
     servers: list = []
@@ -1094,10 +1103,48 @@ async def run(
         # bridging disclosure as everyone after -- `is_bridged()` is
         # never false merely because the listeners came up first.
         await mrc_bridge.start()
+        # Issue #475: this node's file-transfer grants, and the gateway
+        # that redeems them. Only meaningful with the web listener
+        # running -- that HTTP server is where the endpoint lives -- so a
+        # node without it has `None` here and the file screens simply
+        # never offer a link. Built here rather than beside the
+        # listeners because everything it needs (the foreground lane,
+        # this node's Link identity) exists by now and not before.
+        transfer_grants = None
+        transfer_gateway = None
+        if config.web.enabled:
+            try:
+                import aiohttp  # noqa: F401  -- the endpoint's own dependency
+            except ImportError:
+                # The web listener will be skipped below for the same
+                # reason, and a node that advertises transfer links with
+                # nothing serving them is worse than one that never
+                # mentions them (Codex review).
+                _logger.warning(
+                    "web is enabled in configuration but aiohttp is not installed -- "
+                    "file transfer links are unavailable"
+                )
+            else:
+                from netbbs.net.file_transfer import TransferGateway, TransferGrants
+
+                transfer_grants = TransferGrants(base_url=_transfer_base_url(config))
+                transfer_gateway = TransferGateway(
+                    transfer_grants, foreground_lane,
+                    # Signs a Link announcement for anything uploaded
+                    # this way, exactly as the Zmodem path does (#464);
+                    # `None` when Link is off, which makes queueing a
+                    # no-op rather than a special case.
+                    announce_identity=lambda: node_identity if link_node is not None else None,
+                )
+
         servers = await _start_servers(
             config, db, session_handler, ssh_session_handler, throttle, link_node, background_lane,
             link_realtime_registry, link_realtime_bridge, link_realtime_relay, _live_relays_provider,
             own_hello_provider,
+            # Issue #475: without this the web listener registers no
+            # /transfer route and every link printed from the grant
+            # table above answers 404 (Codex review).
+            transfer_gateway,
         )
 
         # Design doc: the piece that makes this node
@@ -1460,6 +1507,58 @@ async def main() -> None:
     except StartupError as exc:
         _logger.error("startup failed: %s", exc)
         raise SystemExit(1) from exc
+
+
+
+
+def _is_unroutable_bind(host: str) -> bool:
+    """Whether this bind address is one no remote caller could use.
+
+    Asked of the whole address space rather than of three spellings
+    (Codex review): `127.0.0.2`, `0:0:0:0:0:0:0:1` and `LOCALHOST` are
+    all loopback, and a URL built from any of them points at whoever
+    opens it. Anything that is not an IP literal at all -- a hostname
+    the operator bound by name -- is taken at its word, since they told
+    us what this node is called.
+    """
+    import ipaddress
+
+    stripped = host.strip().strip("[]")
+    if not stripped or stripped.lower() == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(stripped)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
+def _transfer_base_url(config) -> str | None:
+    """Where a file-transfer link should point (issue #475).
+
+    The operator's `[web] public_url` if they set one -- the only
+    answer that survives a reverse proxy, a different external port, or
+    TLS terminated in front of this process. Otherwise the listener's
+    own address, but only when that is an address someone else could
+    actually reach: a node bound to loopback or to the 0.0.0.0 wildcard
+    knows it is listening, not how it is reached, and saying so beats
+    printing a URL that fails in a browser.
+    """
+    if config.web.public_url:
+        return config.web.public_url
+    if _is_unroutable_bind(config.web.host):
+        # A wildcard bind says nothing about how this node is reached,
+        # and a loopback one is worse than saying nothing: handed to a
+        # remote Telnet or SSH caller -- the callers this feature is for
+        # -- it points at their own machine (Codex review). Both mean
+        # "the operator has to tell us", which `public_url` is for.
+        return None
+    # An IPv6 literal has to be bracketed in a URL authority (Codex
+    # review) -- `http://::1:8080` is not a URL a browser will open.
+    host = config.web.host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{config.web.port}"
 
 
 if __name__ == "__main__":

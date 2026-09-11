@@ -72,6 +72,13 @@
       term.write(doorDecoder.decode(bytes, { stream: true }));
     } else if (msg.type === "output" && typeof msg.data === "string") {
       term.write(msg.data);
+    } else if (msg.type === "transfer" && typeof msg.url === "string") {
+      // Issue #475: the BBS has handed this browser a one-use transfer
+      // link. A download starts by itself; an upload opens a drop
+      // target, because the caller is already in a browser and should
+      // not have to copy a URL out of a terminal.
+      if (msg.direction === "download") startDownload(msg.url, msg.filename);
+      else openUploadPanel(msg.url);
     }
   };
 
@@ -94,6 +101,129 @@
       }
     }
   });
+
+
+  // -- file transfer (issue #475) ---------------------------------------
+  //
+  // Zmodem cannot work in a browser tab, so the BBS hands this page a
+  // single-use HTTP link instead. Everything below is presentation: the
+  // link is already scoped to one caller, one file or area, and one use
+  // by the server, and nothing here can widen it.
+
+  function startDownload(url, filename) {
+    // An anchor click rather than assigning window.location, so the tab
+    // keeps the live terminal session rather than navigating away from
+    // it mid-transfer.
+    var link = document.createElement("a");
+    link.href = url;
+    if (filename) link.download = filename;
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
+  function openUploadPanel(url) {
+    var existing = document.getElementById("transfer-panel");
+    if (existing) existing.remove();
+
+    var panel = document.createElement("div");
+    panel.id = "transfer-panel";
+    panel.className = "transfer-panel";
+    panel.innerHTML =
+      '<div class="transfer-card">' +
+      '<h2>Upload a file</h2>' +
+      '<p class="transfer-drop" id="transfer-drop">Drop a file here, or choose one.</p>' +
+      '<p><input type="file" id="transfer-input"></p>' +
+      '<p class="transfer-status" id="transfer-status">This link works once.</p>' +
+      '<p><button type="button" id="transfer-cancel">Cancel</button></p>' +
+      "</div>";
+    document.body.appendChild(panel);
+
+    var drop = panel.querySelector("#transfer-drop");
+    var input = panel.querySelector("#transfer-input");
+    var status = panel.querySelector("#transfer-status");
+    var done = false;
+    var inFlight = null;
+
+    function close() {
+      // Cancel means cancel (issue #475 review): without this the panel
+      // disappears while the browser keeps sending the file, and the
+      // caller believes they stopped it.
+      if (inFlight) inFlight.abort();
+      panel.remove();
+      term.focus();
+    }
+
+    function send(file) {
+      if (done || !file) return;
+      done = true;
+      status.textContent = "Uploading " + file.name + "...";
+      var body = new FormData();
+      body.append("file", file, file.name);
+      inFlight = typeof AbortController === "function" ? new AbortController() : null;
+      fetch(url, { method: "POST", body: body, signal: inFlight ? inFlight.signal : undefined })
+        .then(function (response) {
+          if (!response.ok) {
+            return response.text().then(function (text) {
+              var rejection = new Error(text || ("HTTP " + response.status));
+              // The server has already spent the single-use token by the
+              // time it rejects, so a retry here can only ever 404
+              // (issue #475 review). Marked so the catch below does not
+              // invite one.
+              rejection.spent = true;
+              throw rejection;
+            });
+          }
+          return response.json();
+        })
+        .then(function (stored) {
+          status.textContent = "Uploaded " + stored.filename + ".";
+          // Nudge the BBS into repainting, so the file appears in the
+          // listing the caller is looking at rather than after their
+          // next keystroke.
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "key", data: "\f" }));
+          }
+          setTimeout(close, 1200);
+        })
+        .catch(function (error) {
+          if (error && error.name === "AbortError") return;  // the caller cancelled
+          inFlight = null;
+          var detail = error && error.message ? error.message : error;
+          if (error && error.spent) {
+            // Nothing to retry with: tell them how to get another link.
+            status.textContent = detail + " Ask the BBS for a new link.";
+            input.disabled = true;
+            return;
+          }
+          // A network failure never reached the server, so the token is
+          // still good and another attempt is worth offering.
+          done = false;
+          status.textContent = "Upload failed: " + detail + " You can try again.";
+        });
+    }
+
+    input.addEventListener("change", function () { send(input.files && input.files[0]); });
+    panel.querySelector("#transfer-cancel").addEventListener("click", close);
+    ["dragenter", "dragover"].forEach(function (name) {
+      drop.addEventListener(name, function (event) {
+        event.preventDefault();
+        drop.classList.add("is-over");
+      });
+    });
+    ["dragleave", "drop"].forEach(function (name) {
+      drop.addEventListener(name, function (event) {
+        event.preventDefault();
+        drop.classList.remove("is-over");
+      });
+    });
+    drop.addEventListener("drop", function (event) {
+      var files = event.dataTransfer && event.dataTransfer.files;
+      send(files && files[0]);
+    });
+    input.focus();
+  }
 
   window.addEventListener("resize", function () {
     if (!fixedDoorSize) fitAddon.fit();

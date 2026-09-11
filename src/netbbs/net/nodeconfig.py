@@ -74,6 +74,15 @@ class TransportConfig:
     enabled: bool
     host: str
     port: int
+    #: What a caller should be told to open, when that differs from
+    #: `host`/`port` -- a node behind a TLS reverse proxy, or one whose
+    #: listener is bound to a private address (issue #475). Only the
+    #: web transport uses it today, to build file-transfer links: a
+    #: listener bound to 0.0.0.0 or loopback cannot be turned into a
+    #: URL anybody else could open, so an unset value means this node
+    #: says it cannot hand out links rather than printing one that
+    #: fails in a browser.
+    public_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -650,10 +659,15 @@ def _transport_from_toml(data: dict, name: str, current: TransportConfig) -> Tra
     table = data.get(name, {})
     if not isinstance(table, dict):
         raise ConfigError(f"[{name}] in the config file must be a table")
+    unknown = set(table) - {"enabled", "host", "port", "public_url"}
+    if unknown:
+        raise ConfigError(f"[{name}] has unknown setting(s): {', '.join(sorted(unknown))}")
+    public_url = table.get("public_url", current.public_url)
     return TransportConfig(
         enabled=bool(table.get("enabled", current.enabled)),
         host=str(table.get("host", current.host)),
         port=int(table.get("port", current.port)),
+        public_url=str(public_url).rstrip("/") if public_url else None,
     )
 
 
@@ -805,6 +819,10 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
                     enabled=current.enabled if enabled is None else enabled,
                     host=current.host if host is None else host,
                     port=current.port if port is None else port,
+                    # Carried, not dropped (Codex review): a flag like
+                    # --web-port must not silently unset the public URL
+                    # a proxied node depends on for transfer links.
+                    public_url=current.public_url,
                 )
             },
         )

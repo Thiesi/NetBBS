@@ -931,8 +931,29 @@ be settled in Phase 3; only presentation refinements may wait until Phase 7.
 ### 6.2 File areas
 
 Local file metadata lives in SQLite; file bytes use content-addressed filesystem
-storage. Areas support permissions, moderation, expiry, and Zmodem transfer on
-byte-capable transports.
+storage. Areas support permissions, moderation, expiry, and two transfer paths
+(issue #475).
+
+**Zmodem** on byte-capable transports, for terminals that implement it —
+SyncTERM, NetRunner, Qodem, Tera Term, ZOC, MobaXterm, minicom. It is a protocol
+*inside* the terminal stream, so the emulator must drive it; PuTTY, Windows
+Terminal, an ordinary OpenSSH client and this project's own browser terminal
+cannot, which for most callers meant no transfer at all.
+
+**A session-bound HTTP link** for everyone else, served by the same aiohttp
+application as the web terminal. The file screen adapts to the transport: Zmodem
+where it can be carried, a link where it cannot, and `[W]eb transfer` for a
+terminal whose own emulator lacks Zmodem. A caller already in the browser is
+handed the transfer rather than the URL — the page opens a drop target or starts
+the download itself.
+
+A transfer grant is not a capability. It records who asked for what; every gate
+the terminal path applies — level, age, name requirement, Community inheritance,
+moderation state, maximum upload size — is applied again when the link is
+redeemed, against live rows. It is single-use, expires in minutes, names its area
+and file by content-addressed ids that no deletion can recycle, and lives in
+memory only. A node that cannot say how it is reached (`[web] public_url` unset,
+listener on a wildcard address) says so rather than printing a URL that fails.
 
 File bytes are node-local. NetBBS Link will distribute catalogue/descriptor
 information and fetch content on demand in bounded resumable chunks. It will

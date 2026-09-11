@@ -779,6 +779,35 @@ Incoming transfers:
 The implemented Zmodem subset is intentionally limited. Keep the limitations
 explicit rather than implying full protocol coverage.
 
+### Transfer paths (issue #475)
+
+Zmodem runs inside the terminal byte stream, so the *emulator* implements it,
+not the transport and not `sz`/`rz` on the caller's machine. Most modern clients
+have none. The web transport never can: its raw I/O exists only inside door
+mode.
+
+So a file area offers two paths, and the screen picks by capability
+(`Session.supports_zmodem`) rather than offering one and failing. Naming a
+protocol the client cannot speak is what made this subsystem look broken.
+
+The HTTP path's rule is that **a grant is not a capability**: it records who
+asked for what, and redemption re-applies every gate against live rows. Single
+use by removal rather than a flag; one indistinguishable 404 for
+never-existed/used/expired; bounded in count, bytes *and* wall-clock time;
+content-addressed ids for the area and file plus a username check, so no reused
+SQLite rowid can redirect a live grant.
+
+Two traps worth keeping:
+
+- `aiohttp`'s `add_get` registers HEAD as well, so a link scanner's probe spends
+  a single-use token unless HEAD is handled separately.
+- The grant table is event-loop state that touches no database. Minting it
+  through `DatabaseLane` puts issuance on a worker thread while redemption runs
+  on the loop — two threads in one dict.
+
+A node builds its listeners before it loads its Link identity and foreground
+lane, so anything a listener needs from those must be late-bound.
+
 ### Reading `FILE_ID.DIZ` out of an upload (issue #463)
 
 Extraction happens between the transfer and `upload_file_from_temp`, while the

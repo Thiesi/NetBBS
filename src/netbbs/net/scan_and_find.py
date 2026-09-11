@@ -88,6 +88,10 @@ async def _new_scan_screen(
     user: User,
     *,
     link_context: LinkContext | None = None,
+    # Issue #475: the node's transfer grants, so an area entered
+    # from here offers the same browser-transfer path the picker
+    # route does.
+    transfers=None,
     mrc_bridge: MrcBridge | None = None,
 ) -> None:
     """
@@ -208,7 +212,10 @@ async def _new_scan_screen(
         )
     else:
         cursor = await lane.run(file_area_read_cursor, user, selected.file_area)
-        await enter_file_area(session, lane, selected.file_area, user, initial_cursor=cursor, link_context=link_context)
+        await enter_file_area(
+            session, lane, selected.file_area, user, initial_cursor=cursor,
+            link_context=link_context, transfers=transfers,
+        )
 
 
 @dataclass(frozen=True)
@@ -302,6 +309,10 @@ async def _find_screen(
     user: User,
     *,
     link_context: LinkContext | None = None,
+    # Issue #475: the node's transfer grants, so an area entered
+    # from here offers the same browser-transfer path the picker
+    # route does.
+    transfers=None,
     mrc_bridge: MrcBridge | None = None,
 ) -> None:
     """
@@ -448,7 +459,8 @@ async def _find_screen(
         elif selected.kind == "file":
             cursor = await lane.run(file_jump_cursor, selected.file.area.id, selected.file.file_id)
             await enter_file_area(
-                session, lane, selected.file.area, user, initial_cursor=cursor, link_context=link_context
+                session, lane, selected.file.area, user, initial_cursor=cursor,
+                link_context=link_context, transfers=transfers,
             )
         else:
             await browse_channels(
