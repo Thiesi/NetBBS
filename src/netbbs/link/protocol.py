@@ -257,13 +257,30 @@ _REALTIME_REPLAY_WINDOW_SIZE = 512
 
 
 def _parse_aware_timestamp(value: str, *, field_name: str) -> datetime:
+    """Every remotely-supplied timestamp in this module goes through here,
+    so every way a string can fail to be a usable instant has to come back
+    as `LinkProtocolError` -- the one exception type each caller is written
+    to handle.
+
+    `OverflowError` is the non-obvious one (Codex review of #500).
+    `fromisoformat` happily accepts `0001-01-01T00:00:00+23:59`; converting
+    it to UTC is what runs off the end of the representable range, so the
+    failure arrives from `astimezone`, not from parsing, and an
+    unauthenticated peer could otherwise raise it straight through an
+    inventory or trust-pull handler.
+    """
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (AttributeError, ValueError) as exc:
         raise LinkProtocolError(f"{field_name} is not a valid ISO 8601 timestamp") from exc
     if parsed.tzinfo is None:
         raise LinkProtocolError(f"{field_name} must include a timezone")
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise LinkProtocolError(
+            f"{field_name} is outside the range of representable timestamps"
+        ) from exc
 
 # Design doc §13.9: `board_post`/`board_post_edit` had no size
 # validation at all on receive, unlike a locally created post. Imported

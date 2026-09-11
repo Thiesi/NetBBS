@@ -299,12 +299,23 @@ def withdraw_remote_file(db: Database, remote_file: RemoteFile) -> bool:
     Returns `False`, changing nothing, for an entry whose
     `fetched_file_id` is already set. Those bytes are local, verified,
     and promoted into a real `files` row; that the origin has since
-    dropped its own copy is not a reason to un-list this node's. In
-    practice the fetch path never reaches a withdrawal for such an entry
-    (a completed transfer short-circuits before any request goes out), so
-    this is a guard on the invariant rather than a live branch.
+    dropped its own copy is not a reason to un-list this node's.
+
+    That check reads the **stored** value, not `remote_file`'s (Codex
+    review of #500). The caller's `RemoteFile` is a snapshot taken before
+    a network round trip, and two sessions fetching the same file share
+    one transfer: the other one can finish, promote the content and set
+    `fetched_file_id` while this withdrawal is still in flight. Trusting
+    the snapshot would then delete a real, downloadable local file's
+    catalogue row -- the guard exists for exactly this case, so it has to
+    look at what is true now.
     """
-    if remote_file.fetched_file_id is not None:
+    stored = db.connection.execute(
+        "SELECT fetched_file_id FROM remote_files WHERE file_id = ?", (remote_file.file_id,)
+    ).fetchone()
+    if stored is None:
+        return False
+    if stored["fetched_file_id"] is not None:
         return False
 
     transfer_rows = db.connection.execute(

@@ -123,11 +123,31 @@ def get_or_create_transfer(
     pair, since `transfer_id` is deterministic. A file with `size_bytes
     == 0` starts (and immediately reports) `'completed'` with no chunk
     ever requested -- there is nothing to fetch.
+
+    Raises `FileTransferError` if `remote_file`'s catalogue row is gone
+    (Codex review of #500). `remote_file` is a snapshot a caller picked
+    out of a listing, and another session's verified `file_withdrawal`
+    can remove that row in between -- two callers browsing the same area
+    is ordinary. The insert below would otherwise violate
+    `link_file_transfers`' foreign key and raise `sqlite3.IntegrityError`
+    at a UI that handles `FileTransferError` and nothing else. This is
+    the mirror of `apply_received_chunk`'s own vanished-row check; that
+    one covers a withdrawal arriving mid-transfer, this one covers it
+    arriving before the transfer starts.
     """
     transfer_id = compute_transfer_id(remote_file.file_id, requester_fingerprint)
     existing = get_transfer(db, transfer_id)
     if existing is not None:
         return existing
+
+    still_catalogued = db.connection.execute(
+        "SELECT 1 FROM remote_files WHERE file_id = ?", (remote_file.file_id,)
+    ).fetchone()
+    if still_catalogued is None:
+        raise FileTransferError(
+            f"{remote_file.filename!r} is no longer in this area's catalogue -- its origin "
+            "withdrew it"
+        )
 
     now = utc_now_iso()
     status = "completed" if remote_file.size_bytes == 0 else "in_progress"

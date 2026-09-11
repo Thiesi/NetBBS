@@ -395,3 +395,59 @@ def test_applying_a_chunk_after_the_transfer_was_withdrawn_fails_cleanly(
             remote_file=remote_file,
         )
     assert not os.path.exists(staging_path)
+
+
+def test_withdrawal_refuses_an_entry_another_session_just_finished_fetching(
+    origin_db, puller_db, origin_identity, puller_identity
+):
+    """Codex review of #500: the "never withdraw a fetched entry" guard
+    is only worth anything if it reads the *stored* value. A caller's
+    `RemoteFile` is a snapshot taken before a network round trip, and two
+    sessions fetching the same file share one transfer -- so the other
+    one can finish, promote the content and set `fetched_file_id` while
+    this withdrawal is still in flight. Trusting the snapshot deletes a
+    real, downloadable local file's catalogue row."""
+    from netbbs.link.files import get_remote_file, withdraw_remote_file
+
+    content = os.urandom(4096)
+    _entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=content
+    )
+    assert remote_file.fetched_file_id is None
+    stale_snapshot = remote_file
+
+    # The other session completes the fetch.
+    _drive_transfer(
+        origin_db, puller_db, remote_file,
+        requester_fingerprint=puller_identity.fingerprint, chunk_size=100_000,
+    )
+    assert get_remote_file(puller_db, remote_file.file_id).fetched_file_id is not None
+
+    # This session's withdrawal arrives afterwards, still holding the
+    # snapshot from before.
+    assert withdraw_remote_file(puller_db, stale_snapshot) is False
+    assert get_remote_file(puller_db, remote_file.file_id) is not None
+
+
+def test_starting_a_transfer_for_an_already_withdrawn_entry_fails_cleanly(
+    origin_db, puller_db, origin_identity, puller_identity
+):
+    """The mirror of the mid-transfer case (Codex review of #500): two
+    callers browse the same entry, the first one's verified withdrawal
+    removes it, and the second then starts a fetch from its cached
+    `RemoteFile`. That must not insert a child row against a deleted
+    parent and surface `sqlite3.IntegrityError` to a UI which handles
+    `FileTransferError` and nothing else."""
+    from netbbs.link.files import withdraw_remote_file
+
+    content = os.urandom(4096)
+    _entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=content
+    )
+    assert withdraw_remote_file(puller_db, remote_file) is True
+
+    with pytest.raises(FileTransferError, match="no longer in this area's catalogue"):
+        get_or_create_transfer(
+            puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint,
+            chunk_size=100_000,
+        )

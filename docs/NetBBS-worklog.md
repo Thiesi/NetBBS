@@ -916,14 +916,35 @@ else would ever return for. Remove the chunk records, the transfer rows and the
 row itself in one transaction, then the staging files — never the other way
 round, or a failed commit strands a transfer that still believes it has one.
 
-**A deletion that races in-flight work has to be handled where the work lands.**
-Two local sessions fetching the same remote file share one deterministic
-transfer row, and their network requests happen outside the database lane, so a
-withdrawal answering one can delete that row and its staging file while the
-other's chunk is still in the air. `apply_received_chunk` checks the row still
-exists before writing anything — otherwise it recreates the staging file on the
-way to a foreign-key violation, leaking the file and surfacing a raw
-`sqlite3.IntegrityError` to a caller that only handles `FileTransferError`.
+**A deletion that races in-flight work has to be handled where the work lands,
+at every ordering.** Two local sessions fetching the same remote file share one
+deterministic transfer row, and their network requests happen outside the
+database lane, so a withdrawal answering one can delete that row while the
+other's work is still in the air. Three orderings, three guards, and finding one
+of them is not finding the class:
+
+- the withdrawal lands mid-transfer — `apply_received_chunk` checks the row
+  still exists before writing, or it recreates the staging file on the way to a
+  foreign-key violation, leaking the file and surfacing a raw
+  `sqlite3.IntegrityError` to a caller that only handles `FileTransferError`;
+- the withdrawal lands before the transfer starts — `get_or_create_transfer`
+  checks the `remote_files` parent still exists, for the same reason;
+- the *fetch* lands first — `withdraw_remote_file` re-reads `fetched_file_id`
+  from the row rather than trusting the caller's `RemoteFile`, which is a
+  snapshot taken before a network round trip. Trusting it deletes the catalogue
+  row of a file this node has already fetched, verified and promoted.
+
+The general rule: **a domain object that crossed a network call is stale by
+definition.** Re-read anything the decision actually turns on, inside the
+transaction that acts on it.
+
+**Every remotely-supplied timestamp must fail as `LinkProtocolError`.**
+`_parse_aware_timestamp` is the single funnel for them, including on routes an
+unauthenticated peer can reach, and callers are written to catch that one type.
+`datetime.fromisoformat` accepts `0001-01-01T00:00:00+23:59` without complaint;
+it is `astimezone` that runs off the representable range and raises
+`OverflowError`, so the failure does not come from the parse step where one
+would look for it.
 
 **The trade-off is deliberate and belongs in the docs, not in a comment.** A
 stale entry stays listed until somebody tries to fetch it. Listing reports what
