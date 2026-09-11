@@ -949,3 +949,72 @@ def file_area_event_diff(
                 break
             collected.append(envelope)
     return collected, truncated
+
+
+def inventory_wanted_ids(
+    db: Database,
+    *,
+    requested_boards: dict[str, list[str]],
+    requested_channels: dict[str, list[str]],
+    requested_file_areas: dict[str, list[str]],
+    limit: int,
+) -> list[str]:
+    """
+    The *reverse* of the three `*_event_diff` functions above, and the
+    other half of one inventory exchange (design doc §8.6/§8.8, issue
+    #478): the `content_id`s the requester declared having that this
+    responder does **not** have on file, so the requester can push
+    exactly those instead of re-offering its entire own-event history
+    every pass.
+
+    This needs no extra round trip and no new request field. An
+    `InventoryRequest` is already documented as exhaustive -- every
+    board/channel/file area the requester carries, each mapped to the
+    full set of content IDs it holds for it -- so the same body that
+    asks "what am I missing?" already states everything the responder
+    could possibly want from it. Comparing that declaration against
+    `_all_board_events`/`_all_channel_events`/`_all_file_area_events`
+    yields the answer directly.
+
+    Declared resources this node does not carry at all are included, not
+    skipped: that is how a peer which has never seen a board/channel/
+    file area still receives its genesis by push, the way the old
+    unbounded push loop delivered one. Nothing here decides whether the
+    requester will actually send a given event -- the push side still
+    only ever sends what it *originated* (§8.8's "no relay from a
+    stranger" scope note), and anything else in this list simply goes
+    undelivered by push and reaches this node through its own inventory
+    pull instead.
+
+    Bounded by `limit` -- the same `_MAX_EVENTS_PER_REQUEST` the
+    response's event list obeys, so the push it provokes is one request,
+    not a burst that exhausts this node's own per-source request budget
+    (§13.9). No cursor is needed for the remainder for the same reason
+    §8.8 already gives for the pull direction: once those events arrive
+    the next pass's declaration covers them, so each pass asks for a
+    strictly shrinking remainder.
+
+    Re-reads the same per-resource event sets `*_event_diff` just built
+    for the forward direction rather than threading them through three
+    separate call sites; at §14's declared deployment scale the second
+    walk is not worth the coupling.
+    """
+    wanted: list[str] = []
+    seen: set[str] = set()
+    for requested, all_events in (
+        (requested_boards, _all_board_events),
+        (requested_channels, _all_channel_events),
+        (requested_file_areas, _all_file_area_events),
+    ):
+        for resource_id in sorted(requested):
+            if len(wanted) >= limit:
+                return wanted
+            held = set(all_events(db, resource_id))
+            for content_id in requested[resource_id]:
+                if content_id in held or content_id in seen:
+                    continue
+                if len(wanted) >= limit:
+                    return wanted
+                seen.add(content_id)
+                wanted.append(content_id)
+    return wanted

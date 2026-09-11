@@ -31,6 +31,7 @@ from netbbs.link.events import (
     build_board_genesis,
     build_board_post,
     build_board_post_edit,
+    build_channel_genesis,
     build_endpoint_descriptor,
     build_file_area_genesis,
     build_file_descriptor,
@@ -1227,4 +1228,113 @@ def test_file_area_event_diff_is_genuinely_multi_hop_for_an_area_this_node_never
     returned_ids = {_content_id_of(e) for e in events}
     assert {genesis.content_id, descriptor.content_id} == returned_ids
     db.close()
+    db.close()
+
+
+def test_inventory_wanted_ids_returns_only_declared_ids_this_node_lacks(tmp_path):
+    """The push direction of one inventory exchange (design doc §8.8,
+    issue #478): the requester's own declaration already says everything
+    it holds, so the responder answers with the subset it is missing --
+    never the ids it already has on file."""
+    from netbbs.link.boards import materialize_carried_board
+    from netbbs.link.store import inventory_wanted_ids
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_genesis_for_store_tests(remote_identity)
+    materialize_carried_board(db, genesis)
+    absent_post = _remote_post_for_store_tests(remote_identity)
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={"remote-board-id": [genesis.content_id, absent_post.content_id]},
+        requested_channels={},
+        requested_file_areas={},
+        limit=200,
+    )
+
+    assert wanted == [absent_post.content_id]
+    db.close()
+
+
+def test_inventory_wanted_ids_asks_for_everything_in_a_resource_this_node_does_not_carry(tmp_path):
+    """Discovery by push must keep working (design doc §8.8): a peer
+    that has never seen a board at all still wants its genesis, so a
+    declared resource this node does not carry contributes every id it
+    declared, not nothing."""
+    from netbbs.link.store import inventory_wanted_ids
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_genesis_for_store_tests(remote_identity)
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={"remote-board-id": [genesis.content_id]},
+        requested_channels={},
+        requested_file_areas={},
+        limit=200,
+    )
+
+    assert wanted == [genesis.content_id]
+    db.close()
+
+
+def test_inventory_wanted_ids_respects_the_limit(tmp_path):
+    """Capped by the same `_MAX_EVENTS_PER_REQUEST` budget the event
+    list obeys, so one exchange can never provoke a push burst larger
+    than a single request (design doc §8.8, issue #478)."""
+    from netbbs.link.store import inventory_wanted_ids
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    declared = [
+        _remote_post_for_store_tests(remote_identity, subject=f"post {i}", nonce=f"nonce-{i}").content_id
+        for i in range(5)
+    ]
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={"remote-board-id": declared},
+        requested_channels={},
+        requested_file_areas={},
+        limit=2,
+    )
+
+    assert wanted == declared[:2]
+    db.close()
+
+
+def test_inventory_wanted_ids_spans_channels_and_file_areas_too(tmp_path):
+    """Boards are not a special case here -- a declared channel or
+    file-area catalogue entry this node lacks is wanted on exactly the
+    same terms (design doc §9.6/§11)."""
+    from netbbs.link.store import inventory_wanted_ids
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    channel_genesis = build_channel_genesis(
+        signing_identity=remote_identity.signing_key,
+        origin_fingerprint=remote_identity.fingerprint,
+        channel_id="remote-channel-id",
+        name="Remote Chat",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    area_genesis = build_file_area_genesis(
+        signing_identity=remote_identity.signing_key,
+        origin_fingerprint=remote_identity.fingerprint,
+        area_id="remote-area-id",
+        name="Remote Files",
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={},
+        requested_channels={"remote-channel-id": [channel_genesis.content_id]},
+        requested_file_areas={"remote-area-id": [area_genesis.content_id]},
+        limit=200,
+    )
+
+    assert wanted == [channel_genesis.content_id, area_genesis.content_id]
     db.close()

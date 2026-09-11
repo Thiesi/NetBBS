@@ -166,6 +166,7 @@ from netbbs.link.store import (
     build_inventory_request,
     channel_event_diff,
     file_area_event_diff,
+    inventory_wanted_ids,
     save_candidate_descriptor,
     save_event,
     save_peer,
@@ -1815,7 +1816,24 @@ class LinkServer:
             file_area_events, file_area_truncated = [], True
         events = board_events + channel_events + file_area_events
         more_available = board_truncated or channel_truncated or file_area_truncated
-        return web.json_response({"events": events, "more_available": more_available})
+        # Issue #478: the other half of the same exchange. The request
+        # already declares everything the requester holds, so answering
+        # "and here is what *I* am missing from that" costs no extra
+        # round trip and lets the requester's push send exactly those
+        # events instead of re-offering its whole originated history
+        # every pass. Capped by the same response budget the event list
+        # obeys, so it can never provoke a push burst larger than one
+        # request.
+        wanted = await self._lane.run(
+            inventory_wanted_ids,
+            requested_boards=inventory_request.boards,
+            requested_channels=inventory_request.channels,
+            requested_file_areas=inventory_request.file_areas,
+            limit=response_limit,
+        )
+        return web.json_response(
+            {"events": events, "more_available": more_available, "wanted": wanted}
+        )
 
     async def _handle_trust_pull(self, request: web.Request) -> web.Response:
         """Serve one authenticated, issuer-filtered trust subscription page."""
@@ -2219,14 +2237,21 @@ async def request_inventory(
     inventory_request: InventoryRequest,
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> tuple[list[dict], bool]:
+) -> tuple[list[dict], bool, list[str] | None]:
     """
     Design doc §8.8, issue #85: ask a peer at `base_url` what it has for
     `inventory_request.boards` that this node doesn't already. Returns
     the raw event dicts it reports (already in `push_events`'s own wire
     shape -- the caller feeds them through `LinkNode.handle_events`
-    exactly as it would a push response, with no translation) and
-    whether more remain beyond the peer's own response cap.
+    exactly as it would a push response, with no translation),
+    whether more remain beyond the peer's own response cap, and (issue
+    #478) which of the `content_id`s this request declared the peer is
+    itself missing -- the list the caller's own push then sends.
+
+    That third element is `None`, not `[]`, when the peer's response
+    carries no `wanted` key at all: a peer predating issue #478 cannot
+    say what it lacks, which is a different thing from saying it lacks
+    nothing, and the caller degrades differently for each.
 
     Deliberately returns the raw dicts rather than applying them itself
     -- unlike `push_events` (whose sender already trusts its own
@@ -2254,8 +2279,13 @@ async def request_inventory(
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
 
     try:
-        return body["events"], bool(body["more_available"])
-    except (KeyError, TypeError) as exc:
+        wanted = body.get("wanted")
+        if wanted is not None:
+            if not isinstance(wanted, list) or not all(isinstance(i, str) for i in wanted):
+                raise LinkTransportError(f"malformed inventory response from {url}: bad wanted list")
+            wanted = wanted[:_MAX_EVENTS_PER_REQUEST]
+        return body["events"], bool(body["more_available"]), wanted
+    except (KeyError, TypeError, AttributeError) as exc:
         raise LinkTransportError(f"malformed inventory response from {url}: {exc}") from exc
 
 

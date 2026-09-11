@@ -2018,8 +2018,9 @@ def test_request_inventory_lets_a_completed_peer_discover_carried_content_from_a
             await bob_server.stop()
 
     try:
-        events, more_available = asyncio.run(scenario())
+        events, more_available, wanted = asyncio.run(scenario())
         assert more_available is False
+        assert wanted == []
         content_ids = set()
         for raw in events:
             accepted = alice_node.handle_events(bob_identity.fingerprint, [raw])

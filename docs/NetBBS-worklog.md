@@ -2217,6 +2217,43 @@ registration meant a sender's own outbound `link_message` could never be
 recognized when its acknowledgement came back, so it was rejected
 unconditionally, every time).
 
+### Push sizing is a budget problem, not a slicing problem (issue #478)
+
+A per-pass push whose size grows with everything this node has ever originated
+cannot be fixed by slicing it into per-request-sized batches. The peer's
+per-source request budget (`LinkRequestThrottle`, `request_rate_capacity`
+20/`request_rate_refill_per_minute` 60) bounds how many *requests* a pass may
+make at all, so past roughly 3,800 originated events a pass spent the whole
+budget on the same early batches, took a 429, and restarted at the first batch
+next pass. Slicing converts "one oversized request refused in full" into "the
+tail is never reached" — quieter, equally broken.
+
+What removes the backlog rather than pacing it: an `InventoryRequest` is
+already documented as exhaustive (every carried resource, each mapped to the
+full set of content IDs held), so the same body that asks "what am I missing?"
+already states everything the responder could want back. The responder
+therefore answers both directions at once — `events` plus a `wanted` list of
+declared IDs it lacks — and the push sends exactly those. One request per pass,
+shrinking to nothing as the peer catches up, no persisted per-peer cursor, no
+extra round trip.
+
+Two things do not fit that model and are stated rather than assumed.
+`key_transition`s are outside inventory scope, so a peer cannot ask for one;
+they stay unconditionally pushed every pass, which is affordable only because
+there are a handful of them. And a `wanted` entry this node merely *carries* is
+skipped: push has only ever carried self-originated content, and the requester
+reaches the rest through its own inventory pull.
+
+**Compatibility shape.** A response with no `wanted` key is a peer predating
+this, which is not the same as a peer answering `[]`; the client keeps those
+distinct (`None` versus empty) and falls back to one request's worth of own
+events, so a first-contact peer still receives this node's genesis events.
+
+**Test method.** Asserting only that the peer ends up holding everything proves
+nothing here — the old code converged too, via pull. Record the push requests
+themselves (wrap `netbbs.link.sync.push_events`) and assert both how many a
+pass made and what each carried.
+
 ### Linked boards
 
 A linked board uses the existing local board ID in its signed genesis; linking
