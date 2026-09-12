@@ -874,12 +874,38 @@ def test_a_public_url_with_a_query_or_fragment_is_refused():
             web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=public_url)
         )
 
-    for bad in ("https://bbs.example.org?proxy=1", "https://bbs.example.org#web"):
+    # The bare delimiters parse to an *empty* component, so a truthiness
+    # test on `parsed.query` / `parsed.fragment` accepts them while the
+    # appended token still lands in the query or the fragment.
+    for bad in (
+        "https://bbs.example.org?proxy=1",
+        "https://bbs.example.org#web",
+        "https://bbs.example.org?",
+        "https://bbs.example.org#",
+    ):
         with pytest.raises(ConfigError, match="query or fragment"):
             web_config(bad).validate()
 
     # A subpath is legitimate and must keep working.
     web_config("https://bbs.example.org/bbs").validate()
+
+
+def test_a_public_url_without_a_host_is_refused():
+    """Codex review of #508: `https://:8443` and `http://@` parse with a
+    truthy `netloc` and no host at all, so the scheme/netloc check passes
+    them and the node prints links nothing can resolve."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    def web_config(public_url):
+        return NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=public_url)
+        )
+
+    for bad in ("https://:8443", "http://@"):
+        with pytest.raises(ConfigError, match="public_url"):
+            web_config(bad).validate()
+
+    web_config("https://bbs.example.org:8443").validate()
 
 
 def test_a_public_url_with_an_unusable_port_is_refused():

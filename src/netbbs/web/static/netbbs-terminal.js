@@ -209,6 +209,16 @@
             "Upload failed: " + detail +
             " It may still have arrived \u2014 check the file listing, and ask the BBS" +
             " for a new link if it did not.";
+          // Repaint too (Codex review of #508). This branch sends the
+          // caller to the listing, and the listing behind the panel is
+          // the page queried *before* the upload -- so without this the
+          // advice points at stale evidence, the file that did arrive is
+          // missing from it, and the obvious conclusion is to upload it
+          // again. The success path already does this; the ambiguous
+          // case needs it more, not less.
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "key", data: "\f" }));
+          }
           input.disabled = true;
         });
     }

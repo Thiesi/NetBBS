@@ -394,7 +394,16 @@ class NodeConfig:
                         f"{name}.public_url must be an absolute http:// or https:// URL, got "
                         f"{transport.public_url!r}"
                     )
-                if parsed.query or parsed.fragment or parsed.params:
+                if not parsed.hostname:
+                    # `https://:8443` and `http://@` both parse with a
+                    # truthy `netloc` and no host whatsoever (Codex review
+                    # of #508), so the check above waves them through and
+                    # the node prints transfer links that every browser
+                    # and every `curl` rejects as hostless.
+                    raise ConfigError(
+                        f"{name}.public_url must name a host, got {transport.public_url!r}"
+                    )
+                if "?" in transport.public_url or "#" in transport.public_url or parsed.params:
                     # A transfer link is this value with `/transfer/<token>`
                     # appended, so anything after the path silently breaks
                     # every link the node prints (Codex review of #508): a
@@ -402,6 +411,14 @@ class NodeConfig:
                     # fragment never reaches the server at all. A path
                     # prefix is fine and stays supported -- that is how a
                     # node behind a reverse proxy subpath is reached.
+                    #
+                    # Asked of the raw string rather than `parsed.query`
+                    # and `parsed.fragment`, because a bare trailing
+                    # delimiter parses to an *empty* component: a
+                    # truthiness test on those accepts
+                    # `https://bbs.example.org?`, which appends the token
+                    # into the query and breaks exactly as the non-empty
+                    # case does.
                     raise ConfigError(
                         f"{name}.public_url must not carry a query or fragment (a path prefix is "
                         f"fine), got {transport.public_url!r}"
