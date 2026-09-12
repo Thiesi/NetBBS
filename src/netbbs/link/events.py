@@ -1397,11 +1397,13 @@ class FileWithdrawal:
     **A valid signature is necessary and nowhere near sufficient here,**
     and `from_dict` enforces the rest (Codex review of #500). The
     `file_descriptor` this withdrawal is about is gossiped to the whole
-    mesh, signed by the very same key, and carries the very same
-    `file_id` -- so "signed by the origin, names this file" describes a
-    document any interceptor already holds. Only `object_type` separates
-    the two, which makes checking it a precondition of the signature
-    check rather than a formality.
+    mesh and carries the very same `file_id` -- so "signed by the origin,
+    names this file" describes a document any interceptor already holds.
+    Until the origin rotates its signing key it is signed by the very key
+    a withdrawal would be verified against, which is precisely when the
+    confusion is exploitable. Only `object_type` separates the two, which
+    makes checking it a precondition of the signature check rather than a
+    formality.
 
     The payload binds the withdrawal to the one request it answers.
     `requester_fingerprint` makes it useless when replayed at anybody
@@ -1616,13 +1618,20 @@ def _verify_canonical_envelope(
     passes every shape check -- to abort a fetch with an unhandled
     exception before its invalid signature was ever examined.
 
+    `RecursionError` is caught for the same reason and is the same class
+    of trap: canonicalization walks the envelope recursively, so a
+    fabricated response only has to nest an unused field deeply enough
+    to exceed the interpreter's limit. Neither exception says anything
+    about the signature, and both mean the same thing here -- this
+    envelope is not something a signature could have covered.
+
     These two need it where the gossiped types do not: they are parsed
     straight off a response, on a transport that is plain HTTP unless a
     deployment says otherwise, with nothing between the wire and here.
     """
     try:
         message = canonical_bytes(envelope)
-    except ContentIdError:
+    except (ContentIdError, RecursionError):
         return False
     return verify_signature(signing_verify_key, message, signature)
 

@@ -897,8 +897,10 @@ But a signature alone is a weak check here for two reasons worth remembering
 whenever a signed object authorizes a deletion:
 
 - **another signed object may satisfy the same predicate.** The `file_descriptor`
-  being withdrawn is gossiped mesh-wide, signed by the same key, and names the
-  same `file_id`; only `object_type` tells it from a withdrawal. Validate the
+  being withdrawn is gossiped mesh-wide and names the same `file_id`, and until
+  the origin rotates its signing key it is signed by the very key the later
+  object is verified against — which is exactly when the confusion is
+  exploitable. Only `object_type` tells it from a withdrawal. Validate the
   envelope — protocol version, object type, payload shape — before the signature
   is worth anything. The gossiped event classes get this for free because
   `handle_events` dispatches on `object_type`; anything parsed outside that

@@ -2809,3 +2809,43 @@ def test_file_chunk_410_without_a_usable_withdrawal_is_an_ordinary_transport_err
     with pytest.raises(LinkTransportError) as raised:
         asyncio.run(scenario())
     assert not isinstance(raised.value, RemoteFileWithdrawnError)
+
+
+def test_an_over_nested_410_body_is_an_ordinary_transport_error(tmp_path):
+    """The parse half of the same hazard (Codex review of #500): JSON
+    decoding is recursive too, so a deeply nested 410 body raises
+    `RecursionError` before any of the errors a parser is expected to
+    produce. It has to reach the caller as an ordinary failed fetch."""
+    from netbbs.link.protocol import FileChunkRequest
+    from netbbs.link.transport import RemoteFileWithdrawnError, request_file_chunk
+
+    alice_identity = bootstrap_node_identity("alice")
+    alice_node = LinkNode(identity=alice_identity)
+
+    body = '{"error": "gone", "withdrawal": ' + "[" * 4000 + "]" * 4000 + "}"
+
+    async def _deeply_nested_gone(request: web.Request) -> web.Response:
+        return web.Response(text=body, status=410, content_type="application/json")
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/link/v1/file-chunk/{fingerprint}", _deeply_nested_gone)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await request_file_chunk(
+                    alice_node, session, f"http://127.0.0.1:{site.port}",
+                    FileChunkRequest(
+                        transfer_id="t", file_id="f", chunk_index=0, max_chunk_size=1024,
+                        authorization=None,
+                    ),
+                )
+        finally:
+            await runner.cleanup()
+
+    with pytest.raises(LinkTransportError) as raised:
+        asyncio.run(scenario())
+    assert not isinstance(raised.value, RemoteFileWithdrawnError)

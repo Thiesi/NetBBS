@@ -1201,3 +1201,31 @@ def test_a_withdrawal_verifies_after_the_origin_rotates_its_signing_key():
     )
     assert verify_file_withdrawal(withdrawal, rotated.signing_key.verify_key) is True
     assert verify_file_withdrawal(withdrawal, before) is False
+
+
+def test_an_over_nested_withdrawal_envelope_fails_verification():
+    """Codex review of #500, the second shape of the same trap: after the
+    float-envelope fix, deep nesting still reached the verify call and
+    raised `RecursionError` instead -- canonicalization walks the
+    envelope recursively, so a fabricated response only has to nest an
+    unused field deeply enough. Neither exception says anything about
+    the signature; both mean this envelope is not something a signature
+    could have covered."""
+    from netbbs.link.events import FileWithdrawal, build_file_withdrawal, verify_file_withdrawal
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    identity = bootstrap_node_identity("origin")
+    raw = build_file_withdrawal(
+        signing_identity=identity.signing_key, file_id="f", requester_fingerprint="r",
+        transfer_id="t", request_nonce="n", created_at="2026-01-01T00:00:00+00:00",
+    ).to_dict()
+    nested: list = []
+    cursor = nested
+    for _ in range(3000):
+        deeper: list = []
+        cursor.append(deeper)
+        cursor = deeper
+    raw["envelope"]["unused"] = nested
+
+    parsed = FileWithdrawal.from_dict(raw)
+    assert verify_file_withdrawal(parsed, identity.signing_key.verify_key) is False

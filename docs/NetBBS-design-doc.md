@@ -2855,8 +2855,9 @@ ordinary redelivery will not bring it back. So the requester checks four things,
 all of them before deleting anything:
 
 - **the envelope is a `file_withdrawal`.** The descriptor being withdrawn is
-  gossiped to the whole mesh, signed by the very same key, and carries the very
-  same `file_id` — so "signed by the origin, names this file" describes a
+  gossiped to the whole mesh and carries the very same `file_id` — and until the
+  origin rotates its signing key, is signed by the very key a withdrawal is
+  verified against, which is exactly when the confusion is exploitable — so "signed by the origin, names this file" describes a
   document any interceptor already holds, and `object_type` is the only thing
   separating the two. It is a precondition of the signature check, not a
   formality;

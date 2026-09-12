@@ -2380,10 +2380,14 @@ def _parse_withdrawal_body(text: str, url: str) -> FileWithdrawal:
     """Pull the signed `file_withdrawal` out of a 410 body, or raise a
     plain `LinkTransportError` if there isn't a well-formed one -- issue
     #479's "an unverifiable claim changes nothing" boundary starts
-    here."""
+    here.
+
+    `RecursionError` counts as malformed: JSON parsing is recursive, so a
+    deeply enough nested body raises it here rather than any of the
+    errors a parser is expected to produce (Codex review of #500)."""
     try:
         return FileWithdrawal.from_dict(strict_json_loads(text)["withdrawal"])
-    except (EventError, KeyError, ValueError, TypeError) as exc:
+    except (EventError, KeyError, ValueError, TypeError, RecursionError) as exc:
         raise LinkTransportError(
             f"origin at {url} refused a chunk request as gone but sent no usable withdrawal: {exc}"
         ) from exc
