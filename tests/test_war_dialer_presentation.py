@@ -2637,7 +2637,11 @@ def test_real_process_display_disconnect_preserves_only_chosen_toggle(tmp_path, 
         assert b'DISPLAY' in output
         if toggle:
             send(b'1')
-            wait_for(b'ASCII decorations [ON]')
+            # A state tag is a badge beside the label, not a bracketed word
+            # appended to it -- and turning ASCII decorations on is exactly the
+            # toggle that respells the badge's own brackets (issue #494).
+            wait_for(b'[ON]')
+            assert b'ASCII decorations' in screen()
         process.stdin.close()
         assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
@@ -3347,4 +3351,112 @@ def test_the_scene_table_advertises_no_hotkey_the_screen_ignores(tmp_path):
         row for _, rows in wd.exchange_detail_cards(palette, exchanges[0], player, 72)
         for row in rows))
     assert "Back on the switchboard" in card and "[G] Garrison" in card
+    conn.close()
+
+
+@pytest.mark.parametrize("action,target_role,rolls", [
+    ("trade", None, True), ("job", None, True), ("raid", None, True), ("root", None, True),
+    ("service", "hub", True),
+    ("recruit", None, False), ("crew", None, False),
+    ("service", "pbx", False), ("service", "carrier", False),
+])
+def test_a_preview_promises_a_bust_roll_only_where_one_happens(tmp_path, action, target_role,
+                                                              rolls):
+    """Only the five resolvers that call `apply_heat` roll against Heat.
+
+    The first round of this fix made `preview_heat` return zero for the two
+    services that take none, but the chance was still computed from the caller's
+    existing Heat -- so above 80 Heat a Lay Low, a Carrier recruitment and every
+    kit purchase still advertised `BUST n%` above terms saying there is no roll.
+    """
+    conn, now = _painted_world(tmp_path, f"roll-{action}-{target_role}.db")
+    palette = wd.Palette(True)
+    conn.execute("UPDATE players SET heat=95, specialty='', support='' WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    if action == "service":
+        exchange = next(e for e in wd.list_exchanges(conn, 1) if e.role == target_role)
+        conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=? "
+                     "WHERE id=?", (wd.to_iso(now), exchange.id))
+        conn.commit()
+        target = next(e for e in wd.list_exchanges(conn, 1) if e.id == exchange.id)
+    elif action == "root":
+        target = wd.list_exchanges(conn, 1)[3]
+    elif action == "raid":
+        target = wd.refresh_player(conn, 2, now)
+    elif action == "job":
+        target = wd.JobChoice(1, 1)
+    elif action == "crew":
+        target = wd.CrewChoice("stash")
+    else:
+        target = None
+    assert wd.rolls_for_bust(action, target) is rolls
+    cards = wd.stakes_cards(palette, action, player, target, 72)
+    stakes = _ANSI_RE.sub("", " ".join(row for heading, rows in cards
+                                      if heading == "STAKES" for row in rows))
+    if action == "recruit":
+        assert "BUST" not in stakes, stakes  # recruiting has no Heat row at all
+    else:
+        assert ("NO BUST ROLL" in stakes) is not rolls, stakes
+        assert ("⟦BUST " in stakes) is rolls, stakes
+
+
+def test_a_bracketed_word_is_never_coloured_like_a_hotkey():
+    """Every hotkey this door has is one character.
+
+    `[ON]`, `[HELD]` or `[SPECIALTY]` in amber and bold beside `[1]` reads as a
+    second key to press. A state tag is a badge or neutral data, never a key.
+    """
+    palette = wd.Palette(True)
+    row = wd.prose_rows(palette, "Press [T] to trade; the slot shows [HELD] when taken.", 72)[0]
+    assert _colour_before(row, "[T]") == palette.amber
+    assert wd.BOLD in row.split("[T]")[0]
+    assert _colour_before(row, "[HELD]") == palette.cyan
+    assert _colour_before(row, "[HELD]") != palette.amber
+
+
+def test_no_screen_prints_a_hotkey_its_own_dispatch_ignores(tmp_path):
+    """The rival directory reads; it does not raid.
+
+    `show_player_directory` delegates input to `show_text_pages`, which accepts
+    only Next/Prev/Back/Quit, so `[R] raid` in its table was a key that did
+    nothing -- the same defect as the scene table's action column.
+    """
+    conn, now = _painted_world(tmp_path, "verdicts.db")
+    palette = wd.Palette(True)
+    conn.execute("UPDATE players SET created_at=? WHERE user_id=2",
+                 (wd.to_iso(now - wd.GRACE * 2),))
+    conn.commit()
+    page = wd.read_player_page(conn, 1, now)
+    cards = wd.rivals_cards(palette, page, 1, 72, now)
+    table = _ANSI_RE.sub("", " ".join(
+        row for heading, rows in cards if heading == "RIVAL CREWS" for row in rows))
+    assert "eligible" in table, table
+    assert "[R]" not in table, "a key the screen's dispatch ignores"
+    # The head card says where the key that does raid actually lives.
+    head = _ANSI_RE.sub("", " ".join(cards[0][1]))
+    assert "Back on the switchboard" in head and "[R] Raid" in head
+    conn.close()
+
+
+def test_the_unread_receipt_page_shows_how_to_keep_it_unread(tmp_path, monkeypatch):
+    """Any key acknowledges the page; Back is the only way not to.
+
+    The login view's footer said only "Press any key to continue...", which both
+    hides the documented escape and implies Back acknowledges like anything else.
+    """
+    conn, now = _painted_world(tmp_path, "unread.db")
+    palette = wd.Palette(True)
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 40)
+    monkeypatch.setattr(wd, "read_input_key", lambda: "B")
+    wd.show_event_history(palette, conn, 1, 40, 12, unseen_only=True, own_handle="Thiesi")
+    screen = _ANSI_RE.sub("", "".join(written))
+    assert "Press any key to continue" in screen
+    assert "[B] Back keeps this page unread" in screen
+    # Back left them unread, which is the behaviour the footer now documents.
+    assert wd.unseen_events(conn, 1), "Back acknowledged the page"
+    for row in _rows("".join(written).split(CLEAR)[-1]):
+        assert sum(wd._char_width(ch) for ch in row) <= 40, repr(row)
     conn.close()

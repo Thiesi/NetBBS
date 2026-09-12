@@ -2777,7 +2777,7 @@ def center(content: str, width: int) -> str:
 
 
 _PROSE_TOKEN = re.compile(
-    r"(\[[^\[\]]{1,6}\]|\$[0-9][0-9,]*|[0-9][0-9.,]*%|\b[0-9][0-9,]*(?:\.[0-9]+)?\b)")
+    r"(\[[^\[\]]\]|\[[^\[\]]{2,6}\]|\$[0-9][0-9,]*|[0-9][0-9.,]*%|\b[0-9][0-9,]*(?:\.[0-9]+)?\b)")
 
 
 def prose_rows(p: Palette, text: str, width: int, *, style: str = "") -> list[str]:
@@ -2788,6 +2788,10 @@ def prose_rows(p: Palette, text: str, width: int, *, style: str = "") -> list[st
     screen, so the door's prose belongs to the design system instead of being
     the grey remainder around it. Sanitize first, style after: the text may name
     a rival crew, and the wrapper measures what it is given.
+
+    Every hotkey this door has is one character, so only a single-character
+    bracket is amber. A bracketed word is a state tag, not a key, and colouring
+    `[ON]` or `[HELD]` the way `[T]` is coloured invites a caller to press it.
     """
     base = style or p.ink
     rows: list[str] = []
@@ -2797,7 +2801,8 @@ def prose_rows(p: Palette, text: str, width: int, *, style: str = "") -> list[st
             if not piece:
                 continue
             if piece.startswith("[") and piece.endswith("]"):
-                parts.append(sty(p.amber + BOLD, piece))
+                parts.append(sty(p.amber + BOLD, piece) if len(piece) == 3
+                             else sty(p.cyan, piece))
             elif piece.startswith("$"):
                 parts.append(sty(p.amber, piece))
             elif piece.endswith("%"):
@@ -3160,8 +3165,12 @@ def show_event_history(
         return
     width -= 1  # Leave room for the prompt cursor at the right edge.
     title = "WHILE YOU WERE AWAY" if unseen_only else "EVENT LOG"
-    bar = ([sty(p.grey, "Press any key to continue...")] if unseen_only
-           else key_bar(p, LOG_BAR, width, 1))
+    # The login view acknowledges a page with any key *except* Back, which is the
+    # only way to keep these receipts unread -- so it has to be on the screen.
+    bar = ([sty(p.grey, "Press any key to continue..."),
+            sty(p.amber + BOLD, "[B]") + " " + sty(p.mint, "Back")
+            + sty(p.grey, " keeps this page unread")]
+           if unseen_only else key_bar(p, LOG_BAR, width, 1))
     body_rows = max(1, height - len(bar) - frame_cost(p, width))
     pages = event_pages(p, events, _panel_width(p, width), body_rows, own_handle=own_handle)
     page_index = 0
@@ -3169,8 +3178,8 @@ def show_event_history(
         page = pages[page_index]
         complete_ids = [event_id for _, event_id in page if event_id is not None]
         out(f"{ESC}[2J{ESC}[H")
-        note = page_note(page_index, len(pages), f"latest {EVENT_HISTORY_LIMIT}")
-        draw_frame(p, width, [("", [line for line, _ in page])], title=title, trailing=note)
+        draw_frame(p, width, [("", [line for line, _ in page])], title=title,
+                   trailing=page_note(page_index, len(pages), f"latest {EVENT_HISTORY_LIMIT}"))
         for row in bar[:-1]:
             out_line(row)
         out_prompt(bar[-1])
@@ -3719,13 +3728,16 @@ def rivals_cards(p: Palette, page: PlayerPage, user_id: int, width: int,
                      (_fit(_event_plain(rival.handle), 20), p.magenta),
                      (tier_name(rank_score(rival)), p.cyan),
                      (f"{rank_score(rival):,}", p.mint),
-                     (sty(p.amber + BOLD, "[R]") + " " + sty(p.phosphor, "raid")) if ok
-                     else (verdict, p.grey)])
+                     # A verdict, not a hotkey: this screen reads and never
+                     # raids, and a bracketed key its dispatch ignores is the
+                     # same lie as one on the scene's table.
+                     (verdict, p.phosphor if ok else p.grey)])
         if not ok and verdict != "you":
             reasons.append(f"{_event_plain(rival.handle)}: {reason}")
     cards: list[tuple[str, list[str]]] = [
         ("", prose_card(p, ["Raid eligibility now. Crew strength and cash are not public "
-                            "intelligence; [O] Ops buys a 24-hour snapshot."], width))]
+                            "intelligence. Back on the switchboard, [R] Raid picks a target and "
+                            "[O] Ops buys a 24-hour snapshot."], width))]
     if rows:
         cards.append(("RIVAL CREWS",
                       table(p, ["#", "CREW", "TIER", "RANK", "RAID"], rows, "<<<><", width)))
@@ -3893,12 +3905,18 @@ def do_display(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, h
     notes = ('Authored box art becomes ASCII; caller names are untouched.',
              'Removes every colour; every status, stake and outcome stays readable.',
              'Drops optional art, flavour and motion; keeps every stake and result.')
+    inner = _panel_width(p, max(1, width - 1))
     while True:
         values = read_display(conn, user_id)
         apply_display(p, values)
-        records = [([f"{label} [{'ON' if getattr(p, key) else 'OFF'}]", note], True)
-                   for key, label, note in zip(DISPLAY_KEYS, labels, notes)]
-        choice = pick_record_page(p, 'DISPLAY', records, width, height,
+        rendered = []
+        for key, label, note in zip(DISPLAY_KEYS, labels, notes):
+            on = getattr(p, key)
+            rows = compose([sty(p.mint + BOLD, label),
+                            badge(p, "ON" if on else "OFF",
+                                  style=p.phosphor if on else p.grey)], inner - 4)
+            rendered.append((rows + prose_rows(p, note, inner - 4, style=p.grey), True))
+        choice = pick_record_page(p, 'DISPLAY', [], width, height, rendered=rendered,
                                   trailing="free; survives seasons")
         if choice in 'BQ':
             return
@@ -4441,10 +4459,14 @@ def stakes_cards(p: Palette, action: str, player: Player, target, width: int, *,
     heat = preview_heat(action, player, target, operation=operation)
     if action != "recruit":
         projected = player.heat + heat
-        chance = min(HEAT_BUST_CHANCE_CAP,
-                     max(0, projected - HEAT_BUST_THRESHOLD) * HEAT_BUST_CHANCE_PER_POINT)
-        risk = badge(p, "BUST " + (f"{chance:.0%}" if chance >= 0.01 else "UNDER 1%"),
-                     style=p.alarm) if chance else badge(p, "NO BUST ROLL", style=p.phosphor)
+        if rolls_for_bust(action, target):
+            chance = min(HEAT_BUST_CHANCE_CAP,
+                         max(0, projected - HEAT_BUST_THRESHOLD) * HEAT_BUST_CHANCE_PER_POINT)
+            risk = (badge(p, "BUST " + (f"{chance:.0%}" if chance >= 0.01 else "UNDER 1%"),
+                          style=p.alarm) if chance
+                    else badge(p, "NO BUST YET", style=p.phosphor))
+        else:
+            risk = badge(p, "NO BUST ROLL", style=p.phosphor)
         heat_row = (sty(p.grey, "HEAT") + " " + meter(p, projected, 100, gauge, climb=True)
                     + " " + sty(p.ink, f"{player.heat:.0f}"))
         if heat:
@@ -4549,13 +4571,17 @@ def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool
     capacity = max(1, height - len(bar) - 1 - frame_cost(p, width))
     before = [(card_heading, rows) for card_heading, rows in before if rows]
     spent = sum(1 + len(rows) for _, rows in before) + (1 if heading else 0)
+    # A picker's first page has to offer at least one complete choice. The
+    # screen's own summary card, and then its heading, are given up for that, in
+    # that order: a picker that cannot be picked from is not a screen, and a
+    # summary is never worth pushing every choice onto a second page.
+    first_choice = next((index for index, (_, key) in enumerate(lines) if key),
+                        len(lines) - 1) + 1
     plain_cost = 1 if heading else 0
-    if spent + 1 > capacity or (before and len(lines) + spent > capacity
-                                and len(lines) + plain_cost <= capacity):
-        # A terminal with no room for the screen's own summary keeps the choices,
-        # and a summary is never worth pushing a choice onto a second page: a
-        # picker that cannot be picked from is not a screen.
+    if spent + first_choice > capacity:
         before, spent = [], plain_cost
+    if spent + first_choice > capacity and heading:
+        heading, spent = "", 0
     pages = [lines[:max(1, capacity - spent)]]
     rest = lines[len(pages[0]):]
     entry_capacity = max(1, capacity - (1 if heading else 0))
@@ -4785,18 +4811,21 @@ def do_operations_hub(p: Palette, conn: sqlite3.Connection, player: Player, rng:
     return False
 
 
-def crew_records(p: Palette, player: Player) -> list[tuple[list[str], bool]]:
+def crew_records(p: Palette, player: Player, width: int) -> list[tuple[list[str], bool]]:
     """The kit board: one specialty slot and one support slot.
 
-    Two rows an entry, so that the first choice is still complete on the first
-    page of a twelve-row terminal -- a picker whose entries cannot be picked is
-    not a screen. What is currently in each slot is on the card above.
+    Two rows an entry, so the first choice is still complete on the first page of
+    a twelve-row terminal. The slot and whether you hold it are badges, not
+    bracketed words: `[SPECIALTY]` printed beside `[1]` reads as a second key.
     """
     records = []
     for item, name, price, effect in CREW_ITEMS:
         slot = "SPECIALTY" if item in SPECIALTIES else "SUPPORT"
-        records.append(([f"{name} [{slot}] ${price}" + (" [HELD]" if item in
-                         (player.specialty, player.support) else ""), effect], True))
+        rows = compose([sty(p.mint + BOLD, name), badge(p, slot, style=p.cyan),
+                        label_value(p, "cost", f"${price}", style=p.amber),
+                        badge(p, "HELD", style=p.phosphor)
+                        if item in (player.specialty, player.support) else ""], width)
+        records.append((rows + prose_rows(p, effect, width, style=p.grey), True))
     return records
 
 
@@ -4808,7 +4837,8 @@ def do_crew(p: Palette, conn: sqlite3.Connection, player: Player, width: int, he
                      label_value(p, "SUPPORT", player.support or "empty",
                                  style=p.phosphor if player.support else p.grey),
                      label_value(p, "cash", f"${player.cash:,}", style=p.amber)], inner)
-    key = pick_record_page(p, "CREW DEVELOPMENT", crew_records(p, player), width, height,
+    key = pick_record_page(p, "CREW DEVELOPMENT", [], width, height,
+                           rendered=crew_records(p, player, inner - 4),
                            before=[("", slots)], heading="KIT")
     if key in "BQ":
         return False
@@ -5128,6 +5158,21 @@ def garrison_entry_rows(p: Palette, exchange: Exchange, player: Player,
                      label_value(p, "security", f"+{max(0, defence - exchange.garrison)}",
                                  style=p.cyan)], width)
     return rows + prose_rows(p, "Service: " + service, width, style=p.grey)
+
+
+def rolls_for_bust(action: str, target=None) -> bool:
+    """Whether committing `action` actually rolls against Heat.
+
+    Only the five resolvers that call `apply_heat` do: trading, a contract, a
+    raid, a territory attack and a Warez Hub's outlet. Recruiting, a kit
+    purchase, recon, a garrison move and the other two owner services -- Lay Low
+    *removes* Heat, a Carrier Switch just recruits -- roll for nothing, and a
+    preview that computed a chance from the caller's existing Heat advertised a
+    bust for all of them above terms that correctly said there is no roll.
+    """
+    if action == "service":
+        return isinstance(target, Exchange) and target.role == "hub"
+    return action in ("trade", "job", "raid", "root")
 
 
 def main() -> int:

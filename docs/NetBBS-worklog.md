@@ -4920,6 +4920,23 @@ nothing; and a three-step operation previewed the execution's odds, Heat and bus
 above a Prepare step that has none and costs $50 the card showed as $0. A card
 this prominent contradicting the terms directly under it is worse than no card.
 
+**A picker's first page must offer a choice, and the screen's own summary card
+is what gets given up for it.** How many entries fit a page depends on the
+terminal, so a card above them that is affordable at eighty columns pushes every
+choice onto page two at forty. `pick_record_page` measures the rows the *first*
+selectable entry needs and drops the summary, then the heading, until it fits --
+not "drop the summary when the whole list would then fit", which is the weaker
+rule that let a three-entry approach picker open with nothing to press.
+
+**A walk can name a place or an entry, never a page number.** The same
+size-dependence makes a fixed key sequence wrong at some size: `I5` opened "Your
+season reports" at eighty columns and pressed a key the picker was ignoring at
+forty. `scripts/door_gallery.py` therefore takes two suffixes -- `N*` presses
+until the screen stops changing, and `5?` pages forward until the screen *says*
+it will accept `5`. Read that from the hint row, not from the frame: Fast mode
+has no frame, and an entry's own `[2]` marker is on the screen while the entry's
+last row, and so its key, is on the next page.
+
 **A test that drives the door by reading its own output has to read what a caller
 reads.** Once a bar is styled segment by segment, `[A] Act` is a hotkey in amber
 followed by a label in mint and is no longer a contiguous run of bytes on the

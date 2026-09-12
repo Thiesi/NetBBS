@@ -58,6 +58,7 @@ sys.path.insert(0, str(SCRIPTS))
 import website_ansi_to_html as term  # noqa: E402
 
 SPAN = re.compile(r'<span style="([^"]*)">(.*?)</span>')
+ANSI = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 CLEAR = "\x1b[2J\x1b[H"
 
 # A keystroke is isolated by the silence around it: comfortably more than War
@@ -74,12 +75,17 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 # not to every panel. The key is the one the door's own dispatch uses -- check it
 # there, not in the action bar, before adding a walk.
 #
-# A `*` after a key means "press it until the screen stops changing, then
-# photograph that". How many pages a screen has depends on the terminal -- War
-# Dialer's switchboard is two pages at 80x24 and eleven at 40x12 -- so a fixed
-# number of Next presses photographs page two twice at one size and never
-# reaches the feed, the orders or the season card at another. A walk that pages
-# to the end reaches the same *place* at every size.
+# Two suffixes exist because how much fits a page depends on the terminal, so a
+# walk can name a place or an entry but never a page number:
+#
+#   `*`  press this key until the screen stops changing, then photograph that.
+#        War Dialer's switchboard is two pages at 80x24 and eleven at 40x12, so a
+#        fixed number of Next presses photographed page two twice at one size and
+#        never reached the feed, the orders or the season card at another.
+#   `?`  page forward until the screen offers this key, then press it. The scene
+#        hub shows all seven entries at 80x24 and four at 40x12, so `I5` reached
+#        "Your season reports" at one size and a key the picker was ignoring at
+#        another.
 WALKS: dict[str, list[tuple[str, bytes]]] = {
     "voidrunner": [
         ("Command Deck", b""),
@@ -109,36 +115,40 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Switchboard, page 2", b"N"),
         ("Switchboard, last page", b"N*"),
         ("BBS scene", b"I"),
-        ("Crew insignia", b"I1"),
-        ("Neutral dossiers", b"I2"),
-        ("Scene bulletins", b"I3"),
-        ("Season results", b"I4"),
-        ("Your season reports", b"I5"),
-        ("Hall of Fame", b"I6"),
-        # `I7` is the caller's own display screen; no other walk opens it.
-        ("Display options", b"I7"),
+        ("Crew insignia", b"I1?"),
+        ("Neutral dossiers", b"I2?"),
+        ("Scene bulletins", b"I3?"),
+        ("Season results", b"I4?"),
+        ("Your season reports", b"I5?"),
+        ("Hall of Fame", b"I6?"),
+        # The last hub entry is the caller's own display screen; no other walk
+        # opens it.
+        ("Display options", b"I7?"),
         ("The scene", b"E"),
         # A digit on the scene screen is the exchange's own number, so it opens
         # that exchange's card wherever the table has been paged to.
-        ("Exchange card", b"E1"),
+        ("Exchange card", b"E1?"),
         ("Rank", b"B"),
         ("Rivals", b"V"),
         ("Log", b"H"),
         ("Contract board", b"J"),
         # An action's preview is two pickers deep: the board, the approach, and
         # only then the terms the player is actually asked to accept.
-        ("Job preview", b"J11"),
-        ("Job preview, terms", b"J11N"),
+        ("Job preview", b"J1?1?"),
+        ("Job preview, terms", b"J1?1?N"),
         ("Trade preview", b"T"),
         ("Recruit preview", b"C"),
         ("Crew development", b"S"),
-        ("Crew preview", b"S1"),
+        ("Crew preview", b"S1?"),
         ("Root exchange", b"X"),
-        ("Root preview", b"X1"),
+        ("Root preview", b"X1?"),
         ("Garrisons", b"G"),
         ("Operations", b"O"),
-        ("Case an operation", b"O1"),
-        ("Rival recon", b"O2"),
+        ("Case an operation", b"O1?"),
+        # The step-stakes card is two pickers past the hub: the contract, the
+        # approach, and only then the terms the caller is asked to accept.
+        ("Case preview", b"O1?1?1?"),
+        ("Rival recon", b"O2?"),
         ("Help", b"?"),
         ("Help, later sections", b"?N"),
     ],
@@ -288,6 +298,39 @@ class Door:
         self.proc.stdin.flush()
         self.settle(before, f"key {key!r}", expect=expect)
 
+    #: How a screen says which keys it will accept right now. Matched on the hint
+    #: row rather than on the frame, because Fast mode has no frame -- and an
+    #: entry's own `[2]` marker can be on the screen while the entry's last row,
+    #: and therefore its key, is on the next page.
+    OFFERS = ("pick ", "no choice on this page", "inspect ")
+
+    def offered(self) -> str:
+        """The screen's own list of the keys it will take, or "" if it offers none."""
+        for row in ANSI.sub("", last_screen(self.read())).split("\r\n"):
+            row = row.strip()
+            if row.startswith(self.OFFERS):
+                return row
+        return ""
+
+    def press_when_offered(self, key: bytes, *, limit: int = 24) -> None:
+        """Page forward until the screen offers `key`, then press it.
+
+        How many entries fit a page depends on the terminal, so a walk can name
+        the entry it wants but never the page the entry is on: the scene hub
+        offers all seven at 80x24 and four at 40x12.
+        """
+        wanted = f"[{key.decode()}]"
+        for _ in range(limit):
+            if wanted in self.offered():
+                self.press(key)
+                return
+            before = last_screen(self.read())
+            self.press(b"N")
+            if last_screen(self.read()) == before:
+                break
+        raise SystemExit(f"{self.door.name} never offered {wanted} at {self.size}:\n"
+                         f"{self.offered()!r}")
+
     def press_to_end(self, key: bytes, *, limit: int = 24) -> None:
         """Press `key` until the screen it redraws stops changing.
 
@@ -345,9 +388,13 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
         running.settle()
         index = 0
         while index < len(keys):
-            key = keys[index:index + 1]
-            if keys[index + 1:index + 2] == b"*":
+            key, suffix = keys[index:index + 1], keys[index + 1:index + 2]
+            if suffix == b"*":
                 running.press_to_end(key)
+                index += 2
+                continue
+            if suffix == b"?":
+                running.press_when_offered(key)
                 index += 2
                 continue
             running.press(key, expect=expect)
