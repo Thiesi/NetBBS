@@ -1838,15 +1838,29 @@ has already created it. To post, write one JSON file there:
 - `subject` must be non-empty; `body` may be empty.
 
 Requests are processed when the door exits. For each one, NetBBS removes the
-request and writes `<name>.result.json` into the directory named by
-`outbound.results` — an absolute path outside the working directory, because
-the working directory is deleted the moment the run ends and a result left
-there could never be read by anyone. The most recent 32 are kept:
+request and writes a result into the directory named by `outbound.results` —
+an absolute path outside the working directory, because the working directory
+is deleted the moment the run ends and a result left there could never be read
+by anyone.
+
+Result files are named `<launch>.<your request name>.result.json`, where
+`<launch>` differs for every run. Do not construct that name: read the
+directory, parse each file, and match on the `request` field it carries. This
+is what lets two sessions of the same door run at once without one
+overwriting the other's outcome — which matters for any door that permits
+more than one player at a time.
 
 ```json
-{"status": "posted", "post_id": "...", "board": "Chronicle", "moderated": true}
-{"status": "rejected", "reason": "board 'Private' is not allowlisted for this door"}
+{"status": "posted", "post_id": "...", "board": "Chronicle", "moderated": true,
+ "request": "chronicle", "at": "2026-09-12T18:04:11.502133Z"}
+{"status": "rejected", "reason": "board 'Private' is not allowlisted for this door",
+ "request": "chronicle", "at": "2026-09-12T18:04:11.502133Z"}
 ```
+
+If a SysOp switched the hook off while your door was running, its requests are
+simply dropped and no result is written — there would be nowhere you could
+find one, since the next launch has no `outbound` block at all. That absent
+block is how you learn the hook is off.
 
 A refusal is never queued for later — a post held back and published after a
 SysOp revoked the allowlist is the surprise the switch exists to prevent. Your
@@ -1861,6 +1875,7 @@ Reasons you can expect to see, and what they mean for the door:
 | `not switched on` | The SysOp has not enabled outbound. Stop trying. |
 | `no board is allowlisted` | Enabled, but nothing is allowed yet. |
 | `not allowlisted for this door` | The board name is wrong, or was revoked. |
+| `matches more than one` | Two allowlisted boards differ only by case; spell one exactly. |
 | `more than one allowlisted board` | Name a board in the request. |
 | `rate limit reached` | Try again later; the ceiling is in `posts_per_hour`. |
 | `larger than` | The request exceeded the size limit and was not read. |

@@ -6626,7 +6626,20 @@ never use it at all.
 A result must outlive the launch that produced it. The door's working
 directory is deleted when the run ends, so an outcome written there can never
 be read -- not during the run, and not on the next launch. Results live in a
-durable per-door directory named in the launch metadata.
+durable per-door directory named in the launch metadata, and are named by
+launch as well as by request: a door which permits several sessions has
+several of them writing at once under the same conventional request name, and
+a basename-only path lets the second overwrite the first. The payload names
+the request it answers, which is how a door identifies its own. With the hook
+switched off nothing is recorded at all -- a refusal would recreate the
+directory that switching off just released, to leave a message the door
+cannot find, since there is then no metadata telling it where to look.
+
+Board names are UNIQUE on exact bytes, so two boards can differ only by case.
+Resolving a door's requested board by case-folding alone returns whichever was
+allowlisted first even when the door spelled the other exactly, which posts to
+the wrong board rather than refusing; an exact match is preferred and an
+ambiguous fold is refused.
 
 Bounds on this path are sized against the largest value the product itself
 permits, not against round numbers: the per-drain cap is not below the highest

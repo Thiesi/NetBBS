@@ -391,8 +391,19 @@ def _resolve_board(db: Database, door_id: int, requested: object) -> tuple[Board
     if not isinstance(requested, str):
         return None, "'board' must be a string"
     for board in allowed:
-        if board.name.casefold() == requested.casefold():
+        if board.name == requested:
             return board, ""
+    # `boards.name` is UNIQUE on exact bytes, so `News` and `news` can both
+    # exist. Case-folding alone would hand the door whichever was allowlisted
+    # first, even when it spelled the other one exactly -- posting to the
+    # wrong board rather than refusing. An exact match above settles it; here,
+    # more than one candidate means the request genuinely cannot be resolved.
+    folded = [board for board in allowed if board.name.casefold() == requested.casefold()]
+    if len(folded) == 1:
+        return folded[0], ""
+    if folded:
+        return None, (f"board {requested!r} matches more than one allowlisted board; "
+                      "spell it exactly")
     return None, f"board {requested!r} is not allowlisted for this door"
 
 
@@ -445,10 +456,27 @@ def _scan_requests(directory: Path) -> tuple[list[Path], bool]:
     return sorted(found), truncated
 
 
-def _refuse_all(db: Database, door, requests: list[Path], reason: str) -> int:
+def _refuse_all(db: Database, door, launch: str, requests: list[Path], reason: str) -> int:
     """Answer every request in `requests` with the same refusal."""
     for request in requests:
-        _write_result(db, door.id, request, {"status": "rejected", "reason": reason})
+        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": reason})
+    return len(requests)
+
+
+def _discard_all(requests: list[Path]) -> int:
+    """Drop requests without recording anything.
+
+    Used only when the hook is switched off. Writing a refusal would recreate
+    the very directory `disable_outbound` just released, to leave a message
+    the door can never find: with the hook off there is no `outbound` block on
+    the next launch, so nothing tells it where to look. The absent block is
+    the signal, and it is one the door already has to handle.
+    """
+    for request in requests:
+        try:
+            request.unlink(missing_ok=True)
+        except OSError:
+            pass
     return len(requests)
 
 
@@ -470,7 +498,7 @@ def _prune_results(directory: Path) -> None:
             pass
 
 
-def _write_result(db: Database, door_id: int, request: Path, payload: dict) -> None:
+def _write_result(db: Database, door_id: int, launch: str, request: Path, payload: dict) -> None:
     """Record the outcome durably, then drop the request.
 
     Not written beside the request. The drop directory lives in the door's
@@ -480,13 +508,23 @@ def _write_result(db: Database, door_id: int, request: Path, payload: dict) -> N
     It goes in a per-door directory beside the node database instead, named in
     `door_info.json` so the door knows where to look on its next launch.
 
+    Named by `launch` as well as by the request, because a door which permits
+    several sessions has several of them writing at once -- and they will use
+    the same conventional request name, since nothing tells them otherwise. A
+    per-door, basename-only path let the second drain overwrite the first
+    door's outcome before it had been read, so a door could read a result
+    belonging to somebody else's request. The payload names the request it
+    answers for the same reason.
+
     Temp-then-rename for the same reason the door is asked to use it: a door
     polling for its result must never read half a file. The request itself is
     removed once answered, so the drop directory does not accumulate work
     already done.
     """
     directory = results_dir(db, door_id)
-    result = directory / (request.name[: -len(_REQUEST_SUFFIX)] + _RESULT_SUFFIX)
+    stem = request.name[: -len(_REQUEST_SUFFIX)]
+    payload = {**payload, "request": stem, "at": utc_now_iso()}
+    result = directory / f"{launch}.{stem}{_RESULT_SUFFIX}"
     staging = result.with_name(result.name + ".part")
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -521,11 +559,13 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None) -> tuple[int
     """
     directory = workdir / OUTBOUND_DIRNAME
     requests, truncated = _scan_requests(directory)
+    # The working directory is freshly made per launch, so its name
+    # distinguishes concurrent sessions of the same door from each other.
+    launch = workdir.name
 
     config = outbound_config(db, door.id)
     if config is None:
-        return 0, _refuse_all(db, door, requests,
-                              "this door's outbound hook is not switched on")
+        return 0, _discard_all(requests)
 
     # A door posts on a named SysOp's authority. If that account is gone the
     # authority has lapsed with it, and there would also be no actor to
@@ -533,13 +573,13 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None) -> tuple[int
     # it on again, rather than posting unattributably.
     actor = get_user_by_id(db, config.enabled_by_user_id) if config.enabled_by_user_id else None
     if actor is None:
-        return 0, _refuse_all(db, door, requests,
+        return 0, _refuse_all(db, door, launch, requests,
                               "the account which enabled this door's outbound no longer exists; "
                               "a SysOp must switch it on again")
 
     posted = refused = 0
     for request in requests[:_MAX_REQUESTS_PER_DRAIN]:
-        reason = _handle_one(db, door, config, actor, request, node_identity=node_identity)
+        reason = _handle_one(db, door, config, actor, launch, request, node_identity=node_identity)
         if reason is None:
             posted += 1
         else:
@@ -549,37 +589,37 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None) -> tuple[int
     overflow = requests[_MAX_REQUESTS_PER_DRAIN:]
     if overflow or truncated:
         refused += _refuse_all(
-            db, door, overflow,
+            db, door, launch, overflow,
             f"more than {_MAX_REQUESTS_PER_DRAIN} requests in one session; "
             "the rest were not processed")
         _log_refusal_once_per_window(db, door, config, actor, "per-session request flood")
     return posted, refused
 
 
-def _handle_one(db: Database, door, config: OutboundConfig, actor: User, request: Path,
-                *, node_identity=None) -> str | None:
+def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch: str,
+                request: Path, *, node_identity=None) -> str | None:
     """Post one request, or return the reason it was refused."""
     try:
         # Checked before reading, not after parsing. A door can stream a file
         # to disk without it counting against its own RLIMIT_AS, and reading
         # it whole would allocate all of it inside NetBBS, on the shared lane.
         if request.stat().st_size > _MAX_REQUEST_BYTES:
-            _write_result(db, door.id, request, {
+            _write_result(db, door.id, launch, request, {
                 "status": "rejected",
                 "reason": f"request is larger than {_MAX_REQUEST_BYTES} bytes",
             })
             return "oversized request"
         payload = json.loads(request.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        _write_result(db, door.id, request, {"status": "rejected", "reason": "request is not readable JSON"})
+        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": "request is not readable JSON"})
         return "malformed request"
     if not isinstance(payload, dict):
-        _write_result(db, door.id, request, {"status": "rejected", "reason": "request must be a JSON object"})
+        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": "request must be a JSON object"})
         return "malformed request"
 
     subject, body = payload.get("subject"), payload.get("body")
     if not isinstance(subject, str) or not isinstance(body, str) or not subject.strip():
-        _write_result(db, door.id, request, {"status": "rejected",
+        _write_result(db, door.id, launch, request, {"status": "rejected",
                                 "reason": "request needs a non-empty 'subject' and a 'body' string"})
         return "malformed request"
     if not _is_storable(subject) or not _is_storable(body):
@@ -588,7 +628,7 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, request
         # which cannot be encoded as UTF-8. Left to reach SQLite it raises
         # outside the exceptions this drain expects, so one malformed request
         # would stop every later one in the same session being answered.
-        _write_result(db, door.id, request, {
+        _write_result(db, door.id, launch, request, {
             "status": "rejected",
             "reason": "request contains text which is not valid Unicode",
         })
@@ -596,12 +636,12 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, request
 
     board, problem = _resolve_board(db, door.id, payload.get("board"))
     if board is None:
-        _write_result(db, door.id, request, {"status": "rejected", "reason": problem})
+        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": problem})
         return problem
 
     if _recent_post_count(db, door.id) >= config.posts_per_hour:
         reason = f"rate limit reached ({config.posts_per_hour} posts per hour)"
-        _write_result(db, door.id, request, {"status": "rejected", "reason": reason})
+        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": reason})
         return reason
 
     # One transaction for the post, the rate debit and the audit entry. The
@@ -624,7 +664,7 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, request
             detail=f"door={door.name!r} label={config.label!r} post={post.post_id}")
     except PostError as exc:
         db.connection.rollback()
-        _write_result(db, door.id, request, {"status": "rejected", "reason": str(exc)})
+        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": str(exc)})
         return "post refused"
     except (sqlite3.Error, OSError, ValueError):
         db.connection.rollback()
@@ -648,7 +688,7 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, request
             # door might act on by posting again.
             _logger.warning("could not queue door post %s for Link: %s", post.post_id, exc)
 
-    _write_result(db, door.id, request, {"status": "posted", "post_id": post.post_id,
+    _write_result(db, door.id, launch, request, {"status": "posted", "post_id": post.post_id,
                             "board": board.name, "moderated": board.moderated})
     return None
 

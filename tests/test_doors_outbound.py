@@ -60,12 +60,23 @@ def _request(workdir, name="post", **payload):
     return path
 
 
+def _results(db, door, request_path):
+    """Every result answering this request, across launches.
+
+    Read from the door's durable directory rather than beside the request:
+    the drop directory is inside a working directory that no longer exists by
+    the time anyone could look. Names carry the launch as well as the request,
+    so two concurrent sessions of one door cannot overwrite each other.
+    """
+    stem = request_path.name[: -len(".json")]
+    return [json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(results_dir(db, door.id).glob(f"*.{stem}.result.json"))]
+
+
 def _result(db, door, request_path):
-    """A result is read from the door's durable directory, not beside the
-    request: the drop directory is inside a working directory that no longer
-    exists by the time anyone could look."""
-    result = results_dir(db, door.id) / (request_path.name[: -len(".json")] + ".result.json")
-    return json.loads(result.read_text(encoding="utf-8"))
+    found = _results(db, door, request_path)
+    assert len(found) == 1, f"expected exactly one result, got {len(found)}"
+    return found[0]
 
 
 def _posts(db, board, user):
@@ -153,10 +164,18 @@ def test_a_label_stays_inside_the_username_grammar(db, sysop):
 
 
 def test_outbound_is_off_until_a_sysop_switches_it_on(db, door, sysop, board, tmp_path):
+    """With the hook off the request is dropped and nothing is recorded.
+
+    Writing a refusal would recreate the directory `disable_outbound` just
+    released, to leave a message the door can never find: with the hook off
+    there is no `outbound` block on the next launch telling it where to look.
+    The absent block is the signal.
+    """
     request = _request(tmp_path, subject="Hello", body="...")
 
     assert drain(db, door, tmp_path) == (0, 1)
-    assert _result(db, door, request)["status"] == "rejected"
+    assert not request.exists()
+    assert not results_dir(db, door.id).exists(), "a released directory must stay released"
     assert outbound_config(db, door.id) is None
 
 
@@ -558,6 +577,43 @@ def test_switching_off_releases_the_results_too(db, door, sysop, board, tmp_path
     disable_outbound(db, door, disabled_by=sysop)
 
     assert not results_dir(db, door.id).exists()
+
+
+def test_two_sessions_of_one_door_do_not_overwrite_each_others_results(
+        db, door, sysop, board, tmp_path):
+    """A door which permits several sessions has several of them writing at
+    once, under the same conventional request name -- nothing tells them
+    otherwise. A per-door, basename-only result path let the second drain
+    overwrite the first door's outcome before it had been read."""
+    _enable(db, door, sysop, board)
+    first = tmp_path / "netbbs-door-aaa"
+    second = tmp_path / "netbbs-door-bbb"
+    for workdir, body in ((first, "from the first session"), (second, "from the second")):
+        workdir.mkdir()
+        _request(workdir, subject="Season 1", body=body)
+
+    assert drain(db, door, first) == (1, 0)
+    assert drain(db, door, second) == (1, 0)
+
+    outcomes = _results(db, door, first / OUTBOUND_DIRNAME / "post.json")
+    assert len(outcomes) == 2, "both sessions must keep their own outcome"
+    assert len({outcome["post_id"] for outcome in outcomes}) == 2
+    assert all(outcome["request"] == "post" for outcome in outcomes)
+
+
+def test_an_exactly_spelled_board_wins_over_a_case_variant(db, door, sysop, tmp_path):
+    """`boards.name` is UNIQUE on exact bytes, so `News` and `news` can both
+    exist. Case-folding alone handed the door whichever was allowlisted first,
+    even when it spelled the other one exactly -- posting to the wrong board."""
+    upper = create_board(db, "News", creator=sysop)
+    lower = create_board(db, "news", creator=sysop)
+    _enable(db, door, sysop, upper)
+    allow_target(db, door, lower, allowed_by=sysop)
+    request = _request(tmp_path, board="news", subject="Season 1", body="...")
+
+    assert drain(db, door, tmp_path) == (1, 0)
+    assert _result(db, door, request)["board"] == "news"
+    assert _posts(db, lower, sysop) and not _posts(db, upper, sysop)
 
 
 def test_results_do_not_accumulate_without_limit(db, door, sysop, board, tmp_path):
