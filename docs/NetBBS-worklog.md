@@ -6589,3 +6589,95 @@ scores into the authoritative save before projecting current career numbers;
 retain unknown historical gaps without inventing dossiers or old combat totals.
 Merged read-only score snapshots retain those lifetime totals too, omitting an
 inconsistent per-career block until the next authoritative checkpoint repairs it.
+
+A door may post to boards a SysOp allowlists for it, and to nothing else. It
+posts as a label, never an account: the users table requires a credential by
+CHECK constraint, and a Link-carried post already demonstrates the shape a
+post with no local account behind it takes. With no account there is nothing
+to exclude from login, listings, mail or moderation, and no infrastructure
+level band is needed.
+
+Boards resolve a stored author by id; chat resolves by username. A posting
+label equal to a real handle therefore renders in chat with that account's
+nick and verified-name styling. Labels are unique across accounts and doors
+and are checked NOCASE when the hook is switched on. The reserved suffix is
+refused at registration forward-only, because a database predating the rule
+may already hold such a name; the enable-time check is what actually protects
+the door path.
+
+A label federates as `local_user_id`, so it must satisfy the username grammar
+and length. It is stored rather than derived: two distinct door names can
+reduce to the same slug, and a derived label would not survive a rename.
+
+The allowlist is the only gate on the door posting path. Level is deliberately
+not a second one: two gates can disagree at post time, over a conflict the
+SysOp never saw when they chose the board. Identity gates (age, verified name)
+are enforced in the flow layer for callers and do not apply to a door, which
+has no birthdate; the allowlist screen says so where the board is chosen.
+
+The transport is a file drop rather than a socket, so that a DOS guest can be
+served: a socket cannot cross the emulator boundary. Suffix matching is
+case-insensitive because DOS writes 8.3 names in upper case. A DOS guest still
+cannot read `door_info.json` -- it names a host path -- so it cannot yet learn
+its label or drop directory, and the hook is in practice for locally launched
+native doors. A remote (RLogin) registration shares no filesystem and can
+never use it at all.
+
+A result must outlive the launch that produced it. The door's working
+directory is deleted when the run ends, so an outcome written there can never
+be read -- not during the run, and not on the next launch. Results live in a
+durable per-door directory named in the launch metadata, and are named by
+launch as well as by request: a door which permits several sessions has
+several of them writing at once under the same conventional request name, and
+a basename-only path lets the second overwrite the first. The payload names
+the request it answers, which is how a door identifies its own. With the hook
+switched off nothing is recorded at all -- a refusal would recreate the
+directory that switching off just released, to leave a message the door
+cannot find, since there is then no metadata telling it where to look.
+
+Board names are UNIQUE on exact bytes, so two boards can differ only by case.
+Resolving a door's requested board by case-folding alone returns whichever was
+allowlisted first even when the door spelled the other exactly, which posts to
+the wrong board rather than refusing; an exact match is preferred and an
+ambiguous fold is refused.
+
+Bounds on this path are sized against the largest value the product itself
+permits, not against round numbers: the per-drain cap is not below the highest
+hourly ceiling a SysOp may set, and retained results are not fewer than one
+drain can produce. Otherwise a permitted configuration loses work silently.
+
+The drain runs on the shared database lane, so it bounds what it enumerates
+rather than what it slices: materializing and sorting a whole directory first
+lets one door in a write loop stall every caller's database work. It also
+checks a request's size before reading it, since a door can stream a file to
+disk without it counting against its own address-space limit.
+
+Request size is measured on the JSON file, where one character can become six;
+the board limits count decoded bytes. A cap set at the decoded limit refuses
+legal non-ASCII posts. Python's JSON decoder also accepts an escaped lone
+surrogate and returns a `str` that cannot be encoded as UTF-8, which raises
+outside the exceptions a drain expects and strands every later request in the
+same session, so text is checked for storability before use.
+
+A door posts on a named SysOp's authority. If that account is deleted the hook
+lapses rather than posting unattributably; another SysOp vouches for it
+without disturbing the identity or the allowlist. The post, its rate debit and
+its audit entry commit in one transaction, so neither a post with no audit
+entry nor one with no budget spent is reachable; the search reindex stays
+outside it, being idempotent and safe after any mutation.
+
+A launch a SysOp made to check a door is not a launch a caller made to play
+it. Test launches and the DOS probe do not publish, and the launch metadata
+says so, so a door can report the truth to the SysOp watching rather than
+claiming a post it did not make.
+
+Rate history is counted from its own table rather than from posts, so deleting
+a door's output cannot return budget it has already spent. Refusals are
+audit-logged once per rate window: `record_action` commits immediately, so a
+door in a retry loop would otherwise make the audit trail the incident.
+
+Testing method for this class of change: a decision recorded in prose is not
+evidence the code delivers it. Each promise here has a test that fails when
+the mechanism behind it is removed, including the ones about durability and
+ordering, which pass trivially against an implementation that never keeps the
+promise at all.

@@ -30,7 +30,32 @@ def _only_user(db):
 
 
 def test_the_contract_version_is_published(db, tmp_path, player):
-    assert _info(db, tmp_path)["door_api"] == DOOR_API_VERSION == 2
+    assert _info(db, tmp_path)["door_api"] == DOOR_API_VERSION == 3
+
+
+def test_only_a_door_with_the_hook_hears_about_outbound(db, tmp_path, player):
+    """Issue #520. The block is absent, and no drop directory is created, for
+    every door whose SysOp has not switched the hook on -- which is the
+    overwhelming majority, and they see exactly what they saw at door_api 2."""
+    from netbbs.doors import create_door
+    from netbbs.doors.outbound import OUTBOUND_DIRNAME, allow_target, enable_outbound
+    from netbbs.boards.boards import create_board
+
+    sysop = _only_user(db)
+    door = create_door(db, "Blacksite", "/bin/true", creator=sysop)
+
+    assert "outbound" not in _info(db, tmp_path, door_id=door.id)
+    assert not (tmp_path / OUTBOUND_DIRNAME).exists()
+
+    enable_outbound(db, door, enabled_by=sysop)
+    allow_target(db, door, create_board(db, "Chronicle", creator=sysop), allowed_by=sysop)
+
+    info = _info(db, tmp_path, door_id=door.id)
+    assert info["outbound"]["label"] == "Blacksite.door"
+    assert info["outbound"]["boards"] == ["Chronicle"]
+    # The door is handed a directory that exists, rather than being asked to
+    # create one inside a workdir it does not own the layout of.
+    assert (tmp_path / OUTBOUND_DIRNAME).is_dir()
 
 
 def test_a_door_learns_the_transport_carrying_its_caller(db, tmp_path, player):
@@ -116,7 +141,7 @@ def test_a_real_door_reads_the_effective_limit_not_the_profile_value(db, lane, p
     result = asyncio.run(_run(session, lane, door, player, wall_time_limit_seconds=30))
 
     assert result.reason == "exited"
-    assert b"API 2 LIMIT 30" in session.written, bytes(session.written)
+    assert b"API 3 LIMIT 30" in session.written, bytes(session.written)
 
 
 def test_a_second_launch_does_not_take_a_write_lock(db, tmp_path, player):

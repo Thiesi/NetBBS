@@ -242,7 +242,7 @@ def test_a_door_recreated_under_the_same_name_does_not_inherit_activity(db, play
     reported as activity in -- or authorised by -- the new registration.
     """
     from netbbs.auth.users import create_user
-    from netbbs.doors import delete_door
+    from netbbs.doors import delete_door, get_door
     from netbbs.net.directory_flow import _who_entry_description, playable_registrations
 
     secret = create_door(db, "Arena", sys.executable, args=(), creator=player,
@@ -253,7 +253,19 @@ def test_a_door_recreated_under_the_same_name_does_not_inherit_activity(db, play
     delete_door(db, secret, deleted_by=player)
     replacement = create_door(db, "Arena", sys.executable, args=(), creator=player,
                               min_play_level=0, profile=DoorProfile(install_dir=str(tmp_path)))
+    # The registration timestamp is what distinguishes the two, so the test has
+    # to guarantee it differs rather than hope the clock moved. Windows ticks
+    # every 15.6 ms and `utc_now_iso` returns the same string for ~99.6% of
+    # consecutive calls, so a delete and a re-register land in one tick most of
+    # the time and the replacement is born indistinguishable from its
+    # predecessor. That is a limit of the clock, not of the product: a SysOp
+    # doing this through two menu screens is never inside 15 ms.
+    db.connection.execute("UPDATE doors SET created_at = ? WHERE id = ?",
+                          ("2026-09-12T12:00:00.000000Z", replacement.id))
+    db.connection.commit()
+    replacement = get_door(db, replacement.id)
     assert replacement.name == secret.name, "precondition: the name was reused"
+    assert replacement.created_at != secret.created_at, "precondition: the timestamp differs"
 
     ordinary = create_user(db, "ordinary", password="hunter2", user_level=10)
     described = _who_entry_description(db, _summary(session), presence,

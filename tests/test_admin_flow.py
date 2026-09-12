@@ -8502,3 +8502,116 @@ def test_rename_refusal_sanitizes_a_hostile_channel_name(db, lane, sysop):
     # remainder of the hostile name is harmless.
     assert "[31m" not in refusal
     assert "cannot be renamed while 1 caller(s) are in it" in refusal
+
+
+# -- door outbound hook (issue #520) ----------------------------------------
+
+
+def _door_outbound_keys(*keys):
+    """Reach a single registered door's outbound screen, then unwind."""
+    return ["c", "d", "l", "0", "1", "o", *keys, "b", "b", "b", "b", "b"]
+
+
+def test_a_door_offers_outbound_and_starts_with_it_off(db, lane, sysop):
+    from netbbs.doors import create_door
+
+    create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+
+    session = FakeSession(_door_outbound_keys())
+    _run(session, lane, sysop)
+    text = _written_text(session)
+
+    assert "utbound" in text, "the door screen must offer the hook"
+    assert "Off." in text
+    assert "cannot post anything" in text
+
+
+def test_turning_outbound_on_shows_the_name_its_posts_will_carry(db, lane, sysop):
+    """The minted label is never a surprise: the SysOp sees it immediately,
+    which is what makes silent disambiguation safe."""
+    from netbbs.doors import create_door
+    from netbbs.doors.outbound import outbound_config
+
+    door = create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+
+    session = FakeSession(_door_outbound_keys("t"))
+    _run(session, lane, sysop)
+    text = _written_text(session)
+
+    assert "Blacksite.door" in text
+    assert outbound_config(db, door.id) is not None
+
+
+def test_outbound_says_plainly_that_it_can_post_nowhere_yet(db, lane, sysop):
+    """Switched on with no board allowed is a real state a SysOp can stop in,
+    and it looks identical to a broken door unless the screen says so."""
+    from netbbs.doors import create_door
+
+    create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+
+    session = FakeSession(_door_outbound_keys("t"))
+    _run(session, lane, sysop)
+
+    assert "it can post nowhere until you allow one" in _written_text(session)
+
+
+def test_a_lapsed_hook_can_be_vouched_for_without_losing_its_configuration(db, lane, sysop):
+    """The screen told the SysOp to switch it on again, but with a
+    configuration present the only available action was [T]urn off -- which
+    releases the label and the entire allowlist. The instruction and the
+    available action disagreed, and the action was the destructive one."""
+    from netbbs.boards.boards import create_board
+    from netbbs.doors import create_door
+    from netbbs.doors.outbound import allow_target, enable_outbound, outbound_config, targets
+
+    door = create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+    board = create_board(db, "Chronicle", creator=sysop)
+    enable_outbound(db, door, enabled_by=sysop)
+    allow_target(db, door, board, allowed_by=sysop)
+    label = outbound_config(db, door.id).label
+    db.connection.execute(
+        "UPDATE door_outbound SET enabled_by_user_id = NULL WHERE door_id = ?", (door.id,))
+    db.connection.commit()
+
+    session = FakeSession(_door_outbound_keys("v"))
+    _run(session, lane, sysop)
+
+    config = outbound_config(db, door.id)
+    assert config.enabled_by_user_id == sysop.id, "vouching must restore the authority"
+    assert config.label == label, "and must not mint a new posting identity"
+    assert [b.name for b in targets(db, door.id)] == ["Chronicle"], "nor drop the allowlist"
+
+
+def test_vouching_is_offered_only_when_the_authority_has_lapsed(db, lane, sysop):
+    from netbbs.doors import create_door
+    from netbbs.doors.outbound import enable_outbound
+
+    door = create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+    enable_outbound(db, door, enabled_by=sysop)
+
+    session = FakeSession(_door_outbound_keys())
+    _run(session, lane, sysop)
+
+    assert "ouch" not in _written_text(session)
+
+
+def test_a_remote_door_is_told_outbound_cannot_work_for_it(db, lane, sysop):
+    """An rlogin registration launches no local process and shares no
+    filesystem, so it can never write a request. Offering the switch would let
+    a SysOp turn on something that silently does nothing forever."""
+    from netbbs.doors import create_door
+    from netbbs.doors.outbound import outbound_config
+    from netbbs.doors.profiles import DoorProfile
+
+    door = create_door(
+        db, "Elsewhere", "/usr/bin/python3", creator=sysop,
+        profile=DoorProfile(adapter="rlogin",
+                            options={"service_name": "bbslink", "host": "127.0.0.1",
+                                     "port": 513, "allowed_destinations": ["127.0.0.1:513"]}),
+    )
+
+    session = FakeSession(_door_outbound_keys("t"))
+    _run(session, lane, sysop)
+
+    assert "has no way to hand anything back" in _written_text(session)
+    assert outbound_config(db, door.id) is None, "the switch must not be reachable at all"

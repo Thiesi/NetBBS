@@ -83,5 +83,7 @@ async def probe_dosbox(lane, door, actor):
                 return "COM1 probe output/CP437 echo did not match."
             return ""
 
+        # A probe runs the real game to see whether it starts. It must never
+        # publish anything the door happens to have queued (issue #520).
         return await run_door(session, lane, candidate, actor, wall_time_limit_seconds=12,
-                              output_check=check_output)
+                              output_check=check_output, rehearsal=True)
