@@ -95,7 +95,17 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Contract Details", b"B1"),
         ("Navigation Chart", b"C"),
         ("Pilot Record", b"S"),
+        # The record's other three views, and the finale, are each one more key.
+        ("Pilot Record, jobs", b"SC"),
+        ("Pilot Record, log", b"SH"),
+        ("Career Dossiers", b"SD"),
+        ("Career Finale", b"SR"),
         ("Hall of Fame", b"H"),
+        # The Hall's five views are five different tables, not one paged table.
+        ("Hall of Fame, trading", b"H2"),
+        ("Hall of Fame, exploration", b"H3"),
+        ("Hall of Fame, combat", b"H4"),
+        ("Hall of Fame, careers", b"H5"),
         ("Pilot Guide", b"G"),
         ("Trading Ledger", b"T"),
         ("Viewport", b"V"),
