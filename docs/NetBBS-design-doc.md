@@ -7420,17 +7420,12 @@ existing terminal UI. Every status, stake and outcome is readable without color.
 Static, compact ASCII diagrams identify exchange roles and NPC operators beside
 their actual current state. Normal action results may add a short fictional
 vignette; Fast omits optional art/flavor and keeps all stakes and net deltas.
-There are no animation delays. War Dialer launch metadata includes the optional
-boolean `unicode_style`, copied from the caller's existing NetBBS preference.
-False defaults to ASCII decorations; true or omission preserves the rich default.
-An explicit in-game ASCII choice wins. Changing monochrome/Fast alone does not
-freeze the inherited Unicode default.
-
-Issue #469 superseded this section's original "unrelated doors receive no new
-fields": `unicode_style` is the caller's own display preference, which was
-War-Dialer-only by scope rather than by policy, and every door now receives it
-along with the rest of the API-2 metadata below. The native-door JSON boundary
-and supervision are otherwise unchanged.
+There are no animation delays. War Dialer reads the optional boolean
+`unicode_style` from the launch metadata every door receives (§6, the
+`door_info.json` contract): false defaults to ASCII decorations, true or
+omission preserves the rich default, an explicit in-game ASCII choice wins,
+and changing monochrome/Fast alone does not freeze the inherited Unicode
+default.
 
 **Screen framing and one hotkey style (issue #487).** Every screen under the
 masthead -- the switchboard, the help and first-visit text, the event log and the
