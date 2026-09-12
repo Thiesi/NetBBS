@@ -1145,6 +1145,23 @@ def exchange_owner(exchange: Exchange) -> str:
     return exchange.controller_handle or ("NPC: " + NPC_NAMES[exchange.npc_key] if exchange.npc_key else "unclaimed")
 
 
+def held_for(exchange: Exchange) -> str:
+    """How long this exchange has been held, for its owner's own card.
+
+    Coarse on purpose: an owner wants "three days", not a timestamp they would
+    have to subtract from the clock themselves.
+    """
+    if not exchange.controlled_since:
+        return "-"
+    span = now_utc() - from_iso(exchange.controlled_since)
+    hours = max(0, int(span.total_seconds() // 3600))
+    if hours < 1:
+        return "under an hour"
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
 def exchange_defense(exchange: Exchange) -> int:
     return exchange.garrison + (exchange_terms(exchange)[3] if exchange_occupied(exchange) else 0)
 
@@ -4163,10 +4180,17 @@ def territory_cards(p: Palette, exchanges: list[Exchange], viewer_id: int | None
 
 def exchange_detail_cards(p: Palette, exchange: Exchange, player: Player | None,
                           width: int) -> list[tuple[str, list[str]]]:
-    """One exchange as a card: who holds it, what it is worth, what it would cost."""
+    """One exchange as a card: who holds it, what it is worth, what it would cost.
+
+    Unless it is already yours, in which case it is a holding and not a target --
+    the same rule `garrison_entry_rows` follows. The odds of attacking your own
+    garrison, and the price of capturing what you already hold, describe an action
+    the root picker will not even offer: it marks your own holdings `[-]`.
+    """
     glyph, style, kind = owner_node(p, exchange, player.user_id if player else None)
     role, base_price, base_heat, security, service = exchange_terms(exchange)
     defence = exchange_defense(exchange)
+    mine = player is not None and exchange.controller_user_id == player.user_id
     gauge = max(6, min(18, width // 3))
     head = compose([sty(style + BOLD, glyph + " " + _fit(exchange_short_name(exchange), 24)),
                     badge(p, _fit(role.upper(), 16)),
@@ -4174,29 +4198,39 @@ def exchange_detail_cards(p: Palette, exchange: Exchange, player: Player | None,
     head += compose([label_value(p, "owner", _fit(owner_label(exchange), 24), style=style),
                      label_value(p, "links", ", ".join(f"#{link}" for link in exchange.linked_ids),
                                  style=p.grey)], width)
-    defence_rows = compose([sty(p.grey, "CREW") + " " + dots(p, exchange.garrison, max(1, defence), cap=6)
+    defence_rows = compose([sty(p.grey, "POSTED" if mine else "CREW") + " "
+                            + dots(p, exchange.garrison, max(1, defence), cap=6)
                             + " " + sty(p.ink, str(exchange.garrison)),
                             label_value(p, "security", f"+{max(0, defence - exchange.garrison)}",
                                         style=p.cyan),
                             label_value(p, "total", str(defence), style=p.ink)], width)
-    if player is not None:
+    if mine:
+        defence_rows += compose([label_value(p, "available", f"{player.crew}", style=p.ink),
+                                 label_value(p, "held", held_for(exchange), style=p.mint)], width)
+    elif player is not None:
         chance = 1.0 if not exchange_occupied(exchange) else success_chance(player.crew, defence)
         defence_rows += compose([sty(p.grey, "YOUR ODDS") + " "
                                  + meter(p, chance, 1.0, gauge,
                                          style=p.phosphor if chance >= 0.5 else p.amber)
                                  + " " + sty(p.cyan, f"{chance:.0%}"),
                                  label_value(p, "crew", f"{player.crew}", style=p.ink)], width)
-    terms = compose([label_value(p, "capture", f"${capture_cost(exchange)}", style=p.amber),
-                     label_value(p, "base", f"${base_price}", style=p.grey),
-                     label_value(p, "neighbour discount", f"${exchange.capture_discount}",
-                                 style=p.phosphor if exchange.capture_discount else p.grey),
-                     label_value(p, "heat", f"+{base_heat}", style=p.alarm)], width)
-    terms += compose([label_value(p, "income", f"${exchange.income_per_hour}/hr", style=p.amber),
-                      label_value(p, "capture rank",
-                                  f"+{capture_rank_award(player, exchange)}" if player else
-                                  f"+{CAPTURE_RANK}", style=p.mint)], width)
-    terms += prose_rows(p, "Owner service: " + service, width, style=p.grey)
-    mine = player is not None and exchange.controller_user_id == player.user_id
+    if mine:
+        # What a holding is worth is what it pays; the capture price, its Heat and
+        # the Rank a capture would award are all about taking it from someone.
+        terms = compose([label_value(p, "income", f"${exchange.income_per_hour}/hr",
+                                     style=p.amber)], width)
+    else:
+        terms = compose([label_value(p, "capture", f"${capture_cost(exchange)}", style=p.amber),
+                         label_value(p, "base", f"${base_price}", style=p.grey),
+                         label_value(p, "neighbour discount", f"${exchange.capture_discount}",
+                                     style=p.phosphor if exchange.capture_discount else p.grey),
+                         label_value(p, "heat", f"+{base_heat}", style=p.alarm)], width)
+        terms += compose([label_value(p, "income", f"${exchange.income_per_hour}/hr", style=p.amber),
+                          label_value(p, "capture rank",
+                                      f"+{capture_rank_award(player, exchange)}" if player else
+                                      f"+{CAPTURE_RANK}", style=p.mint)], width)
+    terms += prose_rows(p, ("Your service: " if mine else "Owner service: ") + service,
+                        width, style=p.grey)
     terms += prose_rows(p, "Back on the switchboard, "
                         + ("[G] Garrison manages this holding and opens its service."
                            if mine else "[R] Raid reaches its owner."

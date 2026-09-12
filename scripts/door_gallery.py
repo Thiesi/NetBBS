@@ -91,6 +91,17 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 #        entry rather than a named one. The root picker marks the caller's own
 #        holdings `[-]`, so which digit it accepts depends on the fixture's own
 #        history -- naming one there broke the build twice as the fixture grew.
+#   `%`  photograph this screen and every page after it, turning them with this
+#        key. Must end the walk. `*` fast-forwards, and a card stack's pages are
+#        *different cards*: at forty columns the switchboard is fourteen pages,
+#        and keeping only the first, the second and the last published three of
+#        them -- the scene, the feed, the orders and most of the season card were
+#        in no panel at any size. Use it where paging changes what kind of
+#        information is on the screen (a card stack, the rules, a preview's
+#        stakes and then its terms), not where it merely shows the next rows of
+#        the same table: page two of the scene table is the same drawing with
+#        different data in it, and reviewing it again costs a panel and teaches
+#        nothing.
 #   `$`  page to the last page and press the last key offered there, for an entry
 #        a picker appends after a variable list. The exchange control screen puts
 #        the owner service after however many crew transfers the holding happens
@@ -126,11 +137,10 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Navigation Chart, map", b"CV"),
     ],
     "war_dialer": [
-        ("Switchboard", b""),
-        # The switchboard is a card stack paged with [N]: at forty columns the
-        # scene and the feed are the pages after the gauges (issue #494).
-        ("Switchboard, page 2", b"N"),
-        ("Switchboard, last page", b"N*"),
+        # The switchboard is a card stack paged with [N]: two pages at eighty
+        # columns and fourteen at forty, where the gauges, the scene, the feed,
+        # the orders and the season card each get their own (issue #494).
+        ("Switchboard", b"N%"),
         ("BBS scene", b"I"),
         ("Crew insignia", b"I1?"),
         ("Insignia preview", b"I1?1?"),
@@ -147,15 +157,21 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Display options", b"I7?"),
         ("The scene", b"E"),
         # A digit on the scene screen is the exchange's own number, so it opens
-        # that exchange's card wherever the table has been paged to.
-        ("Exchange card", b"E1?"),
+        # that exchange's card wherever the table has been paged to. Exchange 1
+        # is the caller's own and 3 is the rival's, and the card reads differently
+        # for each: a holding has posted crew and income, a target has a capture
+        # price and the odds of taking it.
+        # `?` would prove nothing here: the table offers `inspect [1]-[9] [0]` as
+        # a range rather than a key each, and takes the digit on any page.
+        ("Exchange card", b"E1N%"),
+        ("Exchange card, a target", b"E3N%"),
         ("Rank", b"B"),
         ("Rivals", b"V"),
         # The raid dispatch is its own pair of screens, and the raid preview is
         # the only one in the door that draws an empty gauge on purpose: a
         # rival's crew strength is private, so there are no odds to show.
         ("Raid targets", b"R"),
-        ("Raid preview", b"R#"),
+        ("Raid preview", b"R#N%"),
         ("Log", b"H"),
         ("Contract board", b"J"),
         # An action's preview is two pickers deep: the board, the approach, and
@@ -163,41 +179,47 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # three is a screen, so each is a walk: a walk to the preview passes
         # through the approach picker and photographs only the preview.
         ("Choose approach", b"J1?"),
-        ("Job preview", b"J1?1?"),
-        ("Job preview, terms", b"J1?1?N"),
-        ("Trade preview", b"T"),
-        ("Recruit preview", b"C"),
+        ("Job preview", b"J1?1?N%"),
+        ("Trade preview", b"TN%"),
+        ("Recruit preview", b"CN%"),
         # Recruiting is the one action whose outcome is fixed, so the result
         # screen it commits to is the same in every panel.
         ("Action result", b"C" + b"N*" + b"A"),
         ("Crew development", b"S"),
-        ("Crew preview", b"S1?"),
+        ("Crew preview", b"S1?N%"),
         ("Root exchange", b"X"),
-        ("Root preview", b"X#"),
+        ("Root preview", b"X#N%"),
         ("Garrisons", b"G"),
         ("Exchange control", b"G1?"),
         # The transfer preview and the owner service are both behind the control
         # screen. The service is the entry after the transfers, and how many of
         # those there are is the fixture's business, so it is named as the last
         # one rather than by a digit that would silently come to mean a transfer.
-        ("Garrison preview", b"G1?1?"),
-        ("Owner service preview", b"G1?$"),
+        ("Garrison preview", b"G1?1?N%"),
+        ("Owner service preview", b"G1?$N%"),
         ("Operations", b"O"),
         ("Case an operation", b"O1?"),
+        # With an operation saved, the hub's first entry is the operation itself:
+        # continue it, or abandon it. Every screen from here needs a world that
+        # has already cased one, which `SETUP` plays before the panel is taken.
+        ("Active operation", b"O1?"),
+        ("Prepare preview", b"O1?1?N%"),
+        ("Execute preview", b"O1?1?N%"),
+        ("Abandon preview", b"O1?2?N%"),
+        ("Operation abandoned", b"O1?2?" + b"N*" + b"A"),
         # The step-stakes card is two pickers past the hub: the contract, the
         # approach, and only then the terms the caller is asked to accept.
         ("Operation approach", b"O1?1?"),
-        ("Case preview", b"O1?1?1?"),
+        ("Case preview", b"O1?1?1?N%"),
         # Recon names its target first and prices it second; which rival the
         # fixture offers first is its own business, hence `#`.
         ("Rival recon", b"O2?"),
-        ("Recon preview", b"O2?#"),
+        ("Recon preview", b"O2?#N%"),
         # The dossier list as a caller first meets it. A populated one would need
         # a snapshot in the fixture, and a snapshot expires after a day, so a
         # cached fixture would quietly photograph this same empty state anyway.
         ("Your dossiers", b"O3?"),
-        ("Help", b"?"),
-        ("Help, later sections", b"?N"),
+        ("Help", b"?N%"),
     ],
 }
 
@@ -288,6 +310,31 @@ def seed_war_dialer(door: pathlib.Path, state: pathlib.Path) -> None:
 
 SEED = {"war_dialer": seed_war_dialer}
 
+# Keys played against a panel's own copy of the fixture, in a separate launch
+# whose screens are thrown away, before the walk that is photographed.
+#
+# One fixture is one world in one state, and some screens only exist in another:
+# an operation has to have been cased before there is a Prepare step to preview,
+# or an Abandon entry to refuse. Rather than a second fixture, or reaching into
+# the world's tables, the panel plays its way there -- so the state behind every
+# panel is one a caller reaches by playing, and the setup is read as the sequence
+# of keys it is. Each panel has its own copy, so these cost that panel's turns
+# and nobody else's.
+# A result screen takes any key to leave, and at the one size setup runs at the
+# casing receipt is a single page, so one Enter dismisses it and the next sequence
+# starts on the switchboard rather than spending its first key on the receipt.
+CASE_AN_OPERATION = b"O1?1?1?" + b"N*" + b"A"   # contract, approach, preview, Act
+PREPARE_IT = b"\r" + b"O1?1?" + b"N*" + b"A"    # continue the saved one, preview, Act
+SETUP: dict[str, dict[str, bytes]] = {
+    "war_dialer": {
+        "Active operation": CASE_AN_OPERATION,
+        "Prepare preview": CASE_AN_OPERATION,
+        "Abandon preview": CASE_AN_OPERATION,
+        "Operation abandoned": CASE_AN_OPERATION,
+        "Execute preview": CASE_AN_OPERATION + PREPARE_IT,
+    },
+}
+
 # What has to be legible on the screen a walk stops at, checked against the
 # painted panel rather than the door's bytes. A caption is a claim about a
 # picture, and a walk drives a picker whose entries move as the fixture grows:
@@ -298,8 +345,6 @@ SEED = {"war_dialer": seed_war_dialer}
 SHOWS: dict[str, dict[str, str]] = {
     "war_dialer": {
         "Switchboard": "SWITCHBOARD",
-        "Switchboard, page 2": "SWITCHBOARD",
-        "Switchboard, last page": "SWITCHBOARD",
         "BBS scene": "BBS SCENE",
         "Crew insignia": "CREW INSIGNIA",
         "Insignia preview": "INSIGNIA PREVIEW",
@@ -312,6 +357,7 @@ SHOWS: dict[str, dict[str, str]] = {
         "Display options": "DISPLAY",
         "The scene": "THE SCENE",
         "Exchange card": "DEFENCE",
+        "Exchange card, a target": "YOUR ODDS",
         "Rank": "SEASON STANDINGS",
         "Rivals": "RIVAL DIRECTORY",
         "Raid targets": "RAID TARGETS",
@@ -320,7 +366,6 @@ SHOWS: dict[str, dict[str, str]] = {
         "Contract board": "CONTRACT BOARD",
         "Choose approach": "CHOOSE APPROACH",
         "Job preview": "JOB PREVIEW",
-        "Job preview, terms": "JOB PREVIEW",
         "Trade preview": "TRADE PREVIEW",
         "Recruit preview": "RECRUIT PREVIEW",
         "Action result": "ACTION RESULT",
@@ -334,13 +379,17 @@ SHOWS: dict[str, dict[str, str]] = {
         "Owner service preview": "SERVICE PREVIEW",
         "Operations": "OPERATIONS / RECON",
         "Case an operation": "CASE AN OPERATION",
+        "Active operation": "ACTIVE OPERATION",
+        "Prepare preview": "PREPARE PREVIEW",
+        "Execute preview": "EXECUTE PREVIEW",
+        "Abandon preview": "ABANDON PREVIEW",
+        "Operation abandoned": "OPERATION ABANDONED",
         "Operation approach": "OPERATION APPROACH",
         "Case preview": "CASE PREVIEW",
         "Rival recon": "RIVAL RECON",
         "Recon preview": "RECON PREVIEW",
         "Your dossiers": "YOUR DOSSIERS",
         "Help": "HOW TO PLAY",
-        "Help, later sections": "HOW TO PLAY",
     },
 }
 
@@ -517,6 +566,21 @@ class Door:
         raise SystemExit(f"{self.door.name} offered no key at {self.size}:\n"
                          f"{self.offered()!r}")
 
+    def press_pages(self, key: bytes, *, limit: int = 24) -> list[str]:
+        """This screen and every page after it, turned with `key`.
+
+        Stops when a press stops changing the screen, which is the same end at
+        every terminal size -- a paging key on the last page still redraws.
+        """
+        pages = [last_screen(self.read())]
+        for _ in range(limit):
+            self.press(key)
+            page = last_screen(self.read())
+            if page == pages[-1]:
+                break
+            pages.append(page)
+        return pages
+
     def press_last_offered(self, *, limit: int = 24) -> None:
         """Page to the last page and press the last key offered there.
 
@@ -600,14 +664,22 @@ class Door:
 
 
 def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, height: int,
-            info_extra: dict, *, expect: bool = True) -> str:
-    """Drive a walk and return the screen it is looking at when it is done."""
+            info_extra: dict, *, expect: bool = True) -> list[str]:
+    """Drive a walk and return the screen -- or pages -- it ends on."""
     running = Door(door, state, width, height, info_extra)
+    pages: list[str] | None = None
     try:
         running.settle()
         index = 0
         while index < len(keys):
             key, suffix = keys[index:index + 1], keys[index + 1:index + 2]
+            if suffix == b"%":
+                if index + 2 != len(keys):
+                    raise SystemExit(f"`%` photographs where a walk stops, so it has "
+                                     f"to end one: {keys!r}")
+                pages = running.press_pages(key)
+                index += 2
+                continue
             if suffix == b"*":
                 running.press_to_end(key)
                 index += 2
@@ -626,14 +698,15 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
                 continue
             running.press(key, expect=expect)
             index += 1
-        screen = running.read()
+        if pages is None:
+            pages = [last_screen(running.read())]
     except BaseException:
         # A door that hung or crashed the build must not outlive it, or a failed
         # gallery leaves a process per panel behind.
         running.kill()
         raise
     running.finish()
-    return screen
+    return pages
 
 
 def apply_preset(state: pathlib.Path, extra: dict) -> dict:
@@ -766,14 +839,19 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
 
     run_dir = pathlib.Path(tempfile.mkdtemp(prefix="gallery-run-"))
 
-    def shoot(shot) -> str:
-        _, keys, _, extra, width, height = shot
+    def shoot(shot) -> list[str]:
+        label, keys, _, extra, width, height = shot
         work = pathlib.Path(tempfile.mkdtemp(dir=run_dir))
         try:
             state = work / "state"
             shutil.copytree(fixture, state)
             info_extra = apply_preset(state, extra)
-            return last_screen(capture(door, state, keys, width, height, info_extra))
+            setup = SETUP.get(door_name, {}).get(label)
+            if setup:
+                # A launch of its own, at one size, so the setup keys never have
+                # to work at every terminal; what it draws is thrown away.
+                capture(door, state, setup, 80, 24, info_extra)
+            return capture(door, state, keys, width, height, info_extra)
         finally:
             remove(work)
 
@@ -788,24 +866,39 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
         remove(run_dir)
 
     # A panel that is not the screen its caption names is worse than a missing
-    # one: it reads as a review of a screen nobody has looked at.
-    wrong = [f"  {label} at {width}x{height} {preset}: no {shows[label]!r} on screen"
-             for (label, _, preset, _, width, height), screen in zip(shots, screens)
-             if label in shows and shows[label] not in painted(screen, width, height)]
+    # one: it reads as a review of a screen nobody has looked at. The mark has to
+    # be on one of the walk's pages rather than on all of them -- a card stack
+    # carries each heading on the page holding that card, and `DEFENCE` is on page
+    # one of the exchange card while page two is its terms -- and every page has
+    # to have something on it.
+    wrong = [f"  {label} at {width}x{height} {preset}: no {shows[label]!r} on any of "
+             f"{len(pages)} page(s)"
+             for (label, _, preset, _, width, height), pages in zip(shots, screens)
+             if label in shows
+             and not any(shows[label] in painted(screen, width, height) for screen in pages)]
+    wrong += [f"  {label} at {width}x{height} {preset} page {number} is blank"
+              for (label, _, preset, _, width, height), pages in zip(shots, screens)
+              for number, screen in enumerate(pages, 1)
+              if not painted(screen, width, height).strip()]
     if wrong:
         raise SystemExit(f"{door_name}: a walk did not end on the screen it names:\n"
                          + "\n".join(wrong))
 
     styles: dict[str, str] = {}
     sections, panels, current = [], [], shots[0][0]
-    for (label, _, preset, _, width, height), screen in zip(shots, screens):
+    for (label, _, preset, _, width, height), pages in zip(shots, screens):
         if label != current:
             sections.append(f'<section><h2>{html.escape(current)}</h2>'
                             f'<div class="row">{"".join(panels)}</div></section>')
             panels, current = [], label
-        panels.append(
-            f'<figure><figcaption>{html.escape(f"{width}x{height} · {preset}")}</figcaption>'
-            f'<div class="screen"><pre>{to_html(screen, width, height, styles)}</pre></div></figure>')
+        for number, screen in enumerate(pages, 1):
+            caption = f"{width}x{height} · {preset}"
+            if len(pages) > 1:
+                caption += f" · page {number}/{len(pages)}"
+            panels.append(
+                f'<figure><figcaption>{html.escape(caption)}</figcaption>'
+                f'<div class="screen"><pre>{to_html(screen, width, height, styles)}</pre>'
+                f'</div></figure>')
     sections.append(f'<section><h2>{html.escape(current)}</h2>'
                     f'<div class="row">{"".join(panels)}</div></section>')
 

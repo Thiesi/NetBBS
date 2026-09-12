@@ -5022,6 +5022,39 @@ publishes the wrong screen under the right caption and reads as a completed
 review. A door with a `SHOWS` table must name every one of its walks, so a new
 walk cannot be added unchecked.
 
+**A page of a card stack is a screen, and fast-forwarding past it reviews
+nothing.** `N*` presses Next until the screen stops changing and the gallery keeps
+only what is on it at the end, so the switchboard published pages one, two and
+fourteen of fourteen at forty columns: the scene, the feed, the orders and most of
+the season card were in no panel at any size, and the rules were twenty-two pages
+of which two were reviewed. The `%` suffix photographs the screen and every page
+after it, one panel each, captioned with the page number. It is for the screens
+where paging changes *what kind of information* is shown -- a card stack, the
+rules, a preview's stakes and then its terms -- and deliberately not for a table,
+where page two is the same drawing with the next rows in it and a second panel of
+it costs a panel and teaches nothing.
+
+**A panel's state is the fixture plus the keys a walk presses into its own copy of
+it.** "The fixture is idle" was the wrong reason to excuse the screens of an
+operation in progress: every panel already gets its own copy of the world, so a
+walk can play one. `SETUP` presses a whole operation -- contract, approach,
+preview, Act -- in a separate launch against that copy, at one fixed size, and
+throws away what it draws; the photographed walk then starts in a world that has
+cased an operation, and Active Operation, the Prepare and Execute previews, the
+abandon preview and its receipt are panels rather than exemptions. What stays
+excused is what no sequence of keys reaches: fifteen spent turns, an emptied
+wallet, a season rollover, a world with no rivals in it.
+
+**A holding is not a target, on the card as well as in the picker.**
+`garrison_entry_rows` had said so in its own docstring for two rounds while the
+scene's exchange card, for an exchange the caller already controlled, gauged
+`YOUR ODDS 38%` against their own garrison and priced a capture of what they
+already hold -- directly above a line telling them to use Garrison, for an
+exchange the root picker will not even offer. The card now reads as a holding when
+it is one (posted crew, what it pays, how long it has been held, its service) and
+as a target when it is not. Its own walk photographs both, which is how this was
+found at all.
+
 **An entry a picker appends after a variable list is named as the last one, not
 by a digit.** Exchange Control offers one transfer per move the holding can make
 and then the owner service, so `3` meant the service only for as long as the

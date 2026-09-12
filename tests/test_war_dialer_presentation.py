@@ -3668,23 +3668,20 @@ COMPOSED = {f"{name.upper()} PREVIEW" for name in
             ("trade", "job", "recruit", "crew", "root", "service", "raid",
              "case", "prepare", "execute")}
 
-# Screens the gallery cannot reach from one cached fixture, and why. A fixture is
-# a single world in a single state: it cannot be both mid-operation and idle, both
-# populated and empty, both solvent and too poor to act. Anything not listed here
-# must be photographed -- that is the whole argument of the gallery.
+# Screens no walk can reach by playing, and why. A panel's state is the fixture
+# plus whatever keys a walk presses into its own copy of it -- `SETUP` plays a
+# whole operation before five of the panels are taken -- so the bar is not "the
+# fixture is not in that state" but "no reasonable sequence of keys puts it
+# there". Anything not listed here must be photographed; that is the whole
+# argument of the gallery.
 UNREACHABLE = {
-    "FIRST VISIT": "the first-launch guide, which the fixture is past by construction",
-    "FED CRACKDOWN": "drawn only as a season rolls over",
-    "NO RIVAL CREWS": "needs a world with no other crews; the fixture has two",
-    "ACTIVE OPERATION": "needs an operation already paid for",
-    "PREPARE PREVIEW": "the second step of an operation the fixture has not cased",
-    "EXECUTE PREVIEW": "the third step of an operation the fixture has not prepared",
-    "ABANDON PREVIEW": "offered only while an operation is in progress",
-    "OPERATION ABANDONED": "the receipt for abandoning one",
-    "ACTION UNAVAILABLE": "a refusal; the fixture is deliberately able to act",
+    "FIRST VISIT": "the first-launch guide, which every fixture is past by construction",
+    "FED CRACKDOWN": "drawn as a season rolls over, which is the clock and not a key",
+    "NO RIVAL CREWS": "needs a world with no other crews; this one is seeded with two",
+    "ACTION UNAVAILABLE": "a refusal for want of turns: fifteen spent turns is not a walk",
     "GARRISON UNAVAILABLE": "ditto, for a crew move",
-    "PURCHASE UNAVAILABLE": "ditto, for a kit",
-    "RAID UNAVAILABLE": "ditto, for a raid",
+    "PURCHASE UNAVAILABLE": "a refusal for want of cash: an emptied wallet is not a walk",
+    "RAID UNAVAILABLE": "a refusal for want of an eligible rival, or of turns",
     "ROOT UNAVAILABLE": "ditto, for a capture",
 }
 
@@ -3731,8 +3728,82 @@ def test_a_walk_is_named_by_an_entry_a_picker_cannot_move():
     """
     gallery = _gallery()
     walks = dict(gallery.WALKS["war_dialer"])
-    assert walks["Owner service preview"].endswith(b"$")
+    # Pick the holding, then the appended entry by position -- `N%` after it only
+    # turns the preview's own pages.
+    assert walks["Owner service preview"].startswith(b"G1?$")
     # The suffix is explained where the others are, so the next walk can use it.
     source = (Path(gallery.__file__).read_text(encoding="utf-8")
               if gallery.__file__ else "")
     assert "#   `$`" in source
+
+
+def test_your_own_exchange_card_is_not_priced_as_a_target(tmp_path):
+    """The scene's card broke the rule its own garrison picker states.
+
+    Inspecting a holding gauged `YOUR ODDS 38%` against the caller's own
+    garrison and priced a capture of what they already hold, above a line
+    telling them to use Garrison -- and the root picker will not even offer that
+    exchange. The same card for a rival's exchange still has to show both.
+    """
+    conn, now = _painted_world(tmp_path, "card.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    by_id = {exchange.id: exchange for exchange in wd.list_exchanges(conn, 1)}
+    mine = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, by_id[1], player, 68)
+        for row in rows))
+    for absent in ("YOUR ODDS", "capture", "neighbour discount", "heat"):
+        assert absent not in mine, (absent, mine)
+    for present in ("POSTED", "available", "held", "income", "Your service:", "[G] Garrison"):
+        assert present in mine, (present, mine)
+    # A rival's exchange is a target, and still reads like one.
+    theirs = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, by_id[3], player, 68)
+        for row in rows))
+    for present in ("YOUR ODDS", "capture $", "capture rank", "[R] Raid"):
+        assert present in theirs, (present, theirs)
+    conn.close()
+
+
+def test_a_holding_reports_its_age_coarsely(tmp_path):
+    """An owner wants "three days", not a timestamp to subtract from the clock."""
+    conn, now = _painted_world(tmp_path, "held-for.db")
+    held = next(e for e in wd.list_exchanges(conn, 1) if e.controller_user_id == 1)
+    for delta, expected in ((timedelta(minutes=20), "under an hour"),
+                            (timedelta(hours=5), "5h"),
+                            (timedelta(hours=47), "47h"),
+                            (timedelta(days=3), "3d")):
+        conn.execute("UPDATE exchanges SET controlled_since=? WHERE id=?",
+                     (wd.to_iso(wd.now_utc() - delta), held.id))
+        conn.commit()
+        fresh = next(e for e in wd.list_exchanges(conn, 1) if e.id == held.id)
+        assert wd.held_for(fresh) == expected, (delta, wd.held_for(fresh))
+    # An exchange nobody has taken has no age to report.
+    conn.execute("UPDATE exchanges SET controlled_since=NULL WHERE id=?", (held.id,))
+    conn.commit()
+    fresh = next(e for e in wd.list_exchanges(conn, 1) if e.id == held.id)
+    assert wd.held_for(fresh) == "-"
+    conn.close()
+
+
+def test_a_card_stack_is_photographed_page_by_page():
+    """A walk that fast-forwards to the last page reviews neither the ones between.
+
+    At forty columns the switchboard is fourteen pages and the rules twenty-two,
+    and each page is a different card: keeping page one, page two and the last
+    published three of the fourteen, with the scene, the feed, the orders and
+    most of the season card in no panel at any size. A preview is the same shape
+    -- the stakes, and then the authoritative terms.
+    """
+    gallery = _gallery()
+    walks = dict(gallery.WALKS["war_dialer"])
+    for label in ("Switchboard", "Help", "Exchange card", "Job preview", "Raid preview",
+                  "Trade preview", "Crew preview", "Root preview", "Garrison preview",
+                  "Owner service preview", "Case preview", "Recon preview",
+                  "Prepare preview", "Execute preview"):
+        assert walks[label].endswith(b"N%"), (label, walks[label])
+    # And a walk that needs a world mid-operation plays one first, rather than
+    # being excused as unreachable.
+    for label in ("Active operation", "Prepare preview", "Execute preview",
+                  "Abandon preview", "Operation abandoned"):
+        assert gallery.SETUP["war_dialer"][label].startswith(b"O1?1?1?")
