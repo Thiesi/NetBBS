@@ -40,6 +40,12 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 CLEAR = "\x1b[2J\x1b[H"
 _ANSI_BYTES = re.compile(rb"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
 
+# How long a real door process gets to start, answer a key, or exit. These tests
+# assert what the door *wrote*, never how fast it wrote it, and the same eight cases
+# have taken 8s alone and 15s alongside the rest of the suite -- so the budget is
+# generous on purpose. A door that is genuinely hung still fails, just later.
+PROC_WAIT = 30
+
 # The switchboard's own prompt, as a caller reads it: the marker these tests wait
 # for to know the screen is drawn and the cursor is waiting. In one place because
 # it is presentation, and the presentation is rebuilt (issue #494).
@@ -400,7 +406,7 @@ def test_unusable_world_has_readable_exit_without_replacement(tmp_path, future_s
     env.pop("NETBBS_DOOR_INFO", None)
     result = subprocess.run(
         [sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"",
-        capture_output=True, env=env, timeout=10,
+        capture_output=True, env=env, timeout=PROC_WAIT,
     )
     assert result.returncode == 1
     message = b"not supported" if future_schema else b"storage is unavailable"
@@ -562,8 +568,8 @@ def _running_door(tmp_path, *, new_player=False, event=False):
     finally:
         if process.poll() is None:
             process.kill()
-        process.wait(timeout=5)
-        reader.join(timeout=5)
+        process.wait(timeout=PROC_WAIT)
+        reader.join(timeout=PROC_WAIT)
         process.stdin.close()
         process.stdout.close()
         process.stderr.close()
@@ -581,7 +587,7 @@ def test_real_process_main_menu_input_does_not_spend_turns(tmp_path, sequence):
         # interval exercises the decoder's timeout, not a process-start guess.
         time.sleep(0.25)
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
 
         conn = wd.connect(path)
@@ -601,7 +607,7 @@ def test_real_process_target_menu_does_not_select_arrow_or_paste(tmp_path, seque
         send(b"q")
         wait_for(DIAL)
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         conn = wd.connect(path)
         assert wd.read_player(conn, 0).turns_used == 0
         assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
@@ -612,7 +618,7 @@ def test_real_process_incomplete_escape_exits_without_action(tmp_path):
     with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
         wait_for(DIAL)
         send(b"\x1b[")
-        assert process.wait(timeout=5) == 1
+        assert process.wait(timeout=PROC_WAIT) == 1
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         assert wd.read_player(conn, 0).turns_used == 0
@@ -641,7 +647,7 @@ def test_real_process_disconnect_preserves_only_committed_actions(tmp_path, stag
                 send(b"a")
                 wait_for(b"It's yours now.")
         process.stdin.close()
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -731,7 +737,7 @@ def test_real_process_disconnect_does_not_restore_an_incoming_raid(tmp_path):
 
         wd.resolve_raid(conn, attacker, 0, now, Win())
         process.stdin.close()
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert conn.execute("SELECT cash FROM players WHERE user_id=0").fetchone()[0] == 255
         assert len(wd.unseen_events(conn, 0)) == 1
         conn.close()
@@ -763,7 +769,7 @@ def test_linux_console_function_key_never_leaks_an_action(tmp_path, stage):
         if stage == "target":
             wait_for(DIAL)
             send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
 
 
@@ -865,7 +871,7 @@ def test_fragmented_x10_mouse_report_never_spends_a_turn(tmp_path, stage):
         if stage == "target":
             wait_for(DIAL)
             send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
 
 
@@ -889,7 +895,7 @@ def test_extended_x10_mouse_encoding_stops_without_spending_a_turn(tmp_path, sta
             assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
         finally:
             conn.close()
-        assert process.wait(timeout=5) == 1
+        assert process.wait(timeout=PROC_WAIT) == 1
         assert b"Unsupported mouse encoding" in output
         assert process.stderr.read() == b""
 
@@ -1039,7 +1045,7 @@ def test_real_process_history_is_replayable_and_free(tmp_path):
         send(b"b")
         wait_for(DIAL)
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -1158,7 +1164,7 @@ def test_real_process_dashboard_keeps_action_result_until_acknowledged(tmp_path)
         wait_for(DIAL)
         assert b"SWITCHBOARD" in output[after_result:]
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
 
 
@@ -1217,7 +1223,7 @@ def test_real_process_garrison_preview_cancel_and_disconnect_preserve_assignment
             send(b"b")
             wait_for(DIAL)
             send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         actor = wd.read_player(conn, 0)
@@ -1259,7 +1265,7 @@ def test_real_process_browsing_screens_are_free_and_do_not_ack_events(tmp_path, 
         send(b"b")
         wait_for(DIAL)
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -1290,7 +1296,7 @@ def test_real_process_preview_cancel_or_disconnect_spends_nothing(tmp_path, key,
             send(b"b")
             wait_for(DIAL)
             send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -1432,7 +1438,7 @@ def test_real_process_no_turns_explains_refill_before_target_selection(tmp_path,
         send(b"b")
         wait_for(DIAL)
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         conn = wd.connect(path)
         assert wd.read_player(conn, 0).turns_used == 15
         conn.close()
@@ -1447,7 +1453,7 @@ def test_new_player_gets_short_first_visit_then_switchboard(tmp_path):
         wait_for(DIAL)
         assert b"SWITCHBOARD" in output
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
 
 
 def test_recruit_preview_lists_cash_shortfall_even_when_turns_are_exhausted(tmp_path):
@@ -1513,7 +1519,7 @@ def test_bound_world_refuses_guest_or_different_node_process(tmp_path, owner):
     info.write_text(json.dumps({"user_id": 1, "handle": "Other", "war_dialer_owner": owner}), encoding="utf-8")
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(info), PYTHONIOENCODING="utf-8")
     result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
-                            env=env, timeout=10)
+                            env=env, timeout=PROC_WAIT)
     assert result.returncode == 1
     message = b"launch metadata is invalid" if owner is None else b"belongs to another node"
     assert message in result.stdout
@@ -1535,7 +1541,7 @@ def test_bad_host_metadata_does_not_create_guest_world(tmp_path, metadata):
         info.write_text(metadata, encoding="utf-8")
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(info), PYTHONIOENCODING="utf-8")
     result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
-                            env=env, timeout=10)
+                            env=env, timeout=PROC_WAIT)
     assert result.returncode == 1
     assert b"launch metadata is invalid" in result.stdout
     assert b"Traceback" not in result.stderr
@@ -1550,7 +1556,7 @@ def test_world_in_maintenance_returns_clear_message_without_player_creation(tmp_
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), PYTHONIOENCODING="utf-8")
     env.pop("NETBBS_DOOR_INFO", None)
     result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
-                            env=env, timeout=10)
+                            env=env, timeout=PROC_WAIT)
     assert result.returncode == 1
     assert b"closed for SysOp maintenance" in result.stdout
     conn = sqlite3.connect(path)
@@ -1571,7 +1577,7 @@ def test_incomplete_host_owner_does_not_initialize_world(tmp_path, owner):
     info.write_text(json.dumps(metadata), encoding="utf-8")
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(info), PYTHONIOENCODING="utf-8")
     result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
-                            env=env, timeout=10)
+                            env=env, timeout=PROC_WAIT)
     assert result.returncode == 1
     assert b"launch metadata is invalid" in result.stdout
     assert not path.exists()
@@ -1699,7 +1705,7 @@ def test_real_process_disconnect_from_contract_picker_spends_nothing(tmp_path, s
             send(b'1')
             wait_for(b'Cancel')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b''
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -1788,7 +1794,7 @@ def test_real_process_crew_disconnect_boundaries(tmp_path, stage):
             send(b'a')
             wait_for(b'Phreakers ready.')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b''
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -1893,7 +1899,7 @@ def test_real_process_recon_operation_disconnect_boundaries(tmp_path, keys, mark
             else:
                 wait_for(b'Cancel')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b''
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -2034,7 +2040,7 @@ def test_real_process_owner_service_cancel_or_commit(tmp_path, commit):
             send(b' ')
         wait_for(DIAL)
         send(b'q')
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         actor = wd.read_player(conn, 0)
         assert (actor.cash, actor.crew, actor.turns_used) == ((235, 4, 1) if commit else (300, 3, 0))
@@ -2183,7 +2189,7 @@ def test_real_process_neutral_capture_preview_boundaries(tmp_path, stage):
                 send(b'a')
                 wait_for(b'RESULT')
             process.stdin.close()
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         actor, exchange = wd.read_player(conn, 0), wd.list_exchanges(conn)[4]
         assert (actor.cash, actor.turns_used) == ((275, 1) if stage == 'committed' else (300, 0))
@@ -2254,7 +2260,7 @@ def test_real_process_scene_disconnect_preserves_only_selected_insignia(tmp_path
             send(b'a')
             wait_for(b'Archive insignia selected.')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         actor = wd.read_player(conn, 0)
         assert actor.insignia == ('archive' if stage == 'committed' else 'modem')
@@ -2644,7 +2650,7 @@ def test_real_process_display_disconnect_preserves_only_chosen_toggle(tmp_path, 
             wait_for(b'[ON]')
             assert b'ASCII decorations' in screen()
         process.stdin.close()
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         assert wd.read_display(conn, 0) == ({'ascii_art': True} if toggle else {})
         assert wd.read_player(conn, 0).turns_used == 0
@@ -2695,7 +2701,7 @@ def test_real_process_unicode_metadata_defaults_and_local_override(tmp_path, hos
     metadata = tmp_path / 'door_info.json'
     metadata.write_text(json.dumps(info), encoding='utf-8')
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(metadata), PYTHONIOENCODING='utf-8')
-    result = subprocess.run([sys.executable, '-u', str(_WAR_DIALER_PATH)], input=b'q', capture_output=True, env=env, timeout=10)
+    result = subprocess.run([sys.executable, '-u', str(_WAR_DIALER_PATH)], input=b'q', capture_output=True, env=env, timeout=PROC_WAIT)
     assert result.returncode == 0 and result.stderr == b''
     ascii_expected = local_ascii if local_ascii is not None else host_unicode is False
     assert ('\u250f'.encode('utf-8') not in result.stdout) is ascii_expected
@@ -2724,7 +2730,7 @@ def test_real_process_operation_and_recon_disconnect_at_final_act(tmp_path, acti
             send(b'a')
             wait_for(b'OPERATION ABANDONED' if action == 'abandon' else b'ACTION RESULT')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         actor = wd.read_player(conn, 0)
         if not commit:
@@ -2766,7 +2772,7 @@ def test_real_process_every_owner_service_disconnect_preserves_commit_boundary(t
             send(b'a')
             wait_for(b'ACTION RESULT')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         actor = wd.read_player(conn, 0)
         assert actor.turns_used == int(commit)
@@ -2798,7 +2804,7 @@ def test_real_process_lost_output_pipe_exits_cleanly_without_spending(tmp_path):
     os.close(read_fd)
     try:
         result = subprocess.run([sys.executable, '-u', str(_WAR_DIALER_PATH)], input=b'q',
-            stdout=write_fd, stderr=subprocess.PIPE, env=env, timeout=10)
+            stdout=write_fd, stderr=subprocess.PIPE, env=env, timeout=PROC_WAIT)
     finally:
         os.close(write_fd)
     assert result.returncode == 0, result.stderr.decode(errors='replace')
@@ -2858,11 +2864,11 @@ sys.exit(game.main())
         until(b'COMMITTED')
         process.stdout.close()
         send(b'X')
-        assert process.wait(timeout=10) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b''
     finally:
         if process.poll() is None: process.kill()
-        process.wait(timeout=5)
+        process.wait(timeout=PROC_WAIT)
         pool.shutdown(wait=True)
         process.stdin.close()
         process.stdout.close()
