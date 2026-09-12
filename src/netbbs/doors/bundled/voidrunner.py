@@ -550,7 +550,7 @@ class _StdioBytes:
         character or an escape sequence in half behind the decoder's back.
         """
         if self.fd is None:
-            return False
+            return True  # an in-memory scripted stream: nobody is watching
         try:
             if self.kernel is None:
                 import select
@@ -776,14 +776,24 @@ _INPUT_READER = None
 _INPUT_STREAM = None
 
 
-def read_key() -> str:
-    """Read one decoded character or one harmless unsupported terminal key."""
+def input_reader() -> "_DoorInput":
+    """The decoder this session reads keys through, opened on first use.
+
+    `main` opens it before the first page so motion knows there is a terminal
+    on the other end: without it the first screen of every returning session
+    could not reveal, because nothing had read a key yet.
+    """
     global _INPUT_READER, _INPUT_STREAM
     stream = sys.stdin.buffer
     if _INPUT_STREAM is not stream:
         _INPUT_STREAM = stream
         _INPUT_READER = _DoorInput(_StdioBytes(stream))
-    return _INPUT_READER.read_key()
+    return _INPUT_READER
+
+
+def read_key() -> str:
+    """Read one decoded character or one harmless unsupported terminal key."""
+    return input_reader().read_key()
 
 
 # ---------------------------------------------------------------------------
@@ -4839,6 +4849,17 @@ def alert(tone: str, title: str, detail: str = "", action: str = "") -> str:
     return row
 
 
+def verbatim(text: str) -> str:
+    """Mark a cell as already composed, so `table` does not colour it.
+
+    A `table` colours any cell that carries no styling of its own, which is
+    right for the figures screens hand it and wrong for a sample that is meant
+    to have no colour -- the Display Options preview of `mono` and `plain`.
+    The reset says "this is finished" in the one alphabet the rule reads.
+    """
+    return text if ANSI_ESCAPE_RE.search(text) else f"{RESET}{text}"
+
+
 def _cell_style(role: str, text: str) -> str:
     p = pal()
     return f"{p.tone(role)}{text}{RESET}" if text else ""
@@ -4920,12 +4941,34 @@ def table_records(headers: list[str], rows: list[list[str]], aligns: str = "",
     else:
         rest, rest_widths, _ = _fit_columns(headers, rows, rest, optional, 1, max(1, width - indent))
         gap = 1
-    heading = " " * indent + heading_for(rest, rest_widths)
+        stacked_fits = False
+    room = max(1, width - indent)
+    if stacked_fits:
+        bands = [(rest, rest_widths)]
+    else:
+        # Still too wide for one row: the tail runs on to a second and a third
+        # rather than overflowing. Every band is its own little table -- each of
+        # its columns starts on the same display column on every record -- and
+        # the alternative here is a lost figure, which a stack is meant to avoid.
+        bands, band, widths_so_far = [], [], []
+        for position, index in enumerate(rest):
+            column = rest_widths[position]
+            if band and sum(widths_so_far) + gap * len(band) + column > room:
+                bands.append((band, widths_so_far))
+                band, widths_so_far = [], []
+            band.append(index)
+            widths_so_far.append(column)
+        if band:
+            bands.append((band, widths_so_far))
+    heading = "\n".join(" " * indent + heading_for(columns, band_widths)
+                        for columns, band_widths in bands)
     records = []
     for number in range(len(rows)):
-        tail = (" " * gap).join(cell(number, index, rest_widths[position])
-                                for position, index in enumerate(rest)).rstrip()
-        records.append([cell(number, lead, 0).rstrip(), " " * indent + tail])
+        tails = [" " * indent + (" " * gap).join(
+            cell(number, index, band_widths[position])
+            for position, index in enumerate(columns)).rstrip()
+            for columns, band_widths in bands]
+        records.append([cell(number, lead, 0).rstrip()] + tails)
     return heading, records
 
 
@@ -4941,6 +4984,11 @@ def table(headers: list[str], rows: list[list[str]], aligns: str = "",
     # A record is one entry, its rows joined: the paginator keeps a whole entry
     # on one page where it fits, and a stacked record whose second row landed on
     # the next page would be a price with nothing to buy.
+    # A heading that runs to more than one row is not repeated: the paginator
+    # carries a heading as a single row, and a half-carried one would be worse
+    # than none. That only happens at the narrowest widths, where a record is
+    # already stacked into bands.
+    repeat_header = repeat_header and "\n" not in heading
     out_rows = [sticky(heading) if repeat_header else heading]
     for record in records:
         joined = "\n".join(record)
@@ -5310,7 +5358,11 @@ def ship_gauge_rows(world: World) -> list[str]:
     drawn = table(["", "", "", ""], rows, "llrl",
                   styles=[["label", "value", "value", "label"] for _ in rows],
                   optional=(3,))[1:]  # the headers are the gauge labels themselves
-    return beside(drawn, ship_portrait(ship, "compact"))
+    # Tinted before it is laid in: a row that carries the art is already styled,
+    # so raw art would be the one thing on the deck with no role (#493 review).
+    return beside(drawn, portrait(ship_portrait(ship, "compact"),
+                                  "danger" if hull_condition(ship) == "Critical" else
+                                  "caution" if hull_condition(ship) != "Intact" else "info"))
 
 
 def _gauge_cells() -> int:
@@ -5550,7 +5602,9 @@ def screen_display_options(p: Palette, world: World) -> None:
                 sample = (f"{gauge(30, 60, 8)} {pal().ink}30/60{RESET} "
                           f"{badge('LOW FUEL', 'danger')} {chip('day', '12')}")
                 if _OUTPUT_STYLE in ("mono", "plain"):
-                    sample = ANSI_ESCAPE_RE.sub("", sample)
+                    # These previews are of a preset that has no colour, so the
+                    # sample must not pick any up from the table it sits in.
+                    sample = verbatim(ANSI_ESCAPE_RE.sub("", sample))
                 if _OUTPUT_STYLE == "plain":
                     sample = sample.translate(_ASCII_ART_TRANSLATION)
             rows.append([key_label(str(index), DISPLAY_STYLES[style]),
@@ -7014,7 +7068,7 @@ def shipyard_lines(world: World) -> list[str]:
         ["FUEL", gauge(ship.fuel, fuel_capacity(ship), cells), f"{ship.fuel}/{fuel_capacity(ship)}",
          key_label("R", "refuel")],
     ], "llrl", styles=[["label", "value", "value", "value"]] * 2, optional=(3,),
-        repeat_header=False)[1:], ship_portrait(ship, "compact"))
+        repeat_header=False)[1:], portrait(ship_portrait(ship, "compact"), "info"))
     lines.append(section("UPGRADES"))
     rows, styles = [], []
     for index, (key, upgrade) in enumerate(UPGRADES.items()):
@@ -8409,11 +8463,11 @@ def hall_of_fame_lines(entries: list[dict], user_id: int) -> list[str]:
         ])
         styles.append(["value", "value", "label", "value", "value", "value", "value", "value", "value"])
     lines += table(["", "PILOT", "RANK", "BEST CR", "", "WINS", "JOBS", "RUNS", ""],
-                   rows, "rllrlrrrl", styles=styles,
-                   # Drop order, last first: the bar is decoration, the rank
-                   # is the widest column and follows from the credits, and
-                   # the three counts are what the board is a board of.
-                   optional=(6, 7, 2, 4))
+                   # Only the bar is droppable. A pilot's recorded rank and
+                   # their job and run counts are on no other Hall view, so a
+                   # narrow board stacks and keeps them rather than dropping
+                   # figures a caller could not read anywhere else (#493 review).
+                   rows, "rllrlrrrl", styles=styles, optional=(4,))
     lines.append(f"{p.slate}Wins are the latest career's combat victories; jobs are missions "
                  f"completed; runs are retirements.{RESET}")
     return lines
@@ -10009,6 +10063,7 @@ def main() -> int:
         reported_height = _OUTPUT_HEIGHT = 24
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     set_palette(p)  # what every component in the style layer draws with
+    input_reader()  # opened before the first page, so it can reveal itself
     if _terminal_too_small():
         _refuse_size(p, reported_height)
         return 0

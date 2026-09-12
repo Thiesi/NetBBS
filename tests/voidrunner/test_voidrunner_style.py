@@ -234,6 +234,30 @@ def test_a_tables_headings_are_on_every_page_of_that_table(monkeypatch):
         assert "COMMODITY" in text and "BUY" in text, text
 
 
+def test_a_stacked_table_keeps_every_column_and_still_fits(monkeypatch):
+    """Stacking is a change of shape, not a smaller table. When one tail row is
+    still too wide it runs on to a second, rather than dropping a figure or
+    overflowing the frame (issue #493 review)."""
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 40)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 12)
+    monkeypatch.setattr(vr, "_OUTPUT_STYLE", "auto")
+    monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
+    entries = [{"user_id": number, "handle": f"Pilot-{number:02}",
+                "best_credits": 1_000_000 - number, "rank": vr.RANKS[-1][1],
+                "kills": 100 + number, "missions_completed": 200 + number,
+                "retirements": number} for number in (1, 2)]
+    rows = [part for line in vr.hall_of_fame_lines(entries, 2)
+            for part in plain(line).split("\n")]
+    for entry in entries:
+        together = " ".join(rows)
+        for figure in (entry["handle"], entry["rank"], f"{entry['best_credits']:,}cr",
+                       str(entry["kills"]), str(entry["missions_completed"])):
+            assert figure in together, f"{figure} was dropped rather than stacked"
+    for row in rows:
+        if row.startswith(" "):  # a record's own rows; the notes are prose and wrap
+            assert vr._visible_width(row) <= vr._page_content_width(), repr(row)
+
+
 def test_a_heading_or_a_rule_is_never_the_last_row_of_a_page(monkeypatch):
     """A rule or a set of column headings names what follows it, so it is never
     left at the foot of a page with the rows it names on the next one."""
@@ -320,6 +344,27 @@ def test_every_screen_renders_legibly_in_every_preset(monkeypatch, screen, width
 # ---------------------------------------------------------------------------
 # 6. Motion is skippable and optional.
 # ---------------------------------------------------------------------------
+
+
+def test_the_colourless_presets_preview_themselves_colourlessly(monkeypatch):
+    """Each preset previews itself, so the `mono` and `plain` samples have to
+    arrive with no colour -- and a table colours any cell that has none of its
+    own, which would have made those two previews a lie (issue #493 review)."""
+    frame = render("display", monkeypatch, 80, 24, "auto")
+    rows = [row for row in body_rows(frame) if "30/60" in vr._ANSI_RE.sub("", row)]
+    assert len(rows) == len(PRESETS), rows
+    def sample(row: str) -> str:
+        """The preview itself: from its gauge to its last reading, with the
+        frame's own right-hand border -- which is always hull-coloured -- left
+        outside."""
+        start = min((row.index(glyph) for glyph in ("█", "░", "#", ".") if glyph in row),
+                    default=0)
+        return row[start:row.rindex("12") + 2]
+
+    samples = [sample(row) for row in rows]
+    # auto, fast and basic show their colours; mono and plain show none.
+    assert [bool(FOREGROUND.search(text)) for text in samples] == \
+        [True, True, True, False, False], [vr._ANSI_RE.sub("", text) for text in samples]
 
 
 @pytest.mark.parametrize("style,expected", [("auto", True), ("basic", True),
