@@ -187,7 +187,7 @@ def _who_entry_description(db: Database, entry: _WhoEntry, presence=None) -> str
     when = format_for_display(entry.connected_at, db)
     # Issue #470: which door, not merely that they are in one. Remote entries
     # carry no door -- a linked node tells us presence, not activity.
-    playing = presence.door_of(entry.username) if presence is not None and entry.username else None
+    playing = presence.door_of(entry.session) if presence is not None else None
     if playing:
         return f"playing {sanitize_text(playing)} -- connected since {when}"
     return f"connected since {when}"

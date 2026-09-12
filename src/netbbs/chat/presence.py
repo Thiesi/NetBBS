@@ -18,12 +18,18 @@ away" answerable from anywhere in the node.
 
 from __future__ import annotations
 
+import weakref
+
 
 class PresenceRegistry:
     def __init__(self) -> None:
         self._session_counts: dict[str, int] = {}
         self._away_messages: dict[str, str] = {}
-        self._doors: dict[str, list[str]] = {}
+        # Weak-keyed, so a session which vanished without a clean exit cannot
+        # keep itself listed as playing -- and so a reused object identity can
+        # never inherit a previous session's door, which is exactly why
+        # SessionSummary has a node-lifetime id rather than using id().
+        self._doors: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
     def enter(self, username: str) -> None:
         """Register one more live session for `username` — call once
@@ -43,9 +49,6 @@ class PresenceRegistry:
         if remaining <= 0:
             self._session_counts.pop(username, None)
             self._away_messages.pop(username, None)
-            # Defensive: a session which died mid-door would otherwise leave
-            # this account listed as playing something forever.
-            self._doors.pop(username, None)
         else:
             self._session_counts[username] = remaining
 
@@ -59,28 +62,23 @@ class PresenceRegistry:
         check."""
         return set(self._session_counts)
 
-    def enter_door(self, username: str, door_name: str) -> None:
-        """Record that `username` is playing `door_name` (issue #470).
+    def enter_door(self, session: object, door_name: str) -> None:
+        """Record that one *session* is playing `door_name` (issue #470).
 
-        A stack rather than a single value: an account can have more than one
-        session, and saying which door someone is in should not depend on
-        which of their sessions happened to leave one first.
+        Keyed by session rather than by account, because both Who screens
+        render a row per session and the SysOp one disconnects the row that is
+        selected. Keyed by account, an idle session and a playing one would
+        both claim the door -- inflating the apparent player count and hiding
+        which connection a SysOp actually needs to act on.
         """
-        self._doors.setdefault(username, []).append(door_name)
+        self._doors[session] = door_name
 
-    def leave_door(self, username: str, door_name: str) -> None:
-        playing = self._doors.get(username)
-        if not playing:
-            return
-        if door_name in playing:
-            playing.remove(door_name)
-        if not playing:
-            self._doors.pop(username, None)
+    def leave_door(self, session: object) -> None:
+        self._doors.pop(session, None)
 
-    def door_of(self, username: str) -> str | None:
-        """The door this account is most recently in, or None."""
-        playing = self._doors.get(username)
-        return playing[-1] if playing else None
+    def door_of(self, session: object) -> str | None:
+        """The door this session is in, or None."""
+        return self._doors.get(session)
 
     def set_away(self, username: str, message: str) -> None:
         """Mark `username` away, sharing the same status across every

@@ -1526,8 +1526,8 @@ account, so prefix with `sudo -u netbbs` when that is a separate account):
 
 ```sh
 sudo install -d -m 750 -o netbbs -g netbbs /var/games/netbbs/yourgame
-python3 -m venv /var/games/netbbs/yourgame/.venv
-/var/games/netbbs/yourgame/.venv/bin/pip install /path/to/yourgame-1.0-py3-none-any.whl
+sudo -u netbbs python3 -m venv /var/games/netbbs/yourgame/.venv
+sudo -u netbbs /var/games/netbbs/yourgame/.venv/bin/pip install   /path/to/yourgame-1.0-py3-none-any.whl
 ```
 
 Give the door its **own** virtualenv rather than NetBBS's: a door is

@@ -6586,7 +6586,7 @@ def _session_description(entry: SessionSummary, display_format: str, display_tim
                          presence=None) -> str:
     when = format_for_display(entry.connected_at, override_format=display_format, override_timezone=display_timezone)
     # Issue #470: which door, not merely that someone is connected.
-    playing = presence.door_of(entry.username) if presence is not None and entry.username else None
+    playing = presence.door_of(entry.session) if presence is not None else None
     if playing:
         return f"playing {sanitize_text(playing)} -- connected since {when}"
     return f"connected since {when}"

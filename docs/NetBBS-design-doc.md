@@ -5776,10 +5776,18 @@ are specified in section 13.4 and the door guide.
 
 Compatibility extension (issues #296/#297):
 
-- A nullable, versioned profile preserves the original JSON/stdio API for
-  existing registrations. SysOps can explicitly remove a profile in the draft
-  editor without recreating the registration; executable/argv and game data
-  are retained. Native socket profiles require DOOR32 descriptor metadata.
+- A nullable, versioned profile preserves the original stdio API for existing
+  registrations: no drop files, no adapter, raw UTF-8 through stdin/stdout.
+  SysOps can explicitly remove a profile in the draft editor without recreating
+  the registration; executable/argv and game data are retained. Native socket
+  profiles require DOOR32 descriptor metadata.
+- The launch metadata file (`door_info.json`) is itself versioned, by a
+  `door_api` integer, and grows additively (issue #469): a reader treats any
+  absent field as unknown, and a door may refuse a version it does not
+  understand rather than probing for fields. Removing a profile restores the
+  stdio API but does not pin the metadata to an older version — the file is a
+  property of the platform, not of the profile. It never carries a credential,
+  an email address, a user level or a network address.
   Profiles add persistent installation directories,
   disposable node directories, exact CRLF classic drop files, native stdio,
   controlling PTYs, private inherited DOOR32 sockets, DOSBox-X COM1 sockets,
@@ -7416,8 +7424,13 @@ There are no animation delays. War Dialer launch metadata includes the optional
 boolean `unicode_style`, copied from the caller's existing NetBBS preference.
 False defaults to ASCII decorations; true or omission preserves the rich default.
 An explicit in-game ASCII choice wins. Changing monochrome/Fast alone does not
-freeze the inherited Unicode default. Unrelated doors receive no new fields;
-the existing native-door JSON boundary and supervision remain unchanged.
+freeze the inherited Unicode default.
+
+Issue #469 superseded this section's original "unrelated doors receive no new
+fields": `unicode_style` is the caller's own display preference, which was
+War-Dialer-only by scope rather than by policy, and every door now receives it
+along with the rest of the API-2 metadata below. The native-door JSON boundary
+and supervision are otherwise unchanged.
 
 **Screen framing and one hotkey style (issue #487).** Every screen under the
 masthead -- the switchboard, the help and first-visit text, the event log and the

@@ -3,11 +3,15 @@
 "3 callers in Blacksite" is the recruitment a multiplayer door gets from the
 BBS it runs on; before this there was no door presence at all, not even
 "in a door".
+
+Keyed by session, not by account: both Who screens render a row per session
+and the SysOp one disconnects the row that is selected.
 """
 
 from __future__ import annotations
 
 import asyncio
+import gc
 import sys
 
 from netbbs.chat.presence import PresenceRegistry
@@ -17,70 +21,80 @@ from netbbs.net.door_flow import browse_doors
 from tests.test_doors_runtime import FakeSession, _write_script, db, lane, player
 
 
-def _summary(username="keeper"):
+def _summary(session, username="keeper", session_id=1):
     from netbbs.net.session_registry import SessionSummary
-    return SessionSummary(session=FakeSession(), session_id=1, username=username,
+    return SessionSummary(session=session, session_id=session_id, username=username,
                           connected_at="2026-09-12T10:00:00.000000Z", peer_address="127.0.0.1")
 
 
-def test_nobody_is_playing_anything_by_default():
-    presence = PresenceRegistry()
-    presence.enter("carrier")
-    assert presence.door_of("carrier") is None
+def test_no_session_is_playing_anything_by_default():
+    assert PresenceRegistry().door_of(FakeSession()) is None
 
 
 def test_entering_and_leaving_a_door_is_reported():
+    presence, session = PresenceRegistry(), FakeSession()
+
+    presence.enter_door(session, "LORD")
+    assert presence.door_of(session) == "LORD"
+
+    presence.leave_door(session)
+    assert presence.door_of(session) is None
+
+
+def test_one_account_with_two_sessions_reports_each_separately():
+    """The reason this is keyed by session: an idle connection must not claim
+    the door its sibling is playing, or the SysOp cannot tell which row to
+    disconnect and the apparent player count is inflated."""
     presence = PresenceRegistry()
+    playing, idle = FakeSession(), FakeSession()
+    presence.enter("carrier")
     presence.enter("carrier")
 
-    presence.enter_door("carrier", "LORD")
-    assert presence.door_of("carrier") == "LORD"
+    presence.enter_door(playing, "LORD")
 
-    presence.leave_door("carrier", "LORD")
-    assert presence.door_of("carrier") is None
+    assert presence.door_of(playing) == "LORD"
+    assert presence.door_of(idle) is None, "the idle session claimed its sibling's door"
 
 
 def test_two_sessions_in_different_doors_do_not_erase_each_other():
-    """An account can be connected twice; the answer must not depend on
-    which session happened to leave its door first."""
     presence = PresenceRegistry()
-    presence.enter("carrier")
-    presence.enter("carrier")
-    presence.enter_door("carrier", "LORD")
-    presence.enter_door("carrier", "TradeWars")
+    first, second = FakeSession(), FakeSession()
+    presence.enter_door(first, "LORD")
+    presence.enter_door(second, "TradeWars")
 
-    presence.leave_door("carrier", "TradeWars")
+    presence.leave_door(second)
 
-    assert presence.door_of("carrier") == "LORD", "the other session is still playing"
+    assert presence.door_of(first) == "LORD"
+    assert presence.door_of(second) is None
 
 
 def test_leaving_a_door_nobody_entered_is_harmless():
     presence = PresenceRegistry()
-    presence.leave_door("ghost", "LORD")
-    assert presence.door_of("ghost") is None
+    presence.leave_door(FakeSession())
 
 
-def test_a_final_disconnect_clears_a_stranded_door_entry():
-    """A session killed mid-door must not leave the account playing forever."""
+def test_a_vanished_session_cannot_stay_listed_as_playing():
+    """Weak-keyed, so a session which died without a clean exit drops out --
+    and a later object cannot inherit its door through a reused identity."""
     presence = PresenceRegistry()
-    presence.enter("carrier")
-    presence.enter_door("carrier", "LORD")
+    session = FakeSession()
+    presence.enter_door(session, "LORD")
 
-    presence.leave("carrier")
+    del session
+    gc.collect()
 
-    assert presence.door_of("carrier") is None
+    assert len(presence._doors) == 0
 
 
 def test_who_is_online_names_the_door(db):
     from netbbs.net.directory_flow import _who_entry_description
 
-    presence = PresenceRegistry()
-    presence.enter("keeper")
-    entry = _summary()
+    presence, session = PresenceRegistry(), FakeSession()
+    entry = _summary(session)
 
     assert "playing" not in _who_entry_description(db, entry, presence)
 
-    presence.enter_door("keeper", "Blacksite")
+    presence.enter_door(session, "Blacksite")
     described = _who_entry_description(db, entry, presence)
 
     assert described.startswith("playing Blacksite"), described
@@ -90,13 +104,24 @@ def test_who_is_online_names_the_door(db):
 def test_the_sysop_who_screen_names_the_door_too():
     from netbbs.net.admin_flow import _session_description
 
-    presence = PresenceRegistry()
-    presence.enter("keeper")
-    presence.enter_door("keeper", "Blacksite")
-    entry = _summary()
+    presence, session = PresenceRegistry(), FakeSession()
+    presence.enter_door(session, "Blacksite")
+    entry = _summary(session)
 
     assert _session_description(entry, "%Y-%m-%d", "UTC", presence).startswith("playing Blacksite")
     assert "playing" not in _session_description(entry, "%Y-%m-%d", "UTC")
+
+
+def test_the_sysop_who_screen_distinguishes_two_sessions_of_one_account():
+    """What the finding was actually about: telling the rows apart."""
+    from netbbs.net.admin_flow import _session_description
+
+    presence = PresenceRegistry()
+    playing, idle = FakeSession(), FakeSession()
+    presence.enter_door(playing, "Blacksite")
+
+    assert "playing" in _session_description(_summary(playing, session_id=1), "%Y-%m-%d", "UTC", presence)
+    assert "playing" not in _session_description(_summary(idle, session_id=2), "%Y-%m-%d", "UTC", presence)
 
 
 def test_a_real_launch_records_and_clears_presence(db, lane, player, tmp_path):
@@ -114,17 +139,18 @@ def test_a_real_launch_records_and_clears_presence(db, lane, player, tmp_path):
     door = create_door(db, "Boom", sys.executable, args=(str(script),), creator=player,
                        profile=DoorProfile(install_dir=str(tmp_path)))
     presence = PresenceRegistry()
-    presence.enter(player.username)
     during = []
 
     class SamplingSession(FakeSession):
         async def write_raw(self, data):
             if b"READY" in bytes(data):
-                during.append(presence.door_of(player.username))
+                during.append(presence.door_of(self))
             await super().write_raw(data)
 
         async def read_any_key(self):
             return "\r"
+
+    session = SamplingSession()
 
     async def scenario():
         import netbbs.net.door_flow as flow
@@ -136,11 +162,11 @@ def test_a_real_launch_records_and_clears_presence(db, lane, player, tmp_path):
 
         flow.pick_item = fake_pick
         try:
-            await browse_doors(SamplingSession(), lane, player, presence=presence)
+            await browse_doors(session, lane, player, presence=presence)
         finally:
             flow.pick_item = original
 
     asyncio.run(scenario())
 
     assert during == ["Boom"], f"presence while the door ran: {during}"
-    assert presence.door_of(player.username) is None, "a crashed door left the caller playing"
+    assert presence.door_of(session) is None, "a crashed door left the session playing"
