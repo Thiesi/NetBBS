@@ -443,7 +443,9 @@ SETUP: dict[str, dict[str, bytes]] = {
 # unchecked.
 SHOWS: dict[str, dict[str, str]] = {
     "war_dialer": {
-        "Masthead": "W A R   D I A L E R",
+        # `painted` collapses runs of spaces, so the letter-spaced wordmark is
+        # matched single-spaced; Fast mode draws no art and says it plainly.
+        "Masthead": {"*": "W A R D I A L E R", "fast": "WAR DIALER"},
         "First visit": "FIRST VISIT",
         "While you were away": "WHILE YOU WERE AWAY",
         "Switchboard, season closing": "SEASON RESET",
@@ -1122,6 +1124,17 @@ def to_html(screen: str, width: int, height: int, styles: dict[str, str]) -> str
     return "\n".join(out) or "&nbsp;"
 
 
+def shown(mark: str | dict[str, str], preset: str) -> str:
+    """What a walk's screen must say under this preset.
+
+    Usually one string for every preset. A dict is for the screen a preset
+    deliberately draws differently: Fast mode omits optional art, so War
+    Dialer's masthead is `WAR DIALER - Season n` there and the letter-spaced
+    wordmark everywhere else, and no single marker covers both.
+    """
+    return mark.get(preset, mark["*"]) if isinstance(mark, dict) else mark
+
+
 def painted(screen: str, width: int, height: int) -> str:
     """The panel's text as one line, read back through the emulator that paints it.
 
@@ -1203,11 +1216,12 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
     # carries each heading on the page holding that card, and `DEFENCE` is on page
     # one of the exchange card while page two is its terms -- and every page has
     # to have something on it.
-    wrong = [f"  {label} at {width}x{height} {preset}: no {shows[label]!r} on any of "
-             f"{len(pages)} page(s)"
+    wrong = [f"  {label} at {width}x{height} {preset}: no {shown(shows[label], preset)!r} "
+             f"on any of {len(pages)} page(s)"
              for (label, _, preset, _, width, height, _fixture), pages in zip(shots, screens)
              if label in shows
-             and not any(shows[label] in painted(screen, width, height) for screen in pages)]
+             and not any(shown(shows[label], preset) in painted(screen, width, height)
+                         for screen in pages)]
     wrong += [f"  {label} at {width}x{height} {preset} page {number} is blank"
               for (label, _, preset, _, width, height, _fixture), pages in zip(shots, screens)
               for number, screen in enumerate(pages, 1)

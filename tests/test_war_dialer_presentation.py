@@ -3745,7 +3745,10 @@ def test_every_screen_the_door_can_draw_is_photographed_by_a_walk():
     walks = gallery.SHOWS["war_dialer"]
     assert [label for label, _ in gallery.WALKS["war_dialer"]] == list(walks), (
         "every walk must declare what its screen shows")
-    shown = set(walks.values())
+    # A walk may name a different marker per preset (issue #517): Fast mode
+    # draws no masthead art, so no single string covers every preset there.
+    shown = {mark for value in walks.values()
+             for mark in (value.values() if isinstance(value, dict) else [value])}
     unphotographed = sorted(
         title for title in titles | COMPOSED
         if title not in UNREACHABLE
