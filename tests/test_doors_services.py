@@ -480,3 +480,46 @@ def test_renaming_a_door_updates_its_supervisor_diagnostics(db, lane, player, tm
         await manager.stop_all()
 
     asyncio.run(scenario())
+
+
+def test_a_replaced_with_node_service_is_started_not_left_stopped(db, lane, player, tmp_path):
+    """Otherwise a SysOp's edit refuses every caller until they press Start."""
+    door = _door(db, player, tmp_path)
+
+    async def scenario():
+        manager = DoorServiceManager()
+        await manager.start_node_services([door])
+        try:
+            assert await manager.get(door.id).wait_until_running(20)
+
+            edited = replace(door, profile=_profile(tmp_path, argv=["-c", "import time; time.sleep(90)"]))
+            replacement = await manager.adopt(edited)
+
+            assert await replacement.wait_until_running(20), "the replacement was left stopped"
+            assert await manager.ensure_running(edited, wait_seconds=20) is None
+        finally:
+            await manager.stop_all()
+
+    asyncio.run(scenario())
+
+
+def test_a_halted_service_is_not_revived_by_the_next_caller(db, lane, player, tmp_path):
+    """The other half: a deliberate Halt must survive someone opening the door."""
+    door = _door(db, player, tmp_path)
+
+    async def scenario():
+        manager = DoorServiceManager()
+        await manager.start_node_services([door])
+        try:
+            service = manager.get(door.id)
+            assert await service.wait_until_running(20)
+            await service.stop()
+
+            problem = await manager.ensure_running(door, wait_seconds=1)
+
+            assert problem is not None, "a halted with_node service was silently restarted"
+            assert manager.get(door.id) is service, "the halted supervisor was replaced"
+        finally:
+            await manager.stop_all()
+
+    asyncio.run(scenario())

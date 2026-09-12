@@ -480,6 +480,13 @@ class DoorServiceManager:
                 return None
             service = DoorService(door, spec)
             self._services[door.id] = service
+            if spec.start == "with_node":
+                # A replacement is newly constructed, so it has never been
+                # started: `with_node` means it should be up now. Only a
+                # *new* supervisor is started here -- an existing one the
+                # SysOp halted is returned above, untouched, because reviving
+                # it on the next caller would undo a deliberate Halt.
+                await service.start()
             return service
 
     async def start_node_services(self, doors) -> None:
