@@ -1,2 +1,13 @@
 # Unified patches contain significant context prefixes and upstream indentation.
 examples/doors/dosbox-x-*.patch text eol=lf whitespace=-blank-at-eol,-space-before-tab
+
+# The site's pages are deployed byte-for-byte and verified by SHA-256 against
+# the live server. A CRLF checkout would change the hash, and embedding an LF
+# capture in a CRLF page renders a blank line between every terminal row.
+web/** text eol=lf
+# ...except a raw capture, which is the bytes the door actually wrote:
+# its rows end CR LF, and normalising them makes it no longer a record
+# of the door's output. `binary` also spares it the trailing-whitespace
+# check: the padding inside a frame and the SGR resets that end a row are
+# the capture, not sloppiness.
+web/shots/raw-*.txt binary

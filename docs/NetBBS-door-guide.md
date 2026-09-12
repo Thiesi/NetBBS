@@ -221,9 +221,12 @@ unread. In history, use Next/Prev to browse, Ack page to acknowledge, and Back t
 return. New events arriving while you read remain unread. These screens fit down
 to the 40x12 floor; smaller terminals show a size diagnostic and preserve unread state.
 
-The main switchboard shows your resources, holdings and income, Rank progress,
-new events, raid protection, turn refill and the season deadline. Next/Prev pages
-are free and refresh these snapshots; action keys stay available on each page.
+The main switchboard is a stack of cards: who you are with your Rank gauge, then
+cash, Heat, crew, turns, holdings, income, raid protection and unread receipts as
+meters and chips, then the ten exchanges as a ring, the latest receipts as a
+feed, and finally what to do next and the season's absolute deadlines. Next/Prev
+pages are free and refresh these snapshots; action keys stay available on each
+page, and the paging keys sit on the prompt row beside the cursor.
 Outcomes and rejection messages wait for acknowledgement before returning to the
 switchboard. The game requires at least 40 columns by 12 rows; a smaller terminal
 is refused by name, with the size it reported, and nothing in the shared world is
@@ -385,11 +388,17 @@ age and is not renewed by the season change.
 
 Open `[I]Scene`, then Display for free ASCII-decoration, monochrome and Fast-mode
 toggles. Choices apply immediately and survive seasons and competition reset.
-Back leaves without changing anything. ASCII mode keeps authored decorations
-simple and preserves names; monochrome retains explicit labels and numbers.
-Fast skips optional static art and action flavor, keeping every stake and net
-result. There are no animation delays in either mode. The map and NPC dossiers
-show compact role/operator diagrams beside actual ownership and defense.
+Back leaves without changing anything. ASCII mode substitutes plain characters
+for every glyph the screens draw and preserves names; monochrome removes colour
+entirely and retains explicit labels and numbers. Fast skips the frame, optional
+art, action flavour and motion, keeping every stake and net result, and shows the
+page counter in its title row instead of a border.
+Motion -- a screen revealed row by row, a carrier bar filling while a committed
+result comes back -- plays only after the write, and any key skips it; Fast,
+monochrome and ASCII modes never play it at all. The scene screen draws the ten
+exchanges as the ring they are, with owner colour on the ring and in the table
+beside it; an exchange's number opens its own card, which carries its links, its
+price for you, its defence and its owner service.
 War Dialer inherits your NetBBS Unicode-decoration choice unless you explicitly
 toggle ASCII decorations in Display. Monochrome and Fast do not override that
 inheritance. Older launchers without the optional `unicode_style` metadata field
@@ -547,6 +556,51 @@ another session holds it simply skips the import and the next launch retries it
 until every row is in. Scores are optional; a temporary score-write failure does
 not lose the career, and a later checkpoint retries publication from its saved
 high-water mark.
+
+### What Voidrunner looks like
+
+Voidrunner needs a terminal of at least **40 columns by 12 rows**. Below that it
+prints one short, unstyled refusal naming the size it needs and the size the
+terminal reported, and stops before any career is opened or changed. Above it
+there is one layout: every screen, every key and every gauge is the same at 40
+columns as at 80, sized for the room there is. What a narrow terminal gives up
+is named below -- a table's least useful columns, and a silhouette that has
+nowhere to sit -- and never a figure a decision is made on.
+
+Every screen is built from the same small vocabulary. Gauges (`████░░░░`) carry
+hull, fuel, hold, crew, standing and deadlines; chips (`⟦day 12⟧`) carry single
+facts; badges (`ILLEGAL`, `TRACKED`, `MAX`) carry states; tables carry anything
+with more than two columns; and a rule across the frame (`├─ SHIP ─────┤`) names
+each group of rows. Hotkeys are gold, values are bright, labels and prose are
+dim, and severity has its own colour: green good, amber caution, red danger.
+
+Tables narrow gracefully, in two steps. First a table gives up its least useful
+columns: at 40 columns the market keeps the buy and sell price, the hold and the
+`ILLEGAL` flag, and drops the station's stock and demand figures and the price
+spread -- those are still on the commodity's own trade screen, which is where a
+purchase is sized anyway. If what is left still does not fit, the table
+*stacks*: each record's name goes on a line of its own with the rest aligned
+underneath, on as many lines as it takes. Nothing is ever truncated, and nothing
+a table still carries is lost to stacking -- only that first step drops
+anything, and only figures that are a keypress away on another screen. A table's
+column headings reappear at the top of every page of it.
+
+**Display presets** are chosen from the station deck's **[O] Display Options**,
+and each one previews itself on that screen:
+
+| preset | what it does |
+| --- | --- |
+| Full palette | the terminal's own colour depth, with motion |
+| Full palette, no motion | the same palette with every reveal and tick off |
+| 16-color | sixteen ANSI colours and Unicode artwork |
+| Monochrome | Unicode artwork, no ANSI styling |
+| Plain | ASCII artwork, no ANSI styling; letters and typed text stay UTF-8 |
+
+Motion -- rows revealing as a screen opens, and the effects that go with a
+result -- never blocks anything. Any keypress ends an effect immediately, no
+effect delays a save, and a screen redrawn unchanged does not replay one. If
+motion is not wanted at all, choose **Full palette, no motion**; monochrome and
+plain have none either.
 
 ### Starting and returning to Voidrunner
 
@@ -1005,17 +1059,22 @@ terms but expose no action key. Disconnecting preserves the existing pending fig
 
 ### Saved display presets
 
-Station **[O] Display Options** offers **[1] Full palette**, **[2] 16-color**,
-**[3] Monochrome**, and **[4] Plain / ASCII artwork**. Full palette uses the
-terminal's existing truecolor or 256-color setting. Monochrome retains Unicode
-artwork without ANSI styling; Plain also substitutes ASCII decorations. Unicode
-letters and text input remain UTF-8 in every mode. Numeric telemetry and warning
-labels do not depend on color.
+Station **[O] Display Options** offers **[1] Full palette**, **[2] Full palette,
+no motion**, **[3] 16-color**, **[4] Monochrome**, and **[5] Plain / ASCII
+artwork**. Full palette uses the terminal's existing truecolor or 256-color
+setting; the second is the same palette with every reveal, tick and drain off.
+Monochrome retains Unicode artwork without ANSI styling; Plain also substitutes
+ASCII decorations for the whole glyph vocabulary. Unicode letters and text input
+remain UTF-8 in every mode. Numeric telemetry and warning labels do not depend on
+color. Each preset previews itself on that screen, drawn with what your own
+terminal can do.
 
 Selecting a different preset saves it immediately before acknowledging the
 change. **[B] Back**, paging, and selecting the current preset make no change.
 The preference applies from the first title on the next visit and survives
-retirement. Existing careers default to Full palette. No animation is added.
+retirement. Existing careers default to Full palette. Motion is on in the first
+and third and off in the other three; see "What Voidrunner looks like" for what
+it does and how to skip it.
 
 ### Ship and place portraits
 
@@ -1032,8 +1091,9 @@ and specialist contact where present. A landmark portrait becomes viewable
 at its location and remains in the discovery view after investigation.
 
 Portraits use complete large or compact compositions according to terminal
-dimensions, with paginated details and the selected display preset. There is
-no animation. Landmark inspection keeps salvage status and action results
+dimensions, with paginated details and the selected display preset. A portrait
+is a still composition: it is never redrawn once it is on the screen.
+Landmark inspection keeps salvage status and action results
 before the artwork. A hull refit opens an illustrated preview: **[C] Commission**
 then final confirmation purchases it, while **[B] Back** leaves the ship alone.
 Commissioning restores hull health and keeps cargo and modules; it does not
