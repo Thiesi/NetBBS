@@ -4155,11 +4155,15 @@ def exchange_action(p: Palette, exchange: Exchange, viewer_id: int | None) -> st
     them, and a bracketed key printed on a screen whose dispatch ignores it is
     the exact lie the door takes apart elsewhere. The key that does it is named
     on the exchange's own card, which says where to press it.
+
+    The verb has to be the action the row's other columns describe. A rival's
+    exchange is contested with Root, and the `take` column beside it is the
+    chance of exactly that; a raid steals cash from its owner, leaves the
+    exchange where it is, and has odds the door deliberately refuses to show --
+    so `38% raid` priced one action and named another.
     """
     if viewer_id is not None and exchange.controller_user_id == viewer_id:
         return sty(p.grey, "garrison")
-    if exchange.controller_user_id is not None:
-        return sty(p.grey, "raid")
     return sty(p.grey, "root")
 
 
@@ -4682,6 +4686,46 @@ def show_action_result(p: Palette, headlines: list[str], delta: ActionDelta, bus
 PICK_KEYS = "1234567890"
 
 
+def _paginate_entries(p: Palette, entries: list[tuple[list[tuple[str, str]], str]],
+                      first: int, rest: int) -> list[list[tuple[str, str]]]:
+    """Pages of whole entries, so a key never arrives without its entry.
+
+    Only an entry's last row carries its key -- that is how "no half-shown entry
+    is selectable" is enforced -- so slicing the rows flat could leave `[2] Bay`
+    on one page and `pick [2]` on the next beside nothing but an indented tail,
+    with no way for a caller to tell what the key opened. An entry therefore moves
+    to the next page whole rather than being cut.
+
+    One taller than a page of its own still has to be cut, and then each
+    continuation opens with its marker and `(cont.)` -- the marker rather than the
+    name, because repeating wrapped body text would print it twice and a caller
+    counting rows of a long dossier would read the repeat as more of it.
+    """
+    pages: list[list[tuple[str, str]]] = []
+    page: list[tuple[str, str]] = []
+    room = first
+    for rows, marker in entries:
+        rows = list(rows)
+        while rows:
+            if len(rows) > room and page:
+                pages.append(page)
+                page, room = [], rest
+                continue
+            if len(rows) <= room:
+                page += rows
+                room -= len(rows)
+                break
+            # Taller than an empty page: cut it, and carry its name forward.
+            page += rows[:room]
+            rows = rows[room:]
+            pages.append(page)
+            page, room = [], rest
+            rows.insert(0, (marker + sty(p.grey, " (cont.)"), ""))
+    if page:
+        pages.append(page)
+    return pages or [[("", "")]]
+
+
 def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool]], width: int,
                      height: int, *, more_before: bool = False, more_after: bool = False,
                      start_last: bool = False, before: list[tuple[str, list[str]]] = (),
@@ -4699,7 +4743,7 @@ def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool
     """
     width = max(1, width - 1)
     inner = _panel_width(p, width)
-    lines: list[tuple[str, str]] = []
+    entries: list[tuple[list[tuple[str, str]], str]] = []
     for key, (item, selectable) in zip(PICK_KEYS, rendered if rendered is not None else records):
         marker = sty(p.amber + BOLD, f"[{key}]") if selectable else sty(p.grey, "[-]")
         if rendered is not None:
@@ -4710,9 +4754,11 @@ def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool
                 body += prose_rows(p, text, inner - 4, style=p.grey)
         body = body or [""]
         wrapped = [marker + " " + body[0]] + ["    " + row for row in body[1:]]
-        lines.extend((line, key if selectable and i == len(wrapped) - 1 else "")
-                     for i, line in enumerate(wrapped))
-    lines = lines or [(sty(p.grey, "Nothing to choose here yet."), "")]
+        entries.append(([(line, key if selectable and i == len(wrapped) - 1 else "")
+                         for i, line in enumerate(wrapped)], marker))
+    if not entries:
+        entries = [([(sty(p.grey, "Nothing to choose here yet."), "")], "")]
+    lines = [row for rows, _ in entries for row in rows]
     bar = key_bar(p, PICK_BAR, width, 1)
     capacity = max(1, height - len(bar) - 1 - frame_cost(p, width))
     before = [(card_heading, rows) for card_heading, rows in before if rows]
@@ -4728,10 +4774,8 @@ def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool
         before, spent = [], plain_cost
     if spent + first_choice > capacity and heading:
         heading, spent = "", 0
-    pages = [lines[:max(1, capacity - spent)]]
-    rest = lines[len(pages[0]):]
     entry_capacity = max(1, capacity - (1 if heading else 0))
-    pages += [rest[i:i + entry_capacity] for i in range(0, len(rest), entry_capacity)]
+    pages = _paginate_entries(p, entries, max(1, capacity - spent), entry_capacity)
     index = len(pages) - 1 if start_last else 0
     while True:
         keys = "".join(key for _, key in pages[index])
@@ -5090,9 +5134,13 @@ def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: 
     # leaving holes in it would hide the shape of the map -- but they are holdings,
     # not targets: a capture price, root Heat and odds against your own garrison
     # describe an action this picker will not even offer.
+    # Named with the screen it lives on, like every other borrowed key in the
+    # door: this picker's reader takes Next/Prev/Back/Cancel and the selectable
+    # digits, so a bare `[G]` here would be a key that does nothing.
     rendered = [((garrison_entry_rows(p, exchange, player, inner - 4)
-                  + prose_rows(p, "Already yours; [G] Garrison manages it and opens its "
-                               "service.", inner - 4, style=p.grey))
+                  + prose_rows(p, "Already yours. Back, then [G] Garrison on the "
+                               "switchboard manages it and opens its service.",
+                               inner - 4, style=p.grey))
                  if exchange.controller_user_id == player.user_id
                  else exchange_entry_rows(p, exchange, player, inner - 4),
                  exchange.controller_user_id != player.user_id) for exchange in exchanges]

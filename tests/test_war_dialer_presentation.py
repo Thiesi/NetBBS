@@ -3344,10 +3344,18 @@ def test_the_scene_table_advertises_no_hotkey_the_screen_ignores(tmp_path):
     text = _ANSI_RE.sub("", " ".join(table))
     # The scene screen inspects and never acts, so its table names the verb and
     # the exchange's own card says where the key that does it lives.
-    for verb in ("garrison", "raid", "root"):
+    for verb in ("garrison", "root"):
         assert verb in text
     for key in ("[G]", "[R]", "[X]"):
         assert key not in text, f"{key} is printed on a screen whose dispatch ignores it"
+    # And the verb is the action the row's own `take` column priced. A rival's
+    # exchange is contested with Root; a raid steals cash from its owner, leaves
+    # the exchange alone and has odds the door will not show, so "38% raid" named
+    # one action and priced another.
+    assert "raid" not in text, text
+    rival = next(row for row in (_ANSI_RE.sub("", line) for line in table)
+                 if "Loop" in row)
+    assert "root" in rival and "38%" in rival, rival
     card = _ANSI_RE.sub("", " ".join(
         row for _, rows in wd.exchange_detail_cards(palette, exchanges[0], player, 72)
         for row in rows))
@@ -4116,3 +4124,64 @@ def test_the_operator_guide_names_the_schema_the_code_writes():
     assert f"Old binaries refuse schema {version}" in guide
     # And the migration is described, not just numbered.
     assert f"version {version} clears the actor from receipts" in guide
+
+
+def test_a_picker_entry_never_advertises_a_key_its_reader_discards(tmp_path, monkeypatch):
+    """A borrowed key has to say where it is borrowed from.
+
+    The root picker's note for the caller's own holding read "[G] Garrison
+    manages it", painting `[G]` as live on a screen whose reader takes
+    Next/Prev/Back/Cancel and the selectable digits -- the defect this door's own
+    rival directory was fixed for two rounds earlier.
+    """
+    conn, now = _painted_world(tmp_path, "borrowed.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    wd.do_root_exchange(palette, conn, player, now, __import__("random").Random(1), 78, 24)
+    screen = _ANSI_RE.sub("", _last_screen("".join(written)))
+    # Whatever the screen's reader accepts may be printed bare; any other key has
+    # to name the screen it lives on.
+    accepted = set("NPBQA-0123456789")
+    for row in screen.split("\r\n"):
+        for key in re.findall(r"\[(\w)\]", row):
+            if key in accepted:
+                continue
+            assert "switchboard" in row.lower(), (key, row)
+    assert "[G] Garrison on the switchboard" in screen, screen
+    conn.close()
+
+
+@pytest.mark.parametrize("width,height", [(40, 12), (64, 20), (80, 24)])
+def test_a_selectable_key_always_arrives_with_its_entry(width, height, monkeypatch):
+    """A page that offers a key has to show what the key opens.
+
+    Only an entry's last row carries its key, so flat row slicing could put
+    `[2] Bay  WAREZ HUB` on one page and `pick [2]` on the next beside nothing but
+    an indented tail -- a choice a caller cannot identify. Entries move whole
+    instead; one taller than a page of its own is cut under a repeat of its
+    marker.
+    """
+    palette = wd.Palette(True)
+    records = [([f"Exchange {index}", "owner unclaimed   defence 0", "capture $40   heat +8"], True)
+               for index in range(1, 7)]
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
+    seen: list[str] = []
+
+    def choose(valid):
+        seen.append(valid)
+        return "B" if len(seen) > 12 else "N"
+
+    monkeypatch.setattr(wd, "read_menu_choice", choose)
+    wd.pick_record_page(palette, "ROOT EXCHANGE", records, width, height)
+    for screen in "".join(written).split(CLEAR)[1:]:
+        rows = [_ANSI_RE.sub("", row) for row in _rows(screen)]
+        offered = set(re.findall(r"\[(\w)\]", next(
+            (row for row in rows if row.startswith("pick ")), "")))
+        shown = {key for row in rows for key in re.findall(r"^\W*\[(\w)\]", row.strip("┃ "))}
+        assert offered <= shown, (offered - shown, rows)

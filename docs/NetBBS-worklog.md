@@ -5001,10 +5001,9 @@ the stakes fit on one page.
 
 **A walk photographs one screen: the one it is looking at when its keys run
 out.** Passing *through* a picker on the way somewhere else therefore reviews
-nothing of it. The job and operation approach pickers and the recon preview were
-all rebuilt, walked over twice per panel by the walks that went past them to a
-preview, and appeared in none of 468 panels. A screen on the way to another
-screen needs a walk that stops there. A test now reads the screen titles out of
+nothing of it: a walk that ends on a preview reviews the preview, not the two
+pickers it crossed to reach it. A screen on the way to another screen needs a walk
+that stops there. A test reads the screen titles out of
 the door's own source -- every `show_text_pages` and `pick_record_page` call, so
 that a screen added tomorrow is found without anyone remembering to list it --
 and fails unless each is either
@@ -5035,15 +5034,13 @@ where page two is the same drawing with the next rows in it and a second panel o
 it costs a panel and teaches nothing.
 
 **A panel's state is the fixture plus the keys a walk presses into its own copy of
-it.** "The fixture is idle" was the wrong reason to excuse the screens of an
-operation in progress: every panel already gets its own copy of the world, so a
-walk can play one. `SETUP` presses a whole operation -- contract, approach,
-preview, Act -- in a separate launch against that copy, at one fixed size, and
-throws away what it draws; the photographed walk then starts in a world that has
-cased an operation, and Active Operation, the Prepare and Execute previews, the
-abandon preview and its receipt are panels rather than exemptions. What stays
-excused is what no sequence of keys reaches: fifteen spent turns, an emptied
-wallet, a season rollover, a world with no rivals in it.
+it.** Every panel gets its own copy of the world, so a screen that exists only in
+another state is reachable by playing into it: `SETUP` presses a whole operation --
+contract, approach, preview, Act -- in a separate launch against that copy, at one
+fixed size, and throws away what it draws, after which the photographed walk opens
+the in-progress screens. "The fixture is not in that state" is therefore not a
+reason to excuse a screen. What no sequence of keys reaches is: fifteen spent
+turns, an emptied wallet, a season rollover, a world with no rivals in it.
 
 **A skip of a transition is not an acknowledgement of what follows it.** A
 reveal hands its skip key back, so one press both finishes the reveal and answers
@@ -5070,19 +5067,21 @@ says so. A paged walk now stops where the screen says it ends, and a screen that
 prints no counter has exactly one page.
 
 **"The fixture is not in that state" is not the same as "no walk can reach it".**
-The first screen every new caller sees was excused as unreachable because the
-cached fixture is past it by construction -- while `base_fixture` was driving that
-very screen and throwing the capture away. A walk can ask for a world nobody has
-played instead, and the guide is four panels at the forty-column floor. Twice now
-an exemption has been an implementation detail wearing the clothes of a law.
+The cached fixture is past the first-visit guide by construction, which is a fact
+about the fixture and not about the screen: a walk can ask for a world nobody has
+played instead (`FRESH`), and the guide is one panel at eighty columns and four at
+the forty-column floor. A fresh world has no tables to write a display preset
+into, so such a walk builds the schema through the door's own `connect` first --
+which registers nobody, leaving the caller new. An exemption has to name something
+no sequence of keys can produce, not something the current fixture happens not to
+be.
 
-**A screen with three versions needs three panels.** One walk opened whichever
-owner service the fixture happened to hold, which was always the Carrier Switch --
-so the Public PBX's *negative* Heat gauge and the Warez Hub's bust gauge, the two
-role-specific paths earlier rounds had to fix, were reviewed at no size and
-nothing said they were missing. Each has a walk now, and each is marked on its own
-service text rather than on the screen's title, so a panel showing the wrong
-holding's service fails the build instead of passing it.
+**A screen with three versions needs three panels.** The owner service is one
+screen with three drawings -- a Public PBX's *negative* Heat gauge, a Warez Hub's
+bust gauge, a Carrier Switch with neither -- and a single walk photographed
+whichever role the fixture happened to hold. Each has its own walk, and each is
+marked on its own service text rather than on the title the three share, so a panel
+showing the wrong holding's service fails the build instead of passing it.
 
 **Name a picker entry by what it is.** Which digit a Public PBX is depends on what
 the caller holds, so `{X}` presses the key of the entry whose own rows say X. Two
@@ -5093,11 +5092,10 @@ key the text belonged to and keeps paging until the screen will take it. A mark,
 likewise, is matched against painted rows and must be short enough not to be
 wrapped across two of them: "Warez outlet:" is broken in half at the floor.
 
-**Heat reads to one decimal, because Heat decays.** `:g` printed a gauge reading
-`8 -7.86231 = 0` and terms promising to "Remove 7.86231 Heat now", two rows above
-the same screen's `Heat: 15.9 + 4 = 19.9`. `heat_amount` is the one formatter, and
-it drops a pointless `.0` so a whole number still reads as one. Found the first
-time anyone looked at a Public PBX's service preview.
+**Heat reads to one decimal, because Heat decays.** `:g` prints a decayed figure
+in full, so a gauge read `8 -7.86231 = 0` above the same screen's `Heat: 15.9 + 4 =
+19.9`. `heat_amount` is the one formatter, and it drops a pointless `.0` so a whole
+number still reads as one.
 
 **A record is a card, or pagination will cut it in half.** Flattening every
 retained season result into one `RETAINED RESULTS` block let `paginate_cards`
@@ -5117,18 +5115,14 @@ rival's raids read as the caller's own work. Self-authored receipts now record n
 actor at all, `hostile` is simply "an actor is named", and a schema-11 migration
 clears the legacy rows it can still identify.
 
-**A holding is not a target, on the card as well as in the picker.**
-`garrison_entry_rows` had said so in its own docstring for two rounds while the
-scene's exchange card, for an exchange the caller already controlled, gauged
-`YOUR ODDS 38%` against their own garrison and priced a capture of what they
-already hold -- directly above a line telling them to use Garrison, for an
-exchange the root picker will not even offer. The card now reads as a holding when
-it is one (posted crew, what it pays, how long it has been held, its service) and
-as a target when it is not. Its own walk photographs both, which is how this was
-found at all. The root picker was the other half of the same fix, found a round
-later: it still sent an owned exchange through the target renderer and appended
-"already yours", so the one entry it refuses to let a caller choose was the one
-quoting them a capture price, its Heat and the odds against their own garrison.
+**A holding is not a target, and every screen that draws one has to agree.** An
+exchange the caller controls has posted crew, income, an age and a service; a
+capture price, root Heat and the odds of an attack on its own garrison describe an
+action no screen will even offer them. That holds for the scene's exchange card,
+the root picker's rows and the scene table's verb column alike -- the table's
+`take` figure is the chance of *rooting* the exchange, so pairing it with the word
+`raid` priced one action and named another. Each of the three has a walk or a test
+covering both readings, because a half-applied rule reads as a fixed one.
 
 **An entry a picker appends after a variable list is named as the last one, not
 by a digit.** Exchange Control offers one transfer per move the holding can make
