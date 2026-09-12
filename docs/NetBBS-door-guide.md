@@ -221,9 +221,12 @@ unread. In history, use Next/Prev to browse, Ack page to acknowledge, and Back t
 return. New events arriving while you read remain unread. These screens fit down
 to the 40x12 floor; smaller terminals show a size diagnostic and preserve unread state.
 
-The main switchboard shows your resources, holdings and income, Rank progress,
-new events, raid protection, turn refill and the season deadline. Next/Prev pages
-are free and refresh these snapshots; action keys stay available on each page.
+The main switchboard is a stack of cards: who you are with your Rank gauge, then
+cash, Heat, crew, turns, holdings, income, raid protection and unread receipts as
+meters and chips, then the ten exchanges as a ring, the latest receipts as a
+feed, and finally what to do next and the season's absolute deadlines. Next/Prev
+pages are free and refresh these snapshots; action keys stay available on each
+page, and the paging keys sit on the prompt row beside the cursor.
 Outcomes and rejection messages wait for acknowledgement before returning to the
 switchboard. The game requires at least 40 columns by 12 rows; a smaller terminal
 is refused by name, with the size it reported, and nothing in the shared world is
@@ -385,11 +388,17 @@ age and is not renewed by the season change.
 
 Open `[I]Scene`, then Display for free ASCII-decoration, monochrome and Fast-mode
 toggles. Choices apply immediately and survive seasons and competition reset.
-Back leaves without changing anything. ASCII mode keeps authored decorations
-simple and preserves names; monochrome retains explicit labels and numbers.
-Fast skips optional static art and action flavor, keeping every stake and net
-result. There are no animation delays in either mode. The map and NPC dossiers
-show compact role/operator diagrams beside actual ownership and defense.
+Back leaves without changing anything. ASCII mode substitutes plain characters
+for every glyph the screens draw and preserves names; monochrome removes colour
+entirely and retains explicit labels and numbers. Fast skips the frame, optional
+art, action flavour and motion, keeping every stake and net result, and shows the
+page counter in its title row instead of a border.
+Motion -- a screen revealed row by row, a carrier bar filling while a committed
+result comes back -- plays only after the write, and any key skips it; Fast,
+monochrome and ASCII modes never play it at all. The scene screen draws the ten
+exchanges as the ring they are, with owner colour on the ring and in the table
+beside it; an exchange's number opens its own card, which carries its links, its
+price for you, its defence and its owner service.
 War Dialer inherits your NetBBS Unicode-decoration choice unless you explicitly
 toggle ASCII decorations in Display. Monochrome and Fast do not override that
 inheritance. Older launchers without the optional `unicode_style` metadata field
@@ -1403,6 +1412,26 @@ the emulator, game and NetBBS itself must not run as root.
    the game. The DOS templates use CP437, COM1, 38400 baud, 80x25 and 1 GiB
    address-space ceiling. This ceiling includes the emulator's host shared
    libraries, not just its 16 MiB emulated RAM. Native default: 256 MiB.
+
+   **Stop grace** is how long a door gets to exit after `SIGTERM` before it is
+   killed, and it is reached far more often than the name suggests: on every
+   caller disconnect and every timeout, not only at node shutdown. The default
+   is 5 seconds, replacing a fixed half-second which was long enough for a
+   process that exits on the signal and too short for one which flushes
+   anything first — a DOS game writing its scores out through the emulator,
+   for instance.
+
+   Raising it costs nothing for a door which exits promptly: the wait ends the
+   moment the process does, so only a door which refuses to exit ever waits
+   the full period. Raise it for a game you have seen lose progress when a
+   caller drops mid-session; lower it only if you know the door writes nothing
+   on the way out.
+
+   This buys time, not a guarantee. A door which handles `SIGTERM` gets the
+   chance to finish; one which ignores it is killed at the deadline either
+   way, and one which the operating system kills outright never saw the signal
+   at all. If a particular game still loses data on an abrupt disconnect,
+   establish whether it handles `SIGTERM` before raising this further.
 5. **Check setup** reports static problems. For DOS, run **Emulator capability
    probe** to verify headless startup, inherited COM1, CP437 echo and optional
    FOSSIL using NetBBS's own fixture, without launching the game. It requires
