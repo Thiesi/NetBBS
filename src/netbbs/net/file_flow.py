@@ -1997,7 +1997,20 @@ async def _handle_upload(
                     # `queue_file_descriptor_if_linked`'s own commit would
                     # otherwise leave it in a failed transaction for every
                     # later job.
-                    db.connection.rollback()
+                    try:
+                        db.connection.rollback()
+                    except Exception:
+                        # Rolling back can fail for the same reason the write did
+                        # (Codex review of #508): a closed or broken connection
+                        # raises here too, and letting that escape would turn a
+                        # best-effort announcement into exactly the failed upload
+                        # this catch exists to prevent -- the caller told to
+                        # re-upload a file that is already stored, and on the
+                        # Zmodem path the session dropped.
+                        _logger.warning(
+                            "files: could not roll back after a failed descriptor queue",
+                            exc_info=True,
+                        )
                     _logger.warning(
                         "files: stored %r in area %r but could not queue its Link descriptor; "
                         "the file is available locally and will not be announced to peers",

@@ -657,7 +657,20 @@ def _store_upload(
             # every later job: leaving it inside a failed transaction makes
             # the next `BEGIN` fail, or lets an unrelated commit persist the
             # descriptor this log says was never announced.
-            db.connection.rollback()
+            try:
+                db.connection.rollback()
+            except Exception:
+                # Rolling back can fail for the same reason the write did
+                # (Codex review of #508): a closed or broken connection
+                # raises here too, and letting that escape would turn a
+                # best-effort announcement into exactly the failed upload
+                # this catch exists to prevent -- the caller told to
+                # re-upload a file that is already stored, and on the
+                # Zmodem path the session dropped.
+                _logger.warning(
+                    "transfer: could not roll back after a failed descriptor queue",
+                    exc_info=True,
+                )
             _logger.warning(
                 "transfer: stored %r in area %r but could not queue its Link descriptor; "
                 "the file is available locally and will not be announced to peers",

@@ -403,14 +403,34 @@ class NodeConfig:
                     raise ConfigError(
                         f"{name}.public_url must name a host, got {transport.public_url!r}"
                     )
-                if "?" in transport.public_url or "#" in transport.public_url or parsed.params:
+                if any(character.isspace() for character in transport.public_url):
+                    # Whitespace cannot be validated through the parse
+                    # (Codex review of #508): `urlparse` keeps a trailing
+                    # space in `hostname`, making it truthy, and silently
+                    # *drops* a trailing tab so the parse looks perfect
+                    # while the stored string -- the one `url_for`
+                    # concatenates -- still carries it. Either way the
+                    # node prints links no browser accepts. A surrounding
+                    # space is stripped at load because it is never
+                    # intended; one in the middle is a typo worth saying
+                    # out loud.
+                    raise ConfigError(
+                        f"{name}.public_url must not contain whitespace, got "
+                        f"{transport.public_url!r}"
+                    )
+                if "?" in transport.public_url or "#" in transport.public_url:
                     # A transfer link is this value with `/transfer/<token>`
                     # appended, so anything after the path silently breaks
                     # every link the node prints (Codex review of #508): a
                     # query puts the token in the wrong place, and a
                     # fragment never reaches the server at all. A path
                     # prefix is fine and stays supported -- that is how a
-                    # node behind a reverse proxy subpath is reached.
+                    # node behind a reverse proxy subpath is reached,
+                    # including one carrying a path parameter: `;` never
+                    # breaks the append, and rejecting `parsed.params`
+                    # refused `/bbs;tenant=foo` while accepting the
+                    # equivalent `/a;x/b`, whose semicolon `urlparse`
+                    # happens to leave in `path` (Codex review of #508).
                     #
                     # Asked of the raw string rather than `parsed.query`
                     # and `parsed.fragment`, because a bare trailing
@@ -730,7 +750,7 @@ def _transport_from_toml(data: dict, name: str, current: TransportConfig) -> Tra
         enabled=bool(table.get("enabled", current.enabled)),
         host=str(table.get("host", current.host)),
         port=int(table.get("port", current.port)),
-        public_url=str(public_url).rstrip("/") if public_url else None,
+        public_url=str(public_url).strip().rstrip("/") if public_url else None,
     )
 
 

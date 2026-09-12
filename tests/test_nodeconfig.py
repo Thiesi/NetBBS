@@ -908,6 +908,58 @@ def test_a_public_url_without_a_host_is_refused():
     web_config("https://bbs.example.org:8443").validate()
 
 
+def test_a_public_url_containing_whitespace_is_refused():
+    """Codex review of #508: whitespace cannot be caught through the
+    parse. `urlparse` keeps a trailing space in `hostname` (so the
+    presence check passes) and silently *drops* a trailing tab (so the
+    parse looks perfect), while the stored string -- the one `url_for`
+    concatenates -- carries it either way."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    def web_config(public_url):
+        return NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=public_url)
+        )
+
+    for bad in (
+        "https://bbs.example.org ",
+        " https://bbs.example.org",
+        "https://bbs.example.org\t",
+        "https://bbs example.org",
+    ):
+        with pytest.raises(ConfigError, match="whitespace"):
+            web_config(bad).validate()
+
+
+def test_surrounding_whitespace_in_public_url_is_stripped_at_load(tmp_path):
+    """A trailing space in hand-edited TOML is invisible and never
+    intended, so it is corrected rather than rejected (Codex review of
+    #508). Trailing slashes were already stripped here; whitespace has to
+    go first, or the slash strip runs against the space."""
+    from netbbs.net.nodeconfig import load_config
+
+    path = tmp_path / "netbbs.toml"
+    path.write_text(
+        '[web]\nenabled = true\npublic_url = "  https://bbs.example.org/  "\n', encoding="utf-8"
+    )
+    config = load_config(["--config", str(path)])
+    assert config.web.public_url == "https://bbs.example.org"
+
+
+def test_a_public_url_with_a_path_parameter_is_accepted():
+    """Codex review of #508: rejecting `parsed.params` refused
+    `/bbs;tenant=foo` while accepting the equivalent `/a;x/b`, whose
+    semicolon `urlparse` happens to leave in `path`. A semicolon never
+    breaks the append, so neither is a reason to refuse a node's
+    configuration."""
+    from netbbs.net.nodeconfig import NodeConfig, TransportConfig
+
+    for good in ("https://bbs.example.org/bbs;tenant=foo", "https://bbs.example.org/a;x/b"):
+        NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=good)
+        ).validate()
+
+
 def test_a_public_url_with_an_unusable_port_is_refused():
     """Codex review of #508: `urlparse` accepts `:abc` and `:99999` and
     only raises when the port is *read*, so a check that never reads it
