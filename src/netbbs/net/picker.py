@@ -148,7 +148,18 @@ def _pad_cell(text: str, width: int, *, align_right: bool) -> str:
     Measured in display width, not `len` -- a CJK name is two columns
     per character, and padding it by character count is how a table's
     columns wander from row to row.
+
+    Whitespace is normalized to single spaces first (Codex review).
+    `sanitize_text` deliberately preserves a tab, and `display_width`
+    scores a tab zero (it is category Cc), but the write path renders
+    it as one visible space -- so a name carrying a tab would be padded
+    a column too wide and shift every column after it on that row. Any
+    whitespace run is collapsed here, which is what the wrapping inside
+    `Session.write_line` does to it downstream anyway, so the width
+    measured here is the width that reaches the terminal. AGENTS.md:
+    "Width measurement must normalize tabs."
     """
+    text = " ".join(text.split())
     if display_width(text) > width:
         text = truncate_to_width(text, width, ellipsis="…" if width > 1 else "")
     padding = " " * max(0, width - display_width(text))
@@ -454,9 +465,18 @@ async def pick_item(
     # item for nothing. Probed with the narrowest possible reference
     # column, so the error can only ever fall on the side of reserving
     # a line that does get used.
-    header_lines = (
-        1 if columns and _table_widths(session.terminal_width, columns, 1) is not None else 0
-    )
+    #
+    # Read fresh on every call, never captured (Codex review): the
+    # table decision itself is already made per render against the live
+    # terminal width, so a session that opens narrow and is then
+    # widened before a redraw would otherwise draw a heading that the
+    # page size had not reserved -- one item too many on every page,
+    # pushing the prompt past the bottom of the screen. Both now read
+    # the same live width at the same moment.
+    def _header_lines() -> int:
+        if not columns:
+            return 0
+        return 1 if _table_widths(session.terminal_width, columns, 1) is not None else 0
 
     def _masthead_prefix() -> str:
         # Same clear_screen()-ordering hazard `_draw_main_menu`'s own
@@ -482,13 +502,13 @@ async def pick_item(
     if start_stable_id is not None:
         for start_index, item in enumerate(working_set):
             if stable_id_of(item) == start_stable_id:
-                start_page_size = _page_size(session, on_sort, description_level, header_lines=header_lines)
+                start_page_size = _page_size(session, on_sort, description_level, header_lines=_header_lines())
                 page_index = start_index // start_page_size
                 highlighted = start_index % start_page_size
                 break
 
     def _total_pages() -> int:
-        return max(1, math.ceil(len(working_set) / _page_size(session, on_sort, description_level, header_lines=header_lines)))
+        return max(1, math.ceil(len(working_set) / _page_size(session, on_sort, description_level, header_lines=_header_lines())))
 
     async def _render() -> Sequence[T]:
         nonlocal page_index
@@ -505,7 +525,7 @@ async def pick_item(
             await session.write("Choice: ")
             return []
 
-        page_size = _page_size(session, on_sort, description_level, header_lines=header_lines)
+        page_size = _page_size(session, on_sort, description_level, header_lines=_header_lines())
         total_pages = _total_pages()
         page_index = max(0, min(page_index, total_pages - 1))
         start = page_index * page_size

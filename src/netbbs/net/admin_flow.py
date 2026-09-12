@@ -57,6 +57,7 @@ import shlex
 import sqlite3
 import sys
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Sequence
 from zoneinfo import available_timezones
 
@@ -130,6 +131,10 @@ from netbbs.communities import (
     create_community,
     delete_community,
     get_community,
+    get_effective_min_age,
+    get_effective_min_read_level,
+    get_effective_min_write_level,
+    get_effective_name_requirement,
     list_communities,
     update_community,
 )
@@ -11104,7 +11109,14 @@ async def _list_communities_screen(session: Session, lane: DatabaseLane, actor: 
 
 
 def _community_description(community: Community) -> str:
-    return "hidden" if community.hidden else "listed"
+    """A Community sits at the top of the cascade, so its own
+    `default_*` values are already the effective ones -- nothing above
+    it to resolve. Its gates still belong in the fallback text, for the
+    same reason a leaf's do."""
+    gates, _ = _gate_cell(community.default_min_age, community.default_name_requirement)
+    bits = [] if gates == "-" else [f"default {gates}"]  # leads; see `_describe_resource`
+    bits.append("hidden" if community.hidden else "listed")
+    return ", ".join(bits)
 
 
 async def _community_detail_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> None:
@@ -11482,14 +11494,18 @@ async def _board_screen(
 async def _list_boards_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
 ) -> None:
-    boards = await lane.run(list_boards, order_by="alphabetical")
+    def _load_boards(db: Database):
+        boards = list_boards(db, order_by="alphabetical")
+        return boards, _effective_by_id(db, boards)
+
+    boards, effective = await lane.run(_load_boards)
     selected = await pick_item(
         session, boards,
         name_of=lambda b: b.name,
         stable_id_of=lambda b: b.id,
-        description_of=_board_description,
+        description_of=lambda b: _board_description(b, effective[b.id]),
         columns=_BOARD_COLUMNS,
-        column_values_of=_board_columns,
+        column_values_of=lambda b: _board_columns(b, effective[b.id]),
         title="Message boards",
         empty_message="No message boards yet.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -11502,11 +11518,79 @@ async def _list_boards_screen(
         await _board_detail_screen(session, lane, actor, selected, link_context=link_context)
 
 
-def _board_description(board: Board) -> str:
+# -- What actually applies here (issue #528, Codex review) ------------
+#
+# A board, area or channel that leaves a gate unset inherits its
+# Community's, and enforcement reads the inherited value
+# (`get_effective_min_age` / `get_effective_name_requirement`, the same
+# functions `netbbs.net.file_flow` already gates entry on). A list that
+# rendered the resource's own raw `None` therefore printed "-" against a
+# resource callers genuinely cannot enter -- the very failure this issue
+# was filed about, reintroduced one level up the cascade.
+#
+# So every list row is built from *effective* values throughout. A row
+# answers "who can get in here"; the editor behind `[E]` is where a
+# SysOp sees which of those values this resource sets for itself. Levels
+# follow the same rule rather than still saying "inherit", since one
+# column saying "inherit" beside another silently resolving its
+# inherited value would be the more confusing half-measure.
+
+
+@dataclass(frozen=True)
+class _Effective:
+    """The post-cascade values for one resource. `read`/`write` are
+    `None` for a chat channel, which has a single `min_level` and no
+    read/write split to inherit."""
+
+    read: int | None
+    write: int | None
+    min_age: int | None
+    name_requirement: str | None
+
+
+def _effective_for(db: Database, resource, *, levels: bool = True) -> _Effective:
+    return _Effective(
+        read=get_effective_min_read_level(db, resource) if levels else None,
+        write=get_effective_min_write_level(db, resource) if levels else None,
+        min_age=get_effective_min_age(db, resource),
+        name_requirement=get_effective_name_requirement(db, resource),
+    )
+
+
+def _effective_by_id(db: Database, resources, *, levels: bool = True) -> dict[int, _Effective]:
+    """Resolved for the whole list in the caller's existing lane pass,
+    not per row: `column_values_of` and `description_of` are pure
+    synchronous callbacks with no database of their own (the same
+    contract `FieldSpec.render` keeps), so the cascade has to be walked
+    here, where a `db` is already in hand."""
+    return {r.id: _effective_for(db, r, levels=levels) for r in resources}
+
+
+def _board_description(board: Board, effective: _Effective) -> str:
+    """The narrow-terminal form, below the width a table needs.
+
+    Carries the gates too (Codex review). Without them this fallback
+    recreated the exact reported bug on every supported narrow
+    terminal -- gated and open resources indistinguishable -- while
+    design doc §3.6 promises gates appear wherever a resource is
+    listed. A promise the docs make is not optional on small screens."""
     status = "moderated" if board.moderated else "open"
-    read_level = board.min_read_level if board.min_read_level is not None else "inherit"
-    write_level = board.min_write_level if board.min_write_level is not None else "inherit"
-    return f"read {read_level}/write {write_level}, {status}"
+    return _describe_resource(effective.read, effective.write, status, effective)
+
+
+def _describe_resource(read, write, status: str, effective: _Effective) -> str:
+    """Gates lead, deliberately.
+
+    This string is what a narrow terminal shows, and a narrow terminal
+    is exactly where it gets truncated -- appending the gates put them
+    first under the knife, so a 50-column row read
+    "... - read 10/write 0, op..." and lost the only field this issue
+    was filed about. Whoever can enter is the least recoverable fact in
+    the row and the least guessable from context, so it goes first and
+    the levels take the truncation instead."""
+    gates, _ = _gate_cell(effective.min_age, effective.name_requirement)
+    tail = f"read {read}/write {write}, {status}"
+    return tail if gates == "-" else f"{gates}, {tail}"
 
 
 # -- Columnar resource lists (issue #528) -----------------------------
@@ -11519,10 +11603,14 @@ def _board_description(board: Board) -> str:
 
 
 def _level_cell(value: int | None) -> str:
-    """A level column's cell. `None` means "inherit from the Community
-    or the node default" -- a real and different answer from any
-    number, so it is spelled out rather than shown as a blank."""
-    return str(value) if value is not None else "inherit"
+    """A Community's own default-level cell.
+
+    Only Communities use this now: a leaf resource's columns resolve
+    through the cascade and always land on a number. A Community sits
+    at the top with nothing above it, so `None` there means "sets no
+    default", not "inherits one" -- the word matters, since "inherit"
+    on a Community row would point at a parent that does not exist."""
+    return str(value) if value is not None else "none"
 
 
 def _gate_cell(min_age: int | None, name_requirement: str | None) -> tuple[str, SegmentColor]:
@@ -11541,7 +11629,13 @@ def _gate_cell(min_age: int | None, name_requirement: str | None) -> tuple[str, 
     ("verified_and_displayed").
     """
     tags: list[str] = []
-    if min_age is not None:
+    # Truthiness, not `is not None` (Codex review): `meets_age` opens
+    # with `if not min_age: return True` and documents "unset/0 -> always
+    # passes (no gate)", so an explicit 0 -- a supported way to override
+    # an inherited age gate -- admits everyone. Rendering "0+" would
+    # advertise a restriction enforcement does not apply, which is the
+    # same class of lie as omitting a gate that it does.
+    if min_age:
         tags.append(f"{min_age}+")
     if name_requirement == "verified_and_displayed":
         tags.append("name+")
@@ -11576,32 +11670,39 @@ _CHANNEL_COLUMNS = [
 _COMMUNITY_COLUMNS = [*_LEVEL_COLUMNS, ListColumn("listed", 6, VALUE_COLOR), _GATES_COLUMN]
 
 
-def _board_columns(board: Board) -> list[str | tuple[str, SegmentColor]]:
+def _board_columns(board: Board, effective: _Effective) -> list[str | tuple[str, SegmentColor]]:
     return [
-        _level_cell(board.min_read_level),
-        _level_cell(board.min_write_level),
+        str(effective.read),
+        str(effective.write),
         "moderated" if board.moderated else "open",
-        _gate_cell(board.min_age, board.name_requirement),
+        _gate_cell(effective.min_age, effective.name_requirement),
     ]
 
 
-def _area_columns(area: FileArea) -> list[str | tuple[str, SegmentColor]]:
+def _area_columns(area: FileArea, effective: _Effective) -> list[str | tuple[str, SegmentColor]]:
     return [
-        _level_cell(area.min_read_level),
-        _level_cell(area.min_write_level),
+        str(effective.read),
+        str(effective.write),
         "moderated" if area.moderated else "open",
-        _gate_cell(area.min_age, area.name_requirement),
+        _gate_cell(effective.min_age, effective.name_requirement),
     ]
 
 
-def _channel_columns(channel: Channel) -> list[str | tuple[str, SegmentColor]]:
-    access = [] if not channel.members_only else ["members"]
+def _channel_access(channel: Channel) -> str:
+    access = ["members"] if channel.members_only else []
     if channel.hidden:
         access.append("hidden")
+    return "+".join(access) if access else "open"
+
+
+def _channel_columns(channel: Channel, effective: _Effective) -> list[str | tuple[str, SegmentColor]]:
+    # `min_level` is a plain non-nullable int with no Community default
+    # behind it, so unlike a board's read/write there is nothing to
+    # resolve -- only the gates cascade for a channel.
     return [
         str(channel.min_level),
-        "+".join(access) if access else "open",
-        _gate_cell(channel.min_age, channel.name_requirement),
+        _channel_access(channel),
+        _gate_cell(effective.min_age, effective.name_requirement),
     ]
 
 
@@ -12697,14 +12798,18 @@ async def _area_screen(
 async def _list_areas_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
 ) -> None:
-    areas = await lane.run(list_file_areas, order_by="alphabetical")
+    def _load_areas(db: Database):
+        areas = list_file_areas(db, order_by="alphabetical")
+        return areas, _effective_by_id(db, areas)
+
+    areas, effective = await lane.run(_load_areas)
     selected = await pick_item(
         session, areas,
         name_of=lambda a: a.name,
         stable_id_of=lambda a: a.id,
-        description_of=_area_description,
+        description_of=lambda a: _area_description(a, effective[a.id]),
         columns=_AREA_COLUMNS,
-        column_values_of=_area_columns,
+        column_values_of=lambda a: _area_columns(a, effective[a.id]),
         title="File areas",
         empty_message="No file areas yet.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -12717,11 +12822,10 @@ async def _list_areas_screen(
         await _area_detail_screen(session, lane, actor, selected, link_context=link_context)
 
 
-def _area_description(area: FileArea) -> str:
+def _area_description(area: FileArea, effective: _Effective) -> str:
+    """Narrow-terminal fallback; see `_board_description`."""
     status = "moderated" if area.moderated else "open"
-    read_level = area.min_read_level if area.min_read_level is not None else "inherit"
-    write_level = area.min_write_level if area.min_write_level is not None else "inherit"
-    return f"read {read_level}/write {write_level}, {status}"
+    return _describe_resource(effective.read, effective.write, status, effective)
 
 
 async def _area_detail_screen(
@@ -14205,14 +14309,20 @@ async def _list_channels_screen(
     mrc_bridge: MrcBridge | None = None,
     chat_hub: ChatHub | None = None,
 ) -> None:
-    channels = await lane.run(list_channels)
+    def _load_channels(db: Database):
+        channels = list_channels(db)
+        # levels=False: a channel's `min_level` is a plain int
+        # with no Community default behind it to resolve.
+        return channels, _effective_by_id(db, channels, levels=False)
+
+    channels, effective = await lane.run(_load_channels)
     selected = await pick_item(
         session, channels,
         name_of=lambda c: c.name,
         stable_id_of=lambda c: c.id,
-        description_of=_channel_description,
+        description_of=lambda c: _channel_description(c, effective[c.id]),
         columns=_CHANNEL_COLUMNS,
-        column_values_of=_channel_columns,
+        column_values_of=lambda c: _channel_columns(c, effective[c.id]),
         title="Chat channels",
         empty_message="No chat channels yet.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -14225,8 +14335,11 @@ async def _list_channels_screen(
         await _channel_detail_screen(session, lane, actor, selected, link_context=link_context, mrc_bridge=mrc_bridge, chat_hub=chat_hub)
 
 
-def _channel_description(channel: Channel) -> str:
-    bits = [f"level {channel.min_level}"]
+def _channel_description(channel: Channel, effective: _Effective) -> str:
+    """Narrow-terminal fallback; see `_board_description`."""
+    gates, _ = _gate_cell(effective.min_age, effective.name_requirement)
+    bits = [] if gates == "-" else [gates]  # leads; see `_describe_resource`
+    bits.append(f"level {channel.min_level}")
     if channel.members_only:
         bits.append("members-only")
     if channel.hidden:

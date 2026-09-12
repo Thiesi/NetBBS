@@ -539,8 +539,21 @@ Two rules follow from that, and are normative for any future list:
   form. The decision is made per render against the live terminal width, not
   once on entry. A truncated table is worse than the sentence it replaced.
 
+A row shows what **applies** to a caller, resolved through the Community
+cascade (`get_effective_min_age` and friends), never the resource's own raw
+unset value. A board that sets no age gate but sits in a Community that does
+is gated, and enforcement says so; a list that printed the resource's own
+`None` would report it as open. The editor behind `[E]` is where a SysOp sees
+which values the resource itself sets. An explicit `0` minimum age is not a
+gate -- `meets_age` admits everyone -- and is not tagged as one.
+
+In the prose fallback the gates lead the string, because a narrow terminal is
+precisely where that string gets truncated: who may enter is the least
+guessable fact in the row, so the levels take the truncation instead.
+
 Cells are measured and padded in display columns, never character counts, so
-a CJK name does not shift the columns after it.
+a CJK name does not shift the columns after it, and whitespace is normalized
+before measuring since a preserved tab measures zero but renders as a space.
 
 ---
 

@@ -342,3 +342,82 @@ def test_a_narrow_terminal_does_not_reserve_a_row_for_a_header_it_never_draws():
     assert _page_size(narrow, None, "off", header_lines=0) == _page_size(
         wide, None, "off", header_lines=1
     ) + 1
+
+
+# -- Codex review -----------------------------------------------------
+
+
+def test_a_tab_in_a_name_does_not_shift_the_columns():
+    """`sanitize_text` preserves a tab and `display_width` scores it
+    zero (category Cc), but the write path renders it as one visible
+    space -- so padding measured on the raw string ran a column wide
+    and pushed every later column along on that row."""
+    from netbbs.rendering import display_width, sanitize_text
+
+    # The premise, so this test fails loudly if the platform changes.
+    assert sanitize_text("a\tb") == "a\tb"
+    assert display_width("a\tb") == 2
+
+    padded = _pad_cell("a\tb", 10, align_right=False)
+    assert display_width(padded) == 10
+    assert "\t" not in padded
+
+
+def test_padding_collapses_any_whitespace_run_it_is_given():
+    from netbbs.rendering import display_width
+
+    assert display_width(_pad_cell("a \t b", 12, align_right=False)) == 12
+
+
+def test_a_tabbed_row_lines_up_with_a_plain_one():
+    items = [
+        Item(1, "a\tb", ["5", "6", "open", ("-", MUTED_COLOR)]),
+        Item(2, "a b", ["5", "6", "open", ("-", MUTED_COLOR)]),
+    ]
+    session = _table(items=items)
+    rows = [line for line in session.lines() if re.match(r"^\s{2}\d\d\. ", line)]
+    assert rows[0].index("open") == rows[1].index("open")
+
+
+def test_widening_the_terminal_reserves_the_header_it_then_draws():
+    """`table` was already decided per render from the live width while
+    the header reservation was captured once at entry. A picker opened
+    narrow and then widened drew a heading nothing had budgeted for,
+    putting one item too many on every page."""
+    session = FakeSession(["b"], width=50, height=24)
+    narrow_page = None
+
+    async def run():
+        nonlocal narrow_page
+        # Entered narrow: no table, so nothing reserved.
+        assert _table_widths(session.terminal_width, COLUMNS, 1) is None
+        narrow_page = _page_size(session, None, "off", header_lines=0)
+        # The caller resizes before the next redraw.
+        session.terminal_width = 80
+        assert _table_widths(session.terminal_width, COLUMNS, 1) is not None
+
+    asyncio.run(run())
+    widened = _page_size(session, None, "off", header_lines=1)
+    assert widened == narrow_page - 1
+
+
+def test_a_rendered_table_page_never_outgrows_the_terminal():
+    """The consequence the reservation exists to prevent, asserted on
+    the real render rather than on the arithmetic: everything the
+    picker puts on screen for one page has to fit the negotiated
+    height, header row included."""
+    items = [Item(n, f"area {n}", ["0", "0", "open", ("-", MUTED_COLOR)]) for n in range(1, 60)]
+    for height in (10, 16, 24, 40):
+        session = FakeSession(["b"], width=80, height=height)
+        asyncio.run(
+            pick_item(
+                session, items,
+                name_of=lambda i: i.name, stable_id_of=lambda i: i.id,
+                columns=COLUMNS, column_values_of=lambda i: i.cells,
+                title="File areas", empty_message="none",
+            )
+        )
+        # One render, so every physical line written is this page.
+        physical = _plain(session.output).replace("\r\n", "\n").split("\n")
+        drawn = [line for line in physical if line.strip()]
+        assert len(drawn) <= height, f"{len(drawn)} lines drawn on a {height}-row terminal"
