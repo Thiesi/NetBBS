@@ -36,7 +36,13 @@ DOOR_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024
 # RLIMIT_NPROC is shared by the real UID, not a per-door quota.
 DOOR_MAX_PROCESSES = 16
 WALL_TIME_LIMIT_SECONDS = 3600
-_TERMINATE_GRACE_SECONDS = 0.5
+#: How long a door gets to exit on its own after SIGTERM, before SIGKILL.
+#: Was a fixed 0.5 s, which is long enough for a process that exits on the
+#: signal and far too short for one which flushes anything first -- a DOS game
+#: writing its scores through the emulator, say. A door which exits promptly
+#: never waits this long, because the wait ends the moment it does; the only
+#: doors that pay for a longer grace are the ones that need it.
+DOOR_STOP_GRACE_SECONDS = 5
 _DIAGNOSTIC_BYTES = 8192
 # A human dragging a window edge; fine-grained enough to feel immediate
 # without waking the event loop for a size which almost never changes.
@@ -227,7 +233,7 @@ async def _wait_leader(proc):
     return proc.returncode
 
 
-async def _relay(session, endpoint, proc=None):
+async def _relay(session, endpoint, proc=None, stop_grace=DOOR_STOP_GRACE_SECONDS):
     input_task = asyncio.create_task(_pump_input(session, endpoint))
     output_task = asyncio.create_task(_pump_output(session, endpoint))
     exit_task = asyncio.create_task(_wait_leader(proc)) if proc else None
@@ -245,7 +251,7 @@ async def _relay(session, endpoint, proc=None):
                 # Kill lingering pipe/socket holders independently of draining.
                 # A slow caller still gets every final byte, bounded by the
                 # launch watchdog and caller disconnect, not a 250 ms cutoff.
-                stop_task = asyncio.create_task(_stop_process(proc))
+                stop_task = asyncio.create_task(_stop_process(proc, stop_grace))
                 tasks.append(stop_task)
                 pending.add(stop_task)
             # Broken stdin does not imply stdout has finished delivering.
@@ -356,7 +362,7 @@ async def _finish_owned(task):
     return task.result(), cancelled
 
 
-async def _stop_process(proc):
+async def _stop_process(proc, grace=DOOR_STOP_GRACE_SECONDS):
     if os.name == "posix":
         try:
             os.killpg(proc.pid, signal.SIGTERM)
@@ -365,7 +371,7 @@ async def _stop_process(proc):
     elif proc.returncode is None:
         proc.terminate()
     try:
-        await asyncio.wait_for(proc.wait(), timeout=_TERMINATE_GRACE_SECONDS)
+        await asyncio.wait_for(proc.wait(), timeout=grace)
     except asyncio.TimeoutError:
         pass
     finally:
@@ -404,6 +410,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                    output_check=None):
     """Supervise and record one run; an optional synchronous probe check returns an error string."""
     profile = door.profile
+    stop_grace = profile.stop_grace_seconds if profile else DOOR_STOP_GRACE_SECONDS
     start = time.monotonic()
     proc = endpoint = lease = child_socket = None
     slave = workdir = None
@@ -511,7 +518,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     session, proc, info_path, info, published=(width, height),
                     pty_fd=endpoint.fd if mode == "pty" else None, signal_door=mode == "signal"))
         try:
-            reason = await asyncio.wait_for(_relay(terminal, endpoint, proc),
+            reason = await asyncio.wait_for(_relay(terminal, endpoint, proc, stop_grace),
                                             timeout=effective_wall_limit(profile, wall_time_limit_seconds))
             if reason == "door_exited":
                 if proc and proc.returncode is None:
@@ -572,7 +579,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     drains.append(asyncio.create_task(_discard_output(proc.stdout)))
                 if proc.stderr is not None and not diagnostic_tasks:
                     drains.append(asyncio.create_task(_discard_output(proc.stderr)))
-            for operation in (lambda: _stop_process(proc) if proc is not None else None,
+            for operation in (lambda: _stop_process(proc, stop_grace) if proc is not None else None,
                               lambda: asyncio.gather(*drains),
                               lambda: endpoint.close() if endpoint is not None else None):
                 try:
