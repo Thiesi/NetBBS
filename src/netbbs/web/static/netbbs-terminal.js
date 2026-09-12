@@ -197,10 +197,29 @@
             input.disabled = true;
             return;
           }
-          // A network failure never reached the server, so the token is
-          // still good and another attempt is worth offering.
-          done = false;
-          status.textContent = "Upload failed: " + detail + " You can try again.";
+          // A rejected fetch does not prove the request never arrived
+          // (issue #475 review, unaddressed at merge): the connection can
+          // drop after the POST redeemed its token, or after the file was
+          // stored but before the response came back. Offering the same
+          // link again would 404 at best, and at worst would hide an
+          // upload that actually succeeded -- so point them at the
+          // listing and at a fresh link instead of claiming this one
+          // still works.
+          status.textContent =
+            "Upload failed: " + detail +
+            " It may still have arrived \u2014 check the file listing, and ask the BBS" +
+            " for a new link if it did not.";
+          // Repaint too (Codex review of #508). This branch sends the
+          // caller to the listing, and the listing behind the panel is
+          // the page queried *before* the upload -- so without this the
+          // advice points at stale evidence, the file that did arrive is
+          // missing from it, and the obvious conclusion is to upload it
+          // again. The success path already does this; the ambiguous
+          // case needs it more, not less.
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "key", data: "\f" }));
+          }
+          input.disabled = true;
         });
     }
 

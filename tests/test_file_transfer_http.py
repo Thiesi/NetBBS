@@ -419,3 +419,111 @@ def test_a_download_response_is_not_cacheable(node):
                     return response.headers.get("Cache-Control", "")
 
     assert "no-store" in _run(scenario)
+def test_an_upload_survives_a_failed_link_announcement(tmp_path, monkeypatch):
+    """Codex review of #482, unaddressed at merge. `upload_file_from_temp`
+    has already moved the bytes and committed the row by the time a
+    descriptor is signed, so a failure there leaves a genuinely stored
+    file. Reporting "could not be stored" invited the caller to upload a
+    duplicate of something that already existed.
+
+    The gateway needs a real announce identity for this to mean
+    anything: without one the descriptor call is skipped entirely and
+    the test would pass against the unfixed code."""
+    import netbbs.net.file_transfer as transfer_module
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    running = _Node(tmp_path)
+    running.server = WebServer(
+        host="127.0.0.1", port=0, session_handler=running._no_sessions,
+        transfers=TransferGateway(
+            running.grants, running.lane,
+            announce_identity=bootstrap_node_identity("thisnode"),
+        ),
+    )
+    try:
+        alice = create_user(running.db, "alice", password="hunter2", user_level=10)
+        area = create_file_area(running.db, "docs", creator=alice)
+
+        called = []
+
+        def exploding_queue(*args, **kwargs):
+            called.append(True)
+            raise RuntimeError("signing is unavailable")
+
+        monkeypatch.setattr(transfer_module, "queue_file_descriptor_if_linked", exploding_queue)
+
+        async def scenario():
+            async with running:
+                grant = running.grants.issue(direction=UPLOAD, user=alice, area=area)
+                form = aiohttp.FormData()
+                form.add_field("file", b"contents", filename="notes.txt")
+                async with aiohttp.ClientSession() as client:
+                    async with client.post(
+                        f"{running.base}/transfer/{grant.token}", data=form
+                    ) as response:
+                        return response.status
+
+        status = _run(scenario)
+        # The path under test was actually reached.
+        assert called, "the descriptor call was never made; the test proves nothing"
+        # The announcement failed; the upload did not.
+        assert status == 200
+        assert [e.filename for e in list_files_page(running.db, area, alice).entries] == ["notes.txt"]
+    finally:
+        running.close()
+
+
+def test_a_failed_rollback_does_not_reverse_a_stored_upload(tmp_path, monkeypatch):
+    """Codex review of #508: the rollback added to keep the lane's shared
+    connection usable was itself unguarded, so a connection broken badly
+    enough to fail the descriptor write would fail the rollback too and
+    raise straight out of `_store_upload` -- turning a best-effort
+    announcement back into the failed upload the catch exists to prevent.
+
+    The connection is closed by the stub rather than mocked, so the
+    rollback raises the real `sqlite3.ProgrammingError` this guards."""
+    import netbbs.net.file_transfer as transfer_module
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    running = _Node(tmp_path)
+    running.server = WebServer(
+        host="127.0.0.1", port=0, session_handler=running._no_sessions,
+        transfers=TransferGateway(
+            running.grants, running.lane,
+            announce_identity=bootstrap_node_identity("thisnode"),
+        ),
+    )
+    try:
+        alice = create_user(running.db, "alice", password="hunter2", user_level=10)
+        area = create_file_area(running.db, "docs", creator=alice)
+
+        rolled_back = []
+
+        def exploding_queue(db, *args, **kwargs):
+            # Break the connection the caller will try to roll back, the
+            # way an I/O failure would.
+            db.connection.close()
+            rolled_back.append(True)
+            raise RuntimeError("signing is unavailable")
+
+        monkeypatch.setattr(transfer_module, "queue_file_descriptor_if_linked", exploding_queue)
+
+        async def scenario():
+            async with running:
+                grant = running.grants.issue(direction=UPLOAD, user=alice, area=area)
+                form = aiohttp.FormData()
+                form.add_field("file", b"contents", filename="notes.txt")
+                async with aiohttp.ClientSession() as client:
+                    async with client.post(
+                        f"{running.base}/transfer/{grant.token}", data=form
+                    ) as response:
+                        return response.status
+
+        status = _run(scenario)
+        assert rolled_back, "the descriptor call was never made; the test proves nothing"
+        # The upload succeeded and stays succeeded, rollback failure and all.
+        assert status == 200
+        # Read back on a second connection: the lane's is deliberately shut.
+        assert [e.filename for e in list_files_page(running.db, area, alice).entries] == ["notes.txt"]
+    finally:
+        running.close()

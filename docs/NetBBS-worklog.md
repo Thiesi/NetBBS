@@ -871,6 +871,23 @@ has no descriptor and never gets one, matching the pre-Link-history rule
 already stated for posts. Anything the UI says about what peers hold must
 therefore ask the file, not the area.
 
+**Announcement is best-effort, and nothing re-queues a failed one.** Storing a
+file and announcing it are two writes, not one: `upload_file_from_temp` has
+moved the bytes and committed the `files` row before a descriptor is ever
+signed. So a signing or database failure in `queue_file_descriptor_if_linked`
+leaves an approved local file that is complete, browsable and downloadable, and
+permanently absent from its area's Link catalogue. Both upload paths swallow
+that failure deliberately — reporting it as a failed upload would tell a caller
+to re-upload a file that already exists — and both roll the transaction back
+first, because the connection is the lane's and a failed transaction left open
+breaks every later job on it.
+
+The consequence is the part worth carrying forward: **a successful upload does
+not imply propagation.** `has_queued_file_descriptor` can see the gap; nothing
+acts on it, and no retry, sweep or repair path exists. Anything reasoning about
+Link convergence for file areas has to treat announcement as lossy at the moment
+of upload rather than assume every approved file eventually reaches peers.
+
 **Test method.** A queue-on-write helper can be complete, tested, and called
 from nowhere — this one was, for as long as remote file areas have shipped, as
 `link_file_area` had been before it. End-to-end Link tests that call the helper

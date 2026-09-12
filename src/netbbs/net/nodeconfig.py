@@ -31,6 +31,7 @@ import argparse
 import ipaddress
 import math
 import tomllib
+from urllib.parse import urlparse
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -362,6 +363,86 @@ class NodeConfig:
                 raise ConfigError(f"{name}.port must be between 1 and 65535, got {transport.port}")
             if not transport.host.strip():
                 raise ConfigError(f"{name}.host must not be empty")
+            if transport.public_url is not None:
+                # Codex review of #482, unaddressed at merge: this value
+                # is handed to callers as the base of a transfer link, so
+                # a scheme-less or authority-less string does not fail
+                # here -- it fails in somebody's browser, resolved
+                # relative to whatever page they were on, or printed to a
+                # terminal caller as a URL that identifies nothing.
+                try:
+                    parsed = urlparse(transport.public_url)
+                    # Touched deliberately, not incidentally (Codex review
+                    # of #508): `urlparse` accepts `:abc` and `:99999`
+                    # quite happily and only raises when the port is
+                    # *read*, so a check that never reads it passes them
+                    # through to a link nobody can open. `hostname` is
+                    # read for the same reason.
+                    _ = (parsed.hostname, parsed.port)
+                except ValueError as exc:
+                    # `urlparse` raises on some malformed authorities --
+                    # `http://[` among them -- so the check meant to turn
+                    # a typo into a clear diagnostic could itself escape
+                    # as a traceback past `main`'s `ConfigError` handler
+                    # (Codex review of #508).
+                    raise ConfigError(
+                        f"{name}.public_url is not a usable URL ({exc}), got "
+                        f"{transport.public_url!r}"
+                    ) from exc
+                if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                    raise ConfigError(
+                        f"{name}.public_url must be an absolute http:// or https:// URL, got "
+                        f"{transport.public_url!r}"
+                    )
+                if not parsed.hostname:
+                    # `https://:8443` and `http://@` both parse with a
+                    # truthy `netloc` and no host whatsoever (Codex review
+                    # of #508), so the check above waves them through and
+                    # the node prints transfer links that every browser
+                    # and every `curl` rejects as hostless.
+                    raise ConfigError(
+                        f"{name}.public_url must name a host, got {transport.public_url!r}"
+                    )
+                if any(character.isspace() for character in transport.public_url):
+                    # Whitespace cannot be validated through the parse
+                    # (Codex review of #508): `urlparse` keeps a trailing
+                    # space in `hostname`, making it truthy, and silently
+                    # *drops* a trailing tab so the parse looks perfect
+                    # while the stored string -- the one `url_for`
+                    # concatenates -- still carries it. Either way the
+                    # node prints links no browser accepts. A surrounding
+                    # space is stripped at load because it is never
+                    # intended; one in the middle is a typo worth saying
+                    # out loud.
+                    raise ConfigError(
+                        f"{name}.public_url must not contain whitespace, got "
+                        f"{transport.public_url!r}"
+                    )
+                if "?" in transport.public_url or "#" in transport.public_url:
+                    # A transfer link is this value with `/transfer/<token>`
+                    # appended, so anything after the path silently breaks
+                    # every link the node prints (Codex review of #508): a
+                    # query puts the token in the wrong place, and a
+                    # fragment never reaches the server at all. A path
+                    # prefix is fine and stays supported -- that is how a
+                    # node behind a reverse proxy subpath is reached,
+                    # including one carrying a path parameter: `;` never
+                    # breaks the append, and rejecting `parsed.params`
+                    # refused `/bbs;tenant=foo` while accepting the
+                    # equivalent `/a;x/b`, whose semicolon `urlparse`
+                    # happens to leave in `path` (Codex review of #508).
+                    #
+                    # Asked of the raw string rather than `parsed.query`
+                    # and `parsed.fragment`, because a bare trailing
+                    # delimiter parses to an *empty* component: a
+                    # truthiness test on those accepts
+                    # `https://bbs.example.org?`, which appends the token
+                    # into the query and breaks exactly as the non-empty
+                    # case does.
+                    raise ConfigError(
+                        f"{name}.public_url must not carry a query or fragment (a path prefix is "
+                        f"fine), got {transport.public_url!r}"
+                    )
 
         # Only an *explicit* `enabled = true` validates the Link block at
         # config-load time. A silent config (`None`, design doc §16 issue
@@ -663,11 +744,13 @@ def _transport_from_toml(data: dict, name: str, current: TransportConfig) -> Tra
     if unknown:
         raise ConfigError(f"[{name}] has unknown setting(s): {', '.join(sorted(unknown))}")
     public_url = table.get("public_url", current.public_url)
+    if public_url is not None and not isinstance(public_url, str):
+        raise ConfigError(f"[{name}] public_url must be a string, got {type(public_url).__name__}")
     return TransportConfig(
         enabled=bool(table.get("enabled", current.enabled)),
         host=str(table.get("host", current.host)),
         port=int(table.get("port", current.port)),
-        public_url=str(public_url).rstrip("/") if public_url else None,
+        public_url=str(public_url).strip().rstrip("/") if public_url else None,
     )
 
 
