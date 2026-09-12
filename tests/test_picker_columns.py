@@ -421,3 +421,59 @@ def test_a_rendered_table_page_never_outgrows_the_terminal():
         physical = _plain(session.output).replace("\r\n", "\n").split("\n")
         drawn = [line for line in physical if line.strip()]
         assert len(drawn) <= height, f"{len(drawn)} lines drawn on a {height}-row terminal"
+
+
+def test_a_resize_mid_render_cannot_split_the_page_geometry():
+    """Codex review. `netbbs.net.web.WebSession._read_loop` mutates
+    `terminal_width` from its own task, so a caller dragging their
+    browser window can change it *between* the page-size calculation
+    and the table decision inside one render -- drawing a header that
+    nothing budgeted for. `_render` freezes both dimensions on entry,
+    so a resize lands on the next render, whole.
+
+    Asserts form-consistency rather than a height bound: the picker's
+    `_RESERVED_LINES` budget is a long-standing approximation that a
+    wrapped trailer can already exceed at narrow widths, independently
+    of this change, so a height assertion here would be testing
+    something else and failing for the wrong reason.
+    """
+    items = [Item(n, f"area {n}", ["0", "0", "open", ("-", MUTED_COLOR)]) for n in range(1, 60)]
+
+    class ResizingMidRender(FakeSession):
+        """Widens on the first write, the way a resize event arriving
+        during a render would."""
+
+        def __init__(self):
+            super().__init__(["b"], width=50, height=24)
+            self._widened = False
+
+        async def write_line(self, text: str = "") -> None:
+            await super().write_line(text)
+            if not self._widened:
+                self._widened = True
+                self.terminal_width = 80
+
+    session = ResizingMidRender()
+    asyncio.run(
+        pick_item(
+            session, items,
+            name_of=lambda i: i.name, stable_id_of=lambda i: i.id,
+            description_of=lambda i: "read 0/write 0, open",
+            columns=COLUMNS, column_values_of=lambda i: i.cells,
+            title="File areas", empty_message="none",
+        )
+    )
+    assert session.terminal_width == 80, "the resize must actually have landed"
+
+    plain = _plain(session.output)
+    rows = [line for line in plain.split("\n") if re.match(r"^\s{2}\d\d\. ", line)]
+    assert rows
+
+    # One form for the whole render: either a heading and columnar rows
+    # throughout, or no heading and flat rows throughout -- never a
+    # heading over rows the page size was computed without, nor rows
+    # laid out for a width the header was not.
+    drew_header = "NAME" in plain
+    flat_rows = ["(#" in row for row in rows]
+    assert len(set(flat_rows)) == 1, "rows disagree with each other"
+    assert flat_rows[0] != drew_header, "header and rows disagree about the form"

@@ -473,10 +473,36 @@ async def pick_item(
     # page size had not reserved -- one item too many on every page,
     # pushing the prompt past the bottom of the screen. Both now read
     # the same live width at the same moment.
+    # One render, one set of dimensions (Codex review). `_render`
+    # computes its page size and then, several awaits later, decides
+    # whether a table fits -- and `netbbs.net.web.WebSession._read_loop`
+    # mutates `terminal_width` from its own task whenever the caller
+    # resizes the browser. Read live at both points, those two could
+    # disagree within a single render: a header drawn that the page
+    # size had not reserved, so the page runs a line past the bottom of
+    # the screen. Not a race between two people -- one caller dragging
+    # a window. `_render` freezes the pair on entry and everything it
+    # calls measures against the frozen copy; nothing outside a render
+    # is interleaved with awaits, so those keep reading live values.
+    frozen: tuple[int, int] | None = None
+
+    def _dimensions() -> tuple[int, int]:
+        if frozen is not None:
+            return frozen
+        return session.terminal_width, session.terminal_height
+
     def _header_lines() -> int:
         if not columns:
             return 0
-        return 1 if _table_widths(session.terminal_width, columns, 1) is not None else 0
+        width, _ = _dimensions()
+        return 1 if _table_widths(width, columns, 1) is not None else 0
+
+    def _sized_page_size() -> int:
+        width, height = _dimensions()
+        return _page_size(
+            session, on_sort, description_level,
+            header_lines=_header_lines(), width=width, height=height,
+        )
 
     def _masthead_prefix() -> str:
         # Same clear_screen()-ordering hazard `_draw_main_menu`'s own
@@ -502,16 +528,26 @@ async def pick_item(
     if start_stable_id is not None:
         for start_index, item in enumerate(working_set):
             if stable_id_of(item) == start_stable_id:
-                start_page_size = _page_size(session, on_sort, description_level, header_lines=_header_lines())
+                start_page_size = _sized_page_size()
                 page_index = start_index // start_page_size
                 highlighted = start_index % start_page_size
                 break
 
     def _total_pages() -> int:
-        return max(1, math.ceil(len(working_set) / _page_size(session, on_sort, description_level, header_lines=_header_lines())))
+        return max(1, math.ceil(len(working_set) / _sized_page_size()))
 
     async def _render() -> Sequence[T]:
+        nonlocal page_index, frozen
+        # Freeze for the duration of this render; see `_dimensions`.
+        frozen = (session.terminal_width, session.terminal_height)
+        try:
+            return await _render_frozen()
+        finally:
+            frozen = None
+
+    async def _render_frozen() -> Sequence[T]:
         nonlocal page_index
+        render_width, _render_height = _dimensions()
         if not working_set:
             page_index = 0
             prefix = _masthead_prefix()
@@ -525,7 +561,7 @@ async def pick_item(
             await session.write("Choice: ")
             return []
 
-        page_size = _page_size(session, on_sort, description_level, header_lines=_header_lines())
+        page_size = _sized_page_size()
         total_pages = _total_pages()
         page_index = max(0, min(page_index, total_pages - 1))
         start = page_index * page_size
@@ -538,7 +574,7 @@ async def pick_item(
                 title,
                 breadcrumb=(session.node_display_name, *breadcrumb),
                 subtitle=f"page {page_index + 1}/{total_pages}, {len(working_set)} total",
-                width=session.terminal_width,
+                width=render_width,
                 clear=False if masthead else redraw_in_place,
                 unicode_style=unicode_style, collapsed=collapsed,
                 header_color=header_color, node_name_gradient=session.node_name_gradient)
@@ -559,7 +595,7 @@ async def pick_item(
         # fits rather than the one that fitted on entry. `None` here
         # means "too narrow for a table", and every row below falls
         # back to the flat `description_of` form unchanged.
-        table = _table_widths(session.terminal_width, columns, max_id_width) if columns else None
+        table = _table_widths(render_width, columns, max_id_width) if columns else None
         if table is not None:
             reference_width, name_width = table
             await session.write_line(
@@ -635,7 +671,7 @@ async def pick_item(
                     else:
                         cell_text = _pad_cell(sanitize_text(text), column.width, align_right=column.align_right)
                     segments.append((cell_text, item_name_color if is_highlighted else color))
-                await session.write_line(colored_truncate(segments, session.terminal_width))
+                await session.write_line(colored_truncate(segments, render_width))
                 continue
 
             segments = [
@@ -649,7 +685,7 @@ async def pick_item(
                 segments.append((sanitize_text(name_of(item)), item_name_color))
             if description:
                 segments.append((f" - {sanitize_text(description)}", desc_color))
-            await session.write_line(colored_truncate(segments, session.terminal_width))
+            await session.write_line(colored_truncate(segments, render_width))
 
         nav = _render_nav(
             session, on_sort, description_level,
@@ -702,12 +738,12 @@ async def pick_item(
             # descriptions existed at all -- but only when it actually
             # fits; see the comment above for why a hard cut here was
             # the wrong tradeoff.
-            available_for_trailer = session.terminal_width - visible_width(last_nav_line) - visible_width(separator)
+            available_for_trailer = render_width - visible_width(last_nav_line) - visible_width(separator)
             if trailer and visible_width(trailer) <= max(0, available_for_trailer):
                 await session.write_line(f"\r\n{nav}{separator}{trailer}")
             else:
                 await session.write_line(f"\r\n{nav}")
-                for wrapped in wrap_to_width(trailer, session.terminal_width):
+                for wrapped in wrap_to_width(trailer, render_width):
                     await session.write_line(wrapped)
         else:
             # `menu_grid`'s own last line, unlike `action_bar`'s, is
@@ -718,7 +754,7 @@ async def pick_item(
             # Its own line(s) instead, wrapped rather than cut for the
             # same reason as the `off` branch above.
             await session.write_line(f"\r\n{nav}")
-            for wrapped in wrap_to_width(trailer, session.terminal_width):
+            for wrapped in wrap_to_width(trailer, render_width):
                 await session.write_line(wrapped)
         await session.write("Choice: ")
         return page_items
@@ -1139,15 +1175,20 @@ def _nav_entries(on_sort: Callable | None, *, include_next: bool = True, include
 def _render_nav(
     session: Session, on_sort: Callable | None, description_level: str,
     *, include_next: bool = True, include_prev: bool = True,
+    width: int | None = None, height: int | None = None,
 ) -> str:
+    # Dimensions may be supplied by a caller that has frozen them for
+    # one render (see `pick_item`'s `_dimensions`); otherwise read live.
+    width = session.terminal_width if width is None else width
+    height = session.terminal_height if height is None else height
     entries = _nav_entries(on_sort, include_next=include_next, include_prev=include_prev)
     if description_level != "off":
         descriptive = menu_grid(
-            [("", entries)], width=session.terminal_width, height=session.terminal_height,
+            [("", entries)], width=width, height=height,
             description_level=description_level,
         )
         descriptive_lines = descriptive.count("\r\n") + 1
-        available = session.terminal_height - (_RESERVED_LINES - 1 + descriptive_lines)
+        available = height - (_RESERVED_LINES - 1 + descriptive_lines)
         if max(1, min(_MAX_PAGE_SIZE, available)) >= _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV:
             return descriptive
     # `menu_grid` always renders one entry per line, even with
@@ -1156,11 +1197,12 @@ def _render_nav(
     # Reached either because the caller's preference is "off", or
     # because the descriptive form above didn't clear the page-size
     # floor.
-    return action_bar([e.label for e in entries], width=session.terminal_width)
+    return action_bar([e.label for e in entries], width=width)
 
 
 def _page_size(
     session: Session, on_sort: Callable | None, description_level: str, *, header_lines: int = 0,
+    width: int | None = None, height: int | None = None,
 ) -> int:
     # `_RESERVED_LINES` was calibrated against the nav row always being
     # exactly 1 line -- still true for `description_level="off"`
