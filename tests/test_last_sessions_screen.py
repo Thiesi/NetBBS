@@ -146,9 +146,18 @@ def test_previous_callers_screen_shrinks_to_the_available_terminal_rows(tmp_path
     )
 
     visible_lines = _visible(session).splitlines()
-    caller_rows = [line for line in visible_lines if re.search(r"\b0[1-4]\b", line)]
-    assert len(caller_rows) == 4
-    assert not any("05" in line for line in visible_lines)
+    # Read each caller row's own number off the start of the line rather
+    # than searching the whole line for a digit pair (issue #507). Every
+    # row also renders a timestamp, so `"05" in line` matched the `05:39`
+    # in `12.09.2026 05:39` and this test failed for whichever hour, day
+    # or minute happened to print the number it was guarding against --
+    # passing the rest of the day, which is why it went unnoticed.
+    row_numbers = [
+        match.group(1)
+        for line in visible_lines
+        if (match := re.match(r"^\W*(\d{2})\s", line))
+    ]
+    assert row_numbers == ["01", "02", "03", "04"]
     assert len(visible_lines) <= session.terminal_height
     assert all(display_width(line) <= session.terminal_width for line in visible_lines)
     database.close()
