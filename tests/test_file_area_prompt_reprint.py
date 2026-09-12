@@ -203,3 +203,73 @@ def test_every_redraw_carries_its_own_prompt(tmp_path, monkeypatch):
 
     lane.close()
     db.close()
+
+
+def test_enter_without_a_highlight_places_the_cursor(tmp_path, monkeypatch):
+    """Issue #527's open question, answered: Enter means "act on the
+    cursor", so with no cursor yet it places one on the first row --
+    the same row Down moves to from the unhighlighted state -- instead
+    of being a key that does nothing."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    area, user = _setup_area(db, monkeypatch=monkeypatch)
+
+    keys = [
+        EditorKey(EditorKeyKind.ENTER),
+        EditorKey(EditorKeyKind.CHAR, char="b"),
+    ]
+    session = FakeInteractiveSession(editor_keys=keys)
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(_show_area(session, lane, area, user))
+
+    assert ">[ 1]" in session.output
+    # Placing a cursor is not selecting: nothing was sent.
+    assert "Starting Zmodem send" not in session.output
+    # It is a real state change, so it redrew and brought a prompt with it.
+    assert _prompt_count(session) == 2
+    assert "\a" not in session.output
+
+    lane.close()
+    db.close()
+
+
+def test_enter_twice_downloads_the_first_file(tmp_path, monkeypatch):
+    """The corollary: once Enter has placed the cursor, a second Enter
+    acts on it exactly as it would have after an arrow key."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    area, user = _setup_area(db, monkeypatch=monkeypatch)
+
+    keys = [EditorKey(EditorKeyKind.ENTER), EditorKey(EditorKeyKind.ENTER)]
+    session = FakeInteractiveSession(editor_keys=keys)
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(_show_area(session, lane, area, user))
+
+    assert "pkg0.tar.gz" in session.output
+    assert "Starting Zmodem send of 'pkg0.tar.gz'" in session.output
+
+    lane.close()
+    db.close()
+
+
+def test_enter_with_no_rows_to_point_at_still_only_bells():
+    """With no rows there is no cursor to place, so Enter stays a
+    refusal -- and a refusal writes the bell and nothing else.
+
+    Driven through the reader directly: `_show_area` never reaches its
+    listing loop with an empty page (it renders the empty state and
+    returns), so this branch has no route through the whole screen."""
+    from netbbs.files.entries import FileEntryPage
+    from netbbs.net.file_flow import _read_file_choice
+
+    empty = FileEntryPage(entries=[], has_older=False, has_newer=False)
+    session = FakeInteractiveSession(editor_keys=[EditorKey(EditorKeyKind.ENTER)])
+
+    kind, target, new_h = asyncio.run(_read_file_choice(session, empty, None))
+
+    assert kind == "none"
+    assert target is None
+    assert new_h is None
+    assert session.output == "\a"

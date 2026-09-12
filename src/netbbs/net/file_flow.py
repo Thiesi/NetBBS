@@ -621,6 +621,15 @@ async def _read_file_choice(
                 if highlighted is not None and 0 <= highlighted < len(page.entries):
                     await session.write_line("")
                     return ("download", page.entries[highlighted].filename, highlighted)
+                elif page.entries:
+                    # Issue #527's open question. Enter's only meaning
+                    # on this screen is "act on the cursor", so with no
+                    # cursor yet it places one rather than refusing --
+                    # the same row Down already moves to from the
+                    # unhighlighted state. Enter is then never a key
+                    # that does nothing, which is what produced the
+                    # report in the first place.
+                    return ("highlight", None, 0)
                 else:
                     await session.write("\a")
                     return ("none", None, highlighted)
