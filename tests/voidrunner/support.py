@@ -242,7 +242,7 @@ class _Sys:
         self.discovered = discovered
 
 
-def _drain_until(stream, output: bytearray, markers, events) -> None:
+def _drain_until(stream, output: bytearray, markers, events, stop=None) -> None:
     """Read a door's stdout in chunks, setting each event as its marker appears.
 
     `read(1)` is the slowest possible drain and the subprocess tests dominate the
@@ -262,6 +262,13 @@ def _drain_until(stream, output: bytearray, markers, events) -> None:
     emptying, which was harmless only while a screen was smaller than the pipe
     buffer: a coloured page is several times the bytes of a plain one, and the
     door then blocked mid-screen and never reached its next keypress.
+
+    `stop` is what makes "stopped at" mean it. A caller that wants the door
+    frozen where the marker appeared passes its killer here, so the door is
+    stopped *in this thread*, the instant the bytes land -- not whenever the
+    waiting thread is next scheduled. The full pipe used to be an accidental
+    brake on that gap; draining removed it, and a door that ran on could finish
+    the journey the test meant to catch mid-flight.
     """
     if isinstance(markers, bytes):
         markers, events = (markers,), (events,)
@@ -275,6 +282,8 @@ def _drain_until(stream, output: bytearray, markers, events) -> None:
             seen = plain_bytes(bytes(output))
             while pending and pending[0][0] in seen:
                 pending.pop(0)[1].set()
+            if not pending and stop is not None:
+                stop()
 
 
 @contextlib.contextmanager
@@ -298,7 +307,11 @@ def _door_stopped_at(tmp_path, commands, acknowledgement: bytes, ready: bytes | 
     prompt = threading.Event()
     markers = (ready, acknowledgement) if ready else (acknowledgement,)
     events = (prompt, reached) if ready else (reached,)
-    reader = threading.Thread(target=_drain_until, args=(proc.stdout, output, markers, events))
+    # The door is stopped by the reader, the moment its last marker lands: this
+    # helper exists to photograph a career mid-action, and a door left running
+    # until the waiting thread woke up could finish the action instead.
+    reader = threading.Thread(target=_drain_until,
+                              args=(proc.stdout, output, markers, events, proc.kill))
     reader.start()
     try:
         # `ready` waits for the door's own prompt before writing, so the test does
