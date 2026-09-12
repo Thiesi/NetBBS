@@ -372,6 +372,13 @@ class NodeConfig:
                 # terminal caller as a URL that identifies nothing.
                 try:
                     parsed = urlparse(transport.public_url)
+                    # Touched deliberately, not incidentally (Codex review
+                    # of #508): `urlparse` accepts `:abc` and `:99999`
+                    # quite happily and only raises when the port is
+                    # *read*, so a check that never reads it passes them
+                    # through to a link nobody can open. `hostname` is
+                    # read for the same reason.
+                    _ = (parsed.hostname, parsed.port)
                 except ValueError as exc:
                     # `urlparse` raises on some malformed authorities --
                     # `http://[` among them -- so the check meant to turn

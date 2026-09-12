@@ -880,3 +880,21 @@ def test_a_public_url_with_a_query_or_fragment_is_refused():
 
     # A subpath is legitimate and must keep working.
     web_config("https://bbs.example.org/bbs").validate()
+
+
+def test_a_public_url_with_an_unusable_port_is_refused():
+    """Codex review of #508: `urlparse` accepts `:abc` and `:99999` and
+    only raises when the port is *read*, so a check that never reads it
+    lets both through to a link nobody can open."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    def web_config(public_url):
+        return NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=public_url)
+        )
+
+    for bad in ("https://bbs.example.org:abc", "https://bbs.example.org:99999"):
+        with pytest.raises(ConfigError, match="public_url"):
+            web_config(bad).validate()
+
+    web_config("https://bbs.example.org:8443").validate()
