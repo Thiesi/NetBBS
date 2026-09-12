@@ -1467,6 +1467,44 @@ argv `-jar /var/games/netbbs/game/game.jar {node_dir}`; adjust memory after
 checking the JVM's reservation needs. Do not assume that JVM path/package
 exists on your host. Install the runtime recommended by the game's author.
 
+### Installing a packaged Python door
+
+A door distributed as a Python package is the common third-party case, and
+`native-python-module.json` is its starting template: the executable is a
+virtualenv's own interpreter and argv runs a module rather than a script path.
+
+**MANUAL — outside NetBBS,** as the installation's owner (normally the service
+account, so prefix with `sudo -u netbbs` when that is a separate account):
+
+```sh
+sudo install -d -m 750 -o netbbs -g netbbs /var/games/netbbs/yourgame
+python3 -m venv /var/games/netbbs/yourgame/.venv
+/var/games/netbbs/yourgame/.venv/bin/pip install /path/to/yourgame-1.0-py3-none-any.whl
+```
+
+Give the door its **own** virtualenv rather than NetBBS's: a door is
+operator-chosen third-party code, and sharing an environment with the BBS
+would let its dependencies decide NetBBS's. Point `executable_path` at that
+venv's `bin/python`, set argv to `["-m", "yourgame.door"]`, and set the
+installation directory to the package's own data root.
+
+Persistent game data belongs in the installation directory. NetBBS backs up
+its own state, not that directory, unless you turn on
+[door-installation backups](#backing-up-door-installations).
+
+Leave `max_sessions` at 1 until the game's own locking is proven; raising it
+requires **Multi-node certified by SysOp**, which is your statement that you
+tested concurrent play, not a switch that makes a door concurrent.
+
+A door which also needs a long-lived world process adds a
+[companion service](#doors-with-a-companion-service) to the same profile.
+
+An author can ship that whole profile as a JSON file beside the wheel; the
+Compatibility screen's **[J] Import JSON** accepts either a full template
+(`executable_path`, `args`, `profile`) or a bare profile object, so a SysOp
+imports one file instead of retyping fields. Check the paths in an imported
+file before saving: they are the author's, not yours.
+
 An optional `runner` is a fixed argv prefix, e.g. an operator-authored
 `["/usr/local/libexec/netbbs-door-wrapper"]` which finally execs its argv.
 **MANUAL — outside NetBBS:** write/audit that wrapper and configure any
