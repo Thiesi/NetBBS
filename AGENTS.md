@@ -108,7 +108,23 @@ The standing principle is:
   between launches (Retro Trivia, whose round is drawn fresh from an unseeded
   RNG) is not in it yet and is reviewed by running it. Add the screen you changed
   to `WALKS` if no walk reaches it -- the door's own dispatch is the authority on
-  which key opens what, not the action bar.
+  which key opens what, not the action bar. A walk keeps only the screen it stops
+  on, so a screen on the way to another screen needs its own walk; a screen no
+  walk can *reach* -- Voidrunner's combat, which happens on a jump -- needs a
+  fixture of its own in `FIXTURE_BUILDERS`, built by playing the door rather than
+  by writing a save; `%` keeps every
+  page of a card stack rather than fast-forwarding to the last; `SETUP` plays a
+  panel's world into the state a screen needs; and each walk says in `SHOWS` what
+  its screen must show, with the build refusing a panel that does not show it. What the tests *can* assert, and do:
+  that colour reaches every body row, that a hotkey, a label, a value and the
+  frame are four different colours, that one thing reads the same colour on every
+  screen that shows it, and that a table's columns do not wander from row to row.
+  A screen is built from components that return already-styled rows; a renderer
+  that flattens a row to plain text is how both games became grey walls -- War
+  Dialer by colouring the whole line from outside, Voidrunner by stripping the
+  row in its paginator before it was ever printed. Each door's contract is
+  normative for that door: see "the War Dialer presentation contract" and "The
+  Voidrunner presentation contract" in the design document.
 - **Treat migrations as immutable.** Never edit a shipped migration. Test
   migrations against realistic related data, especially before rebuilding a
   table which is a foreign-key parent.

@@ -5216,8 +5216,10 @@ landmarks. Damage changes the hull's visual shading while explicit hull/fuel/car
 figures remain authoritative. Portraits use full and compact authored compositions,
 retaining an entire silhouette on one page at supported terminal dimensions; text
 and navigation paginate normally. Existing full/basic/mono/plain modes apply.
-The plain mode uses ASCII art without color. Artwork is static, with no animation,
-random draws, market observations or career writes. Station captions use actual
+The plain mode uses ASCII art without color. A portrait is a still composition --
+it may be revealed under the motion rules in the presentation contract, but it is
+never redrawn -- and viewing one makes no random draw, market observation or
+career write. Station captions use actual
 places, sectors and specialist contacts. A landmark portrait is available only at
 its station or after investigation, not merely through an accepted bearing.
 Ship commissioning previews and landmark inspection use these same portraits;
@@ -5598,16 +5600,109 @@ ANSI emulator; a change to a screen comes with that page. The test suite can onl
 assert that a screen fits -- never that it looks like anything -- which is how an
 entire visual design was lost with every slice passing review.
 
+### The Voidrunner presentation contract (issue #493)
+
+Voidrunner is the showcase for what a NetBBS door can look like, and after the
+#310 overhaul it was a sequence of grey text walls behind hotkeys. The
+presentation half of that overhaul is this contract. It is normative for the
+door; Retro Trivia is the floor it must clear, not the target.
+
+**Colour reaches the body.** Every body row of every paged screen carries
+styling. The single mechanism that deleted the game's colour was the shared
+paginator: `wrapped_group` wrapped each row through an ANSI-stripping helper
+before it was printed, so the frame was the only styled thing a page could
+have. It now wraps styled text, carrying the active colour across a break, and
+`draw_page` colours by role anything that still reaches it plain -- a screen
+that builds its own rows cannot opt out. This is asserted, at 80 and at 40
+columns, on the deck, market, yard, record, board, chart, crew, display,
+customs and combat screens.
+
+**Nine roles, not nine colours.** What a token *is* decides its colour.
+`hull` `#5fd7ff` frames, section headers and station names; `deep` `#1d3b57`
+frame shadow, gauge tracks and separators; `plasma` `#ff5abe` the brand, the
+rank and the cursor; `gold` `#ffc83c` hotkeys and credits and nothing else;
+`ink` `#e8f0ff` values -- the thing the caller reads off the row; `slate`
+`#7f8fae` labels, hints and units; and `mint` `#6cf2a0` / `amber` `#ffb347` /
+`alarm` `#ff5c6c` for good, caution and danger on gauges and severity glyphs.
+A hotkey is always gold and bold; a value is always ink; a label is always
+slate; chrome is never the colour of content; one accent carries the eye per
+screen. That the hotkey, label, value and frame colours differ, and that all
+four appear on a drawn screen, is asserted rather than eyeballed.
+
+**Truecolour is the design target**, degrading to 256, to 16 (`basic`), to
+monochrome, to plain ASCII, in that order, each deliberate rather than
+accidental. The only effect that truecolour buys outright is the title splash's
+gradient rule, which degrades to a single role colour rather than being
+approximated.
+
+**One glyph vocabulary, every glyph with an ASCII substitute.** `╭─╮ │ ╰─╯
+├─┤` frames; `█░` gauges; `▁▂▃▄▅▆▇█` sparklines; `⟦ ⟧` chips; `◈` credits;
+`▲ ◆ ●` severity; `◤` the brand; `●○` crew pips; `→` a delta. A screen asks for
+one by role -- `glyph("danger")` -- rather than typing the character, so the
+`plain` preset is a designed rendering and a new glyph cannot arrive without
+its substitute. No Unicode from the vocabulary may reach a `plain` terminal.
+
+**A component library, local to the door.** Voidrunner ships as a single
+self-contained file a SysOp can point straight at, so this is the game's own
+vocabulary rather than something shared: `gauge`, `sparkline`, `chip`, `badge`,
+`table`, `menu_grid`, `alert`, `status_band`, `portrait`, plus `section` for a
+named rule across the page frame. Every screen is built from them, which is what
+makes the contract enforceable -- a gauge is the same gauge on the deck, in the
+yard and in a fight, and a later slice cannot flatten one screen without
+flattening all of them.
+
+**Tables are tables.** A column starts on the same display column on every row
+(right-aligned columns end on one), asserted by measuring the rendered rows.
+When a table will not fit, it drops the columns the screen has named as
+droppable, worst first -- so a narrow table can carry fewer facts than a wide
+one, and a screen naming a column droppable is saying that figure is available
+elsewhere (the market's depth figures are on the commodity's own trade screen).
+When dropping all of them is still not enough it *stacks* -- each record's first
+column on a row of its own, the rest aligned and indented beneath, and on a
+further row where one is not wide enough -- rather than overflowing and wrapping
+into rubble. Stacking never drops anything: every column that survived the
+dropping step is on the record somewhere, so the narrow caller reads those facts
+in two or three rows where the wide one reads them in one. The two steps are
+different promises, and a screen chooses between them by what it marks optional:
+mark a column optional only when its figure is a keypress away (the market's
+depth is on the commodity's trade screen; the chart's sector and economy are on
+the star map's Info; the yard's post-refit hold is on the commissioning
+preview), and leave it un-optional when it is not -- the Hall of Fame's rank,
+job and run counts are on no other view, so that table stacks instead. A stacked record stays one paginator entry and moves between pages
+whole. A table's column headings are repeated at the top of every later page
+that carries one of its rows, and only there.
+
+**Layout.** Three menu columns at 72 or more usable columns, two at 52 or more,
+one below. Numbers right-aligned. One blank row between logical groups. The
+action bar outside the frame, where the cursor waits.
+
+**Motion is in, and it replaces the old "no animation delays" rule.** Reveals,
+gauge drains, counter ticks and rank climbs are permitted under three
+conditions, none of them negotiable: any keypress ends the effect immediately;
+no effect may delay a commit or hold up input; and every effect is absent from
+the presets that exist because a caller wants less -- `fast`, `mono` and
+`plain`. A reveal belongs to *arriving* at a screen, never to redrawing one: a
+key that changed nothing redraws the same page and costs the caller nothing. An
+effect with no live terminal on the other end -- a scripted session, a screen
+drawn before stdin is open -- is skipped rather than slept through, because an
+animation nobody is watching is only a delay. `fast` is a display preset beside
+`auto`: the same palette with every effect off.
+
 Voidrunner offers saved display presets from station Display Options: full palette
-using the existing terminal color depth, basic 16-color, monochrome Unicode, and
-plain text with ASCII artwork. Monochrome/plain suppress ANSI styling; plain maps
-box/block/star decorations to equal-width ASCII characters while retaining Unicode
-pilot text and input. This is an artwork fallback, not a change to the UTF-8 door
-transport. A chosen preset checkpoints before acknowledgement; browsing and
-reselecting the current preset write nothing. The validated additive preference
-defaults to full palette for older careers and survives retirement. Apply it after
-loading a valid career and before its normal title/welcome output; recovery uses
-the default presentation until a valid career is available. No animation is added.
+using the existing terminal color depth, the same palette with motion off
+(`fast`), basic 16-color, monochrome Unicode, and plain text with ASCII artwork.
+Monochrome/plain suppress ANSI styling; plain maps the whole glyph vocabulary to
+equal-width ASCII while retaining Unicode pilot text and input. This is an
+artwork fallback, not a change to the UTF-8 door transport. Each preset previews
+itself on the Display Options screen: the sample beside a preset's name is drawn
+the way that preset would draw it, so the choice is made by looking rather than
+by reading an adjective. A chosen preset checkpoints before acknowledgement;
+browsing and reselecting the current preset write nothing. The validated additive
+preference defaults to full palette for older careers and survives retirement.
+Apply it after loading a valid career and before its normal title/welcome output;
+recovery uses the default presentation until a valid career is available. Motion
+is on in `auto` and `basic` and off in the other three, under the conditions in
+the Voidrunner presentation contract above.
 
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 250-credit high-water milestone in cumulative contraband sales minus purchases
@@ -7401,32 +7496,95 @@ callers with unused turns see their current resources and actionable job/trade r
 Help explains that newcomer protection follows preserved account age and is not
 renewed by rollover. These cues change no payout, protection, award or reset rule.
 
-**Terminal presentation (issue #362, slice 9; maintainer approved).** Scene offers
-a free Display screen with immediate ASCII-decoration, monochrome and Fast-mode
-toggles. Back writes nothing. Store one bounded boolean preference object per
-caller in world metadata; preserve it across season and competition resets and
-include it in the world backup. No competitive state or archive row is modified.
-ASCII mode changes authored box decorations while preserving caller names;
-monochrome removes styling SGR while retaining the screen controls used by the
-existing terminal UI. Every status, stake and outcome is readable without color.
-Static, compact ASCII diagrams identify exchange roles and NPC operators beside
-their actual current state. Normal action results may add a short fictional
-vignette; Fast omits optional art/flavor and keeps all stakes and net deltas.
-There are no animation delays. War Dialer launch metadata includes the optional
-boolean `unicode_style`, copied from the caller's existing NetBBS preference.
-False defaults to ASCII decorations; true or omission preserves the rich default.
-An explicit in-game ASCII choice wins. Changing monochrome/Fast alone does not
-freeze the inherited Unicode default. Unrelated doors receive no new fields;
-the existing native-door JSON boundary and supervision remain unchanged.
+**The War Dialer presentation contract (issue #494; supersedes the issue #362
+slice 9 wording).** The door is a phosphor terminal, not a page of sentences.
 
-**Screen framing and one hotkey style (issue #487).** Every screen under the
-masthead -- the switchboard, the help and first-visit text, the event log and the
-record picker -- draws its body inside the door's frame, with its title in the top
-border and the action bar outside, below it. The switchboard overhaul had left
-the masthead framed and everything under it an unindented wall of rows. The frame
-costs one row and four columns, charged to each screen's own page budget, and is
-dropped only in Fast mode, which is deliberately text-only: there is no narrower
-terminal to drop it for, since 40x12 is the floor (issue #495).
+*Palette.* Nine roles, truecolour as the design target, each with a deliberate
+256-colour index beside it rather than whatever a converter would pick:
+`phosphor` `#39ff14` (frames, your holdings, positive deltas), `phosphor-dim`
+`#1f7a3f` (frame shadow, ring links, gauge tracks), `mint` `#7dffb0` (headings,
+your handle, the cursor), `amber` `#ffb000` (money and hotkeys), `cyan`
+`#38d6ff` (NPC operators and neutral data), `magenta` `#ff3caa` (rival crews and
+raids against you), `alarm` `#ff4d4d` (losses and bust risk), `ink` `#d7ffe9`
+(values) and `grey` `#7f9a8c` (labels). A hotkey is always amber and bold. An
+exchange's owner colour is the same on the ring, in the table and in the feed.
+Chrome never shares a colour with content.
+
+*Glyph vocabulary.* Frames `┏━┓ ┃ ┗━┛ ┣━┫`; owner nodes `◆ ◈ ◉ ◇`; crew `●○`;
+turns `▮▯`; meters `█░`; sparklines `▁▂▃`; insignia and badges `⟦ ⟧`; ring links
+`═ ║`; the brand `▚`; the prompt `›`. Every one has an ASCII substitute, and the
+`ascii_art`/`plain` preset is the one place that can prove none was forgotten.
+
+*Components.* The door carries its own copy, like every other helper in its one
+self-contained file: `meter`, `pips`, `dots`, `sparkline`, `label_value`/`chip`,
+`badge`, `progress_chain`, `owner_node`, `scene_map`, `table`, `feed`, `key_bar`,
+`compose` and `prose_rows`. Each returns *styled* rows. The frame leaves a row
+that already carries SGR exactly as its component built it; wrapping every row
+through a plain-text flattener and colouring the whole line from outside is what
+turned the game into one grey block inside a green box. Rows are composed at the
+frame's own inner width, because the rows a card produces are the rows its page
+budget is computed from.
+
+*Layout.* The switchboard is a card stack, not a paragraph list: an operator card
+with a rank gauge, a resources card of meters and chips, the ten exchanges as the
+ring they actually are, the latest receipts as a toned feed, then orders and the
+season's absolute deadlines. A card's opening rule costs a row of the same height
+budget as the rows under it. Numbers are right-aligned in their column and a
+table's columns start at the same display column on every row; a table chooses
+which columns it can carry at the width it has, and everything a narrow terminal
+gives up is on the record's own card one digit away. Action bars live outside the
+frame, where the cursor waits.
+
+*Motion.* This replaces "there are no animation delays". Reveals and the carrier
+sweep that plays while a committed result comes back are in, under three hard
+limits: any key skips whatever is playing, Fast mode and the monochrome/plain
+presets omit it entirely, and nothing animates between a caller's decision and
+the commit -- a result is written to the database first and only then revealed.
+Motion is forward-only except for one row it rewrites in place and owns, so the
+screen a caller is left looking at is identical whether motion played, was
+skipped, or was never enabled.
+
+*Presets.* Scene offers a free Display screen with immediate ASCII-decoration,
+monochrome and Fast-mode toggles. Back writes nothing. Store one bounded boolean
+preference object per caller in world metadata; preserve it across season and
+competition resets and include it in the world backup. No competitive state or
+archive row is modified. ASCII mode substitutes for every glyph in the vocabulary
+while preserving caller names; monochrome removes colour at the source -- a role
+returns no SGR at all -- while retaining the screen controls the terminal UI
+needs. Every status, stake and outcome is readable without colour. Fast mode is
+the one deliberately unframed layout: it omits optional art, flavour and motion
+and keeps every stake and net delta, and its title row carries the page counter
+the border would otherwise hold. Normal action results may add a short fictional
+vignette. War Dialer launch metadata includes the optional boolean
+`unicode_style`, copied from the caller's existing NetBBS preference. False
+defaults to ASCII decorations; true or omission preserves the rich default. An
+explicit in-game ASCII choice wins. Changing monochrome/Fast alone does not
+freeze the inherited Unicode default. Unrelated doors receive no new fields; the
+existing native-door JSON boundary and supervision remain unchanged.
+
+*Review.* A screen is reviewed by looking at it. `scripts/door_gallery.py
+war_dialer` renders every screen at 80x24, 64x20 and 40x12 in every preset, and
+a change to a screen comes with that page attached. The suite can assert that
+colour reaches every body row, that hotkey, label, value and frame are four
+different colours, that an exchange reads the same colour everywhere, and that a
+table's columns do not wander -- what it can never assert is that a screen is
+worth looking at, which is why the pictures are required.
+
+**Screen framing and one hotkey style (issue #487; extended by #494).** Every
+screen under the masthead -- the switchboard, the help and first-visit text, the
+event log and the record picker -- draws its body inside the door's frame, with
+its title in the top border and the action bar outside, below it. The switchboard
+overhaul had left the masthead framed and everything under it an unindented wall
+of rows. The frame costs two rows and four columns, charged to each screen's own
+page budget, and is dropped only in Fast mode, which is deliberately text-only:
+there is no narrower terminal to drop it for, since 40x12 is the floor (issue
+#495). One frame holds a stack of cards: the screen's title goes in the top
+border and each card after the first is opened by a `┣━ HEADING ━┫` rule, which
+costs a row of the same budget as the rows under it. The border's right-hand end
+carries the page counter first -- always spelled `page N/M`, and the handle a
+scripted walk uses to know whether there is another page -- and then whatever
+else the screen wants to say, for as long as it fits whole; a counter cut in half
+tells a caller nothing, so the screen's own name is the half that truncates.
 Hotkeys are written `[K] Label` everywhere the door prints, the rule Voidrunner
 adopted in issue #400: the key is not always the label's first letter
 (`[E] Map`, `[X] Root`), so that is the only spelling that carries every case.
@@ -7434,10 +7592,11 @@ The switchboard's action bar is packed to the width it has rather than hand-type
 full labels first, short labels when the full ones would not leave the page a row
 to stand on. Every key keeps a name at every supported size; the keys-only tier
 below that went with the terminals it was for (issue #495). A key is never
-dropped. A bar written with `out_prompt` leaves its row unterminated on purpose,
-so whatever reads it has to close that row before the next screen draws; the
-first visit every caller saw had printed the Back bar and the switchboard's own
-title on one row.
+dropped. Paging shares the switchboard's prompt row rather than its action bar,
+which is already four rows of a twelve-row terminal. A bar written with
+`out_prompt` leaves its row unterminated on purpose, so whatever reads it has to
+close that row before the next screen draws; the first visit every caller saw had
+printed the Back bar and the switchboard's own title on one row.
 
 **Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
 living crew is the available crew plus the members assigned across their owned
