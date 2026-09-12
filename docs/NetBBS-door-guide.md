@@ -1413,6 +1413,29 @@ the emulator, game and NetBBS itself must not run as root.
    address-space ceiling. This ceiling includes the emulator's host shared
    libraries, not just its 16 MiB emulated RAM. Native default: 256 MiB.
 
+   **Time limit** (wall clock) and **CPU seconds** bound one caller's run.
+   The defaults, 3600 and 300, are what every door got before these were
+   configurable, so an existing profile behaves exactly as it did. Raise the
+   CPU ceiling for a door which renders continuously rather than waiting on
+   keystrokes — a classic door idles between keys and never approaches 300
+   CPU-seconds, while a real-time client can exhaust them inside a normal
+   session and be killed mid-play. Raise the time limit for a door a caller
+   should be able to stay in for an evening.
+
+   Setting either to `0` removes that ceiling entirely. This is a deliberate
+   SysOp decision, not a misconfiguration, so **Check setup** reports it as a
+   note rather than a problem — but understand what you are giving up. With no
+   wall-clock limit a door ends only when it exits, the caller disconnects, or
+   the node stops; until then it holds that caller's session and a node lease,
+   so a hung door with `max_sessions: 1` makes the door unavailable to everyone
+   else until you restart the node. With no CPU limit a runaway door is bounded
+   only by the wall-clock limit. Do not remove both at once on a door you have
+   not watched run.
+
+   Removing the CPU ceiling raises the door's soft limit to the hard limit the
+   service account is permitted, rather than simply leaving NetBBS's own. If
+   your service runs under a login class or unit file which sets a hard CPU
+   limit, that hard limit still applies and `0` cannot exceed it.
    **Stop grace** is how long a door gets to exit after `SIGTERM` before it is
    killed, and it is reached far more often than the name suggests: on every
    caller disconnect and every timeout, not only at node shutdown. The default
@@ -1486,8 +1509,20 @@ screens return to browser-fit geometry after play. Telnet/SSH terminals must
 already be at least the configured size; a smaller browser viewport is allowed
 because web door mode sets the requested terminal geometry. NetBBS does not
 resize Telnet/SSH windows.
-PTY geometry is set at launch; dynamic terminal resizing inside local games
-is not currently forwarded.
+A caller who resizes their terminal mid-game is followed, on POSIX hosts,
+for native doors whose profile leaves columns and rows at 0. A PTY door's
+own terminal is resized and its process group gets `SIGWINCH`, which is what
+a full-screen program already expects. A stdio or socket door is told only if
+its profile enables **Signal door on terminal resize**: NetBBS then rewrites
+`door_info.json` with the new `terminal_width`/`terminal_height` and sends
+`SIGUSR1`. Leave that off unless the door's own documentation says it handles
+`SIGUSR1` — the default action for that signal is to terminate the process,
+so enabling it for a door which ignores it kills the caller's game.
+
+A profile which pins columns and rows asked for a fixed screen and is never
+resized; neither are DOS doors, whose geometry is fixed by design, nor remote
+services, which negotiate their own window size. Resizes are followed within
+about half a second, not instantly.
 
 ## Native doors
 
@@ -1518,6 +1553,103 @@ container/chroot/dedicated-account/VM it uses. It must preserve required
 descriptors, path mappings and process ownership; validate disconnects.
 No privileged helper, containment tool or universal container recipe is
 installed by NetBBS. Wine/Win32 remains experimental and untested.
+
+## Doors with a companion service
+
+Most doors are one process per caller, started when the caller enters and
+reaped when they leave. A door which keeps a world running while nobody is
+connected — a real-time multiplayer game, for instance — needs a process that
+outlives any single caller. A profile may declare **one** such service, and
+NetBBS supervises it:
+
+```json
+"service": {
+  "argv": ["-m", "yourgame.server", "--install-dir", "{install_dir}"],
+  "start": "with_node",
+  "stop_grace_seconds": 10,
+  "service_memory_mb": 512,
+  "health": {"kind": "socket", "path": "{install_dir}/run/game.sock"}
+}
+```
+
+The program is the door's own **executable path**, so a door and its service
+share one interpreter; `argv` is everything after it, and `{install_dir}` is
+the only substitution. The service runs under the service account, in the
+installation directory, with the same narrow environment rules as a door
+launch — never the full parent environment. A service therefore requires an
+installation directory.
+
+`start` is `with_node` (started before the node accepts callers) or
+`on_first_caller` (started lazily by the first caller who opens the door).
+`service_memory_mb` is its own address-space ceiling; unlike a caller's run
+it gets no CPU-seconds limit, because a long-lived process legitimately
+accumulates CPU time.
+
+**Restarts and giving up.** A service which exits is restarted with a
+lengthening delay — 1, 2, 4 seconds and so on to a minute. Five failures
+within five minutes and NetBBS stops trying and reports the door's service as
+failed, rather than respawning a misconfigured program forever. Starting or
+restarting it from the SysOp screen clears that.
+
+**Health.** `kind: "pid"` (the default) means the process is alive.
+`kind: "socket"` also connects to a Unix socket the service listens on, which
+catches a process that is running but wedged. A caller who opens a door whose
+service is not up gets one line and returns to the door list; the refusal is
+logged with the door's name. A freshly started service must stay up briefly
+before callers are let in, so a service which exits during startup is never
+mistaken for a working one.
+
+**SysOp control.** The door's detail screen grows a Service line showing
+state, uptime and restart count, with **[S]tart**, **[H]alt**,
+**[R]estart** and **[V]iew service log** (the most recent 8 KiB of its
+standard error). Each action that changes the process asks for one
+confirmation and is audit-logged like every other door action.
+
+**Shutdown.** Services are stopped first, before listeners and background
+tasks: `SIGTERM`, the configured `stop_grace_seconds`, then `SIGKILL`. All
+services stop concurrently, so the step costs the longest single grace rather
+than their sum, and it can never delay node shutdown indefinitely.
+
+**MANUAL — outside NetBBS:** installing the service's program and its
+runtime. NetBBS supervises the process; it does not install or update what
+that process owns.
+
+### Backing up door installations
+
+By default a NetBBS backup covers the node's own state — database, identity,
+files, banners, and the bundled games' worlds — and leaves each door's
+installation directory to you, because that directory is an operator-owned
+game installation which can be far larger than everything else combined.
+
+**SysOp → Operations → Backup → [D]oor installations** turns that off or on
+for this node. With it on, every registered door's installation directory is
+copied into each backup. Understand what changes before enabling it:
+
+- backups get larger and slower, in proportion to your game installations;
+- a directory shared by two doors is copied once, and one nested inside
+  another already being copied is not copied again;
+- symlinks are copied as symlinks rather than followed, so a link pointing
+  out of the installation does not pull unrelated host data into the backup —
+  but check your installations for links you would rather not carry along;
+- a door whose installation directory is missing or unreadable **fails the
+  backup**, naming that door. Silently omitting data you asked to keep would
+  be worse. Fix the directory, correct the door, or turn the option back off;
+- these directories are recorded by file count and size rather than
+  per-file checksums, unlike node state;
+- **the copy is not quiesced.** A door being played, or a companion service
+  running, can be writing to its installation while it is copied, and the
+  result may be a torn generation — a database and its write-ahead log from
+  different moments, or game files from opposite sides of an update. Halt the
+  door's service and wait for callers to leave first, the same discipline the
+  Voidrunner and War Dialer notes above already ask for. A backup which
+  reports success is not a promise that a live game's state inside it is
+  self-consistent.
+
+**Restore never writes them back.** They are captured as a copy so you have
+one; putting a game installation back is an ordinary file-copy operation you
+perform deliberately, not something a node restore should do over a live
+installation. Find them under `door-installs/` inside the backup, with each
+directory's original path recorded in `manifest.json`.
 
 ## DOS prerequisites
 

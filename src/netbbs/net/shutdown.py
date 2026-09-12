@@ -349,6 +349,12 @@ class NodeControls:
     # test callers status-only; the database path comes from their existing
     # DatabaseLane rather than being duplicated here.
     backup_identity_dir: Path | None = None
+    # Issue #466: the node's one `netbbs.doors.services.DoorServiceManager`,
+    # owning every door service this node supervises. `None` from the
+    # standalone `python -m netbbs.admin` CLI and from a direct test call,
+    # exactly like `session_registry`, and typed `Any` for the same
+    # import-graph reason as `mrc_bridge` above.
+    door_services: Any = None
 
 
 async def run_shutdown_sequence(

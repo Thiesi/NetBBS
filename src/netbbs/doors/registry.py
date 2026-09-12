@@ -131,6 +131,16 @@ def get_door_by_name(db: Database, name: str) -> Door:
     return _row_to_door(row)
 
 
+def get_door(db: Database, door_id: int) -> Door | None:
+    """Re-read one door by its stable id, or None if it is gone.
+
+    By id rather than name, and tolerant of absence, because the caller is
+    refreshing a door a SysOp may have renamed or deleted meanwhile.
+    """
+    row = db.connection.execute("SELECT * FROM doors WHERE id = ?", (door_id,)).fetchone()
+    return _row_to_door(row) if row is not None else None
+
+
 def list_doors(db: Database, *, community_id: int | None = None) -> list[Door]:
     """List doors, pinned first then alphabetical -- same ordering
     convention as `list_file_areas`'/`list_boards`' own default. `None`

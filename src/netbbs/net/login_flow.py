@@ -196,6 +196,7 @@ async def handle_session(
     # the file screens use it to hand a caller whose terminal has
     # no Zmodem a browser link instead.
     transfers: object | None = None,
+    door_services: object | None = None,
 ) -> None:
     """
     Top-level per-connection entry point.
@@ -299,6 +300,7 @@ async def handle_session(
         chat_hub=hub,
         backup_identity_dir=backup_identity_dir,
         transfers=transfers,
+        door_services=door_services,
     )
 
     session_registry.enter(session)
@@ -828,6 +830,7 @@ async def handle_ssh_session(
     # the file screens use it to hand a caller whose terminal has
     # no Zmodem a browser link instead.
     transfers: object | None = None,
+    door_services: object | None = None,
 ) -> None:
     """
     SSH-specific top-level entry point (GitHub issue #25) — the
@@ -884,6 +887,7 @@ async def handle_ssh_session(
         chat_hub=hub,
         backup_identity_dir=backup_identity_dir,
         transfers=transfers,
+        door_services=door_services,
     )
 
     session_registry.enter(session)

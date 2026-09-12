@@ -4732,9 +4732,48 @@ here since #172 is self-contained):
   a live protocol: static session metadata (handle, stable numeric user
   ID, terminal width/height, color-depth capability, node name) written
   before spawn; stdio is pure raw passthrough for the session's
-  duration, with no framing or control messages interleaved; no live
-  terminal-resize propagation (matches every classic door's own static
-  80x24-era assumption); exit code is the only completion signal;
+  duration, with no framing or control messages interleaved; exit code
+  is the only completion signal;
+- terminal size is followed for the duration of a run (issue #468),
+  without interleaving anything into that passthrough stream. A PTY
+  door's own terminal is resized and its group signalled with
+  `SIGWINCH`, exactly as any full-screen program already expects. A
+  stdio or socket door is notified only if its profile opts in, by
+  republishing the same static metadata file with the new geometry and
+  signalling the door leader with `SIGUSR1`; opt-in because that
+  signal's default action terminates a process which does not handle
+  it. A profile which pins width/height, a DOS door and a remote
+  service are each left alone. This supersedes v1's original "no live
+  terminal-resize propagation" rule, which matched every classic door's
+  static 80x24-era assumption; the metadata itself stays a file rather
+  than becoming a live protocol;
+- a door may declare **one** long-lived companion service (issue #466), for
+  a game whose world must keep running while nobody is connected. This is
+  the single exception to "a door is one process per caller", and is
+  deliberately not a general process manager: one service per door, no
+  inter-session channel inside NetBBS (the service's own socket is the
+  channel), and no privilege separation beyond what native doors already
+  have. It starts with the node or on the first caller, under the service
+  account, in the door's installation directory, with the same narrow
+  environment rules as a door launch. Its own memory ceiling applies and no
+  CPU-seconds ceiling does, because a long-lived process legitimately
+  accumulates CPU time. Exits restart with lengthening backoff behind a
+  circuit breaker, after which NetBBS reports the door's service as failed
+  rather than respawning a misconfigured program indefinitely. A caller is
+  admitted only while the service is up, has been up long enough to mean it,
+  and passes its optional health check; otherwise they get one line and the
+  door list back. Stopping is bounded at every level — SIGTERM, the
+  configured grace, SIGKILL, then a deadline after which an unkillable
+  process is abandoned rather than delaying node shutdown — and services
+  stop before listeners and background tasks. NetBBS supervises the process
+  only; installing it stays the operator's, exactly as for the door itself.
+  A door's installation directory is outside the node's own state and is not
+  backed up by default, because it is operator-owned and unbounded in size; a
+  node-level setting includes every door's installation in each backup for an
+  operator who wants one artifact holding everything. Capture only — restore
+  never writes such a directory back, since putting a game installation back
+  over a live one is a deliberate operator action, not part of restoring node
+  state;
 - door output (stdout) is trusted and relayed unmodified, like a SysOp's
   own welcome-banner file, not run through the chat/post sanitizer —
   NetBBS provides the interface and best-effort abuse prevention within
