@@ -1215,7 +1215,7 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
-WORLD_SCHEMA_VERSION = 11
+WORLD_SCHEMA_VERSION = 10
 _OPERATION_COLUMNS = {"operation_contract", "operation_approach", "operation_stage", "successful_operations"}
 
 # Versioned schema contract: future additions need a new numbered migration.
@@ -1341,8 +1341,6 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     fresh.execute("PRAGMA user_version=9")
                     _migrate_world_v10(fresh)
                     fresh.execute("PRAGMA user_version=10")
-                    _migrate_world_v11(fresh)
-                    fresh.execute("PRAGMA user_version=11")
             finally:
                 fresh.close()
             try:
@@ -1413,9 +1411,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if version < 10:
             _migrate_world_v10(conn)
             conn.execute("PRAGMA user_version=10")
-        if version < 11:
-            _migrate_world_v11(conn)
-            conn.execute("PRAGMA user_version=11")
         _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
 
 
@@ -1564,20 +1559,6 @@ def _migrate_world_v10(conn: sqlite3.Connection) -> None:
                  "handle TEXT NOT NULL CHECK (length(handle) <= 80), rank INTEGER NOT NULL CHECK (rank >= 0), "
                  "placement INTEGER NOT NULL, medal TEXT NOT NULL CHECK (medal IN ('', 'Gold', 'Silver', 'Bronze')), "
                  "insignia TEXT NOT NULL, PRIMARY KEY(season,user_id), UNIQUE(season,placement))")
-
-
-def _migrate_world_v11(conn: sqlite3.Connection) -> None:
-    """Clear the actor from receipts a caller wrote about themselves.
-
-    Self-authored rows used to record the caller's own handle, which the feed and
-    the log compared against the handle they happen to hold now. Matching on that
-    same handle is the only evidence those rows carry, so this repairs every
-    caller who has not yet renamed -- and from here on nothing is recorded to
-    repair.
-    """
-    conn.execute("UPDATE events SET actor_handle=NULL WHERE actor_handle IS NOT NULL AND "
-                 "actor_handle=(SELECT handle FROM players WHERE players.user_id="
-                 "events.target_user_id)")
 
 
 def _archive_season(conn: sqlite3.Connection, old: int, current: int, now: datetime) -> None:
@@ -4229,6 +4210,30 @@ def territory_cards(p: Palette, exchanges: list[Exchange], viewer_id: int | None
     return cards
 
 
+def heat_amount(value: float, *, signed: bool = False) -> str:
+    """A Heat figure the way every other Heat figure on the screen reads.
+
+    Heat is a decaying float, so `:g` prints `7.86231` where the same screen says
+    `15.9` two rows below. One decimal, and no pointless `.0` on a whole number.
+    """
+    text = f"{value:+.1f}" if signed else f"{value:.1f}"
+    return text[:-2] if text.endswith(".0") else text
+
+
+def root_heat_chip(player: Player | None, base_heat: int) -> str:
+    """The Heat a capture would actually cost *this* caller.
+
+    Lookouts take five where the role's table says eight and a Burner Kit can take
+    none at all, because `action_root_exchange` applies `adjusted_heat` -- so a
+    screen a caller browses targets on quoted a figure the preview of that very
+    capture then contradicted. With no caller in hand, the role's own number is
+    all there is to show.
+    """
+    if player is None:
+        return f"+{base_heat}"
+    return "+" + heat_amount(adjusted_heat(player, "root", base_heat))
+
+
 def exchange_detail_cards(p: Palette, exchange: Exchange, player: Player | None,
                           width: int) -> list[tuple[str, list[str]]]:
     """One exchange as a card: who holds it, what it is worth, what it would cost.
@@ -4275,7 +4280,8 @@ def exchange_detail_cards(p: Palette, exchange: Exchange, player: Player | None,
                          label_value(p, "base", f"${base_price}", style=p.grey),
                          label_value(p, "neighbour discount", f"${exchange.capture_discount}",
                                      style=p.phosphor if exchange.capture_discount else p.grey),
-                         label_value(p, "heat", f"+{base_heat}", style=p.alarm)], width)
+                         label_value(p, "heat", root_heat_chip(player, base_heat),
+                                     style=p.alarm)], width)
         terms += compose([label_value(p, "income", f"${exchange.income_per_hour}/hr", style=p.amber),
                           label_value(p, "capture rank",
                                       f"+{capture_rank_award(player, exchange)}" if player else
@@ -4320,7 +4326,7 @@ def exchange_entry_rows(p: Palette, exchange: Exchange, player: Player | None,
     # and the odds are on the preview this entry opens, one keystroke away, and
     # an entry taller than its page is an entry a caller has to scroll to pick.
     if width >= 44:
-        chunks.append(label_value(p, "heat", f"+{base_heat}", style=p.alarm))
+        chunks.append(label_value(p, "heat", root_heat_chip(player, base_heat), style=p.alarm))
         if player is not None:
             chance = (1.0 if not exchange_occupied(exchange)
                       else success_chance(player.crew, defence))
@@ -4417,16 +4423,6 @@ def read_menu_choice(valid: str) -> str:
         if key and key in valid:
             out_line(key)
             return key
-
-
-def heat_amount(value: float, *, signed: bool = False) -> str:
-    """A Heat figure the way every other Heat figure on the screen reads.
-
-    Heat is a decaying float, so `:g` prints `7.86231` where the same screen says
-    `15.9` two rows below. One decimal, and no pointless `.0` on a whole number.
-    """
-    text = f"{value:+.1f}" if signed else f"{value:.1f}"
-    return text[:-2] if text.endswith(".0") else text
 
 
 def action_block_reason(action: str, player: Player, target: Exchange | Player | JobChoice | CrewChoice | None = None) -> str | None:

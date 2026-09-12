@@ -153,6 +153,12 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # Before the career exists: the guide every new caller is handed, paged
         # with any key, which is why it is walked with Enter rather than [N].
         ("First visit", b"\r%"),
+        # What a caller is handed when a season closed while they were away: the
+        # receipt, waiting, with the key that keeps it unread.
+        ("While you were away", b""),
+        # And the switchboard inside the last forty-eight hours, where the reset
+        # card opens the stack ahead of everything else (design doc).
+        ("Switchboard, season closing", b"N%"),
         # The switchboard is a card stack paged with [N]: two pages at eighty
         # columns and fourteen at forty, where the gauges, the scene, the feed,
         # the orders and the season card each get their own (issue #494).
@@ -233,10 +239,12 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # fixture offers first is its own business, hence `#`.
         ("Rival recon", b"O2?"),
         ("Recon preview", b"O2?#N%"),
-        # The dossier list as a caller first meets it. A populated one would need
-        # a snapshot in the fixture, and a snapshot expires after a day, so a
-        # cached fixture would quietly photograph this same empty state anyway.
+        # Both readings of the dossier list: the empty state a caller meets
+        # first, and one holding a snapshot. A snapshot expires after a day, which
+        # rules it out of the cached fixture but not out of `SETUP` -- that runs
+        # against this panel's own copy, minutes before the photograph.
         ("Your dossiers", b"O3?"),
+        ("Your dossiers, a snapshot", b"O3?"),
         ("Help", b"?N%"),
     ],
 }
@@ -349,6 +357,42 @@ PREPARE_IT = b"\r" + b"O1?1?" + b"N*" + b"A"    # continue the saved one, previe
 # door's own registration, which is what a new caller pays too.
 FRESH: dict[str, set[str]] = {"war_dialer": {"First visit"}}
 
+
+def _rewind_anchor(door: pathlib.Path, state: pathlib.Path, back) -> None:
+    """Move this panel's world `back` through its own season clock.
+
+    Where a screen depends on where the world is in its season, no key can take it
+    there -- so the anchor is moved through the door's own helpers, exactly as
+    `seed_war_dialer` does to archive one. Keys remain the first resort: this is
+    only for what a clock decides.
+    """
+    game = load_door(door)
+    conn = game.connect(state / "war-dialer.db")
+    try:
+        anchor = game.get_or_create_season_anchor(conn, game.now_utc())
+        with conn:
+            conn.execute("INSERT INTO meta(key,value) VALUES ('season_anchor',?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         (game.to_iso(anchor - back(game)),))
+    finally:
+        conn.close()
+
+
+def past_the_rollover(door: pathlib.Path, state: pathlib.Path) -> None:
+    """A season has closed since the caller was last here."""
+    _rewind_anchor(door, state, lambda game: game.SEASON)
+
+
+def one_day_from_reset(door: pathlib.Path, state: pathlib.Path) -> None:
+    """Inside the last forty-eight hours, where the reset card opens the stack."""
+    _rewind_anchor(door, state, lambda game: game.SEASON - game.DAY)
+
+
+PREPARED: dict[str, dict[str, object]] = {
+    "war_dialer": {"While you were away": past_the_rollover,
+                   "Switchboard, season closing": one_day_from_reset},
+}
+
 SETUP: dict[str, dict[str, bytes]] = {
     "war_dialer": {
         # The three owner services are three different previews, and which
@@ -360,6 +404,8 @@ SETUP: dict[str, dict[str, bytes]] = {
         # a capture posts a crew member, and the caller keeps enough for one.
         "Owner service preview, a Warez Hub": b"X{Bay}" + b"N*" + b"A",
         "Owner service preview, a Public PBX": b"X{Gulf}" + b"N*" + b"A",
+        # Buy the recon whose dossier the next walk reads.
+        "Your dossiers, a snapshot": b"O2?#" + b"N*" + b"A",
         "Active operation": CASE_AN_OPERATION,
         "Prepare preview": CASE_AN_OPERATION,
         "Abandon preview": CASE_AN_OPERATION,
@@ -378,6 +424,8 @@ SETUP: dict[str, dict[str, bytes]] = {
 SHOWS: dict[str, dict[str, str]] = {
     "war_dialer": {
         "First visit": "FIRST VISIT",
+        "While you were away": "WHILE YOU WERE AWAY",
+        "Switchboard, season closing": "SEASON RESET",
         "Switchboard": "SWITCHBOARD",
         "BBS scene": "BBS SCENE",
         "Crew insignia": "CREW INSIGNIA",
@@ -430,6 +478,7 @@ SHOWS: dict[str, dict[str, str]] = {
         "Rival recon": "RIVAL RECON",
         "Recon preview": "RECON PREVIEW",
         "Your dossiers": "YOUR DOSSIERS",
+        "Your dossiers, a snapshot": "Last-known intelligence",
         "Help": "HOW TO PLAY",
     },
 }
@@ -959,6 +1008,9 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
             else:
                 shutil.copytree(fixture, state)
             info_extra = apply_preset(state, extra)
+            prepare = PREPARED.get(door_name, {}).get(label)
+            if prepare:
+                prepare(door, state)
             setup = SETUP.get(door_name, {}).get(label)
             if setup:
                 # A launch of its own, at one size, so the setup keys never have

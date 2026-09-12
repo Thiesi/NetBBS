@@ -5076,6 +5076,24 @@ which registers nobody, leaving the caller new. An exemption has to name somethi
 no sequence of keys can produce, not something the current fixture happens not to
 be.
 
+**A browsing screen quotes the figure the action will charge.** `adjusted_heat`
+makes a capture's Heat specific to the caller -- Lookouts take five where a
+Carrier Switch's table says eight, a Burner Kit can take none -- so a screen that
+prints the role's base number disagrees with the preview of the very action it is
+describing. Every surface a caller compares targets on uses the projected figure;
+only a screen drawn for nobody falls back to the role's own.
+
+**Where a screen depends on the world's clock, a walk cannot reach it by playing.**
+Two around a season boundary can be reached by moving the anchor through the door's
+own helpers against the panel's private copy: the receipt a closed season leaves
+waiting, and the reset card that opens the switchboard in the last forty-eight
+hours. The crackdown card itself cannot -- it is drawn when the world's season
+advances *between two dashboard draws in one session*, which is a clock crossing a
+boundary mid-session, not a state. That is the shape of a defensible exemption: a
+timing condition, not a fixture that happens to be elsewhere. A refusal screen is
+the other shape -- one sentence of domain prose in a frame, where a panel adds
+nothing the fit and wrap tests at the floor already prove.
+
 **A screen with three versions needs three panels.** The owner service is one
 screen with three drawings -- a Public PBX's *negative* Heat gauge, a Warez Hub's
 bust gauge, a Carrier Switch with neither -- and a single walk photographed
@@ -5106,14 +5124,20 @@ and repeats its heading where it does not -- and the heading is the identity tha
 was being orphaned, which is the crew in the Hall and the season in a caller's own
 history.
 
-**A receipt's actor is the other party, not a name to compare.** The feed and the
-log decided "this is mine" by comparing the handle stored on the event against the
-handle the caller holds *now*, and the door recorded the caller's own handle on
-their own garrison receipts. Renaming on the BBS therefore turned a caller's whole
-history hostile magenta, and taking a former rival's handle would have made that
-rival's raids read as the caller's own work. Self-authored receipts now record no
-actor at all, `hostile` is simply "an actor is named", and a schema-11 migration
-clears the legacy rows it can still identify.
+**A receipt's actor is the other party, not a name to compare.** Deciding "this
+is mine" by comparing the handle stored on an event against the handle the caller
+holds *now* turns their whole history hostile the day they rename on the BBS, and
+makes a former rival's raids read as their own work if they take that handle.
+Self-authored receipts record no actor at all, and `hostile` is "an actor is
+named".
+
+**A schema version is not a colour correction.** Bumping one makes older game
+binaries refuse the world outright, which is a real cost to a SysOp and a one-way
+door; paying it to re-tone historical rows was not worth it, and any backfill that
+reads a stored actor against a caller's current handle would erase the record that
+an attack was an attack on a reused handle. Repairs to history need evidence the
+history actually carries. Where there is none, leave it alone and fix the
+behaviour going forward.
 
 **A holding is not a target, and every screen that draws one has to agree.** An
 exchange the caller controls has posted crew, income, an age and a service; a

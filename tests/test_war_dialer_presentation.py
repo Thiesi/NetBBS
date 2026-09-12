@@ -3689,12 +3689,19 @@ COMPOSED = {f"{name.upper()} PREVIEW" for name in
 FINER_MARKS = {"SERVICE PREVIEW": ("Recruit:", "outlet:", "Lay Low:")}
 
 UNREACHABLE = {
-    "FED CRACKDOWN": "drawn as a season rolls over, which is the clock and not a key",
+    "FED CRACKDOWN": "drawn only when the world's season advances between two dashboard "
+                     "draws in one session: a clock crossing a boundary mid-session, which "
+                     "no state and no key produces. What a caller meets instead -- the "
+                     "crackdown receipt, and the reset card in the closing window -- is "
+                     "photographed",
     "NO RIVAL CREWS": "needs a world with no other crews; this one is seeded with two",
-    "ACTION UNAVAILABLE": "a refusal for want of turns: fifteen spent turns is not a walk",
+    # The five refusals are one sentence of domain prose in a frame. A panel would
+    # add nothing the 40x12 fit and wrap tests already prove, and reaching one
+    # means fabricating a caller who has spent fifteen turns or emptied a wallet.
+    "ACTION UNAVAILABLE": "a refusal: one sentence of prose in a frame",
     "GARRISON UNAVAILABLE": "ditto, for a crew move",
-    "PURCHASE UNAVAILABLE": "a refusal for want of cash: an emptied wallet is not a walk",
-    "RAID UNAVAILABLE": "a refusal for want of an eligible rival, or of turns",
+    "PURCHASE UNAVAILABLE": "ditto, for a kit",
+    "RAID UNAVAILABLE": "ditto, for a raid",
     "ROOT UNAVAILABLE": "ditto, for a capture",
 }
 
@@ -3931,27 +3938,6 @@ def test_your_own_receipts_survive_a_change_of_handle(tmp_path):
     conn.close()
 
 
-def test_a_world_from_before_the_rename_fix_is_repaired_once(tmp_path):
-    """Legacy rows carry the caller's handle; the migration clears exactly those."""
-    conn, now = _painted_world(tmp_path, "migrate.db")
-    # Written the way the door used to: the caller's own handle on their own row.
-    with conn:
-        conn.execute("INSERT INTO events (target_user_id, actor_handle, summary_text, "
-                     "created_at, seen_at) VALUES (1, 'Thiesi', 'Reinforced it.', ?, ?)",
-                     (wd.to_iso(now), wd.to_iso(now)))
-        conn.execute("INSERT INTO events (target_user_id, actor_handle, summary_text, "
-                     "created_at, seen_at) VALUES (1, 'Kilobaud', 'Kilobaud raided you.', ?, NULL)",
-                     (wd.to_iso(now),))
-        conn.execute("PRAGMA user_version=10")
-    wd.ensure_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == wd.WORLD_SCHEMA_VERSION
-    actors = [row[0] for row in conn.execute(
-        "SELECT actor_handle FROM events ORDER BY id").fetchall()]
-    assert "Thiesi" not in actors, actors      # the caller's own receipt, repaired
-    assert "Kilobaud" in actors                # the raid against them, untouched
-    conn.close()
-
-
 def test_each_owner_service_has_its_own_panel():
     """One walk reviewed one of three screens, and nothing said so.
 
@@ -4122,8 +4108,6 @@ def test_the_operator_guide_names_the_schema_the_code_writes():
     assert f"records schema version {version} in SQLite" in guide
     assert f"upgrades the world to schema {version} transactionally" in guide
     assert f"Old binaries refuse schema {version}" in guide
-    # And the migration is described, not just numbered.
-    assert f"version {version} clears the actor from receipts" in guide
 
 
 def test_a_picker_entry_never_advertises_a_key_its_reader_discards(tmp_path, monkeypatch):
@@ -4185,3 +4169,91 @@ def test_a_selectable_key_always_arrives_with_its_entry(width, height, monkeypat
             (row for row in rows if row.startswith("pick ")), "")))
         shown = {key for row in rows for key in re.findall(r"^\W*\[(\w)\]", row.strip("┃ "))}
         assert offered <= shown, (offered - shown, rows)
+
+
+def test_a_browsing_screen_quotes_the_heat_this_caller_would_take(tmp_path):
+    """Both surfaces a caller compares targets on, not just the preview.
+
+    `action_root_exchange` applies `adjusted_heat`, so Lookouts take five where a
+    Carrier Switch's table says eight and a Burner Kit can take none -- and the
+    card and the Root picker quoted the role's base figure while the preview of
+    that very capture showed the real one.
+    """
+    conn, now = _painted_world(tmp_path, "rootheat.db")
+    palette = wd.Palette(True)
+    free = next(e for e in wd.list_exchanges(conn, 1) if e.controller_user_id is None)
+    base = wd.exchange_terms(free)[2]
+
+    def chips(player):
+        card = _ANSI_RE.sub("", " ".join(
+            row for _, rows in wd.exchange_detail_cards(palette, free, player, 68)
+            for row in rows))
+        entry = _ANSI_RE.sub("", " ".join(wd.exchange_entry_rows(palette, free, player, 68)))
+        return card, entry
+
+    conn.execute("UPDATE players SET specialty='', support='' WHERE user_id=1")
+    conn.commit()
+    plain = wd.refresh_player(conn, 1, now)
+    assert wd.adjusted_heat(plain, "root", base) == base
+    for text in chips(plain):
+        assert f"heat +{base}" in text, text
+
+    conn.execute("UPDATE players SET specialty='lookouts' WHERE user_id=1")
+    conn.commit()
+    careful = wd.refresh_player(conn, 1, now)
+    reduced = wd.adjusted_heat(careful, "root", base)
+    assert reduced < base, reduced
+    expected = "heat +" + wd.heat_amount(reduced)
+    for text in chips(careful):
+        assert expected in text, (expected, text)
+        assert f"heat +{base}" not in text, text
+    # The preview the caller is about to see agrees with both of them.
+    stakes = _ANSI_RE.sub("", " ".join(
+        row for heading, rows in wd.stakes_cards(palette, "root", careful, free, 68)
+        for row in rows if heading == "STAKES"))
+    assert wd.heat_amount(reduced, signed=True) in stakes, stakes
+    # Drawn for nobody, the role's own number is all there is.
+    assert f"heat +{base}" in _ANSI_RE.sub(
+        "", " ".join(wd.exchange_entry_rows(palette, free, None, 68)))
+    conn.close()
+
+
+def test_a_season_boundary_is_reached_by_moving_the_world_not_the_keys():
+    """Two screens depend on where the world is in its season.
+
+    A walk presses keys, and no key moves a clock, so the anchor is moved through
+    the door's own helpers against the panel's private copy -- the receipt a closed
+    season leaves waiting, and the reset card that opens the switchboard inside the
+    last forty-eight hours.
+    """
+    gallery = _gallery()
+    walks = dict(gallery.WALKS["war_dialer"])
+    prepared = gallery.PREPARED["war_dialer"]
+    assert walks["While you were away"] == b""          # it is the first screen drawn
+    assert walks["Switchboard, season closing"] == b"N%"
+    assert set(prepared) == {"While you were away", "Switchboard, season closing"}
+    assert gallery.SHOWS["war_dialer"]["While you were away"] == "WHILE YOU WERE AWAY"
+    assert gallery.SHOWS["war_dialer"]["Switchboard, season closing"] == "SEASON RESET"
+    # A dossier is bought for the panel that photographs it, since one expires in a
+    # day and could not be seeded into a cached fixture.
+    assert gallery.SETUP["war_dialer"]["Your dossiers, a snapshot"].startswith(b"O2?#")
+    assert gallery.SHOWS["war_dialer"]["Your dossiers, a snapshot"] == "Last-known intelligence"
+
+
+def test_no_world_is_migrated_for_a_tone(tmp_path):
+    """A receipt is a caller's history; a schema bump is not a colour correction.
+
+    Recording no actor for a caller's own moves fixes the tone from here. Repairing
+    older rows would mean guessing what a stored actor meant from the handle its
+    target holds now -- which on a reused handle erases the record that an attack
+    happened -- and it would cost a schema version that older game binaries refuse
+    outright.
+    """
+    assert wd.WORLD_SCHEMA_VERSION == 10
+    assert not hasattr(wd, "_migrate_world_v11")
+    source = _WAR_DIALER_PATH.read_text(encoding="utf-8")
+    assert "UPDATE events SET actor_handle=NULL" not in source
+    # A world at the shipped version is opened, not upgraded.
+    conn, _ = _painted_world(tmp_path, "noupgrade.db")
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    conn.close()
