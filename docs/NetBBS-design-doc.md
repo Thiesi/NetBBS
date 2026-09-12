@@ -6097,8 +6097,14 @@ Compatibility extension (issues #296/#297):
   and a refusal is always returned to the door and never queued -- a held post
   would publish after the allowlist was revoked. Posting is rate-limited per
   door and audit-logged against the SysOp whose authority it runs on; if that
-  account is deleted the hook lapses rather than posting unattributably.
-  Reads of any kind remain out of scope.
+  account is deleted the hook lapses rather than posting unattributably, and
+  another SysOp vouches for it without disturbing its identity or allowlist.
+  An outcome is written where the door can still read it after the run: the
+  working directory is gone by then, so a result left there would make the
+  promise that a refusal is always visible untrue in practice. Reads of any
+  kind remain out of scope, and the hook is available to locally-launched
+  doors only -- a remote registration shares no filesystem, and a DOS guest
+  cannot read the launch metadata that names the drop directory.
   Profiles add persistent installation directories,
   disposable node directories, exact CRLF classic drop files, native stdio,
   controlling PTYs, private inherited DOOR32 sockets, DOSBox-X COM1 sockets,

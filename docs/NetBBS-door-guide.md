@@ -1405,7 +1405,7 @@ Two kinds of registration deliberately get none of it:
 | `node_name` | The node's display name, which a SysOp may change at any time. |
 | `node_id` | A stable, opaque per-node identifier which survives a rename. Key a door's world on this, not on `node_name`. Not a credential. |
 | `session_limit_seconds` | The effective wall-clock cap for *this* launch — the tighter of the profile's limit and any lower bound the launch itself imposes — so a door can warn before it is cut off. Absent when nothing bounds the run. |
-| `outbound` | Present **only** if a SysOp switched this door's outbound hook on: `label` (the name its posts appear under), `directory` (where to drop a request, relative to the file's own directory), `boards` (every board it may name) and `posts_per_hour`. See [Letting a door post to a board](#letting-a-door-post-to-a-board). |
+| `outbound` | Present **only** if a SysOp switched this door's outbound hook on: `label` (the name its posts appear under), `directory` (where to drop a request, relative to the file's own directory), `results` (absolute path where outcomes are kept across launches), `boards` (every board it may name) and `posts_per_hour`. See [Letting a door post to a board](#letting-a-door-post-to-a-board). |
 
 Treat every field as optional and absence as "unknown": that is how the file
 stays compatible as it grows. Two notes on what is deliberately **not** there.
@@ -1740,6 +1740,16 @@ until you switch it on, and switching it on grants exactly one ability:
 posting to the boards on that door's own allowlist. A door can never read the
 BBS, send mail, look up a caller, or post anywhere you did not allow.
 
+**Native doors only, for now.** A DOS door cannot read `door_info.json` at
+all — `NETBBS_DOOR_INFO` names a host path the guest has no way to reach — so
+it has no way to learn its posting name or where to write. The file-drop
+transport was chosen precisely so a DOS door *can* be served later (a socket
+never could, because of the emulator boundary), but publishing the
+configuration where DOS can read it is still to be built. A remote (RLogin)
+registration can never use this at all: NetBBS runs no program for it and
+shares no files with it, so the screen says so instead of offering the
+switch.
+
 Be clear about what this is, because it is easy to over-read. A native door
 already runs as the NetBBS service account with the node database on the disk
 beside it, so this hook gives a door no *power* it did not already have. What
@@ -1764,8 +1774,14 @@ On a door's screen in the SysOp area, press `[O]utbound`.
 3. `[C]eiling`, if you want something other than six posts an hour.
 
 `[R]evoke a board` stops it posting there. `[T]urn off` releases the posting
-name and the whole allowlist; posts the door already made keep the name they
-were written under, exactly as a post keeps the name of a deleted account.
+name, the whole allowlist and the door's stored results; posts the door already
+made keep the name they were written under, exactly as a post keeps the name of
+a deleted account.
+
+If the account that switched a door's outbound on is ever deleted, the door
+stops posting — it runs on a named SysOp's authority, and that authority went
+with the account. The screen says so and offers `[V]ouch for it`, which takes
+responsibility without disturbing the posting name or the allowlist.
 
 ### If you allow a Linked board
 
@@ -1792,6 +1808,7 @@ test for it:
 "outbound": {
   "label": "Blacksite.door",
   "directory": "outbound",
+  "results": "/home/netbbs/.netbbs/door-outbound/3",
   "boards": ["Chronicle"],
   "posts_per_hour": 6
 }
@@ -1806,14 +1823,20 @@ has already created it. To post, write one JSON file there:
 
 - Write it under a temporary name and **rename it into place** with a `.json`
   extension. NetBBS ignores anything not ending in `.json`, so a half-written
-  file is never read. Use your language's atomic rename — `Path.replace` in
-  Python, `rename(2)` in C.
+  file is never read. The check is case-insensitive, so `POST.JSON` counts.
+  Use your language's atomic rename — `Path.replace` in Python, `rename(2)`
+  in C.
+- Keep a request under about 216 KB. A larger one is refused unread rather
+  than loaded into the BBS process.
 - `board` may be omitted if exactly one board is allowlisted. With more than
   one, a request that names none is refused rather than guessed at.
 - `subject` must be non-empty; `body` may be empty.
 
-Requests are processed when the door exits. For each one, NetBBS writes
-`<name>.result.json` beside it and removes the request:
+Requests are processed when the door exits. For each one, NetBBS removes the
+request and writes `<name>.result.json` into the directory named by
+`outbound.results` — an absolute path outside the working directory, because
+the working directory is deleted the moment the run ends and a result left
+there could never be read by anyone. The most recent 32 are kept:
 
 ```json
 {"status": "posted", "post_id": "...", "board": "Chronicle", "moderated": true}
@@ -1835,7 +1858,9 @@ Reasons you can expect to see, and what they mean for the door:
 | `not allowlisted for this door` | The board name is wrong, or was revoked. |
 | `more than one allowlisted board` | Name a board in the request. |
 | `rate limit reached` | Try again later; the ceiling is in `posts_per_hour`. |
-| `switch it on again` | The account that enabled the hook is gone, so it has lapsed until a SysOp re-enables it. |
+| `larger than` | The request exceeded the size limit and was not read. |
+| `requests in one session` | You wrote more in one session than a drain answers. |
+| `switch it on again` | The account that enabled the hook is gone, so it has lapsed until a SysOp vouches for the door again. |
 
 ## DOS prerequisites
 

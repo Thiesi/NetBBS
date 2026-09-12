@@ -13576,6 +13576,19 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     accent_color = await lane.run(effective_accent_color_256)
     header_color = await lane.run(effective_header_color_256)
+    if door.profile and door.profile.adapter == "rlogin":
+        # A remote registration launches no local process and shares no
+        # filesystem with a per-session working directory, so it could never
+        # write a request. Offering the switch would let a SysOp turn on
+        # something that silently does nothing forever.
+        await session.write_line("")
+        await session.write_line(reflow(
+            "This is a remote service. NetBBS runs no program for it and shares no "
+            "files with it, so it has no way to hand anything back to post. Outbound is "
+            "for doors which run on this node.", width=session.terminal_width))
+        await session.write_line("Press any key to return.")
+        await session.read_any_key()
+        return
     message = ""
     while True:
         config = await lane.run(outbound_config, door.id)
@@ -13600,7 +13613,7 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
             if config.enabled_by_user_id is None:
                 await session.write_line(colored(reflow(
                     "The account which switched this on no longer exists, so the door is "
-                    "refused until a SysOp switches it on again.", width=session.terminal_width),
+                    "refused until a SysOp vouches for it again.", width=session.terminal_width),
                     fg_color=MUTED_COLOR))
             if any(board.moderated for board in allowed):
                 await session.write_line(colored(
@@ -13611,6 +13624,13 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
             message = ""
         options = [MenuEntry(label=menu_key("T", "urn " + ("off" if config else "on")),
                              brief="Whether this door may post at all")]
+        if config is not None and config.enabled_by_user_id is None:
+            # Without this the only route out of a lapsed hook is [T]urn off,
+            # which releases the label and the whole allowlist -- the screen
+            # would be telling the SysOp to do something whose only available
+            # action destroys their configuration.
+            options.insert(1, MenuEntry(label=menu_key("V", "ouch for it"),
+                                        brief="Take responsibility for what it posts"))
         if config is not None:
             options += [
                 MenuEntry(label=menu_key("A", "llow a board"), brief="Let it post to one more board"),
@@ -13639,6 +13659,10 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                                    default=False):
                 await lane.run(disable_outbound, door, disabled_by=actor)
                 message = "Off. Posts it already made keep the name they were written under."
+        elif choice == "v" and config is not None and config.enabled_by_user_id is None:
+            config = await lane.run(enable_outbound, door, enabled_by=actor)
+            message = (f"You are now responsible for what {sanitize_text(door.name)} posts. "
+                       f"It kept the name {config.label} and its allowed boards.")
         elif choice == "a" and config is not None:
             board = await pick_item(
                 session, await lane.run(list_boards, order_by="alphabetical"),

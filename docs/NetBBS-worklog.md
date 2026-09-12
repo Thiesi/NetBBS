@@ -6622,3 +6622,38 @@ back the budget it just spent.
 A door posts on a named SysOp's authority. If that account is deleted the hook
 lapses rather than posting unattributably, which is also what keeps every
 accepted post audit-loggable.
+
+Review round on the outbound hook found that its central promise was not
+deliverable. A refusal was written into the door's per-launch working
+directory, which is deleted the moment the run ends, so no door could ever
+read one -- neither during the run nor on its next launch, which the contract
+explicitly offered. Results now live in a durable per-door directory beside
+the node database, named in the launch metadata, pruned to the most recent
+few, and released when the hook is switched off. A decision that cannot be
+observed from outside is worth re-checking against the code that implements
+it, not just against the code that records it.
+
+A SysOp's test launch would have published for real. The compatibility
+screen's test and the DOS probe both run the actual game, and the probe runs
+it on every preflight, so trying a door out would have posted its content
+repeatedly. Both are rehearsals now.
+
+A lapsed hook had only a destructive way out. When the enabling account is
+deleted the screen said to switch the door on again, but with a configuration
+present the only available action turned it off, releasing the label and the
+allowlist. The instruction and the available action disagreed and the action
+was the damaging one; vouching now restores the authority alone.
+
+Three bounds were wrong in the same direction: the per-drain cap sat below the
+highest hourly ceiling a SysOp may set, so a permitted configuration could
+lose posts silently; the drop directory was materialized and sorted whole
+before any cap applied, so a door in a write loop would stall the shared
+database lane for every caller; and a request was parsed before its size was
+checked, so a file streamed to disk outside the door's own address-space limit
+would be allocated inside NetBBS. Size a cap against the largest value the
+product itself permits, and bound the scan rather than the slice.
+
+The suffix check was case-sensitive, which excluded the 8.3 upper-case names
+DOS produces -- and DOS doors were the stated reason for choosing a file drop
+over a socket. A justification that the implementation does not honour is
+worth testing directly.

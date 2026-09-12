@@ -38,13 +38,16 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 import re
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.auth.users import DOOR_LABEL_SUFFIX, User, get_user_by_id
 from netbbs.boards.boards import Board, _row_to_board
+from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
 from netbbs.boards.posts import PostError, create_labelled_post
 from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
@@ -61,17 +64,44 @@ OUTBOUND_DIRNAME = "outbound"
 _REQUEST_SUFFIX = ".json"
 _RESULT_SUFFIX = ".result.json"
 
+#: Where a door's results are kept. Deliberately *not* the door's working
+#: directory: that is a fresh temporary directory per launch which is deleted
+#: the moment the run ends, so a result written there could never be read by
+#: anyone -- not by a door polling during the run, and not by the same door on
+#: its next launch, which is what the contract promises. Durable, per door,
+#: beside the node database so a backup carries it.
+_RESULTS_DIRNAME = "door-outbound"
+
+#: Results kept per door. A door reads the outcome of what it just wrote; it
+#: has no use for the hundredth-oldest, and an unbounded directory beside the
+#: node database is a slow leak nobody would notice.
+_RESULTS_KEPT = 32
+
 #: Default ceiling, per door, per rolling hour. One number rather than one
 #: per target kind: two knobs would be two knobs nobody tunes, and the SysOp
 #: who owns the trust decision can raise this one where it matters.
 DEFAULT_POSTS_PER_HOUR = 6
+#: Highest ceiling a SysOp may set. Everything below is sized against it.
+MAX_POSTS_PER_HOUR = 240
 _RATE_WINDOW = datetime.timedelta(hours=1)
 
-#: How many requests one drain will look at. A door that fills its drop
-#: directory faster than the rate ceiling lets through is misbehaving; the
-#: cap keeps one session's cleanup bounded rather than proportional to
-#: whatever it wrote.
-_MAX_REQUESTS_PER_DRAIN = 64
+#: How many requests one drain answers. Above `MAX_POSTS_PER_HOUR` on purpose:
+#: a cap *below* the highest ceiling a SysOp can set would silently discard
+#: posts from a configuration NetBBS itself permits.
+_MAX_REQUESTS_PER_DRAIN = MAX_POSTS_PER_HOUR + 16
+
+#: How many directory entries one drain will even enumerate. `iterdir()` plus
+#: `sorted()` materializes the whole directory before any cap applies, and a
+#: door in a write loop would make the drain allocate proportionally to
+#: whatever it wrote -- on the shared `DatabaseLane`, so every other caller's
+#: database work waits behind it. Scanning stops here instead.
+_MAX_REQUESTS_SCANNED = 4 * _MAX_REQUESTS_PER_DRAIN
+
+#: Largest request we will read into memory. A door can stream a file to disk
+#: without it counting against its own `RLIMIT_AS`; `read_text()` and
+#: `json.loads()` would then allocate all of it inside NetBBS. Sized well
+#: above a legitimate post so nothing real is refused by it.
+_MAX_REQUEST_BYTES = MAX_SUBJECT_BYTES + MAX_BODY_BYTES + 16 * 1024
 
 #: Longest label we will mint, matching `_MAX_USERNAME_LENGTH`, because the
 #: label federates as `local_user_id` and a peer validates it as a handle.
@@ -223,14 +253,18 @@ def disable_outbound(db: Database, door, *, disabled_by: User) -> None:
     db.connection.execute("DELETE FROM door_outbound_history WHERE door_id = ?", (door.id,))
     db.connection.execute("DELETE FROM door_outbound WHERE door_id = ?", (door.id,))
     db.connection.commit()
+    # Releases everything, results included: they name a label this door no
+    # longer holds, and leaving them would be the one piece of the hook that
+    # switching it off did not switch off.
+    shutil.rmtree(results_dir(db, door.id), ignore_errors=True)
     record_action(db, actor=disabled_by, action="door_outbound", object_type="door",
                   object_id=door.id, detail=f"door={door.name!r} action=disable label={config.label!r}")
 
 
 def set_rate_ceiling(db: Database, door, ceiling: int, *, changed_by: User) -> OutboundConfig:
     """Change how many posts an hour this door may make."""
-    if not 1 <= ceiling <= 240:
-        raise OutboundError("the hourly ceiling must be between 1 and 240")
+    if not 1 <= ceiling <= MAX_POSTS_PER_HOUR:
+        raise OutboundError(f"the hourly ceiling must be between 1 and {MAX_POSTS_PER_HOUR}")
     if outbound_config(db, door.id) is None:
         raise OutboundError("this door's outbound hook is not switched on")
     db.connection.execute(
@@ -351,22 +385,101 @@ def _resolve_board(db: Database, door_id: int, requested: object) -> tuple[Board
     return None, f"board {requested!r} is not allowlisted for this door"
 
 
-def _write_result(request: Path, payload: dict) -> None:
-    """Leave the outcome beside the request, atomically, then drop the request.
+def _is_request(name: str) -> bool:
+    """A finished request, not a result and not a half-written file.
 
-    Written temp-then-rename for the same reason the door is asked to do it:
-    a door polling for its result must never read half a file. The request
-    itself is removed once answered, so the drop directory does not
-    accumulate work that has already been done.
+    Case-folded because a DOS door writes 8.3 names in upper case -- and DOS
+    doors are the reason a file drop was chosen over a socket in the first
+    place, so `POST.JSON` has to count.
     """
-    result = request.with_name(request.name[: -len(_REQUEST_SUFFIX)] + _RESULT_SUFFIX)
-    staging = result.with_suffix(".part")
+    lowered = name.lower()
+    return lowered.endswith(_REQUEST_SUFFIX) and not lowered.endswith(_RESULT_SUFFIX)
+
+
+def _scan_requests(directory: Path) -> tuple[list[Path], bool]:
+    """Finished requests in `directory`, bounded; and whether we stopped early.
+
+    `os.scandir` with an explicit bound rather than `sorted(iterdir())`: the
+    latter materializes and orders the whole directory before any cap can
+    apply, so a door stuck in a write loop would make this allocate in
+    proportion to whatever it wrote -- and the drain runs on the shared
+    `DatabaseLane`, so every other caller's database work would wait behind it.
+    """
+    found: list[Path] = []
+    truncated = False
     try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if len(found) >= _MAX_REQUESTS_SCANNED:
+                    truncated = True
+                    break
+                try:
+                    if entry.is_file() and _is_request(entry.name):
+                        found.append(Path(entry.path))
+                except OSError:
+                    continue
+    except OSError:
+        return [], False
+    # Sorted so a door which numbers its requests gets them in its own order,
+    # and so two runs over the same directory behave identically.
+    return sorted(found), truncated
+
+
+def _refuse_all(db: Database, door, requests: list[Path], reason: str) -> int:
+    """Answer every request in `requests` with the same refusal."""
+    for request in requests:
+        _write_result(db, door.id, request, {"status": "rejected", "reason": reason})
+    return len(requests)
+
+
+def results_dir(db: Database, door_id: int) -> Path:
+    """Where this door's results are kept, across launches."""
+    return db.path.parent / _RESULTS_DIRNAME / str(door_id)
+
+
+def _prune_results(directory: Path) -> None:
+    """Keep only the most recent results, oldest first out."""
+    try:
+        existing = sorted(directory.glob("*" + _RESULT_SUFFIX), key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return
+    for stale in existing[:-_RESULTS_KEPT]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def _write_result(db: Database, door_id: int, request: Path, payload: dict) -> None:
+    """Record the outcome durably, then drop the request.
+
+    Not written beside the request. The drop directory lives in the door's
+    per-launch working directory, which is deleted the moment the run ends --
+    a result left there could never be read by anybody, which would make the
+    promise that a refusal is always visible to the door untrue in practice.
+    It goes in a per-door directory beside the node database instead, named in
+    `door_info.json` so the door knows where to look on its next launch.
+
+    Temp-then-rename for the same reason the door is asked to use it: a door
+    polling for its result must never read half a file. The request itself is
+    removed once answered, so the drop directory does not accumulate work
+    already done.
+    """
+    directory = results_dir(db, door_id)
+    result = directory / (request.name[: -len(_REQUEST_SUFFIX)] + _RESULT_SUFFIX)
+    staging = result.with_name(result.name + ".part")
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
         staging.write_text(json.dumps(payload), encoding="utf-8")
         staging.replace(result)
-        request.unlink(missing_ok=True)
     except OSError as exc:
         _logger.warning("could not write door outbound result %s: %s", result, exc)
+    finally:
+        try:
+            request.unlink(missing_ok=True)
+        except OSError:
+            pass
+    _prune_results(directory)
 
 
 def drain(db: Database, door, workdir: Path, *, node_identity=None) -> tuple[int, int]:
@@ -387,21 +500,12 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None) -> tuple[int
     because its drop directory was unreadable.
     """
     directory = workdir / OUTBOUND_DIRNAME
-    try:
-        requests = sorted(
-            path for path in directory.iterdir()
-            if path.is_file() and path.name.endswith(_REQUEST_SUFFIX)
-            and not path.name.endswith(_RESULT_SUFFIX)
-        )
-    except OSError:
-        return 0, 0
+    requests, truncated = _scan_requests(directory)
 
     config = outbound_config(db, door.id)
     if config is None:
-        for request in requests[:_MAX_REQUESTS_PER_DRAIN]:
-            _write_result(request, {"status": "rejected",
-                                    "reason": "this door's outbound hook is not switched on"})
-        return 0, len(requests[:_MAX_REQUESTS_PER_DRAIN])
+        return 0, _refuse_all(db, door, requests,
+                              "this door's outbound hook is not switched on")
 
     # A door posts on a named SysOp's authority. If that account is gone the
     # authority has lapsed with it, and there would also be no actor to
@@ -409,13 +513,9 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None) -> tuple[int
     # it on again, rather than posting unattributably.
     actor = get_user_by_id(db, config.enabled_by_user_id) if config.enabled_by_user_id else None
     if actor is None:
-        for request in requests[:_MAX_REQUESTS_PER_DRAIN]:
-            _write_result(request, {
-                "status": "rejected",
-                "reason": "the account which enabled this door's outbound no longer exists; "
-                          "a SysOp must switch it on again",
-            })
-        return 0, len(requests[:_MAX_REQUESTS_PER_DRAIN])
+        return 0, _refuse_all(db, door, requests,
+                              "the account which enabled this door's outbound no longer exists; "
+                              "a SysOp must switch it on again")
 
     posted = refused = 0
     for request in requests[:_MAX_REQUESTS_PER_DRAIN]:
@@ -426,6 +526,13 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None) -> tuple[int
             refused += 1
             _log_refusal_once_per_window(db, door, config, actor, reason)
             config = outbound_config(db, door.id) or config
+    overflow = requests[_MAX_REQUESTS_PER_DRAIN:]
+    if overflow or truncated:
+        refused += _refuse_all(
+            db, door, overflow,
+            f"more than {_MAX_REQUESTS_PER_DRAIN} requests in one session; "
+            "the rest were not processed")
+        _log_refusal_once_per_window(db, door, config, actor, "per-session request flood")
     return posted, refused
 
 
@@ -433,34 +540,43 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, request
                 *, node_identity=None) -> str | None:
     """Post one request, or return the reason it was refused."""
     try:
+        # Checked before reading, not after parsing. A door can stream a file
+        # to disk without it counting against its own RLIMIT_AS, and reading
+        # it whole would allocate all of it inside NetBBS, on the shared lane.
+        if request.stat().st_size > _MAX_REQUEST_BYTES:
+            _write_result(db, door.id, request, {
+                "status": "rejected",
+                "reason": f"request is larger than {_MAX_REQUEST_BYTES} bytes",
+            })
+            return "oversized request"
         payload = json.loads(request.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        _write_result(request, {"status": "rejected", "reason": "request is not readable JSON"})
+        _write_result(db, door.id, request, {"status": "rejected", "reason": "request is not readable JSON"})
         return "malformed request"
     if not isinstance(payload, dict):
-        _write_result(request, {"status": "rejected", "reason": "request must be a JSON object"})
+        _write_result(db, door.id, request, {"status": "rejected", "reason": "request must be a JSON object"})
         return "malformed request"
 
     subject, body = payload.get("subject"), payload.get("body")
     if not isinstance(subject, str) or not isinstance(body, str) or not subject.strip():
-        _write_result(request, {"status": "rejected",
+        _write_result(db, door.id, request, {"status": "rejected",
                                 "reason": "request needs a non-empty 'subject' and a 'body' string"})
         return "malformed request"
 
     board, problem = _resolve_board(db, door.id, payload.get("board"))
     if board is None:
-        _write_result(request, {"status": "rejected", "reason": problem})
+        _write_result(db, door.id, request, {"status": "rejected", "reason": problem})
         return problem
 
     if _recent_post_count(db, door.id) >= config.posts_per_hour:
         reason = f"rate limit reached ({config.posts_per_hour} posts per hour)"
-        _write_result(request, {"status": "rejected", "reason": reason})
+        _write_result(db, door.id, request, {"status": "rejected", "reason": reason})
         return reason
 
     try:
         post = create_labelled_post(db, board, config.label, subject, body)
     except PostError as exc:
-        _write_result(request, {"status": "rejected", "reason": str(exc)})
+        _write_result(db, door.id, request, {"status": "rejected", "reason": str(exc)})
         return "post refused"
 
     db.connection.execute(
@@ -488,7 +604,7 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, request
     record_action(db, actor=actor, action="door_outbound_post", object_type="board",
                   object_id=board.id,
                   detail=f"door={door.name!r} label={config.label!r} post={post.post_id}")
-    _write_result(request, {"status": "posted", "post_id": post.post_id,
+    _write_result(db, door.id, request, {"status": "posted", "post_id": post.post_id,
                             "board": board.name, "moderated": board.moderated})
     return None
 
@@ -506,6 +622,10 @@ def door_info_block(db: Database, door_id: int) -> dict | None:
     return {
         "label": config.label,
         "directory": OUTBOUND_DIRNAME,
+        # Absolute, and outside the working directory on purpose: the workdir
+        # is deleted when the run ends, so this is the only place a result can
+        # survive long enough for the door to read it on its next launch.
+        "results": str(results_dir(db, door_id)),
         "boards": [board.name for board in targets(db, door_id)],
         "posts_per_hour": config.posts_per_hour,
     }
