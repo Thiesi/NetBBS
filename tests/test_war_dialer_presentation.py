@@ -416,10 +416,14 @@ def test_unusable_world_has_readable_exit_without_replacement(tmp_path, future_s
     assert path.read_bytes() == before
 
 
-#: The frame's corners and rules, in both the heavy set the rebuilt screens use
-#: (issue #494) and the ASCII substitutes the `plain` preset gets.
-_FRAME_EDGES = "┏┗┣┓┛┫╔╚╠+"
-_FRAME_FILL = set("━═─-=+| ┏┓┗┛┣┫")
+#: The frame's corners and rules. Light since issue #517 -- a run of heavy `━`
+#: shows gaps at the cell seams in many monospace fonts, so the border read as
+#: a failed render. The heavy set stays listed: a caller's saved capture, and
+#: the double-line set an older screen used, are still recognised here, and a
+#: helper that stopped seeing a frame would silently return an empty string
+#: rather than fail, which is how this file's own assertions go quiet.
+_FRAME_EDGES = "┌└├┐┘┤┏┗┣┓┛┫╔╚╠+"
+_FRAME_FILL = set("━═─-=+| ┌┐└┘├┤┏┓┗┛┣┫")
 
 
 def _rows(screen: str, *, keep_style: bool = False) -> list[str]:
@@ -467,7 +471,7 @@ def _screen_text(written) -> str:
         row = row.strip()
         if not row or row[0] in _FRAME_EDGES or set(row) <= _FRAME_FILL:
             continue
-        words += row.strip("║┃|").split()
+        words += row.strip("║┃│|").split()
     return " ".join(words)
 
 
@@ -528,9 +532,21 @@ def _running_door(tmp_path, *, new_player=False, event=False):
         deadline = time.monotonic() + 8
         while True:
             plain, offsets = _plain_with_offsets(pending)
-            at = plain.find(marker)
+            # Runs of spaces are collapsed on both sides. An action bar is laid
+            # out on a grid (issue #517), so the gap between two entries is
+            # whatever that column needed -- padding a marker to match it would
+            # pin a layout detail in every one of these waits.
+            collapsed, back, previous_space = bytearray(), [], False
+            for index, byte in enumerate(plain):
+                if byte == 0x20 and previous_space:
+                    continue
+                collapsed.append(byte)
+                back.append(index)
+                previous_space = byte == 0x20
+            needle = re.sub(rb" +", b" ", marker)
+            at = bytes(collapsed).find(needle)
             if at >= 0:
-                del pending[:offsets[at + len(marker) - 1] + 1]
+                del pending[:offsets[back[at + len(needle) - 1]] + 1]
                 return
             try:
                 chunk = chunks.get(timeout=max(0.01, deadline - time.monotonic()))
@@ -996,7 +1012,7 @@ def test_history_pages_fit_terminal_and_preserve_long_unicode_records(tmp_path, 
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
         # The frame is not part of a record: take the borders off the row.
-        body.extend(line.strip("║┃ ") for line in lines if "界" in line or "END" in line)
+        body.extend(line.strip("║┃│ ") for line in lines if "界" in line or "END" in line)
     assert "".join(body).replace(" ", "") == "界e\u0301" * 600 + "END"
     assert len(wd.unseen_events(conn, 1)) == (0 if unseen_only else 1)
     conn.close()
@@ -1247,7 +1263,8 @@ def test_text_screen_pages_preserve_content_with_clear_back_path(monkeypatch, wi
         lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
-        assert lines[-1] == "[N] Next [P] Prev [B] Back"
+        # Same reasoning as `wait_for`: the gap is the grid's, not the bar's.
+        assert " ".join(lines[-1].split()) == "[N] Next [P] Prev [B] Back"
     assert "".join(written).count("界") == 200
 
 
@@ -2076,7 +2093,7 @@ def test_exchange_map_shows_actual_ring_security_services_and_viewer_price(tmp_p
     monkeypatch.setattr(wd, 'read_menu_choice', select)
     wd.show_territory(wd.Palette(False), conn, 80, 24, viewer_id=1)
     rows = [row for screen in ''.join(written).split(CLEAR)[1:] for row in _rows(screen)]
-    text = ' '.join(' '.join(' '.join(rows).split('┃')).split())
+    text = ' '.join(' '.join(' '.join(rows).split(wd.gl('v'))).split())
     # Node 1 neighbours node 10, which this viewer holds, so its Warez Hub
     # capture is discounted from $75 to $65 and its ring links name both sides.
     assert 'links #10, #2' in text and 'capture $40' in text and 'base $50' in text
@@ -2154,7 +2171,7 @@ def test_neutral_map_paginates_names_defense_and_return_deadline(tmp_path, monke
     body = []
     for screen in ''.join(written).split(CLEAR)[1:]:
         body.extend(_rows(screen)[1:-1])
-    normalized = ' '.join(' '.join(' '.join(body).split('┃')).split())
+    normalized = ' '.join(' '.join(' '.join(body).split(wd.gl('v'))).split())
     assert 'Returns if still unclaimed at' in normalized
     assert 'Night Relay Union' in normalized and 'Spool Archive Collective' in normalized
     assert wd.read_player(conn, 1).turns_used == 0
@@ -2622,7 +2639,7 @@ def test_fast_mode_skips_only_optional_flavor_and_art(tmp_path, monkeypatch):
         written.clear()
         wd.show_territory(palette, conn, 40, 12, viewer_id=1)
         screen = _ANSI_RE.sub('', ''.join(written))
-        assert ('┃' in screen) is framed
+        assert (wd.gl('v') in screen) is framed
         assert 'TEN EXCHANGES' in screen and 'Rain City' in screen
     conn.close()
 
@@ -2704,7 +2721,7 @@ def test_real_process_unicode_metadata_defaults_and_local_override(tmp_path, hos
     result = subprocess.run([sys.executable, '-u', str(_WAR_DIALER_PATH)], input=b'q', capture_output=True, env=env, timeout=PROC_WAIT)
     assert result.returncode == 0 and result.stderr == b''
     ascii_expected = local_ascii if local_ascii is not None else host_unicode is False
-    assert ('\u250f'.encode('utf-8') not in result.stdout) is ascii_expected
+    assert (wd.gl('tl').encode('utf-8') not in result.stdout) is ascii_expected
     assert b'SWITCHBOARD' in result.stdout
 
 
@@ -3855,7 +3872,7 @@ def test_the_root_picker_lists_your_own_exchanges_as_holdings(tmp_path, monkeypa
     monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
     monkeypatch.setattr(wd, "read_input_key", lambda: "B")
     wd.do_root_exchange(palette, conn, player, now, __import__("random").Random(1), 78, 24)
-    rows = [row.strip("┃ ") for row in _ANSI_RE.sub("", _last_screen("".join(written))).split("\r\n")]
+    rows = [row.strip(wd.gl("v") + " ") for row in _ANSI_RE.sub("", _last_screen("".join(written))).split("\r\n")]
     # The caller's own entry is the unselectable one, and runs until the next key.
     start = next(index for index, row in enumerate(rows) if row.startswith("[-]"))
     end = next(index for index in range(start + 1, len(rows))
@@ -4060,13 +4077,13 @@ def test_a_rival_exchange_points_at_the_action_it_priced(tmp_path):
 def test_a_walk_reads_an_entry_through_either_frame():
     """The plain preset draws the box in ASCII, and a selector has to see past it.
 
-    Stripping only the Unicode `┃` left every entry row beginning with `|` before
+    Stripping only one weight of vertical left every entry row beginning with `|` before
     its `[K]` marker, so under that preset no walk that names an entry by what it
     is could find one -- and the whole build died on the first of them.
     """
     gallery = _gallery()
-    for edge in ("\u2503  [2] Bay   \u27e6WAREZ HUB\u27e6", "|  [2] Bay   [WAREZ HUB]",
-                 "  [2] Bay   [WAREZ HUB]"):
+    for edge in ("\u2502  [2] Bay   \u27e6WAREZ HUB\u27e6", "\u2503  [2] Bay   \u27e6WAREZ HUB\u27e6",
+                 "|  [2] Bay   [WAREZ HUB]", "  [2] Bay   [WAREZ HUB]"):
         assert re.match(r"\[(\w)\]", gallery.FRAME_EDGE.sub("", edge)).group(1) == "2", edge
     # And a row of prose that merely mentions a key is not an entry.
     assert not re.match(r"\[(\w)\]",
@@ -4173,7 +4190,7 @@ def test_a_selectable_key_always_arrives_with_its_entry(width, height, monkeypat
         rows = [_ANSI_RE.sub("", row) for row in _rows(screen)]
         offered = set(re.findall(r"\[(\w)\]", next(
             (row for row in rows if row.startswith("pick ")), "")))
-        shown = {key for row in rows for key in re.findall(r"^\W*\[(\w)\]", row.strip("┃ "))}
+        shown = {key for row in rows for key in re.findall(r"^\W*\[(\w)\]", row.strip(wd.gl("v") + " "))}
         assert offered <= shown, (offered - shown, rows)
 
 
@@ -4347,3 +4364,110 @@ def test_the_door_adopts_the_timezone_from_its_drop_file(tmp_path, monkeypatch):
     loaded = wd._load_door_info()
     wd.apply_timezone(loaded.get("timezone"))
     assert wd.when(_A_MOMENT) == "2026-10-10 21:19 JST"
+
+
+# -- the presentation defects of issue #517 --------------------------------
+
+
+def test_the_frame_is_light_box_drawing():
+    """Heavy `━` shows gaps at the cell seams in many monospace fonts, so the
+    border read as a failed render rather than a box."""
+    assert {wd.gl(name) for name in ("tl", "tr", "bl", "br", "h", "v", "ml", "mr")} == set("┌┐└┘─│├┤")
+
+
+def test_the_scanline_is_not_the_frames_own_glyph():
+    # It used to be a run of `━` inset two columns and joined to nothing,
+    # between two borders made of that same character.
+    p = wd.Palette(truecolor=True)
+    drawn = _ANSI_RE.sub("", wd.scanline(p, 60))
+    assert wd.gl("h") not in drawn
+    assert set(drawn) <= set("▓▒░")
+
+
+def test_the_scanline_fades_in_density_not_only_colour():
+    """Monochrome returns no SGR at all, so a colour-only fade is flat there."""
+    p = wd.Palette(truecolor=True)
+    p.monochrome = True
+    try:
+        wd._MONOCHROME = True
+        drawn = _ANSI_RE.sub("", wd.scanline(p, 60))
+    finally:
+        wd._MONOCHROME = False
+    assert drawn.count("▓") and drawn.count("▒") and drawn.count("░")
+    # Brightest first: the beam has just passed on the left.
+    assert drawn.index("▓") < drawn.index("▒") < drawn.index("░")
+
+
+def test_the_scanline_fades_under_the_ascii_preset_too():
+    p = wd.Palette(truecolor=True)
+    try:
+        wd._ASCII_DECOR = True
+        drawn = _ANSI_RE.sub("", wd.scanline(p, 60))
+    finally:
+        wd._ASCII_DECOR = False
+    assert len(set(drawn)) == 3, drawn
+
+
+def test_the_ring_stems_stand_under_the_nodes_they_join(tmp_path):
+    """The docstring claimed the verticals closed the ring; they sat two
+    columns past the last node, so it read as two chains and two floaters."""
+    conn, _now = _painted_world(tmp_path, "ring.db")
+    p = wd.Palette(truecolor=True)
+    exchanges = wd.list_exchanges(conn, 1)
+    rows = [_ANSI_RE.sub("", row) for row in wd.scene_map(p, exchanges, 1, 78)]
+    assert len(rows) == 3, rows
+    top, middle, bottom = rows
+    stems = [index for index, ch in enumerate(middle) if ch == wd.gl("link_v")]
+    assert len(stems) == 2, middle
+    for column in stems:
+        nodes = {wd.gl(name) for name in ("mine", "rival", "npc", "free")}
+        assert top[column] in nodes, (column, top)
+        assert bottom[column] in nodes, (column, bottom)
+
+
+def test_the_label_role_is_not_another_green():
+    """Labels were `#87af87` at 256 -- sage -- on a green screen."""
+    red, green, blue = wd.Palette.ROLES["grey"][0]
+    assert not (green > red and green > blue), (red, green, blue)
+    assert wd.Palette.ROLES["grey"][1] != 108
+
+
+def test_every_palette_role_stays_distinct_in_both_depths():
+    truecolour = [rgb for rgb, _ in wd.Palette.ROLES.values()]
+    indexed = [index for _, index in wd.Palette.ROLES.values()]
+    assert len(set(truecolour)) == len(truecolour)
+    assert len(set(indexed)) == len(indexed)
+
+
+@pytest.mark.parametrize("width", [40, 64, 78])
+def test_every_hotkey_begins_a_column(width):
+    """Packed rows put a key wherever the previous label ended."""
+    p = wd.Palette(truecolor=True)
+    entries = tuple((key, label, label[:4]) for key, label in [
+        ("T", "Trade"), ("C", "Crew"), ("J", "Job"), ("R", "Raid"), ("X", "Root"),
+        ("G", "Garrison"), ("S", "Kit"), ("O", "Ops"), ("B", "Rank"), ("E", "Map"),
+        ("V", "Rivals"), ("H", "Log"), ("I", "Scene"), ("?", "Help"), ("Q", "Quit")])
+    rows = [_ANSI_RE.sub("", row) for row in wd.key_bar(p, entries, width, 4)]
+    columns = [[index for index, ch in enumerate(row) if ch == "["] for row in rows]
+    for row in rows:
+        assert sum(wd._char_width(ch) for ch in row) <= width, (width, row)
+    # Every row's keys sit on columns the first row also uses: a short final
+    # row is fine, a row whose keys land between another's columns is not.
+    for row_columns in columns[1:]:
+        assert set(row_columns) <= set(columns[0]), (columns, rows)
+
+
+def test_no_key_is_dropped_when_the_bar_must_shrink():
+    p = wd.Palette(truecolor=True)
+    entries = tuple((key, f"Label{key}", key) for key in "ABCDEFGHIJKLMNO")
+    rows = " ".join(_ANSI_RE.sub("", row) for row in wd.key_bar(p, entries, 40, 2))
+    for key, _, _ in entries:
+        assert f"[{key}]" in rows, key
+
+
+def test_full_labels_are_kept_when_shortening_would_not_save_a_row():
+    """Spending the labels *and* keeping the extra row is the worst of both."""
+    p = wd.Palette(truecolor=True)
+    entries = tuple((key, f"Label{key}", "L") for key in "AB")
+    rows = " ".join(_ANSI_RE.sub("", row) for row in wd.key_bar(p, entries, 78, 1))
+    assert "LabelA" in rows and "LabelB" in rows

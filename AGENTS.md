@@ -113,7 +113,10 @@ The standing principle is:
   walk can *reach* -- Voidrunner's combat, which happens on a jump -- needs a
   fixture of its own in `FIXTURE_BUILDERS`, built by playing the door rather than
   by writing a save; `%` keeps every
-  page of a card stack rather than fast-forwarding to the last; `SETUP` plays a
+  page of a card stack rather than fast-forwarding to the last; `^` keeps what a
+  door drew *before* its first screen cleared, which is the only way to reach a
+  masthead -- War Dialer's scanline was rebuilt once with no panel to review it
+  on because nothing could photograph the screen it lives on; `SETUP` plays a
   panel's world into the state a screen needs; and each walk says in `SHOWS` what
   its screen must show, with the build refusing a panel that does not show it. What the tests *can* assert, and do:
   that colour reaches every body row, that a hotkey, a label, a value and the

@@ -65,7 +65,9 @@ CLEAR = "\x1b[2J\x1b[H"
 # (`|` where Unicode has `┃`), and stripping only the Unicode one left every entry
 # row beginning with a character before its `[K]` marker -- so under that preset
 # no walk that names an entry by what it is could find one.
-FRAME_EDGE = re.compile(r"^[\s┃|]*")
+# Both weights of vertical: War Dialer moved from heavy to light in issue
+# #517, Voidrunner has always drawn light, and the ASCII presets use "|".
+FRAME_EDGE = re.compile(r"^[\s┃││|]*")
 #: A screen's own statement of which page this is, which it prints for this.
 PAGE_NOTE = re.compile(r"page (\d+)/(\d+)")
 
@@ -164,6 +166,10 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Navigation Chart, map", b"CV"),
     ],
     "war_dialer": [
+        # The masthead, drawn before the first screen clears: `^` keeps what a
+        # walk would otherwise throw away. Its scanline is the door's only
+        # gradient, and had no panel to be reviewed on at all.
+        ("Masthead", b"^"),
         # Before the career exists: the guide every new caller is handed, paged
         # with any key, which is why it is walked with Enter rather than [N].
         ("First visit", b"\r%"),
@@ -437,6 +443,7 @@ SETUP: dict[str, dict[str, bytes]] = {
 # unchecked.
 SHOWS: dict[str, dict[str, str]] = {
     "war_dialer": {
+        "Masthead": "W A R   D I A L E R",
         "First visit": "FIRST VISIT",
         "While you were away": "WHILE YOU WERE AWAY",
         "Switchboard, season closing": "SEASON RESET",
@@ -825,6 +832,13 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
     pages: list[str] | None = None
     try:
         running.settle()
+        if keys == b"^":
+            # The masthead, and anything else a door draws before its first
+            # screen clears. `last_screen` keeps what follows the clear, so
+            # these were unreachable by any walk: War Dialer's scanline was
+            # rebuilt in issue #517 with no panel to review it on.
+            running.kill()
+            return [running.read().split(CLEAR)[0]]
         index = 0
         while index < len(keys):
             key, suffix = keys[index:index + 1], keys[index + 1:index + 2]
