@@ -12966,12 +12966,14 @@ async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "g":
             await session.write_line("")
-            await _door_gallery_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _door_gallery_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed,
+                                       door_services=door_services)
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "f":
             await session.write_line("")
-            await _door_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _door_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed,
+                                          door_services=door_services)
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "l":
@@ -13163,7 +13165,7 @@ def _find_door_by_name(db: Database, name: str) -> Door | None:
 
 
 async def _resolve_door_name_collision(
-    session: Session, lane: DatabaseLane, actor: User, default_name: str,
+    session: Session, lane: DatabaseLane, actor: User, default_name: str, *, door_services: Any = None,
 ) -> str | None:
     """Shared by every screen that prefills a *new* door registration
     from a default name it didn't get to choose freely (the bundled-door
@@ -13204,7 +13206,7 @@ async def _resolve_door_name_collision(
             break
         await session.write(reject_unhandled_key(choice))
     if choice == "e":
-        await _door_detail_screen(session, lane, actor, existing)
+        await _door_detail_screen(session, lane, actor, existing, door_services=door_services)
         return None
     if choice != "n":
         return None
@@ -13215,7 +13217,7 @@ async def _resolve_door_name_collision(
 
 async def _door_gallery_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
-    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool, *, door_services: Any = None,
 ) -> None:
     """Browse NetBBS's own first-party doors (issue #172) and register
     one with sensible defaults pre-filled, instead of starting
@@ -13309,7 +13311,8 @@ async def _door_gallery_screen(
         await session.write_line(colored(f"  Interpreter (default, editable next): {sys.executable}", fg_color=MUTED_COLOR))
         await session.write_line(colored(f"  Script: {path}", fg_color=MUTED_COLOR))
 
-        prefill_name = await _resolve_door_name_collision(session, lane, actor, entry.name)
+        prefill_name = await _resolve_door_name_collision(session, lane, actor, entry.name,
+                                                         door_services=door_services)
         if prefill_name is None:
             continue
 
@@ -13333,7 +13336,7 @@ async def _door_gallery_screen(
 
 async def _door_filesystem_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
-    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool, *, door_services: Any = None,
 ) -> None:
     """A SysOp's *own* door scripts, not NetBBS's -- the direct
     counterpart to `[G]allery` for something a SysOp wrote or downloaded
@@ -13397,7 +13400,8 @@ async def _door_filesystem_screen(
         await session.write_line(colored(f"  Interpreter (default, editable next): {sys.executable}", fg_color=MUTED_COLOR))
         await session.write_line(colored(f"  Script: {path}", fg_color=MUTED_COLOR))
 
-        prefill_name = await _resolve_door_name_collision(session, lane, actor, path.stem)
+        prefill_name = await _resolve_door_name_collision(session, lane, actor, path.stem,
+                                                         door_services=door_services)
         if prefill_name is None:
             continue
 

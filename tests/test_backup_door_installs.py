@@ -250,3 +250,30 @@ def test_a_database_named_door_installs_still_restores_when_capture_is_off(tmp_p
     restore_backup(source=backup, db_path=target, identity_dir=tmp_path / "restored-identity")
 
     assert target.is_file(), "the database snapshot was dropped during staging"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX Unix sockets")
+def test_a_live_health_socket_does_not_abort_the_backup(tmp_path, db_path, identity_dir):
+    """The documented service layout puts one inside the installation.
+
+    `copytree` cannot copy a socket and raises, so without this the ordinary
+    configuration the door guide recommends would abort every backup.
+    """
+    import socket
+
+    directory = _install(tmp_path, "served")
+    (directory / "run").mkdir()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(directory / "run" / "game.sock"))
+    try:
+        _register(db_path, "Served", directory)
+        _enable(db_path)
+
+        backup = create_backup(db_path=db_path, identity_dir=identity_dir,
+                               destination=tmp_path / "backup")
+    finally:
+        server.close()
+
+    copied = backup / "door-installs" / "1"
+    assert (copied / "scores.dat").read_text(encoding="utf-8") == "top: 42", "the data was captured"
+    assert not (copied / "run" / "game.sock").exists(), "the socket should be skipped, not copied"

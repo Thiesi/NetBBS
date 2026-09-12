@@ -530,6 +530,25 @@ def _door_install_sources(db_path: Path) -> list[tuple[str, Path]]:
     return unique
 
 
+def _ignore_special_files(directory, names):
+    """Names in `directory` which are neither a regular file, a directory nor
+    a symlink -- sockets, FIFOs and device nodes. Backing up a game
+    installation means its data, and a live socket cannot be copied at all.
+    """
+    skipped = set()
+    for name in names:
+        path = Path(directory) / name
+        try:
+            if path.is_symlink() or path.is_file() or path.is_dir():
+                continue
+        except OSError:
+            # Unreadable is not the same as special; leave it to the copy,
+            # which reports it against the door rather than silently dropping.
+            continue
+        skipped.add(name)
+    return skipped
+
+
 def _capture_door_installs(db_path: Path, destination: Path) -> dict | None:
     """Copy opted-in door installations verbatim beside the node's own state.
 
@@ -552,7 +571,13 @@ def _capture_door_installs(db_path: Path, destination: Path) -> dict | None:
             raise BackupError(
                 f"A backup destination cannot be inside door {name!r}'s installation directory {directory}.")
         target = output / str(index)
-        shutil.copytree(directory, target, symlinks=True)
+        # Sockets, FIFOs and device nodes are not data and cannot be copied:
+        # `copytree` raises on a live Unix socket and aborts the whole backup.
+        # A door service's health socket lives inside its installation
+        # directory by documented convention, so this is the ordinary case
+        # rather than an exotic one -- and the pathname can outlive the
+        # service, so halting it first is not enough.
+        shutil.copytree(directory, target, symlinks=True, ignore=_ignore_special_files)
         files = [path for path in target.rglob("*") if path.is_file() and not path.is_symlink()]
         captured.append({"key": str(index), "door_name": name, "source_path": str(directory),
                          "file_count": len(files), "total_bytes": sum(path.stat().st_size for path in files)})
