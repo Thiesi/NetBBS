@@ -4939,6 +4939,11 @@ def table_records(headers: list[str], rows: list[list[str]], aligns: str = "",
             rest, gap = narrowed, tight
             break
     else:
+        # A column the screen named `optional` is one whose figure the caller
+        # can read on another screen, and it stays dropped: the alternative is
+        # four rows per chart destination at the floor, which is worse for the
+        # one thing that screen is for. A column that must never go is simply
+        # not named optional -- the Hall of Fame's counts are not (#493 review).
         rest, rest_widths, _ = _fit_columns(headers, rows, rest, optional, 1, max(1, width - indent))
         gap = 1
         stacked_fits = False

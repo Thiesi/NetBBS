@@ -567,11 +567,12 @@ Tables narrow gracefully, in two steps. First a table gives up its least useful
 columns: at 40 columns the market keeps the buy and sell price, the hold and the
 `ILLEGAL` flag, and drops the station's stock and demand figures and the price
 spread -- those are still on the commodity's own trade screen, which is where a
-purchase is sized anyway. If dropping every one of them still is not enough, the
-table *stacks*: each record's name goes on a line of its own with the rest
-aligned underneath, and every dropped column comes back, because stacking is a
-change of shape rather than a smaller table. Nothing is ever truncated, and a
-table's column headings reappear at the top of every page of it.
+purchase is sized anyway. If what is left still does not fit, the table
+*stacks*: each record's name goes on a line of its own with the rest aligned
+underneath, on as many lines as it takes. Nothing is ever truncated, and nothing
+a table still carries is lost to stacking -- only that first step drops
+anything, and only figures that are a keypress away on another screen. A table's
+column headings reappear at the top of every page of it.
 
 **Display presets** are chosen from the station deck's **[O] Display Options**,
 and each one previews itself on that screen:

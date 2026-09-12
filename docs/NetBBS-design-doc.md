@@ -5619,10 +5619,17 @@ droppable, worst first -- so a narrow table can carry fewer facts than a wide
 one, and a screen naming a column droppable is saying that figure is available
 elsewhere (the market's depth figures are on the commodity's own trade screen).
 When dropping all of them is still not enough it *stacks* -- each record's first
-column on a row of its own, the rest aligned and indented beneath -- rather than
-overflowing and wrapping into rubble. Stacking restores every dropped column: it
-is a change of shape, not a smaller table, so a stacked 40-column caller reads
-the same facts in two rows that an 80-column caller reads in one. A stacked record stays one paginator entry and moves between pages
+column on a row of its own, the rest aligned and indented beneath, and on a
+further row where one is not wide enough -- rather than overflowing and wrapping
+into rubble. Stacking never drops anything: every column that survived the
+dropping step is on the record somewhere, so the narrow caller reads those facts
+in two or three rows where the wide one reads them in one. The two steps are
+different promises, and a screen chooses between them by what it marks optional:
+mark a column optional only when its figure is a keypress away (the market's
+depth is on the commodity's trade screen; the chart's sector and economy are on
+the star map's Info; the yard's post-refit hold is on the commissioning
+preview), and leave it un-optional when it is not -- the Hall of Fame's rank,
+job and run counts are on no other view, so that table stacks instead. A stacked record stays one paginator entry and moves between pages
 whole. A table's column headings are repeated at the top of every later page
 that carries one of its rows, and only there.
 
