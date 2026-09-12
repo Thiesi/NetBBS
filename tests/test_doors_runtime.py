@@ -267,7 +267,9 @@ _DOOR_ANSI = re.compile(rb"\x1b\[[0-9;]*[a-zA-Z]")
 
 
 @pytest.mark.parametrize("game,keys,expected", [
-    ("retro_trivia.py", "A" * 9, b"Final score:"),
+    # "2" answers the round-length picker (issue #514) with the eight-question
+    # round, then eight answers and one key to dismiss the score.
+    ("retro_trivia.py", "2" + "A" * 9, b"Final score:"),
     ("voidrunner.py", "\rYQ", b"Docking clamps engaged"),
     ("war_dialer.py", " Q", b"W A R"),
 ])
@@ -415,11 +417,12 @@ def test_the_real_demo_door_plays_a_full_round_through_run_door(db, lane, player
 
     async def scenario():
         task = asyncio.create_task(_run(session, lane, door, player))
-        # 8 questions this round, one keystroke each, then one more to
-        # dismiss the final "press any key to leave" prompt.
-        for _ in range(9):
+        # "2" picks the eight-question round from the length picker (issue
+        # #514); then one keystroke per question, then one more to dismiss
+        # the final "press any key to leave" prompt.
+        for key in ["2"] + ["A"] * 9:
             await asyncio.sleep(0.05)
-            session.type_in("A")
+            session.type_in(key)
         return await task
 
     result = asyncio.run(scenario())
@@ -433,6 +436,11 @@ def test_the_real_demo_door_plays_a_full_round_through_run_door(db, lane, player
     assert "Question 1/8" in output
     assert "Question 8/8" in output
     assert "Final score:" in output
+    # Every row fits the negotiated terminal. This held before issue #514 too --
+    # `out_line` passes each row through `_wrap_output`, which re-wraps an
+    # over-long boxed row rather than letting it overflow -- so it is a fit
+    # assertion, not a legibility one. What #514 changed is *how* a long choice
+    # is broken: under its own marker rather than hard against the border.
     assert all(display_width(strip_ansi(line)) <= 40 for line in output.splitlines())
 
 
