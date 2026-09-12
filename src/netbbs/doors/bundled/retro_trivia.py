@@ -448,7 +448,6 @@ QUESTIONS = [
     ("LORD2 continued which earlier door game?", ["Legend of the Red Dragon", "TradeWars 2002", "Barren Realms Elite", "Usurper"], 0),
     ("What does a door game's 'drop file' give the external program?", ["Details of the caller and the connection", "The game's high scores", "The BBS software's licence key", "A list of other nodes"], 0),
     ("Why did many door games limit a caller to a fixed number of turns per day?", ["To keep play fair across callers sharing a node", "Because DOS could not count higher", "To reduce disk usage", "Because modems disconnected hourly"], 0),
-    ("What is an inter-BBS door game?", ["One whose players compete across several BBSes", "One that runs without a BBS", "One installed behind a locked door", "One playable only by the SysOp"], 0),
     ("Which DEC terminal's escape sequences became the model for ANSI terminal emulation?", ["VT100", "TTY 33", "IBM 3270", "Wyse 60"], 0),
     ("Which standard defines the control sequences commonly called ANSI escape codes?", ["ECMA-48", "RFC 854", "POSIX.1", "ISO 9660"], 0),
     ("Which two characters begin a CSI escape sequence?", ["ESC and [", "ESC and ]", "CR and LF", "NUL and ESC"], 0),
@@ -485,7 +484,7 @@ QUESTIONS = [
     ("What is a sliding window in a file-transfer protocol used for?", ["Sending more blocks before waiting for acknowledgement", "Resizing the terminal", "Scrolling the file list", "Selecting a download directory"], 0),
     ("What did a BBS upload/download ratio require of a caller?", ["Contributing files in proportion to what they took", "Paying a subscription", "Staying online a minimum time", "Posting in every message area"], 0),
     ("What was a 'leech' in BBS culture?", ["A caller who downloads without contributing", "A file-transfer protocol", "A kind of modem", "A SysOp's assistant"], 0),
-    ("What does RIME stand for in BBS networking?", ["RelayNet International Message Exchange", "Remote Interactive Mail Exchange", "Routed Internet Mail Envelope", "Realtime Inter-node Message Exchange"], 0),
+    ("Which BBS message network was also known as RelayNet?", ["RIME", "FidoNet", "Usenet", "WWIVnet"], 0),
     ("In a FidoNet address such as 1:105/42.7, what does the number after the dot identify?", ["A point, a system hanging off a node", "The zone", "The net", "The message area"], 0),
     ("What is a FidoNet hub responsible for?", ["Relaying mail for a group of nodes", "Printing the nodelist", "Hosting door games", "Issuing modems"], 0),
     ("What is Zone Mail Hour in FidoNet?", ["A daily period reserved for netmail transfer", "The busiest hour for callers", "A weekly SysOp meeting", "The time limit on a netmail message"], 0),
@@ -554,7 +553,7 @@ QUESTIONS = [
     ("Which line ending does DOS use to end a text line?", ["Carriage return followed by line feed", "Line feed alone", "Carriage return alone", "A null byte"], 0),
     ("What does a terminal's 'scrollback' hold?", ["Lines that have scrolled off the screen", "Keys pressed but not yet read", "The current colour palette", "Pending downloads"], 0),
     ("What does an escape sequence that sets a scroll region restrict?", ["The rows that scroll when text reaches the bottom", "The colours available", "The keyboard layout", "The baud rate"], 0),
-    ("What is a control character, in ASCII terms?", ["A character below 32 that commands rather than prints", "Any character above 127", "A letter with an accent", "A character used in passwords"], 0),
+    ("Which ASCII codes are the control characters?", ["0-31 and 127", "0-31 only", "128-255", "32-126"], 0),
     ("What does the acronym ASCII stand for?", ["American Standard Code for Information Interchange", "Automatic Serial Code for Interactive Input", "Advanced Standard Character Interchange Index", "American System Code for Internal Interchange"], 0),
     ("Which encoding uses one to four bytes per character and is backward compatible with ASCII?", ["UTF-8", "UTF-16", "Latin-1", "CP437"], 0),
     ("What is a 'wide' character in terminal terms?", ["One that occupies two display columns", "One stored in two bytes", "One drawn in bold", "One above code point 65535"], 0),
@@ -565,7 +564,6 @@ QUESTIONS = [
     ("What is a socket, in network programming?", ["An endpoint identified by an address and a port", "A physical connector", "A buffer in the kernel", "A kind of firewall rule"], 0),
     ("What does 'store and forward' describe?", ["Holding a message until the next hop is reachable", "Compressing before sending", "Writing to disk before display", "Caching downloads locally"], 0),
     ("What is latency, as distinct from bandwidth?", ["The delay before data begins to arrive", "The total volume that can be carried", "The error rate of a link", "The number of hops"], 0),
-    ("What is a node number on a multi-line BBS?", ["The identifier of one concurrent caller line", "The caller's account number", "A message area index", "The BBS's phone number"], 0),
     ("What does a BBS 'access level' typically control?", ["Which areas and commands a caller may use", "The caller's modem speed", "The screen width", "The colour scheme"], 0),
     ("What is a validated user on a BBS?", ["One the SysOp has approved for fuller access", "One who has paid a fee", "One connected from a local number", "One with a co-SysOp account"], 0),
     ("What did many SysOps use a callback verifier for?", ["Confirming a new caller's phone number", "Testing modem speed", "Backing up the message base", "Checking file integrity"], 0),
@@ -588,10 +586,15 @@ LETTERS = ["A", "B", "C", "D"]
 QUIT_KEY = "Q"
 
 
-def draw_title(p: Palette, info: dict, width: int = 78, questions: int | None = None) -> None:
-    """The masthead. `questions` is the chosen round length, or `None` before
-    the caller has been asked -- the chip says so rather than naming a number
-    the round may not use."""
+def draw_title(p: Palette, info: dict, width: int = 78) -> None:
+    """The masthead, drawn once before the caller is asked anything.
+
+    Its ROUND chip reads YOU CHOOSE rather than naming a length: the title is
+    printed before the picker and this door does not clear or redraw, so any
+    number here would be a guess at what the caller is about to pick. The
+    chosen length is echoed by the picker and carried by every `Question n/M`
+    header afterwards, so nothing is lost by not repeating it.
+    """
     w = width
     out_line()
     out_line(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}")
@@ -603,8 +606,7 @@ def draw_title(p: Palette, info: dict, width: int = 78, questions: int | None = 
     out_line()
     b1 = f"{p.dark_border}⟦{RESET} {p.muted}NODE:{RESET} {p.accent}{BOLD}{info.get('node_name', 'NetBBS')}{RESET} {p.dark_border}⟧{RESET}"
     b2 = f"{p.dark_border}⟦{RESET} {p.muted}CALLER:{RESET} {p.gold}{BOLD}{info.get('handle', 'Guest')}{RESET} {p.dark_border}⟧{RESET}"
-    round_text = f"{questions} QUESTIONS" if questions else "YOU CHOOSE"
-    b3 = f"{p.dark_border}⟦{RESET} {p.muted}ROUND:{RESET} {p.accent}{BOLD}{round_text}{RESET} {p.dark_border}⟧{RESET}"
+    b3 = f"{p.dark_border}⟦{RESET} {p.muted}ROUND:{RESET} {p.accent}{BOLD}YOU CHOOSE{RESET} {p.dark_border}⟧{RESET}"
     out_line(f"  {b1}   {b2}   {b3}")
     out_line()
     out_line(f"{p.muted}Welcome, {RESET}{p.accent}{BOLD}{info.get('handle', 'Guest')}{RESET}{p.muted}, to {info.get('node_name', 'NetBBS')}'s trivia challenge.{RESET}")

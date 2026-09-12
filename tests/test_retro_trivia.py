@@ -79,6 +79,14 @@ def test_every_question_is_well_formed():
 
 
 def test_no_question_is_asked_twice_in_the_bank():
+    """Exact prompts only -- what this cannot catch is a paraphrase.
+
+    Two entries asking the same fact in different words can still be drawn into
+    one round, and three of those shipped in the first version of the expanded
+    bank. Matching on the *answer* instead would be worse: "Zmodem" is correctly
+    the answer to two unrelated questions already in the bank. So paraphrase is
+    a review concern, not an assertable one; this only guards the literal case.
+    """
     seen = [re.sub(r"[^a-z0-9]+", " ", q.lower()).strip() for q, _, _ in rt.QUESTIONS]
     assert len(seen) == len(set(seen))
 
@@ -147,11 +155,17 @@ def test_an_exhausted_input_falls_back_to_the_classic_round(keys):
     assert chosen == rt.QUESTIONS_PER_ROUND
 
 
-def test_the_masthead_does_not_name_a_length_before_one_is_chosen():
+def test_the_masthead_does_not_name_a_length_it_cannot_know():
+    # The title is printed before the picker and the door never redraws it, so
+    # a number in this chip would be a guess. An earlier revision took a
+    # `questions` argument that nothing in `main()` ever passed, which made the
+    # branch naming a length unreachable in play while a unit test called it
+    # directly and looked green.
     _, drawn = _drawn(lambda: rt.draw_title(rt.Palette(truecolor=True), {}, width=78))
-    assert "8 QUESTIONS" not in drawn
-    _, chosen = _drawn(lambda: rt.draw_title(rt.Palette(truecolor=True), {}, width=78, questions=12))
-    assert "12 QUESTIONS" in chosen
+    assert "YOU CHOOSE" in drawn
+    assert "QUESTIONS" not in drawn.replace("YOU CHOOSE", "")
+    import inspect
+    assert "questions" not in inspect.signature(rt.draw_title).parameters
 
 
 # -- fitting the terminal ------------------------------------------------
