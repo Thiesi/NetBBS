@@ -1320,10 +1320,16 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
             # inside a game installation would fail an otherwise valid node
             # restore, and a live one would drag unrelated host data into
             # staging. Excluded at the archive root only.
+            # Only when the manifest says this archive actually has the
+            # capture-only component. A node whose database is *named*
+            # `door-installs` keeps that basename when no installations were
+            # captured, and skipping it unconditionally would drop the
+            # database snapshot and make a good backup unrestorable.
+            skip = ({_DOOR_INSTALLS_DIRNAME}
+                    if manifest.get("door_installs") is not None else set())
             shutil.copytree(source, staging_dir, dirs_exist_ok=True,
                             ignore=lambda directory, names:
-                            {_DOOR_INSTALLS_DIRNAME}
-                            if Path(directory).resolve() == source.resolve() else set())
+                            skip if Path(directory).resolve() == source.resolve() else set())
             staged_manifest = _validate_backup_source(staging_dir, allow_migrate=True)
             plan = _restore_switch_plan(staging_dir, db_path, identity_dir,
                                         _database_filename_from_manifest(staged_manifest))

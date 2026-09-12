@@ -225,3 +225,28 @@ def test_a_dangling_link_in_an_installation_cannot_break_a_node_restore(
     restore_backup(source=backup, db_path=target, identity_dir=tmp_path / "restored-identity")
 
     assert target.is_file()
+
+
+def test_a_database_named_door_installs_still_restores_when_capture_is_off(tmp_path, identity_dir):
+    """The staging skip must key on the manifest, not the name.
+
+    With capture off the basename is legitimately kept, so the snapshot itself
+    is the file called `door-installs`; skipping it unconditionally during
+    staging loses the database and makes a good backup unrestorable.
+    """
+    from netbbs.backup import restore_backup
+
+    db_path = tmp_path / "door-installs"
+    Database(db_path).close()
+    _register(db_path, "Game", _install(tmp_path, "game"))
+
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir,
+                           destination=tmp_path / "backup")
+    assert _manifest(backup)["door_installs"] is None, "precondition: capture is off"
+    assert (backup / "door-installs").is_file(), "precondition: the snapshot kept the name"
+
+    target = tmp_path / "restored" / "door-installs"
+    target.parent.mkdir()
+    restore_backup(source=backup, db_path=target, identity_dir=tmp_path / "restored-identity")
+
+    assert target.is_file(), "the database snapshot was dropped during staging"

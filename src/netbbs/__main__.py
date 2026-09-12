@@ -840,18 +840,6 @@ async def run(
     own_hello_provider = None
     reliable_anchor_task: asyncio.Task | None = None
     try:
-        # Issue #466: inside this guard, before any listener, so a `with_node`
-        # service is already up for the first caller and the matching
-        # `stop_all` below always runs -- including when a later startup step
-        # raises. A service which cannot start backs off in its own supervisor
-        # rather than holding up node startup.
-        try:
-            await door_services.start_node_services(list_doors(db))
-        except Exception as exc:
-            # Deliberately broad. A door profile is operator-authored data
-            # parsed here, and no malformed stored profile may be able to stop
-            # the node from starting; the door simply has no service.
-            _logger.error("could not start door services: %s", exc, exc_info=exc)
         # Design doc §13.10, issue #75: this node's own PID, so a later
         # `netbbs.backup restore` can reliably refuse against an idle-
         # but-running node (the write-lock probe it also uses only ever
@@ -1173,6 +1161,22 @@ async def run(
             # table above answers 404 (Codex review).
             transfer_gateway,
         )
+
+        # Issue #466: after the listeners are bound, not before. A second
+        # NetBBS started against the same state directory fails here, on the
+        # port already owned by the running one -- and a `with_node` companion
+        # started earlier would by then already be running against that node's
+        # installation, letting two game servers write one world. Still inside
+        # the lifecycle guard, so the matching `stop_all` always runs, and
+        # still before the ready line below, so no caller can reach a door
+        # whose service has not been registered.
+        try:
+            await door_services.start_node_services(list_doors(db))
+        except Exception as exc:
+            # Deliberately broad. A door profile is operator-authored data
+            # parsed here, and no malformed stored profile may be able to stop
+            # the node from starting; the door simply has no service.
+            _logger.error("could not start door services: %s", exc, exc_info=exc)
 
         # Design doc: the piece that makes this node
         # *originate* outbound Link activity, not just answer it. A
