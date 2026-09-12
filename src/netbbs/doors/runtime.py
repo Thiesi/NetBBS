@@ -14,6 +14,7 @@ import os
 import secrets
 import shutil
 import signal
+import sqlite3
 import sys
 import tempfile
 import time
@@ -25,6 +26,7 @@ from netbbs.doors.endpoints import NodeLease, StreamEndpoint, pty_endpoint, sock
 from netbbs.doors.dropfiles import write_drop_files
 from netbbs.doors.profiles import preflight
 from netbbs.net.color_depth_preference import effective_truecolor
+from netbbs.timeutil import resolve_display_preferences
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.session import SessionClosedError
 from netbbs.moderation.log import record_action
@@ -35,8 +37,17 @@ DOOR_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024
 # RLIMIT_NPROC is shared by the real UID, not a per-door quota.
 DOOR_MAX_PROCESSES = 16
 WALL_TIME_LIMIT_SECONDS = 3600
-_TERMINATE_GRACE_SECONDS = 0.5
+#: How long a door gets to exit on its own after SIGTERM, before SIGKILL.
+#: Was a fixed 0.5 s, which is long enough for a process that exits on the
+#: signal and far too short for one which flushes anything first -- a DOS game
+#: writing its scores through the emulator, say. A door which exits promptly
+#: never waits this long, because the wait ends the moment it does; the only
+#: doors that pay for a longer grace are the ones that need it.
+DOOR_STOP_GRACE_SECONDS = 5
 _DIAGNOSTIC_BYTES = 8192
+# A human dragging a window edge; fine-grained enough to feel immediate
+# without waking the event loop for a size which almost never changes.
+_RESIZE_POLL_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -47,20 +58,68 @@ class DoorRunResult:
     diagnostic: str = ""
 
 
-def _write_door_info(db, workdir, session, player, war_dialer=False):
+#: Version of the `door_info.json` contract (issue #469). 1 was the original
+#: six fields; 2 adds the caller/node metadata below. A door may refuse a
+#: platform it does not understand instead of probing for fields.
+DOOR_API_VERSION = 2
+
+
+def node_opaque_id(db) -> str:
+    """A stable, opaque identifier for this node, minted on first use.
+
+    Not a credential and not derived from the display name, which a SysOp can
+    change at will; a door which keys its world on the node needs something
+    that survives a rename. Lives in the node database, so it survives a
+    backup and restore with everything else.
+    """
+    return _minted_once(db, "node_opaque_id")
+
+
+def _minted_once(db, key: str) -> str:
+    """Read a node-scoped opaque value, minting it only on first use.
+
+    Read before write deliberately: an unconditional INSERT OR IGNORE takes
+    SQLite's write lock on *every* door launch, and a second connection holding
+    a write transaction -- a live administrative process, say -- would make
+    each launch wait out the busy timeout and then fail.
+    """
+    row = db.connection.execute("SELECT value FROM node_config WHERE key = ?", (key,)).fetchone()
+    if row is not None:
+        return row[0]
+    db.connection.execute("INSERT OR IGNORE INTO node_config (key, value) VALUES (?, ?)",
+                          (key, secrets.token_hex(16)))
+    db.connection.commit()
+    return db.connection.execute(
+        "SELECT value FROM node_config WHERE key = ?", (key,)).fetchone()[0]
+
+
+def _write_door_info(db, workdir, session, player, war_dialer=False, session_limit_seconds=None):
     info = {"handle": player.username, "user_id": player.id,
             "terminal_width": session.terminal_width, "terminal_height": session.terminal_height,
             "color_depth": "truecolor" if effective_truecolor(session, db, player) else "256",
-            "node_name": session.node_display_name}
+            "node_name": session.node_display_name,
+            "door_api": DOOR_API_VERSION,
+            # The caller's own display preference, so a door can match the
+            # glyph style they already chose rather than guessing.
+            "unicode_style": unicode_style_enabled(db, player),
+            "transport": getattr(session, "transport_name", "unknown"),
+            # Node-wide, not per-caller: NetBBS has one display timezone.
+            "timezone": resolve_display_preferences(db)[1],
+            # `node_fingerprint` is deliberately absent: the node's own Link
+            # identity is not in the database, so supplying it would mean
+            # threading the identity (or its directory and passphrase) down
+            # into the door runtime. Every reader treats a missing field as
+            # unknown, and `node_id` is what a door keying its world on the
+            # node actually needs today.
+            "node_id": node_opaque_id(db)}
+    if session_limit_seconds is not None:
+        # The effective wall clock for *this* launch, so a door can warn
+        # before it is cut off rather than being surprised by it.
+        info["session_limit_seconds"] = session_limit_seconds
     if war_dialer:
-        info["unicode_style"] = unicode_style_enabled(db, player)
         # An opaque namespace belongs to the node database and survives its backup.
         # It is not a credential and does not depend on a mutable display name.
-        db.connection.execute("INSERT OR IGNORE INTO node_config (key, value) VALUES (?, ?)",
-                              ("war_dialer_owner", secrets.token_hex(16)))
-        db.connection.commit()
-        info["war_dialer_owner"] = db.connection.execute(
-            "SELECT value FROM node_config WHERE key='war_dialer_owner'").fetchone()[0]
+        info["war_dialer_owner"] = _minted_once(db, "war_dialer_owner")
     path = workdir / "door_info.json"
     path.write_text(json.dumps(info), encoding="utf-8")
     return path
@@ -185,7 +244,7 @@ async def _wait_leader(proc):
     return proc.returncode
 
 
-async def _relay(session, endpoint, proc=None):
+async def _relay(session, endpoint, proc=None, stop_grace=DOOR_STOP_GRACE_SECONDS):
     input_task = asyncio.create_task(_pump_input(session, endpoint))
     output_task = asyncio.create_task(_pump_output(session, endpoint))
     exit_task = asyncio.create_task(_wait_leader(proc)) if proc else None
@@ -203,7 +262,7 @@ async def _relay(session, endpoint, proc=None):
                 # Kill lingering pipe/socket holders independently of draining.
                 # A slow caller still gets every final byte, bounded by the
                 # launch watchdog and caller disconnect, not a 250 ms cutoff.
-                stop_task = asyncio.create_task(_stop_process(proc))
+                stop_task = asyncio.create_task(_stop_process(proc, stop_grace))
                 tasks.append(stop_task)
                 pending.add(stop_task)
             # Broken stdin does not imply stdout has finished delivering.
@@ -212,6 +271,83 @@ async def _relay(session, endpoint, proc=None):
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def resize_mode(profile, endpoint_kind):
+    """How a running door is told the caller resized, or None for not at all.
+
+    Policy only, so it can be checked without a POSIX host; the caller adds
+    the platform gate. A profile which pins width/height asked for a fixed
+    screen, and DOS geometry is fixed by design, so only a native door
+    following the caller's own terminal is ever notified.
+    """
+    if profile is None or profile.adapter != "native" or profile.width:
+        return None
+    if endpoint_kind == "pty":
+        return "pty"
+    if profile.resize_signal and endpoint_kind in ("stdio", "socketpair"):
+        return "signal"
+    return None
+
+
+def _republish_terminal_size(info_path, info, width, height):
+    """Rewrite the door's metadata with the caller's current geometry.
+
+    Through a temporary file in the same directory: a door woken by the
+    signal below may read this the instant it is notified, and must never
+    catch a half-written file.
+    """
+    info = dict(info, terminal_width=width, terminal_height=height)
+    temporary = info_path.parent / (info_path.name + ".new")
+    temporary.write_text(json.dumps(info), encoding="utf-8")
+    os.replace(temporary, info_path)
+    return info
+
+
+async def _forward_resize(session, proc, info_path, info, *, published, pty_fd=None, signal_door=False,
+                          interval=_RESIZE_POLL_SECONDS):
+    """Follow the caller's terminal size while the door runs (issue #468).
+
+    Polled rather than pushed. Telnet NAWS, SSH's window-change message and
+    the web client's resize event each update `Session.terminal_width`/
+    `terminal_height` in place, with no notification in common, so one bounded
+    poll here covers every transport — including any later one — instead of
+    each transport growing a hook it must remember to call. `RemoteEndpoint.
+    _urgent_loop` already reads its own out-of-band channel the same way.
+    """
+    # The baseline is what the door was actually told at launch, not the
+    # session's size now: a caller who resized during door-mode entry or the
+    # spawn would otherwise leave the door holding stale geometry until they
+    # happened to resize a second time.
+    last = published
+    while True:
+        await asyncio.sleep(interval)
+        current = (session.terminal_width, session.terminal_height)
+        if current == last or not all(current):
+            continue
+        last = current
+        width, height = current
+        try:
+            info = _republish_terminal_size(info_path, info, width, height)
+            if pty_fd is not None:
+                import fcntl
+                import struct
+                import termios
+                fcntl.ioctl(pty_fd, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
+                # The kernel signals the terminal's foreground group itself;
+                # this also reaches a door which never made the PTY its
+                # controlling terminal.
+                os.killpg(proc.pid, signal.SIGWINCH)
+            elif signal_door:
+                # The leader only, never the process group: SIGUSR1 terminates
+                # a process which does not handle it, and only the door itself
+                # opted in. Helper processes it spawned did not, and killing
+                # them on the caller's first resize would break the game.
+                os.kill(proc.pid, signal.SIGUSR1)
+        except OSError:
+            # The door or its terminal is gone. Ending the run is the relay's
+            # job, not this task's; stop following rather than report.
+            return
 
 
 async def _diagnostics(reader, tail):
@@ -237,7 +373,7 @@ async def _finish_owned(task):
     return task.result(), cancelled
 
 
-async def _stop_process(proc):
+async def _stop_process(proc, grace=DOOR_STOP_GRACE_SECONDS):
     if os.name == "posix":
         try:
             os.killpg(proc.pid, signal.SIGTERM)
@@ -246,7 +382,7 @@ async def _stop_process(proc):
     elif proc.returncode is None:
         proc.terminate()
     try:
-        await asyncio.wait_for(proc.wait(), timeout=_TERMINATE_GRACE_SECONDS)
+        await asyncio.wait_for(proc.wait(), timeout=grace)
     except asyncio.TimeoutError:
         pass
     finally:
@@ -268,17 +404,33 @@ def _record_door_session(db, *, actor, door, duration_seconds, reason, exit_code
                   detail=f"door={door.name!r} duration={duration_seconds:.1f}s reason={reason} exit_code={exit_code}")
 
 
-async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_TIME_LIMIT_SECONDS,
+def effective_wall_limit(profile, call_site_limit=None):
+    """Tightest explicit wall-clock bound, or None when nothing bounds the run.
+
+    A profile's `time_limit` of 0 is the SysOp's explicit opt-out, so it must
+    not be folded in with `min()` as if it were the smallest bound. An
+    unprofiled door keeps the original fixed ceiling; a caller-supplied bound
+    (the capability probe's, say) still wins when it is tighter.
+    """
+    bounds = [value for value in (call_site_limit,
+                                  profile.time_limit if profile else WALL_TIME_LIMIT_SECONDS) if value]
+    return min(bounds) if bounds else None
+
+
+async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                    output_check=None):
     """Supervise and record one run; an optional synchronous probe check returns an error string."""
     profile = door.profile
+    stop_grace = profile.stop_grace_seconds if profile else DOOR_STOP_GRACE_SECONDS
     start = time.monotonic()
     proc = endpoint = lease = child_socket = None
     slave = workdir = None
     diagnostic_tasks = []
+    resize_task = None
     tail = bytearray()
     reason, exit_code = "failed_to_start", None
     mode_entered = False
+    handled_failure = False
     try:
         problems = await asyncio.to_thread(preflight, door, session)
         if problems:
@@ -292,7 +444,8 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
             # Small local lock operation; no await that could lose an acquired lease on cancellation.
             lease = NodeLease(root, identity, profile.max_sessions)
         workdir = Path(tempfile.mkdtemp(prefix="netbbs-door-"))
-        info_path = await lane.run(_write_door_info, workdir, session, player, world_path is not None)
+        info_path = await lane.run(_write_door_info, workdir, session, player, world_path is not None,
+                                   effective_wall_limit(profile, wall_time_limit_seconds))
         info = json.loads(info_path.read_text(encoding="utf-8"))
         width = profile.width if profile and profile.width else session.terminal_width
         height = profile.height if profile and profile.height else session.terminal_height
@@ -343,9 +496,15 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
                 if profile.runner:
                     argv = [*profile.runner, *argv]
             if os.name == "posix":
-                setup = {"pty": kind == "pty", "limits": {"RLIMIT_CPU": DOOR_CPU_LIMIT_SECONDS,
-                         "RLIMIT_AS": profile.memory_mb * 1024 * 1024 if profile else DOOR_MEMORY_LIMIT_BYTES,
-                         "RLIMIT_NPROC": DOOR_MAX_PROCESSES}}
+                limits = {"RLIMIT_AS": profile.memory_mb * 1024 * 1024 if profile else DOOR_MEMORY_LIMIT_BYTES,
+                          "RLIMIT_NPROC": DOOR_MAX_PROCESSES}
+                # A profile may remove the CPU ceiling outright (0). That is sent
+                # as null, not as zero -- a limit of zero would kill the door on
+                # its first scheduler tick, and simply omitting the key would
+                # leave whatever soft limit this service inherited, which is not
+                # what the screen and the guide promise.
+                limits["RLIMIT_CPU"] = (profile.cpu_seconds if profile else DOOR_CPU_LIMIT_SECONDS) or None
+                setup = {"pty": kind == "pty", "limits": limits}
                 argv = [sys.executable, "-I", str(Path(__file__).with_name("launcher.py")), json.dumps(setup), *argv]
             kwargs = {"start_new_session": True, "pass_fds": pass_fds} if os.name == "posix" else {}
             # Cancellation during spawn must not lose ownership of a live child.
@@ -365,9 +524,14 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
             elif kind == "socketpair":
                 diagnostic_tasks.append(asyncio.create_task(_diagnostics(proc.stdout, tail)))
             diagnostic_tasks.append(asyncio.create_task(_diagnostics(proc.stderr, tail)))
+            mode = resize_mode(profile, kind)
+            if os.name == "posix" and mode is not None:
+                resize_task = asyncio.create_task(_forward_resize(
+                    session, proc, info_path, info, published=(width, height),
+                    pty_fd=endpoint.fd if mode == "pty" else None, signal_door=mode == "signal"))
         try:
-            reason = await asyncio.wait_for(_relay(terminal, endpoint, proc),
-                            timeout=min(wall_time_limit_seconds, profile.time_limit if profile else WALL_TIME_LIMIT_SECONDS))
+            reason = await asyncio.wait_for(_relay(terminal, endpoint, proc, stop_grace),
+                                            timeout=effective_wall_limit(profile, wall_time_limit_seconds))
             if reason == "door_exited":
                 if proc and proc.returncode is None:
                     try:
@@ -402,8 +566,10 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
         reason = "caller_disconnected"
     except BlockingIOError as exc:
         reason = "busy"
+        handled_failure = True
         tail.extend(str(exc).encode())
-    except (OSError, ValueError, KeyError) as exc:
+    except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+        handled_failure = True
         tail.extend(str(exc).encode("utf-8", errors="replace")[:4096])
         _logger.warning("door %r failed preflight/start: %s", door.name, exc)
     finally:
@@ -412,6 +578,12 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
         async def cleanup():
             nonlocal exit_code
             errors = []
+            # First, before the endpoint below is closed: the resize follower
+            # captured the PTY master descriptor by number, and a descriptor
+            # number is reused. It must never ioctl one this run no longer owns.
+            if resize_task is not None:
+                resize_task.cancel()
+                await asyncio.gather(resize_task, return_exceptions=True)
             # A full StreamReader can pause the underlying pipe. After timeout
             # or disconnect the terminal pump is gone; drain without forwarding
             # so process reaping/pipe closure cannot depend on that slow caller.
@@ -421,7 +593,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
                     drains.append(asyncio.create_task(_discard_output(proc.stdout)))
                 if proc.stderr is not None and not diagnostic_tasks:
                     drains.append(asyncio.create_task(_discard_output(proc.stderr)))
-            for operation in (lambda: _stop_process(proc) if proc is not None else None,
+            for operation in (lambda: _stop_process(proc, stop_grace) if proc is not None else None,
                               lambda: asyncio.gather(*drains),
                               lambda: endpoint.close() if endpoint is not None else None):
                 try:
@@ -459,7 +631,13 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=WALL_
                 errors.append(exc)
             for exc in errors:
                 _logger.error("door cleanup failed: %s", exc, exc_info=exc)
-            if errors and primary is None:
+            # A failure already turned into a reported reason must not be
+            # replaced by a secondary one from cleanup. The obvious case is a
+            # locked database: the launch fails, is handled, and then the
+            # audit write fails the same way -- and re-raising that would hand
+            # the caller an exception instead of the failure result they were
+            # about to be shown.
+            if errors and primary is None and not handled_failure:
                 raise errors[0]
             return diagnostic
 

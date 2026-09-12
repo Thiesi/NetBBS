@@ -15,6 +15,16 @@ class ProfileError(ValueError):
     pass
 
 
+def _check_substitutions(value: str, allowed: tuple[str, ...], message: str) -> None:
+    """Reject any placeholder the caller cannot actually substitute."""
+    try:
+        for _, name, spec, conversion in string.Formatter().parse(value):
+            if name is not None and (name not in allowed or spec or conversion):
+                raise ProfileError(message)
+    except ValueError as exc:
+        raise ProfileError(str(exc)) from exc
+
+
 def read_profile_file(path: str) -> bytes:
     """Read a bounded regular file; a mistaken FIFO must not hang the server."""
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
@@ -41,12 +51,30 @@ class DoorProfile:
     height: int = 0
     baud: int = 38400
     security_level: int = 10
+    #: Wall-clock and CPU ceilings for one caller's run. Zero means the SysOp
+    #: explicitly removed that ceiling; the defaults reproduce the original
+    #: fixed constants, so an existing profile is bounded exactly as before.
     time_limit: int = 3600
+    cpu_seconds: int = 300
     memory_mb: int = 256
+    #: Seconds a door gets to exit after SIGTERM before it is killed, on a
+    #: caller disconnect, a timeout or node shutdown. A door which exits on
+    #: the signal never waits this long; one which flushes game data first
+    #: needs more than the 0.5 s this replaced.
+    stop_grace_seconds: int = 5
     max_sessions: int = 1
     multinode_certified: bool = False
+    #: Wake a stdio/socket door with SIGUSR1 when the caller's terminal is
+    #: resized. Opt-in because SIGUSR1 terminates a process which does not
+    #: handle it; PTY doors never need this and are resized through the
+    #: terminal itself.
+    resize_signal: bool = False
     environment: dict[str, str] = field(default_factory=dict)
     runner: tuple[str, ...] = ()
+    #: At most one long-lived companion process for this door (issue #466):
+    #: `argv`, `start`, `stop_grace_seconds`, `service_memory_mb`, `health`.
+    #: Empty for the overwhelming majority of doors, which need none.
+    service: dict = field(default_factory=dict)
     options: dict = field(default_factory=dict)
 
     def validate(self) -> DoorProfile:
@@ -58,9 +86,12 @@ class DoorProfile:
             raise ProfileError("endpoint must be stdio, pty, or socketpair")
         if self.encoding not in ("utf-8", "cp437", "raw"):
             raise ProfileError("encoding must be utf-8, cp437, or raw")
+        # Zero is the explicit "no ceiling" opt-out for time_limit/cpu_seconds
+        # only; it is not a valid value for any other bound below.
         for name, low, high in (("width", 0, 500), ("height", 0, 200), ("baud", 300, 115200),
-                                ("security_level", 0, 255), ("time_limit", 1, 3600), ("max_sessions", 1, 36),
-                                ("memory_mb", 64, 2048)):
+                                ("security_level", 0, 255), ("time_limit", 0, 86400),
+                                ("cpu_seconds", 0, 86400), ("max_sessions", 1, 36),
+                                ("memory_mb", 64, 2048), ("stop_grace_seconds", 1, 60)):
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ProfileError(f"{name} must be between {low} and {high}")
@@ -68,6 +99,8 @@ class DoorProfile:
             raise ProfileError("set both terminal width and height, or leave both zero")
         if type(self.multinode_certified) is not bool:
             raise ProfileError("multinode_certified must be a boolean")
+        if type(self.resize_signal) is not bool:
+            raise ProfileError("resize_signal must be a boolean")
         if self.max_sessions > 1 and not self.multinode_certified:
             raise ProfileError("multiple sessions require explicit multi-node certification")
         if not isinstance(self.install_dir, str) or any(c in self.install_dir for c in '\r\n\x00"'):
@@ -100,6 +133,7 @@ class DoorProfile:
             raise ProfileError("external runner executable must be absolute")
         if not isinstance(self.options, dict):
             raise ProfileError("adapter options must be an object")
+        self._validate_service()
         if self.adapter == "dosbox":
             if self.endpoint != "socketpair" or self.encoding != "cp437" or not self.install_dir:
                 raise ProfileError("DOSBox requires socketpair, cp437, and an installation directory")
@@ -125,6 +159,52 @@ class DoorProfile:
             except (ValueError, OSError) as exc:
                 raise ProfileError(str(exc)) from exc
         return self
+
+    def _validate_service(self) -> None:
+        """One optional long-lived companion process, or nothing at all."""
+        if not isinstance(self.service, dict):
+            raise ProfileError("service must be an object")
+        if not self.service:
+            return
+        if unknown := set(self.service) - {"argv", "start", "stop_grace_seconds",
+                                           "service_memory_mb", "health"}:
+            raise ProfileError(f"unknown service fields: {', '.join(sorted(unknown))}")
+        argv = self.service.get("argv")
+        if not isinstance(argv, list) or not 1 <= len(argv) <= 32:
+            raise ProfileError("service argv must be an array of 1-32 arguments")
+        for argument in argv:
+            if not isinstance(argument, str) or "\x00" in argument or len(argument) > 2048:
+                raise ProfileError("invalid service argument")
+            _check_substitutions(argument, ("install_dir",), "service argv accepts only {install_dir}")
+        if self.service.get("start", "with_node") not in ("with_node", "on_first_caller"):
+            raise ProfileError("service start must be with_node or on_first_caller")
+        for name, low, high, default in (("stop_grace_seconds", 1, 60, 10),
+                                         ("service_memory_mb", 64, 4096, 512)):
+            value = self.service.get(name, default)
+            if type(value) is not int or not low <= value <= high:
+                raise ProfileError(f"service {name} must be between {low} and {high}")
+        health = self.service.get("health", {})
+        if not isinstance(health, dict):
+            raise ProfileError("service health must be an object")
+        if health:
+            if set(health) - {"kind", "path"} or health.get("kind") not in ("pid", "socket"):
+                raise ProfileError("service health kind must be pid or socket")
+            if health["kind"] == "socket":
+                path = health.get("path")
+                if not isinstance(path, str) or not path or "\x00" in path:
+                    raise ProfileError("service socket health needs a path")
+                _check_substitutions(path, ("install_dir",), "service health path accepts only {install_dir}")
+            elif "path" in health:
+                # A pid check has nothing to open. Left unvalidated, a saved
+                # non-string or unknown substitution here would only fail when
+                # the service is next parsed -- which happens during node
+                # startup, so a stored profile could stop the node booting.
+                raise ProfileError("service pid health takes no path")
+        # The service runs in the door's installation directory, so there has
+        # to be one; without it there is no defined working directory or place
+        # for a health socket to live.
+        if not self.install_dir:
+            raise ProfileError("a door service requires an installation directory")
 
     def to_json(self) -> str:
         self.validate()
@@ -221,3 +301,39 @@ def preflight(door, session=None) -> list[str]:
             if platform.system() == "NetBSD" and b"ld-linux" in header:
                 problems.append("Linux ELF loader detected on NetBSD; use a NetBSD build, not Linux emulation.")
     return problems
+
+
+def profile_advisories(profile) -> list[str]:
+    """Consequences of settings which are deliberate rather than mistaken.
+
+    Separate from `preflight` on purpose: preflight returns problems which
+    refuse the launch, and an unbounded door is a deliberate configuration,
+    not a misconfiguration. These are shown by Check setup and never block.
+    """
+    if profile is None:
+        return []
+    notes = []
+    if not profile.time_limit:
+        notes.append("No wall-clock limit: this door ends only when it exits, the caller disconnects, "
+                     "or the node stops. It holds a caller session and a node lease until then.")
+    elif profile.time_limit > 3600:
+        notes.append(f"Wall-clock limit is {profile.time_limit} seconds, above the {3600}-second default; "
+                     "one caller can hold a node lease for that long.")
+    if not profile.cpu_seconds:
+        # Naming the wall-clock limit as the remaining bound is false when it
+        # has been removed too, which is exactly the riskiest configuration.
+        notes.append("No CPU-seconds limit: a runaway door is bounded only by the wall-clock limit above."
+                     if profile.time_limit else
+                     "No CPU-seconds limit either: with both ceilings removed, nothing bounds this door "
+                     "except the caller disconnecting or the node stopping.")
+    # A resize opt-out which silently never fires is worth saying out loud;
+    # it looks configured on this screen and does nothing at runtime.
+    if profile.resize_signal:
+        if profile.adapter != "native":
+            notes.append(f"Resize signal is ignored for the {profile.adapter} adapter; only native doors are signalled.")
+        elif profile.endpoint == "pty":
+            notes.append("Resize signal is unnecessary for a PTY door: its terminal is resized directly instead.")
+        elif profile.width:
+            notes.append("Resize signal never fires while this profile pins the terminal size; "
+                         "set columns and rows to 0 to follow the caller's terminal.")
+    return notes

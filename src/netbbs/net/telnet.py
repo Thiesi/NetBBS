@@ -86,6 +86,7 @@ _SUBNEGOTIATION_TIMEOUT = 1.0
 
 
 class TelnetSession(Session):
+    transport_name = "telnet"
     """A single Telnet client connection."""
 
     def __init__(

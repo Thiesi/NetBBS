@@ -14,8 +14,10 @@ subprocess, not an ordinarily-imported library module.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
+import json
 import os
 import re
 import sys
@@ -35,6 +37,39 @@ _WAR_DIALER_PATH = (
 )
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+CLEAR = "\x1b[2J\x1b[H"
+_ANSI_BYTES = re.compile(rb"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
+
+# How long a real door process gets to start, answer a key, or exit. These tests
+# assert what the door *wrote*, never how fast it wrote it, and the same eight cases
+# have taken 8s alone and 15s alongside the rest of the suite -- so the budget is
+# generous on purpose. A door that is genuinely hung still fails, just later.
+PROC_WAIT = 30
+
+# The switchboard's own prompt, as a caller reads it: the marker these tests wait
+# for to know the screen is drawn and the cursor is waiting. In one place because
+# it is presentation, and the presentation is rebuilt (issue #494).
+DIAL = "dial \u203a ".encode()
+
+
+def _plain_with_offsets(raw) -> tuple[bytes, list[int]]:
+    """The bytes a caller reads, and where each one sat in the styled stream."""
+    raw = bytes(raw)
+    plain, offsets, index = bytearray(), [], 0
+    while index < len(raw):
+        escape = _ANSI_BYTES.match(raw, index)
+        if escape:
+            index = escape.end()
+            continue
+        plain.append(raw[index])
+        offsets.append(index)
+        index += 1
+    return bytes(plain), offsets
+
+
+def _plain(raw) -> bytes:
+    """Output with its styling removed, for a substring assertion."""
+    return _ANSI_BYTES.sub(b"", bytes(raw))
 
 
 def _load_war_dialer():
@@ -371,7 +406,7 @@ def test_unusable_world_has_readable_exit_without_replacement(tmp_path, future_s
     env.pop("NETBBS_DOOR_INFO", None)
     result = subprocess.run(
         [sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"",
-        capture_output=True, env=env, timeout=10,
+        capture_output=True, env=env, timeout=PROC_WAIT,
     )
     assert result.returncode == 1
     message = b"not supported" if future_schema else b"storage is unavailable"
@@ -381,6 +416,38 @@ def test_unusable_world_has_readable_exit_without_replacement(tmp_path, future_s
     assert path.read_bytes() == before
 
 
+#: The frame's corners and rules, in both the heavy set the rebuilt screens use
+#: (issue #494) and the ASCII substitutes the `plain` preset gets.
+_FRAME_EDGES = "┏┗┣┓┛┫╔╚╠+"
+_FRAME_FILL = set("━═─-=+| ┏┓┗┛┣┫")
+
+
+def _rows(screen: str, *, keep_style: bool = False) -> list[str]:
+    """The rows a terminal would be showing after `screen` was written.
+
+    A row rewritten in place -- the carrier sweep that plays while a committed
+    result comes back (issue #494) -- shows whatever follows its last carriage
+    return, and the door pads each frame to a constant width so that is also
+    the widest one. Measuring the whole sequence as one row would report a
+    width no caller ever saw.
+    """
+    text = screen if keep_style else _ANSI_RE.sub("", screen)
+    return [row.split("\r")[-1] for row in text.rstrip("\r\n").split("\r\n")]
+
+
+def _last_screen(written) -> str:
+    """The screen a caller is looking at, with its styling removed.
+
+    A screen is everything after the last clear. Styling comes off because rows
+    and bars are styled segment by segment now, so `[A] Act` is a hotkey in
+    amber followed by a label in mint and is not a contiguous run of characters
+    (issue #494) -- a stub that drives the door by reading its own output has to
+    read what a caller reads.
+    """
+    raw = written if isinstance(written, str) else "".join(written)
+    return _ANSI_RE.sub("", raw.split(CLEAR)[-1])
+
+
 def _screen_text(written) -> str:
     """What a caller reads, with the door's frame taken off.
 
@@ -388,6 +455,9 @@ def _screen_text(written) -> str:
     has a border between its halves: joining the raw rows would look for
     "season 2 has started" in "season 2 has | | started". Works the same on an
     unframed narrow screen, where there is nothing to take off.
+
+    A border row is dropped entirely, including the card heading written into
+    it, so a title assertion reads `_screen_titles` instead.
     """
     # A list here is what the door wrote, chunk by chunk, not a list of rows:
     # join it the way `out` did, and let the row split below do the rest.
@@ -395,10 +465,21 @@ def _screen_text(written) -> str:
     words: list[str] = []
     for row in _ANSI_RE.sub("", raw).replace("\r\n", "\n").split("\n"):
         row = row.strip()
-        if not row or row[0] in "╔╚╠" or set(row) <= set("═─-=+| "):
+        if not row or row[0] in _FRAME_EDGES or set(row) <= _FRAME_FILL:
             continue
-        words += row.strip("║|").split()
+        words += row.strip("║┃|").split()
     return " ".join(words)
+
+
+def _screen_titles(written) -> str:
+    """The titles and card headings, which live in the frame's own borders."""
+    raw = written if isinstance(written, str) else "".join(written)
+    rows = []
+    for row in _ANSI_RE.sub("", raw).replace("\r\n", "\n").split("\n"):
+        row = row.strip()
+        if row and row[0] in _FRAME_EDGES:
+            rows.append(" ".join(row.strip(_FRAME_EDGES + "━═─-= ▚").split()))
+    return " | ".join(rows)
 
 
 @contextmanager
@@ -435,8 +516,22 @@ def _running_door(tmp_path, *, new_player=False, event=False):
     pending = bytearray()
 
     def wait_for(marker):
+        """Wait for text to reach the screen, ignoring the styling around it.
+
+        Every row and bar is styled segment by segment now, so `[A] Act` is a
+        hotkey in amber followed by a label in mint and is not a contiguous run
+        of bytes on the wire (issue #494). Matching therefore runs against the
+        output with its SGR removed -- which is what a caller actually reads --
+        while the raw bytes consumed are still tracked exactly, so a later
+        marker in the same chunk is never thrown away.
+        """
         deadline = time.monotonic() + 8
-        while marker not in pending:
+        while True:
+            plain, offsets = _plain_with_offsets(pending)
+            at = plain.find(marker)
+            if at >= 0:
+                del pending[:offsets[at + len(marker) - 1] + 1]
+                return
             try:
                 chunk = chunks.get(timeout=max(0.01, deadline - time.monotonic()))
             except Empty:
@@ -444,20 +539,37 @@ def _running_door(tmp_path, *, new_player=False, event=False):
             if chunk is None:
                 pytest.fail(f"Door exited before {marker!r}: {bytes(output)!r}")
             pending.extend(chunk)
-        end = pending.index(marker) + len(marker)
-        del pending[:end]
 
     def send(data):
         process.stdin.write(data)
         process.stdin.flush()
 
+    def screen() -> bytes:
+        """What is on the terminal now, with its styling removed."""
+        return _plain(bytes(output).split(CLEAR.encode())[-1])
+
+    def reach(marker, *, limit=12):
+        """Press [N] until `marker` is on the screen.
+
+        A preview's [A] Act bar appears only on its last page -- reading to the
+        end is the contract (issue #282) -- and a rebuilt preview has more pages
+        than the sentences it replaced, so a walk turns pages rather than
+        assuming the stakes fit on one.
+        """
+        for _ in range(limit):
+            wait_for(b"[B] Back")  # whatever page is showing has this in its bar
+            if marker in screen():
+                return
+            send(b"n")
+        pytest.fail(f"never reached {marker!r}: {bytes(output)!r}")
+
     try:
-        yield process, path, wait_for, send, output
+        yield process, path, wait_for, send, output, reach, screen
     finally:
         if process.poll() is None:
             process.kill()
-        process.wait(timeout=5)
-        reader.join(timeout=5)
+        process.wait(timeout=PROC_WAIT)
+        reader.join(timeout=PROC_WAIT)
         process.stdin.close()
         process.stdout.close()
         process.stderr.close()
@@ -468,14 +580,14 @@ def _running_door(tmp_path, *, new_player=False, event=False):
     b"\x1b[200~CCCJTRXA\x1b[201~", b"CCCJTRXA", b"\x1b",
 ])
 def test_real_process_main_menu_input_does_not_spend_turns(tmp_path, sequence):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b">\x1b[0m ")
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         send(sequence)
         # Deliberately separate the later real key from the input burst. This
         # interval exercises the decoder's timeout, not a process-start guess.
         time.sleep(0.25)
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
 
         conn = wd.connect(path)
@@ -486,16 +598,16 @@ def test_real_process_main_menu_input_does_not_spend_turns(tmp_path, sequence):
 
 @pytest.mark.parametrize("sequence", [b"\x1b[A", b"\x1bOA", b"\x1b[200~A\x1b[201~"])
 def test_real_process_target_menu_does_not_select_arrow_or_paste(tmp_path, sequence):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b">\x1b[0m ")
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         send(b"x")
-        wait_for(b"cancel")
+        wait_for(b"Cancel")
         send(sequence)
         time.sleep(0.25)
         send(b"q")
-        wait_for(b">\x1b[0m ")
+        wait_for(DIAL)
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         conn = wd.connect(path)
         assert wd.read_player(conn, 0).turns_used == 0
         assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
@@ -503,10 +615,10 @@ def test_real_process_target_menu_does_not_select_arrow_or_paste(tmp_path, seque
 
 
 def test_real_process_incomplete_escape_exits_without_action(tmp_path):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b">\x1b[0m ")
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         send(b"\x1b[")
-        assert process.wait(timeout=5) == 1
+        assert process.wait(timeout=PROC_WAIT) == 1
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         assert wd.read_player(conn, 0).turns_used == 0
@@ -517,11 +629,11 @@ def test_real_process_incomplete_escape_exits_without_action(tmp_path):
 def test_real_process_disconnect_preserves_only_committed_actions(tmp_path, stage):
     with _running_door(
         tmp_path, new_player=stage == "onboarding", event=stage == "receipt",
-    ) as (process, path, wait_for, send, output):
+    ) as (process, path, wait_for, send, output, reach, screen):
         if stage in ("onboarding", "receipt"):
             wait_for(b"Press any key to continue...")
         else:
-            wait_for(b">\x1b[0m ")
+            wait_for(DIAL)
             if stage == "recruit":
                 send(b"c")
                 wait_for(b"[A] Act [B] Back")
@@ -529,13 +641,13 @@ def test_real_process_disconnect_preserves_only_committed_actions(tmp_path, stag
                 wait_for(b"A new member joins")
             elif stage == "root":
                 send(b"x")
-                wait_for(b"cancel")
+                wait_for(b"Cancel")
                 send(b"1")
                 wait_for(b"[A] Act [B] Back")
                 send(b"a")
                 wait_for(b"It's yours now.")
         process.stdin.close()
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -612,8 +724,8 @@ def test_action_is_durable_before_success_output_fails(tmp_path, monkeypatch, ac
 
 
 def test_real_process_disconnect_does_not_restore_an_incoming_raid(tmp_path):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b">\x1b[0m ")
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         conn = wd.connect(path)
         now = wd.now_utc()
         attacker = wd.load_or_create_player(conn, 1, "Alpha", now, 1)
@@ -625,7 +737,7 @@ def test_real_process_disconnect_does_not_restore_an_incoming_raid(tmp_path):
 
         wd.resolve_raid(conn, attacker, 0, now, Win())
         process.stdin.close()
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert conn.execute("SELECT cash FROM players WHERE user_id=0").fetchone()[0] == 255
         assert len(wd.unseen_events(conn, 0)) == 1
         conn.close()
@@ -635,17 +747,17 @@ def test_real_process_disconnect_does_not_restore_an_incoming_raid(tmp_path):
 def test_linux_console_function_key_never_leaks_an_action(tmp_path, stage):
     with _running_door(
         tmp_path, new_player=stage == "onboarding", event=stage == "receipt",
-    ) as (process, path, wait_for, send, output):
+    ) as (process, path, wait_for, send, output, reach, screen):
         if stage in ("onboarding", "receipt"):
             wait_for(b"Press any key to continue...")
         else:
-            wait_for(b">\x1b[0m ")
+            wait_for(DIAL)
             if stage == "target":
                 send(b"x")
-                wait_for(b"cancel")
+                wait_for(b"Cancel")
         send(b"\x1b[[C")  # Linux-console F3, not Crew Recruit / exchange C.
         if stage in ("onboarding", "receipt"):
-            wait_for(b">\x1b[0m ")
+            wait_for(DIAL)
         time.sleep(0.25)
         conn = wd.connect(path)
         try:
@@ -655,9 +767,9 @@ def test_linux_console_function_key_never_leaks_an_action(tmp_path, stage):
             conn.close()
         send(b"q")
         if stage == "target":
-            wait_for(b">\x1b[0m ")
+            wait_for(DIAL)
             send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
 
 
@@ -734,20 +846,20 @@ def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
 def test_fragmented_x10_mouse_report_never_spends_a_turn(tmp_path, stage):
     with _running_door(
         tmp_path, new_player=stage == "onboarding", event=stage == "receipt",
-    ) as (process, path, wait_for, send, output):
+    ) as (process, path, wait_for, send, output, reach, screen):
         if stage in ("onboarding", "receipt"):
             wait_for(b"Press any key to continue...")
         else:
-            wait_for(b">\x1b[0m ")
+            wait_for(DIAL)
             if stage == "target":
                 send(b"x")
-                wait_for(b"cancel")
+                wait_for(b"Cancel")
         send(b"\x1b[M")
         for byte in (b" ", b"C", b"C"):
             time.sleep(0.05)  # Beyond burst detection, within sequence lookahead.
             send(byte)
         if stage in ("onboarding", "receipt"):
-            wait_for(b">\x1b[0m ")
+            wait_for(DIAL)
         time.sleep(0.15)
         conn = wd.connect(path)
         try:
@@ -757,9 +869,9 @@ def test_fragmented_x10_mouse_report_never_spends_a_turn(tmp_path, stage):
             conn.close()
         send(b"q")
         if stage == "target":
-            wait_for(b">\x1b[0m ")
+            wait_for(DIAL)
             send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
 
 
@@ -767,14 +879,14 @@ def test_fragmented_x10_mouse_report_never_spends_a_turn(tmp_path, stage):
 def test_extended_x10_mouse_encoding_stops_without_spending_a_turn(tmp_path, stage):
     with _running_door(
         tmp_path, new_player=stage == "onboarding", event=stage == "receipt",
-    ) as (process, path, wait_for, send, output):
+    ) as (process, path, wait_for, send, output, reach, screen):
         if stage in ("onboarding", "receipt"):
             wait_for(b"Press any key to continue...")
         else:
-            wait_for(b">\x1b[0m ")
+            wait_for(DIAL)
             if stage == "target":
                 send(b"x")
-                wait_for(b"cancel")
+                wait_for(b"Cancel")
         send(b"\x1b[M \xc4\x80C")  # UTF-8 coordinate, then an ASCII coordinate.
         time.sleep(0.25)
         conn = wd.connect(path)
@@ -783,7 +895,7 @@ def test_extended_x10_mouse_encoding_stops_without_spending_a_turn(tmp_path, sta
             assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
         finally:
             conn.close()
-        assert process.wait(timeout=5) == 1
+        assert process.wait(timeout=PROC_WAIT) == 1
         assert b"Unsupported mouse encoding" in output
         assert process.stderr.read() == b""
 
@@ -821,6 +933,9 @@ def test_open_session_can_continue_after_season_refresh(tmp_path, monkeypatch):
     def accept_preview(*args, **kwargs):
         for text in args[2]:
             wd.out_line(text)
+        for _, card in kwargs.get('cards') or []:
+            for row in card:
+                wd.out_line(row)
         if clock[0] == now:
             clock[0] += wd.SEASON
         return "A"
@@ -830,8 +945,8 @@ def test_open_session_can_continue_after_season_refresh(tmp_path, monkeypatch):
     player = wd.read_player(conn, 0)
     assert (player.season_number, player.cash, player.crew, player.turns_used) == (2, 225, 4, 1)
     assert wd.read_player(conn, 1).cash == wd.STARTING_CASH
-    assert 'Season changed.' in output.getvalue()
-    assert 'season 2 has started' in output.getvalue()
+    assert 'Season changed.' in _ANSI_RE.sub('', output.getvalue())
+    assert 'season 2 has started' in _screen_text(output.getvalue())
     conn.close()
 
 
@@ -868,20 +983,20 @@ def test_history_pages_fit_terminal_and_preserve_long_unicode_records(tmp_path, 
         monkeypatch.setattr(wd, "read_input_key", lambda: " ")
     else:
         def choose(valid):
-            if "END" in _ANSI_RE.sub("", "".join(written).split("\x1b[2J\x1b[H")[-1]):
+            if "END" in _last_screen(written):
                 return "B"
             return "N"
         monkeypatch.setattr(wd, "read_menu_choice", choose)
     wd.show_event_history(wd.Palette(False), conn, 1, width, height, unseen_only=unseen_only)
-    screens = "".join(written).split("\x1b[2J\x1b[H")[1:-1]
+    screens = "".join(written).split(CLEAR)[1:-1]
     assert len(screens) > 1
     body = []
     for screen in screens:
-        lines = _ANSI_RE.sub("", screen).rstrip("\r\n").split("\r\n")
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
         # The frame is not part of a record: take the borders off the row.
-        body.extend(line.strip("║ ") for line in lines if "界" in line or "END" in line)
+        body.extend(line.strip("║┃ ") for line in lines if "界" in line or "END" in line)
     assert "".join(body).replace(" ", "") == "界e\u0301" * 600 + "END"
     assert len(wd.unseen_events(conn, 1)) == (0 if unseen_only else 1)
     conn.close()
@@ -911,23 +1026,26 @@ def test_history_ack_skips_partial_records_and_new_arrivals(tmp_path, monkeypatc
     monkeypatch.setattr(wd, "read_menu_choice", choose)
     wd.show_event_history(wd.Palette(False), conn, 1, 40, 12)
     read_ids = [e.id for e in wd.history_events(conn, 1) if e.seen_at]
-    assert read_ids == ids[:3]
+    # How many records a page holds is a layout decision; what matters is that a
+    # page acknowledges a prefix of what it showed, never a partial record and
+    # never one that arrived while it was being read.
+    assert read_ids and read_ids == ids[:len(read_ids)] and len(read_ids) < len(ids)
     assert wd.history_events(conn, 1)[0].seen_at is None
     conn.close()
 
 
 def test_real_process_history_is_replayable_and_free(tmp_path):
-    with _running_door(tmp_path, event=True) as (process, path, wait_for, send, output):
+    with _running_door(tmp_path, event=True) as (process, path, wait_for, send, output, reach, screen):
         wait_for(b"Press any key to continue")
         send(b" ")
-        wait_for(b">\x1b[0m ")
+        wait_for(DIAL)
         send(b"h")
         wait_for(b"[A] Ack page [B] Back")
-        assert b"EVENT HISTORY" in output and b"[READ]" in output
+        assert b"EVENT LOG" in output and b"READ" in screen()
         send(b"b")
-        wait_for(b">\x1b[0m ")
+        wait_for(DIAL)
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -954,7 +1072,10 @@ def test_offline_summary_disconnect_only_acknowledges_completed_pages(tmp_path, 
     monkeypatch.setattr(wd, "read_input_key", read)
     with pytest.raises(EOFError):
         wd.show_event_history(wd.Palette(False), conn, 1, 40, 12, unseen_only=True)
-    assert [e.id for e in wd.unseen_events(conn, 1)] == ids[3:]
+    # Only the records the first page showed completely are acknowledged; how
+    # many that is belongs to the layout, not to this boundary.
+    remaining = [e.id for e in wd.unseen_events(conn, 1)]
+    assert remaining and remaining == ids[len(ids) - len(remaining):]
     conn.close()
 
 
@@ -975,15 +1096,15 @@ def test_dashboard_pages_fit_with_long_names_and_large_resources(tmp_path, monke
     index, count = wd.draw_dashboard(wd.Palette(False), state, now, width, height)
     for index in range(1, count):
         wd.draw_dashboard(wd.Palette(False), state, now, width, height, index)
-    screens = "".join(written).split("\x1b[2J\x1b[H")[1:]
+    screens = "".join(written).split(CLEAR)[1:]
     for screen in screens:
-        lines = _ANSI_RE.sub("", screen).rstrip("\r\n").split("\r\n")
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     text = _ANSI_RE.sub("", "".join(written))
     assert "999,999,999" in text
-    assert "Season end:" in text
-    assert "Next:" not in text  # Already at the highest tier.
+    assert "Season end:" in text  # the absolute deadline, on the SEASON card
+    assert "top tier" in text  # Already at the highest tier; no next-tier chip.
     conn.close()
 
 
@@ -997,21 +1118,38 @@ def test_dashboard_explains_unstarted_and_running_turn_windows(tmp_path):
     state = wd.dashboard_state(conn, 1, now)
     text = "\n".join(wd.dashboard_lines(state, now))
     assert "Turn window starts with your next action" in text
-    assert "Next: Wannabe in 100 Rank" in text
-    assert "newcomer, 2d 0h 0m remaining" in text
+    # The rank ladder and the protection clock are gauges and chips on the
+    # switchboard's first card now, not sentences in the fact list.
+    written: list[str] = []
+    original_out, wd.out = wd.out, written.append
+    try:
+        wd.draw_dashboard(wd.Palette(False), state, now, 80, 24)
+    finally:
+        wd.out = original_out
+    card = _screen_text(written)
+    assert "rank 0" in card and "next Wannabe" in card
+    assert "SHIELD newcomer 2d 0h 0m" in card
     wd.resolve_recruit(conn, player, now)
-    state = wd.dashboard_state(conn, 1, now + timedelta(hours=1))
-    text = "\n".join(wd.dashboard_lines(state, now + timedelta(hours=1)))
-    assert "Turns left: 14/15" in text
-    assert "Turn refill in 23h 0m" in text
-    assert "Next: Wannabe in 90 Rank" in text
+    later = now + timedelta(hours=1)
+    state = wd.dashboard_state(conn, 1, later)
+    assert "Turn refill at " in "\n".join(wd.dashboard_lines(state, later))
+    written = []
+    original_out, wd.out = wd.out, written.append
+    try:
+        wd.draw_dashboard(wd.Palette(False), state, later, 80, 24)
+    finally:
+        wd.out = original_out
+    card = _screen_text(written)
+    assert "TURNS" in card and "14/15" in card
+    assert "refill 23h 0m" in card
+    assert "rank 10" in card and "next Wannabe" in card
     conn.close()
 
 
 def test_real_process_dashboard_keeps_action_result_until_acknowledged(tmp_path):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b">\x1b[0m ")
-        assert b"SWITCHBOARD" in output and b"New events: 0" in output
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
+        assert b"SWITCHBOARD" in output and b"NEW" in output and b"0" in output
         send(b"c")
         wait_for(b"[A] Act [B] Back")
         send(b"a")
@@ -1023,10 +1161,10 @@ def test_real_process_dashboard_keeps_action_result_until_acknowledged(tmp_path)
         assert wd.read_player(conn, 0).turns_used == 1
         conn.close()
         send(b" ")
-        wait_for(b">\x1b[0m ")
+        wait_for(DIAL)
         assert b"SWITCHBOARD" in output[after_result:]
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
 
 
@@ -1044,7 +1182,7 @@ def test_garrison_flow_fits_and_commits_only_after_final_preview(tmp_path, monke
     monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
     monkeypatch.setattr(wd, "now_utc", lambda: now)
     def select(valid):
-        screen = "".join(written).split("\x1b[2J\x1b[H")[-1]
+        screen = _last_screen(written)
         # Every picker/preview key is driven by the currently displayed choices.
         assert wd.read_player(conn, actor.user_id).turns_used == 1
         if "[A] Act" in screen:
@@ -1058,8 +1196,8 @@ def test_garrison_flow_fits_and_commits_only_after_final_preview(tmp_path, monke
     monkeypatch.setattr(wd, "read_input_key", lambda: " ")
     assert wd.do_garrison(wd.Palette(False), conn, actor, width, height)
     assert (actor.crew, wd.assigned_crew(conn, actor.user_id), actor.turns_used) == (1, 2, 2)
-    for screen in "".join(written).split("\x1b[2J\x1b[H")[1:]:
-        lines = _ANSI_RE.sub("", screen).rstrip("\r\n").split("\r\n")
+    for screen in "".join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -1067,25 +1205,25 @@ def test_garrison_flow_fits_and_commits_only_after_final_preview(tmp_path, monke
 
 @pytest.mark.parametrize("disconnect", [False, True])
 def test_real_process_garrison_preview_cancel_and_disconnect_preserve_assignment(tmp_path, disconnect):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b">\x1b[0m ")
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         conn = wd.connect(path)
         actor = wd.read_player(conn, 0)
         wd.resolve_root_exchange(conn, actor, 1, wd.now_utc(), __import__("random").Random(1))
         conn.close()
         send(b"g")
-        wait_for(b"[B] Back (Q cancel)")
+        wait_for(b"[B] Back [Q] Cancel")
         send(b"1")
-        wait_for(b"[B] Back (Q cancel)")
+        wait_for(b"[B] Back [Q] Cancel")
         send(b"1")
         wait_for(b"[A] Act [B] Back")
         if disconnect:
             process.stdin.close()
         else:
             send(b"b")
-            wait_for(b">\x1b[0m ")
+            wait_for(DIAL)
             send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         actor = wd.read_player(conn, 0)
@@ -1100,24 +1238,24 @@ def test_text_screen_pages_preserve_content_with_clear_back_path(monkeypatch, wi
     monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
     def choose(valid):
         assert "B" in valid
-        screen = "".join(written).split("\x1b[2J\x1b[H")[-1]
+        screen = _last_screen(written)
         return "B" if "LAST RECORD" in screen else "N"
     monkeypatch.setattr(wd, "read_menu_choice", choose)
     wd.show_text_pages(wd.Palette(False), "RIVAL DIRECTORY", ["界e\u0301" * 200, "LAST RECORD"], width, height)
-    screens = "".join(written).split("\x1b[2J\x1b[H")[1:]
+    screens = "".join(written).split(CLEAR)[1:]
     for screen in screens:
-        lines = _ANSI_RE.sub("", screen).rstrip("\r\n").split("\r\n")
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
-        assert lines[-1] == "[B] Back"
+        assert lines[-1] == "[N] Next [P] Prev [B] Back"
     assert "".join(written).count("界") == 200
 
 
-@pytest.mark.parametrize("key,heading", [(b"b", b"SEASON STANDINGS"), (b"e", b"EXCHANGE TERRITORY"),
+@pytest.mark.parametrize("key,heading", [(b"b", b"SEASON STANDINGS"), (b"e", b"THE SCENE"),
                                          (b"v", b"RIVAL DIRECTORY"), (b"?", b"HOW TO PLAY")])
 def test_real_process_browsing_screens_are_free_and_do_not_ack_events(tmp_path, key, heading):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b">\x1b[0m ")
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         conn = wd.connect(path)
         wd.record_event(conn, 0, "Rival", "Arrived in session", wd.now_utc())
         conn.close()
@@ -1125,9 +1263,9 @@ def test_real_process_browsing_screens_are_free_and_do_not_ack_events(tmp_path, 
         wait_for(b"[B] Back")
         assert heading in output
         send(b"b")
-        wait_for(b">\x1b[0m ")
+        wait_for(DIAL)
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -1139,26 +1277,26 @@ def test_real_process_browsing_screens_are_free_and_do_not_ack_events(tmp_path, 
 @pytest.mark.parametrize("key", [b"t", b"c", b"j", b"x"])
 @pytest.mark.parametrize("disconnect", [False, True])
 def test_real_process_preview_cancel_or_disconnect_spends_nothing(tmp_path, key, disconnect):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b">\x1b[0m ")
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         send(key)
         if key == b"x":
-            wait_for(b"cancel")
+            wait_for(b"Cancel")
             send(b"1")
         if key == b"j":
-            wait_for(b"cancel")
+            wait_for(b"Cancel")
             send(b"1")
-            wait_for(b"cancel")
+            wait_for(b"Cancel")
             send(b"1")
         wait_for(b"[A] Act [B] Back")
-        assert b"Cost: 1 turn" in output
+        assert b"Cost: 1 turn" in _plain(output)
         if disconnect:
             process.stdin.close()
         else:
             send(b"b")
-            wait_for(b">\x1b[0m ")
+            wait_for(DIAL)
             send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -1219,9 +1357,9 @@ def test_picker_pages_fit_and_only_select_complete_visible_records(monkeypatch, 
     assert wd.pick_record_page(wd.Palette(False), "RAID TARGETS", records, width, height) == "2"
     assert all("1" not in state for state in states)
     assert all("2" not in state for state in states[:-1])
-    screens = "".join(written).split("\x1b[2J\x1b[H")[1:]
+    screens = "".join(written).split(CLEAR)[1:]
     for screen in screens:
-        lines = _ANSI_RE.sub("", screen).rstrip("\r\n").split("\r\n")
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     assert "".join(written).count("界") == 150
@@ -1235,15 +1373,15 @@ def test_result_pages_keep_all_net_changes_readable(monkeypatch, width, height):
     monkeypatch.setattr(wd, "read_input_key", lambda: " ")
     delta = wd.ActionDelta(cash=-1234567890123, crew=0, heat=-90, rank=500, turns=1)
     wd.show_action_result(wd.Palette(False), ["You root " + "界e\u0301" * 150], delta, True, width, height)
-    screens = "".join(written).split("\x1b[2J\x1b[H")[1:]
+    screens = "".join(written).split(CLEAR)[1:]
     for screen in screens:
-        lines = _ANSI_RE.sub("", screen).rstrip("\r\n").split("\r\n")
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     text = _ANSI_RE.sub("", "".join(written))
     assert text.count("界") == 150
-    assert "crew: +0" in text
-    assert "turns spent: 1" in _screen_text(text)  # the frame sits between the words
+    assert "CREW +0" in text
+    assert "turns spent 1" in _screen_text(text)  # the frame sits between the words
 
 
 def test_raid_picker_can_choose_an_eligible_crew_after_fifty_others(tmp_path, monkeypatch):
@@ -1288,8 +1426,8 @@ def test_next_steps_explain_depleted_resources_without_spending(tmp_path):
 
 @pytest.mark.parametrize("key,heading", [(b"r", b"RAID UNAVAILABLE"), (b"x", b"ROOT UNAVAILABLE")])
 def test_real_process_no_turns_explains_refill_before_target_selection(tmp_path, key, heading):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b">\x1b[0m ")
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         conn = wd.connect(path)
         conn.execute("UPDATE players SET turns_used=15, turn_day_start=heat_updated_at")
         conn.close()
@@ -1298,24 +1436,24 @@ def test_real_process_no_turns_explains_refill_before_target_selection(tmp_path,
         assert heading in output
         assert b"No turns. Refill at" in output
         send(b"b")
-        wait_for(b">\x1b[0m ")
+        wait_for(DIAL)
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         conn = wd.connect(path)
         assert wd.read_player(conn, 0).turns_used == 15
         conn.close()
 
 
 def test_new_player_gets_short_first_visit_then_switchboard(tmp_path):
-    with _running_door(tmp_path, new_player=True) as (process, path, wait_for, send, output):
+    with _running_door(tmp_path, new_player=True) as (process, path, wait_for, send, output, reach, screen):
         wait_for(b"Press any key to continue...")
         assert b"FIRST VISIT" in output
-        assert b"[E] Map first" in output
+        assert b"[E] Map first" in _plain(output)
         send(b" ")
-        wait_for(b">\x1b[0m ")
+        wait_for(DIAL)
         assert b"SWITCHBOARD" in output
         send(b"q")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
 
 
 def test_recruit_preview_lists_cash_shortfall_even_when_turns_are_exhausted(tmp_path):
@@ -1381,7 +1519,7 @@ def test_bound_world_refuses_guest_or_different_node_process(tmp_path, owner):
     info.write_text(json.dumps({"user_id": 1, "handle": "Other", "war_dialer_owner": owner}), encoding="utf-8")
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(info), PYTHONIOENCODING="utf-8")
     result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
-                            env=env, timeout=10)
+                            env=env, timeout=PROC_WAIT)
     assert result.returncode == 1
     message = b"launch metadata is invalid" if owner is None else b"belongs to another node"
     assert message in result.stdout
@@ -1403,7 +1541,7 @@ def test_bad_host_metadata_does_not_create_guest_world(tmp_path, metadata):
         info.write_text(metadata, encoding="utf-8")
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(info), PYTHONIOENCODING="utf-8")
     result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
-                            env=env, timeout=10)
+                            env=env, timeout=PROC_WAIT)
     assert result.returncode == 1
     assert b"launch metadata is invalid" in result.stdout
     assert b"Traceback" not in result.stderr
@@ -1418,7 +1556,7 @@ def test_world_in_maintenance_returns_clear_message_without_player_creation(tmp_
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), PYTHONIOENCODING="utf-8")
     env.pop("NETBBS_DOOR_INFO", None)
     result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
-                            env=env, timeout=10)
+                            env=env, timeout=PROC_WAIT)
     assert result.returncode == 1
     assert b"closed for SysOp maintenance" in result.stdout
     conn = sqlite3.connect(path)
@@ -1439,7 +1577,7 @@ def test_incomplete_host_owner_does_not_initialize_world(tmp_path, owner):
     info.write_text(json.dumps(metadata), encoding="utf-8")
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(info), PYTHONIOENCODING="utf-8")
     result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
-                            env=env, timeout=10)
+                            env=env, timeout=PROC_WAIT)
     assert result.returncode == 1
     assert b"launch metadata is invalid" in result.stdout
     assert not path.exists()
@@ -1461,8 +1599,8 @@ def test_rival_shield_expiry_is_public_and_private_resources_stay_hidden(tmp_pat
     written = []
     monkeypatch.setattr(wd, 'out', written.append)
     def choose(valid):
-        page = next(re.search(r'Page (\d+)/(\d+)', text) for text in reversed(written) if 'Page ' in text)
-        return 'N' if page[1] != page[2] else 'B'
+        page = re.search(r'page (\d+)/(\d+)', _last_screen(written))
+        return 'N' if page and page.group(1) != page.group(2) else 'B'
     monkeypatch.setattr(wd, 'read_menu_choice', choose)
     wd.show_player_directory(wd.Palette(False), conn, 1, width, height)
     text = _ANSI_RE.sub('', ''.join(written))
@@ -1470,8 +1608,8 @@ def test_rival_shield_expiry_is_public_and_private_resources_stay_hidden(tmp_pat
     assert (now + wd.RAID_SHIELD).strftime('%Y-%m-%d') in text
     assert '87654321' not in text and '87,654,321' not in text
     assert '7654321' not in text and '7,654,321' not in text
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -1496,7 +1634,7 @@ def test_contract_flow_reaches_chosen_job_and_commits_only_after_preview(tmp_pat
         calls += 1
         assert calls < 100
         assert (wd.read_player(conn, 1).cash, wd.read_player(conn, 1).turns_used) == (300, 0)
-        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        screen = _last_screen(written)
         if 'CONTRACT BOARD' in screen:
             return '5' if '5' in valid else 'N'
         if 'CHOOSE APPROACH' in screen:
@@ -1512,8 +1650,8 @@ def test_contract_flow_reaches_chosen_job_and_commits_only_after_preview(tmp_pat
     assert wd.do_job(wd.Palette(False), conn, actor, now, SuccessRoll(), width, height)
     terms = wd.job_terms(wd.JobChoice(4, approach))
     assert (actor.cash, actor.heat, actor.turns_used, actor.successful_jobs) == (300 + terms[2][0], terms[4], 1, 1)
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -1538,7 +1676,7 @@ def test_contract_browsing_cancel_and_reconnect_preserve_offers_without_random_d
         written = []
         monkeypatch.setattr(wd, 'out', written.append)
         def select(valid):
-            screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+            screen = _last_screen(written)
             if 'CONTRACT BOARD' in screen:
                 return 'B' if stage == 'board' else '1' if '1' in valid else 'N'
             if 'CHOOSE APPROACH' in screen:
@@ -1559,15 +1697,15 @@ def test_contract_browsing_cancel_and_reconnect_preserve_offers_without_random_d
 
 @pytest.mark.parametrize('stage', ['board', 'approach'])
 def test_real_process_disconnect_from_contract_picker_spends_nothing(tmp_path, stage):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b'>\x1b[0m ')
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         send(b'j')
-        wait_for(b'cancel')
+        wait_for(b'Cancel')
         if stage == 'approach':
             send(b'1')
-            wait_for(b'cancel')
+            wait_for(b'Cancel')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b''
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -1594,7 +1732,7 @@ def test_crew_screen_previews_every_purchase_before_committing(tmp_path, monkeyp
         calls += 1
         assert calls < 100
         assert wd.read_player(conn, 1).cash == 300
-        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        screen = _last_screen(written)
         if 'CREW DEVELOPMENT' in screen:
             key = str(index + 1)
             return key if key in valid else 'N'
@@ -1606,8 +1744,8 @@ def test_crew_screen_previews_every_purchase_before_committing(tmp_path, monkeyp
     item, _, price, _ = wd.CREW_ITEMS[index]
     assert actor.cash == 300 - price and actor.turns_used == 1
     assert item in (actor.specialty, actor.support)
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -1626,7 +1764,7 @@ def test_crew_purchase_retains_selection_after_stale_preview(tmp_path, monkeypat
     acts = 0
     def select(valid):
         nonlocal acts
-        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        screen = _last_screen(written)
         if 'CREW DEVELOPMENT' in screen: return '1' if '1' in valid else 'N'
         assert 'CREW PREVIEW' in screen
         if 'A' not in valid: return 'N'
@@ -1645,18 +1783,18 @@ def test_crew_purchase_retains_selection_after_stale_preview(tmp_path, monkeypat
 
 @pytest.mark.parametrize('stage', ['board', 'preview', 'committed'])
 def test_real_process_crew_disconnect_boundaries(tmp_path, stage):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b'>\x1b[0m ')
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         send(b's')
-        wait_for(b'cancel')
+        wait_for(b'Cancel')
         if stage != 'board':
             send(b'1')
-            wait_for(b'[A] Act')
+            reach(b'[A] Act')
         if stage == 'committed':
             send(b'a')
             wait_for(b'Phreakers ready.')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b''
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -1686,7 +1824,7 @@ def test_operations_hub_completes_three_previewed_steps_at_compact_sizes(tmp_pat
             nonlocal calls
             calls += 1
             assert calls < 150 and wd.read_player(conn, 1).turns_used == phase
-            screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+            screen = _last_screen(written)
             if 'PREVIEW' in screen: return 'A' if 'A' in valid else 'N'
             return '1' if '1' in valid else 'N'
         monkeypatch.setattr(wd, 'read_menu_choice', select)
@@ -1694,8 +1832,8 @@ def test_operations_hub_completes_three_previewed_steps_at_compact_sizes(tmp_pat
     assert (actor.operation_stage, actor.successful_operations, actor.cash, actor.turns_used) == (0, 1, 334, 3)
     text = _ANSI_RE.sub('', ''.join(written))
     assert all(title in text for title in ('CASE PREVIEW', 'PREPARE PREVIEW', 'EXECUTE PREVIEW'))
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -1724,16 +1862,16 @@ def test_recon_reaches_rival_beyond_fifty_without_disclosing_resources_before_ac
         assert conn.execute('SELECT COUNT(*) FROM recon').fetchone()[0] == 0
         text = ''.join(written)
         assert '87,654,321' not in text and '7,654,321' not in text
-        screen = text.split('\x1b[2J\x1b[H')[-1]
+        screen = _last_screen(text)
         if 'RECON PREVIEW' in screen: return 'A' if 'A' in valid else 'N'
         return '1' if 'Rival62' in text and '1' in valid else 'N'
     monkeypatch.setattr(wd, 'read_menu_choice', select)
     assert wd.do_recon(wd.Palette(False), conn, actor, width, height)
     dossiers = wd.read_dossiers(conn, 1, now)
     assert len(dossiers) == 1 and dossiers[0]['target'] == 62
-    assert 'Last-known' in ''.join(written)
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    assert 'Last-known' in _ANSI_RE.sub('', ''.join(written))
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -1746,8 +1884,8 @@ def test_recon_reaches_rival_beyond_fifty_without_disclosing_resources_before_ac
     ([b'o', b'2', b'1'], b'RECON PREVIEW', 0, 0),
 ])
 def test_real_process_recon_operation_disconnect_boundaries(tmp_path, keys, marker, stage, turns):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b'>\x1b[0m ')
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         conn = wd.connect(path)
         now = wd.now_utc()
         wd.load_or_create_player(conn, 2, 'Rival', now, 1)
@@ -1757,11 +1895,11 @@ def test_real_process_recon_operation_disconnect_boundaries(tmp_path, keys, mark
             if index == len(keys) - 1:
                 wait_for(marker)
             elif keys[index + 1] == b'a':
-                wait_for(b'[A] Act')
+                reach(b'[A] Act')
             else:
-                wait_for(b'cancel')
+                wait_for(b'Cancel')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b''
         conn = wd.connect(path)
         player = wd.read_player(conn, 0)
@@ -1782,7 +1920,7 @@ def test_operation_inspection_and_abandon_are_free_with_no_turns(tmp_path, monke
     written = []
     monkeypatch.setattr(wd, 'out', written.append)
     def cancel(valid):
-        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        screen = _last_screen(written)
         if 'ACTIVE OPERATION' in screen: return '1' if '1' in valid else 'N'
         assert 'EXECUTE PREVIEW' in screen and 'A' not in valid
         return 'B'
@@ -1793,7 +1931,7 @@ def test_operation_inspection_and_abandon_are_free_with_no_turns(tmp_path, monke
     assert not wd.do_operation(wd.Palette(False), conn, actor, NoDraws(), 80, 24)
     assert list(conn.iterdump()) == before
     def abandon(valid):
-        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
+        screen = _last_screen(written)
         if 'ACTIVE OPERATION' in screen: return '2' if '2' in valid else 'N'
         return 'A' if 'A' in valid else 'N'
     monkeypatch.setattr(wd, 'read_menu_choice', abandon)
@@ -1835,8 +1973,8 @@ def test_operations_hub_does_not_advertise_an_inactive_ops_hotkey(tmp_path, monk
     monkeypatch.setattr(wd, 'out', output.append)
     monkeypatch.setattr(wd, 'read_menu_choice', lambda valid: 'B')
     assert not wd.do_operations_hub(wd.Palette(False), conn, actor, None, 80, 24)
-    assert '[O] Ops' not in ''.join(output)
-    assert '3 turns and $50' in ''.join(output)
+    assert '[O] Ops' not in _ANSI_RE.sub('', ''.join(output))
+    assert '3 turns and $50' in _ANSI_RE.sub('', ''.join(output))
     conn.close()
 
 
@@ -1873,8 +2011,8 @@ def test_owner_services_reachable_through_garrison_at_compact_sizes(tmp_path, mo
     assert actor.turns_used == 1 and stage == 3
     assert (actor.cash == 235) if role == 'carrier' else (actor.cash >= 300)
     assert wd.assigned_crew(conn, 1) == 1
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -1882,8 +2020,8 @@ def test_owner_services_reachable_through_garrison_at_compact_sizes(tmp_path, mo
 
 @pytest.mark.parametrize('commit', [False, True])
 def test_real_process_owner_service_cancel_or_commit(tmp_path, commit):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b'>\x1b[0m ')
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         conn = wd.connect(path)
         conn.execute('UPDATE exchanges SET controller_user_id=0, garrison=1, controlled_since=? WHERE id=1', (wd.to_iso(wd.now_utc()),))
         actor = wd.read_player(conn, 0)
@@ -1891,18 +2029,18 @@ def test_real_process_owner_service_cancel_or_commit(tmp_path, commit):
         service_key = wd.PICK_KEYS[len(wd.garrison_options(actor, exchange))].encode()
         conn.close()
         send(b'g')
-        wait_for(b'cancel')
+        wait_for(b'Cancel')
         send(b'1')
-        wait_for(b'cancel')
+        wait_for(b'Cancel')
         send(service_key)
-        wait_for(b'[A] Act')
+        reach(b'[A] Act')
         send(b'a' if commit else b'b')
         if commit:
             wait_for(b'Carrier recruitment:')
             send(b' ')
-        wait_for(b'>\x1b[0m ')
+        wait_for(DIAL)
         send(b'q')
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         actor = wd.read_player(conn, 0)
         assert (actor.cash, actor.crew, actor.turns_used) == ((235, 4, 1) if commit else (300, 3, 0))
@@ -1918,14 +2056,35 @@ def test_exchange_map_shows_actual_ring_security_services_and_viewer_price(tmp_p
     wd.load_or_create_player(conn, 1, 'Owner', now, 1)
     conn.execute('UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=? WHERE id=10', (wd.to_iso(now),))
     monkeypatch.setattr(wd, 'now_utc', lambda: now)
-    captured = []
-    monkeypatch.setattr(wd, 'show_text_pages', lambda p, title, lines, *args: captured.extend(lines))
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', 80)
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    # Inspect every exchange in turn: the ring and the table carry ownership,
+    # defence and income, and each exchange's own card carries its links, its
+    # role's service and the price this viewer would pay (issue #494).
+    wanted, calls = list(wd.PICK_KEYS), 0
+    def select(valid):
+        nonlocal calls
+        calls += 1
+        assert calls < 300
+        page = re.search(r'page (\d+)/(\d+)', _last_screen(written))
+        if page and page.group(1) != page.group(2):
+            return 'N'
+        if wanted and wanted[0] in valid:
+            return wanted.pop(0)
+        return 'B'
+    monkeypatch.setattr(wd, 'read_menu_choice', select)
     wd.show_territory(wd.Palette(False), conn, 80, 24, viewer_id=1)
-    text = '\n'.join(captured)
-    assert 'Ring links: #1 -- #2' in text and '#10 -- #1' in text
-    assert 'Links: #10, #2' in text and 'Capture $40 (discount $10)' in text
-    assert 'garrison 1; security +2; total defense 3' in text
-    assert all(role in text for role in ('Public PBX', 'Carrier Switch', 'Warez Hub', 'Lay Low', 'Recruit:', 'Warez outlet'))
+    rows = [row for screen in ''.join(written).split(CLEAR)[1:] for row in _rows(screen)]
+    text = ' '.join(' '.join(' '.join(rows).split('┃')).split())
+    # Node 1 neighbours node 10, which this viewer holds, so its Warez Hub
+    # capture is discounted from $75 to $65 and its ring links name both sides.
+    assert 'links #10, #2' in text and 'capture $40' in text and 'base $50' in text
+    assert 'neighbour discount $10' in text
+    assert 'security +2' in text and 'total 3' in text
+    assert all(role in text for role in ('⟦PUBLIC PBX⟧', '⟦CARRIER SWITCH⟧',
+                                         '⟦WAREZ HUB⟧', 'Lay Low', 'Recruit:',
+                                         'Warez outlet'))
     conn.close()
 
 
@@ -1975,25 +2134,32 @@ def test_neutral_map_paginates_names_defense_and_return_deadline(tmp_path, monke
     monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
     written = []
     monkeypatch.setattr(wd, 'out', written.append)
-    calls = 0
+    # The ring and the table name every exchange; an operator's biography, its
+    # return deadline and its defence live on the exchange's own card, which is
+    # the digit in its first column away (issue #494). The walk opens each of
+    # the three NPC homes, turning every page of each.
+    wanted, calls = ['5', '6', '7'], 0
     def select(valid):
         nonlocal calls
         calls += 1
-        assert calls < 200 and 'B' in valid
-        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
-        page = re.search(r'Page (\d+)/(\d+)', screen)
-        return 'B' if page.group(1) == page.group(2) else 'N'
+        assert calls < 300 and 'B' in valid
+        page = re.search(r'page (\d+)/(\d+)', _last_screen(written))
+        if page and page.group(1) != page.group(2):
+            return 'N'
+        if wanted and wanted[0] in valid:
+            return wanted.pop(0)
+        return 'B'
     monkeypatch.setattr(wd, 'read_menu_choice', select)
     wd.show_territory(wd.Palette(False), conn, width, height, viewer_id=1)
     body = []
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        body.extend(_ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')[2:-2])
-    normalized = ' '.join(' '.join(body).split())
-    assert 'NPC returns at' in normalized and 'if still unclaimed.' in normalized
-    assert 'NPC: Night Relay' in normalized and 'NPC: Spool Archive' in normalized
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        body.extend(_rows(screen)[1:-1])
+    normalized = ' '.join(' '.join(' '.join(body).split('┃')).split())
+    assert 'Returns if still unclaimed at' in normalized
+    assert 'Night Relay Union' in normalized and 'Spool Archive Collective' in normalized
     assert wd.read_player(conn, 1).turns_used == 0
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -2001,29 +2167,29 @@ def test_neutral_map_paginates_names_defense_and_return_deadline(tmp_path, monke
 
 @pytest.mark.parametrize('stage', ['cancel', 'disconnect', 'committed'])
 def test_real_process_neutral_capture_preview_boundaries(tmp_path, stage):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b'>\x1b[0m ')
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         send(b'x')
         for _ in range(10):
-            wait_for(b'cancel')
-            screen = bytes(output).split(b'\x1b[2J\x1b[H')[-1].decode('utf-8', errors='replace')
-            match = re.search(r'\[([0-9]+)\] Pick', screen)
-            if match and '5' in match.group(1): break
+            wait_for(b'Cancel')
+            # The digit has to be in the hint, not only in an entry's marker:
+            # an entry whose last row is on the next page is not selectable.
+            if b'[5]' in screen().split(b'pick ')[-1]: break
             send(b'n')
         else: pytest.fail('NPC home never became selectable')
         send(b'5')
-        wait_for(b'[A] Act')
-        assert b'NPC: Patch Panel Society' in output and b'Success: 60%' in output
+        reach(b'[A] Act')
+        assert b'Patch Panel Society' in output and b'Success: 60%' in _plain(output)
         if stage == 'cancel':
             send(b'b')
-            wait_for(b'>\x1b[0m ')
+            wait_for(DIAL)
             send(b'q')
         else:
             if stage == 'committed':
                 send(b'a')
                 wait_for(b'RESULT')
             process.stdin.close()
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         actor, exchange = wd.read_player(conn, 0), wd.list_exchanges(conn)[4]
         assert (actor.cash, actor.turns_used) == ((275, 1) if stage == 'committed' else (300, 0))
@@ -2063,15 +2229,16 @@ def test_scene_and_insignia_are_free_and_fit_small_terminals(tmp_path, monkeypat
                 stage += 1
                 return key
             return 'N'
-        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
-        page = re.search(r'Page (\d+)/(\d+)', screen)
-        return 'B' if page.group(1) == page.group(2) else 'N'
+        screen = _last_screen(written)
+        page = re.search(r'page (\d+)/(\d+)', screen)
+        # A single-page screen has no counter at all now: there is nothing to turn.
+        return 'B' if page is None or page.group(1) == page.group(2) else 'N'
     monkeypatch.setattr(wd, 'read_menu_choice', select)
     wd.do_scene(wd.Palette(False), conn, actor, width, height)
     assert (actor.cash, actor.turns_used, actor.crew, actor.heat) == (0, 15, 3, 0)
     assert actor.insignia == ('archive' if entry == '1' else 'modem')
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -2079,21 +2246,21 @@ def test_scene_and_insignia_are_free_and_fit_small_terminals(tmp_path, monkeypat
 
 @pytest.mark.parametrize('stage', ['scene', 'preview', 'committed'])
 def test_real_process_scene_disconnect_preserves_only_selected_insignia(tmp_path, stage):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b'>\x1b[0m ')
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         send(b'i')
-        wait_for(b'cancel')
+        wait_for(b'Cancel')
         assert b'BBS SCENE' in output
         if stage != 'scene':
             send(b'1')
-            wait_for(b'cancel')
+            wait_for(b'Cancel')
             send(b'4')
-            wait_for(b'[A] Act')
+            reach(b'[A] Act')
         if stage == 'committed':
             send(b'a')
             wait_for(b'Archive insignia selected.')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         actor = wd.read_player(conn, 0)
         assert actor.insignia == ('archive' if stage == 'committed' else 'modem')
@@ -2158,8 +2325,8 @@ def test_complete_visit_stays_productive_without_pvp_at_every_world_size(tmp_pat
     assert conn.execute('SELECT SUM(successful_raids) FROM players').fetchone()[0] == 0
     assert conn.execute('SELECT COUNT(*) FROM players').fetchone()[0] == population
     assert len(wd.read_scene(conn)) == 3 and all(r['kind'] == 'neutral' for r in wd.read_scene(conn))
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -2193,22 +2360,24 @@ def test_season_rules_and_archived_results_are_readable_and_free(tmp_path, monke
                 selected = True
                 return '4'
             return 'N'
-        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
-        page = re.search(r'Page (\d+)/(\d+)', screen)
-        return 'B' if page.group(1) == page.group(2) else 'N'
+        screen = _last_screen(written)
+        page = re.search(r'page (\d+)/(\d+)', screen)
+        # A single-page screen has no counter at all now: there is nothing to turn.
+        return 'B' if page is None or page.group(1) == page.group(2) else 'N'
     monkeypatch.setattr(wd, 'read_menu_choice', select)
     before = list(conn.iterdump())
     wd.do_scene(wd.Palette(False), conn, actor, width, height)
     assert list(conn.iterdump()) == before
     body = []
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
-        if 'SEASON RESULTS' in lines[0]: body.extend(lines[2:-2])
+        if 'SEASON RESULTS' in lines[0]: body.extend(lines[1:-1])
     normalized = ' '.join(' '.join(body).split())
-    assert 'Gold: HistoricalCaller, Rank 10' in normalized
-    assert 'inactive' in normalized and 'Your result: #1, Rank 10.' in normalized
+    # A medal is a badge beside the handle that earned it, not a sentence.
+    assert '⟦GOLD⟧ HistoricalCaller' in normalized and 'rank 10' in normalized
+    assert 'inactive' in normalized and 'your result #1' in normalized
     conn.close()
 
 
@@ -2241,34 +2410,35 @@ def test_season_recognition_from_scene_is_historical_free_and_bounded(tmp_path, 
                 selected = True
                 return choice
             return 'N'
-        screen = ''.join(written).split('\x1b[2J\x1b[H')[-1]
-        page = re.search(r'Page (\d+)/(\d+)', screen)
-        return 'B' if page.group(1) == page.group(2) else 'N'
+        screen = _last_screen(written)
+        page = re.search(r'page (\d+)/(\d+)', screen)
+        # A single-page screen has no counter at all now: there is nothing to turn.
+        return 'B' if page is None or page.group(1) == page.group(2) else 'N'
     monkeypatch.setattr(wd, 'read_menu_choice', select)
     before = list(conn.iterdump())
     wd.do_scene(wd.Palette(False), conn, actor, width, height)
     assert list(conn.iterdump()) == before
     body = []
     title = 'YOUR SEASON REPORTS' if choice == '5' else 'HALL OF FAME'
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
         # Past the title and the counter, and stopping where the bar starts:
         # a sentence that runs onto the next page must not have the bar
         # spliced into the middle of it. `_screen_text` drops the frame.
         if title in lines[0]:
-            rows = lines[2:]
+            rows = lines[1:]
             bar = next((index for index, row in enumerate(rows)
                         if row.strip().startswith(("Press any key", "[N] Next", "[B] Back"))), len(rows))
             body.append(_screen_text("\r\n".join(rows[:bar])))
     normalized = ' '.join(' '.join(body).split())
     if played:
-        assert '{##} HistoricalCaller' in normalized and 'RenamedCaller' not in normalized
-        assert 'Gold; final Rank 10; #1 of 1.' in normalized
+        assert '⟦{##}⟧ HistoricalCaller' in normalized and 'RenamedCaller' not in normalized
+        assert '⟦GOLD⟧' in normalized and 'rank 10' in normalized and 'place #1 of 1' in normalized
         if choice == '5':
-            assert 'Gold 1, Silver 0, Bronze 0' in normalized
-            assert 'Best retained Rank: 10' in normalized
+            assert 'Gold 1' in normalized and 'Silver 0' in normalized
+            assert 'best rank 10' in normalized
     else:
         assert ('No completed-season result' if choice == '5' else 'No medals awarded') in normalized
     conn.close()
@@ -2324,11 +2494,11 @@ def test_late_join_and_fresh_season_dashboard_explains_actual_reset(tmp_path, mo
         page_start = len(written)
         _, count = wd.draw_dashboard(wd.Palette(False), shown, stamp, width, height)
         if stamp == late:
-            assert 'Reset in' in ''.join(written[page_start:])
+            assert 'Season reset in' in _ANSI_RE.sub('', ''.join(written[page_start:]))
         for page in range(1, count): wd.draw_dashboard(wd.Palette(False), shown, stamp, width, height, page)
     assert list(conn.iterdump()) == before
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -2351,7 +2521,7 @@ def test_display_toggles_are_free_paginated_and_survive_seasons(tmp_path, monkey
         nonlocal selected, calls
         calls += 1
         assert calls < 60
-        screen = ' '.join(_ANSI_RE.sub('', ''.join(written).split('\x1b[2J\x1b[H')[-1]).split())
+        screen = ' '.join(_ANSI_RE.sub('', ''.join(written).split(CLEAR)[-1]).split())
         for digit, label in zip('123', ('ASCII decorations', 'Monochrome', 'Fast mode')):
             if digit in valid:
                 assert label in screen
@@ -2373,8 +2543,8 @@ def test_display_toggles_are_free_paginated_and_survive_seasons(tmp_path, monkey
     assert list(conn.iterdump()) == before
     wd.settle_world(conn, now + wd.SEASON)
     assert wd.read_display(conn, 1) == {key: True}
-    for screen in ''.join(written).split('\x1b[2J\x1b[H')[1:]:
-        lines = _ANSI_RE.sub('', screen).rstrip('\r\n').split('\r\n')
+    for screen in ''.join(written).split(CLEAR)[1:]:
+        lines = _rows(screen)
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
     conn.close()
@@ -2383,15 +2553,27 @@ def test_display_toggles_are_free_paginated_and_survive_seasons(tmp_path, monkey
 def test_ascii_monochrome_output_preserves_controls_names_and_noncolor_results(monkeypatch, capsys):
     monkeypatch.setattr(wd, '_ASCII_DECOR', True)
     monkeypatch.setattr(wd, '_MONOCHROME', True)
-    wd.out(wd.decor('\x1b[2J\x1b[38;5;51m\u2554\u2550\u2551\u2557\x1b[0m') + ' Caller Jos\u00e9 A\u2502B: +10 Rank')
+    palette = wd.Palette(True)
+    palette.monochrome = True
+    # Glyphs are substituted where a row is built, not by translating a finished
+    # one (issue #494): `gl()` is the only spelling a screen ever prints, so no
+    # preset can miss a glyph -- and a caller's own name, which may itself
+    # contain a box-drawing character, is never rewritten.
+    frame = "".join(wd.gl(name) for name in ('tl', 'h', 'v', 'tr'))
+    wd.out('\x1b[2J' + wd.sty(palette.phosphor, frame) + ' Caller Jos\u00e9 A\u2502B: +10 Rank')
     assert capsys.readouterr().out == '\x1b[2J+-|+ Caller Jos\u00e9 A\u2502B: +10 Rank'
+    assert palette.phosphor == ''  # monochrome removes colour at the source
 
 
 def test_fast_mode_skips_only_optional_flavor_and_art(tmp_path, monkeypatch):
     monkeypatch.setattr(wd, '_ASCII_DECOR', False)
     monkeypatch.setattr(wd, '_MONOCHROME', False)
     rendered = []
-    monkeypatch.setattr(wd, 'show_text_pages', lambda p, title, lines, *a, **k: rendered.append((title, lines)))
+    def capture(p, title, lines, *a, **k):
+        # A rebuilt screen hands over styled cards, not paragraphs (issue #494).
+        rows = [row for _, card in k.get('cards') or [('', lines)] for row in card]
+        rendered.append((title, [_ANSI_RE.sub('', row) for row in rows]))
+    monkeypatch.setattr(wd, 'show_text_pages', capture)
     palette = wd.Palette(False)
     delta = wd.ActionDelta(cash=-25, crew=-1, heat=4, rank=0, turns=1)
     wd.show_action_result(palette, ['Attempt failed.'], delta, True, 40, 12)
@@ -2399,46 +2581,76 @@ def test_fast_mode_skips_only_optional_flavor_and_art(tmp_path, monkeypatch):
     palette.fast = True
     wd.show_action_result(palette, ['Attempt failed.'], delta, True, 40, 12)
     fast = rendered[-1][1]
-    assert len(normal) == len(fast) + 1
-    assert all(line in normal for line in fast)
+    flavour = 'Sirens cut through the carrier tone.'
+    assert flavour in ' '.join(normal) and flavour not in ' '.join(fast)
     assert any('BUSTED' in line for line in fast)
-    assert any('turns spent: 1' in line for line in fast)
+    # Every stake and net change survives; only the flavour and the frame go.
+    for figure in ('turns spent 1', '-$25', 'CREW -1', 'HEAT +4.0', 'RANK +0'):
+        assert figure in ' '.join(fast), figure
     conn = wd.connect(tmp_path / 'art.db')
     wd.ensure_schema(conn)
     now = wd.now_utc()
     wd.get_or_create_season_anchor(conn, now)
     wd.ensure_exchanges_seeded(conn, 1, now)
     wd.load_or_create_player(conn, 1, 'Caller', now, 1)
-    palette.fast = False
-    wd.show_territory(palette, conn, 40, 12, viewer_id=1)
-    for exchange in wd.list_exchanges(conn):
-        assert f'#{exchange.id} ' + wd.ROLE_ART[exchange.role] in rendered[-1][1]
-    palette.fast = True
-    wd.show_territory(palette, conn, 40, 12, viewer_id=1)
-    assert not any(line.endswith(art) for line in rendered[-1][1] for art in wd.ROLE_ART.values())
-    assert any('Owner:' in line for line in rendered[-1][1])
+    # The neutral-operator dossiers keep the only static ASCII art the door still
+    # draws: exchange roles are badges on the ring's own table now, and the ring
+    # is the screen's content, not optional flavour (issue #494).
+    actor = wd.read_player(conn, 1)
+    for fast in (False, True):
+        palette.fast = fast
+        rendered.clear()
+        # The dossiers entry may sit on a later page of the scene picker at forty
+        # columns; turn pages until the digit it is keyed to is selectable.
+        monkeypatch.setattr(wd, 'read_menu_choice',
+                            lambda valid: '2' if '2' in valid else 'N' if 'N' in valid else 'B')
+        wd.do_scene(palette, conn, actor, 40, 12)
+        dossiers = next(rows for title, rows in rendered if title == 'NEUTRAL DOSSIERS')
+        drawn = any(art in line for line in dossiers for art in wd.NPC_ART.values())
+        assert drawn is not fast
+        assert any('Patch Panel Society' in line for line in dossiers)
+    # Fast mode is the one deliberately unframed layout; the ring survives it.
+    written = []
+    monkeypatch.setattr(wd, 'out', written.append)
+    monkeypatch.setattr(wd, '_OUTPUT_WIDTH', 40)
+    def turn(valid):
+        page = re.search(r'page (\d+)/(\d+)', _last_screen(written))
+        return 'N' if page and page.group(1) != page.group(2) else 'B'
+    monkeypatch.setattr(wd, 'read_menu_choice', turn)
+    for fast, framed in ((False, True), (True, False)):
+        palette.fast = fast
+        written.clear()
+        wd.show_territory(palette, conn, 40, 12, viewer_id=1)
+        screen = _ANSI_RE.sub('', ''.join(written))
+        assert ('┃' in screen) is framed
+        assert 'TEN EXCHANGES' in screen and 'Rain City' in screen
     conn.close()
 
 
 @pytest.mark.parametrize('toggle', [False, True])
 def test_real_process_display_disconnect_preserves_only_chosen_toggle(tmp_path, toggle):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b'>\x1b[0m ')
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         send(b'i')
         for _ in range(10):
-            wait_for(b'cancel')
-            screen = bytes(output).split(b'\x1b[2J\x1b[H')[-1]
-            if b'[7] Pick' in screen: break
+            wait_for(b'Cancel')
+            # The digit has to be in the hint, not only in an entry's marker:
+            # an entry whose last row is on the next page is not selectable.
+            if b'[7]' in screen().split(b'pick ')[-1]: break
             send(b'n')
         else: pytest.fail('Display entry was not reachable')
         send(b'7')
-        wait_for(b'cancel')
+        wait_for(b'Cancel')
         assert b'DISPLAY' in output
         if toggle:
             send(b'1')
-            wait_for(b'ASCII decorations: ON')
+            # A state tag is a badge beside the label, not a bracketed word
+            # appended to it -- and turning ASCII decorations on is exactly the
+            # toggle that respells the badge's own brackets (issue #494).
+            wait_for(b'[ON]')
+            assert b'ASCII decorations' in screen()
         process.stdin.close()
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         assert wd.read_display(conn, 0) == ({'ascii_art': True} if toggle else {})
         assert wd.read_player(conn, 0).turns_used == 0
@@ -2489,18 +2701,18 @@ def test_real_process_unicode_metadata_defaults_and_local_override(tmp_path, hos
     metadata = tmp_path / 'door_info.json'
     metadata.write_text(json.dumps(info), encoding='utf-8')
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), NETBBS_DOOR_INFO=str(metadata), PYTHONIOENCODING='utf-8')
-    result = subprocess.run([sys.executable, '-u', str(_WAR_DIALER_PATH)], input=b'q', capture_output=True, env=env, timeout=10)
+    result = subprocess.run([sys.executable, '-u', str(_WAR_DIALER_PATH)], input=b'q', capture_output=True, env=env, timeout=PROC_WAIT)
     assert result.returncode == 0 and result.stderr == b''
     ascii_expected = local_ascii if local_ascii is not None else host_unicode is False
-    assert ('\u2554'.encode('utf-8') not in result.stdout) is ascii_expected
+    assert ('\u250f'.encode('utf-8') not in result.stdout) is ascii_expected
     assert b'SWITCHBOARD' in result.stdout
 
 
 @pytest.mark.parametrize('action', ['prepare', 'execute', 'abandon', 'recon'])
 @pytest.mark.parametrize('commit', [False, True])
 def test_real_process_operation_and_recon_disconnect_at_final_act(tmp_path, action, commit):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b'>\x1b[0m ')
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         conn = wd.connect(path)
         now = wd.now_utc()
         wd.load_or_create_player(conn, 2, 'Rival', now, 1)
@@ -2509,16 +2721,16 @@ def test_real_process_operation_and_recon_disconnect_at_final_act(tmp_path, acti
         before = wd.read_player(conn, 0)
         conn.close()
         send(b'o')
-        wait_for(b'cancel')
+        wait_for(b'Cancel')
         send(b'2' if action == 'recon' else b'1')
-        wait_for(b'cancel')
+        wait_for(b'Cancel')
         send(b'2' if action == 'abandon' else b'1')
-        wait_for(b'[A] Act')
+        reach(b'[A] Act')
         if commit:
             send(b'a')
             wait_for(b'OPERATION ABANDONED' if action == 'abandon' else b'ACTION RESULT')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         actor = wd.read_player(conn, 0)
         if not commit:
@@ -2540,8 +2752,8 @@ def test_real_process_operation_and_recon_disconnect_at_final_act(tmp_path, acti
 @pytest.mark.parametrize('exchange_id', [1, 4, 5])
 @pytest.mark.parametrize('commit', [False, True])
 def test_real_process_every_owner_service_disconnect_preserves_commit_boundary(tmp_path, exchange_id, commit):
-    with _running_door(tmp_path) as (process, path, wait_for, send, output):
-        wait_for(b'>\x1b[0m ')
+    with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
+        wait_for(DIAL)
         conn = wd.connect(path)
         now = wd.now_utc()
         conn.execute("UPDATE exchanges SET controller_user_id=0,garrison=1,npc_key='',controlled_since=? WHERE id=?", (wd.to_iso(now), exchange_id))
@@ -2551,16 +2763,16 @@ def test_real_process_every_owner_service_disconnect_preserves_commit_boundary(t
         service_key = wd.PICK_KEYS[len(wd.garrison_options(actor, exchange))].encode()
         conn.close()
         send(b'g')
-        wait_for(b'cancel')
+        wait_for(b'Cancel')
         send(b'1')
-        wait_for(b'cancel')
+        wait_for(b'Cancel')
         send(service_key)
-        wait_for(b'[A] Act')
+        reach(b'[A] Act')
         if commit:
             send(b'a')
             wait_for(b'ACTION RESULT')
         process.stdin.close()
-        assert process.wait(timeout=5) == 0 and process.stderr.read() == b''
+        assert process.wait(timeout=PROC_WAIT) == 0 and process.stderr.read() == b''
         conn = wd.connect(path)
         actor = wd.read_player(conn, 0)
         assert actor.turns_used == int(commit)
@@ -2592,7 +2804,7 @@ def test_real_process_lost_output_pipe_exits_cleanly_without_spending(tmp_path):
     os.close(read_fd)
     try:
         result = subprocess.run([sys.executable, '-u', str(_WAR_DIALER_PATH)], input=b'q',
-            stdout=write_fd, stderr=subprocess.PIPE, env=env, timeout=10)
+            stdout=write_fd, stderr=subprocess.PIPE, env=env, timeout=PROC_WAIT)
     finally:
         os.close(write_fd)
     assert result.returncode == 0, result.stderr.decode(errors='replace')
@@ -2636,27 +2848,27 @@ sys.exit(game.main())
     def until(marker):
         def read():
             data = bytearray()
-            while marker not in data:
+            while marker not in _plain(data):
                 part = process.stdout.read(1)
                 assert part, bytes(data)
                 data.extend(part)
-        pool.submit(read).result(timeout=10)
+        pool.submit(read).result(timeout=20)
     def send(key):
         process.stdin.write(key)
         process.stdin.flush()
     try:
-        until(b'>\x1b[0m ')
+        until(DIAL)
         send(b'c')
         until(b'[A] Act')
         send(b'a')
         until(b'COMMITTED')
         process.stdout.close()
         send(b'X')
-        assert process.wait(timeout=10) == 0
+        assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b''
     finally:
         if process.poll() is None: process.kill()
-        process.wait(timeout=5)
+        process.wait(timeout=PROC_WAIT)
         pool.shutdown(wait=True)
         process.stdin.close()
         process.stdout.close()
@@ -2681,4 +2893,1373 @@ def test_fast_goodbye_retains_rank_without_a_decorative_frame(tmp_path, monkeypa
     lines.clear()
     wd.draw_title(palette, {'node_name': 'TestNode', 'handle': 'Caller'}, 2, 20)
     assert lines == ['WAR DIALER - Season 2', 'Node: TestNode; Handle: Caller']
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# The presentation contract (issue #494). These are the tests that can fail
+# because a screen is grey, because two things that mean different things are
+# the same colour, or because a table's columns wander from row to row. The
+# suite could only ever assert that a screen *fits* before, which is how an
+# entire visual design was lost with every slice passing review.
+# ---------------------------------------------------------------------------
+
+_GLYPH_VOCABULARY = None  # filled in lazily from the door's own table
+
+
+def _unicode_glyphs() -> set[str]:
+    """Every glyph the design system draws, in its Unicode spelling."""
+    glyphs = {rich for rich, _ in wd._GLYPHS.values()} | set(wd.SPARK)
+    glyphs |= {"╔", "╗", "╚", "╝", "═", "║", "│", "…"}
+    return glyphs
+
+
+def _colour_before(raw: str, marker: str) -> str:
+    """The last colour introduced before `marker` first appears in `raw`."""
+    at = raw.index(marker)
+    colours = [escape for escape in _ANSI_RE.findall(raw[:at]) if "38;" in escape]
+    return colours[-1] if colours else ""
+
+
+def _body_rows(raw_screen: str) -> list[str]:
+    """Every row's content between the frame's sides, styling intact.
+
+    The frame's own SGR is left outside: a screen whose rows are grey inside a
+    green box passes any test that looks at the whole row (issue #494).
+    """
+    edge = wd.gl("v")
+    rows = []
+    for row in raw_screen.split("\r\n"):
+        plain = _ANSI_RE.sub("", row)
+        if not plain.strip():
+            continue
+        if plain.startswith(edge) and plain.rstrip().endswith(edge):
+            rows.append(edge.join(row.split(edge)[1:-1]))
+        elif plain[0] not in _FRAME_EDGES:
+            rows.append(row)
+    return rows
+
+
+def _painted_world(tmp_path, name="paint.db"):
+    """A world with one holding, one rival holding, an NPC home and two receipts."""
+    conn = wd.connect(tmp_path / name)
+    wd.ensure_schema(conn)
+    now = wd.now_utc()
+    wd.get_or_create_season_anchor(conn, now)
+    wd.ensure_exchanges_seeded(conn, 1, now)
+    wd.load_or_create_player(conn, 1, "Thiesi", now, 1)
+    wd.load_or_create_player(conn, 2, "Kilobaud", now, 1)
+    conn.execute("UPDATE players SET cash=4820, crew=3, heat=72, turns_used=7, "
+                 "crew_recruited_total=24, successful_raids=4, successful_jobs=12, "
+                 "specialty='phreakers', support='burner' WHERE user_id=1")
+    conn.execute("UPDATE players SET crew_recruited_total=40, successful_raids=9 WHERE user_id=2")
+    conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=2 WHERE id=1")
+    conn.execute("UPDATE exchanges SET controller_user_id=2, garrison=3 WHERE id=3")
+    conn.commit()
+    wd.record_event(conn, 1, "Kilobaud", "Kilobaud raided you and got away with $340!", now)
+    wd.record_event(conn, 1, None, "Rooted 212-555 Uptown Exchange; +$120/hour.", now, seen=True)
+    return conn, now
+
+
+def _walk_screens(conn, palette, width, height, monkeypatch, *, keys=()):
+    """Every screen a shallow walk of the door reaches, as raw written chunks."""
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
+    monkeypatch.setattr(wd, "read_input_key", lambda: " ")
+    wanted = list(keys)
+
+    def select(valid):
+        page = re.search(r"page (\d+)/(\d+)", _last_screen(written))
+        if page and page.group(1) != page.group(2):
+            key = "N"
+        elif wanted and wanted[0] in valid:
+            key = wanted.pop(0)
+        else:
+            key = "B"
+        # The real reader echoes the key, which is what ends the bar's own row
+        # (issue #487); a stub that does not would glue the next screen onto it.
+        wd.out_line(key)
+        return key
+
+    monkeypatch.setattr(wd, "read_menu_choice", select)
+    now = wd.now_utc()
+    player = wd.refresh_player(conn, 1, now)
+    state = wd.dashboard_state(conn, 1, now)
+    wd.draw_title(palette, {"node_name": "ReLink", "handle": "Thiesi"}, 1, width)
+    _, pages = wd.draw_dashboard(palette, state, now, width, height)
+    for page in range(1, pages):
+        wd.draw_dashboard(palette, state, now, width, height, page)
+    wd.show_territory(palette, conn, width, height, player=player)
+    wd.show_player_directory(palette, conn, 1, width, height, standings=True)
+    wd.show_player_directory(palette, conn, 1, width, height)
+    wd.show_event_history(palette, conn, 1, width, height)
+    wd.draw_help(palette, width, height)
+    wd.draw_help(palette, width, height, onboarding=True)
+    wd.confirm_action(palette, conn, player, "root", width, height,
+                      wd.list_exchanges(conn, 1)[3])
+    wd.confirm_action(palette, conn, player, "raid", width, height,
+                      wd.refresh_player(conn, 2, now))
+    wd.show_action_result(palette, ["You root 415-555 Bay Exchange."],
+                          wd.ActionDelta(cash=420, crew=-1, heat=12.0, rank=30, turns=1, assigned=1),
+                          False, width, height)
+    wd.do_crew(palette, conn, player, width, height)
+    wd.do_operations_hub(palette, conn, player, __import__("random").Random(1), width, height)
+    wd.do_display(palette, conn, 1, width, height)
+    wd.show_season_results(palette, conn, 1, width, height)
+    wd.show_season_recognition(palette, conn, 1, width, height)
+    # The goodbye card is deliberately not part of the walk: it scrolls under
+    # whatever screen the caller quit from, the way the host's own three epilogue
+    # rows do, so it is not a screen of its own to measure.
+    return "".join(written).split(CLEAR)
+
+
+@pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
+def test_every_screen_colours_the_rows_a_caller_reads(tmp_path, monkeypatch, width, height):
+    """Acceptance criterion 1: colour reaches the body.
+
+    This is the test that would have caught the regression. Every screen's rows
+    used to be wrapped through a plain-text flattener and then coloured one
+    colour from outside, so `p.white` on the row was the only styling that
+    survived and the whole game read as one grey block inside a green frame.
+    """
+    conn, _ = _painted_world(tmp_path)
+    palette = wd.Palette(True)
+    screens = _walk_screens(conn, palette, width, height, monkeypatch, keys=["1"])
+    assert len(screens) > 12, "the walk did not reach the door's screens"
+    grey = []
+    for screen in screens:
+        for row in _body_rows(screen):
+            if "\x1b[" not in row:
+                grey.append(row)
+    assert not grey, f"{len(grey)} body rows printed with no styling: {grey[:4]!r}"
+    conn.close()
+
+
+def test_hotkeys_labels_values_and_the_frame_are_four_different_colours():
+    """Acceptance criterion 2: roles are distinct."""
+    palette = wd.Palette(True)
+    roles = {name: palette.role(name) for name in wd.Palette.ROLES}
+    assert len(set(roles.values())) == len(roles), "two roles share a colour"
+    # The four roles a caller has to tell apart on every screen.
+    assert len({palette.amber, palette.grey, palette.ink, palette.phosphor}) == 4
+    bar = wd.key_bar(palette, (("T", "Trade", "Trade"),), 40, 1)[0]
+    assert bar.startswith(palette.amber + wd.BOLD + "[T]")
+    assert _colour_before(bar, "Trade") == palette.mint
+    chip = wd.label_value(palette, "CASH", "$4,820", style=palette.amber)
+    assert _colour_before(chip, "CASH") == palette.grey
+    assert _colour_before(chip, "$4,820") == palette.amber
+    # 256-colour terminals get a deliberate fallback index per role, not a guess.
+    fallback = wd.Palette(False)
+    indexes = {fallback.role(name) for name in wd.Palette.ROLES}
+    assert len(indexes) == len(wd.Palette.ROLES)
+    assert all("38;5;" in escape for escape in indexes)
+
+
+def test_an_exchange_reads_the_same_colour_on_the_map_the_table_and_the_feed(tmp_path, monkeypatch):
+    """Acceptance criterion 3: owner colour is consistent."""
+    conn, now = _painted_world(tmp_path, "owner.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    exchanges = wd.list_exchanges(conn, 1)
+    mine, rival = exchanges[0], exchanges[2]
+    assert wd.owner_node(palette, mine, 1)[1] == palette.phosphor
+    assert wd.owner_node(palette, rival, 1)[1] == palette.magenta
+    ring = wd.scene_map(palette, exchanges, 1, 72)[0]
+    assert _colour_before(ring, f"{wd.gl('mine')}") == palette.phosphor
+    assert _colour_before(ring, f"{wd.gl('rival')}") == palette.magenta
+    # [0] is the header row; the ten exchanges follow it in world order.
+    rows = wd.territory_cards(palette, exchanges, 1, player, 72)[1][1][1:]
+    assert _colour_before(rows[0], wd.gl("mine")) == palette.phosphor
+    assert _colour_before(rows[2], wd.gl("rival")) == palette.magenta
+    # A rival's own move against you is the same magenta in the feed.
+    events = wd.history_events(conn, 1)
+    feed = wd.feed(palette, events, 72)
+    raided = next(row for row in feed if "Kilobaud" in row)
+    assert _colour_before(raided, wd.gl("bullet")) == palette.magenta
+    assert _colour_before(raided, "Kilobaud") == palette.magenta
+    mine_row = next(row for row in feed if "Rooted" in row)
+    assert _colour_before(mine_row, wd.gl("bullet")) == palette.phosphor
+    conn.close()
+
+
+@pytest.mark.parametrize("width", [40, 64, 80])
+def test_table_columns_start_at_the_same_display_column_on_every_row(width):
+    """Acceptance criterion 4: columns align."""
+    palette = wd.Palette(True)
+    rows = [[f"a{'x' * index}", f"b{'y' * (9 - index)}", wd.dots(palette, index, 4, cap=4),
+             f"{index * 137}"] for index in range(5)]
+    drawn = wd.table(palette, ["KEY", "NAME", "DEFENCE", "RANK"], rows, "<<<>", width)
+    columns = None
+    for row in drawn[1:]:
+        plain = _ANSI_RE.sub("", row)
+        starts = tuple(sum(wd._char_width(ch) for ch in plain[:plain.index(marker)])
+                       for marker in ("a", "b"))
+        assert columns in (None, starts), f"columns moved at width {width}: {drawn}"
+        columns = starts
+    for row in drawn:
+        assert sum(wd._char_width(ch) for ch in _ANSI_RE.sub("", row)) <= width
+
+
+@pytest.mark.parametrize("preset", ["default", "ascii_art", "monochrome", "fast"])
+@pytest.mark.parametrize("width,height", [(40, 12), (64, 20), (80, 24)])
+def test_every_display_preset_renders_every_screen_deliberately(tmp_path, monkeypatch, preset,
+                                                                width, height):
+    """Acceptance criteria 5 and 6: it still fits, and every preset is deliberate."""
+    conn, _ = _painted_world(tmp_path, f"preset-{preset}-{width}.db")
+    palette = wd.Palette(True)
+    # The preset goes where the door reads it from, exactly as its own Display
+    # screen writes it: the walk opens that screen, and `apply_display` would
+    # otherwise reset a palette flag a test had set by hand.
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                     ("display:1", json.dumps({preset: True} if preset != "default" else {})))
+    wd.apply_display(palette, wd.read_display(conn, 1))
+    monkeypatch.setattr(wd, "_ASCII_DECOR", preset == "ascii_art")
+    monkeypatch.setattr(wd, "_MONOCHROME", preset == "monochrome")
+    screens = _walk_screens(conn, palette, width, height, monkeypatch, keys=["1"])
+    for screen in screens:
+        rows = _rows(screen)
+        assert len(rows) <= height, (f"{preset} at {width}x{height}: "
+                                     f"{len(rows)} rows " + " | ".join(rows))
+        for row in rows:
+            assert sum(wd._char_width(ch) for ch in row) <= width, repr(row)
+    text = "".join(screens)
+    if preset == "ascii_art":
+        # Every glyph in the vocabulary has an ASCII substitute, and the ASCII
+        # preset is the one place that can prove none was forgotten.
+        leaked = sorted(glyph for glyph in _unicode_glyphs() if glyph in text)
+        assert not leaked, f"no ASCII substitute reached the screen for {leaked}"
+    if preset == "monochrome":
+        # Monochrome is removed at the source: a role returns no SGR at all, so
+        # no screen can depend on a colour it is not going to get.
+        assert all(palette.role(name) == "" for name in wd.Palette.ROLES)
+        assert "38;" not in text
+    if preset == "fast":
+        assert wd.gl("v") not in text  # the one deliberately unframed layout
+        assert "SWITCHBOARD" in _ANSI_RE.sub("", text)
+    conn.close()
+
+
+def test_motion_is_skippable_absent_in_fast_and_mono_and_changes_no_screen(monkeypatch):
+    """Acceptance criterion 7: motion is skippable and never blocks input."""
+    palette = wd.Palette(True)
+    assert wd.motion_enabled(palette)
+    for preset in ("fast", "monochrome", "ascii_art"):
+        muted = wd.Palette(True)
+        setattr(muted, preset, True)
+        assert not wd.motion_enabled(muted), preset
+
+    rows = [f"row {index}" for index in range(8)]
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    beats = []
+    monkeypatch.setattr(wd, "_read_key_with_timeout", lambda timeout: beats.append(timeout) or None)
+    wd.reveal(palette, rows)
+    animated = "".join(written)
+    assert len(beats) == len(rows), "a reveal waits once per row"
+    assert sum(beats) <= wd.MOTION_BUDGET_SECONDS + 1e-9, "motion stays inside its budget"
+
+    # A key skips the rest: the same screen, written without waiting again.
+    written.clear()
+    beats.clear()
+    monkeypatch.setattr(wd, "_read_key_with_timeout", lambda timeout: beats.append(timeout) or " ")
+    wd.reveal(palette, rows)
+    assert len(beats) == 1 and "".join(written) == animated
+
+    # And a preset without motion writes exactly the same rows, with no waiting.
+    written.clear()
+    beats.clear()
+    still = wd.Palette(True)
+    still.fast = True
+    wd.reveal(still, rows)
+    assert not beats and "".join(written) == animated
+
+
+def test_the_carrier_sweep_plays_after_the_commit_and_ends_on_the_real_figure(monkeypatch):
+    palette = wd.Palette(True)
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(wd, "_read_key_with_timeout", lambda timeout: None)
+    wd.resolve_sweep(palette, 72, amount=420)
+    text = "".join(written)
+    # It owns its own screen: a sweep drawn under the screen the caller pressed a
+    # key at would push that screen off a twelve-row terminal.
+    assert text.startswith(CLEAR)
+    frames = [frame for frame in _ANSI_RE.sub("", text).split("\r") if frame.strip()]
+    assert len(frames) > 4 and "$420" in frames[-1]
+    assert all(sum(wd._char_width(ch) for ch in frame) <= 80 for frame in frames)
+    written.clear()
+    muted = wd.Palette(True)
+    muted.fast = True
+    wd.resolve_sweep(muted, 72, amount=420)
+    assert written == []
+
+
+def test_the_switchboard_reads_at_a_glance_with_gauges_not_sentences(tmp_path, monkeypatch):
+    """The §1 target: the facts a caller scans for are gauges, chips and a map."""
+    conn, now = _painted_world(tmp_path, "glance.db")
+    palette = wd.Palette(True)
+    state = wd.dashboard_state(conn, 1, now)
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    wd.draw_dashboard(palette, state, now, 78, 24)
+    first = _screen_text(written)
+    for fact in ("CASH $4,820", "HEAT", "CREW", "TURNS", "HOLD", "SHIELD"):
+        assert fact in first, fact
+    # Gauges, pips, crew dots and the ring, all on the first page.
+    assert wd.gl("meter_on") in first and wd.gl("meter_off") in first
+    assert wd.gl("turn_on") in first and wd.gl("crew_on") in first
+    assert wd.gl("link_h") * 2 in first and wd.gl("mine") in first
+    assert _screen_titles(written).startswith("SWITCHBOARD")
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Defects the review of the rebuild found (PR #503). Each one is a screen saying
+# something that is not true of the action behind it, or a keystroke reaching a
+# screen the caller never pressed it on.
+# ---------------------------------------------------------------------------
+
+
+def test_a_key_that_skips_the_masthead_does_not_reach_the_next_screen(monkeypatch):
+    """The masthead's reveal has no reader of its own.
+
+    Handing its skip key on would acknowledge a page of unread receipts, or skip
+    a page of the first-visit guide, that the caller never pressed anything on.
+    A result screen's reveal is the opposite case: an acknowledgement follows it
+    immediately, so one press should do both.
+    """
+    palette = wd.Palette(True)
+    monkeypatch.setattr(wd, "out", lambda text: None)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(wd, "_read_key_with_timeout", lambda timeout: " ")
+    wd._PENDING_INPUT.clear()
+    wd.draw_title(palette, {"node_name": "ReLink", "handle": "Thiesi"}, 1, 78)
+    assert wd._PENDING_INPUT == [], "the masthead handed its skip key to the next screen"
+    wd.reveal(palette, ["one", "two"])
+    assert wd._PENDING_INPUT == [" "], "a result reveal must not eat the acknowledgement"
+    wd._PENDING_INPUT.clear()
+
+
+def test_the_log_tones_your_own_receipts_the_way_the_dashboard_does(tmp_path, monkeypatch):
+    conn, now = _painted_world(tmp_path, "tone.db")
+    palette = wd.Palette(True)
+    # A receipt the caller caused records no actor; one a rival caused records the
+    # rival's handle. Both screens have to agree about which is which.
+    wd.record_event(conn, 1, None, "Reinforced 212-555 Uptown Exchange with 1.", now,
+                    seen=True)
+    events = wd.history_events(conn, 1)
+    feed = wd.feed(palette, events, 72)
+    own_feed = next(row for row in feed if "Reinforced" in row)
+    assert _colour_before(own_feed, wd.gl("bullet")) == palette.phosphor
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    wd.show_event_history(palette, conn, 1, 78, 24)
+    own_log = next(row for row in "".join(written).split("\r\n") if "Reinforced" in row)
+    assert palette.magenta not in own_log, "your own receipt read as hostile in the log"
+    assert palette.ink in own_log
+    conn.close()
+
+
+def test_the_feed_wraps_wide_glyphs_without_losing_the_tail(tmp_path, monkeypatch):
+    conn, now = _painted_world(tmp_path, "wide.db")
+    palette = wd.Palette(True)
+    # A handle of CJK glyphs is twice as wide as it is long; a row measured in
+    # characters would be clipped by the frame and lose the end of the receipt.
+    wd.record_event(conn, 1, "界" * 12, "界" * 12 + " raided you and got away with $5.",
+                    now)
+    rows = wd.feed(palette, wd.history_events(conn, 1), 60, limit=1)
+    assert len(rows) > 1, "a wide receipt has to carry onto another row"
+    for row in rows:
+        assert wd._dlen(row) <= 60, (wd._dlen(row), row)
+    assert "$5." in "".join(rows), "the tail of the receipt was dropped"
+    conn.close()
+
+
+@pytest.mark.parametrize("role,expect_roll", [("pbx", False), ("carrier", False), ("hub", True)])
+def test_an_owner_service_preview_shows_only_the_risk_that_service_takes(tmp_path, role,
+                                                                        expect_roll):
+    conn, now = _painted_world(tmp_path, f"service-{role}.db")
+    palette = wd.Palette(True)
+    exchange = next(e for e in wd.list_exchanges(conn, 1) if e.role == role)
+    conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=? "
+                 "WHERE id=?", (wd.to_iso(now), exchange.id))
+    conn.execute("UPDATE players SET heat=78 WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    exchange = next(e for e in wd.list_exchanges(conn, 1) if e.id == exchange.id)
+    cards = wd.stakes_cards(palette, "service", player, exchange, 72)
+    text = _ANSI_RE.sub("", " ".join(row for _, rows in cards for row in rows))
+    # Only a Warez Hub adds Heat and rolls for a bust. At 78 Heat the other two
+    # would otherwise advertise a bust chance directly above terms that say there
+    # is no roll. ("NO BUST ROLL" contains "BUST", so the badge is matched whole.)
+    assert ("NO BUST ROLL" in text) is not expect_roll, text
+    assert ("⟦BUST " in text) is expect_roll, text
+    assert (wd.preview_heat("service", player, exchange) > 0) is expect_roll
+    conn.close()
+
+
+@pytest.mark.parametrize("step,cost", [("case", "$0"), ("prepare", "$50"), ("execute", "$0")])
+def test_an_operation_step_previews_its_own_cost_and_its_own_risk(tmp_path, step, cost):
+    conn, now = _painted_world(tmp_path, f"step-{step}.db")
+    palette = wd.Palette(True)
+    # No specialty and no support, so the execution's Heat actually lands and its
+    # bust badge is the thing being compared against the other two steps.
+    conn.execute("UPDATE players SET heat=78, specialty='', support='' WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    cards = wd.operation_step_cards(palette, player, step, wd.JobChoice(1, 1), 72)
+    head = _ANSI_RE.sub("", " ".join(cards[1][1]))
+    stakes = _ANSI_RE.sub("", " ".join(rows for heading, rows in cards
+                                      if heading == "STAKES" for rows in rows))
+    assert f"cash {cost}" in head, head
+    # Casing and preparing roll for nothing and add no Heat; only executing does.
+    assert ("ODDS" in stakes) is (step == "execute"), stakes
+    assert ("NO BUST ROLL" in stakes) is (step != "execute"), stakes
+    assert wd.progress_chain(palette, list(wd.OPERATION_STAGES),
+                             wd.OPERATION_STAGES.index(step)) in cards[0][1][0]
+    conn.close()
+
+
+def test_your_own_garrisons_are_not_described_as_targets(tmp_path):
+    conn, now = _painted_world(tmp_path, "held.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    held = next(e for e in wd.list_exchanges(conn, 1) if e.controller_user_id == 1)
+    rows = _ANSI_RE.sub("", " ".join(wd.garrison_entry_rows(palette, held, player, 68)))
+    # A holding has posted crew, defence, income and a service; a capture price,
+    # root Heat or odds against its own defence would mean nothing here.
+    for absent in ("capture", "odds", "heat"):
+        assert absent not in rows.lower(), rows
+    for present in ("posted", "defence", "income", "Service:"):
+        assert present in rows, rows
+    conn.close()
+
+
+def test_the_scene_table_advertises_no_hotkey_the_screen_ignores(tmp_path):
+    conn, now = _painted_world(tmp_path, "verbs.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    exchanges = wd.list_exchanges(conn, 1)
+    table = wd.territory_cards(palette, exchanges, 1, player, 72)[1][1]
+    text = _ANSI_RE.sub("", " ".join(table))
+    # The scene screen inspects and never acts, so its table names the verb and
+    # the exchange's own card says where the key that does it lives.
+    for verb in ("garrison", "root"):
+        assert verb in text
+    for key in ("[G]", "[R]", "[X]"):
+        assert key not in text, f"{key} is printed on a screen whose dispatch ignores it"
+    # And the verb is the action the row's own `take` column priced. A rival's
+    # exchange is contested with Root; a raid steals cash from its owner, leaves
+    # the exchange alone and has odds the door will not show, so "38% raid" named
+    # one action and priced another.
+    assert "raid" not in text, text
+    rival = next(row for row in (_ANSI_RE.sub("", line) for line in table)
+                 if "Loop" in row)
+    assert "root" in rival and "38%" in rival, rival
+    card = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, exchanges[0], player, 72)
+        for row in rows))
+    assert "Back on the switchboard" in card and "[G] Garrison" in card
+    conn.close()
+
+
+@pytest.mark.parametrize("action,target_role,rolls", [
+    ("trade", None, True), ("job", None, True), ("raid", None, True), ("root", None, True),
+    ("service", "hub", True),
+    ("recruit", None, False), ("crew", None, False),
+    ("service", "pbx", False), ("service", "carrier", False),
+])
+def test_a_preview_promises_a_bust_roll_only_where_one_happens(tmp_path, action, target_role,
+                                                              rolls):
+    """Only the five resolvers that call `apply_heat` roll against Heat.
+
+    The first round of this fix made `preview_heat` return zero for the two
+    services that take none, but the chance was still computed from the caller's
+    existing Heat -- so above 80 Heat a Lay Low, a Carrier recruitment and every
+    kit purchase still advertised `BUST n%` above terms saying there is no roll.
+    """
+    conn, now = _painted_world(tmp_path, f"roll-{action}-{target_role}.db")
+    palette = wd.Palette(True)
+    conn.execute("UPDATE players SET heat=95, specialty='', support='' WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    if action == "service":
+        exchange = next(e for e in wd.list_exchanges(conn, 1) if e.role == target_role)
+        conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=? "
+                     "WHERE id=?", (wd.to_iso(now), exchange.id))
+        conn.commit()
+        target = next(e for e in wd.list_exchanges(conn, 1) if e.id == exchange.id)
+    elif action == "root":
+        target = wd.list_exchanges(conn, 1)[3]
+    elif action == "raid":
+        target = wd.refresh_player(conn, 2, now)
+    elif action == "job":
+        target = wd.JobChoice(1, 1)
+    elif action == "crew":
+        target = wd.CrewChoice("stash")
+    else:
+        target = None
+    assert wd.rolls_for_bust(action, target) is rolls
+    cards = wd.stakes_cards(palette, action, player, target, 72)
+    stakes = _ANSI_RE.sub("", " ".join(row for heading, rows in cards
+                                      if heading == "STAKES" for row in rows))
+    if action == "recruit":
+        assert "BUST" not in stakes, stakes  # recruiting has no Heat row at all
+    else:
+        assert ("NO BUST ROLL" in stakes) is not rolls, stakes
+        assert ("⟦BUST " in stakes) is rolls, stakes
+
+
+def test_a_bracketed_word_is_never_coloured_like_a_hotkey():
+    """Every hotkey this door has is one character.
+
+    `[ON]`, `[HELD]` or `[SPECIALTY]` in amber and bold beside `[1]` reads as a
+    second key to press. A state tag is a badge or neutral data, never a key.
+    """
+    palette = wd.Palette(True)
+    row = wd.prose_rows(palette, "Press [T] to trade; the slot shows [HELD] when taken.", 72)[0]
+    assert _colour_before(row, "[T]") == palette.amber
+    assert wd.BOLD in row.split("[T]")[0]
+    assert _colour_before(row, "[HELD]") == palette.cyan
+    assert _colour_before(row, "[HELD]") != palette.amber
+
+
+def test_no_screen_prints_a_hotkey_its_own_dispatch_ignores(tmp_path):
+    """The rival directory reads; it does not raid.
+
+    `show_player_directory` delegates input to `show_text_pages`, which accepts
+    only Next/Prev/Back/Quit, so `[R] raid` in its table was a key that did
+    nothing -- the same defect as the scene table's action column.
+    """
+    conn, now = _painted_world(tmp_path, "verdicts.db")
+    palette = wd.Palette(True)
+    conn.execute("UPDATE players SET created_at=? WHERE user_id=2",
+                 (wd.to_iso(now - wd.GRACE * 2),))
+    conn.commit()
+    page = wd.read_player_page(conn, 1, now)
+    cards = wd.rivals_cards(palette, page, 1, 72, now)
+    table = _ANSI_RE.sub("", " ".join(
+        row for heading, rows in cards if heading == "RIVAL CREWS" for row in rows))
+    assert "eligible" in table, table
+    assert "[R]" not in table, "a key the screen's dispatch ignores"
+    # The head card says where the key that does raid actually lives.
+    head = _ANSI_RE.sub("", " ".join(cards[0][1]))
+    assert "Back on the switchboard" in head and "[R] Raid" in head
+    conn.close()
+
+
+def test_the_unread_receipt_page_shows_how_to_keep_it_unread(tmp_path, monkeypatch):
+    """Any key acknowledges the page; Back is the only way not to.
+
+    The login view's footer said only "Press any key to continue...", which both
+    hides the documented escape and implies Back acknowledges like anything else.
+    """
+    conn, now = _painted_world(tmp_path, "unread.db")
+    palette = wd.Palette(True)
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 40)
+    monkeypatch.setattr(wd, "read_input_key", lambda: "B")
+    wd.show_event_history(palette, conn, 1, 40, 12, unseen_only=True)
+    screen = _ANSI_RE.sub("", "".join(written))
+    assert "Press any key to continue" in screen
+    assert "[B] Back keeps this page unread" in screen
+    # Back left them unread, which is the behaviour the footer now documents.
+    assert wd.unseen_events(conn, 1), "Back acknowledged the page"
+    for row in _rows("".join(written).split(CLEAR)[-1]):
+        assert sum(wd._char_width(ch) for ch in row) <= 40, repr(row)
+    conn.close()
+
+
+def test_skipping_the_masthead_consumes_the_whole_input_unit(monkeypatch):
+    """An arrow key is several bytes, and all of them belong to the skip.
+
+    Dropping only the leading ESC left `[A` for the next reader, where `A` was
+    taken as the "any key" that advances the first-visit guide or marks a page of
+    receipts read -- an action on a screen the caller never pressed anything on.
+    """
+    palette = wd.Palette(True)
+    monkeypatch.setattr(wd, "out", lambda text: None)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    stream = list("\x1b[A")  # one press of the up arrow
+    monkeypatch.setattr(wd, "_read_key_with_timeout",
+                        lambda timeout: wd.read_key() if wd._PENDING_INPUT
+                        else (stream.pop(0) if stream else None))
+    wd._PENDING_INPUT.clear()
+    wd.draw_title(palette, {"node_name": "ReLink", "handle": "Thiesi"}, 1, 78)
+    assert stream == [], "the rest of the sequence was left for the next screen"
+    assert wd._PENDING_INPUT == []
+    wd._PENDING_INPUT.clear()
+
+
+def test_one_width_rule_measures_every_row():
+    """`_dlen` and the wrapper have to agree, or a budget is a guess.
+
+    A Hangul choseong is two columns wide and sits *below* U+2E80, and a combining
+    accent is zero; the old rule called both one. A handle of them was budgeted as
+    one row, wrapped into two by `out_line`, and scrolled the footer off a
+    twelve-row terminal.
+    """
+    for sample in ("ᄀ" * 6, "界é" * 6, "plain ascii", "　ᅠ"):
+        assert wd._dlen(sample) == wd._visible_width(sample), sample
+        wrapped = wd._wrap_output(sample, 20).split("\r\n")
+        assert all(wd._dlen(row) <= 20 for row in wrapped), wrapped
+    # And a truncation measures the same way, so a fitted cell really fits.
+    for width in (4, 9, 20):
+        assert wd._dlen(wd._fit("ᄀ" * 30, width)) <= width
+
+
+def test_turning_fast_mode_off_inside_display_redraws_at_the_frame_width(tmp_path, monkeypatch):
+    """Fast mode is the one preset that changes how wide a row may be.
+
+    Caching the width across the toggle composed the next screen's rows for an
+    unframed terminal, and the frame then clipped the setting descriptions.
+    """
+    conn, _ = _painted_world(tmp_path, "fast-toggle.db")
+    palette = wd.Palette(True)
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                     ("display:1", json.dumps({"fast": True})))
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 40)
+    # Fast mode is the third entry, which may be on the picker's second page at
+    # forty columns; page forward until it is offered, then turn it off and leave.
+    state = {"off": False}
+
+    def select(valid):
+        if state["off"]:
+            return "B"
+        if "3" in valid:
+            state["off"] = True
+            return "3"
+        return "N" if "N" in valid else "B"
+
+    monkeypatch.setattr(wd, "read_menu_choice", select)
+    wd.do_display(palette, conn, 1, 40, 12)
+    screens = "".join(written).split(CLEAR)[1:]
+    assert len(screens) > 1, "the toggle did not redraw"
+    framed = screens[-1]
+    assert wd.gl("v") in _ANSI_RE.sub("", framed), "Fast mode was not turned off"
+    for row in _rows(framed):
+        assert sum(wd._char_width(ch) for ch in row) <= 40, repr(row)
+    # Nothing was clipped away by the frame on the redraw.
+    assert "caller names are untouched." in _screen_text(framed)
+    conn.close()
+
+
+def test_raid_authorization_stays_above_the_ui_boundary():
+    """`resolve_raid` reaches `raid_block` through `is_eligible_raid_target`.
+
+    A helper the domain depends on cannot live below the file's UI-layer marker,
+    or a presentation-only edit can change whether raids are permitted.
+    """
+    source = _WAR_DIALER_PATH.read_text(encoding="utf-8")
+    boundary = source.index("# UI layer -- everything below touches")
+    # `rolls_for_bust` is deliberately *not* here: nothing but a preview card
+    # consults it, so it belongs with the screens.
+    for name in ("def raid_block", "def raid_eligibility_reason",
+                 "def is_eligible_raid_target"):
+        assert name in source, name
+        assert source.index(name) < boundary, f"{name} is below the UI-layer boundary"
+    # And the direction of the dependency: the domain helper takes no palette.
+    assert "p: Palette" not in source[source.index("def raid_block"):
+                                     source.index("def raid_eligibility_reason")]
+
+
+def test_lay_low_previews_the_heat_it_will_leave(tmp_path):
+    """A PBX's service removes Heat, which is the reason a caller opens it.
+
+    Reporting it as no change left the prominent gauge at the Heat the terms
+    immediately below promised to reduce: 78 above "remove up to 15 Heat".
+    """
+    conn, now = _painted_world(tmp_path, "laylow.db")
+    palette = wd.Palette(True)
+    pbx = next(e for e in wd.list_exchanges(conn, 1) if e.role == "pbx")
+    conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=? "
+                 "WHERE id=?", (wd.to_iso(now), pbx.id))
+    conn.execute("UPDATE players SET heat=78 WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    pbx = next(e for e in wd.list_exchanges(conn, 1) if e.id == pbx.id)
+    assert wd.preview_heat("service", player, pbx) == -15
+    stakes = next(rows for heading, rows in wd.stakes_cards(palette, "service", player, pbx, 72)
+                  if heading == "STAKES")
+    text = _ANSI_RE.sub("", " ".join(stakes))
+    assert "78 -15 = 63" in text, text
+    # A reduction is not an alarm.
+    heat_row = next(row for row in stakes if "HEAT" in _ANSI_RE.sub("", row))
+    assert _colour_before(heat_row, "-15") == palette.phosphor
+    # Less Heat than the caller has, on the gauge itself.
+    assert heat_row.count(wd.gl("meter_on")) < wd.meter(palette, 78, 100, 18).count(wd.gl("meter_on"))
+    conn.close()
+
+
+def test_capped_dots_keep_their_proportion():
+    """A gauge that lights every dot for half a pool is worse than no gauge."""
+    palette = wd.Palette(True)
+    lit = wd.gl("crew_on")
+    half = wd.dots(palette, 10, 20, cap=6)
+    assert half.count(lit) == 3, _ANSI_RE.sub("", half)
+    assert wd.dots(palette, 20, 20, cap=6).count(lit) == 6  # all of it is all of it
+    assert wd.dots(palette, 0, 20, cap=6).count(lit) == 0  # and none is none
+    assert wd.dots(palette, 1, 40, cap=6).count(lit) == 1  # some is never none
+    assert wd.dots(palette, 39, 40, cap=6).count(lit) == 5  # and not-all is never all
+    # A transfer at the top of the range still moves the gauge.
+    before = wd.dots(palette, 10, 20, cap=6).count(lit)
+    after = wd.dots(palette, 14, 20, cap=6).count(lit)
+    assert after > before
+
+
+@pytest.mark.parametrize("heat,expected", [(0, ""), (72, "near bust"), (79, "bust risk"),
+                                           (95, "bust risk")])
+def test_the_heat_chip_warns_about_what_a_trade_would_leave(tmp_path, heat, expected):
+    """At 79 Heat a trade crosses the threshold and rolls.
+
+    Judging the chip on where Heat stands called that "near bust" while the
+    advice on the same screen told the caller to wait for a risk-free trade.
+    """
+    conn, now = _painted_world(tmp_path, f"chip-{heat}.db")
+    conn.execute("UPDATE players SET heat=?, specialty='', support='' WHERE user_id=1", (heat,))
+    conn.commit()
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    chip = _ANSI_RE.sub("", wd.heat_chip(palette, player))
+    assert (expected in chip if expected else chip == ""), (heat, chip)
+    if expected == "bust risk":
+        # The same screen's advice agrees: it offers a wait, not a free trade.
+        state = wd.dashboard_state(conn, 1, now)
+        assert any("without a bust roll" in line for line in wd.next_steps(state, now))
+    conn.close()
+
+
+def _gallery():
+    """`scripts/door_gallery.py` as a module, for the walks it declares."""
+    path = Path(__file__).resolve().parent.parent / "scripts" / "door_gallery.py"
+    spec = importlib.util.spec_from_file_location("gallery_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _door_screen_titles() -> tuple[set[str], list[int]]:
+    """Every title the door writes into a frame heading, from its own source.
+
+    Read from the two wrappers every screen with a heading goes through, so a
+    screen added tomorrow is found without anyone remembering to list it. The
+    second return value is the call sites whose title is composed rather than
+    written; they are named in `COMPOSED` and counted, so a third one fails here
+    rather than going unphotographed.
+    """
+    tree = ast.parse(_WAR_DIALER_PATH.read_text(encoding="utf-8"))
+    titles: set[str] = set()
+    composed: list[int] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id not in ("show_text_pages", "pick_record_page") or len(node.args) < 2:
+            continue
+        argument = node.args[1]
+        parts = ([argument.body, argument.orelse] if isinstance(argument, ast.IfExp)
+                 else [argument])
+        for part in parts:
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                titles.add(part.value)
+            else:
+                composed.append(node.lineno)
+    return titles, composed
+
+# The titles the door composes: a confirmation is named after the action it
+# commits, an operation step after the step in hand.
+COMPOSED = {f"{name.upper()} PREVIEW" for name in
+            ("trade", "job", "recruit", "crew", "root", "service", "raid",
+             "case", "prepare", "execute")}
+
+# Screens no walk can reach by playing, and why. A panel's state is the fixture
+# plus whatever keys a walk presses into its own copy of it -- `SETUP` plays a
+# whole operation before five of the panels are taken -- so the bar is not "the
+# fixture is not in that state" but "no reasonable sequence of keys puts it
+# there". Anything not listed here must be photographed; that is the whole
+# argument of the gallery.
+# Where a walk's mark is finer than the screen's own title: one screen with three
+# texts. The owner service is marked on the service itself, so a panel that showed
+# the wrong holding's service fails the build instead of passing under the title
+# they share.
+FINER_MARKS = {"SERVICE PREVIEW": ("Recruit:", "outlet:", "Lay Low:")}
+
+UNREACHABLE = {
+    "FED CRACKDOWN": "drawn only when the world's season advances between two dashboard "
+                     "draws in one session: a clock crossing a boundary mid-session, which "
+                     "no state and no key produces. What a caller meets instead -- the "
+                     "crackdown receipt, and the reset card in the closing window -- is "
+                     "photographed",
+    "NO RIVAL CREWS": "needs a world with no other crews; this one is seeded with two",
+    # The five refusals are one sentence of domain prose in a frame. A panel would
+    # add nothing the 40x12 fit and wrap tests already prove, and reaching one
+    # means fabricating a caller who has spent fifteen turns or emptied a wallet.
+    "ACTION UNAVAILABLE": "a refusal: one sentence of prose in a frame",
+    "GARRISON UNAVAILABLE": "ditto, for a crew move",
+    "PURCHASE UNAVAILABLE": "ditto, for a kit",
+    "RAID UNAVAILABLE": "ditto, for a raid",
+    "ROOT UNAVAILABLE": "ditto, for a capture",
+}
+
+
+def test_every_screen_the_door_can_draw_is_photographed_by_a_walk():
+    """The gallery is only a countermeasure for the screens it photographs.
+
+    A walk keeps the screen it is looking at when its keys run out, so passing
+    *through* a picker reviews nothing of it: the approach pickers and the recon
+    preview were rebuilt, walked over twice a panel, and appeared in none of 468
+    panels. This reads the door's own source rather than a list someone maintains,
+    so the next screen added is either walked or deliberately excused here.
+    """
+    gallery = _gallery()
+    titles, composed = _door_screen_titles()
+    # Both composed titles are accounted for in COMPOSED; a third is not.
+    assert len(composed) == 2, f"a new composed screen title at lines {composed}"
+    walks = gallery.SHOWS["war_dialer"]
+    assert [label for label, _ in gallery.WALKS["war_dialer"]] == list(walks), (
+        "every walk must declare what its screen shows")
+    shown = set(walks.values())
+    unphotographed = sorted(
+        title for title in titles | COMPOSED
+        if title not in UNREACHABLE
+        and not any(mark == title or mark in title for mark in shown)
+        and not all(mark in shown for mark in FINER_MARKS.get(title, ())))
+    assert not unphotographed, (
+        "these screens appear in no gallery panel; add a walk that ends on each, "
+        f"or excuse it in UNREACHABLE with a reason: {unphotographed}")
+    # And nothing is excused that the door no longer draws, or that a walk now
+    # reaches after all -- a stale excuse hides the next gap.
+    stale = sorted(title for title in UNREACHABLE
+                   if title not in titles | COMPOSED
+                   or any(mark == title for mark in shown))
+    stale += sorted(title for title in FINER_MARKS if title not in titles | COMPOSED)
+    assert not stale, f"excused but reachable or gone: {stale}"
+
+
+def test_a_walk_is_named_by_an_entry_a_picker_cannot_move():
+    """A digit is not a name for an entry a picker appends after a list.
+
+    The exchange control screen puts the owner service after one entry per crew
+    transfer the holding can make, so `3` meant the service only while the
+    fixture happened to offer exactly two -- and a digit that lands on a transfer
+    publishes a garrison preview under the service's caption.
+    """
+    gallery = _gallery()
+    walks = dict(gallery.WALKS["war_dialer"])
+    # Pick the holding by the role it is, then the appended entry by position --
+    # `N%` after that only turns the preview's own pages.
+    assert walks["Owner service preview"] == b"G{CARRIER SWITCH}$N%"
+    assert not re.search(rb"\d", walks["Owner service preview"])
+    # The suffix is explained where the others are, so the next walk can use it.
+    source = (Path(gallery.__file__).read_text(encoding="utf-8")
+              if gallery.__file__ else "")
+    assert "#   `$`" in source
+
+
+def test_your_own_exchange_card_is_not_priced_as_a_target(tmp_path):
+    """The scene's card broke the rule its own garrison picker states.
+
+    Inspecting a holding gauged `YOUR ODDS 38%` against the caller's own
+    garrison and priced a capture of what they already hold, above a line
+    telling them to use Garrison -- and the root picker will not even offer that
+    exchange. The same card for a rival's exchange still has to show both.
+    """
+    conn, now = _painted_world(tmp_path, "card.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    by_id = {exchange.id: exchange for exchange in wd.list_exchanges(conn, 1)}
+    mine = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, by_id[1], player, 68)
+        for row in rows))
+    for absent in ("YOUR ODDS", "capture", "neighbour discount", "heat"):
+        assert absent not in mine, (absent, mine)
+    for present in ("POSTED", "available", "held", "income", "Your service:", "[G] Garrison"):
+        assert present in mine, (present, mine)
+    # A rival's exchange is a target, and still reads like one.
+    theirs = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, by_id[3], player, 68)
+        for row in rows))
+    for present in ("YOUR ODDS", "capture $", "capture rank", "[R] Raid"):
+        assert present in theirs, (present, theirs)
+    conn.close()
+
+
+def test_a_holding_reports_its_age_coarsely(tmp_path):
+    """An owner wants "three days", not a timestamp to subtract from the clock."""
+    conn, now = _painted_world(tmp_path, "held-for.db")
+    held = next(e for e in wd.list_exchanges(conn, 1) if e.controller_user_id == 1)
+    for delta, expected in ((timedelta(minutes=20), "under an hour"),
+                            (timedelta(hours=5), "5h"),
+                            (timedelta(hours=47), "47h"),
+                            (timedelta(days=3), "3d")):
+        conn.execute("UPDATE exchanges SET controlled_since=? WHERE id=?",
+                     (wd.to_iso(wd.now_utc() - delta), held.id))
+        conn.commit()
+        fresh = next(e for e in wd.list_exchanges(conn, 1) if e.id == held.id)
+        assert wd.held_for(fresh) == expected, (delta, wd.held_for(fresh))
+    # An exchange nobody has taken has no age to report.
+    conn.execute("UPDATE exchanges SET controlled_since=NULL WHERE id=?", (held.id,))
+    conn.commit()
+    fresh = next(e for e in wd.list_exchanges(conn, 1) if e.id == held.id)
+    assert wd.held_for(fresh) == "-"
+    conn.close()
+
+
+def test_a_card_stack_is_photographed_page_by_page():
+    """A walk that fast-forwards to the last page reviews neither the ones between.
+
+    At forty columns the switchboard is fourteen pages and the rules twenty-two,
+    and each page is a different card: keeping page one, page two and the last
+    published three of the fourteen, with the scene, the feed, the orders and
+    most of the season card in no panel at any size. A preview is the same shape
+    -- the stakes, and then the authoritative terms.
+    """
+    gallery = _gallery()
+    walks = dict(gallery.WALKS["war_dialer"])
+    for label in ("Switchboard", "Help", "Exchange card", "Job preview", "Raid preview",
+                  "Trade preview", "Crew preview", "Root preview", "Garrison preview",
+                  "Owner service preview", "Case preview", "Recon preview",
+                  "Prepare preview", "Execute preview"):
+        assert walks[label].endswith(b"N%"), (label, walks[label])
+    # And a walk that needs a world mid-operation plays one first, rather than
+    # being excused as unreachable.
+    for label in ("Active operation", "Prepare preview", "Execute preview",
+                  "Abandon preview", "Operation abandoned"):
+        assert gallery.SETUP["war_dialer"][label].startswith(b"O1?1?1?")
+
+
+def test_the_root_picker_lists_your_own_exchanges_as_holdings(tmp_path, monkeypatch):
+    """The card was fixed and the picker was not, which is half a fix.
+
+    An owned exchange went through `exchange_entry_rows` with "already yours"
+    appended, so it still carried a capture price, root Heat and the odds of an
+    attack on the caller's own garrison -- for the one entry the picker refuses
+    to let them choose.
+    """
+    conn, now = _painted_world(tmp_path, "rootpick.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    monkeypatch.setattr(wd, "read_input_key", lambda: "B")
+    wd.do_root_exchange(palette, conn, player, now, __import__("random").Random(1), 78, 24)
+    rows = [row.strip("┃ ") for row in _ANSI_RE.sub("", _last_screen("".join(written))).split("\r\n")]
+    # The caller's own entry is the unselectable one, and runs until the next key.
+    start = next(index for index, row in enumerate(rows) if row.startswith("[-]"))
+    end = next(index for index in range(start + 1, len(rows))
+               if re.match(r"\[\w\]", rows[index]))
+    own = " ".join(rows[start:end])
+    for absent in ("capture $", "odds", "heat +"):
+        assert absent not in own, (absent, own)
+    for present in ("posted", "defence", "Service:", "Already yours"):
+        assert present in own, (present, own)
+    # And a target still says what taking it would cost and what the odds are.
+    target = " ".join(rows[end:end + 3])
+    for present in ("capture $", "odds", "heat +"):
+        assert present in target, (present, target)
+    conn.close()
+
+
+def test_a_retained_result_is_one_card_with_its_own_name(tmp_path):
+    """Flattened into one card, a record split wherever the page happened to end.
+
+    The Hall of Fame put a winner's medal and handle on page one and their
+    season, Rank, placement and closing time alone on page two, attached to
+    nothing at all.
+    """
+    conn, now = _painted_world(tmp_path, "hall.db")
+    palette = wd.Palette(True)
+    with conn:
+        conn.execute("INSERT INTO seasons (number, ended_at, status, players) VALUES "
+                     "(1, ?, 'completed', 2)", (wd.to_iso(now),))
+        for user_id, handle, place, medal in ((1, "Thiesi", 1, "Gold"),
+                                              (2, "Kilobaud", 2, "Silver")):
+            conn.execute("INSERT INTO season_results (season, user_id, handle, rank, placement, "
+                         "medal, insignia) VALUES (1, ?, ?, ?, ?, ?, 'modem')",
+                         (user_id, handle, 900 - place, place, medal))
+    rows = conn.execute("SELECT r.*,s.players,s.ended_at FROM season_results r "
+                        "JOIN seasons s ON s.number=r.season ORDER BY r.placement").fetchall()
+    # The Hall heads each card with the crew, because one season holds several.
+    hall = wd.recognition_cards(palette, rows, 36, hall=True)
+    assert [heading for heading, _ in hall] == ["THIESI", "KILOBAUD"]
+    # A caller's own history heads each with the season, because every card is
+    # theirs -- and then the facts do not repeat it.
+    mine = wd.recognition_cards(palette, rows[:1], 36, hall=False)
+    assert [heading for heading, _ in mine] == ["SEASON 1"]
+    assert "season" not in _ANSI_RE.sub("", " ".join(mine[0][1]))
+    # Paginated at the forty-column floor, a medal is never orphaned from the
+    # facts that describe it: every page of a split card repeats its heading.
+    pages = wd.paginate_cards(hall, 6)
+    for page in pages:
+        for heading, page_rows in page:
+            assert heading, (heading, page_rows)
+    conn.close()
+
+
+def test_your_own_receipts_survive_a_change_of_handle(tmp_path):
+    """A receipt's actor is the *other* party, not a name to compare.
+
+    Toning on "the recorded handle differs from the one you hold now" turned a
+    caller's whole history hostile the day they renamed on the BBS, and would
+    have made a former rival's raids read as the caller's own work if they took
+    that rival's handle.
+    """
+    conn, now = _painted_world(tmp_path, "rename.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    # The door's own garrison move, through the resolver rather than by hand.
+    held = next(e for e in wd.list_exchanges(conn, 1) if e.controller_user_id == 1)
+    conn.execute("UPDATE players SET crew=4 WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    wd.resolve_garrison(conn, player, held.id, 1, wd.now_utc(), expected_exchange=held)
+    wd.record_event(conn, 1, "Kilobaud", "Kilobaud raided you and got away with $10!",
+                    wd.now_utc())
+
+    def tones():
+        events = wd.history_events(conn, 1)
+        rows = wd.feed(palette, events, 72, limit=10)
+        mine = next(row for row in rows if "Reinforced" in row)
+        theirs = next(row for row in rows if "raided you" in row)
+        return (_colour_before(mine, wd.gl("bullet")), _colour_before(theirs, wd.gl("bullet")))
+
+    assert tones() == (palette.phosphor, palette.magenta)
+    # Rename the caller, and then take the rival's old handle for good measure.
+    for handle in ("Carrier", "Kilobaud"):
+        conn.execute("UPDATE players SET handle=? WHERE user_id=1", (handle,))
+        conn.commit()
+        assert tones() == (palette.phosphor, palette.magenta), handle
+    conn.close()
+
+
+def test_each_owner_service_has_its_own_panel():
+    """One walk reviewed one of three screens, and nothing said so.
+
+    A Public PBX's Lay Low *removes* Heat, a Warez Hub's outlet adds it and rolls
+    for a bust, and a Carrier Switch does neither -- the three role-specific paths
+    two earlier rounds had to fix. `G1?$` photographed whichever role the fixture
+    happened to have captured, which was always the Carrier Switch.
+    """
+    gallery = _gallery()
+    walks = dict(gallery.WALKS["war_dialer"])
+    marks = gallery.SHOWS["war_dialer"]
+    for label, role, mark in (("Owner service preview", b"{CARRIER SWITCH}", "Recruit:"),
+                              ("Owner service preview, a Warez Hub", b"{WAREZ HUB}", "outlet:"),
+                              ("Owner service preview, a Public PBX", b"{PUBLIC PBX}", "Lay Low:")):
+        # Named by the role it is, not by the digit it happens to be.
+        assert walks[label] == b"G" + role + b"$N%", (label, walks[label])
+        # And marked on the service itself, so the wrong holding's would fail.
+        assert marks[label] == mark
+    # The two holdings the caller does not start with are captured by name, since
+    # a picker lists exchanges by short name and a position would drift.
+    assert gallery.SETUP["war_dialer"]["Owner service preview, a Warez Hub"].startswith(b"X{Bay}")
+    assert gallery.SETUP["war_dialer"]["Owner service preview, a Public PBX"].startswith(b"X{Gulf}")
+
+
+@pytest.mark.parametrize("value,signed,expected", [
+    (7.86231, False, "7.9"), (15.0, False, "15"), (0.0, False, "0"),
+    (-7.86231, True, "-7.9"), (4.0, True, "+4"), (0.04, True, "+0"),
+])
+def test_heat_reads_to_one_decimal(value, signed, expected):
+    """Heat decays, so `:g` printed `7.86231` beside `15.9` on the same screen.
+
+    Found by photographing a Public PBX's service preview: the gauge read
+    `8 -7.86231 = 0` and the terms promised to "Remove 7.86231 Heat now".
+    """
+    assert wd.heat_amount(value, signed=signed) == expected
+
+
+def test_a_service_that_removes_heat_says_how_much_in_the_same_words(tmp_path):
+    """The gauge chip and the terms agree, and both read like every other figure."""
+    conn, now = _painted_world(tmp_path, "laylow-text.db")
+    palette = wd.Palette(True)
+    pbx = next(e for e in wd.list_exchanges(conn, 1) if e.role == "pbx")
+    conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=? "
+                 "WHERE id=?", (wd.to_iso(now), pbx.id))
+    conn.execute("UPDATE players SET heat=7.86231 WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    pbx = next(e for e in wd.list_exchanges(conn, 1) if e.id == pbx.id)
+    cards = wd.stakes_cards(palette, "service", player, pbx, 72)
+    text = _ANSI_RE.sub("", " ".join(row for _, rows in cards for row in rows))
+    assert "-7.9" in text, text
+    assert "Remove 7.9 Heat now" in text, text
+    assert "7.86231" not in text, text
+    conn.close()
+
+
+def test_skipping_the_sweep_does_not_dismiss_the_receipt_behind_it(tmp_path, monkeypatch):
+    """The sweep is a transition into the result, not a screen of its own.
+
+    Handing its skip key on meant one press both skipped the animation and
+    answered the result's "press any key", so a caller who did not want the
+    animation never saw what their turn bought.
+    """
+    palette = wd.Palette(True)
+    monkeypatch.setattr(wd, "out", lambda text: None)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(wd, "_read_key_with_timeout", lambda timeout: " ")
+    wd._PENDING_INPUT.clear()
+    # `read_input_key` is the real one on purpose: without `hand_back` the beat
+    # decodes the whole input unit through it and throws it away, so an arrow key
+    # cannot leave its tail behind to answer the next prompt.
+    wd.resolve_sweep(palette, 72, amount=420)
+    assert wd._PENDING_INPUT == [], "the sweep handed its skip key to the receipt"
+
+    # The receipt that follows still acknowledges on one press of its own.
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_read_key_with_timeout", lambda timeout: None)
+    monkeypatch.setattr(wd, "read_input_key", lambda: "\r")
+    wd.show_action_result(palette, ["Recruited one crew."], wd.ActionDelta(), False, 78, 24)
+    assert "ACTION RESULT" in _ANSI_RE.sub("", "".join(written))
+    wd._PENDING_INPUT.clear()
+
+
+def test_a_rival_exchange_points_at_the_action_it_priced(tmp_path):
+    """The card priced a capture and then sent the caller to Raid.
+
+    Raid is a separate cash-stealing attempt on the owner, with odds the door
+    deliberately will not show; every stake on this card -- the capture price, the
+    public defence, `YOUR ODDS`, the Heat and the capture Rank -- belongs to Root.
+    """
+    conn, now = _painted_world(tmp_path, "points.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    by_id = {exchange.id: exchange for exchange in wd.list_exchanges(conn, 1)}
+    theirs = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, by_id[3], player, 68)
+        for row in rows))
+    assert "[X] Root contests it" in theirs, theirs
+    assert "[R] Raid" in theirs, theirs          # still named, as the other option
+    assert theirs.index("[X] Root") < theirs.index("[R] Raid")
+    # An unclaimed one has no owner to raid, and a holding is managed, not taken.
+    free = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, by_id[2], player, 68)
+        for row in rows))
+    assert "[X] Root contests it." in free and "[R] Raid" not in free
+    mine = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, by_id[1], player, 68)
+        for row in rows))
+    assert "[G] Garrison" in mine and "[X] Root" not in mine
+    conn.close()
+
+
+def test_a_walk_reads_an_entry_through_either_frame():
+    """The plain preset draws the box in ASCII, and a selector has to see past it.
+
+    Stripping only the Unicode `┃` left every entry row beginning with `|` before
+    its `[K]` marker, so under that preset no walk that names an entry by what it
+    is could find one -- and the whole build died on the first of them.
+    """
+    gallery = _gallery()
+    for edge in ("\u2503  [2] Bay   \u27e6WAREZ HUB\u27e6", "|  [2] Bay   [WAREZ HUB]",
+                 "  [2] Bay   [WAREZ HUB]"):
+        assert re.match(r"\[(\w)\]", gallery.FRAME_EDGE.sub("", edge)).group(1) == "2", edge
+    # And a row of prose that merely mentions a key is not an entry.
+    assert not re.match(r"\[(\w)\]",
+                        gallery.FRAME_EDGE.sub("", "\u2503  Already yours; [G] Garrison manages it."))
+
+
+def test_a_paged_walk_stops_where_the_screen_says_it_ends():
+    """"Until it stops changing" is the wrong end for a screen that leaves.
+
+    The first-visit guide takes any key and then hands the caller the switchboard,
+    so paging "until nothing changes" photographed the switchboard under the
+    guide's name -- and then pressed Enter at the switchboard, which answers
+    nothing, and failed the build with `printed nothing after key`. The door
+    prints `page i/n` for exactly this purpose.
+    """
+    gallery = _gallery()
+    assert gallery.PAGE_NOTE.search("FIRST VISIT page 2/4").groups() == ("2", "4")
+    assert gallery.PAGE_NOTE.search("SWITCHBOARD") is None
+    # The door's own counter, in the frame and in Fast mode's title row alike.
+    palette = wd.Palette(True)
+    assert wd.page_note(1, 4) == ["page 2/4"]
+    assert wd.page_note(0, 1) == []          # one page says nothing, and is one panel
+    fast = wd.Palette(True)
+    fast.fast = True
+    rows = wd.frame_rows(fast, 40, [("", ["body"])], title="FIRST VISIT",
+                         trailing=wd.page_note(1, 4))
+    assert "page 2/4" in _ANSI_RE.sub("", " ".join(rows))
+
+
+def test_the_first_screen_a_new_caller_sees_has_a_panel():
+    """It is not unreachable -- it needs a world nobody has played, not an excuse."""
+    gallery = _gallery()
+    walks = dict(gallery.WALKS["war_dialer"])
+    assert walks["First visit"] == b"\r%"        # any key turns its pages
+    assert "First visit" in gallery.FRESH["war_dialer"]
+    assert gallery.SHOWS["war_dialer"]["First visit"] == "FIRST VISIT"
+    assert "FIRST VISIT" not in UNREACHABLE
+
+
+def test_the_operator_guide_names_the_schema_the_code_writes():
+    """A guide that names the wrong version makes its own diagnostics wrong."""
+    guide = " ".join((Path(__file__).resolve().parent.parent / "docs"
+                      / "NetBBS-door-guide.md").read_text(encoding="utf-8").split())
+    version = wd.WORLD_SCHEMA_VERSION
+    assert f"records schema version {version} in SQLite" in guide
+    assert f"upgrades the world to schema {version} transactionally" in guide
+    assert f"Old binaries refuse schema {version}" in guide
+
+
+def test_a_picker_entry_never_advertises_a_key_its_reader_discards(tmp_path, monkeypatch):
+    """A borrowed key has to say where it is borrowed from.
+
+    The root picker's note for the caller's own holding read "[G] Garrison
+    manages it", painting `[G]` as live on a screen whose reader takes
+    Next/Prev/Back/Cancel and the selectable digits -- the defect this door's own
+    rival directory was fixed for two rounds earlier.
+    """
+    conn, now = _painted_world(tmp_path, "borrowed.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    wd.do_root_exchange(palette, conn, player, now, __import__("random").Random(1), 78, 24)
+    screen = _ANSI_RE.sub("", _last_screen("".join(written)))
+    # Whatever the screen's reader accepts may be printed bare; any other key has
+    # to name the screen it lives on.
+    accepted = set("NPBQA-0123456789")
+    for row in screen.split("\r\n"):
+        for key in re.findall(r"\[(\w)\]", row):
+            if key in accepted:
+                continue
+            assert "switchboard" in row.lower(), (key, row)
+    assert "[G] Garrison on the switchboard" in screen, screen
+    conn.close()
+
+
+@pytest.mark.parametrize("width,height", [(40, 12), (64, 20), (80, 24)])
+def test_a_selectable_key_always_arrives_with_its_entry(width, height, monkeypatch):
+    """A page that offers a key has to show what the key opens.
+
+    Only an entry's last row carries its key, so flat row slicing could put
+    `[2] Bay  WAREZ HUB` on one page and `pick [2]` on the next beside nothing but
+    an indented tail -- a choice a caller cannot identify. Entries move whole
+    instead; one taller than a page of its own is cut under a repeat of its
+    marker.
+    """
+    palette = wd.Palette(True)
+    records = [([f"Exchange {index}", "owner unclaimed   defence 0", "capture $40   heat +8"], True)
+               for index in range(1, 7)]
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
+    seen: list[str] = []
+
+    def choose(valid):
+        seen.append(valid)
+        return "B" if len(seen) > 12 else "N"
+
+    monkeypatch.setattr(wd, "read_menu_choice", choose)
+    wd.pick_record_page(palette, "ROOT EXCHANGE", records, width, height)
+    for screen in "".join(written).split(CLEAR)[1:]:
+        rows = [_ANSI_RE.sub("", row) for row in _rows(screen)]
+        offered = set(re.findall(r"\[(\w)\]", next(
+            (row for row in rows if row.startswith("pick ")), "")))
+        shown = {key for row in rows for key in re.findall(r"^\W*\[(\w)\]", row.strip("┃ "))}
+        assert offered <= shown, (offered - shown, rows)
+
+
+def test_a_browsing_screen_quotes_the_heat_this_caller_would_take(tmp_path):
+    """Both surfaces a caller compares targets on, not just the preview.
+
+    `action_root_exchange` applies `adjusted_heat`, so Lookouts take five where a
+    Carrier Switch's table says eight and a Burner Kit can take none -- and the
+    card and the Root picker quoted the role's base figure while the preview of
+    that very capture showed the real one.
+    """
+    conn, now = _painted_world(tmp_path, "rootheat.db")
+    palette = wd.Palette(True)
+    free = next(e for e in wd.list_exchanges(conn, 1) if e.controller_user_id is None)
+    base = wd.exchange_terms(free)[2]
+
+    def chips(player):
+        card = _ANSI_RE.sub("", " ".join(
+            row for _, rows in wd.exchange_detail_cards(palette, free, player, 68)
+            for row in rows))
+        entry = _ANSI_RE.sub("", " ".join(wd.exchange_entry_rows(palette, free, player, 68)))
+        return card, entry
+
+    conn.execute("UPDATE players SET specialty='', support='' WHERE user_id=1")
+    conn.commit()
+    plain = wd.refresh_player(conn, 1, now)
+    assert wd.adjusted_heat(plain, "root", base) == base
+    for text in chips(plain):
+        assert f"heat +{base}" in text, text
+
+    conn.execute("UPDATE players SET specialty='lookouts' WHERE user_id=1")
+    conn.commit()
+    careful = wd.refresh_player(conn, 1, now)
+    reduced = wd.adjusted_heat(careful, "root", base)
+    assert reduced < base, reduced
+    expected = "heat +" + wd.heat_amount(reduced)
+    for text in chips(careful):
+        assert expected in text, (expected, text)
+        assert f"heat +{base}" not in text, text
+    # The preview the caller is about to see agrees with both of them.
+    stakes = _ANSI_RE.sub("", " ".join(
+        row for heading, rows in wd.stakes_cards(palette, "root", careful, free, 68)
+        for row in rows if heading == "STAKES"))
+    assert wd.heat_amount(reduced, signed=True) in stakes, stakes
+    # Drawn for nobody, the role's own number is all there is.
+    assert f"heat +{base}" in _ANSI_RE.sub(
+        "", " ".join(wd.exchange_entry_rows(palette, free, None, 68)))
+    conn.close()
+
+
+def test_a_season_boundary_is_reached_by_moving_the_world_not_the_keys():
+    """Two screens depend on where the world is in its season.
+
+    A walk presses keys, and no key moves a clock, so the anchor is moved through
+    the door's own helpers against the panel's private copy -- the receipt a closed
+    season leaves waiting, and the reset card that opens the switchboard inside the
+    last forty-eight hours.
+    """
+    gallery = _gallery()
+    walks = dict(gallery.WALKS["war_dialer"])
+    prepared = gallery.PREPARED["war_dialer"]
+    assert walks["While you were away"] == b""          # it is the first screen drawn
+    assert walks["Switchboard, season closing"] == b"N%"
+    assert set(prepared) == {"While you were away", "Switchboard, season closing"}
+    assert gallery.SHOWS["war_dialer"]["While you were away"] == "WHILE YOU WERE AWAY"
+    assert gallery.SHOWS["war_dialer"]["Switchboard, season closing"] == "SEASON RESET"
+    # A dossier is bought for the panel that photographs it, since one expires in a
+    # day and could not be seeded into a cached fixture.
+    assert gallery.SETUP["war_dialer"]["Your dossiers, a snapshot"].startswith(b"O2?#")
+    assert gallery.SHOWS["war_dialer"]["Your dossiers, a snapshot"] == "Last-known intelligence"
+
+
+def test_no_world_is_migrated_for_a_tone(tmp_path):
+    """A receipt is a caller's history; a schema bump is not a colour correction.
+
+    Recording no actor for a caller's own moves fixes the tone from here. Repairing
+    older rows would mean guessing what a stored actor meant from the handle its
+    target holds now -- which on a reused handle erases the record that an attack
+    happened -- and it would cost a schema version that older game binaries refuse
+    outright.
+    """
+    assert wd.WORLD_SCHEMA_VERSION == 10
+    assert not hasattr(wd, "_migrate_world_v11")
+    source = _WAR_DIALER_PATH.read_text(encoding="utf-8")
+    assert "UPDATE events SET actor_handle=NULL" not in source
+    # A world at the shipped version is opened, not upgraded.
+    conn, _ = _painted_world(tmp_path, "noupgrade.db")
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     conn.close()

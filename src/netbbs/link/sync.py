@@ -13,30 +13,33 @@ transitions are excluded from the hello bundle specifically
 because live transport-key *authentication* is Noise's own concern
 (§11), but the transition record itself is still an ordinary event
 (design doc) that needs to reach other nodes via Link like
-any other, so a node's transport-key rotations get gossiped too. No
-per-peer "what have I already pushed" tracking — `handle_events` on
-the receiving end already dedups via its own `known_event_ids` (§7:
-"transport-level dedup... is a pure performance optimization"), so
-re-pushing everything every interval is simply a harmless no-op for
-whatever a peer has already seen, and keeps this module's own state
-to nothing worth persisting.
+any other, so a node's transport-key rotations get gossiped too.
+Transitions are the one thing still re-sent in full every pass:
+`handle_events` on the receiving end dedups via its own
+`known_event_ids` (§7: "transport-level dedup... is a pure performance
+optimization"), there are only ever a handful of them, and they are
+deliberately outside inventory scope (§8.8), so a peer has no way to ask
+for one.
 
-The same "re-push everything every pass"
-treatment extends to `netbbs.link.boards.load_own_board_events` — this node's
-own Linked boards' genesis events and its own posts' board_post events,
-read fresh off the `boards`/`posts` tables each pass rather than
-tracked in any in-memory list of "what's pending push," the same
-"nothing here worth persisting separately" reasoning as `identity.
-transitions` above.
+Everything else this node originated — `netbbs.link.boards.load_own_
+board_events` and its channel/file-area counterparts, read fresh off the
+`boards`/`posts`/`channels`/`file_areas` tables each pass rather than
+tracked in any in-memory "pending push" list — is sent *only when the
+peer says it lacks it* (design doc §8.6/§8.8, issue #478). The peer says
+so in the same inventory response this module already asks for, so the
+push costs no extra round trip, needs no persisted per-peer cursor, and
+is one bounded request that shrinks to nothing once a peer has caught
+up. Re-offering the whole originated history every pass was harmless
+only while that history was small: past roughly 3,800 events it exceeded
+the peer's entire per-source request budget, so every pass re-sent the
+same early slices and the tail was never reached. See
+`_push_own_events`.
 
-Deliberately minimal: a
-single interval, no per-seed backoff/retry state, no peer-list
-exchange (a peer that has only ever *dialed this node*, never been
-dialed by it, is not re-contacted here — a known, named gap), and no pull
-("what am I missing") request — `push_events` is the only gossip
-direction this module drives. A single unreachable or misbehaving seed
-logs a warning and is skipped; it never aborts the rest of that pass
-or the loop itself.
+Deliberately minimal: a single interval and no per-seed backoff/retry
+state. A peer that has only ever *dialed this node*, never been dialed
+by it, is still not re-contacted here — a known, named gap. A single
+unreachable or misbehaving seed logs a warning and is skipped; it never
+aborts the rest of that pass or the loop itself.
 
 `dial_hello` persists the resulting `PeerRecord`
 via a `DatabaseLane`, so `run_link_sync` takes one and threads it
@@ -330,6 +333,9 @@ async def run_link_sync(
     that gap is what this issue closes.
     """
     isolated_passes = 0
+    # Per-peer starting point for the push when an inventory exchange
+    # fails, for the lifetime of this loop -- see `_push_own_events`.
+    fallback_offsets: dict[str, int] = {}
     while stop_event is None or not stop_event.is_set():
         refresh = getattr(own_hello_provider, "refresh", None)
         if refresh is not None:
@@ -360,6 +366,7 @@ async def run_link_sync(
                 max_remote_files_per_area=max_remote_files_per_area,
                 enforce_trust_policy=enforce_trust_policy,
                 reliable_urls=frozenset(reliable),
+                fallback_offsets=fallback_offsets,
             )
             reached_network = reached_network or succeeded
         if not reached_network:
@@ -373,6 +380,7 @@ async def run_link_sync(
             reached_network = await _try_candidate_fallback(
                 node, session, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
+                fallback_offsets=fallback_offsets,
             )
         # Issue #313: a node that reaches nothing at all, pass after
         # pass, is in a meaningfully broken state -- a dead seed roster,
@@ -478,6 +486,127 @@ async def run_link_sync(
                 pass
 
 
+async def _push_own_events(
+    node: LinkNode,
+    session: ClientSession,
+    seed_url: str,
+    lane: DatabaseLane,
+    *,
+    wanted: list[str] | None,
+    peer_fingerprint: str,
+    fallback_offsets: dict[str, int],
+) -> None:
+    """
+    Push this node's own originated events to one seed -- design doc
+    §8.6/§8.8, issue #478: *only the ones that seed just said it lacks*,
+    rather than the whole originated history every pass.
+
+    `wanted` is the `content_id` list the seed returned alongside its
+    own inventory response, computed from the inventory this node
+    declared in the very same request (`netbbs.link.store.inventory_
+    wanted_ids`). Everything in it this node actually originated is sent
+    in one request; anything it merely *carries* is skipped, because
+    push has only ever carried self-originated content (§8.8's "no relay
+    from a stranger" scope note) and the seed reaches the rest through
+    its own inventory pull.
+
+    What this replaces, and why the replacement is not merely tidier:
+    the old loop sent every own event every pass, sliced into requests
+    of `MAX_EVENTS_PER_REQUEST`. Past roughly 3,800 originated events
+    that exceeded the peer's whole per-source request budget (§13.9,
+    `request_rate_capacity`), so a pass spent it all on the same early
+    slices, took an HTTP 429, and began again at the first slice on the
+    next pass: the tail was never reached, at any point, ever. Sending
+    only what the peer asked for makes the push one bounded request that
+    shrinks to nothing as the peer catches up, so there is no backlog to
+    pace in the first place.
+
+    `key_transition`s are the exception and are still sent
+    unconditionally every pass: identity events are deliberately outside
+    inventory scope (§8.8's Scope paragraph -- they are gossiped to
+    every seed every pass by §12 and are far too few for that to
+    matter), so a peer has no way to ask for one, and dedup makes a
+    re-send a no-op. They ride *alongside* the selected events rather
+    than out of their budget, so a node with a long rotation history
+    sends a second request rather than starving its resource push of
+    capacity (Codex review of issue #478); the loop below is what splits
+    the two, since a peer refuses any single request carrying more than
+    `MAX_EVENTS_PER_REQUEST`.
+
+    `wanted is None` means exactly one thing: the inventory exchange with
+    this seed did not complete this pass. A responder that answers 200
+    without a `wanted` list is malformed and rejected by `request_
+    inventory`, not accommodated -- every node here runs the same release
+    -- so this is a live failure, not a version difference: the seed's
+    `/inventory` route erroring or timing out while `/events` still
+    accepts a push.
+
+    That case still pushes, and walks the list rather than re-offering
+    its head. Sending the same leading page every pass would mean a node
+    with more than one page of own events never delivers the rest to a
+    seed whose inventory route stays broken -- and in an asymmetric
+    topology, where that seed never dials this node, its own pull cannot
+    make up the difference either. `fallback_offsets` holds the next
+    starting point per peer for the lifetime of one `run_link_sync`
+    loop, advanced only by what a pass actually delivered and wrapped at
+    the end of the list.
+
+    In memory, not on disk, and deliberately so: a restart simply begins
+    the walk again, which dedup makes free, and the alternative is a
+    persisted cursor maintained forever against a transient failure
+    mode. Bounded by the number of distinct peers one run dials, itself
+    bounded by `max_peers` (§13.9).
+    """
+    transitions = list(node.identity.transitions)
+    resource_events = (
+        await lane.run(load_own_board_events, node.identity.fingerprint)
+        # Design doc §9.6, issue #87.
+        + await lane.run(load_own_channel_events, node.identity.fingerprint)
+        # Design doc §11, issue #89.
+        + await lane.run(load_own_file_area_events, node.identity.fingerprint)
+    )
+    start = 0
+    if wanted is None:
+        start = fallback_offsets.get(peer_fingerprint, 0)
+        if start >= len(resource_events):
+            start = 0
+        selected = resource_events[start:]
+    else:
+        by_content_id = {event.content_id: event for event in resource_events}
+        selected = [by_content_id[cid] for cid in wanted if cid in by_content_id]
+
+    # The cap belongs *here*, after the filter, not on the `wanted` list
+    # the peer sent (Codex review of issue #478). Truncating what the
+    # peer asked for would prefix-cap a list this node cannot fully
+    # send -- IDs it merely carries are dropped by the filter above, so
+    # a page full of them would come back unchanged forever. Capping
+    # what survives the filter instead truncates only events this node
+    # can actually push, which the peer then has, so the next pass's
+    # list is strictly shorter.
+    #
+    # Transitions come out of the same request while there is room, so
+    # an ordinary node's whole push is one request; past that they get
+    # their own, because resource push must never be squeezed to
+    # nothing by a long rotation history (Codex review of #478 again:
+    # 99 rotations would otherwise have starved it permanently).
+    resource_budget = max(MAX_EVENTS_PER_REQUEST - len(transitions), MAX_EVENTS_PER_REQUEST // 2)
+    sending = selected[:resource_budget]
+    to_push = transitions + sending
+    if not to_push:
+        return
+    for index in range(0, len(to_push), MAX_EVENTS_PER_REQUEST):
+        try:
+            await push_events(node, session, seed_url, to_push[index:index + MAX_EVENTS_PER_REQUEST])
+        except LinkTransportError as exc:
+            _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
+            # Deliberately without advancing the offset: the seed
+            # received nothing, so the next pass owes it this same
+            # stretch, not the one after it.
+            return
+    if wanted is None and resource_events:
+        fallback_offsets[peer_fingerprint] = (start + len(sending)) % len(resource_events)
+
+
 async def _sync_one_seed(
     node: LinkNode,
     session: ClientSession,
@@ -491,6 +620,7 @@ async def _sync_one_seed(
     max_remote_files_per_area: int | None = None,
     enforce_trust_policy: bool = False,
     reliable_urls: frozenset[str] = frozenset(),
+    fallback_offsets: dict[str, int] | None = None,
 ) -> bool:
     """Returns whether the hello itself succeeded -- the bar `run_link_
     sync` uses to decide "did this node reach the network at all this
@@ -529,53 +659,21 @@ async def _sync_one_seed(
         )
         return True
 
-    own_events = (
-        list(node.identity.transitions)
-        + await lane.run(load_own_board_events, node.identity.fingerprint)
-        # Design doc §9.6, issue #87.
-        + await lane.run(load_own_channel_events, node.identity.fingerprint)
-        # Design doc §11, issue #89.
-        + await lane.run(load_own_file_area_events, node.identity.fingerprint)
-    )
-    if peer_state == TrustState.ESTABLISHED:
-        # Pushed in bounded slices, not as one request (Codex review of
-        # issue #464). A peer refuses any request carrying more than
-        # `MAX_EVENTS_PER_REQUEST` events, and this list grows with
-        # everything this node has ever originated -- every key
-        # transition, board, channel, file area and, now that uploads
-        # are announced at all, every catalogued file. One node with a
-        # couple of hundred of them would otherwise send a request that
-        # is rejected in full, on every pass, forever: not a backlog
-        # that drains but a node whose direct pushes stop working.
-        for index in range(0, len(own_events), MAX_EVENTS_PER_REQUEST):
-            batch = own_events[index:index + MAX_EVENTS_PER_REQUEST]
-            try:
-                await push_events(node, session, seed_url, batch)
-            except LinkTransportError as exc:
-                _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
-                break
-
-    # Also ask this seed who else it knows -- feeds the
-    # candidate pool `_try_candidate_fallback` (below) draws from.
-    if peer_state == TrustState.ESTABLISHED:
-        try:
-            await request_peer_list(
-                node, session, seed_url, seed_peer.fingerprint, lane,
-                refresh_identity_claims=getattr(own_hello_provider, "refresh", None),
-            )
-        except LinkTransportError as exc:
-            _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
-
     # Design doc §8.8, issue #85 (§9.6, issue #87 for channels; §11,
     # issue #93 for file-area catalogues): pull-based catch-up, asked of
     # every seed this pass already reached (not one arbitrary "best"
     # peer) -- not every peer necessarily carries every board/channel/
-    # file area this node does, and the push loop above already iterates
-    # all of them regardless. `handle_events` (not this function) is what
+    # file area this node does, and the push below runs against all of
+    # them regardless. `handle_events` (not this function) is what
     # actually verifies the response; a seed that carries none of the
     # requested boards/channels/file areas simply returns an empty list,
     # indistinguishable from -- and no more costly than -- this loop's
     # own existing per-seed push tolerance.
+    #
+    # Runs *before* the push (issue #478), not after, because the same
+    # response now also reports what this seed is missing from the
+    # inventory this request declared -- which is exactly what the push
+    # should send.
     #
     # Always sent, even when `inventory_request` is entirely empty
     # (issue #94) -- an empty request is exactly what a node with zero
@@ -584,6 +682,12 @@ async def _sync_one_seed(
     # discover its first one: the responder side (`board_event_diff` et
     # al.) now also returns anything it carries that's simply absent
     # from the request, which for an empty request means "everything."
+    #
+    # `wanted` stays `None` unless this seed actually answered with a
+    # list -- a failed request and a peer predating issue #478 both
+    # leave it unset, and the push below treats that differently from
+    # an answered "I need nothing from you."
+    wanted: list[str] | None = None
     try:
         inventory_request = await lane.run(
             build_inventory_request,
@@ -591,7 +695,9 @@ async def _sync_one_seed(
             requester_fingerprint=node.identity.fingerprint,
             responder_fingerprint=seed_peer.fingerprint,
         )
-        events, _more_available = await request_inventory(node, session, seed_url, inventory_request)
+        events, _more_available, wanted = await request_inventory(
+            node, session, seed_url, inventory_request
+        )
         if events:
             allowed_events = []
             for event in events:
@@ -624,6 +730,34 @@ async def _sync_one_seed(
                 )
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not request inventory from seed %s: %s", seed_url, exc)
+
+    if peer_state == TrustState.ESTABLISHED:
+        await _push_own_events(
+            node, session, seed_url, lane, wanted=wanted,
+            peer_fingerprint=seed_peer.fingerprint,
+            # A caller with no loop of its own gets a throwaway: a single
+            # pass has nothing to rotate against.
+            fallback_offsets=fallback_offsets if fallback_offsets is not None else {},
+        )
+
+    # Also ask this seed who else it knows -- feeds the candidate pool
+    # `_try_candidate_fallback` (below) draws from.
+    #
+    # Last of the three requests, after the inventory exchange and the
+    # push it feeds (Codex review of #498). All three share one
+    # per-source request budget at the seed (§13.9), and this is the only
+    # one whose failure costs nothing this pass: candidate discovery is a
+    # resilience path for a future pass, while hello/inventory/push are
+    # what this pass is *for*. Ordering them by what a scarce budget
+    # should buy first costs nothing when the budget is ample.
+    if peer_state == TrustState.ESTABLISHED:
+        try:
+            await request_peer_list(
+                node, session, seed_url, seed_peer.fingerprint, lane,
+                refresh_identity_claims=getattr(own_hello_provider, "refresh", None),
+            )
+        except LinkTransportError as exc:
+            _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
 
     configured_reporters = await lane.run(list_trusted_reporter_fingerprints)
     if peer_state == TrustState.ESTABLISHED and seed_peer.fingerprint in configured_reporters:
@@ -810,6 +944,7 @@ async def _try_candidate_fallback(
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
     *, enforce_trust_policy: bool = False,
+    fallback_offsets: dict[str, int] | None = None,
 ) -> bool:
     """
     Returns whether this node reached the network at all through a
@@ -873,6 +1008,7 @@ async def _try_candidate_fallback(
             base_urls, lambda url: _sync_one_seed(
                 node, session, url, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
+                fallback_offsets=fallback_offsets,
             )
         )
         await lane.run(record_dial_outcome, fingerprint, succeeded=succeeded)

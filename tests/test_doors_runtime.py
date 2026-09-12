@@ -12,6 +12,7 @@ import collections
 import importlib.util
 import json
 import os
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -261,6 +262,10 @@ def test_bad_executable_path_is_reported_as_failed_to_start(db, lane, player):
     assert result.exit_code is None
 
 
+#: A door's own styling, removed before matching on what a caller reads.
+_DOOR_ANSI = re.compile(rb"\x1b\[[0-9;]*[a-zA-Z]")
+
+
 @pytest.mark.parametrize("game,keys,expected", [
     ("retro_trivia.py", "A" * 9, b"Final score:"),
     ("voidrunner.py", "\rYQ", b"Docking clamps engaged"),
@@ -305,7 +310,7 @@ def test_web_bundled_trivia_round_restores_menu_on_same_websocket(db, lane, play
                                 if not help_acknowledged and b"Press any key to continue..." in output:
                                     await ws.send_json({"type": "door_key", "stream": mode["stream"], "data": " "})
                                     help_acknowledged = True
-                                if not quit_sent and b">\x1b[0m " in output:
+                                if not quit_sent and b"dial " in _DOOR_ANSI.sub(b"", output):
                                     await ws.send_json({"type": "door_key", "stream": mode["stream"], "data": "Q"})
                                     quit_sent = True
                         elif msg["type"] == "door_mode":
@@ -622,10 +627,17 @@ def test_real_war_dialer_launches_keep_two_node_worlds_separate(tmp_path, monkey
                         if task.done():
                             pytest.fail(f"Door exited early: {task.result()}")
                         await asyncio.sleep(0.01)
+                async def wait_for_text(marker):
+                    # War Dialer styles a prompt's label and its cursor
+                    # separately (issue #494), so wait on what a caller reads.
+                    while marker not in _DOOR_ANSI.sub(b"", bytes(session.written)):
+                        if task.done():
+                            pytest.fail(f"Door exited early: {task.result()}")
+                        await asyncio.sleep(0.01)
                 try:
                     await asyncio.wait_for(wait_for(b"Press any key to continue..."), 8)
                     session.type_in(" ")
-                    await asyncio.wait_for(wait_for(b">\x1b[0m "), 8)
+                    await asyncio.wait_for(wait_for_text(b"dial "), 8)
                     session.type_in("q")
                     assert (await asyncio.wait_for(task, 8)).exit_code == 0
                 finally:
@@ -682,12 +694,16 @@ def test_war_dialer_path_probes_run_outside_event_loop(db, lane, player, tmp_pat
 
 
 @pytest.mark.parametrize('unicode_enabled', [False, True])
-def test_war_dialer_metadata_forwards_only_the_existing_unicode_choice(db, player, tmp_path, unicode_enabled):
+def test_metadata_forwards_the_existing_unicode_choice_to_every_door(db, player, tmp_path, unicode_enabled):
+    """Issue #469 widened this: it was War-Dialer-only, and is now the
+    caller's preference every door gets, so a door can match the glyph style
+    they already chose. `war_dialer_owner` stays War-Dialer-only."""
     from netbbs.doors.runtime import _write_door_info
     from netbbs.net.unicode_style_preference import set_unicode_style_enabled
     set_unicode_style_enabled(db, player, unicode_enabled)
     info = json.loads(_write_door_info(db, tmp_path, FakeSession(), player, war_dialer=True).read_text(encoding='utf-8'))
     assert info['unicode_style'] is unicode_enabled
     unrelated = json.loads(_write_door_info(db, tmp_path, FakeSession(), player).read_text(encoding='utf-8'))
-    assert 'unicode_style' not in unrelated and 'war_dialer_owner' not in unrelated
-    assert set(info) - set(unrelated) == {'unicode_style', 'war_dialer_owner'}
+    assert unrelated['unicode_style'] is unicode_enabled
+    assert 'war_dialer_owner' not in unrelated
+    assert set(info) - set(unrelated) == {'war_dialer_owner'}

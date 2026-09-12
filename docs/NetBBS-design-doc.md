@@ -955,6 +955,17 @@ and file by content-addressed ids that no deletion can recycle, and lives in
 memory only. A node that cannot say how it is reached (`[web] public_url` unset,
 listener on a wildcard address) says so rather than printing a URL that fails.
 
+**A JavaScript Zmodem implementation for the browser terminal is not planned.**
+It was listed as a possible follow-on while issue #475 was open, on the reasoning
+that keeping one transfer protocol everywhere would be simpler than maintaining
+two. What shipped answers the same need better: a browser caller gets a drop
+target and a download the page performs itself, which is what their environment
+is actually good at, and the bytes never pass through the terminal stream. A
+Zmodem implementation in the page would add a second protocol to maintain, in
+JavaScript, to reach exactly the callers already served — and it would put file
+transfer back inside the byte stream it was moved out of. Zmodem remains the
+right answer on terminals that already implement it, which is where it stays.
+
 File bytes are node-local. NetBBS Link will distribute catalogue/descriptor
 information and fetch content on demand in bounded resumable chunks. It will
 not replicate every file to every node.
@@ -1698,7 +1709,8 @@ Current background sync:
 
 - contacts configured/cached seeds and candidates;
 - performs hello/peer discovery;
-- pushes the complete locally originated supported event set;
+- pushes locally originated events the peer has said it lacks, plus
+  `key_transition`s unconditionally (§8.8's *Push direction*, issue #478);
 - relies on idempotent acceptance;
 - sends targeted Link mail directly or through a selected relay;
 - requests and applies bounded inventory/pull-based catch-up for linked
@@ -1712,7 +1724,9 @@ This is intentionally simple but incomplete.
 Not yet present:
 
 - efficient per-peer deltas beyond a full per-board known-ID list (fine at
-  this project's declared scale; a compact digest would be needed beyond it);
+  this project's declared scale; a compact digest would be needed beyond it) —
+  this bounds the size of one inventory request, and therefore of the push it
+  provokes, in *both* directions;
 - complete retained-event and dedup-purge policy — `key_transition` alone
   is purged (§8.9, issue #86, closed); every board-scoped type stays
   unbounded, stated explicitly as still-needed, not silently deferred;
@@ -1792,8 +1806,12 @@ The response is **not** a new envelope type either — it is the same raw
 JSON event-list shape `push_events`'s request body already uses:
 
 ```
-{ "events": [ <raw event dict>, ... ], "more_available": bool }
+{ "events": [ <raw event dict>, ... ], "more_available": bool,
+  "wanted": [ content_id, ... ] }
 ```
+
+`wanted` is the push direction's half of the same exchange (issue #478,
+below). It is required: a response omitting it is malformed.
 
 **Responder-side diff.** For each `board_id` this responder itself
 currently carries — whether or not it appears as a key in the request at
@@ -1915,15 +1933,104 @@ each board grows after every partial response, each subsequent pass
 naturally asks for a shrinking remainder — no separate pagination cursor is
 needed.
 
-**Requester side (`netbbs.link.sync`).** Each pass, after the existing
-per-seed push loop (§12) completes for a given seed, that same seed also
-receives one `InventoryRequest` covering every board this node carries.
-Not sent to one arbitrary "best" peer — every seed already dialed that pass
-gets asked, since not every peer necessarily carries every board this node
-does, and the push loop already iterates all of them regardless. A seed
-that carries none of the requested boards simply returns an empty event
-list; this is indistinguishable from (and no more expensive than) today's
-existing per-seed push tolerance for an uncooperative peer.
+**Requester side (`netbbs.link.sync`).** Each pass, every seed whose hello
+completed receives one `InventoryRequest` covering every board this node
+carries, and the push to that seed (§12) then runs on the answer — issue
+#478 reversed the original order, because the response is now what tells
+the push what to send. The peer-list request comes last of the three: all
+three draw on one per-source request budget at the seed (§13.9), and
+candidate discovery is a resilience path for a later pass, while
+hello/inventory/push are what the pass exists for. Not sent to one arbitrary "best" peer — every seed
+already dialed that pass gets asked, since not every peer necessarily
+carries every board this node does, and the push runs against all of them
+regardless. A seed that carries none of the requested boards simply
+returns an empty event list; this is indistinguishable from (and no more
+expensive than) today's existing per-seed push tolerance for an
+uncooperative peer.
+
+**Push direction: send what the peer asked for, not everything (issue
+#478).** An `InventoryRequest` is already exhaustive — every board,
+channel and file area the requester carries, each mapped to the full set
+of content IDs it holds. That body therefore already states everything
+the *responder* could want from the requester, so the responder answers
+with both halves of one comparison: `events` (what the requester lacks,
+above) and `wanted` (the declared content IDs the responder itself lacks).
+The requester then pushes exactly the `wanted` events it originated. No
+second round trip, no new request field, and no per-peer push cursor to
+persist.
+
+**Scope: a resource the requester declared, and nothing else.** `wanted`
+answers "do you hold this?" for every content ID the request lists, so what
+it may consult is a disclosure boundary, not an implementation detail. It is
+computed per declared resource — the materialized sources union whatever
+`link_events` holds under that same resource id — never against this node's
+global dedup set. That set spans `link_message`s, their acknowledgements and
+`key_transition`s, all of which this section deliberately excludes from
+inventory; consulting it would let any completed peer file a known content ID
+under a fabricated resource and read an exact membership answer off the
+response. A signed request identifies the asker; it does not make an ID belong
+to the resource it was filed under.
+
+A resource this node has **seen and declined** — persisted but not
+materialized, which is what a carry-quota refusal (§13.9) leaves behind —
+wants nothing further. Asking on would be asking for what this node already
+refused to keep, and would not terminate: a declined board's posts never reach
+`link_events` at all, so they would be wanted every pass forever and occupy the
+requester's whole push page. A resource never seen is the opposite case and
+still wants everything declared for it, which is how a genesis arrives by push.
+
+**The cap goes on the push, not on `wanted`.** `wanted` is returned whole:
+it can never exceed the content IDs the requester itself just declared, which
+the responder's `client_max_size` already bounds, and prefix-capping a list the
+*responder* orders is the one thing that must not happen here. A requester
+carrying more events originated elsewhere than the cap allows would see those
+unsendable IDs fill the page, drop every one of them at the filter below, leave
+the responder's state unchanged, and get the identical page back next pass —
+its own events never offered at all. The requester caps instead, after
+filtering `wanted` down to what it originated: that truncation only ever drops
+events it can actually send, so the responder has them next pass and the list
+strictly shrinks. No cursor is needed for the remainder, for the same reason the
+pull direction needs none.
+
+Two things stay outside this. `key_transition`s are pushed
+unconditionally every pass, because identity events are outside inventory
+scope (the Scope paragraph above) and a peer has no way to ask for one;
+they are few and dedup makes a re-send a no-op. They ride in the same request
+while there is room, so an ordinary node's whole push is one request — but
+resource events keep at least half a request's capacity whatever the rotation
+history looks like, and a long history simply costs a second request rather
+than starving them. And the push still only ever carries *self-originated*
+content — a `wanted` entry the requester merely carries is skipped, preserving
+the "no relay from a stranger" scope note; the responder reaches that content
+through its own inventory pull, which is what the multi-hop diff exists for.
+
+`wanted` is required, not optional: a 200 response without it is malformed
+and refused. Every node on this mesh runs the same release, so there is no
+older peer to accommodate, and accepting a missing key would quietly turn a
+broken responder into a degraded-but-working exchange.
+
+That leaves exactly one way to finish a pass without a `wanted` list — the
+inventory exchange itself failing, e.g. a peer whose `/inventory` route errors
+while `/events` still accepts a push. Such a peer still gets pushed to, from a
+rotating starting point held in memory for the lifetime of one sync loop, so
+successive passes walk the originated history instead of re-offering its head.
+Without that, a node with more than one page of own events would never deliver
+the rest to a peer whose inventory route stayed broken — and in an asymmetric
+topology, where that peer never dials back, its own pull cannot make up the
+difference. The offset is deliberately not persisted: a restart simply begins
+the walk again, which dedup makes free.
+
+**What this replaced, and why it was a real defect.** The push previously
+sent every locally originated event to every seed every pass, sliced into
+requests of `_MAX_EVENTS_PER_REQUEST`. Past roughly 3,800 originated
+events — reachable once §11.2 began announcing every upload — that
+exceeded the peer's entire per-source request budget (§13.9,
+`request_rate_capacity`): a pass spent the whole budget on the same early
+slices, took an HTTP 429, and began again at the first slice next pass.
+The tail was never reached at any point. Pull-based catch-up still
+converged the peer, so this was a starved optimization rather than lost
+content, but a push that provably cannot deliver its own tail is not a
+push.
 
 **No loop or amplification guard is needed beyond what already exists.**
 This is pull-based and diff-first by construction: nothing is transmitted
@@ -4807,9 +4914,48 @@ here since #172 is self-contained):
   a live protocol: static session metadata (handle, stable numeric user
   ID, terminal width/height, color-depth capability, node name) written
   before spawn; stdio is pure raw passthrough for the session's
-  duration, with no framing or control messages interleaved; no live
-  terminal-resize propagation (matches every classic door's own static
-  80x24-era assumption); exit code is the only completion signal;
+  duration, with no framing or control messages interleaved; exit code
+  is the only completion signal;
+- terminal size is followed for the duration of a run (issue #468),
+  without interleaving anything into that passthrough stream. A PTY
+  door's own terminal is resized and its group signalled with
+  `SIGWINCH`, exactly as any full-screen program already expects. A
+  stdio or socket door is notified only if its profile opts in, by
+  republishing the same static metadata file with the new geometry and
+  signalling the door leader with `SIGUSR1`; opt-in because that
+  signal's default action terminates a process which does not handle
+  it. A profile which pins width/height, a DOS door and a remote
+  service are each left alone. This supersedes v1's original "no live
+  terminal-resize propagation" rule, which matched every classic door's
+  static 80x24-era assumption; the metadata itself stays a file rather
+  than becoming a live protocol;
+- a door may declare **one** long-lived companion service (issue #466), for
+  a game whose world must keep running while nobody is connected. This is
+  the single exception to "a door is one process per caller", and is
+  deliberately not a general process manager: one service per door, no
+  inter-session channel inside NetBBS (the service's own socket is the
+  channel), and no privilege separation beyond what native doors already
+  have. It starts with the node or on the first caller, under the service
+  account, in the door's installation directory, with the same narrow
+  environment rules as a door launch. Its own memory ceiling applies and no
+  CPU-seconds ceiling does, because a long-lived process legitimately
+  accumulates CPU time. Exits restart with lengthening backoff behind a
+  circuit breaker, after which NetBBS reports the door's service as failed
+  rather than respawning a misconfigured program indefinitely. A caller is
+  admitted only while the service is up, has been up long enough to mean it,
+  and passes its optional health check; otherwise they get one line and the
+  door list back. Stopping is bounded at every level — SIGTERM, the
+  configured grace, SIGKILL, then a deadline after which an unkillable
+  process is abandoned rather than delaying node shutdown — and services
+  stop before listeners and background tasks. NetBBS supervises the process
+  only; installing it stays the operator's, exactly as for the door itself.
+  A door's installation directory is outside the node's own state and is not
+  backed up by default, because it is operator-owned and unbounded in size; a
+  node-level setting includes every door's installation in each backup for an
+  operator who wants one artifact holding everything. Capture only — restore
+  never writes such a directory back, since putting a game installation back
+  over a live one is a deliberate operator action, not part of restoring node
+  state;
 - door output (stdout) is trusted and relayed unmodified, like a SysOp's
   own welcome-banner file, not run through the chat/post sanitizer —
   NetBBS provides the interface and best-effort abuse prevention within
@@ -5252,8 +5398,10 @@ landmarks. Damage changes the hull's visual shading while explicit hull/fuel/car
 figures remain authoritative. Portraits use full and compact authored compositions,
 retaining an entire silhouette on one page at supported terminal dimensions; text
 and navigation paginate normally. Existing full/basic/mono/plain modes apply.
-The plain mode uses ASCII art without color. Artwork is static, with no animation,
-random draws, market observations or career writes. Station captions use actual
+The plain mode uses ASCII art without color. A portrait is a still composition --
+it may be revealed under the motion rules in the presentation contract, but it is
+never redrawn -- and viewing one makes no random draw, market observation or
+career write. Station captions use actual
 places, sectors and specialist contacts. A landmark portrait is available only at
 its station or after investigation, not merely through an accepted bearing.
 Ship commissioning previews and landmark inspection use these same portraits;
@@ -5634,16 +5782,109 @@ ANSI emulator; a change to a screen comes with that page. The test suite can onl
 assert that a screen fits -- never that it looks like anything -- which is how an
 entire visual design was lost with every slice passing review.
 
+### The Voidrunner presentation contract (issue #493)
+
+Voidrunner is the showcase for what a NetBBS door can look like, and after the
+#310 overhaul it was a sequence of grey text walls behind hotkeys. The
+presentation half of that overhaul is this contract. It is normative for the
+door; Retro Trivia is the floor it must clear, not the target.
+
+**Colour reaches the body.** Every body row of every paged screen carries
+styling. The single mechanism that deleted the game's colour was the shared
+paginator: `wrapped_group` wrapped each row through an ANSI-stripping helper
+before it was printed, so the frame was the only styled thing a page could
+have. It now wraps styled text, carrying the active colour across a break, and
+`draw_page` colours by role anything that still reaches it plain -- a screen
+that builds its own rows cannot opt out. This is asserted, at 80 and at 40
+columns, on the deck, market, yard, record, board, chart, crew, display,
+customs and combat screens.
+
+**Nine roles, not nine colours.** What a token *is* decides its colour.
+`hull` `#5fd7ff` frames, section headers and station names; `deep` `#1d3b57`
+frame shadow, gauge tracks and separators; `plasma` `#ff5abe` the brand, the
+rank and the cursor; `gold` `#ffc83c` hotkeys and credits and nothing else;
+`ink` `#e8f0ff` values -- the thing the caller reads off the row; `slate`
+`#7f8fae` labels, hints and units; and `mint` `#6cf2a0` / `amber` `#ffb347` /
+`alarm` `#ff5c6c` for good, caution and danger on gauges and severity glyphs.
+A hotkey is always gold and bold; a value is always ink; a label is always
+slate; chrome is never the colour of content; one accent carries the eye per
+screen. That the hotkey, label, value and frame colours differ, and that all
+four appear on a drawn screen, is asserted rather than eyeballed.
+
+**Truecolour is the design target**, degrading to 256, to 16 (`basic`), to
+monochrome, to plain ASCII, in that order, each deliberate rather than
+accidental. The only effect that truecolour buys outright is the title splash's
+gradient rule, which degrades to a single role colour rather than being
+approximated.
+
+**One glyph vocabulary, every glyph with an ASCII substitute.** `╭─╮ │ ╰─╯
+├─┤` frames; `█░` gauges; `▁▂▃▄▅▆▇█` sparklines; `⟦ ⟧` chips; `◈` credits;
+`▲ ◆ ●` severity; `◤` the brand; `●○` crew pips; `→` a delta. A screen asks for
+one by role -- `glyph("danger")` -- rather than typing the character, so the
+`plain` preset is a designed rendering and a new glyph cannot arrive without
+its substitute. No Unicode from the vocabulary may reach a `plain` terminal.
+
+**A component library, local to the door.** Voidrunner ships as a single
+self-contained file a SysOp can point straight at, so this is the game's own
+vocabulary rather than something shared: `gauge`, `sparkline`, `chip`, `badge`,
+`table`, `menu_grid`, `alert`, `status_band`, `portrait`, plus `section` for a
+named rule across the page frame. Every screen is built from them, which is what
+makes the contract enforceable -- a gauge is the same gauge on the deck, in the
+yard and in a fight, and a later slice cannot flatten one screen without
+flattening all of them.
+
+**Tables are tables.** A column starts on the same display column on every row
+(right-aligned columns end on one), asserted by measuring the rendered rows.
+When a table will not fit, it drops the columns the screen has named as
+droppable, worst first -- so a narrow table can carry fewer facts than a wide
+one, and a screen naming a column droppable is saying that figure is available
+elsewhere (the market's depth figures are on the commodity's own trade screen).
+When dropping all of them is still not enough it *stacks* -- each record's first
+column on a row of its own, the rest aligned and indented beneath, and on a
+further row where one is not wide enough -- rather than overflowing and wrapping
+into rubble. Stacking never drops anything: every column that survived the
+dropping step is on the record somewhere, so the narrow caller reads those facts
+in two or three rows where the wide one reads them in one. The two steps are
+different promises, and a screen chooses between them by what it marks optional:
+mark a column optional only when its figure is a keypress away (the market's
+depth is on the commodity's trade screen; the chart's sector and economy are on
+the star map's Info; the yard's post-refit hold is on the commissioning
+preview), and leave it un-optional when it is not -- the Hall of Fame's rank,
+job and run counts are on no other view, so that table stacks instead. A stacked record stays one paginator entry and moves between pages
+whole. A table's column headings are repeated at the top of every later page
+that carries one of its rows, and only there.
+
+**Layout.** Three menu columns at 72 or more usable columns, two at 52 or more,
+one below. Numbers right-aligned. One blank row between logical groups. The
+action bar outside the frame, where the cursor waits.
+
+**Motion is in, and it replaces the old "no animation delays" rule.** Reveals,
+gauge drains, counter ticks and rank climbs are permitted under three
+conditions, none of them negotiable: any keypress ends the effect immediately;
+no effect may delay a commit or hold up input; and every effect is absent from
+the presets that exist because a caller wants less -- `fast`, `mono` and
+`plain`. A reveal belongs to *arriving* at a screen, never to redrawing one: a
+key that changed nothing redraws the same page and costs the caller nothing. An
+effect with no live terminal on the other end -- a scripted session, a screen
+drawn before stdin is open -- is skipped rather than slept through, because an
+animation nobody is watching is only a delay. `fast` is a display preset beside
+`auto`: the same palette with every effect off.
+
 Voidrunner offers saved display presets from station Display Options: full palette
-using the existing terminal color depth, basic 16-color, monochrome Unicode, and
-plain text with ASCII artwork. Monochrome/plain suppress ANSI styling; plain maps
-box/block/star decorations to equal-width ASCII characters while retaining Unicode
-pilot text and input. This is an artwork fallback, not a change to the UTF-8 door
-transport. A chosen preset checkpoints before acknowledgement; browsing and
-reselecting the current preset write nothing. The validated additive preference
-defaults to full palette for older careers and survives retirement. Apply it after
-loading a valid career and before its normal title/welcome output; recovery uses
-the default presentation until a valid career is available. No animation is added.
+using the existing terminal color depth, the same palette with motion off
+(`fast`), basic 16-color, monochrome Unicode, and plain text with ASCII artwork.
+Monochrome/plain suppress ANSI styling; plain maps the whole glyph vocabulary to
+equal-width ASCII while retaining Unicode pilot text and input. This is an
+artwork fallback, not a change to the UTF-8 door transport. Each preset previews
+itself on the Display Options screen: the sample beside a preset's name is drawn
+the way that preset would draw it, so the choice is made by looking rather than
+by reading an adjective. A chosen preset checkpoints before acknowledgement;
+browsing and reselecting the current preset write nothing. The validated additive
+preference defaults to full palette for older careers and survives retirement.
+Apply it after loading a valid career and before its normal title/welcome output;
+recovery uses the default presentation until a valid career is available. Motion
+is on in `auto` and `basic` and off in the other three, under the conditions in
+the Voidrunner presentation contract above.
 
 Economy safeguards (issue #310): Blackwake standing from trade follows each new
 250-credit high-water milestone in cumulative contraband sales minus purchases
@@ -5812,10 +6053,30 @@ are specified in section 13.4 and the door guide.
 
 Compatibility extension (issues #296/#297):
 
-- A nullable, versioned profile preserves the original JSON/stdio API for
-  existing registrations. SysOps can explicitly remove a profile in the draft
-  editor without recreating the registration; executable/argv and game data
-  are retained. Native socket profiles require DOOR32 descriptor metadata.
+- A nullable, versioned profile preserves the original stdio API for existing
+  registrations: no drop files, no adapter, raw UTF-8 through stdin/stdout.
+  SysOps can explicitly remove a profile in the draft editor without recreating
+  the registration; executable/argv and game data are retained. Native socket
+  profiles require DOOR32 descriptor metadata.
+- The launch metadata file (`door_info.json`) is itself versioned, by a
+  `door_api` integer, and grows additively (issue #469): a reader treats any
+  absent field as unknown, and a door may refuse a version it does not
+  understand rather than probing for fields. Removing a profile restores the
+  stdio API but does not pin the metadata to an older version — the file is a
+  property of the platform, not of the profile. It never carries a credential,
+  an email address, a user level or a network address.
+- Which door a caller is in is presence, not catalogue data, and is scoped to
+  the viewer (issue #470). It is held per *session*, not per account: both Who
+  screens render a row per session, and the SysOp one acts on the row
+  selected, so an idle connection must never claim the door its sibling is
+  playing. A caller-facing screen names a door only when that viewer could
+  currently open it — the same `min_play_level` gate the door picker applies —
+  so Who can never advertise a door a caller is not allowed to see. A door
+  deleted since, or one whose registration no longer matches the activity
+  recorded, is omitted rather than named; door ids are reusable, so identity
+  is checked, not just the number. A SysOp screen names everything, being
+  SysOp-only already. Remote presence carries no door: a linked node reports
+  who is online, not what they are doing.
   Profiles add persistent installation directories,
   disposable node directories, exact CRLF classic drop files, native stdio,
   controlling PTYs, private inherited DOOR32 sockets, DOSBox-X COM1 sockets,
@@ -7437,32 +7698,95 @@ callers with unused turns see their current resources and actionable job/trade r
 Help explains that newcomer protection follows preserved account age and is not
 renewed by rollover. These cues change no payout, protection, award or reset rule.
 
-**Terminal presentation (issue #362, slice 9; maintainer approved).** Scene offers
-a free Display screen with immediate ASCII-decoration, monochrome and Fast-mode
-toggles. Back writes nothing. Store one bounded boolean preference object per
-caller in world metadata; preserve it across season and competition resets and
-include it in the world backup. No competitive state or archive row is modified.
-ASCII mode changes authored box decorations while preserving caller names;
-monochrome removes styling SGR while retaining the screen controls used by the
-existing terminal UI. Every status, stake and outcome is readable without color.
-Static, compact ASCII diagrams identify exchange roles and NPC operators beside
-their actual current state. Normal action results may add a short fictional
-vignette; Fast omits optional art/flavor and keeps all stakes and net deltas.
-There are no animation delays. War Dialer launch metadata includes the optional
-boolean `unicode_style`, copied from the caller's existing NetBBS preference.
-False defaults to ASCII decorations; true or omission preserves the rich default.
-An explicit in-game ASCII choice wins. Changing monochrome/Fast alone does not
-freeze the inherited Unicode default. Unrelated doors receive no new fields;
-the existing native-door JSON boundary and supervision remain unchanged.
+**The War Dialer presentation contract (issue #494; supersedes the issue #362
+slice 9 wording).** The door is a phosphor terminal, not a page of sentences.
 
-**Screen framing and one hotkey style (issue #487).** Every screen under the
-masthead -- the switchboard, the help and first-visit text, the event log and the
-record picker -- draws its body inside the door's frame, with its title in the top
-border and the action bar outside, below it. The switchboard overhaul had left
-the masthead framed and everything under it an unindented wall of rows. The frame
-costs one row and four columns, charged to each screen's own page budget, and is
-dropped only in Fast mode, which is deliberately text-only: there is no narrower
-terminal to drop it for, since 40x12 is the floor (issue #495).
+*Palette.* Nine roles, truecolour as the design target, each with a deliberate
+256-colour index beside it rather than whatever a converter would pick:
+`phosphor` `#39ff14` (frames, your holdings, positive deltas), `phosphor-dim`
+`#1f7a3f` (frame shadow, ring links, gauge tracks), `mint` `#7dffb0` (headings,
+your handle, the cursor), `amber` `#ffb000` (money and hotkeys), `cyan`
+`#38d6ff` (NPC operators and neutral data), `magenta` `#ff3caa` (rival crews and
+raids against you), `alarm` `#ff4d4d` (losses and bust risk), `ink` `#d7ffe9`
+(values) and `grey` `#7f9a8c` (labels). A hotkey is always amber and bold. An
+exchange's owner colour is the same on the ring, in the table and in the feed.
+Chrome never shares a colour with content.
+
+*Glyph vocabulary.* Frames `┏━┓ ┃ ┗━┛ ┣━┫`; owner nodes `◆ ◈ ◉ ◇`; crew `●○`;
+turns `▮▯`; meters `█░`; sparklines `▁▂▃`; insignia and badges `⟦ ⟧`; ring links
+`═ ║`; the brand `▚`; the prompt `›`. Every one has an ASCII substitute, and the
+`ascii_art`/`plain` preset is the one place that can prove none was forgotten.
+
+*Components.* The door carries its own copy, like every other helper in its one
+self-contained file: `meter`, `pips`, `dots`, `sparkline`, `label_value`/`chip`,
+`badge`, `progress_chain`, `owner_node`, `scene_map`, `table`, `feed`, `key_bar`,
+`compose` and `prose_rows`. Each returns *styled* rows. The frame leaves a row
+that already carries SGR exactly as its component built it; wrapping every row
+through a plain-text flattener and colouring the whole line from outside is what
+turned the game into one grey block inside a green box. Rows are composed at the
+frame's own inner width, because the rows a card produces are the rows its page
+budget is computed from.
+
+*Layout.* The switchboard is a card stack, not a paragraph list: an operator card
+with a rank gauge, a resources card of meters and chips, the ten exchanges as the
+ring they actually are, the latest receipts as a toned feed, then orders and the
+season's absolute deadlines. A card's opening rule costs a row of the same height
+budget as the rows under it. Numbers are right-aligned in their column and a
+table's columns start at the same display column on every row; a table chooses
+which columns it can carry at the width it has, and everything a narrow terminal
+gives up is on the record's own card one digit away. Action bars live outside the
+frame, where the cursor waits.
+
+*Motion.* This replaces "there are no animation delays". Reveals and the carrier
+sweep that plays while a committed result comes back are in, under three hard
+limits: any key skips whatever is playing, Fast mode and the monochrome/plain
+presets omit it entirely, and nothing animates between a caller's decision and
+the commit -- a result is written to the database first and only then revealed.
+Motion is forward-only except for one row it rewrites in place and owns, so the
+screen a caller is left looking at is identical whether motion played, was
+skipped, or was never enabled.
+
+*Presets.* Scene offers a free Display screen with immediate ASCII-decoration,
+monochrome and Fast-mode toggles. Back writes nothing. Store one bounded boolean
+preference object per caller in world metadata; preserve it across season and
+competition resets and include it in the world backup. No competitive state or
+archive row is modified. ASCII mode substitutes for every glyph in the vocabulary
+while preserving caller names; monochrome removes colour at the source -- a role
+returns no SGR at all -- while retaining the screen controls the terminal UI
+needs. Every status, stake and outcome is readable without colour. Fast mode is
+the one deliberately unframed layout: it omits optional art, flavour and motion
+and keeps every stake and net delta, and its title row carries the page counter
+the border would otherwise hold. Normal action results may add a short fictional
+vignette. War Dialer reads the optional boolean `unicode_style` from the launch
+metadata every door receives (§6, the `door_info.json` contract). False
+defaults to ASCII decorations; true or omission preserves the rich default. An
+explicit in-game ASCII choice wins. Changing monochrome/Fast alone does not
+freeze the inherited Unicode default. The native-door JSON boundary and
+supervision are otherwise unchanged.
+
+*Review.* A screen is reviewed by looking at it. `scripts/door_gallery.py
+war_dialer` renders every screen at 80x24, 64x20 and 40x12 in every preset, and
+a change to a screen comes with that page attached. The suite can assert that
+colour reaches every body row, that hotkey, label, value and frame are four
+different colours, that an exchange reads the same colour everywhere, and that a
+table's columns do not wander -- what it can never assert is that a screen is
+worth looking at, which is why the pictures are required.
+
+**Screen framing and one hotkey style (issue #487; extended by #494).** Every
+screen under the masthead -- the switchboard, the help and first-visit text, the
+event log and the record picker -- draws its body inside the door's frame, with
+its title in the top border and the action bar outside, below it. The switchboard
+overhaul had left the masthead framed and everything under it an unindented wall
+of rows. The frame costs two rows and four columns, charged to each screen's own
+page budget, and is dropped only in Fast mode, which is deliberately text-only:
+there is no narrower terminal to drop it for, since 40x12 is the floor (issue
+#495). One frame holds a stack of cards: the screen's title goes in the top
+border and each card after the first is opened by a `┣━ HEADING ━┫` rule, which
+costs a row of the same budget as the rows under it. The border's right-hand end
+carries the page counter first -- always spelled `page N/M`, and the handle a
+scripted walk uses to know whether there is another page -- and then whatever
+else the screen wants to say, for as long as it fits whole; a counter cut in half
+tells a caller nothing, so the screen's own name is the half that truncates.
 Hotkeys are written `[K] Label` everywhere the door prints, the rule Voidrunner
 adopted in issue #400: the key is not always the label's first letter
 (`[E] Map`, `[X] Root`), so that is the only spelling that carries every case.
@@ -7470,10 +7794,11 @@ The switchboard's action bar is packed to the width it has rather than hand-type
 full labels first, short labels when the full ones would not leave the page a row
 to stand on. Every key keeps a name at every supported size; the keys-only tier
 below that went with the terminals it was for (issue #495). A key is never
-dropped. A bar written with `out_prompt` leaves its row unterminated on purpose,
-so whatever reads it has to close that row before the next screen draws; the
-first visit every caller saw had printed the Back bar and the switchboard's own
-title on one row.
+dropped. Paging shares the switchboard's prompt row rather than its action bar,
+which is already four rows of a twelve-row terminal. A bar written with
+`out_prompt` leaves its row unterminated on purpose, so whatever reads it has to
+close that row before the next screen draws; the first visit every caller saw had
+printed the Back bar and the switchboard's own title on one row.
 
 **Shared crew defense (issue #362, slice 5; maintainer accepted).** A player's
 living crew is the available crew plus the members assigned across their owned
@@ -8253,6 +8578,41 @@ nodes -- a separate step, roughly the size of the direct-message vertical.
 All frame additions (`via_relay`, `hops`, `for_fingerprint`) ride real-time
 protocol v3, unreleased at the time, so no further bump was needed.
 Normative description: §8.10.3.
+
+### SFTP over the SSH transport — declined
+
+Listed as a possible follow-on while issue #475 was open, on the reasoning that
+SSH callers already have an authenticated connection and SFTP would ride it.
+Declined; this is the decision, not a deferral.
+
+**The motivating problem is gone.** #475 existed because most callers could not
+transfer at all — Zmodem needs an emulator that implements it, and PuTTY,
+Windows Terminal, an ordinary OpenSSH client and this project's own browser
+terminal do not. The session-bound HTTP path (§6.2) answers that for every
+transport. SFTP would not reach anyone who is currently stuck.
+
+**What it would add is bulk and scripted transfer**, and the cost of that is a
+second enforcement path for every gate the file screen applies: `min_read_level`
+/`min_write_level`, `min_age`, `name_requirement`, Community inheritance,
+moderation state, `get_max_upload_bytes`, and the rule that a pending upload is
+visible only to its uploader and to moderators. Writes carry nearly all of it,
+and would additionally have to route through `upload_file_from_temp` so that
+content-addressed storage, `FILE_ID.DIZ` reading (issue #463) and Link
+descriptor queueing (issue #464) behave exactly as they do elsewhere. A file
+area is not a directory tree; presenting it as one means re-deriving each of
+those rules in a filesystem vocabulary that cannot express them, which is how
+the two surfaces drift apart.
+
+**And bulk seeding does not want a live network surface anyway.** The realistic
+case is a SysOp arriving from other BBS software with an existing collection to
+bring across — a migration, run once, against a node that is not serving it yet.
+That is a local job on the machine holding the files, where the work is reading
+someone else's catalogue format and converting it, not moving bytes over a
+protocol. It belongs in a standalone CLI tool alongside `python -m netbbs.admin`,
+not in the SSH listener. Recorded as issue #505.
+
+Revisit only if a concrete caller-facing need appears that HTTP transfer cannot
+serve — not because SFTP would be convenient to have.
 
 ### Deliberately deferred without active issue
 

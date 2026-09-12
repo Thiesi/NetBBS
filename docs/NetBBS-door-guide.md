@@ -221,9 +221,12 @@ unread. In history, use Next/Prev to browse, Ack page to acknowledge, and Back t
 return. New events arriving while you read remain unread. These screens fit down
 to the 40x12 floor; smaller terminals show a size diagnostic and preserve unread state.
 
-The main switchboard shows your resources, holdings and income, Rank progress,
-new events, raid protection, turn refill and the season deadline. Next/Prev pages
-are free and refresh these snapshots; action keys stay available on each page.
+The main switchboard is a stack of cards: who you are with your Rank gauge, then
+cash, Heat, crew, turns, holdings, income, raid protection and unread receipts as
+meters and chips, then the ten exchanges as a ring, the latest receipts as a
+feed, and finally what to do next and the season's absolute deadlines. Next/Prev
+pages are free and refresh these snapshots; action keys stay available on each
+page, and the paging keys sit on the prompt row beside the cursor.
 Outcomes and rejection messages wait for acknowledgement before returning to the
 switchboard. The game requires at least 40 columns by 12 rows; a smaller terminal
 is refused by name, with the size it reported, and nothing in the shared world is
@@ -385,11 +388,17 @@ age and is not renewed by the season change.
 
 Open `[I]Scene`, then Display for free ASCII-decoration, monochrome and Fast-mode
 toggles. Choices apply immediately and survive seasons and competition reset.
-Back leaves without changing anything. ASCII mode keeps authored decorations
-simple and preserves names; monochrome retains explicit labels and numbers.
-Fast skips optional static art and action flavor, keeping every stake and net
-result. There are no animation delays in either mode. The map and NPC dossiers
-show compact role/operator diagrams beside actual ownership and defense.
+Back leaves without changing anything. ASCII mode substitutes plain characters
+for every glyph the screens draw and preserves names; monochrome removes colour
+entirely and retains explicit labels and numbers. Fast skips the frame, optional
+art, action flavour and motion, keeping every stake and net result, and shows the
+page counter in its title row instead of a border.
+Motion -- a screen revealed row by row, a carrier bar filling while a committed
+result comes back -- plays only after the write, and any key skips it; Fast,
+monochrome and ASCII modes never play it at all. The scene screen draws the ten
+exchanges as the ring they are, with owner colour on the ring and in the table
+beside it; an exchange's number opens its own card, which carries its links, its
+price for you, its defence and its owner service.
 War Dialer inherits your NetBBS Unicode-decoration choice unless you explicitly
 toggle ASCII decorations in Display. Monochrome and Fast do not override that
 inheritance. Older launchers without the optional `unicode_style` metadata field
@@ -547,6 +556,51 @@ another session holds it simply skips the import and the next launch retries it
 until every row is in. Scores are optional; a temporary score-write failure does
 not lose the career, and a later checkpoint retries publication from its saved
 high-water mark.
+
+### What Voidrunner looks like
+
+Voidrunner needs a terminal of at least **40 columns by 12 rows**. Below that it
+prints one short, unstyled refusal naming the size it needs and the size the
+terminal reported, and stops before any career is opened or changed. Above it
+there is one layout: every screen, every key and every gauge is the same at 40
+columns as at 80, sized for the room there is. What a narrow terminal gives up
+is named below -- a table's least useful columns, and a silhouette that has
+nowhere to sit -- and never a figure a decision is made on.
+
+Every screen is built from the same small vocabulary. Gauges (`████░░░░`) carry
+hull, fuel, hold, crew, standing and deadlines; chips (`⟦day 12⟧`) carry single
+facts; badges (`ILLEGAL`, `TRACKED`, `MAX`) carry states; tables carry anything
+with more than two columns; and a rule across the frame (`├─ SHIP ─────┤`) names
+each group of rows. Hotkeys are gold, values are bright, labels and prose are
+dim, and severity has its own colour: green good, amber caution, red danger.
+
+Tables narrow gracefully, in two steps. First a table gives up its least useful
+columns: at 40 columns the market keeps the buy and sell price, the hold and the
+`ILLEGAL` flag, and drops the station's stock and demand figures and the price
+spread -- those are still on the commodity's own trade screen, which is where a
+purchase is sized anyway. If what is left still does not fit, the table
+*stacks*: each record's name goes on a line of its own with the rest aligned
+underneath, on as many lines as it takes. Nothing is ever truncated, and nothing
+a table still carries is lost to stacking -- only that first step drops
+anything, and only figures that are a keypress away on another screen. A table's
+column headings reappear at the top of every page of it.
+
+**Display presets** are chosen from the station deck's **[O] Display Options**,
+and each one previews itself on that screen:
+
+| preset | what it does |
+| --- | --- |
+| Full palette | the terminal's own colour depth, with motion |
+| Full palette, no motion | the same palette with every reveal and tick off |
+| 16-color | sixteen ANSI colours and Unicode artwork |
+| Monochrome | Unicode artwork, no ANSI styling |
+| Plain | ASCII artwork, no ANSI styling; letters and typed text stay UTF-8 |
+
+Motion -- rows revealing as a screen opens, and the effects that go with a
+result -- never blocks anything. Any keypress ends an effect immediately, no
+effect delays a save, and a screen redrawn unchanged does not replay one. If
+motion is not wanted at all, choose **Full palette, no motion**; monochrome and
+plain have none either.
 
 ### Starting and returning to Voidrunner
 
@@ -1005,17 +1059,22 @@ terms but expose no action key. Disconnecting preserves the existing pending fig
 
 ### Saved display presets
 
-Station **[O] Display Options** offers **[1] Full palette**, **[2] 16-color**,
-**[3] Monochrome**, and **[4] Plain / ASCII artwork**. Full palette uses the
-terminal's existing truecolor or 256-color setting. Monochrome retains Unicode
-artwork without ANSI styling; Plain also substitutes ASCII decorations. Unicode
-letters and text input remain UTF-8 in every mode. Numeric telemetry and warning
-labels do not depend on color.
+Station **[O] Display Options** offers **[1] Full palette**, **[2] Full palette,
+no motion**, **[3] 16-color**, **[4] Monochrome**, and **[5] Plain / ASCII
+artwork**. Full palette uses the terminal's existing truecolor or 256-color
+setting; the second is the same palette with every reveal, tick and drain off.
+Monochrome retains Unicode artwork without ANSI styling; Plain also substitutes
+ASCII decorations for the whole glyph vocabulary. Unicode letters and text input
+remain UTF-8 in every mode. Numeric telemetry and warning labels do not depend on
+color. Each preset previews itself on that screen, drawn with what your own
+terminal can do.
 
 Selecting a different preset saves it immediately before acknowledging the
 change. **[B] Back**, paging, and selecting the current preset make no change.
 The preference applies from the first title on the next visit and survives
-retirement. Existing careers default to Full palette. No animation is added.
+retirement. Existing careers default to Full palette. Motion is on in the first
+and third and off in the other three; see "What Voidrunner looks like" for what
+it does and how to skip it.
 
 ### Ship and place portraits
 
@@ -1032,8 +1091,9 @@ and specialist contact where present. A landmark portrait becomes viewable
 at its location and remains in the discovery view after investigation.
 
 Portraits use complete large or compact compositions according to terminal
-dimensions, with paginated details and the selected display preset. There is
-no animation. Landmark inspection keeps salvage status and action results
+dimensions, with paginated details and the selected display preset. A portrait
+is a still composition: it is never redrawn once it is on the screen.
+Landmark inspection keeps salvage status and action results
 before the artwork. A hull refit opens an illustrated preview: **[C] Commission**
 then final confirmation purchases it, while **[B] Back** leaves the ship alone.
 Commissioning restores hull health and keeps cargo and modules; it does not
@@ -1313,6 +1373,48 @@ host data in the game installation. Run NetBBS unprivileged, never as root.
   files persist, but the OS releases locks at process exit/reboot. Do not
   remove lock files while NetBBS is running.
 
+### What a door is told: `door_info.json`
+
+Every **native** door -- stdio, PTY or socket -- is given the path to a small
+JSON file in `NETBBS_DOOR_INFO`. It is the NetBBS-native alternative to the
+classic drop files, and such a door may use either or both.
+
+Two kinds of registration deliberately get none of it:
+
+- A **DOS** door. `NETBBS_DOOR_INFO` is set in the emulator's *host*
+  environment and names a host path; nothing inside the guest sets it, and a
+  DOS path could not reach it anyway. Give a DOS game the classic
+  [drop files](#register-and-test-inside-netbbs) instead — which is what the
+  DOS templates configure, and what a DOS-era program can actually read.
+- A **remote** (RLogin) registration. NetBBS launches no process for it, so
+  there is no environment to carry a path and no filesystem in common. The
+  RFC 1282 handshake conveys only the configured local and remote identity
+  strings and a terminal type; everything else about that caller stays on
+  this side of the connection.
+
+| Field | Meaning |
+| --- | --- |
+| `door_api` | Contract version, currently `2`. Refuse a version you do not understand rather than probing for fields. |
+| `handle` | The caller's NetBBS handle. |
+| `user_id` | Their stable numeric id on this node. |
+| `terminal_width`, `terminal_height` | Current geometry; rewritten mid-run if the caller resizes and the door opted in (see above). |
+| `color_depth` | `truecolor` or `256`. |
+| `unicode_style` | The caller's own NetBBS glyph preference, so a door can match what they already chose. |
+| `transport` | `telnet`, `ssh`, `web`, `local`, or `unknown`. Key decoding and latency assumptions differ, particularly for the browser terminal. |
+| `timezone` | The node's display timezone as an IANA name, for in-game clocks. Node-wide: NetBBS has no per-caller timezone. |
+| `node_name` | The node's display name, which a SysOp may change at any time. |
+| `node_id` | A stable, opaque per-node identifier which survives a rename. Key a door's world on this, not on `node_name`. Not a credential. |
+| `session_limit_seconds` | The effective wall-clock cap for *this* launch — the tighter of the profile's limit and any lower bound the launch itself imposes — so a door can warn before it is cut off. Absent when nothing bounds the run. |
+
+Treat every field as optional and absence as "unknown": that is how the file
+stays compatible as it grows. Two notes on what is deliberately **not** there.
+`node_fingerprint` (the Link identity) is not published yet — the node's own
+identity is not held in the database, so supplying it would mean threading it
+into the door runtime; `node_id` is what a door keying its world on the node
+needs today. And nothing here is a credential or a privilege: no password, no
+email, no user level, no IP address. A door learns who the caller says they
+are, not what they may do.
+
 **MANUAL — outside NetBBS:** create the installation directories and give the
 actual service account read/write/search access. For a service user/group both
 named `netbbs`, for example (substitute your real account names):
@@ -1352,6 +1454,49 @@ the emulator, game and NetBBS itself must not run as root.
    the game. The DOS templates use CP437, COM1, 38400 baud, 80x25 and 1 GiB
    address-space ceiling. This ceiling includes the emulator's host shared
    libraries, not just its 16 MiB emulated RAM. Native default: 256 MiB.
+
+   **Time limit** (wall clock) and **CPU seconds** bound one caller's run.
+   The defaults, 3600 and 300, are what every door got before these were
+   configurable, so an existing profile behaves exactly as it did. Raise the
+   CPU ceiling for a door which renders continuously rather than waiting on
+   keystrokes — a classic door idles between keys and never approaches 300
+   CPU-seconds, while a real-time client can exhaust them inside a normal
+   session and be killed mid-play. Raise the time limit for a door a caller
+   should be able to stay in for an evening.
+
+   Setting either to `0` removes that ceiling entirely. This is a deliberate
+   SysOp decision, not a misconfiguration, so **Check setup** reports it as a
+   note rather than a problem — but understand what you are giving up. With no
+   wall-clock limit a door ends only when it exits, the caller disconnects, or
+   the node stops; until then it holds that caller's session and a node lease,
+   so a hung door with `max_sessions: 1` makes the door unavailable to everyone
+   else until you restart the node. With no CPU limit a runaway door is bounded
+   only by the wall-clock limit. Do not remove both at once on a door you have
+   not watched run.
+
+   Removing the CPU ceiling raises the door's soft limit to the hard limit the
+   service account is permitted, rather than simply leaving NetBBS's own. If
+   your service runs under a login class or unit file which sets a hard CPU
+   limit, that hard limit still applies and `0` cannot exceed it.
+   **Stop grace** is how long a door gets to exit after `SIGTERM` before it is
+   killed, and it is reached far more often than the name suggests: on every
+   caller disconnect and every timeout, not only at node shutdown. The default
+   is 5 seconds, replacing a fixed half-second which was long enough for a
+   process that exits on the signal and too short for one which flushes
+   anything first — a DOS game writing its scores out through the emulator,
+   for instance.
+
+   Raising it costs nothing for a door which exits promptly: the wait ends the
+   moment the process does, so only a door which refuses to exit ever waits
+   the full period. Raise it for a game you have seen lose progress when a
+   caller drops mid-session; lower it only if you know the door writes nothing
+   on the way out.
+
+   This buys time, not a guarantee. A door which handles `SIGTERM` gets the
+   chance to finish; one which ignores it is killed at the deadline either
+   way, and one which the operating system kills outright never saw the signal
+   at all. If a particular game still loses data on an abrupt disconnect,
+   establish whether it handles `SIGTERM` before raising this further.
 5. **Check setup** reports static problems. For DOS, run **Emulator capability
    probe** to verify headless startup, inherited COM1, CP437 echo and optional
    FOSSIL using NetBBS's own fixture, without launching the game. It requires
@@ -1406,8 +1551,20 @@ screens return to browser-fit geometry after play. Telnet/SSH terminals must
 already be at least the configured size; a smaller browser viewport is allowed
 because web door mode sets the requested terminal geometry. NetBBS does not
 resize Telnet/SSH windows.
-PTY geometry is set at launch; dynamic terminal resizing inside local games
-is not currently forwarded.
+A caller who resizes their terminal mid-game is followed, on POSIX hosts,
+for native doors whose profile leaves columns and rows at 0. A PTY door's
+own terminal is resized and its process group gets `SIGWINCH`, which is what
+a full-screen program already expects. A stdio or socket door is told only if
+its profile enables **Signal door on terminal resize**: NetBBS then rewrites
+`door_info.json` with the new `terminal_width`/`terminal_height` and sends
+`SIGUSR1`. Leave that off unless the door's own documentation says it handles
+`SIGUSR1` — the default action for that signal is to terminate the process,
+so enabling it for a door which ignores it kills the caller's game.
+
+A profile which pins columns and rows asked for a fixed screen and is never
+resized; neither are DOS doors, whose geometry is fixed by design, nor remote
+services, which negotiate their own window size. Resizes are followed within
+about half a second, not instantly.
 
 ## Native doors
 
@@ -1431,6 +1588,44 @@ argv `-jar /var/games/netbbs/game/game.jar {node_dir}`; adjust memory after
 checking the JVM's reservation needs. Do not assume that JVM path/package
 exists on your host. Install the runtime recommended by the game's author.
 
+### Installing a packaged Python door
+
+A door distributed as a Python package is the common third-party case, and
+`native-python-module.json` is its starting template: the executable is a
+virtualenv's own interpreter and argv runs a module rather than a script path.
+
+**MANUAL — outside NetBBS,** as the installation's owner (normally the service
+account, so prefix with `sudo -u netbbs` when that is a separate account):
+
+```sh
+sudo install -d -m 750 -o netbbs -g netbbs /var/games/netbbs/yourgame
+sudo -u netbbs python3 -m venv /var/games/netbbs/yourgame/.venv
+sudo -u netbbs /var/games/netbbs/yourgame/.venv/bin/pip install   /path/to/yourgame-1.0-py3-none-any.whl
+```
+
+Give the door its **own** virtualenv rather than NetBBS's: a door is
+operator-chosen third-party code, and sharing an environment with the BBS
+would let its dependencies decide NetBBS's. Point `executable_path` at that
+venv's `bin/python`, set argv to `["-m", "yourgame.door"]`, and set the
+installation directory to the package's own data root.
+
+Persistent game data belongs in the installation directory. NetBBS backs up
+its own state, not that directory, unless you turn on
+[door-installation backups](#backing-up-door-installations).
+
+Leave `max_sessions` at 1 until the game's own locking is proven; raising it
+requires **Multi-node certified by SysOp**, which is your statement that you
+tested concurrent play, not a switch that makes a door concurrent.
+
+A door which also needs a long-lived world process adds a
+[companion service](#doors-with-a-companion-service) to the same profile.
+
+An author can ship that whole profile as a JSON file beside the wheel; the
+Compatibility screen's **[J] Import JSON** accepts either a full template
+(`executable_path`, `args`, `profile`) or a bare profile object, so a SysOp
+imports one file instead of retyping fields. Check the paths in an imported
+file before saving: they are the author's, not yours.
+
 An optional `runner` is a fixed argv prefix, e.g. an operator-authored
 `["/usr/local/libexec/netbbs-door-wrapper"]` which finally execs its argv.
 **MANUAL — outside NetBBS:** write/audit that wrapper and configure any
@@ -1438,6 +1633,103 @@ container/chroot/dedicated-account/VM it uses. It must preserve required
 descriptors, path mappings and process ownership; validate disconnects.
 No privileged helper, containment tool or universal container recipe is
 installed by NetBBS. Wine/Win32 remains experimental and untested.
+
+## Doors with a companion service
+
+Most doors are one process per caller, started when the caller enters and
+reaped when they leave. A door which keeps a world running while nobody is
+connected — a real-time multiplayer game, for instance — needs a process that
+outlives any single caller. A profile may declare **one** such service, and
+NetBBS supervises it:
+
+```json
+"service": {
+  "argv": ["-m", "yourgame.server", "--install-dir", "{install_dir}"],
+  "start": "with_node",
+  "stop_grace_seconds": 10,
+  "service_memory_mb": 512,
+  "health": {"kind": "socket", "path": "{install_dir}/run/game.sock"}
+}
+```
+
+The program is the door's own **executable path**, so a door and its service
+share one interpreter; `argv` is everything after it, and `{install_dir}` is
+the only substitution. The service runs under the service account, in the
+installation directory, with the same narrow environment rules as a door
+launch — never the full parent environment. A service therefore requires an
+installation directory.
+
+`start` is `with_node` (started before the node accepts callers) or
+`on_first_caller` (started lazily by the first caller who opens the door).
+`service_memory_mb` is its own address-space ceiling; unlike a caller's run
+it gets no CPU-seconds limit, because a long-lived process legitimately
+accumulates CPU time.
+
+**Restarts and giving up.** A service which exits is restarted with a
+lengthening delay — 1, 2, 4 seconds and so on to a minute. Five failures
+within five minutes and NetBBS stops trying and reports the door's service as
+failed, rather than respawning a misconfigured program forever. Starting or
+restarting it from the SysOp screen clears that.
+
+**Health.** `kind: "pid"` (the default) means the process is alive.
+`kind: "socket"` also connects to a Unix socket the service listens on, which
+catches a process that is running but wedged. A caller who opens a door whose
+service is not up gets one line and returns to the door list; the refusal is
+logged with the door's name. A freshly started service must stay up briefly
+before callers are let in, so a service which exits during startup is never
+mistaken for a working one.
+
+**SysOp control.** The door's detail screen grows a Service line showing
+state, uptime and restart count, with **[S]tart**, **[H]alt**,
+**[R]estart** and **[V]iew service log** (the most recent 8 KiB of its
+standard error). Each action that changes the process asks for one
+confirmation and is audit-logged like every other door action.
+
+**Shutdown.** Services are stopped first, before listeners and background
+tasks: `SIGTERM`, the configured `stop_grace_seconds`, then `SIGKILL`. All
+services stop concurrently, so the step costs the longest single grace rather
+than their sum, and it can never delay node shutdown indefinitely.
+
+**MANUAL — outside NetBBS:** installing the service's program and its
+runtime. NetBBS supervises the process; it does not install or update what
+that process owns.
+
+### Backing up door installations
+
+By default a NetBBS backup covers the node's own state — database, identity,
+files, banners, and the bundled games' worlds — and leaves each door's
+installation directory to you, because that directory is an operator-owned
+game installation which can be far larger than everything else combined.
+
+**SysOp → Operations → Backup → [D]oor installations** turns that off or on
+for this node. With it on, every registered door's installation directory is
+copied into each backup. Understand what changes before enabling it:
+
+- backups get larger and slower, in proportion to your game installations;
+- a directory shared by two doors is copied once, and one nested inside
+  another already being copied is not copied again;
+- symlinks are copied as symlinks rather than followed, so a link pointing
+  out of the installation does not pull unrelated host data into the backup —
+  but check your installations for links you would rather not carry along;
+- a door whose installation directory is missing or unreadable **fails the
+  backup**, naming that door. Silently omitting data you asked to keep would
+  be worse. Fix the directory, correct the door, or turn the option back off;
+- these directories are recorded by file count and size rather than
+  per-file checksums, unlike node state;
+- **the copy is not quiesced.** A door being played, or a companion service
+  running, can be writing to its installation while it is copied, and the
+  result may be a torn generation — a database and its write-ahead log from
+  different moments, or game files from opposite sides of an update. Halt the
+  door's service and wait for callers to leave first, the same discipline the
+  Voidrunner and War Dialer notes above already ask for. A backup which
+  reports success is not a promise that a live game's state inside it is
+  self-consistent.
+
+**Restore never writes them back.** They are captured as a copy so you have
+one; putting a game installation back is an ordinary file-copy operation you
+perform deliberately, not something a node restore should do over a live
+installation. Find them under `door-installs/` inside the backup, with each
+directory's original path recorded in `manifest.json`.
 
 ## DOS prerequisites
 

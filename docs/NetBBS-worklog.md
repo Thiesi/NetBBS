@@ -871,6 +871,23 @@ has no descriptor and never gets one, matching the pre-Link-history rule
 already stated for posts. Anything the UI says about what peers hold must
 therefore ask the file, not the area.
 
+**Announcement is best-effort, and nothing re-queues a failed one.** Storing a
+file and announcing it are two writes, not one: `upload_file_from_temp` has
+moved the bytes and committed the `files` row before a descriptor is ever
+signed. So a signing or database failure in `queue_file_descriptor_if_linked`
+leaves an approved local file that is complete, browsable and downloadable, and
+permanently absent from its area's Link catalogue. Both upload paths swallow
+that failure deliberately — reporting it as a failed upload would tell a caller
+to re-upload a file that already exists — and both roll the transaction back
+first, because the connection is the lane's and a failed transaction left open
+breaks every later job on it.
+
+The consequence is the part worth carrying forward: **a successful upload does
+not imply propagation.** `has_queued_file_descriptor` can see the gap; nothing
+acts on it, and no retry, sweep or repair path exists. Anything reasoning about
+Link convergence for file areas has to treat announcement as lossy at the moment
+of upload rather than assume every approved file eventually reaches peers.
+
 **Test method.** A queue-on-write helper can be complete, tested, and called
 from nowhere — this one was, for as long as remote file areas have shipped, as
 `link_file_area` had been before it. End-to-end Link tests that call the helper
@@ -2107,6 +2124,24 @@ other kind of cleanup (stdio flushes, other `atexit` handlers, any other
 still-pending async work) along with it, a real tradeoff that needs a
 deliberate decision, not a reflexive fix.
 
+Door services (issue #466) are subprocesses, not network tasks, so their stop
+step is bounded by construction rather than by trusting cancellation:
+`SIGTERM`, the profile's `stop_grace_seconds`, `SIGKILL`, then a short deadline
+after which an unkillable process is abandoned with a logged error. Cancelling
+the supervising task only unblocks its own await; the child is ended
+separately and explicitly, because a cancelled `await proc.wait()` leaves the
+process running. `stop_all` runs every service's stop concurrently, so the
+step costs the longest single grace rather than their sum. Services stop
+before listeners and other background tasks, and `__main__` still wraps the
+whole step in its own ceiling — the per-service bounds are the mechanism, that
+ceiling only guards against the mechanism itself failing.
+
+A service which exits during startup passes briefly through a running state on
+every restart. Liveness alone is therefore not enough to admit a caller: a
+freshly started service must stay up for a short settle window first, or a
+caller arriving inside that window is let through to a door whose companion
+process is already gone.
+
 ---
 
 ## 9. Link protocol invariants
@@ -2318,6 +2353,83 @@ not any individual call site of the composer (issue #69: the missing
 registration meant a sender's own outbound `link_message` could never be
 recognized when its acknowledgement came back, so it was rejected
 unconditionally, every time).
+
+### Push sizing is a budget problem, not a slicing problem (issue #478)
+
+A per-pass push whose size grows with everything this node has ever originated
+cannot be fixed by slicing it into per-request-sized batches. The peer's
+per-source request budget (`LinkRequestThrottle`, `request_rate_capacity`
+20/`request_rate_refill_per_minute` 60) bounds how many *requests* a pass may
+make at all, so past roughly 3,800 originated events a pass spent the whole
+budget on the same early batches, took a 429, and restarted at the first batch
+next pass. Slicing converts "one oversized request refused in full" into "the
+tail is never reached" — quieter, equally broken.
+
+What removes the backlog rather than pacing it: an `InventoryRequest` is
+already documented as exhaustive (every carried resource, each mapped to the
+full set of content IDs held), so the same body that asks "what am I missing?"
+already states everything the responder could want back. The responder
+therefore answers both directions at once — `events` plus a `wanted` list of
+declared IDs it lacks — and the push sends exactly those. One request per pass,
+shrinking to nothing as the peer catches up, no persisted per-peer cursor, no
+extra round trip.
+
+**Cap the push, never `wanted`.** The two are not interchangeable, and getting
+it backwards reintroduces the same starvation in a quieter form. `wanted` is
+ordered by the *responder*; prefix-capping it lets IDs the requester is not
+allowed to push (content it merely carries) fill the page, get dropped by the
+requester's own filter, leave the responder unchanged, and come back identical
+forever. Capping after that filter truncates only events the requester can
+actually send, so the responder has them next pass and the list strictly
+shrinks. `wanted` needs no cap of its own: it is a subset of the IDs the
+requester just declared, which `client_max_size` already bounds.
+
+**Anything that rides along with a budgeted push must not eat the budget.**
+`key_transition`s are append-only and sent unconditionally; deriving the
+resource capacity as `cap - len(transitions)` reaches zero after ~99 rotations
+and stays there. Reserve a floor (half a request) and let a long history cost a
+second request instead.
+
+Two things do not fit that model and are stated rather than assumed.
+`key_transition`s are outside inventory scope, so a peer cannot ask for one;
+they stay unconditionally pushed every pass, which is affordable only because
+there are a handful of them. And a `wanted` entry this node merely *carries* is
+skipped: push has only ever carried self-originated content, and the requester
+reaches the rest through its own inventory pull.
+
+**`wanted` is required, and a missing one is not a compatibility case.** Every
+node on this mesh is upgraded together, so a 200 response omitting it is a
+broken responder and is rejected as malformed. Tolerating it would have been the
+compatibility layer, and removing that tolerance is what leaves a single meaning
+for "this pass produced no `wanted` list": the inventory exchange failed — a
+peer whose `/inventory` route errors while `/events` still accepts a push. That
+case still pushes, walking the originated history from a rotating per-peer
+offset held for the lifetime of one sync loop, because re-offering the same head
+every pass would never deliver the rest to such a peer, and an asymmetric one
+never dials back to pull it.
+
+**Accepting an event and projecting it locally are separate decisions, and
+both have to be recorded.** Every quota refusal (§13.9) keeps the event and
+declines only the local row — `board_genesis` past `max_carried_boards`,
+`file_descriptor` past `max_remote_files_per_area`. Anything that instead keeps
+*neither* cannot tell "declined this" from "never saw this" afterwards, which
+reads as a permanent gap: the resource is reported as wanted on every pass, its
+origin re-pushes the same prefix forever, and everything ordered behind it is
+starved. A refused `file_descriptor` was that case until it was made to persist
+its event like the others.
+
+**What `wanted` may consult is a disclosure boundary.** It is computed per
+declared resource, never against the global dedup set — that set spans
+`link_message`s, acknowledgements and `key_transition`s, which §8.8 keeps out of
+inventory, so consulting it turns the response into a membership oracle for any
+completed peer willing to file a known content ID under a fabricated resource.
+A resource this node has seen and declined wants nothing further; one it has
+never seen wants everything declared for it.
+
+**Test method.** Asserting only that the peer ends up holding everything proves
+nothing here — the old code converged too, via pull. Record the push requests
+themselves (wrap `netbbs.link.sync.push_events`) and assert both how many a
+pass made and what each carried.
 
 ### Linked boards
 
@@ -4772,6 +4884,30 @@ NetBSD/Linux node enforces; only the async wall-time watchdog (pure
 the `resource.setrlimit` ceilings themselves needs to happen on an
 actual POSIX target, not this Windows dev box.
 
+A door profile's `time_limit` and `cpu_seconds` treat 0 as the SysOp's
+explicit "no ceiling" rather than as a value. Neither may be folded into the
+obvious expression: `min(call_site, profile.time_limit)` makes the opt-out the
+tightest bound and times the door out immediately, and an `RLIMIT_CPU` of zero
+kills the door on its first scheduler tick. `effective_wall_limit` filters
+opt-outs before taking the minimum. Removing a CPU ceiling is sent to the
+launcher as `None`, which raises the soft limit to the inherited hard limit:
+omitting the key instead would leave whatever soft limit NetBBS itself runs
+under, so a service started from a login class with a CPU limit would still
+cap a door which asked for none. Door services pass the same `None` for the
+same reason. A call-site bound must still win when it is tighter, because the
+DOSBox capability probe depends on its own 12-second limit.
+
+Terminal resize is followed by polling `Session.terminal_width`/
+`terminal_height` rather than by a transport callback: Telnet NAWS, SSH's
+window-change message and the web client's resize event all update those
+attributes in place with no notification in common, so one poll covers every
+transport including future ones. The follower captures the PTY master
+descriptor by number, so it must be cancelled *before* the endpoint closes
+that descriptor — descriptor numbers are reused, and an `ioctl` on a reused
+one reaches an unrelated file. `SIGUSR1` notification for stdio/socket doors
+is opt-in because that signal's default action terminates a process, so
+signalling every door would kill exactly the doors which never asked for it.
+
 `netbbs.doors.runtime.run_door` builds a deliberately minimal child
 environment and passes it straight to `asyncio.create_subprocess_exec`'s
 `env=` -- which *replaces* the child's environment outright rather than
@@ -4962,6 +5098,349 @@ refusal happens before a save directory or world is opened, so a caller who
 resizes loses nothing. `scripts/door_gallery.py` renders every screen at every
 supported size into one page, and is how a presentation change is reviewed --
 the suite can assert that a screen fits, never that it looks like anything.
+
+**Colour has to reach the body row, and that is a structural property, not a
+coat of paint (issue #494).** War Dialer's screens used to be built as plain
+sentences, wrapped by a flattener that stripped ANSI by construction, and then
+coloured one colour per row from outside the frame -- so nothing inside a row
+could ever be a different colour from anything else, and the whole game read as
+one grey block inside a green box. The fix is that a component returns *styled*
+rows and the frame leaves a row that already carries SGR exactly as it arrived.
+Three invariants hold it in place, and each one is a test that can fail:
+
+- Every body row a screen prints carries at least one SGR sequence. Check the
+  row *between* the frame's sides: a screen that is grey inside a green box
+  passes any assertion that looks at the whole row.
+- A hotkey, a label, a value and the frame are four different colours, and an
+  exchange's owner colour is the same on the ring, in the table and in the feed,
+  because one function (`owner_node`) decides it for all three.
+- Segments are composed independently and each closes its own style. An SGR
+  reset does not restore an outer colour, so passing an already-styled value
+  into a helper that wraps it in another colour colours its head and then loses
+  the colour entirely at the first internal reset. `label_value` and `table`
+  detect an already-styled argument and leave it alone for exactly this reason;
+  a styled table cell also cannot be truncated (the cut would land inside an
+  escape sequence), so its own width is the floor its column can shrink to.
+
+**Rows are composed at the width the page budget was computed from.** A card
+builds its rows with `compose`, which breaks *between* styled chunks, never
+inside a gauge or a chip; `table` fits its columns; `prose_rows` wraps. The frame
+clips an over-wide row rather than wrapping it, deliberately: a row that silently
+became two would break the height budget already spent on it, and a frame with
+one side missing is the worse failure. A card's opening rule costs a row of the
+same budget as the rows under it -- a frame that draws rules nobody charged for
+overflows its terminal by exactly the number of cards on the screen.
+
+**Motion is allowed, under limits that keep it out of the way (issue #494).**
+It runs strictly after the commit, it is forward-only apart from one row it
+clears the screen for and owns, and any key skips it -- which means the beat
+between frames is a *read* with a timeout, not a sleep, so the keystroke that
+interrupts it is consumed as the skip instead of being left in the buffer to act
+as a hotkey on the screen underneath. Two traps: a carriage-return-rewritten row
+looks like one enormous row to anything that splits output on `\r\n` only (the
+visible row is what follows the last `\r`, which is why each frame is padded to
+a constant width), and motion written *under* the screen the caller pressed a key
+at spends rows that screen's height budget already owns.
+
+**A skip key belongs to the screen behind it, or to nobody.** Handing the
+keystroke that interrupted motion to the next reader is right where an
+acknowledgement follows immediately -- a result screen -- and wrong where the
+reveal has no reader of its own. The masthead's reveal is followed by whatever
+screen the caller has not chosen yet, so handing its skip key on would
+acknowledge a page of unread receipts or skip a page of the first-visit guide
+that nobody pressed anything on. `reveal(..., hand_back=False)` marks that case.
+
+**A preview's prominent summary has to be the stakes of the step being
+committed, not of the flow it belongs to.** Two instances of the same mistake
+came out of one shared stakes builder: an owner service previewed a Warez Hub's
+Heat and bust roll at a Public PBX, whose service removes Heat and rolls for
+nothing; and a three-step operation previewed the execution's odds, Heat and bust
+above a Prepare step that has none and costs $50 the card showed as $0. A card
+this prominent contradicting the terms directly under it is worse than no card.
+
+**A picker's first page must offer a choice, and the screen's own summary card
+is what gets given up for it.** How many entries fit a page depends on the
+terminal, so a card above them that is affordable at eighty columns pushes every
+choice onto page two at forty. `pick_record_page` measures the rows the *first*
+selectable entry needs and drops the summary, then the heading, until it fits --
+not "drop the summary when the whole list would then fit", which is the weaker
+rule that let a three-entry approach picker open with nothing to press.
+
+**A walk can name a place or an entry, never a page number.** The same
+size-dependence makes a fixed key sequence wrong at some size: `I5` opened "Your
+season reports" at eighty columns and pressed a key the picker was ignoring at
+forty. `scripts/door_gallery.py` therefore takes two suffixes -- `N*` presses
+until the screen stops changing, and `5?` pages forward until the screen *says*
+it will accept `5`. Read that from the hint row, not from the frame: Fast mode
+has no frame, and an entry's own `[2]` marker is on the screen while the entry's
+last row, and so its key, is on the next page.
+
+**One width rule, or a budget is a guess.** `_dlen` and `_fit` each carried
+their own "two columns above U+2E80" shortcut while `_wrap_output` measured with
+`unicodedata.east_asian_width`. A Hangul choseong (U+1100) is two columns and
+sits *below* the cutoff, and a combining accent is zero; a handle of either was
+budgeted as one row, wrapped into two by `out_line`, and scrolled a twelve-row
+terminal's footer away. Both now delegate to `_char_width`. Any new measuring
+helper does the same -- a second rule reintroduces exactly this.
+
+**A preset that changes the frame changes the width.** Fast mode is the one
+unframed layout, so a screen that caches `_panel_width` across its own toggles
+composes the next redraw for the wrong terminal: turning Fast off inside the
+Display screen clipped the setting descriptions. Recompute after `apply_display`,
+not before.
+
+**The gallery fixture has to be far enough into the game to reach the screens.**
+A brand-new War Dialer player owns nothing, so `G` was a panel of "No exchanges
+held" at every size and preset while the garrison picker, Exchange Control, the
+transfer preview and the owner service -- all rebuilt -- appeared nowhere. The
+fixture's onboarding keys now capture exchange 1, which is unclaimed in a fresh
+world and therefore a certainty rather than a dice roll. That also makes the
+holdings and income gauges non-zero in every panel. The consequence to remember:
+a walk's digits depend on the fixture's state -- `X1?` stopped working the moment
+exchange 1 became the caller's own -- and `?` is what turns that into a failed
+build instead of a panel of the wrong screen.
+
+**Raid authorization is domain logic.** `resolve_raid` reaches
+`raid_eligibility_reason` through `is_eligible_raid_target`, so the helper they
+share cannot live below the file's UI-layer marker: a presentation-only edit
+would otherwise be able to change whether a raid is permitted. A test asserts the
+source order, because that is the actual invariant.
+
+**A gauge that caps has to cap proportionally.** Clamping the filled count and
+the total independently lit every dot for ten available crew beside ten posted --
+a gauge reading "all of it" for exactly half, and showing no movement at all
+across a large transfer. `dots` and `meter` both scale the fill to the capped
+total, keeping "some is never none" and "not all is never all".
+
+**A preview's Heat is a signed change, not an addition.** A Public PBX's Lay Low
+*removes* up to fifteen, which is the whole reason a caller opens it; treating
+every service as an addition left the prominent gauge at the Heat the terms
+immediately below promised to reduce. And a warning chip is judged on what the
+action would *leave*: at 79 Heat a trade crosses the threshold and rolls, so
+"near bust" was the wrong word for it while the advice on the same screen already
+told the caller to wait.
+
+**A gallery fixture that grows invalidates any walk that names a number.** `X1?`
+broke when the fixture captured exchange 1, and `X2?` broke when it captured 2 --
+the picker marks the caller's own holdings `[-]`. A walk that wants *an* entry now
+says `#` (press whichever key the screen offers, paging to find one) instead of
+naming a digit. Keep a digit only where the identity matters, such as the scene
+hub's seventh entry being the Display screen.
+
+**A test that drives the door by reading its own output has to read what a caller
+reads.** Once a bar is styled segment by segment, `[A] Act` is a hotkey in amber
+followed by a label in mint and is no longer a contiguous run of bytes on the
+wire; a scripted walk that matched raw bytes silently stopped finding it and
+looped on the page it was already on. Both harnesses strip SGR before matching --
+the in-process one with `_last_screen`, the subprocess one with a byte-offset
+index so the raw bytes consumed are still tracked exactly -- and a walk that has
+to accept a preview presses Next until the Act bar appears rather than assuming
+the stakes fit on one page.
+
+**A walk photographs one screen: the one it is looking at when its keys run
+out.** Passing *through* a picker on the way somewhere else therefore reviews
+nothing of it: a walk that ends on a preview reviews the preview, not the two
+pickers it crossed to reach it. A screen on the way to another screen needs a walk
+that stops there. A test reads the screen titles out of
+the door's own source -- every `show_text_pages` and `pick_record_page` call, so
+that a screen added tomorrow is found without anyone remembering to list it --
+and fails unless each is either
+photographed or excused in `UNREACHABLE` with the reason one cached fixture
+cannot reach it (it cannot be both mid-operation and idle, both populated and
+empty, both solvent and too poor to act). An excuse that stops being true fails
+the test too, because a stale excuse hides the next gap.
+
+**A caption is a claim about a picture, so the build checks it.** Every walk
+declares in `SHOWS` what its screen must say, and the gallery reads the *painted*
+panel back -- through the same emulator that renders it, because a styled heading
+is not a contiguous run of bytes on the wire -- and refuses to publish a panel
+that does not say it. Without that, a walk whose keys land somewhere else
+publishes the wrong screen under the right caption and reads as a completed
+review. A door with a `SHOWS` table must name every one of its walks, so a new
+walk cannot be added unchecked.
+
+**A page of a card stack is a screen, and fast-forwarding past it reviews
+nothing.** `N*` presses Next until the screen stops changing and the gallery keeps
+only what is on it at the end, so the switchboard published pages one, two and
+fourteen of fourteen at forty columns: the scene, the feed, the orders and most of
+the season card were in no panel at any size, and the rules were twenty-two pages
+of which two were reviewed. The `%` suffix photographs the screen and every page
+after it, one panel each, captioned with the page number. It is for the screens
+where paging changes *what kind of information* is shown -- a card stack, the
+rules, a preview's stakes and then its terms -- and deliberately not for a table,
+where page two is the same drawing with the next rows in it and a second panel of
+it costs a panel and teaches nothing.
+
+**A panel's state is the fixture plus the keys a walk presses into its own copy of
+it.** Every panel gets its own copy of the world, so a screen that exists only in
+another state is reachable by playing into it: `SETUP` presses a whole operation --
+contract, approach, preview, Act -- in a separate launch against that copy, at one
+fixed size, and throws away what it draws, after which the photographed walk opens
+the in-progress screens. "The fixture is not in that state" is therefore not a
+reason to excuse a screen. What no sequence of keys reaches is: fifteen spent
+turns, an emptied wallet, a season rollover, a world with no rivals in it.
+
+**A skip of a transition is not an acknowledgement of what follows it.** A
+reveal hands its skip key back, so one press both finishes the reveal and answers
+the screen being revealed. The carrier sweep is the other case: what follows it is
+the receipt for the turn just spent, whose bar takes any key, so handing the key
+back meant a caller who skipped the animation never saw what their turn bought.
+The sweep consumes the whole input unit instead. The rule that decides it is
+whether the thing after the motion is the same screen the motion was drawing.
+
+**A selector has to see the screen in every spelling it is drawn in.** The plain
+preset draws the frame in ASCII, so an entry row starts `|` where Unicode starts
+`┃`; stripping only the Unicode edge left a character before every `[K]` marker and
+no walk that names an entry by what it is could find one. The whole build died on
+the first such walk, under one preset out of four -- which is the argument for
+building every preset rather than sampling one.
+
+**"Until it stops changing" is the wrong end for a screen that leaves.** The
+first-visit guide takes any key per page and then hands the caller the switchboard,
+so paging it that way photographed the switchboard under the guide's name and then
+pressed Enter at a prompt that answers nothing. War Dialer prints `page i/n` in the
+border -- and in Fast mode's title row, which has no border -- precisely so a
+scripted walk can know whether there is another page; `page_note`'s own docstring
+says so. A paged walk now stops where the screen says it ends, and a screen that
+prints no counter has exactly one page.
+
+**"The fixture is not in that state" is not the same as "no walk can reach it".**
+The cached fixture is past the first-visit guide by construction, which is a fact
+about the fixture and not about the screen: a walk can ask for a world nobody has
+played instead (`FRESH`), and the guide is one panel at eighty columns and four at
+the forty-column floor. A fresh world has no tables to write a display preset
+into, so such a walk builds the schema through the door's own `connect` first --
+which registers nobody, leaving the caller new. An exemption has to name something
+no sequence of keys can produce, not something the current fixture happens not to
+be.
+
+**A browsing screen quotes the figure the action will charge.** `adjusted_heat`
+makes a capture's Heat specific to the caller -- Lookouts take five where a
+Carrier Switch's table says eight, a Burner Kit can take none -- so a screen that
+prints the role's base number disagrees with the preview of the very action it is
+describing. Every surface a caller compares targets on uses the projected figure;
+only a screen drawn for nobody falls back to the role's own.
+
+**Where a screen depends on the world's clock, a walk cannot reach it by playing.**
+Two around a season boundary can be reached by moving the anchor through the door's
+own helpers against the panel's private copy: the receipt a closed season leaves
+waiting, and the reset card that opens the switchboard in the last forty-eight
+hours. The crackdown card itself cannot -- it is drawn when the world's season
+advances *between two dashboard draws in one session*, which is a clock crossing a
+boundary mid-session, not a state. That is the shape of a defensible exemption: a
+timing condition, not a fixture that happens to be elsewhere. A refusal screen is
+the other shape -- one sentence of domain prose in a frame, where a panel adds
+nothing the fit and wrap tests at the floor already prove.
+
+**A screen with three versions needs three panels.** The owner service is one
+screen with three drawings -- a Public PBX's *negative* Heat gauge, a Warez Hub's
+bust gauge, a Carrier Switch with neither -- and a single walk photographed
+whichever role the fixture happened to hold. Each has its own walk, and each is
+marked on its own service text rather than on the title the three share, so a panel
+showing the wrong holding's service fails the build instead of passing it.
+
+**Name a picker entry by what it is.** Which digit a Public PBX is depends on what
+the caller holds, so `{X}` presses the key of the entry whose own rows say X. Two
+pages can disagree about that: at forty columns the garrison list draws
+`[2] Bay  WAREZ HUB` at the foot of page one while offering only `[1]`, and page
+two offers `[2]` with the name nowhere on it -- so the selector remembers which
+key the text belonged to and keeps paging until the screen will take it. A mark,
+likewise, is matched against painted rows and must be short enough not to be
+wrapped across two of them: "Warez outlet:" is broken in half at the floor.
+
+**Heat reads to one decimal, because Heat decays.** `:g` prints a decayed figure
+in full, so a gauge read `8 -7.86231 = 0` above the same screen's `Heat: 15.9 + 4 =
+19.9`. `heat_amount` is the one formatter, and it drops a pointless `.0` so a whole
+number still reads as one.
+
+**A record is a card, or pagination will cut it in half.** Flattening every
+retained season result into one `RETAINED RESULTS` block let `paginate_cards`
+break wherever a page happened to end: the Hall of Fame put a winner's medal and
+handle on page one and their season, Rank, placement and closing time alone on
+page two, attached to nothing. One card per record keeps it together where it fits
+and repeats its heading where it does not -- and the heading is the identity that
+was being orphaned, which is the crew in the Hall and the season in a caller's own
+history.
+
+**A receipt's actor is the other party, not a name to compare.** Deciding "this
+is mine" by comparing the handle stored on an event against the handle the caller
+holds *now* turns their whole history hostile the day they rename on the BBS, and
+makes a former rival's raids read as their own work if they take that handle.
+Self-authored receipts record no actor at all, and `hostile` is "an actor is
+named".
+
+**A schema version is not a colour correction.** Bumping one makes older game
+binaries refuse the world outright, which is a real cost to a SysOp and a one-way
+door; paying it to re-tone historical rows was not worth it, and any backfill that
+reads a stored actor against a caller's current handle would erase the record that
+an attack was an attack on a reused handle. Repairs to history need evidence the
+history actually carries. Where there is none, leave it alone and fix the
+behaviour going forward.
+
+**A holding is not a target, and every screen that draws one has to agree.** An
+exchange the caller controls has posted crew, income, an age and a service; a
+capture price, root Heat and the odds of an attack on its own garrison describe an
+action no screen will even offer them. That holds for the scene's exchange card,
+the root picker's rows and the scene table's verb column alike -- the table's
+`take` figure is the chance of *rooting* the exchange, so pairing it with the word
+`raid` priced one action and named another. Each of the three has a walk or a test
+covering both readings, because a half-applied rule reads as a fixed one.
+
+**An entry a picker appends after a variable list is named as the last one, not
+by a digit.** Exchange Control offers one transfer per move the holding can make
+and then the owner service, so `3` meant the service only for as long as the
+fixture happened to offer exactly two transfers -- after which the walk would
+have published a garrison preview under the service's caption. The `$` suffix
+pages to the last page and presses the last key offered there, which is what the
+door actually guarantees about that entry.
+
+Voidrunner's colour lived and died in one function (issue #493). `wrapped_group`
+wrapped every body row of every paged screen through `_mission_plain`, which is
+`ANSI.sub("")`, *before* it was printed; the frame restored in #486 was the only
+styled thing a page could have, because it is added afterwards. Two rules keep
+that from recurring, and both are asserted. First, the wrap is styled:
+`wrap_styled` carries the active SGR across a break -- `_wrap_output` is
+ANSI-aware about width but leaves a broken span's continuation in the terminal's
+default foreground -- and `style_body_line` colours by role anything that
+arrives plain. Second, `draw_page` applies that same styling to rows a screen
+built itself and handed straight to it, because a rule that held for most pages
+and not the rest is how the design was lost one slice at a time. A component's
+own styling always wins: `style_body_line` returns a row that already carries an
+escape untouched.
+
+Three zero-width control marks say what a Voidrunner row *is*, and the paginator
+acts on them: `SECTION_MARK` a named rule drawn across the page frame,
+`STICKY_MARK` a table's column headings, `MEMBER_MARK` a row of that table. They
+measure zero columns (`_char_width` returns 0 for category C), so a marked row
+costs exactly its text, and `draw_page` strips them as it prints -- they must
+never reach a terminal, and `plain()` in the test support strips them too.
+Headings are repeated at the top of every later page carrying one of their own
+rows and nowhere else, which is why the member mark exists: a screen may hold
+two tables, and a page of trailing footnotes is not a page of either.
+
+`table_records` is the responsive contract, and it makes two different
+promises. It first drops the columns a screen named as droppable,
+worst-priority first, and those stay dropped -- naming a column optional is a
+screen saying that figure is a keypress away on another screen, and the
+alternative is four rows per chart destination at the floor. What survives that
+step survives everything after it: if the remainder is still too wide the record
+*stacks*, first column alone on a row and the rest indented beneath, on as many
+bands as it takes, each band its own little table so a column still starts on
+one display column across records. A column that must never go is simply not
+named optional -- the Hall of Fame's rank, job and run counts are not. A stacked
+record is returned as its own list of rows and joined with `\n` into one
+paginator entry, so it moves between pages whole; `wrapped_group` splits on
+`\n` before wrapping. The gutter narrows from two spaces to one before a column
+is dropped, and a heading that runs to more than one band is not repeated across
+pages, because the paginator carries a heading as one row.
+
+Motion (issue #493) asks `_StdioBytes.waiting()`, which *peeks* -- select with a
+zero timeout, `PeekNamedPipe`, `kbhit` -- and never reads. Reading a raw byte
+would cut a UTF-8 character or an escape sequence in half behind the decoder's
+back, and would eat the key that skipped the effect, which is usually the
+caller's next command. With no input reader at all, motion reports itself
+interrupted: a scripted caller is not watching, and the alternative is a
+`time.sleep` per page draw across the whole suite.
 
 Paged Voidrunner screens measure their capacity with `page_capacity` -- the
 content column is `_page_content_width()`, the box interior less its indent and

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from netbbs.auth.users import create_user
 from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board
@@ -31,12 +33,17 @@ from netbbs.link.events import (
     build_board_genesis,
     build_board_post,
     build_board_post_edit,
+    build_channel_genesis,
     build_endpoint_descriptor,
     build_file_area_genesis,
     build_file_descriptor,
     build_key_transition,
 )
-from netbbs.link.files import link_file_area, queue_file_descriptor_if_linked
+from netbbs.link.files import (
+    link_file_area,
+    materialize_carried_file_descriptor,
+    queue_file_descriptor_if_linked,
+)
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.store import load_link_node, load_peer_last_contact, save_candidate_descriptor, save_event, save_peer
@@ -1227,4 +1234,232 @@ def test_file_area_event_diff_is_genuinely_multi_hop_for_an_area_this_node_never
     returned_ids = {_content_id_of(e) for e in events}
     assert {genesis.content_id, descriptor.content_id} == returned_ids
     db.close()
+    db.close()
+
+
+def test_inventory_wanted_ids_returns_only_declared_ids_this_node_lacks(tmp_path):
+    """The push direction of one inventory exchange (design doc §8.8,
+    issue #478): the requester's own declaration already says everything
+    it holds, so the responder answers with the subset it is missing --
+    never the ids it already has on file."""
+    from netbbs.link.boards import materialize_carried_board
+    from netbbs.link.store import inventory_wanted_ids
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_genesis_for_store_tests(remote_identity)
+    materialize_carried_board(db, genesis)
+    absent_post = _remote_post_for_store_tests(remote_identity)
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={"remote-board-id": [genesis.content_id, absent_post.content_id]},
+        requested_channels={},
+        requested_file_areas={},
+    )
+
+    assert wanted == [absent_post.content_id]
+    db.close()
+
+
+def test_inventory_wanted_ids_asks_for_everything_in_a_resource_this_node_does_not_carry(tmp_path):
+    """Discovery by push must keep working (design doc §8.8): a peer
+    that has never seen a board at all still wants its genesis, so a
+    declared resource this node does not carry contributes every id it
+    declared, not nothing."""
+    from netbbs.link.store import inventory_wanted_ids
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_genesis_for_store_tests(remote_identity)
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={"remote-board-id": [genesis.content_id]},
+        requested_channels={},
+        requested_file_areas={},
+    )
+
+    assert wanted == [genesis.content_id]
+    db.close()
+
+
+def test_inventory_wanted_ids_is_not_truncated_to_a_page(tmp_path):
+    """Deliberately not prefix-capped (Codex review of issue #478):
+    truncating a list the *responder* orders would let IDs the requester
+    is not allowed to push fill the page and pin it forever. The bound
+    is the request itself -- this can never exceed what the requester
+    declared. The push is capped instead, after filtering to what the
+    requester can actually send."""
+    from netbbs.link.protocol import MAX_EVENTS_PER_REQUEST
+    from netbbs.link.store import inventory_wanted_ids
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    declared = [
+        _remote_post_for_store_tests(remote_identity, subject=f"post {i}", nonce=f"nonce-{i}").content_id
+        for i in range(MAX_EVENTS_PER_REQUEST + 25)
+    ]
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={"remote-board-id": declared},
+        requested_channels={},
+        requested_file_areas={},
+    )
+
+    assert wanted == declared
+    db.close()
+
+
+def test_inventory_wanted_ids_spans_channels_and_file_areas_too(tmp_path):
+    """Boards are not a special case here -- a declared channel or
+    file-area catalogue entry this node lacks is wanted on exactly the
+    same terms (design doc §9.6/§11)."""
+    from netbbs.link.store import inventory_wanted_ids
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    channel_genesis = build_channel_genesis(
+        signing_identity=remote_identity.signing_key,
+        origin_fingerprint=remote_identity.fingerprint,
+        channel_id="remote-channel-id",
+        name="Remote Chat",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    area_genesis = build_file_area_genesis(
+        signing_identity=remote_identity.signing_key,
+        origin_fingerprint=remote_identity.fingerprint,
+        area_id="remote-area-id",
+        name="Remote Files",
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={},
+        requested_channels={"remote-channel-id": [channel_genesis.content_id]},
+        requested_file_areas={"remote-area-id": [area_genesis.content_id]},
+    )
+
+    assert wanted == [channel_genesis.content_id, area_genesis.content_id]
+    db.close()
+
+
+def test_inventory_wanted_ids_counts_accepted_events_with_no_local_row(tmp_path):
+    """Codex review of #498: `_all_*_events` reads materialized state, so
+    a resource whose local row was refused (`max_carried_boards` and its
+    channel/file-area counterparts) looks like one this node has nothing
+    for -- even though the events were accepted and persisted. Reading
+    `link_events` under the same resource id is what makes the answer
+    honest; without it every event in such a resource is wanted on every
+    pass, forever."""
+    from netbbs.link.store import inventory_wanted_ids, save_event
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_genesis_for_store_tests(remote_identity)
+    post = _remote_post_for_store_tests(remote_identity)
+
+    # No `boards` row at all -- exactly what a carry-limit refusal leaves
+    # behind, with the events themselves accepted and persisted.
+    for event in (genesis, post):
+        save_event(
+            db,
+            sender_fingerprint=remote_identity.fingerprint,
+            content_id=event.content_id,
+            object_type=event.envelope["object_type"],
+            envelope=event.to_dict(),
+        )
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={"remote-board-id": [genesis.content_id, post.content_id]},
+        requested_channels={},
+        requested_file_areas={},
+    )
+
+    assert wanted == []
+    db.close()
+
+
+def test_inventory_wanted_ids_is_not_a_membership_oracle_for_out_of_scope_events(tmp_path):
+    """Codex review of #498. `wanted` answers "do you have this?" for
+    every id the requester declares, so what it is allowed to consult
+    matters: reading the global dedup set would answer for
+    `link_message`s, their acknowledgements and `key_transition`s too --
+    types design doc §8.8 deliberately keeps out of inventory -- and any
+    completed peer could file a known id under a fabricated board and
+    read the answer straight off the response.
+
+    Scoped to the declared resource, an accepted event filed under a
+    resource it does not belong to is simply reported as wanted, which
+    tells the asker nothing it did not already know."""
+    from netbbs.link.store import inventory_wanted_ids, save_event
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    # A genuinely accepted event that is *not* inventory-scoped.
+    transition = remote_identity.transitions[0]
+    save_event(
+        db,
+        sender_fingerprint=remote_identity.fingerprint,
+        content_id=transition.content_id,
+        object_type=transition.envelope["object_type"],
+        envelope=transition.to_dict(),
+    )
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={"a-board-this-node-never-heard-of": [transition.content_id]},
+        requested_channels={},
+        requested_file_areas={},
+    )
+
+    # Reported as wanted: the answer carries no signal about whether this
+    # node actually holds that key_transition.
+    assert wanted == [transition.content_id]
+    db.close()
+
+
+def test_inventory_wanted_ids_counts_a_descriptor_refused_by_the_per_area_quota(tmp_path):
+    """Codex review of #498, the per-file counterpart. An area this node
+    carries but whose `max_remote_files_per_area` is reached refuses the
+    catalogue row -- and the descriptor was previously kept nowhere at
+    all, so it was reported as wanted on every pass forever, re-pushed by
+    its origin and starving everything behind it. The event is now
+    retained even though its row is declined, the same way a refused
+    `board_genesis` already was."""
+    from netbbs.link.files import RemoteFileCatalogueLimitError, materialize_carried_file_area
+    from netbbs.link.store import inventory_wanted_ids
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = build_file_area_genesis(
+        signing_identity=remote_identity.signing_key,
+        origin_fingerprint=remote_identity.fingerprint,
+        area_id="remote-area-id", name="Remote Files",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    materialize_carried_file_area(db, genesis, own_fingerprint="this-node")
+    refused = build_file_descriptor(
+        signing_identity=remote_identity.signing_key,
+        area_id="remote-area-id", file_id="a-file-over-the-quota",
+        filename="over.bin", size_bytes=10, sha256="b" * 64,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    with pytest.raises(RemoteFileCatalogueLimitError):
+        materialize_carried_file_descriptor(
+            db, refused, sender_fingerprint=remote_identity.fingerprint,
+            max_remote_files_per_area=0,
+        )
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={},
+        requested_channels={},
+        requested_file_areas={"remote-area-id": [genesis.content_id, refused.content_id]},
+    )
+
+    assert wanted == []
     db.close()

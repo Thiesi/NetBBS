@@ -813,3 +813,166 @@ def test_non_finite_relay_timeouts_are_rejected(tmp_path, value):
     )
     with pytest.raises(ConfigError, match="live_relay_rendezvous_timeout_seconds"):
         load_config(["--config", str(config_file)])
+
+
+def test_a_public_url_without_a_scheme_is_refused():
+    """Codex review of #482, unaddressed at merge. This value is handed
+    to callers as the base of a transfer link, so a scheme-less or
+    authority-less string does not fail at load -- it fails in somebody's
+    browser, resolved against whatever page they were on, or reaches a
+    terminal caller as a URL identifying nothing."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    def web_config(public_url):
+        return NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=public_url)
+        )
+
+    for bad in ("netbbs.example.org", "//netbbs.example.org", "ftp://netbbs.example.org", "https://"):
+        with pytest.raises(ConfigError, match="public_url"):
+            web_config(bad).validate()
+
+    for good in ("http://netbbs.example.org", "https://netbbs.example.org:8443/bbs"):
+        web_config(good).validate()
+
+
+def test_a_non_string_public_url_is_refused(tmp_path):
+    """The same value arriving from TOML as a number or a table used to
+    be coerced with `str()` and accepted."""
+    from netbbs.net.nodeconfig import ConfigError, load_config
+
+    path = tmp_path / "netbbs.toml"
+    path.write_text("[web]\nenabled = true\npublic_url = 8080\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="public_url"):
+        load_config(["--config", str(path)])
+
+
+def test_a_public_url_that_cannot_be_parsed_is_a_config_error():
+    """Codex review of #508: `urlparse` raises on some malformed
+    authorities, so the check meant to turn an operator typo into a clear
+    diagnostic could itself escape as a traceback past `main`'s
+    `ConfigError` handler."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    config = NodeConfig(
+        web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url="http://[")
+    )
+    with pytest.raises(ConfigError, match="public_url"):
+        config.validate()
+
+
+def test_a_public_url_with_a_query_or_fragment_is_refused():
+    """Codex review of #508: a transfer link is this value with
+    `/transfer/<token>` appended, so a query puts the token in the wrong
+    place and a fragment never reaches the server -- every printed link
+    fails, silently. A path prefix stays supported: that is how a node
+    behind a reverse-proxy subpath is reached."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    def web_config(public_url):
+        return NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=public_url)
+        )
+
+    # The bare delimiters parse to an *empty* component, so a truthiness
+    # test on `parsed.query` / `parsed.fragment` accepts them while the
+    # appended token still lands in the query or the fragment.
+    for bad in (
+        "https://bbs.example.org?proxy=1",
+        "https://bbs.example.org#web",
+        "https://bbs.example.org?",
+        "https://bbs.example.org#",
+    ):
+        with pytest.raises(ConfigError, match="query or fragment"):
+            web_config(bad).validate()
+
+    # A subpath is legitimate and must keep working.
+    web_config("https://bbs.example.org/bbs").validate()
+
+
+def test_a_public_url_without_a_host_is_refused():
+    """Codex review of #508: `https://:8443` and `http://@` parse with a
+    truthy `netloc` and no host at all, so the scheme/netloc check passes
+    them and the node prints links nothing can resolve."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    def web_config(public_url):
+        return NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=public_url)
+        )
+
+    for bad in ("https://:8443", "http://@"):
+        with pytest.raises(ConfigError, match="public_url"):
+            web_config(bad).validate()
+
+    web_config("https://bbs.example.org:8443").validate()
+
+
+def test_a_public_url_containing_whitespace_is_refused():
+    """Codex review of #508: whitespace cannot be caught through the
+    parse. `urlparse` keeps a trailing space in `hostname` (so the
+    presence check passes) and silently *drops* a trailing tab (so the
+    parse looks perfect), while the stored string -- the one `url_for`
+    concatenates -- carries it either way."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    def web_config(public_url):
+        return NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=public_url)
+        )
+
+    for bad in (
+        "https://bbs.example.org ",
+        " https://bbs.example.org",
+        "https://bbs.example.org\t",
+        "https://bbs example.org",
+    ):
+        with pytest.raises(ConfigError, match="whitespace"):
+            web_config(bad).validate()
+
+
+def test_surrounding_whitespace_in_public_url_is_stripped_at_load(tmp_path):
+    """A trailing space in hand-edited TOML is invisible and never
+    intended, so it is corrected rather than rejected (Codex review of
+    #508). Trailing slashes were already stripped here; whitespace has to
+    go first, or the slash strip runs against the space."""
+    from netbbs.net.nodeconfig import load_config
+
+    path = tmp_path / "netbbs.toml"
+    path.write_text(
+        '[web]\nenabled = true\npublic_url = "  https://bbs.example.org/  "\n', encoding="utf-8"
+    )
+    config = load_config(["--config", str(path)])
+    assert config.web.public_url == "https://bbs.example.org"
+
+
+def test_a_public_url_with_a_path_parameter_is_accepted():
+    """Codex review of #508: rejecting `parsed.params` refused
+    `/bbs;tenant=foo` while accepting the equivalent `/a;x/b`, whose
+    semicolon `urlparse` happens to leave in `path`. A semicolon never
+    breaks the append, so neither is a reason to refuse a node's
+    configuration."""
+    from netbbs.net.nodeconfig import NodeConfig, TransportConfig
+
+    for good in ("https://bbs.example.org/bbs;tenant=foo", "https://bbs.example.org/a;x/b"):
+        NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=good)
+        ).validate()
+
+
+def test_a_public_url_with_an_unusable_port_is_refused():
+    """Codex review of #508: `urlparse` accepts `:abc` and `:99999` and
+    only raises when the port is *read*, so a check that never reads it
+    lets both through to a link nobody can open."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    def web_config(public_url):
+        return NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=public_url)
+        )
+
+    for bad in ("https://bbs.example.org:abc", "https://bbs.example.org:99999"):
+        with pytest.raises(ConfigError, match="public_url"):
+            web_config(bad).validate()
+
+    web_config("https://bbs.example.org:8443").validate()

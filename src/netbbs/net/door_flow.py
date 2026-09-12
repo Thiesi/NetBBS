@@ -18,7 +18,7 @@ forward the way file_flow.py/chat_flow.py had to.
 from __future__ import annotations
 
 from netbbs.auth.users import User
-from netbbs.doors import Door, list_doors
+from netbbs.doors import Door, get_door, list_doors
 from netbbs.doors.runtime import DoorRunResult, run_door
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.menu_description_preference import menu_description_level
@@ -61,6 +61,8 @@ async def browse_doors(
     community_id: int | None = None,
     community_scoped: bool = False,
     title_prefix: str | None = None,
+    door_services=None,
+    presence=None,
 ) -> None:
     """Pick a door and play it, looping back to the picker afterward so a
     caller can play another without re-entering the menu -- same
@@ -96,11 +98,20 @@ async def browse_doors(
         if door is None:
             return
 
-        # Re-checked here, not just filtered into the list above -- same
-        # defense-in-depth precedent chat's own _authorize_channel_entry
-        # sets: a level could change between listing and picking (an
-        # admin demoting the caller mid-session), and this is cheap
-        # enough to just always re-verify.
+        # The picked door is a snapshot of the listing, so it is re-read here
+        # before anything acts on it. Partly the defense-in-depth precedent
+        # chat's own _authorize_channel_entry sets -- a level could change
+        # between listing and picking -- and partly because a SysOp editing or
+        # deleting the door meanwhile would otherwise make the stale profile
+        # authoritative: reconciliation would stop the newly correct
+        # supervisor and start the obsolete one, or resurrect a deleted door's
+        # service with no screen left to stop it.
+        door = await lane.run(get_door, door.id)
+        if door is None:
+            await session.write_line(
+                colored("That door is no longer available.", fg_color=MUTED_COLOR)
+            )
+            continue
         if not meets_level(user, door.min_play_level):
             await session.write_line(
                 colored("You no longer have permission to play that door.", fg_color=MUTED_COLOR)
@@ -110,8 +121,26 @@ async def browse_doors(
         if door.profile and door.profile.adapter == "rlogin":
             await session.write_line("Remote service: " + sanitize_text(door.profile.options["service_name"]) +
                                      ". Its operator receives your game identity and controls game data and availability.")
+        # A door whose companion process is not up cannot be played, and
+        # learning that from the game's own connection error is a worse
+        # experience than one line here and a return to the picker.
+        if door_services is not None:
+            if problem := await door_services.ensure_running(door):
+                await session.write_line(colored(sanitize_text(problem), fg_color=MUTED_COLOR))
+                await session.write_line("Press any key to return to the door list.")
+                await session.read_any_key()
+                continue
         await session.write_line(colored(f"\r\nLaunching {door.name}...", fg_color=MUTED_COLOR))
-        result = await run_door(session, lane, door, user)
+        # Issue #470: "3 callers in Blacksite" on Who's online is the best
+        # recruitment a multiplayer door can have on a BBS. Cleared in the
+        # `finally` so a crash or a disconnect cannot strand the entry.
+        if presence is not None:
+            presence.enter_door(session, door.id, door.name, door.created_at)
+        try:
+            result = await run_door(session, lane, door, user)
+        finally:
+            if presence is not None:
+                presence.leave_door(session)
         if not await _report_door_result(session, door, result):
             return
 

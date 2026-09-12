@@ -328,6 +328,15 @@ python -m netbbs.backup create --db /var/lib/netbbs/netbbs.db \
   --identity-dir /var/lib/netbbs/netbbs_identity --to /path/to/backups/$(date +%F)
 ```
 
+A backup covers the node's own state: database, identity, stored files,
+banners, and the bundled games' worlds. Each door's *installation* directory
+is left out by default, being operator-owned and potentially far larger than
+everything else. `[D]oor installations` on the same Backup screen includes
+them if you want a single artifact holding everything; a backup then fails
+rather than silently skipping a door whose directory it cannot read, and
+restore never writes those directories back over a live installation. See
+`docs/NetBBS-door-guide.md` for the full behaviour.
+
 Restore is staged and validated, refusing against a still-running node
 rather than overwriting live state (design doc §13.10). See
 `docs/NetBBS-disaster-recovery-drill.md` for a complete, actually-run

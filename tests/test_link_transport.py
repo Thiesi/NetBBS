@@ -1,17 +1,17 @@
 """
-Integration tests for `netbbs.link.transport` (design doc §11) — these
+Integration tests for `netbbs.link.transport` (design doc Â§11) â€” these
 spin up real `LinkServer` instances on OS-assigned loopback ports and
 connect real `aiohttp` clients to them, exercising actual HTTP+JSON
 traffic end to end, the same "real server, real client, real socket"
 convention `tests/test_web.py` already established for `WebServer`.
 `tests/test_link_protocol.py` already proves the underlying protocol
-logic against a fully synthetic transport (`ScriptedTransport`) —
+logic against a fully synthetic transport (`ScriptedTransport`) â€”
 these tests prove the same logic survives an actual wire (and an
 actual database).
 
 The persistence assertions read back through a second,
 separately-opened `Database` against the same file the test's own
-`DatabaseLane` writes through — the same "one connection for the
+`DatabaseLane` writes through â€” the same "one connection for the
 lane's worker thread, one for the test's own assertions" split `tests/
 test_admin_flow.py`'s `db`/`lane` fixtures already use, since a
 `sqlite3.Connection` is bound to whichever thread created it
@@ -685,7 +685,7 @@ def test_realtime_session_registry_converges_on_the_deterministic_winner_for_sim
         await server_b.start()
         try:
             # Both nodes dial each other "simultaneously" -- the exact
-            # collision design doc §8.10.1 describes. Either leg may or may
+            # collision design doc Â§8.10.1 describes. Either leg may or may
             # not itself raise depending on real accept/handshake timing;
             # what matters is where both registries settle afterward.
             await asyncio.gather(
@@ -975,7 +975,7 @@ def test_real_transport_enforces_probation_quarantine_block_explains_and_recover
                     chunk_index=0, max_chunk_size=1024, authorization=authorization,
                 )
                 async with session.post(chunk_url, json=authenticated_chunk.to_dict()) as response:
-                    # 410, not a generic 400 (design doc §11.2, issue
+                    # 410, not a generic 400 (design doc Â§11.2, issue
                     # #479): "this node holds no row for that file_id" is
                     # the one serving-side refusal the requester can act
                     # on, and it now comes with a signed file_withdrawal.
@@ -1787,7 +1787,7 @@ def test_dial_hello_raises_link_transport_error_on_a_genuine_timeout(tmp_path):
 
 
 def test_server_rejects_a_hello_body_with_a_duplicate_json_key(tmp_path):
-    """Design doc §7.2/issue #11: a wire JSON object containing the same
+    """Design doc Â§7.2/issue #11: a wire JSON object containing the same
     key twice must be rejected outright, not silently resolved to
     "last one wins" -- see `netbbs.link.events.strict_json_loads`'s own
     docstring for why. Sends genuinely malformed raw bytes no `HelloMessage`
@@ -2025,8 +2025,11 @@ def test_request_inventory_lets_a_completed_peer_discover_carried_content_from_a
             await bob_server.stop()
 
     try:
-        events, more_available = asyncio.run(scenario())
+        events, more_available, wanted = asyncio.run(scenario())
         assert more_available is False
+        # Alice's request declares nothing carried, so there is nothing
+        # Bob can ask her for (the `wanted` half, #478/PR #498).
+        assert wanted == []
         content_ids = set()
         for raw in events:
             accepted = alice_node.handle_events(bob_identity.fingerprint, [raw])
@@ -2602,7 +2605,7 @@ def test_deposit_is_refused_once_the_recipients_mailbox_is_full(tmp_path):
         bob.close()
 
 
-# -- quotas (design doc §13.9, issue #60's third operational slice) --------
+# -- quotas (design doc Â§13.9, issue #60's third operational slice) --------
 
 
 def test_events_push_still_succeeds_once_the_carried_board_cap_is_reached(tmp_path):
@@ -2695,7 +2698,7 @@ def test_handle_hello_over_http_rejects_a_new_peer_once_bobs_max_peers_cap_is_re
 
 
 def test_client_max_size_rejects_an_oversized_request_body(tmp_path):
-    """Design doc §13.9: turns aiohttp's implicit 1 MiB `client_max_
+    """Design doc Â§13.9: turns aiohttp's implicit 1 MiB `client_max_
     size` default into a deliberate, documented value on `LinkServer`'s
     own `web.Application` -- proved here against a real oversized POST,
     not just a config-value assertion."""
@@ -2773,7 +2776,7 @@ def test_rate_limit_middleware_is_a_no_op_when_no_throttle_is_configured(tmp_pat
 
 
 def test_file_chunk_410_without_a_usable_withdrawal_is_an_ordinary_transport_error(tmp_path):
-    """Design doc §11.2, issue #479: a 410 is only actionable because it
+    """Design doc Â§11.2, issue #479: a 410 is only actionable because it
     carries a signed `file_withdrawal`. A peer that refuses a chunk as
     gone but sends no usable one is an ordinary failed fetch -- never a
     silent "well, delete the entry anyway" path, which is precisely what
@@ -2849,3 +2852,47 @@ def test_an_over_nested_410_body_is_an_ordinary_transport_error(tmp_path):
     with pytest.raises(LinkTransportError) as raised:
         asyncio.run(scenario())
     assert not isinstance(raised.value, RemoteFileWithdrawnError)
+
+
+def test_inventory_response_without_a_wanted_list_is_refused_as_malformed(tmp_path):
+    """Every node on this mesh runs the same release, so a 200 that omits
+    `wanted` is a broken responder, not an older one. Accepting it would
+    quietly turn that into a degraded-but-working exchange; it is refused
+    like any other malformed response, which leaves "this node has no
+    wanted list" meaning exactly one thing: the call failed."""
+    from netbbs.link.store import build_inventory_request
+    from netbbs.link.transport import request_inventory
+
+    alice_identity = bootstrap_node_identity("alice")
+    alice_node = LinkNode(identity=alice_identity)
+    alice = _NodeDb(tmp_path, "alice")
+
+    async def _no_wanted_key(request: web.Request) -> web.Response:
+        return web.json_response({"events": [], "more_available": False})
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/link/v1/inventory/{fingerprint}", _no_wanted_key)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                inventory_request = await alice.lane.run(
+                    build_inventory_request,
+                    signing_identity=alice_identity.signing_key,
+                    requester_fingerprint=alice_identity.fingerprint,
+                    responder_fingerprint="whoever",
+                )
+                await request_inventory(
+                    alice_node, session, f"http://127.0.0.1:{site.port}", inventory_request
+                )
+        finally:
+            await runner.cleanup()
+
+    try:
+        with pytest.raises(LinkTransportError):
+            asyncio.run(scenario())
+    finally:
+        alice.close()
