@@ -889,6 +889,7 @@ async def _resource_type_menu(
                     community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
                     door_services=node_controls.door_services if node_controls is not None else None,
                     presence=presence,
+                    link_context=link_context,
                 )
             else:
                 await session.write_line(

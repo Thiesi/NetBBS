@@ -6589,3 +6589,36 @@ scores into the authoritative save before projecting current career numbers;
 retain unknown historical gaps without inventing dossiers or old combat totals.
 Merged read-only score snapshots retain those lifetime totals too, omitting an
 inconsistent per-career block until the next authoritative checkpoint repairs it.
+
+A door may post to boards a SysOp allowlists for it, and to nothing else. It
+posts as a label, never an account: the users table requires a credential by
+CHECK constraint, and a Link-carried post already demonstrates the shape a
+post with no local account behind it takes. With no account there is nothing
+to exclude from login, listings, mail or moderation, and no infrastructure
+level band is needed.
+
+The label ends in a reserved suffix and is checked for collisions against both
+accounts and other doors when the hook is switched on. Chat resolves a stored
+author by username where boards resolve by id, so a label equal to a real
+handle would let a door speak in that account's nick and verified-name
+styling. The suffix reservation is forward-only; the enable-time check is what
+protects a database that predates it.
+
+The allowlist is the only gate. Level is deliberately not a second one,
+because two gates can disagree at post time where only one was visible when
+the SysOp made the decision. Transport is a file drop, chosen so a DOS door
+can use it at all; a socket cannot cross the emulator boundary. Requests are
+drained after the door exits and strictly before its working directory is torn
+down.
+
+A refusal is always written back and never queued: a held post publishes after
+the allowlist is revoked, which is the surprise the switch exists to prevent.
+Refusals are audit-logged once per rate window rather than once per attempt,
+since record_action commits immediately and a door in a retry loop would
+otherwise make the audit trail the incident. The rate window counts from its
+own history table, not from posts, so deleting a door's output cannot hand it
+back the budget it just spent.
+
+A door posts on a named SysOp's authority. If that account is deleted the hook
+lapses rather than posting unattributably, which is also what keeps every
+accepted post audit-loggable.

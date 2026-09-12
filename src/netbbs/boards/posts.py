@@ -195,6 +195,90 @@ def create_post(
     return get_post(db, post_id)
 
 
+def create_labelled_post(
+    db: Database,
+    board: Board,
+    author_label: str,
+    subject: str,
+    body: str,
+) -> Post:
+    """
+    Create a post authored by a *label* rather than by a local account
+    (issue #520): `author_user_id` and `author_fingerprint` are NULL and
+    `author_label` alone carries the identity.
+
+    This is not a new concept. `netbbs.link.boards` already inserts
+    exactly this shape for a post carried from a peer -- NetBBS has had
+    "a post authored by something that is not a local account" since
+    Link boards existed. A door's outbound hook is the second such
+    author, which is why it needs no service *account*: `users` carries
+    a CHECK constraint requiring at least one credential
+    (`password_hash IS NOT NULL OR public_key IS NOT NULL`), so a
+    credential-less service row cannot exist without weakening a
+    constraint whose whole job is making sure an account is never
+    locked out of itself.
+
+    Deliberately **not** routed through `create_post`, and not merely to
+    skip building a throwaway `User`: `create_post` opens with
+    `require_level(author, board.min_write_level)`, and a door already
+    passes a SysOp-set allowlist to get here. Running both gates means
+    they can disagree -- the SysOp allowlists a board, and the post is
+    refused at 3am in a door's result file for a reason the SysOp never
+    saw. The allowlist is the only gate on this path.
+
+    Everything a post owes the rest of the system is kept: the closed-
+    board refusal, the content-length limits, the content-addressed id,
+    the moderated-board `'pending'` status, and the search reindex.
+    Notably `'pending'` is why a moderated board is the recommended way
+    to switch a door's outbound on for the first time -- the SysOp reads
+    what it wrote before anyone else does, with no new mechanism.
+
+    Callers that want the post to reach a Linked board's peers pass the
+    returned post to `netbbs.link.boards.queue_board_post_if_linked`,
+    exactly as the interactive path does; it needs a `Post`, not a
+    `User`, and builds `local_user_id` from `author_label`, so a label
+    author federates with no special case.
+    """
+    _check_content_length(subject, body)
+    closed_row = db.connection.execute(
+        "SELECT link_closed_at FROM boards WHERE id = ?", (board.id,)
+    ).fetchone()
+    if closed_row is not None and closed_row["link_closed_at"] is not None:
+        raise PostError(f"board {board.name!r} is closed and no longer accepts new posts")
+
+    status = "pending" if board.moderated else "approved"
+    created_at = utc_now_iso()
+    post_id = compute_content_id(
+        {
+            "type": "board_post",
+            "board_id": board.board_id,
+            "parent_post_id": None,
+            "author": author_label,
+            "subject": subject,
+            "body": body,
+            "created_at": created_at,
+        }
+    )
+    try:
+        db.connection.execute(
+            """
+            INSERT INTO posts
+                (post_id, board_id, parent_post_id, author_user_id, author_label,
+                 author_fingerprint, subject, body, created_at, status, root_post_id)
+            VALUES (?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?)
+            """,
+            (post_id, board.id, author_label, subject, body, created_at, status, post_id),
+        )
+        db.connection.commit()
+    except sqlite3.IntegrityError as exc:
+        raise PostError(
+            "could not create post — identical content posted twice in the same instant?"
+        ) from exc
+
+    reindex_post(db, board.id, post_id)
+    return get_post(db, post_id)
+
+
 def edit_post(
     db: Database,
     post: Post,

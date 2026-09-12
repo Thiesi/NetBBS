@@ -68,6 +68,18 @@ SYSOP_LEVEL = 255
 NEW_ACCOUNT_SENTINEL = "new"
 RESERVED_USERNAMES = {NEW_ACCOUNT_SENTINEL}
 
+#: Suffix marking a door's posting identity (issue #520). A door posts under
+#: a *label*, not an account, and that label federates as `local_user_id`, so
+#: it has to satisfy `_USERNAME_PATTERN` -- which means it is shaped exactly
+#: like a handle and could be claimed by one. Refused here, forward-only: an
+#: existing database may already hold such a name (the grammar allowed it
+#: until now), and retroactively enforcing that needs its own migration and
+#: audit pass rather than being a side effect of this feature -- the same
+#: reasoning `_USERNAME_PATTERN`'s own comment above records. What actually
+#: protects the door path is `netbbs.doors.outbound`'s check that a minted
+#: label is free at the moment outbound is switched on.
+DOOR_LABEL_SUFFIX = ".door"
+
 # Self-service registration's own minimum, deliberately stricter than
 # admin-created accounts (netbbs.net.admin_flow._prompt_optional_password
 # enforces no minimum at all) -- a SysOp vetting each account by hand is
@@ -267,6 +279,11 @@ def _validate_username(username: str) -> None:
     # a real account a case away from the trigger word.
     if username.lower() in RESERVED_USERNAMES:
         raise AuthError(f"{username!r} is a reserved username and cannot be registered")
+    if username.lower().endswith(DOOR_LABEL_SUFFIX):
+        raise AuthError(
+            f"usernames may not end in {DOOR_LABEL_SUFFIX!r} — that suffix is reserved "
+            "for doors which post to a board (issue #520)"
+        )
 
 
 def _create_user_with_password_hash(

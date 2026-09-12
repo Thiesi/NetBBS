@@ -1394,7 +1394,7 @@ Two kinds of registration deliberately get none of it:
 
 | Field | Meaning |
 | --- | --- |
-| `door_api` | Contract version, currently `2`. Refuse a version you do not understand rather than probing for fields. |
+| `door_api` | Contract version, currently `3`. Refuse a version you do not understand rather than probing for fields. |
 | `handle` | The caller's NetBBS handle. |
 | `user_id` | Their stable numeric id on this node. |
 | `terminal_width`, `terminal_height` | Current geometry; rewritten mid-run if the caller resizes and the door opted in (see above). |
@@ -1405,6 +1405,7 @@ Two kinds of registration deliberately get none of it:
 | `node_name` | The node's display name, which a SysOp may change at any time. |
 | `node_id` | A stable, opaque per-node identifier which survives a rename. Key a door's world on this, not on `node_name`. Not a credential. |
 | `session_limit_seconds` | The effective wall-clock cap for *this* launch — the tighter of the profile's limit and any lower bound the launch itself imposes — so a door can warn before it is cut off. Absent when nothing bounds the run. |
+| `outbound` | Present **only** if a SysOp switched this door's outbound hook on: `label` (the name its posts appear under), `directory` (where to drop a request, relative to the file's own directory), `boards` (every board it may name) and `posts_per_hour`. See [Letting a door post to a board](#letting-a-door-post-to-a-board). |
 
 Treat every field as optional and absence as "unknown": that is how the file
 stays compatible as it grows. Two notes on what is deliberately **not** there.
@@ -1730,6 +1731,111 @@ one; putting a game installation back is an ordinary file-copy operation you
 perform deliberately, not something a node restore should do over a live
 installation. Find them under `door-installs/` inside the backup, with each
 directory's original path recorded in `manifest.json`.
+
+## Letting a door post to a board
+
+A door can be allowed to post plain text to boards you choose — a season
+summary, a tournament result, a high-score roundup. It is off for every door
+until you switch it on, and switching it on grants exactly one ability:
+posting to the boards on that door's own allowlist. A door can never read the
+BBS, send mail, look up a caller, or post anywhere you did not allow.
+
+Be clear about what this is, because it is easy to over-read. A native door
+already runs as the NetBBS service account with the node database on the disk
+beside it, so this hook gives a door no *power* it did not already have. What
+it gives you is a supported interface instead of a door reaching into the
+database, an audit entry naming the door for every post it makes, and one
+switch you can turn off. The trust decision about the program itself is still
+yours, exactly as it is for any door you register.
+
+### Switching it on
+
+On a door's screen in the SysOp area, press `[O]utbound`.
+
+1. `[T]urn on`. The door is given a **posting name** derived from its own,
+   ending in `.door` — `Blacksite` posts as `Blacksite.door`. This is a label,
+   not an account: nobody can log in as it, it never appears in the user list,
+   and it cannot receive mail. If something already answers to that name the
+   door gets a numbered variant instead, and the screen shows you which.
+2. `[A]llow a board`. Until you do this the door can post nowhere. Start with
+   a **moderated** board: the door's posts land in your approval queue, so you
+   read the first few before anyone else does. That is the recommended way to
+   introduce any door's outbound, and it costs nothing to undo.
+3. `[C]eiling`, if you want something other than six posts an hour.
+
+`[R]evoke a board` stops it posting there. `[T]urn off` releases the posting
+name and the whole allowlist; posts the door already made keep the name they
+were written under, exactly as a post keeps the name of a deleted account.
+
+### If you allow a Linked board
+
+A door's post on a Linked board reaches that board's peers like any other
+post, which is usually the point of automating it. Two things follow:
+
+- **Retracting it is a redaction, not an erasure.** Use `[T]ombstone` on the
+  post — that is the action that reaches the peers. Peers keep a redacted
+  placeholder where the post was; they do not forget it happened. Plain
+  `[D]elete` removes the post here only, and refuses outright once anything
+  replies to it.
+- Peers see the posting name as an ordinary author from your node. The `.door`
+  suffix is a convention a reader can recognise, not something a remote node
+  verifies.
+
+### Writing a door that uses it
+
+A door learns about its hook from `door_info.json` (see
+[What a door is told](#what-a-door-is-told-door_infojson)). The `outbound`
+key is **absent** when the hook is off, which is the only supported way to
+test for it:
+
+```json
+"outbound": {
+  "label": "Blacksite.door",
+  "directory": "outbound",
+  "boards": ["Chronicle"],
+  "posts_per_hour": 6
+}
+```
+
+`directory` is relative to the directory holding `door_info.json`, and NetBBS
+has already created it. To post, write one JSON file there:
+
+```json
+{"board": "Chronicle", "subject": "Season 1 closes", "body": "..."}
+```
+
+- Write it under a temporary name and **rename it into place** with a `.json`
+  extension. NetBBS ignores anything not ending in `.json`, so a half-written
+  file is never read. Use your language's atomic rename — `Path.replace` in
+  Python, `rename(2)` in C.
+- `board` may be omitted if exactly one board is allowlisted. With more than
+  one, a request that names none is refused rather than guessed at.
+- `subject` must be non-empty; `body` may be empty.
+
+Requests are processed when the door exits. For each one, NetBBS writes
+`<name>.result.json` beside it and removes the request:
+
+```json
+{"status": "posted", "post_id": "...", "board": "Chronicle", "moderated": true}
+{"status": "rejected", "reason": "board 'Private' is not allowlisted for this door"}
+```
+
+A refusal is never queued for later — a post held back and published after a
+SysOp revoked the allowlist is the surprise the switch exists to prevent. Your
+door can read the result on its next launch if it wants to know what happened;
+`"moderated": true` means the post is waiting for the SysOp's approval rather
+than already visible.
+
+Reasons you can expect to see, and what they mean for the door:
+
+| `reason` contains | What happened |
+| --- | --- |
+| `not switched on` | The SysOp has not enabled outbound. Stop trying. |
+| `no board is allowlisted` | Enabled, but nothing is allowed yet. |
+| `not allowlisted for this door` | The board name is wrong, or was revoked. |
+| `more than one allowlisted board` | Name a board in the request. |
+| `rate limit reached` | Try again later; the ceiling is in `posts_per_hour`. |
+| `switch it on again` | The account that enabled the hook is gone, so it has lapsed until a SysOp re-enables it. |
 
 ## DOS prerequisites
 

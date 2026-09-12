@@ -2645,4 +2645,50 @@ MIGRATIONS = [
         WHERE mrc_room IS NOT NULL AND length(mrc_room) > 20;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #520 (from #470): a door's outbound hook -- a per-door, SysOp-enabled "
+            "allowlist of boards it may post to. `label` is the door's posting identity and "
+            "is deliberately NOT a `users` row: `users` carries a CHECK constraint requiring "
+            "at least one credential, so a credential-less service account cannot exist "
+            "without weakening it, and `posts.author_user_id` is already nullable for exactly "
+            "this shape (see netbbs.link.boards' own import path, which authors a post with "
+            "no local account behind it). UNIQUE and NOCASE because "
+            "`netbbs.net.chat_flow._resolve_message_author` resolves a stored author by "
+            "*username*, not by id, so a label colliding with an account would make the door "
+            "speak in that account's nick and verified-name styling. "
+            "`door_outbound_history` is a separate table rather than a COUNT over `posts` so "
+            "that deleting a door's output cannot silently raise its own ceiling; it is "
+            "pruned to the rate window on every check, so it stays bounded by "
+            "`posts_per_hour` per door."
+        ),
+        sql="""
+        CREATE TABLE door_outbound (
+            door_id                  INTEGER PRIMARY KEY
+                                     REFERENCES doors(id) ON DELETE CASCADE,
+            label                    TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            posts_per_hour           INTEGER NOT NULL DEFAULT 6,
+            enabled_by_user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            last_refusal_logged_at   TEXT,
+            created_at               TEXT NOT NULL
+        );
+
+        CREATE TABLE door_outbound_targets (
+            id          INTEGER PRIMARY KEY,
+            door_id     INTEGER NOT NULL REFERENCES doors(id) ON DELETE CASCADE,
+            board_id    INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            created_at  TEXT NOT NULL,
+            UNIQUE (door_id, board_id)
+        );
+
+        CREATE TABLE door_outbound_history (
+            id          INTEGER PRIMARY KEY,
+            door_id     INTEGER NOT NULL REFERENCES doors(id) ON DELETE CASCADE,
+            created_at  TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_door_outbound_history_door
+            ON door_outbound_history(door_id, created_at);
+        """,
+    ),
 ]

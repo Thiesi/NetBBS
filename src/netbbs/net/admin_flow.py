@@ -153,6 +153,16 @@ from netbbs.doors import (
     update_door,
 )
 from netbbs.doors.bundled import available_bundled_doors
+from netbbs.doors.outbound import (
+    OutboundError,
+    allow_target,
+    disable_outbound,
+    enable_outbound,
+    outbound_config,
+    revoke_target,
+    set_rate_ceiling,
+)
+from netbbs.doors.outbound import targets as outbound_targets
 from netbbs.files.areas import FileArea, FileAreaError, create_file_area, delete_file_area, list_file_areas, update_file_area
 from netbbs.files.categories import FileAreaCategory
 from netbbs.files.categories import FileAreaCategoryError as FileCategoryError
@@ -13492,6 +13502,9 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
                     await door_services.forget(door.id)
                 return
             await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
+        elif choice == "o":
+            await _door_outbound_screen(session, lane, actor, door)
+            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice in {"s", "h", "r", "v"} and door_services is not None and door.profile and door.profile.service:
             await session.write_line("")
             await _door_service_action(session, lane, actor, door, choice, door_services)
@@ -13523,6 +13536,7 @@ async def _draw_door_detail(
         MenuEntry(label=menu_key("C", "ompatibility"), brief="Profile, preflight and test launch"),
         MenuEntry(label=menu_key("L", "ast diagnostic"), brief="View runtime errors"),
         MenuEntry(label=menu_key("E", "dit"), brief="Change this door's settings"),
+        MenuEntry(label=menu_key("O", "utbound"), brief="Whether this door may post to a board"),
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this door"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),
     ]
@@ -13536,7 +13550,7 @@ async def _draw_door_detail(
         if status is not None and status.last_exit_code is not None:
             await session.write_line(f"Last service exit code: {status.last_exit_code}")
         if door_services is not None:
-            options[4:4] = [
+            options[-1:-1] = [
                 MenuEntry(label=menu_key("S", "tart service"), brief="Start this door's companion process"),
                 MenuEntry(label=menu_key("H", "alt service"), brief="Stop this door's companion process"),
                 MenuEntry(label=menu_key("R", "estart service"), brief="Stop then start it again"),
@@ -13546,6 +13560,123 @@ async def _draw_door_detail(
         "\r\n" + _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
     )
     await session.write("Choice: ")
+
+
+async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: User, door: Door) -> None:
+    """Switch one door's outbound hook on or off, and curate its allowlist.
+
+    Status plus an action bar, never a chain of questions (design doc §3.5):
+    every key acts on what the screen is already showing, and the only
+    confirmation is the one that destroys something -- switching the hook
+    off releases the door's posting label and its whole allowlist.
+    """
+    description_level = await lane.run(menu_description_level, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    accent_color = await lane.run(effective_accent_color_256)
+    header_color = await lane.run(effective_header_color_256)
+    message = ""
+    while True:
+        config = await lane.run(outbound_config, door.id)
+        allowed = await lane.run(outbound_targets, door.id) if config is not None else []
+        await session.write_line(
+            "\r\n" + screen_title(f"{sanitize_text(door.name)} — outbound",
+                breadcrumb=(session.node_display_name,), width=session.terminal_width,
+                clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                header_color=header_color, node_name_gradient=session.node_name_gradient)
+        )
+        if config is None:
+            await session.write_line(reflow(
+                "Off. This door cannot post anything. Switching it on lets it post to boards "
+                "you allow here, and nothing else — it can never read the BBS, send mail, or "
+                "look up a caller.", width=session.terminal_width))
+        else:
+            await session.write_line(f"On. Posts appear as: {sanitize_text(config.label)}")
+            await session.write_line(f"Ceiling: {config.posts_per_hour} posts per hour")
+            await session.write_line("Allowed boards: " + (
+                ", ".join(sanitize_text(board.name) for board in allowed) if allowed
+                else "(none yet — it can post nowhere until you allow one)"))
+            if config.enabled_by_user_id is None:
+                await session.write_line(colored(reflow(
+                    "The account which switched this on no longer exists, so the door is "
+                    "refused until a SysOp switches it on again.", width=session.terminal_width),
+                    fg_color=MUTED_COLOR))
+            if any(board.moderated for board in allowed):
+                await session.write_line(colored(
+                    "A moderated board holds this door's posts for your approval first.",
+                    fg_color=MUTED_COLOR))
+        if message:
+            await session.write_line(colored(sanitize_text(message), fg_color=MUTED_COLOR))
+            message = ""
+        options = [MenuEntry(label=menu_key("T", "urn " + ("off" if config else "on")),
+                             brief="Whether this door may post at all")]
+        if config is not None:
+            options += [
+                MenuEntry(label=menu_key("A", "llow a board"), brief="Let it post to one more board"),
+                MenuEntry(label=menu_key("R", "evoke a board"), brief="Stop it posting to one"),
+                MenuEntry(label=menu_key("C", "eiling"), brief="Posts per hour"),
+            ]
+        options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the door"))
+        await session.write_line(
+            "\r\n" + _menu_row(options, description_level, width=session.terminal_width,
+                               height=session.terminal_height)
+        )
+        await session.write("Choice: ")
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
+
+        if choice == "b":
+            return
+        elif choice == "t" and config is None:
+            config = await lane.run(enable_outbound, door, enabled_by=actor)
+            message = (f"On. This door posts as {config.label}. Allow it a board next — "
+                       "a moderated one holds its first posts for you to read.")
+        elif choice == "t":
+            if await prompt_yes_no(session,
+                                   f"Turn off outbound for {sanitize_text(door.name)}? "
+                                   "This releases its posting name and its whole allowlist.",
+                                   default=False):
+                await lane.run(disable_outbound, door, disabled_by=actor)
+                message = "Off. Posts it already made keep the name they were written under."
+        elif choice == "a" and config is not None:
+            board = await pick_item(
+                session, await lane.run(list_boards, order_by="alphabetical"),
+                name_of=lambda b: b.name, stable_id_of=lambda b: b.id,
+                description_of=lambda b: ("moderated — holds this door's posts for approval"
+                                          if b.moderated else b.description),
+                title="Which board may it post to?", empty_message="No message boards yet.",
+                description_level=description_level,
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                accent_color=accent_color, header_color=header_color,
+            )
+            if board is not None:
+                await lane.run(allow_target, door, board, allowed_by=actor)
+                message = f"{board.name} allowed."
+        elif choice == "r" and config is not None:
+            board = await pick_item(
+                session, allowed, name_of=lambda b: b.name, stable_id_of=lambda b: b.id,
+                title="Stop it posting to which board?",
+                empty_message="It cannot post to any board yet.",
+                description_level=description_level,
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                accent_color=accent_color, header_color=header_color,
+            )
+            if board is not None:
+                await lane.run(revoke_target, door, board, revoked_by=actor)
+                message = f"{board.name} revoked."
+        elif choice == "c" and config is not None:
+            await session.write_line(f"Posts per hour (1-240, currently {config.posts_per_hour}):")
+            raw = (await session.read_line()).strip()
+            if raw:
+                try:
+                    config = await lane.run(set_rate_ceiling, door, int(raw), changed_by=actor)
+                    message = f"Ceiling is now {config.posts_per_hour} posts per hour."
+                except (ValueError, OutboundError) as exc:
+                    message = (str(exc) if isinstance(exc, OutboundError)
+                               else "That is not a whole number.")
+        else:
+            await session.write(reject_unhandled_key(choice))
 
 
 async def _door_service_action(session: Session, lane: DatabaseLane, actor: User, door: Door,

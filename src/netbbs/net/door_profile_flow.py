@@ -135,7 +135,7 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
         await session.write_line("A test runs the configured program/service and can change its game data.")
         if not await prompt_yes_no(session, "Launch this test now?", default=False):
             return
-        result = await run_door(session, lane, candidate, actor)
+        result = await run_door(session, lane, candidate, actor, rehearsal=True)
         await session.write_line(f"Test result: {result.reason}; exit code: {result.exit_code}")
         if result.diagnostic:
             await session.write_line(sanitize_text(result.diagnostic))

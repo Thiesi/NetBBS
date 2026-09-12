@@ -8502,3 +8502,54 @@ def test_rename_refusal_sanitizes_a_hostile_channel_name(db, lane, sysop):
     # remainder of the hostile name is harmless.
     assert "[31m" not in refusal
     assert "cannot be renamed while 1 caller(s) are in it" in refusal
+
+
+# -- door outbound hook (issue #520) ----------------------------------------
+
+
+def _door_outbound_keys(*keys):
+    """Reach a single registered door's outbound screen, then unwind."""
+    return ["c", "d", "l", "0", "1", "o", *keys, "b", "b", "b", "b", "b"]
+
+
+def test_a_door_offers_outbound_and_starts_with_it_off(db, lane, sysop):
+    from netbbs.doors import create_door
+
+    create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+
+    session = FakeSession(_door_outbound_keys())
+    _run(session, lane, sysop)
+    text = _written_text(session)
+
+    assert "utbound" in text, "the door screen must offer the hook"
+    assert "Off." in text
+    assert "cannot post anything" in text
+
+
+def test_turning_outbound_on_shows_the_name_its_posts_will_carry(db, lane, sysop):
+    """The minted label is never a surprise: the SysOp sees it immediately,
+    which is what makes silent disambiguation safe."""
+    from netbbs.doors import create_door
+    from netbbs.doors.outbound import outbound_config
+
+    door = create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+
+    session = FakeSession(_door_outbound_keys("t"))
+    _run(session, lane, sysop)
+    text = _written_text(session)
+
+    assert "Blacksite.door" in text
+    assert outbound_config(db, door.id) is not None
+
+
+def test_outbound_says_plainly_that_it_can_post_nowhere_yet(db, lane, sysop):
+    """Switched on with no board allowed is a real state a SysOp can stop in,
+    and it looks identical to a broken door unless the screen says so."""
+    from netbbs.doors import create_door
+
+    create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+
+    session = FakeSession(_door_outbound_keys("t"))
+    _run(session, lane, sysop)
+
+    assert "it can post nowhere until you allow one" in _written_text(session)

@@ -63,6 +63,7 @@ async def browse_doors(
     title_prefix: str | None = None,
     door_services=None,
     presence=None,
+    link_context=None,
 ) -> None:
     """Pick a door and play it, looping back to the picker afterward so a
     caller can play another without re-entering the menu -- same
@@ -137,7 +138,12 @@ async def browse_doors(
         if presence is not None:
             presence.enter_door(session, door.id, door.name, door.created_at)
         try:
-            result = await run_door(session, lane, door, user)
+            result = await run_door(
+                session, lane, door, user,
+                # Issue #520: without this a door's post to a Linked board would
+                # never reach the peers the SysOp linked that board to.
+                node_identity=link_context.node_identity if link_context is not None else None,
+            )
         finally:
             if presence is not None:
                 presence.leave_door(session)

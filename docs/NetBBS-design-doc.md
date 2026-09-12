@@ -6077,6 +6077,28 @@ Compatibility extension (issues #296/#297):
   is checked, not just the number. A SysOp screen names everything, being
   SysOp-only already. Remote presence carries no door: a linked node reports
   who is online, not what they are doing.
+- A door may post to boards a SysOp allowlists for it (issue #520, the
+  outbound half of #470), and to nothing else. It posts under a **label**, not
+  an account: `author_user_id` and `author_fingerprint` are NULL and
+  `author_label` alone carries the identity, which is the shape a Link-carried
+  post has always had. An account was rejected as the answer -- `users`
+  requires at least one credential by CHECK constraint, so a credential-less
+  service row could not exist without weakening it -- and with no account
+  there is nothing to exclude from login, listings, mail or moderation, and
+  the infrastructure level band sketched under issue #63 is not needed for
+  this. The label ends in a reserved suffix, is unique across accounts and
+  doors, and is checked at the moment the hook is switched on: it is shaped
+  like a handle because it federates as `local_user_id`, and chat resolves a
+  stored author by username where boards resolve by id, so a collision would
+  let a door speak in a real account's presentation. The SysOp's allowlist is
+  the only gate on this path; level is deliberately not a second one, because
+  two gates can disagree where only one is visible to the SysOp. Transport is
+  a file drop rather than a socket, chosen so a DOS door can use it at all,
+  and a refusal is always returned to the door and never queued -- a held post
+  would publish after the allowlist was revoked. Posting is rate-limited per
+  door and audit-logged against the SysOp whose authority it runs on; if that
+  account is deleted the hook lapses rather than posting unattributably.
+  Reads of any kind remain out of scope.
   Profiles add persistent installation directories,
   disposable node directories, exact CRLF classic drop files, native stdio,
   controlling PTYs, private inherited DOOR32 sockets, DOSBox-X COM1 sockets,
@@ -6634,13 +6656,20 @@ schema, consider gating them with an elevated minimum user level (e.g. 245)
 rather than a new visibility flag, since minimum-level is already a resource
 gate (§5.1) and sits safely below `SYSOP_LEVEL = 255`. This only works if:
 
-- door processes write under their own capability-scoped service identity
-  minted by the session capability API, not the player's own account level;
+- door processes write under their own identity, not the player's own account
+  level. Answered for boards by issue #520, and the answer generalizes: the
+  identity is a *label* carried in `author_label` with no account behind it,
+  not a minted account (see the Phase 7 door bullets above for why an account
+  was rejected and what guards a label needs). A channel-facing identity
+  should take the same shape;
 - board/channel listing queries honor the minimum-level gate, not just entry,
   so gated resources don't appear in listings for users below the threshold;
 - the level band used for infrastructure resources (e.g. 240–254) is a named
   constant, so a future SysOp level-preset feature cannot hand that range to a
-  real user by accident.
+  real user by accident. Note this band gates the *resources* -- keeping
+  door-facing boards and channels out of ordinary users' listings -- and is
+  not what hides a door's own identity, which needs no hiding because it is
+  not an account.
 
 ### Issue #165 — MRC gateway scoping — closed
 
