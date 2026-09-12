@@ -98,6 +98,50 @@ _OUTPUT_WIDTH = 80
 # ---------------------------------------------------------------------------
 
 
+#: The zone every absolute instant is shown in. UTC until the drop file names
+#: another, which is also where a standalone run stays.
+_DISPLAY_TZ = timezone.utc
+#: `%Y-%m-%d` rather than the node's own display format: these screens are full
+#: of dates in tight columns, and an unambiguous one sorts and aligns.
+_STAMP_FORMAT = "%Y-%m-%d %H:%M"
+
+
+def apply_timezone(name: object) -> None:
+    """Adopt the node's display timezone, if this host can resolve it.
+
+    `zoneinfo` has no system database on Windows and falls back to the `tzdata`
+    package, so resolution can fail on a perfectly healthy node. Raising there
+    would be worse than printing UTC, which is what this door did before the
+    field existed, so every failure lands back on UTC.
+    """
+    global _DISPLAY_TZ
+    _DISPLAY_TZ = timezone.utc
+    if not isinstance(name, str) or not name.strip():
+        return
+    try:
+        from zoneinfo import ZoneInfo
+
+        _DISPLAY_TZ = ZoneInfo(name)
+    except Exception:
+        _DISPLAY_TZ = timezone.utc
+
+
+def when(moment: datetime) -> str:
+    """An absolute instant in the node's display zone, with the zone named.
+
+    Named because this door used to print `UTC` on every stamp: switching to
+    unlabelled local time would leave a season deadline ambiguous rather than
+    clearer, which is the opposite of the point.
+    """
+    local = moment.astimezone(_DISPLAY_TZ)
+    return f"{local.strftime(_STAMP_FORMAT)} {local.tzname() or 'UTC'}"
+
+
+def clock(moment: datetime) -> str:
+    """Time of day only, in the node's display zone -- the feed's own stamp."""
+    return moment.astimezone(_DISPLAY_TZ).strftime("%H:%M")
+
+
 def _load_door_info() -> dict:
     default = {
         "handle": "Guest",
@@ -969,10 +1013,10 @@ def raid_block(attacker: Player, target: Player, now: datetime) -> tuple[str, st
         return "you", "Your own crew"
     if is_in_grace(target, now):
         return "newcomer", ("Newcomer shield until "
-                            + (from_iso(target.created_at) + GRACE).strftime("%Y-%m-%d %H:%M UTC"))
+                            + when(from_iso(target.created_at) + GRACE))
     if target.raid_shield_until and now < from_iso(target.raid_shield_until):
         return "recovering", ("Raid shield until "
-                              + from_iso(target.raid_shield_until).strftime("%Y-%m-%d %H:%M UTC"))
+                              + when(from_iso(target.raid_shield_until)))
     if abs(tier_index(rank_score(target)) - tier_index(rank_score(attacker))) > 1:
         return "tier", "Outside your tier +/-1"
     return "eligible", "Eligible"
@@ -2132,7 +2176,7 @@ def read_dossiers(conn: sqlite3.Connection, user_id: int, now: datetime) -> list
 def dossier_lines(dossier: dict) -> list[str]:
     return [f"Last-known intelligence: {dossier['handle']}",
             f"Cash ${dossier['cash']:,}; available crew {dossier['crew']:,} when observed.",
-            "Observed " + from_iso(dossier['observed_at']).strftime("%Y-%m-%d %H:%M UTC") + "; expires " + from_iso(dossier['expires_at']).strftime("%Y-%m-%d %H:%M UTC"),
+            "Observed " + when(from_iso(dossier['observed_at'])) + "; expires " + when(from_iso(dossier['expires_at'])),
             "A snapshot, not live resources. The rival may have acted or suffered losses since."]
 
 
@@ -2801,7 +2845,7 @@ def feed(p: Palette, events: list[GameEvent], width: int, *, limit: int = 6) -> 
         hostile = bool(event.actor_handle)
         bullet = sty((p.magenta if hostile else p.phosphor) + (BOLD if event.seen_at is None else ""),
                      gl("bullet"))
-        stamp = from_iso(event.created_at).astimezone(timezone.utc).strftime("%H:%M")
+        stamp = clock(from_iso(event.created_at))
         lead = f"{gl('bullet')} {stamp} "
         # Wrapped by display columns, not by character count: a rival handle of
         # CJK glyphs is twice as wide as it is long, and a row the frame has to
@@ -3213,7 +3257,7 @@ def event_pages(p: Palette, events: list[GameEvent], width: int,
     tail the caller has not seen."""
     lines: list[tuple[str, int | None]] = []
     for event in events:
-        stamp = from_iso(event.created_at).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        stamp = when(from_iso(event.created_at))
         hostile = bool(event.actor_handle)
         fresh = event.seen_at is None
         head = (sty((p.magenta if hostile else p.phosphor) + (BOLD if fresh else ""), gl("bullet"))
@@ -3369,7 +3413,7 @@ def dashboard_notes(state: DashboardState, now: datetime) -> list[str]:
                   "retained results; medals give no resource or protection bonus."]
     if player.turns_used:
         notes.append("Turn refill at "
-                     + (from_iso(player.turn_day_start) + DAY).strftime("%Y-%m-%d %H:%M UTC") + ".")
+                     + when(from_iso(player.turn_day_start) + DAY) + ".")
     else:
         notes.append("Turn window starts with your next action.")
     notes.append("Owned: " + (", ".join(_event_plain(e.name) for e in state.holdings) or "none")
@@ -3377,13 +3421,13 @@ def dashboard_notes(state: DashboardState, now: datetime) -> list[str]:
     effective_now = max(now, from_iso(player.heat_updated_at))
     if is_in_grace(player, effective_now):
         notes.append("Newcomer raid shield: no rival may raid you until "
-                     + (from_iso(player.created_at) + GRACE).strftime("%Y-%m-%d %H:%M UTC") + ".")
+                     + when(from_iso(player.created_at) + GRACE) + ".")
     if player.raid_shield_until and effective_now < from_iso(player.raid_shield_until):
         notes.append("Raid recovery shield: all attackers blocked until "
-                     + from_iso(player.raid_shield_until).strftime("%Y-%m-%d %H:%M UTC")
+                     + when(from_iso(player.raid_shield_until))
                      + ". Login and reading receipts never clear it.")
     notes.append("Season end: "
-                 + state.season_ends_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+                 + when(state.season_ends_at))
     notes.append(SEASON_AWARDS)
     notes.append("[I] Scene is free: crew insignia, NPC dossiers, public bulletins and the latest "
                  "12 completed seasons. [S] Kit trains one specialty and holds one support item.")
@@ -3776,7 +3820,7 @@ def standings_cards(p: Palette, page: PlayerPage, user_id: int, width: int,
             ("STANDINGS", table_rows),
             ("AWARDS", prose_card(p, [
                 SEASON_AWARDS,
-                "Season end: " + season_ends_at.strftime("%Y-%m-%d %H:%M UTC") + ".",
+                "Season end: " + when(season_ends_at) + ".",
             ], width))]
 
 
@@ -3911,7 +3955,7 @@ def do_scene(p: Palette, conn: sqlite3.Connection, player: Player, width: int, h
                                          style=owner_node(p, exchange, player.user_id)[1])], inner)
             if exchange.npc_return_at and exchange.controller_user_id is None:
                 rows += prose_rows(p, "Returns if unclaimed: "
-                                   + from_iso(exchange.npc_return_at).strftime("%Y-%m-%d %H:%M UTC"),
+                                   + when(from_iso(exchange.npc_return_at)),
                                    inner, style=p.grey)
             elif exchange.controller_user_id is not None:
                 rows += prose_rows(p, "Displaced from home. The NPC cannot take a human holding.",
@@ -3925,7 +3969,7 @@ def do_scene(p: Palette, conn: sqlite3.Connection, player: Player, width: int, h
         rows = []
         for bulletin in read_scene(conn):
             rows.append(sty(p.phosphor, gl("bullet")) + " "
-                        + sty(p.grey, from_iso(bulletin["created_at"]).strftime("%Y-%m-%d %H:%M UTC"))
+                        + sty(p.grey, when(from_iso(bulletin["created_at"])))
                         + "  " + badge(p, f"S{bulletin['season']}", style=p.cyan))
             rows += ["  " + row for row in prose_rows(p, bulletin["summary"], inner - 2)]
         show_text_pages(p, "SCENE BULLETINS", ["No public territory activity recorded yet."],
@@ -4032,7 +4076,7 @@ def recognition_rows(p: Palette, row, width: int, *, named: bool = False) -> lis
         label_value(p, "rank", f"{row['rank']:,}", style=p.mint),
         label_value(p, "place", f"#{row['placement']} of {row['players']}", style=p.ink),
         label_value(p, "closed",
-                    from_iso(row["ended_at"]).strftime("%Y-%m-%d %H:%M UTC"), style=p.grey)]
+                    when(from_iso(row["ended_at"])), style=p.grey)]
     return compose(head, width) + compose(facts, width)
 
 
@@ -4098,7 +4142,7 @@ def show_season_results(p: Palette, conn: sqlite3.Connection, user_id: int, widt
                                         style=p.phosphor if season['status'] != 'inactive' else p.grey),
                             label_value(p, "players", str(season['players']), style=p.ink),
                             label_value(p, "ended",
-                                        from_iso(season['ended_at']).strftime("%Y-%m-%d %H:%M UTC"),
+                                        when(from_iso(season['ended_at'])),
                                         style=p.grey)], inner)
             if season['status'] == 'inactive':
                 rows += prose_rows(p, "No activity materialized this season; no winners awarded.",
@@ -4304,7 +4348,7 @@ def exchange_detail_cards(p: Palette, exchange: Exchange, player: Player | None,
                  "it never attacks callers."]
         if exchange.npc_return_at and exchange.controller_user_id is None:
             notes.append("Returns if still unclaimed at "
-                         + from_iso(exchange.npc_return_at).strftime("%Y-%m-%d %H:%M UTC") + ".")
+                         + when(from_iso(exchange.npc_return_at)) + ".")
         cards.append(("NEUTRAL OPERATOR", prose_card(p, notes, width)))
     return cards
 
@@ -4429,7 +4473,7 @@ def action_block_reason(action: str, player: Player, target: Exchange | Player |
     reasons = []
     if player.turns_used >= TURNS_PER_DAY:
         refill = from_iso(player.turn_day_start) + DAY
-        reasons.append("No turns. Refill at " + refill.strftime("%Y-%m-%d %H:%M UTC") +
+        reasons.append("No turns. Refill at " + when(refill) +
                        ". Back to the switchboard for free Rank, Map, Rivals and Log browsing.")
     if action == "recruit" and player.cash < RECRUIT_COST:
         reasons.append(f"Need ${RECRUIT_COST - player.cash} more cash to recruit. Trade needs no cash; preview its Heat risk first.")
@@ -5394,6 +5438,8 @@ def main() -> int:
         return 1
     palette = Palette(truecolor=info.get("color_depth") == "truecolor")
     palette.default_ascii = info.get("unicode_style", True) is False
+    # Node-wide, per the drop-file contract: NetBBS has no per-caller timezone.
+    apply_timezone(info.get("timezone"))
     try:
         _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
     except (TypeError, ValueError):

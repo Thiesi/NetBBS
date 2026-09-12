@@ -7737,6 +7737,17 @@ which columns it can carry at the width it has, and everything a narrow terminal
 gives up is on the record's own card one digit away. Action bars live outside the
 frame, where the cursor waits.
 
+*Clocks.* Every absolute instant is shown in the node's display timezone, which
+the drop file supplies as an IANA name (`timezone`, door_api 2), and names the
+zone it is showing -- a deadline in unlabelled local time is more ambiguous than
+one marked UTC, not less. One helper converts, so a new screen cannot
+reintroduce a fixed zone by copying the line above it, which is how fifteen of
+them came to print UTC while the rest of the node showed local time. An absent
+or unresolvable zone falls back to UTC and still renders: `zoneinfo` has no
+system database on Windows and depends on the `tzdata` package, so a door that
+raised there would fail on a healthy node. Relative durations carry no zone and
+are unaffected.
+
 *Motion.* This replaces "there are no animation delays". Reveals and the carrier
 sweep that plays while a committed result comes back are in, under three hard
 limits: any key skips whatever is playing, Fast mode and the monochrome/plain
