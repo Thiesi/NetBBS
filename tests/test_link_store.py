@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from netbbs.auth.users import create_user
 from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board
@@ -37,7 +39,11 @@ from netbbs.link.events import (
     build_file_descriptor,
     build_key_transition,
 )
-from netbbs.link.files import link_file_area, queue_file_descriptor_if_linked
+from netbbs.link.files import (
+    link_file_area,
+    materialize_carried_file_descriptor,
+    queue_file_descriptor_if_linked,
+)
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.store import load_link_node, load_peer_last_contact, save_candidate_descriptor, save_event, save_peer
@@ -1413,4 +1419,47 @@ def test_inventory_wanted_ids_is_not_a_membership_oracle_for_out_of_scope_events
     # Reported as wanted: the answer carries no signal about whether this
     # node actually holds that key_transition.
     assert wanted == [transition.content_id]
+    db.close()
+
+
+def test_inventory_wanted_ids_counts_a_descriptor_refused_by_the_per_area_quota(tmp_path):
+    """Codex review of #498, the per-file counterpart. An area this node
+    carries but whose `max_remote_files_per_area` is reached refuses the
+    catalogue row -- and the descriptor was previously kept nowhere at
+    all, so it was reported as wanted on every pass forever, re-pushed by
+    its origin and starving everything behind it. The event is now
+    retained even though its row is declined, the same way a refused
+    `board_genesis` already was."""
+    from netbbs.link.files import RemoteFileCatalogueLimitError, materialize_carried_file_area
+    from netbbs.link.store import inventory_wanted_ids
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = build_file_area_genesis(
+        signing_identity=remote_identity.signing_key,
+        origin_fingerprint=remote_identity.fingerprint,
+        area_id="remote-area-id", name="Remote Files",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    materialize_carried_file_area(db, genesis, own_fingerprint="this-node")
+    refused = build_file_descriptor(
+        signing_identity=remote_identity.signing_key,
+        area_id="remote-area-id", file_id="a-file-over-the-quota",
+        filename="over.bin", size_bytes=10, sha256="b" * 64,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    with pytest.raises(RemoteFileCatalogueLimitError):
+        materialize_carried_file_descriptor(
+            db, refused, sender_fingerprint=remote_identity.fingerprint,
+            max_remote_files_per_area=0,
+        )
+
+    wanted = inventory_wanted_ids(
+        db,
+        requested_boards={},
+        requested_channels={},
+        requested_file_areas={"remote-area-id": [genesis.content_id, refused.content_id]},
+    )
+
+    assert wanted == []
     db.close()

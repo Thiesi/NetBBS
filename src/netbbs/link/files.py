@@ -282,6 +282,36 @@ def get_remote_file(db: Database, file_id: str) -> RemoteFile | None:
     return None if row is None else _remote_file_from_row(row)
 
 
+def _save_refused_descriptor_event(
+    db: Database, descriptor: FileDescriptor, *, sender_fingerprint: str
+) -> None:
+    """Retain a `file_descriptor` whose catalogue row this node declined
+    on `max_remote_files_per_area` (design doc §13.9).
+
+    Accepting an event and projecting it locally are separate decisions
+    everywhere else in this module's neighbours -- a `board_genesis`
+    refused on `max_carried_boards` is already in `link_events` by the
+    time materialization declines it. A refused descriptor was the one
+    case that kept neither, so nothing on this node could tell "declined
+    this" from "never saw this": it was re-offered by its origin on every
+    pass, occupying a push budget that then never reached anything else,
+    and forgotten entirely across a restart.
+    """
+    db.connection.execute(
+        """
+        INSERT INTO link_events
+            (content_id, sender_fingerprint, object_type, envelope_json, received_at, file_area_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(content_id) DO NOTHING
+        """,
+        (
+            descriptor.content_id, sender_fingerprint, FILE_DESCRIPTOR_OBJECT_TYPE,
+            json.dumps(descriptor.to_dict()), utc_now_iso(), descriptor.payload["area_id"],
+        ),
+    )
+    db.connection.commit()
+
+
 def materialize_carried_file_descriptor(
     db: Database,
     descriptor: FileDescriptor,
@@ -349,6 +379,15 @@ def materialize_carried_file_descriptor(
         max_remote_files_per_area is not None
         and remote_file_count_for_area(db, area_local_id) >= max_remote_files_per_area
     ):
+        # The event is still accepted and retained; only the catalogue
+        # row is refused (Codex review of #498). That mirrors what a
+        # carry-quota refusal does for a `board_genesis`, where
+        # `save_event` has already run -- and it is what stops the
+        # refused descriptor being reported as wanted on every pass
+        # forever, re-pushed by the origin and starving everything
+        # behind it. Committed on its own, because the raise below
+        # unwinds the caller, not merely this statement.
+        _save_refused_descriptor_event(db, descriptor, sender_fingerprint=sender_fingerprint)
         raise RemoteFileCatalogueLimitError(
             f"cannot catalogue file {file_id!r}: already at this node's own "
             f"max_remote_files_per_area limit ({max_remote_files_per_area}) for area_id "

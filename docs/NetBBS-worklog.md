@@ -2260,10 +2260,34 @@ there are a handful of them. And a `wanted` entry this node merely *carries* is
 skipped: push has only ever carried self-originated content, and the requester
 reaches the rest through its own inventory pull.
 
-**Compatibility shape.** A response with no `wanted` key is a peer predating
-this, which is not the same as a peer answering `[]`; the client keeps those
-distinct (`None` versus empty) and falls back to one request's worth of own
-events, so a first-contact peer still receives this node's genesis events.
+**`wanted` is required, and a missing one is not a compatibility case.** Every
+node on this mesh is upgraded together, so a 200 response omitting it is a
+broken responder and is rejected as malformed. Tolerating it would have been the
+compatibility layer, and removing that tolerance is what leaves a single meaning
+for "this pass produced no `wanted` list": the inventory exchange failed — a
+peer whose `/inventory` route errors while `/events` still accepts a push. That
+case still pushes, walking the originated history from a rotating per-peer
+offset held for the lifetime of one sync loop, because re-offering the same head
+every pass would never deliver the rest to such a peer, and an asymmetric one
+never dials back to pull it.
+
+**Accepting an event and projecting it locally are separate decisions, and
+both have to be recorded.** Every quota refusal (§13.9) keeps the event and
+declines only the local row — `board_genesis` past `max_carried_boards`,
+`file_descriptor` past `max_remote_files_per_area`. Anything that instead keeps
+*neither* cannot tell "declined this" from "never saw this" afterwards, which
+reads as a permanent gap: the resource is reported as wanted on every pass, its
+origin re-pushes the same prefix forever, and everything ordered behind it is
+starved. A refused `file_descriptor` was that case until it was made to persist
+its event like the others.
+
+**What `wanted` may consult is a disclosure boundary.** It is computed per
+declared resource, never against the global dedup set — that set spans
+`link_message`s, acknowledgements and `key_transition`s, which §8.8 keeps out of
+inventory, so consulting it turns the response into a membership oracle for any
+completed peer willing to file a known content ID under a fabricated resource.
+A resource this node has seen and declined wants nothing further; one it has
+never seen wants everything declared for it.
 
 **Test method.** Asserting only that the peer ends up holding everything proves
 nothing here — the old code converged too, via pull. Record the push requests
