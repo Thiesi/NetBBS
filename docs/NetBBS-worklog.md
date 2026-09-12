@@ -5045,6 +5045,37 @@ abandon preview and its receipt are panels rather than exemptions. What stays
 excused is what no sequence of keys reaches: fifteen spent turns, an emptied
 wallet, a season rollover, a world with no rivals in it.
 
+**A skip of a transition is not an acknowledgement of what follows it.** A
+reveal hands its skip key back, so one press both finishes the reveal and answers
+the screen being revealed. The carrier sweep is the other case: what follows it is
+the receipt for the turn just spent, whose bar takes any key, so handing the key
+back meant a caller who skipped the animation never saw what their turn bought.
+The sweep consumes the whole input unit instead. The rule that decides it is
+whether the thing after the motion is the same screen the motion was drawing.
+
+**A selector has to see the screen in every spelling it is drawn in.** The plain
+preset draws the frame in ASCII, so an entry row starts `|` where Unicode starts
+`┃`; stripping only the Unicode edge left a character before every `[K]` marker and
+no walk that names an entry by what it is could find one. The whole build died on
+the first such walk, under one preset out of four -- which is the argument for
+building every preset rather than sampling one.
+
+**"Until it stops changing" is the wrong end for a screen that leaves.** The
+first-visit guide takes any key per page and then hands the caller the switchboard,
+so paging it that way photographed the switchboard under the guide's name and then
+pressed Enter at a prompt that answers nothing. War Dialer prints `page i/n` in the
+border -- and in Fast mode's title row, which has no border -- precisely so a
+scripted walk can know whether there is another page; `page_note`'s own docstring
+says so. A paged walk now stops where the screen says it ends, and a screen that
+prints no counter has exactly one page.
+
+**"The fixture is not in that state" is not the same as "no walk can reach it".**
+The first screen every new caller sees was excused as unreachable because the
+cached fixture is past it by construction -- while `base_fixture` was driving that
+very screen and throwing the capture away. A walk can ask for a world nobody has
+played instead, and the guide is four panels at the forty-column floor. Twice now
+an exemption has been an implementation detail wearing the clothes of a law.
+
 **A screen with three versions needs three panels.** One walk opened whichever
 owner service the fixture happened to hold, which was always the Carrier Switch --
 so the Public PBX's *negative* Heat gauge and the Warez Hub's bust gauge, the two

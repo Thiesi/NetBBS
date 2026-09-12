@@ -4278,9 +4278,14 @@ def exchange_detail_cards(p: Palette, exchange: Exchange, player: Player | None,
                                       f"+{CAPTURE_RANK}", style=p.mint)], width)
     terms += prose_rows(p, ("Your service: " if mine else "Owner service: ") + service,
                         width, style=p.grey)
+    # The action this card has just priced. For a rival's exchange that is Root:
+    # every stake above it -- the capture price, the public defence, the odds and
+    # the capture Rank -- belongs to contesting the exchange, while a raid is a
+    # separate cash-stealing attempt on its owner with odds nobody can show.
     terms += prose_rows(p, "Back on the switchboard, "
                         + ("[G] Garrison manages this holding and opens its service."
-                           if mine else "[R] Raid reaches its owner."
+                           if mine else
+                           "[X] Root contests it; [R] Raid takes cash from its owner instead."
                            if exchange.controller_user_id is not None else
                            "[X] Root contests it."), width, style=p.grey)
     cards = [("", head), ("DEFENCE", defence_rows), ("TERMS", terms)]
@@ -5241,6 +5246,13 @@ def resolve_sweep(p: Palette, width: int, *, amount: int = 0) -> None:
     screen the caller just pressed a key at would have pushed that screen past
     the bottom of a twelve-row terminal -- motion is not allowed to spend rows
     a screen's height budget has already been spent on.
+
+    The skip is *not* handed back, unlike a reveal's. What follows a sweep is the
+    receipt for what just happened, and its bar takes any key: handing the key
+    back meant one press skipped the sweep and dismissed the result behind it in
+    the same breath, so a caller who did not want the animation never saw what
+    their turn bought. Only a key pressed while the result itself is revealing
+    acknowledges the result.
     """
     if not motion_enabled(p):
         return
@@ -5252,7 +5264,7 @@ def resolve_sweep(p: Palette, width: int, *, amount: int = 0) -> None:
         money = sty(p.amber + BOLD, f"${amount * step // span:,}") if amount else ""
         out("\r  " + label + " " + sty(p.phosphor, gl("meter_on") * step)
             + sty(p.phosphor_dim, gl("meter_off") * (span - step)) + "  " + money)
-        if _beat(MOTION_BUDGET_SECONDS / span):
+        if _beat(MOTION_BUDGET_SECONDS / span, hand_back=False):
             break
     out_line()
 

@@ -61,6 +61,13 @@ import website_ansi_to_html as term  # noqa: E402
 SPAN = re.compile(r'<span style="([^"]*)">(.*?)</span>')
 ANSI = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 CLEAR = "\x1b[2J\x1b[H"
+# A row's frame edge, in either spelling. The plain preset draws the box in ASCII
+# (`|` where Unicode has `┃`), and stripping only the Unicode one left every entry
+# row beginning with a character before its `[K]` marker -- so under that preset
+# no walk that names an entry by what it is could find one.
+FRAME_EDGE = re.compile(r"^[\s┃|]*")
+#: A screen's own statement of which page this is, which it prints for this.
+PAGE_NOTE = re.compile(r"page (\d+)/(\d+)")
 
 # A keystroke is isolated by the silence around it: comfortably more than War
 # Dialer's 20ms burst window, and enough quiet afterwards for the door to have
@@ -143,6 +150,9 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Navigation Chart, map", b"CV"),
     ],
     "war_dialer": [
+        # Before the career exists: the guide every new caller is handed, paged
+        # with any key, which is why it is walked with Enter rather than [N].
+        ("First visit", b"\r%"),
         # The switchboard is a card stack paged with [N]: two pages at eighty
         # columns and fourteen at forty, where the gauges, the scene, the feed,
         # the orders and the season card each get their own (issue #494).
@@ -333,6 +343,12 @@ SEED = {"war_dialer": seed_war_dialer}
 # starts on the switchboard rather than spending its first key on the receipt.
 CASE_AN_OPERATION = b"O1?1?1?" + b"N*" + b"A"   # contract, approach, preview, Act
 PREPARE_IT = b"\r" + b"O1?1?" + b"N*" + b"A"    # continue the saved one, preview, Act
+# Walks that want a world nobody has played, rather than the cached fixture: the
+# first-visit guide exists only before there is a career, and `base_fixture` was
+# driving it and throwing the screens away. A fresh state costs this panel the
+# door's own registration, which is what a new caller pays too.
+FRESH: dict[str, set[str]] = {"war_dialer": {"First visit"}}
+
 SETUP: dict[str, dict[str, bytes]] = {
     "war_dialer": {
         # The three owner services are three different previews, and which
@@ -361,6 +377,7 @@ SETUP: dict[str, dict[str, bytes]] = {
 # unchecked.
 SHOWS: dict[str, dict[str, str]] = {
     "war_dialer": {
+        "First visit": "FIRST VISIT",
         "Switchboard": "SWITCHBOARD",
         "BBS scene": "BBS SCENE",
         "Crew insignia": "CREW INSIGNIA",
@@ -553,6 +570,12 @@ class Door:
         time.sleep(QUIET)  # every key arrives alone; a burst is discarded as paste
         with self.lock:
             before = len(self.out)
+        if self.proc.poll() is not None:
+            # Writing to a closed pipe raises `OSError: [Errno 22]` on Windows,
+            # which says nothing about the walk that ran out of door.
+            raise SystemExit(f"{self.door.name} had already exited (code "
+                             f"{self.proc.poll()}) when {key!r} was pressed at "
+                             f"{self.size}: a key before it left the game")
         self.proc.stdin.write(key)
         self.proc.stdin.flush()
         self.settle(before, f"key {key!r}", expect=expect)
@@ -606,7 +629,7 @@ class Door:
             screen = ANSI.sub("", last_screen(self.read()))
             key = None
             for row in screen.split("\r\n"):
-                stripped = row.strip("\u2503 ")
+                stripped = FRAME_EDGE.sub("", row)
                 found = re.match(r"\[(\w)\]", stripped)
                 if found:
                     key = found.group(1)
@@ -623,14 +646,26 @@ class Door:
                          f"{self.size}"
                          + (f" (found it as [{wanted}], never offered)" if wanted else ""))
 
-    def press_pages(self, key: bytes, *, limit: int = 24) -> list[str]:
+    def press_pages(self, key: bytes, *, limit: int = 32) -> list[str]:
         """This screen and every page after it, turned with `key`.
 
-        Stops when a press stops changing the screen, which is the same end at
-        every terminal size -- a paging key on the last page still redraws.
+        War Dialer prints `page i/n` in the border for exactly this -- its own
+        `page_note` calls the counter "the handle a scripted walk uses to know
+        whether there is another page to turn" -- so stop on page n rather than
+        on "the screen stopped changing". For a screen that is merely paged those
+        are the same end; for one that *leaves* when its last page is
+        acknowledged they are not, and the first-visit guide takes any key and
+        then hands the caller the switchboard -- which "until it stops changing"
+        photographed twice under the guide's name. A screen that prints no
+        counter has exactly one page: `page_note` writes one whenever there is
+        more than one, and Fast mode, which has no border to write it into, puts
+        it in the title row for the same reason.
         """
         pages = [last_screen(self.read())]
         for _ in range(limit):
+            note = PAGE_NOTE.search(ANSI.sub("", pages[-1]))
+            if not note or note.group(1) == note.group(2):
+                break
             self.press(key)
             page = last_screen(self.read())
             if page == pages[-1]:
@@ -771,6 +806,18 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
     return pages
 
 
+def blank_world(door: pathlib.Path, state: pathlib.Path) -> None:
+    """Create the world a fresh walk will play, without playing any of it.
+
+    A display preset is written *into* the world, and a world nobody has opened
+    has no tables to write it to -- `no such table: meta` on the first-visit
+    panel. The door's own `connect` builds and migrates the schema; it registers
+    nobody, so the caller is still new and the guide is still to come.
+    """
+    game = load_door(door)
+    game.connect(state / f"{door.stem.replace('_', '-')}.db").close()
+
+
 def apply_preset(state: pathlib.Path, extra: dict) -> dict:
     """Put the preset where the door reads it; return what the drop file needs."""
     style = extra.get("display_style")
@@ -906,7 +953,11 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
         work = pathlib.Path(tempfile.mkdtemp(dir=run_dir))
         try:
             state = work / "state"
-            shutil.copytree(fixture, state)
+            if label in FRESH.get(door_name, ()):
+                state.mkdir(parents=True)
+                blank_world(door, state)
+            else:
+                shutil.copytree(fixture, state)
             info_extra = apply_preset(state, extra)
             setup = SETUP.get(door_name, {}).get(label)
             if setup:
@@ -914,6 +965,11 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
                 # to work at every terminal; what it draws is thrown away.
                 capture(door, state, setup, 80, 24, info_extra)
             return capture(door, state, keys, width, height, info_extra)
+        except BaseException as exc:
+            # A build of nine hundred panels that dies must say which walk died:
+            # the bare exception names a key and a size, and never the screen.
+            raise SystemExit(f"{label} at {width}x{height} {shot[2]} "
+                             f"({keys!r}): {type(exc).__name__}: {exc}") from exc
         finally:
             remove(work)
 

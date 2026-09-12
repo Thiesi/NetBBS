@@ -3681,7 +3681,6 @@ COMPOSED = {f"{name.upper()} PREVIEW" for name in
 FINER_MARKS = {"SERVICE PREVIEW": ("Recruit:", "outlet:", "Lay Low:")}
 
 UNREACHABLE = {
-    "FIRST VISIT": "the first-launch guide, which every fixture is past by construction",
     "FED CRACKDOWN": "drawn as a season rolls over, which is the clock and not a key",
     "NO RIVAL CREWS": "needs a world with no other crews; this one is seeded with two",
     "ACTION UNAVAILABLE": "a refusal for want of turns: fifteen spent turns is not a walk",
@@ -3999,3 +3998,121 @@ def test_a_service_that_removes_heat_says_how_much_in_the_same_words(tmp_path):
     assert "Remove 7.9 Heat now" in text, text
     assert "7.86231" not in text, text
     conn.close()
+
+
+def test_skipping_the_sweep_does_not_dismiss_the_receipt_behind_it(tmp_path, monkeypatch):
+    """The sweep is a transition into the result, not a screen of its own.
+
+    Handing its skip key on meant one press both skipped the animation and
+    answered the result's "press any key", so a caller who did not want the
+    animation never saw what their turn bought.
+    """
+    palette = wd.Palette(True)
+    monkeypatch.setattr(wd, "out", lambda text: None)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(wd, "_read_key_with_timeout", lambda timeout: " ")
+    wd._PENDING_INPUT.clear()
+    # `read_input_key` is the real one on purpose: without `hand_back` the beat
+    # decodes the whole input unit through it and throws it away, so an arrow key
+    # cannot leave its tail behind to answer the next prompt.
+    wd.resolve_sweep(palette, 72, amount=420)
+    assert wd._PENDING_INPUT == [], "the sweep handed its skip key to the receipt"
+
+    # The receipt that follows still acknowledges on one press of its own.
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_read_key_with_timeout", lambda timeout: None)
+    monkeypatch.setattr(wd, "read_input_key", lambda: "\r")
+    wd.show_action_result(palette, ["Recruited one crew."], wd.ActionDelta(), False, 78, 24)
+    assert "ACTION RESULT" in _ANSI_RE.sub("", "".join(written))
+    wd._PENDING_INPUT.clear()
+
+
+def test_a_rival_exchange_points_at_the_action_it_priced(tmp_path):
+    """The card priced a capture and then sent the caller to Raid.
+
+    Raid is a separate cash-stealing attempt on the owner, with odds the door
+    deliberately will not show; every stake on this card -- the capture price, the
+    public defence, `YOUR ODDS`, the Heat and the capture Rank -- belongs to Root.
+    """
+    conn, now = _painted_world(tmp_path, "points.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    by_id = {exchange.id: exchange for exchange in wd.list_exchanges(conn, 1)}
+    theirs = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, by_id[3], player, 68)
+        for row in rows))
+    assert "[X] Root contests it" in theirs, theirs
+    assert "[R] Raid" in theirs, theirs          # still named, as the other option
+    assert theirs.index("[X] Root") < theirs.index("[R] Raid")
+    # An unclaimed one has no owner to raid, and a holding is managed, not taken.
+    free = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, by_id[2], player, 68)
+        for row in rows))
+    assert "[X] Root contests it." in free and "[R] Raid" not in free
+    mine = _ANSI_RE.sub("", " ".join(
+        row for _, rows in wd.exchange_detail_cards(palette, by_id[1], player, 68)
+        for row in rows))
+    assert "[G] Garrison" in mine and "[X] Root" not in mine
+    conn.close()
+
+
+def test_a_walk_reads_an_entry_through_either_frame():
+    """The plain preset draws the box in ASCII, and a selector has to see past it.
+
+    Stripping only the Unicode `┃` left every entry row beginning with `|` before
+    its `[K]` marker, so under that preset no walk that names an entry by what it
+    is could find one -- and the whole build died on the first of them.
+    """
+    gallery = _gallery()
+    for edge in ("\u2503  [2] Bay   \u27e6WAREZ HUB\u27e6", "|  [2] Bay   [WAREZ HUB]",
+                 "  [2] Bay   [WAREZ HUB]"):
+        assert re.match(r"\[(\w)\]", gallery.FRAME_EDGE.sub("", edge)).group(1) == "2", edge
+    # And a row of prose that merely mentions a key is not an entry.
+    assert not re.match(r"\[(\w)\]",
+                        gallery.FRAME_EDGE.sub("", "\u2503  Already yours; [G] Garrison manages it."))
+
+
+def test_a_paged_walk_stops_where_the_screen_says_it_ends():
+    """"Until it stops changing" is the wrong end for a screen that leaves.
+
+    The first-visit guide takes any key and then hands the caller the switchboard,
+    so paging "until nothing changes" photographed the switchboard under the
+    guide's name -- and then pressed Enter at the switchboard, which answers
+    nothing, and failed the build with `printed nothing after key`. The door
+    prints `page i/n` for exactly this purpose.
+    """
+    gallery = _gallery()
+    assert gallery.PAGE_NOTE.search("FIRST VISIT page 2/4").groups() == ("2", "4")
+    assert gallery.PAGE_NOTE.search("SWITCHBOARD") is None
+    # The door's own counter, in the frame and in Fast mode's title row alike.
+    palette = wd.Palette(True)
+    assert wd.page_note(1, 4) == ["page 2/4"]
+    assert wd.page_note(0, 1) == []          # one page says nothing, and is one panel
+    fast = wd.Palette(True)
+    fast.fast = True
+    rows = wd.frame_rows(fast, 40, [("", ["body"])], title="FIRST VISIT",
+                         trailing=wd.page_note(1, 4))
+    assert "page 2/4" in _ANSI_RE.sub("", " ".join(rows))
+
+
+def test_the_first_screen_a_new_caller_sees_has_a_panel():
+    """It is not unreachable -- it needs a world nobody has played, not an excuse."""
+    gallery = _gallery()
+    walks = dict(gallery.WALKS["war_dialer"])
+    assert walks["First visit"] == b"\r%"        # any key turns its pages
+    assert "First visit" in gallery.FRESH["war_dialer"]
+    assert gallery.SHOWS["war_dialer"]["First visit"] == "FIRST VISIT"
+    assert "FIRST VISIT" not in UNREACHABLE
+
+
+def test_the_operator_guide_names_the_schema_the_code_writes():
+    """A guide that names the wrong version makes its own diagnostics wrong."""
+    guide = " ".join((Path(__file__).resolve().parent.parent / "docs"
+                      / "NetBBS-door-guide.md").read_text(encoding="utf-8").split())
+    version = wd.WORLD_SCHEMA_VERSION
+    assert f"records schema version {version} in SQLite" in guide
+    assert f"upgrades the world to schema {version} transactionally" in guide
+    assert f"Old binaries refuse schema {version}" in guide
+    # And the migration is described, not just numbered.
+    assert f"version {version} clears the actor from receipts" in guide
