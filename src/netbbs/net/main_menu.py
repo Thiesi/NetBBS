@@ -888,6 +888,7 @@ async def _resource_type_menu(
                     session, lane, user,
                     community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
                     door_services=node_controls.door_services if node_controls is not None else None,
+                    presence=presence,
                 )
             else:
                 await session.write_line(

@@ -355,6 +355,11 @@ class NodeControls:
     # exactly like `session_registry`, and typed `Any` for the same
     # import-graph reason as `mrc_bridge` above.
     door_services: Any = None
+    # Issue #470: the node's one `netbbs.chat.presence.PresenceRegistry`, so
+    # the SysOp Who screen can say which door a caller is in. `None` from the
+    # standalone CLI and typed `Any` for the same import-graph reason as
+    # `mrc_bridge` above.
+    presence: Any = None
 
 
 async def run_shutdown_sequence(

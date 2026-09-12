@@ -181,10 +181,15 @@ def _who_entry_name(entry: _WhoEntry) -> str:
     return entry.username or "(unauthenticated)"
 
 
-def _who_entry_description(db: Database, entry: _WhoEntry) -> str:
+def _who_entry_description(db: Database, entry: _WhoEntry, presence=None) -> str:
     if isinstance(entry, _RemoteWhoEntry):
         return f"on linked node {_remote_who_node_label(db, entry)}"
     when = format_for_display(entry.connected_at, db)
+    # Issue #470: which door, not merely that they are in one. Remote entries
+    # carry no door -- a linked node tells us presence, not activity.
+    playing = presence.door_of(entry.username) if presence is not None and entry.username else None
+    if playing:
+        return f"playing {sanitize_text(playing)} -- connected since {when}"
     return f"connected since {when}"
 
 
@@ -440,7 +445,7 @@ async def _caller_who_screen(
             session, await _load_entries(),
             name_of=_who_entry_name,
             stable_id_of=_stable_id,
-            description_of=lambda e: _who_entry_description(db, e),
+            description_of=lambda e: _who_entry_description(db, e, presence),
             title="Who's online",
             empty_message="No one else is online right now.",
             # Issue #304: the network beyond this node, when the MRC

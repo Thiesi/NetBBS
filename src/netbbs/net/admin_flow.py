@@ -6582,8 +6582,13 @@ def _session_name(entry: SessionSummary) -> str:
     return f"(unauthenticated) {entry.peer_address or 'unknown address'}"
 
 
-def _session_description(entry: SessionSummary, display_format: str, display_timezone: str) -> str:
+def _session_description(entry: SessionSummary, display_format: str, display_timezone: str,
+                         presence=None) -> str:
     when = format_for_display(entry.connected_at, override_format=display_format, override_timezone=display_timezone)
+    # Issue #470: which door, not merely that someone is connected.
+    playing = presence.door_of(entry.username) if presence is not None and entry.username else None
+    if playing:
+        return f"playing {sanitize_text(playing)} -- connected since {when}"
     return f"connected since {when}"
 
 
@@ -6614,7 +6619,8 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
         session, entries,
         name_of=_session_name,
         stable_id_of=lambda e: e.session_id,
-        description_of=lambda e: _session_description(e, display_format, display_timezone),
+        description_of=lambda e: _session_description(e, display_format, display_timezone,
+                                                      node_controls.presence),
         title="Active sessions",
         empty_message="No active sessions.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),

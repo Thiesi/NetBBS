@@ -301,6 +301,7 @@ async def handle_session(
         backup_identity_dir=backup_identity_dir,
         transfers=transfers,
         door_services=door_services,
+        presence=presence,
     )
 
     session_registry.enter(session)
@@ -888,6 +889,7 @@ async def handle_ssh_session(
         backup_identity_dir=backup_identity_dir,
         transfers=transfers,
         door_services=door_services,
+        presence=presence,
     )
 
     session_registry.enter(session)
