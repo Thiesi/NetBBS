@@ -139,6 +139,15 @@ def get_or_create_transfer(
     short-circuit: no database in existence has one (confirmed with the
     SysOp), so a repair path would be code that can never run.
 
+    A `'failed'` transfer, by contrast, is reopened here (Codex review of
+    #500). `_finalize_transfer` records that status when reassembled
+    content does not match the catalogue's own hash -- a real outcome,
+    and one nothing else ever cleared, so selecting the file again
+    returned the old failure without contacting anybody: the fetch could
+    never be retried, and if the origin had since dropped the file its
+    withdrawal could never arrive either. Reopening makes the retry a
+    caller asked for actually happen.
+
     Raises `FileTransferError` if `remote_file`'s catalogue row is gone
     (Codex review of #500). `remote_file` is a snapshot a caller picked
     out of a listing, and another session's verified `file_withdrawal`
@@ -152,8 +161,11 @@ def get_or_create_transfer(
     """
     transfer_id = compute_transfer_id(remote_file.file_id, requester_fingerprint)
     existing = get_transfer(db, transfer_id)
-    if existing is not None:
+    if existing is not None and existing.status != "failed":
         return existing
+    if existing is not None:
+        _reopen_failed_transfer(db, existing)
+        return get_transfer(db, transfer_id)
 
     still_catalogued = db.connection.execute(
         "SELECT 1 FROM remote_files WHERE file_id = ?", (remote_file.file_id,)
@@ -177,6 +189,29 @@ def get_or_create_transfer(
     )
     db.connection.commit()
     return get_transfer(db, transfer_id)
+
+
+def _reopen_failed_transfer(db: Database, transfer: TransferState) -> None:
+    """Clear a failed transfer back to a fresh start (design doc §11.3;
+    Codex review of #500).
+
+    Everything the failed attempt accumulated has to go: its chunk
+    records, its byte count, and its staging path -- `_finalize_transfer`
+    already removed the staging file itself when the reassembly failed,
+    so the stored path points at nothing. Keeping any of it would either
+    trip the already-applied dedup or resume from a byte count no file
+    backs.
+    """
+    with db.connection:
+        db.connection.execute(
+            "DELETE FROM link_file_transfer_chunks WHERE transfer_id = ?", (transfer.transfer_id,)
+        )
+        db.connection.execute(
+            """UPDATE link_file_transfers
+               SET status = 'in_progress', bytes_received = 0, temp_path = NULL, updated_at = ?
+               WHERE transfer_id = ?""",
+            (utc_now_iso(), transfer.transfer_id),
+        )
 
 
 def apply_received_chunk(

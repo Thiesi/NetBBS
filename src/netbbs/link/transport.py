@@ -245,8 +245,9 @@ _MAX_ALLOWED_CHUNK_SIZE_BYTES = 1024 * 1024
 # state, and a signature alone is durable -- a recorded 410 would stay
 # usable indefinitely. Same five minutes `_INVENTORY_REQUEST_FRESHNESS_
 # SECONDS` allows, for the same "ordinary clock skew, not durable
-# authority" reason; no nonce cache is needed on top, because the
-# withdrawal is already bound to one requester and one transfer_id.
+# authority" reason. This is the outer bound, not the binding: what ties
+# a withdrawal to one exchange is the echoed `request_nonce`, since
+# `transfer_id` is content-derived and identical across retries.
 _FILE_WITHDRAWAL_FRESHNESS_SECONDS = 5 * 60
 # fetch_next_file_chunk's own default -- matches netbbs.link.file_
 # transfer's internal default exactly (kept as a separate constant

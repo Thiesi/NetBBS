@@ -26,6 +26,7 @@ from netbbs.link.file_transfer import (
     build_chunk_for_serving,
     compute_transfer_id,
     get_or_create_transfer,
+    get_transfer,
 )
 from netbbs.link.files import (
     link_file_area,
@@ -363,10 +364,11 @@ def test_finalize_rejects_a_reassembly_not_matching_the_catalogued_hash(
             claimed_chunk_sha256=hashlib.sha256(chunk_bytes).hexdigest(), is_last=is_last,
             remote_file=tampered_remote_file,
         )
-    failed = get_or_create_transfer(
-        puller_db, tampered_remote_file, requester_fingerprint=puller_identity.fingerprint, chunk_size=100_000,
-    )
-    assert failed.status == "failed"
+    # Observed with `get_transfer`, not `get_or_create_transfer`: the
+    # latter deliberately reopens a failed transfer so a caller can retry
+    # (see test_a_failed_transfer_can_be_retried), which would hide the
+    # status this test is about.
+    assert get_transfer(puller_db, transfer.transfer_id).status == "failed"
 
 
 def test_build_chunk_for_serving_rejects_unknown_file_id(origin_db, puller_db, origin_identity, puller_identity):
@@ -500,3 +502,48 @@ def test_starting_a_transfer_for_an_already_withdrawn_entry_fails_cleanly(
             puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint,
             chunk_size=100_000,
         )
+
+
+def test_a_failed_transfer_can_be_retried(origin_db, puller_db, origin_identity, puller_identity):
+    """Codex review of #500: `_finalize_transfer` records `'failed'` when
+    reassembled content does not match the catalogue's own hash, and
+    nothing ever cleared it. Selecting the file again returned that
+    stale failure without contacting anybody -- the fetch could never be
+    retried, and if the origin had since dropped the file, its
+    withdrawal could never arrive either."""
+    from netbbs.link.files import get_remote_file
+
+    content = os.urandom(4096)
+    entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=content
+    )
+    transfer = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint
+    )
+
+    # A last chunk whose own hash is honest but whose bytes are not the
+    # catalogued file: per-chunk verification passes, whole-file fails.
+    wrong = os.urandom(len(content))
+    with pytest.raises(FileTransferError):
+        apply_received_chunk(
+            puller_db, transfer, chunk_index=0, chunk_bytes=wrong,
+            claimed_chunk_sha256=hashlib.sha256(wrong).hexdigest(), is_last=True,
+            remote_file=remote_file,
+        )
+    assert get_transfer(puller_db, transfer.transfer_id).status == "failed"
+
+    # Selecting it again reopens the transfer instead of replaying the
+    # old failure, and a clean fetch then succeeds.
+    reopened = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint
+    )
+    assert reopened.status == "in_progress"
+    assert reopened.bytes_received == 0
+    assert reopened.next_chunk_index == 0
+
+    finished = _drive_transfer(
+        origin_db, puller_db, remote_file,
+        requester_fingerprint=puller_identity.fingerprint, chunk_size=100_000,
+    )
+    assert finished.status == "completed"
+    assert get_remote_file(puller_db, remote_file.file_id).fetched_file_id == entry.file_id

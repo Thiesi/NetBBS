@@ -903,10 +903,15 @@ whenever a signed object authorizes a deletion:
   is worth anything. The gossiped event classes get this for free because
   `handle_events` dispatches on `object_type`; anything parsed outside that
   dispatch does not, and `from_dict` is where it belongs.
-- **a signature is durable, so it replays.** Bind the object to the exchange it
-  answers (`requester_fingerprint`, `transfer_id`) and check `created_at`
-  freshness, the way `InventoryRequest` does. Without it a recorded 410 stays
-  usable forever, including after a backup restore puts the file back.
+- **a signature is durable, so it replays.** Bind the object to the *request*
+  it answers, and check `created_at` freshness besides, the way
+  `InventoryRequest` does. The binding has to be something that varies per
+  request: `requester_fingerprint` narrows it to a node and `transfer_id` to a
+  fetch, but `transfer_id` is content-derived from `(file_id, requester)` and is
+  therefore identical across every retry — relying on it leaves the whole
+  freshness window open to replay. The chunk request's own authorization nonce
+  is what varies, so the withdrawal echoes it and the requester checks it.
+  Freshness is then an outer bound, not the binding.
 
 The 410 body carrying no usable withdrawal is an ordinary failed fetch.
 
