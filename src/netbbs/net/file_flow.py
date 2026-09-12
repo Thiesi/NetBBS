@@ -509,6 +509,51 @@ async def _render_area_page(
     await session.write_line(
         _menu_row(hints, width=session.terminal_width, height=session.terminal_height, description_level=description_level)
     )
+    await _write_choice_prompt(session)
+
+
+# This screen's one prompt string, written by whoever last put
+# something on screen -- never by the key reader.
+#
+# Dogfood report: `_read_file_choice` used to write this itself, once
+# per call, and the loop below calls it once per keystroke. A key the
+# screen does not handle bells and changes nothing, so the next
+# iteration wrote a second copy with no newline between them, and a
+# caller leaning on Enter got
+#
+#     Choice or command: Choice or command: Choice or command: ...
+#
+# marching across the line. The rule every other interactive loop in
+# the codebase already follows (`netbbs.net.picker`'s docstring states
+# it outright) is that a prompt belongs to a *render*: an action that
+# changes nothing leaves the screen exactly as it was, and the bell is
+# the whole response.
+#
+# The wrinkle specific to this screen is that not every rejection
+# happens with the prompt still intact. `read_editor_key` does not
+# echo, so an unhandled key leaves the cursor sitting right after the
+# prompt and there is nothing to reprint -- but the keys this screen
+# *does* recognize echo themselves with a trailing newline before
+# dispatching, and a typed command line consumes one too. Those have
+# scrolled the prompt away by the time they turn out to be refusable
+# (`o` on a page with no older files, `e` where nothing is
+# describable, an unknown typed command), so they reprint it
+# deliberately. That is the same distinction `picker` draws between a
+# stray keystroke and "a deliberately typed sub-prompt that fails on
+# its own terms."
+_CHOICE_PROMPT = "Choice or command: "
+
+
+async def _write_choice_prompt(session: Session) -> None:
+    await session.write(_CHOICE_PROMPT)
+
+
+async def _reject_after_echo(session: Session) -> None:
+    """Refuse an action whose own keystroke (or typed line) already
+    echoed a newline: bell, then put the prompt back, because the one
+    that was on screen has scrolled up out of reach."""
+    await session.write("\a")
+    await _write_choice_prompt(session)
 
 
 async def _read_file_choice(
@@ -540,9 +585,12 @@ async def _read_file_choice(
     and download were given keys. The slash forms still work — both
     here, through the `read_line()` fallback below for a transport with
     no editor-key support, and as typed commands in `_show_area`.
-    """
-    await session.write("Choice or command: ")
 
+    Deliberately writes no prompt of its own: the prompt belongs to
+    whatever last rendered the screen (see `_CHOICE_PROMPT`). Returning
+    `('none', ...)` means the screen is unchanged and the bell already
+    rung here is the entire response.
+    """
     read_editor_key = getattr(session, "read_editor_key", None)
     if read_editor_key is not None:
         try:
@@ -789,7 +837,7 @@ async def _show_area(
                     return
             elif kind == "upload":
                 if not can_write:
-                    await session.write("\a")
+                    await _reject_after_echo(session)
                     continue
                 if await _handle_upload(
                     session, lane, area, user, link_context=link_context, transfers=transfers
@@ -805,7 +853,7 @@ async def _show_area(
                 continue
             elif kind == "weblink":
                 if transfers is None:
-                    await session.write("\a")
+                    await _reject_after_echo(session)
                     continue
                 await _transfer_link_screen(
                     session, lane, user, area, page,
@@ -815,7 +863,7 @@ async def _show_area(
                 continue
             elif kind == "describe":
                 if not _can_describe(page):
-                    await session.write("\a")
+                    await _reject_after_echo(session)
                     continue
                 page = await _handle_describe(
                     session, lane, area, user, page,
@@ -846,7 +894,11 @@ async def _show_area(
                     highlighted = None
                     await _render_and_advance_cursor(page, highlighted=highlighted)
                 else:
-                    await session.write("\a")
+                    # `b`/`o`/`n`/`r` echo themselves with a newline
+                    # before dispatching, so a nav key refused at the
+                    # edge of the listing has already scrolled the
+                    # prompt away.
+                    await _reject_after_echo(session)
                 continue
             elif kind == "command":
                 choice = target or ""
@@ -937,6 +989,11 @@ async def _show_area(
                         await session.write("File number or name to download: ")
                         sub_choice = (await session.read_line()).strip()
                         if not sub_choice:
+                            # Backing out of the sub-prompt is not a
+                            # rejection, so no bell -- but it consumed
+                            # a line, so the screen still owes the
+                            # caller a prompt to type the next thing at.
+                            await _write_choice_prompt(session)
                             continue
                         if sub_choice.isdigit() and 1 <= int(sub_choice) <= len(page.entries):
                             exact = next((e.filename for e in page.entries if e.filename == sub_choice), None)
@@ -946,7 +1003,9 @@ async def _show_area(
                         await _handle_download(session, lane, area, target_file, user, transfers=transfers)
                         return
                 else:
-                    await session.write("\a")
+                    # A typed line that means nothing here. Enter
+                    # consumed the prompt, so it has to come back.
+                    await _reject_after_echo(session)
         return
 
     # This screen has no listing to act on, so [E] resolves its target
