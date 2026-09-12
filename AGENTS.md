@@ -108,7 +108,10 @@ The standing principle is:
   between launches (Retro Trivia, whose round is drawn fresh from an unseeded
   RNG) is not in it yet and is reviewed by running it. Add the screen you changed
   to `WALKS` if no walk reaches it -- the door's own dispatch is the authority on
-  which key opens what, not the action bar. What the tests *can* assert, and do:
+  which key opens what, not the action bar. A walk keeps only the screen it stops
+  on, so a screen on the way to another screen needs its own walk; each walk says
+  in `SHOWS` what its screen must show, and the build refuses a panel that does
+  not show it. What the tests *can* assert, and do:
   that colour reaches every body row, that a hotkey, a label, a value and the
   frame are four different colours, that one thing reads the same colour on every
   screen that shows it, and that a table's columns do not wander from row to row.

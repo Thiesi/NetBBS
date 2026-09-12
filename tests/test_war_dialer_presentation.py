@@ -14,6 +14,7 @@ subprocess, not an ordinarily-imported library module.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import json
@@ -3622,3 +3623,116 @@ def test_the_heat_chip_warns_about_what_a_trade_would_leave(tmp_path, heat, expe
         state = wd.dashboard_state(conn, 1, now)
         assert any("without a bust roll" in line for line in wd.next_steps(state, now))
     conn.close()
+
+
+def _gallery():
+    """`scripts/door_gallery.py` as a module, for the walks it declares."""
+    path = Path(__file__).resolve().parent.parent / "scripts" / "door_gallery.py"
+    spec = importlib.util.spec_from_file_location("gallery_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _door_screen_titles() -> tuple[set[str], list[int]]:
+    """Every title the door writes into a frame heading, from its own source.
+
+    Read from the two wrappers every screen with a heading goes through, so a
+    screen added tomorrow is found without anyone remembering to list it. The
+    second return value is the call sites whose title is composed rather than
+    written; they are named in `COMPOSED` and counted, so a third one fails here
+    rather than going unphotographed.
+    """
+    tree = ast.parse(_WAR_DIALER_PATH.read_text(encoding="utf-8"))
+    titles: set[str] = set()
+    composed: list[int] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id not in ("show_text_pages", "pick_record_page") or len(node.args) < 2:
+            continue
+        argument = node.args[1]
+        parts = ([argument.body, argument.orelse] if isinstance(argument, ast.IfExp)
+                 else [argument])
+        for part in parts:
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                titles.add(part.value)
+            else:
+                composed.append(node.lineno)
+    return titles, composed
+
+# The titles the door composes: a confirmation is named after the action it
+# commits, an operation step after the step in hand.
+COMPOSED = {f"{name.upper()} PREVIEW" for name in
+            ("trade", "job", "recruit", "crew", "root", "service", "raid",
+             "case", "prepare", "execute")}
+
+# Screens the gallery cannot reach from one cached fixture, and why. A fixture is
+# a single world in a single state: it cannot be both mid-operation and idle, both
+# populated and empty, both solvent and too poor to act. Anything not listed here
+# must be photographed -- that is the whole argument of the gallery.
+UNREACHABLE = {
+    "FIRST VISIT": "the first-launch guide, which the fixture is past by construction",
+    "FED CRACKDOWN": "drawn only as a season rolls over",
+    "NO RIVAL CREWS": "needs a world with no other crews; the fixture has two",
+    "ACTIVE OPERATION": "needs an operation already paid for",
+    "PREPARE PREVIEW": "the second step of an operation the fixture has not cased",
+    "EXECUTE PREVIEW": "the third step of an operation the fixture has not prepared",
+    "ABANDON PREVIEW": "offered only while an operation is in progress",
+    "OPERATION ABANDONED": "the receipt for abandoning one",
+    "ACTION UNAVAILABLE": "a refusal; the fixture is deliberately able to act",
+    "GARRISON UNAVAILABLE": "ditto, for a crew move",
+    "PURCHASE UNAVAILABLE": "ditto, for a kit",
+    "RAID UNAVAILABLE": "ditto, for a raid",
+    "ROOT UNAVAILABLE": "ditto, for a capture",
+}
+
+
+def test_every_screen_the_door_can_draw_is_photographed_by_a_walk():
+    """The gallery is only a countermeasure for the screens it photographs.
+
+    A walk keeps the screen it is looking at when its keys run out, so passing
+    *through* a picker reviews nothing of it: the approach pickers and the recon
+    preview were rebuilt, walked over twice a panel, and appeared in none of 468
+    panels. This reads the door's own source rather than a list someone maintains,
+    so the next screen added is either walked or deliberately excused here.
+    """
+    gallery = _gallery()
+    titles, composed = _door_screen_titles()
+    # Both composed titles are accounted for in COMPOSED; a third is not.
+    assert len(composed) == 2, f"a new composed screen title at lines {composed}"
+    walks = gallery.SHOWS["war_dialer"]
+    assert [label for label, _ in gallery.WALKS["war_dialer"]] == list(walks), (
+        "every walk must declare what its screen shows")
+    shown = set(walks.values())
+    unphotographed = sorted(
+        title for title in titles | COMPOSED
+        if title not in UNREACHABLE
+        and not any(mark == title or mark in title for mark in shown))
+    assert not unphotographed, (
+        "these screens appear in no gallery panel; add a walk that ends on each, "
+        f"or excuse it in UNREACHABLE with a reason: {unphotographed}")
+    # And nothing is excused that the door no longer draws, or that a walk now
+    # reaches after all -- a stale excuse hides the next gap.
+    stale = sorted(title for title in UNREACHABLE
+                   if title not in titles | COMPOSED
+                   or any(mark == title for mark in shown))
+    assert not stale, f"excused but reachable or gone: {stale}"
+
+
+def test_a_walk_is_named_by_an_entry_a_picker_cannot_move():
+    """A digit is not a name for an entry a picker appends after a list.
+
+    The exchange control screen puts the owner service after one entry per crew
+    transfer the holding can make, so `3` meant the service only while the
+    fixture happened to offer exactly two -- and a digit that lands on a transfer
+    publishes a garrison preview under the service's caption.
+    """
+    gallery = _gallery()
+    walks = dict(gallery.WALKS["war_dialer"])
+    assert walks["Owner service preview"].endswith(b"$")
+    # The suffix is explained where the others are, so the next walk can use it.
+    source = (Path(gallery.__file__).read_text(encoding="utf-8")
+              if gallery.__file__ else "")
+    assert "#   `$`" in source

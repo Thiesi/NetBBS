@@ -76,7 +76,7 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 # not to every panel. The key is the one the door's own dispatch uses -- check it
 # there, not in the action bar, before adding a walk.
 #
-# Two suffixes exist because how much fits a page depends on the terminal, so a
+# The suffixes exist because how much fits a page depends on the terminal, so a
 # walk can name a place or an entry but never a page number:
 #
 #   `*`  press this key until the screen stops changing, then photograph that.
@@ -91,6 +91,18 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 #        entry rather than a named one. The root picker marks the caller's own
 #        holdings `[-]`, so which digit it accepts depends on the fixture's own
 #        history -- naming one there broke the build twice as the fixture grew.
+#   `$`  page to the last page and press the last key offered there, for an entry
+#        a picker appends after a variable list. The exchange control screen puts
+#        the owner service after however many crew transfers the holding happens
+#        to offer, so `3` meant the service only for as long as the fixture kept
+#        exactly two of them -- and a digit that lands on a transfer instead
+#        publishes a garrison preview under the service's caption.
+#
+# A walk photographs one screen: the one it is looking at when its keys run out.
+# Passing *through* a picker on the way somewhere else therefore reviews nothing
+# of it, so a screen on the way to another screen needs a walk of its own that
+# stops there. `SHOWS` names what each walk's screen must say, and the build
+# refuses to publish a panel that does not say it.
 WALKS: dict[str, list[tuple[str, bytes]]] = {
     "voidrunner": [
         ("Command Deck", b""),
@@ -122,6 +134,9 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("BBS scene", b"I"),
         ("Crew insignia", b"I1?"),
         ("Insignia preview", b"I1?1?"),
+        # Committing the insignia is its own screen, and the only result screen
+        # in the door that reports a change costing nothing.
+        ("Insignia chosen", b"I1?1?A"),
         ("Neutral dossiers", b"I2?"),
         ("Scene bulletins", b"I3?"),
         ("Season results", b"I4?"),
@@ -144,7 +159,10 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Log", b"H"),
         ("Contract board", b"J"),
         # An action's preview is two pickers deep: the board, the approach, and
-        # only then the terms the player is actually asked to accept.
+        # only then the terms the player is actually asked to accept. Each of the
+        # three is a screen, so each is a walk: a walk to the preview passes
+        # through the approach picker and photographs only the preview.
+        ("Choose approach", b"J1?"),
         ("Job preview", b"J1?1?"),
         ("Job preview, terms", b"J1?1?N"),
         ("Trade preview", b"T"),
@@ -159,17 +177,25 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Garrisons", b"G"),
         ("Exchange control", b"G1?"),
         # The transfer preview and the owner service are both behind the control
-        # screen; which digit the service is depends on how many crew transfers
-        # the fixture's holding offers, so `?` makes a changed fixture fail the
-        # build rather than quietly drop the panel.
+        # screen. The service is the entry after the transfers, and how many of
+        # those there are is the fixture's business, so it is named as the last
+        # one rather than by a digit that would silently come to mean a transfer.
         ("Garrison preview", b"G1?1?"),
-        ("Owner service preview", b"G1?3?"),
+        ("Owner service preview", b"G1?$"),
         ("Operations", b"O"),
         ("Case an operation", b"O1?"),
         # The step-stakes card is two pickers past the hub: the contract, the
         # approach, and only then the terms the caller is asked to accept.
+        ("Operation approach", b"O1?1?"),
         ("Case preview", b"O1?1?1?"),
+        # Recon names its target first and prices it second; which rival the
+        # fixture offers first is its own business, hence `#`.
         ("Rival recon", b"O2?"),
+        ("Recon preview", b"O2?#"),
+        # The dossier list as a caller first meets it. A populated one would need
+        # a snapshot in the fixture, and a snapshot expires after a day, so a
+        # cached fixture would quietly photograph this same empty state anyway.
+        ("Your dossiers", b"O3?"),
         ("Help", b"?"),
         ("Help, later sections", b"?N"),
     ],
@@ -261,6 +287,62 @@ def seed_war_dialer(door: pathlib.Path, state: pathlib.Path) -> None:
 
 
 SEED = {"war_dialer": seed_war_dialer}
+
+# What has to be legible on the screen a walk stops at, checked against the
+# painted panel rather than the door's bytes. A caption is a claim about a
+# picture, and a walk drives a picker whose entries move as the fixture grows:
+# without this the gallery could publish the exchange control screen's transfer
+# preview under "Owner service preview" and read as a complete review. Every walk
+# of a door listed here must name its screen, so a new walk cannot be added
+# unchecked.
+SHOWS: dict[str, dict[str, str]] = {
+    "war_dialer": {
+        "Switchboard": "SWITCHBOARD",
+        "Switchboard, page 2": "SWITCHBOARD",
+        "Switchboard, last page": "SWITCHBOARD",
+        "BBS scene": "BBS SCENE",
+        "Crew insignia": "CREW INSIGNIA",
+        "Insignia preview": "INSIGNIA PREVIEW",
+        "Insignia chosen": "CREW IDENTITY",
+        "Neutral dossiers": "NEUTRAL DOSSIERS",
+        "Scene bulletins": "SCENE BULLETINS",
+        "Season results": "SEASON RESULTS",
+        "Your season reports": "YOUR SEASON REPORTS",
+        "Hall of Fame": "HALL OF FAME",
+        "Display options": "DISPLAY",
+        "The scene": "THE SCENE",
+        "Exchange card": "DEFENCE",
+        "Rank": "SEASON STANDINGS",
+        "Rivals": "RIVAL DIRECTORY",
+        "Raid targets": "RAID TARGETS",
+        "Raid preview": "RAID PREVIEW",
+        "Log": "EVENT LOG",
+        "Contract board": "CONTRACT BOARD",
+        "Choose approach": "CHOOSE APPROACH",
+        "Job preview": "JOB PREVIEW",
+        "Job preview, terms": "JOB PREVIEW",
+        "Trade preview": "TRADE PREVIEW",
+        "Recruit preview": "RECRUIT PREVIEW",
+        "Action result": "ACTION RESULT",
+        "Crew development": "CREW DEVELOPMENT",
+        "Crew preview": "CREW PREVIEW",
+        "Root exchange": "ROOT EXCHANGE",
+        "Root preview": "ROOT PREVIEW",
+        "Garrisons": "YOUR GARRISONS",
+        "Exchange control": "EXCHANGE CONTROL",
+        "Garrison preview": "GARRISON PREVIEW",
+        "Owner service preview": "SERVICE PREVIEW",
+        "Operations": "OPERATIONS / RECON",
+        "Case an operation": "CASE AN OPERATION",
+        "Operation approach": "OPERATION APPROACH",
+        "Case preview": "CASE PREVIEW",
+        "Rival recon": "RIVAL RECON",
+        "Recon preview": "RECON PREVIEW",
+        "Your dossiers": "YOUR DOSSIERS",
+        "Help": "HOW TO PLAY",
+        "Help, later sections": "HOW TO PLAY",
+    },
+}
 
 # Every preset a caller can choose, applied to the fixture's copy rather than
 # passed as a flag: Voidrunner keeps its display style in the career (all four of
@@ -435,6 +517,20 @@ class Door:
         raise SystemExit(f"{self.door.name} offered no key at {self.size}:\n"
                          f"{self.offered()!r}")
 
+    def press_last_offered(self, *, limit: int = 24) -> None:
+        """Page to the last page and press the last key offered there.
+
+        The only stable way to name an entry a picker appends after a list whose
+        length is the fixture's business: the exchange control screen's owner
+        service sits after one crew transfer per offer the holding can make.
+        """
+        self.press_to_end(b"N", limit=limit)
+        keys = re.findall(r"\[(\w)\]", self.offered())
+        if not keys:
+            raise SystemExit(f"{self.door.name} offered no key on its last page "
+                             f"at {self.size}:\n{self.offered()!r}")
+        self.press(keys[-1].encode())
+
     def press_when_offered(self, key: bytes, *, limit: int = 24) -> None:
         """Page forward until the screen offers `key`, then press it.
 
@@ -522,6 +618,10 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
                 continue
             if key == b"#":
                 running.press_first_offered()
+                index += 1
+                continue
+            if key == b"$":
+                running.press_last_offered()
                 index += 1
                 continue
             running.press(key, expect=expect)
@@ -632,6 +732,19 @@ def to_html(screen: str, width: int, height: int, styles: dict[str, str]) -> str
     return "\n".join(out) or "&nbsp;"
 
 
+def painted(screen: str, width: int, height: int) -> str:
+    """The panel's text as one line, read back through the emulator that paints it.
+
+    Checking the door's bytes would not do: a heading is styled, so in the byte
+    stream its words are separated by the sequences that colour them, and a
+    screen drawn with cursor moves says nothing in the order it was written.
+    """
+    canvas = term.Screen(width, height)
+    canvas.feed(screen)
+    rows = ["".join(char for char, _ in row) for row in canvas.cells]
+    return " ".join(" ".join(rows).split())
+
+
 def build(door_name: str, widths: list[int], heights: dict[int, int],
           out_dir: pathlib.Path, fresh: bool) -> pathlib.Path:
     door = ROOT / "src/netbbs/doors/bundled" / f"{door_name}.py"
@@ -639,6 +752,12 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
         raise SystemExit(f"no such bundled door: {door}")
     out_dir.mkdir(parents=True, exist_ok=True)
     fixture = base_fixture(door_name, door, out_dir, fresh)
+
+    shows = SHOWS.get(door_name, {})
+    unnamed = [label for label, _ in WALKS[door_name] if label not in shows]
+    if shows and unnamed:
+        raise SystemExit("every walk must say what its screen shows; "
+                         f"{door_name} does not for: {', '.join(unnamed)}")
 
     shots = [(label, keys, preset, extra, width, heights.get(width, 24))
              for label, keys in WALKS[door_name]
@@ -667,6 +786,15 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
             screens = list(pool.map(shoot, shots))
     finally:
         remove(run_dir)
+
+    # A panel that is not the screen its caption names is worse than a missing
+    # one: it reads as a review of a screen nobody has looked at.
+    wrong = [f"  {label} at {width}x{height} {preset}: no {shows[label]!r} on screen"
+             for (label, _, preset, _, width, height), screen in zip(shots, screens)
+             if label in shows and shows[label] not in painted(screen, width, height)]
+    if wrong:
+        raise SystemExit(f"{door_name}: a walk did not end on the screen it names:\n"
+                         + "\n".join(wrong))
 
     styles: dict[str, str] = {}
     sections, panels, current = [], [], shots[0][0]

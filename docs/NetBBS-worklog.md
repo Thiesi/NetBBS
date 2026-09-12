@@ -4999,6 +4999,37 @@ index so the raw bytes consumed are still tracked exactly -- and a walk that has
 to accept a preview presses Next until the Act bar appears rather than assuming
 the stakes fit on one page.
 
+**A walk photographs one screen: the one it is looking at when its keys run
+out.** Passing *through* a picker on the way somewhere else therefore reviews
+nothing of it. The job and operation approach pickers and the recon preview were
+all rebuilt, walked over twice per panel by the walks that went past them to a
+preview, and appeared in none of 468 panels. A screen on the way to another
+screen needs a walk that stops there. A test now reads the screen titles out of
+the door's own source -- every `show_text_pages` and `pick_record_page` call, so
+that a screen added tomorrow is found without anyone remembering to list it --
+and fails unless each is either
+photographed or excused in `UNREACHABLE` with the reason one cached fixture
+cannot reach it (it cannot be both mid-operation and idle, both populated and
+empty, both solvent and too poor to act). An excuse that stops being true fails
+the test too, because a stale excuse hides the next gap.
+
+**A caption is a claim about a picture, so the build checks it.** Every walk
+declares in `SHOWS` what its screen must say, and the gallery reads the *painted*
+panel back -- through the same emulator that renders it, because a styled heading
+is not a contiguous run of bytes on the wire -- and refuses to publish a panel
+that does not say it. Without that, a walk whose keys land somewhere else
+publishes the wrong screen under the right caption and reads as a completed
+review. A door with a `SHOWS` table must name every one of its walks, so a new
+walk cannot be added unchecked.
+
+**An entry a picker appends after a variable list is named as the last one, not
+by a digit.** Exchange Control offers one transfer per move the holding can make
+and then the owner service, so `3` meant the service only for as long as the
+fixture happened to offer exactly two transfers -- after which the walk would
+have published a garrison preview under the service's caption. The `$` suffix
+pages to the last page and presses the last key offered there, which is what the
+door actually guarantees about that entry.
+
 Paged Voidrunner screens measure their capacity with `page_capacity` -- the
 content column is `_page_content_width()`, the box interior less its indent and
 gutter, and the overhead comes from `_page_header_rows` (one row when the header
