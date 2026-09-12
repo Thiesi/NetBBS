@@ -94,18 +94,18 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Mission Board", b"B"),
         ("Contract Details", b"B1"),
         ("Navigation Chart", b"C"),
-        ("Pilot Record", b"S"),
+        ("Pilot Record", b"S", "played"),
         # The record's other three views, and the finale, are each one more key.
-        ("Pilot Record, jobs", b"SC"),
-        ("Pilot Record, log", b"SH"),
-        ("Career Dossiers", b"SD"),
-        ("Career Finale", b"SR"),
-        ("Hall of Fame", b"H"),
+        ("Pilot Record, jobs", b"SC", "played"),
+        ("Pilot Record, log", b"SH", "played"),
+        ("Career Dossiers", b"SD", "played"),
+        ("Career Finale", b"SR", "played"),
+        ("Hall of Fame", b"H", "played"),
         # The Hall's five views are five different tables, not one paged table.
-        ("Hall of Fame, trading", b"H2"),
-        ("Hall of Fame, exploration", b"H3"),
-        ("Hall of Fame, combat", b"H4"),
-        ("Hall of Fame, careers", b"H5"),
+        ("Hall of Fame, trading", b"H2", "played"),
+        ("Hall of Fame, exploration", b"H3", "played"),
+        ("Hall of Fame, combat", b"H4", "played"),
+        ("Hall of Fame, careers", b"H5", "played"),
         ("Pilot Guide", b"G"),
         ("Trading Ledger", b"T"),
         ("Viewport", b"V"),
@@ -464,8 +464,34 @@ def build_voidrunner_combat(door_name: str, door: pathlib.Path, state: pathlib.P
                      "the combat fixture could not be built")
 
 
+def build_voidrunner_played(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """A career with a fight behind it, for the screens that show a record.
+
+    A brand-new career has no combat victories, one charted system and no
+    trading margin, and `achievement_ranking` filters exactly those -- so the
+    Hall of Fame's four achievement views photographed their empty-state
+    message rather than the tables this change rebuilt. This takes the combat
+    fixture one step further and finishes the fight, which is the shortest walk
+    the door itself offers to a career with something on its record.
+    """
+    build_voidrunner_combat(door_name, door, state)
+    running = Door(door, state, 80, 24, {})
+    try:
+        running.settle()
+        for _ in range(20):
+            rows = _screen_rows(running)
+            if any("STATION SERVICES" in row or "Station Services" in row for row in rows):
+                break  # the fight is over, one way or the other, and we are docked
+            running.press(b"F" if "[F] Fire" in " ".join(rows) else b"\r", expect=False)
+    except BaseException:
+        running.kill()
+        raise
+    running.kill()  # the career on disk is what the panels copy
+
+
 FIXTURE_BUILDERS = {
     ("voidrunner", "combat"): build_voidrunner_combat,
+    ("voidrunner", "played"): build_voidrunner_played,
 }
 
 

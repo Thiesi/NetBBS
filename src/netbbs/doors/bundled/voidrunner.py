@@ -7219,9 +7219,12 @@ def _box_header(p: "Palette", title: str, counter: str) -> str:
     hold them -- the title is the part that says what the caller is looking at.
     """
     inner = _box_inner_width()
-    edge, dim, name = f"{p.hull}{BOLD}", p.deep, f"{p.hull}{BOLD}"
+    edge, dim = f"{p.hull}{BOLD}", p.deep
+    # The brand is plasma, which is what plasma is for; the frame around it is
+    # hull, and chrome is never the colour of the thing it frames (#493 review).
+    brand = f"{p.plasma}{BOLD}{_brand()}{RESET}{edge}"
     tail = f" {p.slate}{counter}{RESET}{edge} " if counter else ""
-    for lead in (f"{_brand()} {glyph('dot')} {title}", title):
+    for lead in (f"{brand} {glyph('dot')} {title}", title):
         head = f"─ {lead} "
         fill = inner - _visible_width(head) - _visible_width(tail)
         if fill >= 1:

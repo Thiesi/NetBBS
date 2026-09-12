@@ -4885,13 +4885,21 @@ Headings are repeated at the top of every later page carrying one of their own
 rows and nowhere else, which is why the member mark exists: a screen may hold
 two tables, and a page of trailing footnotes is not a page of either.
 
-`table_records` is the responsive contract. It drops the columns a screen named
-as droppable, worst-priority first; if that is still too wide it *stacks*, first
-column alone on a row and the rest indented beneath, and stacking restores every
-dropped column -- shape changes, content does not. A stacked record is returned
-as its own list of rows and joined with `\n` into one paginator entry, so it
-moves between pages whole; `wrapped_group` splits on `\n` before wrapping. The
-gutter narrows from two spaces to one before a column is dropped.
+`table_records` is the responsive contract, and it makes two different
+promises. It first drops the columns a screen named as droppable,
+worst-priority first, and those stay dropped -- naming a column optional is a
+screen saying that figure is a keypress away on another screen, and the
+alternative is four rows per chart destination at the floor. What survives that
+step survives everything after it: if the remainder is still too wide the record
+*stacks*, first column alone on a row and the rest indented beneath, on as many
+bands as it takes, each band its own little table so a column still starts on
+one display column across records. A column that must never go is simply not
+named optional -- the Hall of Fame's rank, job and run counts are not. A stacked
+record is returned as its own list of rows and joined with `\n` into one
+paginator entry, so it moves between pages whole; `wrapped_group` splits on
+`\n` before wrapping. The gutter narrows from two spaces to one before a column
+is dropped, and a heading that runs to more than one band is not repeated across
+pages, because the paginator carries a heading as one row.
 
 Motion (issue #493) asks `_StdioBytes.waiting()`, which *peeks* -- select with a
 zero timeout, `PeekNamedPipe`, `kbhit` -- and never reads. Reading a raw byte
