@@ -553,8 +553,16 @@ def _strip_ansi(text: str) -> str:
 
 
 def _dlen(text: str) -> int:
-    clean = _strip_ansi(text)
-    return sum(2 if ord(ch) > 0x2E80 else 1 for ch in clean)
+    """Display columns a string occupies, SGR removed.
+
+    One measurement rule for the whole door: this is what `_wrap_output` uses, so
+    a row composed to `_dlen` and then written through `out_line` cannot disagree
+    about its own width. The old rule -- two columns for anything above U+2E80 --
+    called Hangul choseong (U+1100) and a combining accent one column each, so a
+    handle made of them was budgeted as one row, wrapped into two by the writer,
+    and scrolled the footer off a twelve-row terminal.
+    """
+    return _visible_width(text)
 
 
 def _wrap_output(text: str, width: int) -> str:
@@ -949,6 +957,25 @@ def success_chance(attacker_crew: int, defender_strength: int) -> float:
 
 def is_in_grace(player: Player, now: datetime) -> bool:
     return now - from_iso(player.created_at) < GRACE
+
+
+def raid_block(attacker: Player, target: Player, now: datetime) -> tuple[str, str]:
+    """A one-word verdict and the full public reason for raiding `target`.
+
+    One set of conditions behind both, so a rival table's verdict and a
+    preview's sentence can never disagree about the same crew.
+    """
+    if target.user_id == attacker.user_id:
+        return "you", "Your own crew"
+    if is_in_grace(target, now):
+        return "newcomer", ("Newcomer shield until "
+                            + (from_iso(target.created_at) + GRACE).strftime("%Y-%m-%d %H:%M UTC"))
+    if target.raid_shield_until and now < from_iso(target.raid_shield_until):
+        return "recovering", ("Raid shield until "
+                              + from_iso(target.raid_shield_until).strftime("%Y-%m-%d %H:%M UTC"))
+    if abs(tier_index(rank_score(target)) - tier_index(rank_score(attacker))) > 1:
+        return "tier", "Outside your tier +/-1"
+    return "eligible", "Eligible"
 
 
 def raid_eligibility_reason(attacker: Player, target: Player, now: datetime) -> str:
@@ -2487,7 +2514,9 @@ def _fit(text: str, width: int) -> str:
     mark = "." if _ASCII_DECOR else "…"
     kept, used = [], 0
     for ch in text:
-        size = 2 if ord(ch) > 0x2E80 else 1
+        # The same rule `_dlen` and `_wrap_output` use: a cut measured any other
+        # way produces a cell wider than the column it was fitted to.
+        size = _char_width(ch)
         if used + size > width - 1:
             break
         kept.append(ch)
@@ -3061,19 +3090,28 @@ def _beat(seconds: float, *, hand_back: bool = True) -> bool:
     The wait is a read, not a sleep, so motion never blocks input. With
     `hand_back`, the keystroke that interrupted it waits for the next reader
     instead of being eaten, so one press both skips a reveal and acknowledges
-    the screen it was revealing. A reveal with no reader behind it -- the
-    masthead, which is followed by whatever screen the caller has not chosen
-    yet -- consumes the key instead: handing it on would acknowledge a page of
-    unread receipts, or skip a page of the first-visit guide, that the caller
-    never pressed anything on.
+    the screen it was revealing.
+
+    Without it -- the masthead, whose reveal is followed by whatever screen the
+    caller has not chosen yet -- the *whole* input unit is consumed, not just its
+    leading byte. An arrow key, a function key, a mouse report or a paste is
+    several bytes; dropping only the first left the rest to be read as the "any
+    key" that advances the first-visit guide or marks a page of receipts read.
     """
     try:
         key = _read_key_with_timeout(seconds)
     except (OSError, ValueError, EOFError):
         return True
-    if key and hand_back and len(_PENDING_INPUT) < _MAX_PENDING_INPUT:
+    if not key:
+        return key is not None
+    if len(_PENDING_INPUT) < _MAX_PENDING_INPUT:
         _PENDING_INPUT.append(key)
-    return key is not None
+    if not hand_back:
+        try:
+            read_input_key()  # decode the rest of the unit, and throw it away
+        except (InputSequenceError, EOFError, OSError, ValueError):
+            _PENDING_INPUT.clear()
+    return True
 
 
 def reveal(p: Palette, rows: list[str], *, frame: float = MOTION_FRAME_SECONDS,
@@ -3653,25 +3691,6 @@ def draw_help(p: Palette, w: int, height: int = 24, *, onboarding: bool = False)
                     cards=help_cards(p, sections, inner), onboarding=onboarding)
 
 
-def raid_block(attacker: Player, target: Player, now: datetime) -> tuple[str, str]:
-    """A one-word verdict and the full public reason for raiding `target`.
-
-    One set of conditions behind both, so a rival table's verdict and a
-    preview's sentence can never disagree about the same crew.
-    """
-    if target.user_id == attacker.user_id:
-        return "you", "Your own crew"
-    if is_in_grace(target, now):
-        return "newcomer", ("Newcomer shield until "
-                            + (from_iso(target.created_at) + GRACE).strftime("%Y-%m-%d %H:%M UTC"))
-    if target.raid_shield_until and now < from_iso(target.raid_shield_until):
-        return "recovering", ("Raid shield until "
-                              + from_iso(target.raid_shield_until).strftime("%Y-%m-%d %H:%M UTC"))
-    if abs(tier_index(rank_score(target)) - tier_index(rank_score(attacker))) > 1:
-        return "tier", "Outside your tier +/-1"
-    return "eligible", "Eligible"
-
-
 def rank_ladder(p: Palette, rank: int, width: int) -> list[str]:
     """The tier ladder with your rung lit, highest first."""
     here = tier_index(rank)
@@ -3905,10 +3924,13 @@ def do_display(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, h
     notes = ('Authored box art becomes ASCII; caller names are untouched.',
              'Removes every colour; every status, stake and outcome stays readable.',
              'Drops optional art, flavour and motion; keeps every stake and result.')
-    inner = _panel_width(p, max(1, width - 1))
     while True:
         values = read_display(conn, user_id)
         apply_display(p, values)
+        # After the toggles are applied, not before: Fast mode is the one preset
+        # that changes how wide a row may be, and a cached width composed rows for
+        # an unframed screen that the frame then had to clip.
+        inner = _panel_width(p, max(1, width - 1))
         rendered = []
         for key, label, note in zip(DISPLAY_KEYS, labels, notes):
             on = getattr(p, key)

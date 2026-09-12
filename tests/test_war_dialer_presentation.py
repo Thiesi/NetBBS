@@ -3460,3 +3460,99 @@ def test_the_unread_receipt_page_shows_how_to_keep_it_unread(tmp_path, monkeypat
     for row in _rows("".join(written).split(CLEAR)[-1]):
         assert sum(wd._char_width(ch) for ch in row) <= 40, repr(row)
     conn.close()
+
+
+def test_skipping_the_masthead_consumes_the_whole_input_unit(monkeypatch):
+    """An arrow key is several bytes, and all of them belong to the skip.
+
+    Dropping only the leading ESC left `[A` for the next reader, where `A` was
+    taken as the "any key" that advances the first-visit guide or marks a page of
+    receipts read -- an action on a screen the caller never pressed anything on.
+    """
+    palette = wd.Palette(True)
+    monkeypatch.setattr(wd, "out", lambda text: None)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    stream = list("\x1b[A")  # one press of the up arrow
+    monkeypatch.setattr(wd, "_read_key_with_timeout",
+                        lambda timeout: wd.read_key() if wd._PENDING_INPUT
+                        else (stream.pop(0) if stream else None))
+    wd._PENDING_INPUT.clear()
+    wd.draw_title(palette, {"node_name": "ReLink", "handle": "Thiesi"}, 1, 78)
+    assert stream == [], "the rest of the sequence was left for the next screen"
+    assert wd._PENDING_INPUT == []
+    wd._PENDING_INPUT.clear()
+
+
+def test_one_width_rule_measures_every_row():
+    """`_dlen` and the wrapper have to agree, or a budget is a guess.
+
+    A Hangul choseong is two columns wide and sits *below* U+2E80, and a combining
+    accent is zero; the old rule called both one. A handle of them was budgeted as
+    one row, wrapped into two by `out_line`, and scrolled the footer off a
+    twelve-row terminal.
+    """
+    for sample in ("ᄀ" * 6, "界é" * 6, "plain ascii", "　ᅠ"):
+        assert wd._dlen(sample) == wd._visible_width(sample), sample
+        wrapped = wd._wrap_output(sample, 20).split("\r\n")
+        assert all(wd._dlen(row) <= 20 for row in wrapped), wrapped
+    # And a truncation measures the same way, so a fitted cell really fits.
+    for width in (4, 9, 20):
+        assert wd._dlen(wd._fit("ᄀ" * 30, width)) <= width
+
+
+def test_turning_fast_mode_off_inside_display_redraws_at_the_frame_width(tmp_path, monkeypatch):
+    """Fast mode is the one preset that changes how wide a row may be.
+
+    Caching the width across the toggle composed the next screen's rows for an
+    unframed terminal, and the frame then clipped the setting descriptions.
+    """
+    conn, _ = _painted_world(tmp_path, "fast-toggle.db")
+    palette = wd.Palette(True)
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                     ("display:1", json.dumps({"fast": True})))
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 40)
+    # Fast mode is the third entry, which may be on the picker's second page at
+    # forty columns; page forward until it is offered, then turn it off and leave.
+    state = {"off": False}
+
+    def select(valid):
+        if state["off"]:
+            return "B"
+        if "3" in valid:
+            state["off"] = True
+            return "3"
+        return "N" if "N" in valid else "B"
+
+    monkeypatch.setattr(wd, "read_menu_choice", select)
+    wd.do_display(palette, conn, 1, 40, 12)
+    screens = "".join(written).split(CLEAR)[1:]
+    assert len(screens) > 1, "the toggle did not redraw"
+    framed = screens[-1]
+    assert wd.gl("v") in _ANSI_RE.sub("", framed), "Fast mode was not turned off"
+    for row in _rows(framed):
+        assert sum(wd._char_width(ch) for ch in row) <= 40, repr(row)
+    # Nothing was clipped away by the frame on the redraw.
+    assert "caller names are untouched." in _screen_text(framed)
+    conn.close()
+
+
+def test_raid_authorization_stays_above_the_ui_boundary():
+    """`resolve_raid` reaches `raid_block` through `is_eligible_raid_target`.
+
+    A helper the domain depends on cannot live below the file's UI-layer marker,
+    or a presentation-only edit can change whether raids are permitted.
+    """
+    source = _WAR_DIALER_PATH.read_text(encoding="utf-8")
+    boundary = source.index("# UI layer -- everything below touches")
+    # `rolls_for_bust` is deliberately *not* here: nothing but a preview card
+    # consults it, so it belongs with the screens.
+    for name in ("def raid_block", "def raid_eligibility_reason",
+                 "def is_eligible_raid_target"):
+        assert name in source, name
+        assert source.index(name) < boundary, f"{name} is below the UI-layer boundary"
+    # And the direction of the dependency: the domain helper takes no palette.
+    assert "p: Palette" not in source[source.index("def raid_block"):
+                                     source.index("def raid_eligibility_reason")]

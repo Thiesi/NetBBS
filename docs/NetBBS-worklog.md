@@ -4937,6 +4937,37 @@ it will accept `5`. Read that from the hint row, not from the frame: Fast mode
 has no frame, and an entry's own `[2]` marker is on the screen while the entry's
 last row, and so its key, is on the next page.
 
+**One width rule, or a budget is a guess.** `_dlen` and `_fit` each carried
+their own "two columns above U+2E80" shortcut while `_wrap_output` measured with
+`unicodedata.east_asian_width`. A Hangul choseong (U+1100) is two columns and
+sits *below* the cutoff, and a combining accent is zero; a handle of either was
+budgeted as one row, wrapped into two by `out_line`, and scrolled a twelve-row
+terminal's footer away. Both now delegate to `_char_width`. Any new measuring
+helper does the same -- a second rule reintroduces exactly this.
+
+**A preset that changes the frame changes the width.** Fast mode is the one
+unframed layout, so a screen that caches `_panel_width` across its own toggles
+composes the next redraw for the wrong terminal: turning Fast off inside the
+Display screen clipped the setting descriptions. Recompute after `apply_display`,
+not before.
+
+**The gallery fixture has to be far enough into the game to reach the screens.**
+A brand-new War Dialer player owns nothing, so `G` was a panel of "No exchanges
+held" at every size and preset while the garrison picker, Exchange Control, the
+transfer preview and the owner service -- all rebuilt -- appeared nowhere. The
+fixture's onboarding keys now capture exchange 1, which is unclaimed in a fresh
+world and therefore a certainty rather than a dice roll. That also makes the
+holdings and income gauges non-zero in every panel. The consequence to remember:
+a walk's digits depend on the fixture's state -- `X1?` stopped working the moment
+exchange 1 became the caller's own -- and `?` is what turns that into a failed
+build instead of a panel of the wrong screen.
+
+**Raid authorization is domain logic.** `resolve_raid` reaches
+`raid_eligibility_reason` through `is_eligible_raid_target`, so the helper they
+share cannot live below the file's UI-layer marker: a presentation-only edit
+would otherwise be able to change whether a raid is permitted. A test asserts the
+source order, because that is the actual invariant.
+
 **A test that drives the door by reading its own output has to read what a caller
 reads.** Once a bar is styled segment by segment, `[A] Act` is a hotkey in amber
 followed by a label in mint and is no longer a contiguous run of bytes on the

@@ -116,6 +116,7 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Switchboard, last page", b"N*"),
         ("BBS scene", b"I"),
         ("Crew insignia", b"I1?"),
+        ("Insignia preview", b"I1?1?"),
         ("Neutral dossiers", b"I2?"),
         ("Scene bulletins", b"I3?"),
         ("Season results", b"I4?"),
@@ -141,8 +142,17 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Crew development", b"S"),
         ("Crew preview", b"S1?"),
         ("Root exchange", b"X"),
-        ("Root preview", b"X1?"),
+        # Exchange 1 is the one the fixture captured, so the root picker marks it
+        # `[-]`; 2 is the first one still worth attacking.
+        ("Root preview", b"X2?"),
         ("Garrisons", b"G"),
+        ("Exchange control", b"G1?"),
+        # The transfer preview and the owner service are both behind the control
+        # screen; which digit the service is depends on how many crew transfers
+        # the fixture's holding offers, so `?` makes a changed fixture fail the
+        # build rather than quietly drop the panel.
+        ("Garrison preview", b"G1?1?"),
+        ("Owner service preview", b"G1?3?"),
         ("Operations", b"O"),
         ("Case an operation", b"O1?"),
         # The step-stakes card is two pickers past the hub: the contract, the
@@ -155,8 +165,14 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
 }
 
 # Keys that take a brand-new career or world through everything a first launch
-# asks, so a panel never opens on registration or the first-visit guide.
-ONBOARDING: dict[str, bytes] = {"voidrunner": b"\rY", "war_dialer": b"\r\r"}
+# asks, so a panel never opens on registration or the first-visit guide -- and
+# then far enough into the game that the screens about *having* something are
+# reachable at all. War Dialer's fixture captures exchange 1: it is unclaimed in
+# a fresh world, so the attempt is a certainty rather than a dice roll, and
+# without it every garrison screen was a panel of "No exchanges held" and the
+# switchboard's holdings and income gauges were permanently zero.
+ONBOARDING: dict[str, bytes] = {"voidrunner": b"\rY",
+                                "war_dialer": b"\r\r" + b"X1?" + b"N*" + b"A" + b"\r"}
 
 # Every preset a caller can choose, applied to the fixture's copy rather than
 # passed as a flag: Voidrunner keeps its display style in the career (all four of
