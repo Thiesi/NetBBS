@@ -430,6 +430,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
     tail = bytearray()
     reason, exit_code = "failed_to_start", None
     mode_entered = False
+    handled_failure = False
     try:
         problems = await asyncio.to_thread(preflight, door, session)
         if problems:
@@ -565,8 +566,10 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
         reason = "caller_disconnected"
     except BlockingIOError as exc:
         reason = "busy"
+        handled_failure = True
         tail.extend(str(exc).encode())
     except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+        handled_failure = True
         tail.extend(str(exc).encode("utf-8", errors="replace")[:4096])
         _logger.warning("door %r failed preflight/start: %s", door.name, exc)
     finally:
@@ -628,7 +631,13 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                 errors.append(exc)
             for exc in errors:
                 _logger.error("door cleanup failed: %s", exc, exc_info=exc)
-            if errors and primary is None:
+            # A failure already turned into a reported reason must not be
+            # replaced by a secondary one from cleanup. The obvious case is a
+            # locked database: the launch fails, is handled, and then the
+            # audit write fails the same way -- and re-raising that would hand
+            # the caller an exception instead of the failure result they were
+            # about to be shown.
+            if errors and primary is None and not handled_failure:
                 raise errors[0]
             return diagnostic
 

@@ -190,23 +190,30 @@ def _who_entry_description(db: Database, entry: _WhoEntry, presence=None, viewer
     # Issue #470: which door, not merely that they are in one. Remote entries
     # carry no door -- a linked node tells us presence, not activity.
     playing = presence.door_of(entry.session) if presence is not None else None
-    if playing and _door_visible_to(db, viewer, playing[0]):
+    if playing and _door_visible_to(db, viewer, *playing):
         return f"playing {sanitize_text(playing[1])} -- connected since {when}"
     return f"connected since {when}"
 
 
-def _door_visible_to(db: Database, viewer: User | None, door_id: int) -> bool:
+def _door_visible_to(db: Database, viewer: User | None, door_id: int, door_name: str) -> bool:
     """Whether `viewer` may be told this door's name at all.
 
     The door picker already hides a door above the caller's play level, so
     naming it here would advertise a restricted door -- a SysOp-only one, say
-    -- to someone who cannot open it. A door which has since been deleted is
-    treated as not visible rather than named from a stale entry.
+    -- to someone who cannot open it. A door deleted since is treated as not
+    visible rather than named from a stale entry.
+
+    The name is checked too, not only the id: `doors.id` is an INTEGER PRIMARY
+    KEY without AUTOINCREMENT, so deleting the highest row frees its id for the
+    next registration. Checking the id alone would authorise a cached name
+    against a *different* door's play level -- letting a public replacement
+    expose the restricted name it replaced.
     """
     if viewer is None:
         return False
     door = get_door(db, door_id)
-    return door is not None and meets_level(viewer, door.min_play_level)
+    return (door is not None and door.name == door_name
+            and meets_level(viewer, door.min_play_level))
 
 
 def _remote_who_node_label(db: Database, entry: _RemoteWhoEntry) -> str:

@@ -205,3 +205,30 @@ def test_a_real_launch_records_and_clears_presence(db, lane, player, tmp_path):
 
     assert [name for _, name in during] == ["Boom"], f"presence while the door ran: {during}"
     assert presence.door_of(session) is None, "a crashed door left the session playing"
+
+
+def test_a_reused_door_id_does_not_expose_the_name_it_replaced(db, player, tmp_path):
+    """`doors.id` is INTEGER PRIMARY KEY without AUTOINCREMENT, so deleting the
+    highest row frees its id. Checking the id alone would authorise a cached
+    restricted name against a public replacement's play level."""
+    from netbbs.auth.users import create_user
+    from netbbs.doors import delete_door
+    from netbbs.net.directory_flow import _who_entry_description
+
+    secret = create_door(db, "SysOp Only", sys.executable, args=(), creator=player,
+                         min_play_level=255, profile=DoorProfile(install_dir=str(tmp_path)))
+    presence, session = PresenceRegistry(), FakeSession()
+    presence.enter_door(session, secret.id, secret.name)
+
+    delete_door(db, secret, deleted_by=player)
+    replacement = create_door(db, "Public Game", sys.executable, args=(), creator=player,
+                              min_play_level=0, profile=DoorProfile(install_dir=str(tmp_path)))
+    if replacement.id != secret.id:
+        import pytest
+        pytest.skip(f"id was not reused ({secret.id} -> {replacement.id})")
+
+    ordinary = create_user(db, "ordinary", password="hunter2", user_level=10)
+    described = _who_entry_description(db, _summary(session), presence, ordinary)
+
+    assert "SysOp Only" not in described, "the replacement exposed the name it replaced"
+    assert "playing" not in described

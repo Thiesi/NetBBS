@@ -5788,6 +5788,18 @@ Compatibility extension (issues #296/#297):
   stdio API but does not pin the metadata to an older version — the file is a
   property of the platform, not of the profile. It never carries a credential,
   an email address, a user level or a network address.
+- Which door a caller is in is presence, not catalogue data, and is scoped to
+  the viewer (issue #470). It is held per *session*, not per account: both Who
+  screens render a row per session, and the SysOp one acts on the row
+  selected, so an idle connection must never claim the door its sibling is
+  playing. A caller-facing screen names a door only when that viewer could
+  currently open it — the same `min_play_level` gate the door picker applies —
+  so Who can never advertise a door a caller is not allowed to see. A door
+  deleted since, or one whose registration no longer matches the activity
+  recorded, is omitted rather than named; door ids are reusable, so identity
+  is checked, not just the number. A SysOp screen names everything, being
+  SysOp-only already. Remote presence carries no door: a linked node reports
+  who is online, not what they are doing.
   Profiles add persistent installation directories,
   disposable node directories, exact CRLF classic drop files, native stdio,
   controlling PTYs, private inherited DOOR32 sockets, DOSBox-X COM1 sockets,
