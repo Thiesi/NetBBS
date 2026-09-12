@@ -610,7 +610,16 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
             })
             return "oversized request"
         payload = json.loads(request.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except Exception:
+        # Deliberately broad, and the second finding of this shape: a lone
+        # surrogate produced a UnicodeEncodeError, deep nesting produces a
+        # RecursionError, which is a RuntimeError and not a ValueError at all.
+        # Enumerating the ways a door can hand us bytes we cannot parse is a
+        # list that only ever grows, and every miss strands every *later*
+        # request in the same session -- the door has already exited, so
+        # nothing will retry. The door controls these bytes entirely, so any
+        # failure to read them is its problem to hear about, not ours to
+        # classify.
         _write_result(db, door.id, launch, request, {"status": "rejected", "reason": "request is not readable JSON"})
         return "malformed request"
     if not isinstance(payload, dict):

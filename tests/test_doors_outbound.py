@@ -707,3 +707,28 @@ def test_a_door_under_test_is_told_the_post_will_not_be_published(db, door, syso
 
     assert "rehearsal" not in door_info_block(db, door.id)
     assert door_info_block(db, door.id, rehearsal=True)["rehearsal"] is True
+
+
+# -- review round 4 -------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw, what", [
+    ("{not json", "a syntax error"),
+    ("[" * 5000 + "]" * 5000, "nesting deeper than the decoder's recursion limit"),
+    ('{"subject": "S", "body": "\\ud800"}', "a lone surrogate"),
+], ids=["syntax-error", "deep-nesting", "lone-surrogate"])
+def test_no_single_unreadable_request_strands_the_rest(db, door, sysop, board, tmp_path, raw, what):
+    """The door has already exited by the time a drain runs, so nothing will
+    retry: a request that escapes the handler takes every *later* request in
+    the same session with it. Enumerating the ways bytes can be unreadable is
+    a list that only grows -- a syntax error is a ValueError, a lone surrogate
+    a UnicodeEncodeError, and deep nesting a RecursionError, which is not a
+    ValueError at all -- so the class is handled rather than the instances."""
+    _enable(db, door, sysop, board)
+    directory = tmp_path / OUTBOUND_DIRNAME
+    directory.mkdir(exist_ok=True)
+    (directory / "a-bad.json").write_text(raw, encoding="utf-8")
+    good = _request(tmp_path, name="b-good", subject="Season", body="...")
+
+    assert drain(db, door, tmp_path) == (1, 1), f"{what} stranded the request after it"
+    assert _result(db, door, good)["status"] == "posted"
