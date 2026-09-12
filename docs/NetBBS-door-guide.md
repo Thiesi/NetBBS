@@ -1315,16 +1315,22 @@ host data in the game installation. Run NetBBS unprivileged, never as root.
 
 ### What a door is told: `door_info.json`
 
-Every **locally launched** door -- native stdio, PTY, socket and DOS -- is
-given the path to a small JSON file in `NETBBS_DOOR_INFO`. It is the
-NetBBS-native alternative to the classic drop files, and such a door may use
-either or both.
+Every **native** door -- stdio, PTY or socket -- is given the path to a small
+JSON file in `NETBBS_DOOR_INFO`. It is the NetBBS-native alternative to the
+classic drop files, and such a door may use either or both.
 
-A **remote** (RLogin) registration gets none of this: NetBBS launches no
-process for it, so there is no environment to carry the path and no filesystem
-in common. The RFC 1282 handshake conveys only the configured local and remote
-identity strings and a terminal type, and everything else about that caller
-stays on this side of the connection.
+Two kinds of registration deliberately get none of it:
+
+- A **DOS** door. `NETBBS_DOOR_INFO` is set in the emulator's *host*
+  environment and names a host path; nothing inside the guest sets it, and a
+  DOS path could not reach it anyway. Give a DOS game the classic
+  [drop files](#register-and-test-inside-netbbs) instead — which is what the
+  DOS templates configure, and what a DOS-era program can actually read.
+- A **remote** (RLogin) registration. NetBBS launches no process for it, so
+  there is no environment to carry a path and no filesystem in common. The
+  RFC 1282 handshake conveys only the configured local and remote identity
+  strings and a terminal type; everything else about that caller stays on
+  this side of the connection.
 
 | Field | Meaning |
 | --- | --- |
