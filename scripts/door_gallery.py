@@ -129,15 +129,29 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 # refuses to publish a panel that does not say it.
 WALKS: dict[str, list[tuple[str, bytes]]] = {
     "voidrunner": [
+        # (label, keys) or (label, keys, fixture). The default fixture is "base".
+        ("Combat", b"", "combat"),
         ("Command Deck", b""),
         ("Command Deck, expanded", b"X"),
         ("Commodity Market", b"M"),
         ("Engineering Yard", b"Y"),
+        # The crew roster is behind the yard, not the deck: `K` from `Y`.
+        ("Crew Roster", b"YK"),
         ("Mission Board", b"B"),
         ("Contract Details", b"B1"),
         ("Navigation Chart", b"C"),
-        ("Pilot Record", b"S"),
-        ("Hall of Fame", b"H"),
+        ("Pilot Record", b"S", "played"),
+        # The record's other three views, and the finale, are each one more key.
+        ("Pilot Record, jobs", b"SC", "played"),
+        ("Pilot Record, log", b"SH", "played"),
+        ("Career Dossiers", b"SD", "played"),
+        ("Career Finale", b"SR", "played"),
+        ("Hall of Fame", b"H", "played"),
+        # The Hall's five views are five different tables, not one paged table.
+        ("Hall of Fame, trading", b"H2", "played"),
+        ("Hall of Fame, exploration", b"H3", "played"),
+        ("Hall of Fame, combat", b"H4", "played"),
+        ("Hall of Fame, careers", b"H5", "played"),
         ("Pilot Guide", b"G"),
         ("Trading Ledger", b"T"),
         ("Viewport", b"V"),
@@ -488,7 +502,7 @@ SHOWS: dict[str, dict[str, str]] = {
 # `DISPLAY_STYLES`), War Dialer takes `unicode_style` from the drop file.
 PRESETS: dict[str, dict[str, dict]] = {
     "voidrunner": {style: {"display_style": style} for style in
-                   ("auto", "basic", "mono", "plain")},
+                   ("auto", "fast", "basic", "mono", "plain")},
     # War Dialer splits its presentation in two: `unicode_style` arrives in the
     # drop file, while the caller's own display switches live in the world's
     # `meta` table, which is where Fast mode -- the one deliberately unframed
@@ -894,15 +908,150 @@ def apply_preset(state: pathlib.Path, extra: dict) -> dict:
             if key not in ("display_style", "display")}
 
 
+def _screen_rows(running: "Door") -> list[str]:
+    """The page the door is looking at: unstyled, unframed, one row per line.
+
+    Only the last page it drew. A door does not clear between screens, so the
+    whole conversation is still on the wire, and an entry read out of an earlier
+    screen would send the walk somewhere else entirely.
+    """
+    rows = [re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", row).strip()
+            for row in last_screen(running.read()).replace("\r\n", "\n").split("\n")]
+    opened = max((index for index, row in enumerate(rows) if row[:1] in ("\u256d", "+")), default=0)
+    return [row.strip("\u2502\u2551|").strip() for row in rows[opened:]]
+
+
+def _entry_key(rows: list[str], pattern: str, follower: str | None = None) -> str | None:
+    """The `[K]` of the first listed entry matching `pattern`.
+
+    `follower` is matched against the entry's second row, which is where a
+    contract card puts the facts its first row does not have room for.
+    """
+    for index, row in enumerate(rows):
+        match = re.match(r"^\[([0-9A-Z])\]\s+(.*)$", row)
+        if not match or not re.search(pattern, match.group(2)):
+            continue
+        if follower is not None and not re.search(follower, rows[index + 1] if index + 1 < len(rows) else ""):
+            continue
+        return match.group(1)
+    return None
+
+
+def build_voidrunner_combat(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """A career left in the middle of a fight, so combat gets a panel too.
+
+    Combat is only reachable through a jump, and a random encounter is a chance
+    roll -- a dozen consecutive hops against the cached career drew none, which
+    is why the screen the old presentation was thinnest on had no picture. The
+    deterministic route is a bounty whose target is the next system along: that
+    forces the fight on arrival rather than rolling for one. The career is left
+    mid-fight, because the door commits the fight before narrating it, so every
+    later launch resumes straight into the combat screen.
+
+    An opening board carries such a bounty about three times in four, so this
+    retries with a fresh career rather than hoping; each attempt is one short
+    subprocess. It reads the door's own screens for the keys it presses -- the
+    board's letters, the offer's Accept page, the chart's destination -- so the
+    save format lives in the door and nowhere else.
+    """
+    for attempt in range(16):
+        remove(state)
+        _onboard(door_name, door, state)
+        running = Door(door, state, 80, 24, {})
+        try:
+            running.settle()
+            running.press(b"B")  # the contract board
+            rows = _screen_rows(running)
+            # A bounty card says BOUNTY on its first row and "1 jumps" on its
+            # second; one jump is what makes the fight happen on arrival.
+            key = _entry_key(rows, r"BOUNTY", r"\b1 jumps\b")
+            target = None
+            if key is not None:
+                entry = next(row for row in rows if row.startswith(f"[{key}] "))
+                target = re.sub(r"^\[.\]\s+(?:\S*\s)?", "", entry).split("  ")[0].strip()
+            if not key or not target:
+                running.kill()
+                continue
+            running.press(key.encode())  # the contract's own terms
+            # Accept lives on the page that offers it; the first page says which.
+            for _ in range(8):
+                if "[A] Accept" in " ".join(_screen_rows(running)):
+                    break
+                running.press(b">")
+            running.press(b"A")
+            running.press(b"B")  # back to the board
+            running.press(b"B")  # back to the deck
+            running.press(b"C")  # the chart
+            letter = _entry_key(_screen_rows(running), re.escape(target))
+            if letter is None:
+                running.kill()
+                continue
+            running.press(letter.encode())
+            running.press(b"Y")  # depart; the bounty is waiting on arrival
+            if "Combat" not in " ".join(_screen_rows(running)):
+                running.kill()
+                continue
+        except BaseException:
+            running.kill()
+            raise
+        # Deliberately killed, not closed: the career is meant to stay in the
+        # fight, and a clean exit would be a career that had left one.
+        running.kill()
+        return
+    raise SystemExit("no adjacent bounty appeared on 16 opening boards; "
+                     "the combat fixture could not be built")
+
+
+def build_voidrunner_played(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """A career with a fight behind it, for the screens that show a record.
+
+    A brand-new career has no combat victories, one charted system and no
+    trading margin, and `achievement_ranking` filters exactly those -- so the
+    Hall of Fame's four achievement views photographed their empty-state
+    message rather than the tables #493 rebuilt. This takes the combat fixture
+    one step further and finishes the fight, which is the shortest walk the door
+    itself offers to a career with something on its record.
+    """
+    build_voidrunner_combat(door_name, door, state)
+    running = Door(door, state, 80, 24, {})
+    try:
+        running.settle()
+        for _ in range(20):
+            rows = _screen_rows(running)
+            if any("STATION SERVICES" in row for row in rows):
+                break  # the fight is over, one way or the other, and we are docked
+            running.press(b"F" if "[F] Fire" in " ".join(rows) else b"\r", expect=False)
+    except BaseException:
+        running.kill()
+        raise
+    running.kill()  # the career on disk is what the panels copy
+
+
+FIXTURE_BUILDERS = {
+    ("voidrunner", "combat"): build_voidrunner_combat,
+    ("voidrunner", "played"): build_voidrunner_played,
+}
+
+
+def _onboard(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """A career or world at its first ordinary screen."""
+    state.mkdir(parents=True, exist_ok=True)
+    # First-launch keys are the one place a key may find nothing to answer.
+    capture(door, state, ONBOARDING[door_name], 80, 24, {}, expect=False)
+    if door_name in SEED:
+        SEED[door_name](door, state)
+        capture(door, state, RESUME[door_name], 80, 24, {})
+
+
 def base_fixture(door_name: str, door: pathlib.Path, root_dir: pathlib.Path,
-                 fresh: bool = False) -> pathlib.Path:
-    """One career or world per door, created once and copied by every panel.
+                 fresh: bool = False, name: str = "base") -> pathlib.Path:
+    """One career or world per (door, fixture), created once and copied by every panel.
 
     Built in a temporary directory and moved into place only once the door has
     exited cleanly, so an interrupted run never leaves a half-made fixture that
     the next run would accept simply because the directory exists.
     """
-    fixture = root_dir / "fixtures" / door_name
+    fixture = root_dir / "fixtures" / (door_name if name == "base" else f"{door_name}-{name}")
     if fresh:
         remove(fixture)
     # A directory is not a fixture; a world or a saves directory inside one is.
@@ -913,15 +1062,11 @@ def base_fixture(door_name: str, door: pathlib.Path, root_dir: pathlib.Path,
     if any(fixture.glob("*.db")) or any(fixture.glob("saves")):
         return fixture
     remove(fixture)
+    build = FIXTURE_BUILDERS.get((door_name, name), _onboard)
     staging = pathlib.Path(tempfile.mkdtemp(prefix="gallery-fixture-"))
     try:
         state = staging / "state"
-        state.mkdir()
-        # First-launch keys are the one place a key may find nothing to answer.
-        capture(door, state, ONBOARDING[door_name], 80, 24, {}, expect=False)
-        if door_name in SEED:
-            SEED[door_name](door, state)
-            capture(door, state, RESUME[door_name], 80, 24, {})
+        build(door_name, door, state)
         # Move the state *into* the fixture directory entry by entry rather than
         # moving the directory itself: if Windows would not let the old fixture
         # go, `shutil.move` treats it as a destination and nests the staging
@@ -982,23 +1127,26 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
     if not door.exists():
         raise SystemExit(f"no such bundled door: {door}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    fixture = base_fixture(door_name, door, out_dir, fresh)
+    # A walk may name the fixture it needs; most want the plain one.
+    walks = [(walk + ("base",))[:3] for walk in WALKS[door_name]]
+    fixtures = {name: base_fixture(door_name, door, out_dir, fresh, name)
+                for name in dict.fromkeys(name for _, _, name in walks)}
 
     shows = SHOWS.get(door_name, {})
-    unnamed = [label for label, _ in WALKS[door_name] if label not in shows]
+    unnamed = [label for label, _, _ in walks if label not in shows]
     if shows and unnamed:
         raise SystemExit("every walk must say what its screen shows; "
                          f"{door_name} does not for: {', '.join(unnamed)}")
 
-    shots = [(label, keys, preset, extra, width, heights.get(width, 24))
-             for label, keys in WALKS[door_name]
+    shots = [(label, keys, preset, extra, width, heights.get(width, 24), fixture)
+             for label, keys, fixture in walks
              for preset, extra in PRESETS[door_name].items()
              for width in widths]
 
     run_dir = pathlib.Path(tempfile.mkdtemp(prefix="gallery-run-"))
 
     def shoot(shot) -> list[str]:
-        label, keys, _, extra, width, height = shot
+        label, keys, _, extra, width, height, fixture = shot
         work = pathlib.Path(tempfile.mkdtemp(dir=run_dir))
         try:
             state = work / "state"
@@ -1006,7 +1154,7 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
                 state.mkdir(parents=True)
                 blank_world(door, state)
             else:
-                shutil.copytree(fixture, state)
+                shutil.copytree(fixtures[fixture], state)
             info_extra = apply_preset(state, extra)
             prepare = PREPARED.get(door_name, {}).get(label)
             if prepare:
@@ -1043,11 +1191,11 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
     # to have something on it.
     wrong = [f"  {label} at {width}x{height} {preset}: no {shows[label]!r} on any of "
              f"{len(pages)} page(s)"
-             for (label, _, preset, _, width, height), pages in zip(shots, screens)
+             for (label, _, preset, _, width, height, _fixture), pages in zip(shots, screens)
              if label in shows
              and not any(shows[label] in painted(screen, width, height) for screen in pages)]
     wrong += [f"  {label} at {width}x{height} {preset} page {number} is blank"
-              for (label, _, preset, _, width, height), pages in zip(shots, screens)
+              for (label, _, preset, _, width, height, _fixture), pages in zip(shots, screens)
               for number, screen in enumerate(pages, 1)
               if not painted(screen, width, height).strip()]
     if wrong:
@@ -1056,7 +1204,7 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
 
     styles: dict[str, str] = {}
     sections, panels, current = [], [], shots[0][0]
-    for (label, _, preset, _, width, height), pages in zip(shots, screens):
+    for (label, _, preset, _, width, height, _fixture), pages in zip(shots, screens):
         if label != current:
             sections.append(f'<section><h2>{html.escape(current)}</h2>'
                             f'<div class="row">{"".join(panels)}</div></section>')
