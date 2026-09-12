@@ -4892,9 +4892,11 @@ here since #172 is self-contained):
   gating; caller-facing launch and interactive play across Telnet, SSH,
   and web; door-session start/end audit-logged through the existing
   moderation/audit-log mechanism — no new subsystem;
-- two real bundled doors ship as installed package data
+- three real bundled doors ship as installed package data
   (`netbbs.doors.bundled`, not loose example files), proving the
-  pipeline end to end: Retro Trivia, a small demo, and Voidrunner, a
+  pipeline end to end: Retro Trivia, a deliberately stateless one-off
+  round that is the floor a door must clear; War Dialer, a persistent
+  competitive world shared by a node's callers; and Voidrunner, a
   persistent Elite/Trade-Wars-style space-trading and exploration game
   that grew substantially past its own proof-of-concept scope across
   several post-launch feature and hardening rounds (economy, missions,
