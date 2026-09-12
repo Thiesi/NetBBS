@@ -553,8 +553,10 @@ high-water mark.
 Voidrunner needs a terminal of at least **40 columns by 12 rows**. Below that it
 prints one short, unstyled refusal naming the size it needs and the size the
 terminal reported, and stops before any career is opened or changed. Above it
-there is one layout: a 40-column caller and an 80-column caller see the same
-screens, the same facts and the same artwork, sized for the room they have.
+there is one layout: every screen, every key and every gauge is the same at 40
+columns as at 80, sized for the room there is. What a narrow terminal gives up
+is named below -- a table's least useful columns, and a silhouette that has
+nowhere to sit -- and never a figure a decision is made on.
 
 Every screen is built from the same small vocabulary. Gauges (`████░░░░`) carry
 hull, fuel, hold, crew, standing and deadlines; chips (`⟦day 12⟧`) carry single

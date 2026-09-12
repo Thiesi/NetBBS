@@ -7236,7 +7236,9 @@ def _box_header(p: "Palette", title: str, counter: str) -> str:
 def _box_section(p: "Palette", label: str) -> str:
     """`├─ LABEL ───────────────┤`: a named rule across the page frame."""
     inner = _box_inner_width()
-    head = f"─ {p.slate}{label}{RESET}{p.hull} "
+    # A section header is chrome and wears the frame's own role, not the role
+    # of the hints inside it (issue #493 review).
+    head = f"─ {p.hull}{BOLD}{label}{RESET}{p.hull} "
     fill = max(1, inner - 3 - _visible_width(label))
     return f"{p.hull}├{head}{p.deep}{'─' * fill}{p.hull}┤{RESET}"
 
