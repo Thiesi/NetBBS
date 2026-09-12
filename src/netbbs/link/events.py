@@ -64,7 +64,7 @@ from typing import Any
 
 import nacl.signing
 
-from netbbs.boards.content_id import canonical_json_bytes, compute_content_id
+from netbbs.boards.content_id import ContentIdError, canonical_json_bytes, compute_content_id
 from netbbs.identity.keys import Identity, verify_signature
 
 # Versioning mandatory from the first byte, not inferred.
@@ -136,6 +136,14 @@ FILE_DESCRIPTOR_OBJECT_TYPE = "file_descriptor"
 # not a candidate chain extension of anything). See FileChunkDescriptor's
 # own docstring.
 FILE_CHUNK_DESCRIPTOR_OBJECT_TYPE = "file_chunk_descriptor"
+
+# Design doc §11.2, issue #479: the origin's signed answer to a chunk
+# request for a file it no longer holds -- deleted, or swept past its
+# area's expiry grace period. Same never-gossiped, never-through-
+# handle_events shape as file_chunk_descriptor above, and returned on
+# the same route; it is the one thing that lets a peer's catalogue stop
+# outliving the file it describes. See FileWithdrawal's own docstring.
+FILE_WITHDRAWAL_OBJECT_TYPE = "file_withdrawal"
 
 # Design doc: Link's extension of local mail. A signed message
 # to one specific recipient node, and the two acknowledgement shapes the
@@ -1355,6 +1363,158 @@ def verify_file_descriptor(descriptor: FileDescriptor, signing_verify_key: nacl.
 
 
 @dataclass(frozen=True)
+class FileWithdrawal:
+    """
+    One signed `file_withdrawal` (design doc §11.2, issue #479): a file's
+    own origin stating that it no longer holds the file a peer just asked
+    for, so that peer can drop the catalogue entry describing it instead
+    of listing a phantom and failing the fetch again on every attempt.
+
+    Deliberately **not** a gossiped tombstone. §11.2 makes a `file_
+    descriptor` immutable and single-shot, and a withdrawal event would
+    have to be retained and re-pushed forever -- one per deleted file,
+    and one per file every expiry sweep purges, growing without bound in
+    exactly the place issue #478 had just finished bounding. This is the
+    point-to-point answer to a point-to-point request instead, on the
+    same route and in the same never-through-`handle_events` shape as
+    `FileChunkDescriptor`. The cost is that a stale entry survives until
+    somebody actually tries to fetch it; the benefit is that it then
+    disappears for good, for deletion and expiry alike, with no new
+    retained state anywhere.
+
+    Signed for the same reason every chunk descriptor is: this deletes a
+    peer's local catalogue row, and an unsigned HTTP status could be
+    produced by anything that intercepted or misdirected the request. The
+    requester verifies it against the origin's *current* signing key.
+
+    That is the same origin identity that signed the `file_descriptor`
+    being withdrawn, but not necessarily the same key: a descriptor is
+    immutable and keeps the signature it was created with, while an
+    operational signing key rotates (§12). Resolving the current key
+    through the origin's transition chain is what makes a withdrawal
+    issued after a rotation verify at all.
+
+    **A valid signature is necessary and nowhere near sufficient here,**
+    and `from_dict` enforces the rest (Codex review of #500). The
+    `file_descriptor` this withdrawal is about is gossiped to the whole
+    mesh and carries the very same `file_id` -- so "signed by the origin,
+    names this file" describes a document any interceptor already holds.
+    Until the origin rotates its signing key it is signed by the very key
+    a withdrawal would be verified against, which is precisely when the
+    confusion is exploitable. Only `object_type` separates the two, which
+    makes checking it a precondition of the signature check rather than a
+    formality.
+
+    The payload binds the withdrawal to the one request it answers.
+    `requester_fingerprint` makes it useless when replayed at anybody
+    else, and `transfer_id` names the fetch -- but `transfer_id` is
+    content-derived from `(file_id, requester)` and is therefore the
+    *same* value for every fetch of that file by that node, so it
+    identifies the transfer, never the individual request (Codex review
+    of #500 -- an earlier version of this docstring claimed otherwise).
+
+    `request_nonce` is what makes it single-use: the chunk request's own
+    authorization carries a fresh random nonce, echoed here and checked
+    by the requester, so a withdrawal captured off the wire cannot be
+    replayed even at the same node for the same file. `created_at` is
+    checked for freshness besides, the way `InventoryRequest`'s is.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FileWithdrawal":
+        """Parses *and* validates the envelope, unlike the gossiped event
+        classes whose object_type `handle_events` dispatches on: nothing
+        downstream of this would otherwise notice a `file_descriptor`
+        presented in a withdrawal's place. Raises `EventError`, which the
+        transport turns into an ordinary failed fetch."""
+        envelope = data["envelope"]
+        if not isinstance(envelope, dict):
+            raise EventError("file_withdrawal envelope is not an object")
+        if envelope.get("netbbs_protocol") != NETBBS_PROTOCOL_VERSION:
+            raise EventError(
+                f"file_withdrawal declares netbbs_protocol "
+                f"{envelope.get('netbbs_protocol')!r}, not {NETBBS_PROTOCOL_VERSION}"
+            )
+        if envelope.get("object_type") != FILE_WITHDRAWAL_OBJECT_TYPE:
+            raise EventError(
+                f"expected a {FILE_WITHDRAWAL_OBJECT_TYPE}, got "
+                f"{envelope.get('object_type')!r} -- refusing"
+            )
+        payload = envelope.get("payload")
+        if not isinstance(payload, dict):
+            raise EventError("file_withdrawal envelope carries no payload object")
+        for field in (
+            "file_id", "requester_fingerprint", "transfer_id", "request_nonce", "created_at", "nonce",
+        ):
+            if not isinstance(payload.get(field), str) or not payload[field]:
+                raise EventError(f"file_withdrawal payload is missing a usable {field}")
+        return cls(envelope=envelope, signature=base64.b64decode(data["signature"]))
+
+
+def build_file_withdrawal(
+    *,
+    signing_identity: Identity,
+    file_id: str,
+    requester_fingerprint: str,
+    transfer_id: str,
+    request_nonce: str,
+    created_at: str,
+    nonce: str | None = None,
+) -> FileWithdrawal:
+    """Build and sign one `file_withdrawal`, per design doc §11.2. Always
+    signed by `signing_identity` -- the origin's *current* signing key,
+    which after a rotation (§12) is no longer the key that signed the
+    file's own immutable `file_descriptor`. Same identity, resolved key.
+
+    Every binding field comes from the chunk request being answered.
+    `request_nonce` is the one that makes the result single-use: it is
+    the fresh nonce on that request's own authorization, so the
+    withdrawal cannot be replayed even at the same node for the same
+    file. `requester_fingerprint` and `transfer_id` narrow it to that
+    node and that fetch, but neither varies between retries."""
+    payload = {
+        "file_id": file_id,
+        "requester_fingerprint": requester_fingerprint,
+        "transfer_id": transfer_id,
+        "request_nonce": request_nonce,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+    envelope = build_envelope(FILE_WITHDRAWAL_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return FileWithdrawal(envelope=envelope, signature=signature)
+
+
+def verify_file_withdrawal(
+    withdrawal: FileWithdrawal, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `withdrawal`'s signature against the claimed origin's
+    *current signing key* -- same division of responsibility as
+    `verify_file_chunk_descriptor`. The envelope's own shape is already
+    settled by `from_dict`; this is only the signature."""
+    return _verify_canonical_envelope(
+        signing_verify_key, withdrawal.envelope, withdrawal.signature
+    )
+
+
+@dataclass(frozen=True)
 class FileChunkDescriptor:
     """
     One signed `file_chunk_descriptor` (design doc §11.3, issue #89): the
@@ -1409,9 +1569,12 @@ def build_file_chunk_descriptor(
     nonce: str | None = None,
 ) -> FileChunkDescriptor:
     """Build and sign one `file_chunk_descriptor`, per design doc §11.3.
-    Always signed by `signing_identity` -- the serving origin's current
-    signing key, the same key that signed this file's own
-    `file_descriptor`."""
+    Always signed by `signing_identity` -- the serving origin's *current*
+    signing key. That is the same origin identity that signed this file's
+    own `file_descriptor`, though after a rotation (§12) no longer the
+    same key: the descriptor is immutable and keeps its original
+    signature, so a requester resolves the current key rather than
+    reusing that one."""
     payload = {
         "file_id": file_id,
         "chunk_index": chunk_index,
@@ -1434,7 +1597,43 @@ def verify_file_chunk_descriptor(
     """Verify `descriptor`'s signature against the claimed origin's
     *current signing key* -- same division of responsibility as
     `verify_file_descriptor`."""
-    return verify_signature(signing_verify_key, canonical_bytes(descriptor.envelope), descriptor.signature)
+    return _verify_canonical_envelope(
+        signing_verify_key, descriptor.envelope, descriptor.signature
+    )
+
+
+def _verify_canonical_envelope(
+    signing_verify_key: nacl.signing.VerifyKey, envelope: dict, signature: bytes
+) -> bool:
+    """Signature check for the two signed objects that arrive as an HTTP
+    *response* rather than through `handle_events` -- `file_chunk_
+    descriptor` and `file_withdrawal`.
+
+    An envelope that cannot be canonicalized cannot carry a valid
+    signature, so that is a verification failure and is reported as one
+    (Codex review of #500). It was previously an uncaught
+    `ContentIdError` escaping into the caller: `canonical_bytes` refuses
+    floats, and a fabricated 410 or chunk response only has to encode
+    `netbbs_protocol` as `1.0` -- which compares equal to `1`, so it
+    passes every shape check -- to abort a fetch with an unhandled
+    exception before its invalid signature was ever examined.
+
+    `RecursionError` is caught for the same reason and is the same class
+    of trap: canonicalization walks the envelope recursively, so a
+    fabricated response only has to nest an unused field deeply enough
+    to exceed the interpreter's limit. Neither exception says anything
+    about the signature, and both mean the same thing here -- this
+    envelope is not something a signature could have covered.
+
+    These two need it where the gossiped types do not: they are parsed
+    straight off a response, on a transport that is plain HTTP unless a
+    deployment says otherwise, with nothing between the wire and here.
+    """
+    try:
+        message = canonical_bytes(envelope)
+    except (ContentIdError, RecursionError):
+        return False
+    return verify_signature(signing_verify_key, message, signature)
 
 
 @dataclass(frozen=True)

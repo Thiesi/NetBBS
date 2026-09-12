@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 
 from netbbs.files.areas import FileArea
@@ -280,6 +281,71 @@ def list_remote_files(db: Database, area: FileArea) -> list[RemoteFile]:
 def get_remote_file(db: Database, file_id: str) -> RemoteFile | None:
     row = db.connection.execute("SELECT * FROM remote_files WHERE file_id = ?", (file_id,)).fetchone()
     return None if row is None else _remote_file_from_row(row)
+
+
+def withdraw_remote_file(db: Database, remote_file: RemoteFile) -> bool:
+    """
+    Drop one carried catalogue entry whose origin has said it no longer
+    holds the file (design doc §11.2, issue #479) -- the local half of a
+    verified `file_withdrawal`.
+
+    Removes the `remote_files` row together with the fetch state that
+    exists only to serve it: `link_file_transfers`, its
+    `link_file_transfer_chunks`, and any staging file a partial transfer
+    left behind. That staging file is the reason this is not a bare
+    `DELETE` -- nothing else would ever come back for it, and the
+    `remote_files` foreign key would refuse the delete anyway.
+
+    Returns `False`, changing nothing, for an entry whose
+    `fetched_file_id` is already set. Those bytes are local, verified,
+    and promoted into a real `files` row; that the origin has since
+    dropped its own copy is not a reason to un-list this node's.
+
+    That check reads the **stored** value, not `remote_file`'s (Codex
+    review of #500). The caller's `RemoteFile` is a snapshot taken before
+    a network round trip, and two sessions fetching the same file share
+    one transfer: the other one can finish, promote the content and set
+    `fetched_file_id` while this withdrawal is still in flight. Trusting
+    the snapshot would then delete a real, downloadable local file's
+    catalogue row -- the guard exists for exactly this case, so it has to
+    look at what is true now.
+    """
+    stored = db.connection.execute(
+        "SELECT fetched_file_id FROM remote_files WHERE file_id = ?", (remote_file.file_id,)
+    ).fetchone()
+    if stored is None:
+        return False
+    if stored["fetched_file_id"] is not None:
+        return False
+
+    transfer_rows = db.connection.execute(
+        "SELECT transfer_id, temp_path FROM link_file_transfers WHERE remote_file_id = ?",
+        (remote_file.file_id,),
+    ).fetchall()
+    with db.connection:
+        for row in transfer_rows:
+            db.connection.execute(
+                "DELETE FROM link_file_transfer_chunks WHERE transfer_id = ?", (row["transfer_id"],)
+            )
+        db.connection.execute(
+            "DELETE FROM link_file_transfers WHERE remote_file_id = ?", (remote_file.file_id,)
+        )
+        db.connection.execute("DELETE FROM remote_files WHERE file_id = ?", (remote_file.file_id,))
+
+    # After the rows are gone, never before: a staging file removed
+    # ahead of a failed commit would strand a transfer that still
+    # believes it has one.
+    for row in transfer_rows:
+        temp_path = row["temp_path"]
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                _logger.warning(
+                    "Link files: could not remove staging file %s for withdrawn %s",
+                    temp_path, remote_file.file_id,
+                )
+    return True
 
 
 def _save_refused_descriptor_event(

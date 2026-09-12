@@ -2905,7 +2905,8 @@ carries no bearing on whether a peer should fetch the bytes. Only an
 `file_descriptor` — the identical "never leak a moderation queue onto the
 network" rule §9.2 already states for `board_post`. Immutable, single-shot,
 like `board_post`/`channel_message` — no edit chain; a changed file is a new
-upload with its own new `file_id`, not a revision of an old one.
+upload with its own new `file_id`, not a revision of an old one. Immutable is
+not the same as permanent: see *Withdrawal* below.
 
 Queued from exactly two places, mirroring `board_post`'s own pair (issue #464,
 which fixed a period where neither existed and a Linked area consequently
@@ -2936,6 +2937,80 @@ criterion's own "discover and list... without fetching any file content"),
 with `fetched_file_id` set only once §11.3's transfer completes and
 verifies, at which point the content is promoted into a genuine `files` row
 indistinguishable from a local upload for browsing/download purposes.
+
+**Withdrawal — a catalogue entry may outlive its file, and stops when it is
+asked to (issue #479).** Once an area announces its uploads, a peer's
+catalogue can describe a file its origin no longer has: the SysOp deleted it,
+or `_sweep_expired_files` purged it past the area's grace period. Either way
+the only origin row that could serve the bytes is gone, and nothing in the
+catalogue knows.
+
+The origin says so when asked. A chunk request (§11.3) for a `file_id` this
+node holds no row for is answered **HTTP 410 with a signed `file_withdrawal`**
+— `file_id`, `requester_fingerprint`, `transfer_id`, `request_nonce`,
+`created_at`, `nonce`, signed by the origin's **current** signing key. That is
+the same origin *identity* that signed the `file_descriptor` being withdrawn,
+but not necessarily the same *key*: a descriptor is immutable and keeps the
+signature it was created with, while an operational signing key rotates (§12).
+An implementation that verified a withdrawal against the descriptor's own key
+would reject every legitimate one issued after a rotation; the current key is
+resolved through the origin's transition chain, as everywhere else.
+
+Acting on one is irreversible in a way discarding a bad chunk is not: once the
+`remote_files` row is gone, the `file_descriptor` still in `link_events` means
+ordinary redelivery will not bring it back. So the requester checks four things,
+all of them before deleting anything:
+
+- **the envelope is a `file_withdrawal`.** The descriptor being withdrawn is
+  gossiped to the whole mesh and carries the very same `file_id` — and until the
+  origin rotates its signing key, is signed by the very key a withdrawal is
+  verified against, which is exactly when the confusion is exploitable — so "signed by the origin, names this file" describes a
+  document any interceptor already holds, and `object_type` is the only thing
+  separating the two. It is a precondition of the signature check, not a
+  formality;
+- **`requester_fingerprint` is this node, `transfer_id` is this fetch, and
+  `request_nonce` echoes the chunk request's own authorization nonce.**
+  `transfer_id` is content-derived from `(file_id, requester)` and so is
+  identical across retries — it names the transfer, never the individual
+  request. `request_nonce` is what makes the answer single-use, so a withdrawal
+  captured off the wire cannot be replayed even at the same node for the same
+  file;
+- **`created_at` is fresh**, on the same five-minute window and for the same
+  reason `InventoryRequest` has one: a signature is durable, and without
+  freshness a recorded 410 stays usable indefinitely — including after the
+  origin restores the file from backup, when the entry it deletes would describe
+  bytes the origin is serving again;
+- **the signature verifies** against the origin's current signing key — and an
+  envelope that cannot be canonicalized fails this check rather than raising,
+  since it could not have carried a valid signature anyway.
+
+Any failure refuses the withdrawal and changes nothing. On success the requester
+deletes its `remote_files` row along with the fetch state that existed only to
+serve it (`link_file_transfers`, its chunk records, and any staging file), and
+tells the caller the origin no longer has the file rather than reporting a
+generic transfer error. A chunk still in flight for a transfer withdrawn this
+way fails as an ordinary `FileTransferError` rather than writing into a row that
+no longer exists.
+
+A withdrawal is **not** a gossiped tombstone, and deliberately so. A
+`file_descriptor_tombstone` mirroring `board_post_tombstone` would have to be
+retained and re-offered forever — one per deleted file, and one per file every
+expiry sweep purges, growing without bound in exactly the place §8.8's push
+direction had just finished bounding. A point-to-point answer to a
+point-to-point request covers deletion and expiry alike with no retained state
+anywhere, in the same never-gossiped, never-through-`handle_events` shape
+`file_chunk_descriptor` already uses.
+
+The cost is stated rather than hidden: **a stale entry survives until somebody
+tries to fetch it.** Listing is honest about what the origin last announced,
+not about what it still holds; the first attempt is what reconciles them, and
+it reconciles them permanently. The event dedup that makes `handle_events`
+idempotent is what keeps a re-delivered `file_descriptor` from resurrecting a
+withdrawn row.
+
+An entry whose `fetched_file_id` is already set is never withdrawn. Those
+bytes are local, verified and promoted into a real `files` row; the origin
+dropping its own copy is not a reason to un-list this node's.
 
 ### 11.3 On-demand chunk transfer
 
@@ -6004,6 +6079,34 @@ Compatibility extension (issues #296/#297):
   is checked, not just the number. A SysOp screen names everything, being
   SysOp-only already. Remote presence carries no door: a linked node reports
   who is online, not what they are doing.
+- A door may post to boards a SysOp allowlists for it (issue #520, the
+  outbound half of #470), and to nothing else. It posts under a **label**, not
+  an account: `author_user_id` and `author_fingerprint` are NULL and
+  `author_label` alone carries the identity, which is the shape a Link-carried
+  post has always had. An account was rejected as the answer -- `users`
+  requires at least one credential by CHECK constraint, so a credential-less
+  service row could not exist without weakening it -- and with no account
+  there is nothing to exclude from login, listings, mail or moderation, and
+  the infrastructure level band sketched under issue #63 is not needed for
+  this. The label ends in a reserved suffix, is unique across accounts and
+  doors, and is checked at the moment the hook is switched on: it is shaped
+  like a handle because it federates as `local_user_id`, and chat resolves a
+  stored author by username where boards resolve by id, so a collision would
+  let a door speak in a real account's presentation. The SysOp's allowlist is
+  the only gate on this path; level is deliberately not a second one, because
+  two gates can disagree where only one is visible to the SysOp. Transport is
+  a file drop rather than a socket, chosen so a DOS door can use it at all,
+  and a refusal is always returned to the door and never queued -- a held post
+  would publish after the allowlist was revoked. Posting is rate-limited per
+  door and audit-logged against the SysOp whose authority it runs on; if that
+  account is deleted the hook lapses rather than posting unattributably, and
+  another SysOp vouches for it without disturbing its identity or allowlist.
+  An outcome is written where the door can still read it after the run: the
+  working directory is gone by then, so a result left there would make the
+  promise that a refusal is always visible untrue in practice. Reads of any
+  kind remain out of scope, and the hook is available to locally-launched
+  doors only -- a remote registration shares no filesystem, and a DOS guest
+  cannot read the launch metadata that names the drop directory.
   Profiles add persistent installation directories,
   disposable node directories, exact CRLF classic drop files, native stdio,
   controlling PTYs, private inherited DOOR32 sockets, DOSBox-X COM1 sockets,
@@ -6561,13 +6664,20 @@ schema, consider gating them with an elevated minimum user level (e.g. 245)
 rather than a new visibility flag, since minimum-level is already a resource
 gate (§5.1) and sits safely below `SYSOP_LEVEL = 255`. This only works if:
 
-- door processes write under their own capability-scoped service identity
-  minted by the session capability API, not the player's own account level;
+- door processes write under their own identity, not the player's own account
+  level. Answered for boards by issue #520, and the answer generalizes: the
+  identity is a *label* carried in `author_label` with no account behind it,
+  not a minted account (see the Phase 7 door bullets above for why an account
+  was rejected and what guards a label needs). A channel-facing identity
+  should take the same shape;
 - board/channel listing queries honor the minimum-level gate, not just entry,
   so gated resources don't appear in listings for users below the threshold;
 - the level band used for infrastructure resources (e.g. 240–254) is a named
   constant, so a future SysOp level-preset feature cannot hand that range to a
-  real user by accident.
+  real user by accident. Note this band gates the *resources* -- keeping
+  door-facing boards and channels out of ordinary users' listings -- and is
+  not what hides a door's own identity, which needs no hiding because it is
+  not an account.
 
 ### Issue #165 — MRC gateway scoping — closed
 
@@ -7663,6 +7773,17 @@ table's columns start at the same display column on every row; a table chooses
 which columns it can carry at the width it has, and everything a narrow terminal
 gives up is on the record's own card one digit away. Action bars live outside the
 frame, where the cursor waits.
+
+*Clocks.* Every absolute instant is shown in the node's display timezone, which
+the drop file supplies as an IANA name (`timezone`, door_api 2), and names the
+zone it is showing -- a deadline in unlabelled local time is more ambiguous than
+one marked UTC, not less. One helper converts, so a new screen cannot
+reintroduce a fixed zone by copying the line above it, which is how fifteen of
+them came to print UTC while the rest of the node showed local time. An absent
+or unresolvable zone falls back to UTC and still renders: `zoneinfo` has no
+system database on Windows and depends on the `tzdata` package, so a door that
+raised there would fail on a healthy node. Relative durations carry no zone and
+are unaffected.
 
 *Motion.* This replaces "there are no animation delays". Reveals and the carrier
 sweep that plays while a committed result comes back are in, under three hard

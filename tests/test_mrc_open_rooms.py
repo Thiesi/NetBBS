@@ -355,7 +355,12 @@ def test_an_overlength_name_matches_no_mapping_and_legacy_rows_are_upgraded(db, 
             ("t" * 20 + tail * 5, row.id),
         )
     db.connection.commit()
-    sql = MIGRATIONS[-1].sql
+    # Found by description rather than MIGRATIONS[-1]: "last" meant "the one
+    # this test is about" only until the next migration was appended, which
+    # was always going to happen. Unlike test_doors_compatibility's absolute
+    # indices, nothing here is pinning a released schema number.
+    sql = next(migration.sql for migration in MIGRATIONS
+               if "MRC room names longer than" in migration.description)
     assert "length(mrc_room) > 20" in sql
     db.connection.executescript(sql)
     db.connection.commit()

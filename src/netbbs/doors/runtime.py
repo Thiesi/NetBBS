@@ -24,6 +24,7 @@ from pathlib import Path
 
 from netbbs.doors.endpoints import NodeLease, StreamEndpoint, pty_endpoint, socket_endpoint
 from netbbs.doors.dropfiles import write_drop_files
+from netbbs.doors.outbound import OUTBOUND_DIRNAME, door_info_block, drain as drain_outbound
 from netbbs.doors.profiles import preflight
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.timeutil import resolve_display_preferences
@@ -59,9 +60,11 @@ class DoorRunResult:
 
 
 #: Version of the `door_info.json` contract (issue #469). 1 was the original
-#: six fields; 2 adds the caller/node metadata below. A door may refuse a
-#: platform it does not understand instead of probing for fields.
-DOOR_API_VERSION = 2
+#: six fields; 2 adds the caller/node metadata below; 3 adds the optional
+#: `outbound` object (issue #520), present only for a door whose SysOp has
+#: switched its outbound hook on. A door may refuse a platform it does not
+#: understand instead of probing for fields.
+DOOR_API_VERSION = 3
 
 
 def node_opaque_id(db) -> str:
@@ -93,7 +96,8 @@ def _minted_once(db, key: str) -> str:
         "SELECT value FROM node_config WHERE key = ?", (key,)).fetchone()[0]
 
 
-def _write_door_info(db, workdir, session, player, war_dialer=False, session_limit_seconds=None):
+def _write_door_info(db, workdir, session, player, war_dialer=False, session_limit_seconds=None,
+                     door_id=None, rehearsal=False):
     info = {"handle": player.username, "user_id": player.id,
             "terminal_width": session.terminal_width, "terminal_height": session.terminal_height,
             "color_depth": "truecolor" if effective_truecolor(session, db, player) else "256",
@@ -120,6 +124,15 @@ def _write_door_info(db, workdir, session, player, war_dialer=False, session_lim
         # An opaque namespace belongs to the node database and survives its backup.
         # It is not a credential and does not depend on a mutable display name.
         info["war_dialer_owner"] = _minted_once(db, "war_dialer_owner")
+    if door_id is not None and (
+            outbound := door_info_block(db, door_id, rehearsal=rehearsal)) is not None:
+        # Issue #520. Present only for a door whose SysOp switched the hook
+        # on, so the overwhelming majority of doors see exactly what they saw
+        # at door_api 2. The door is told its own label and which boards it
+        # may name, because neither is discoverable any other way and a door
+        # left to guess would guess wrong.
+        (workdir / OUTBOUND_DIRNAME).mkdir(exist_ok=True)
+        info["outbound"] = outbound
     path = workdir / "door_info.json"
     path.write_text(json.dumps(info), encoding="utf-8")
     return path
@@ -418,8 +431,22 @@ def effective_wall_limit(profile, call_site_limit=None):
 
 
 async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
-                   output_check=None):
-    """Supervise and record one run; an optional synchronous probe check returns an error string."""
+                   output_check=None, node_identity=None, rehearsal=False):
+    """Supervise and record one run; an optional synchronous probe check returns an error string.
+
+    `node_identity`, when this node has Link running, is what lets a post a
+    door made through its outbound hook (issue #520) reach the peers a
+    Linked board is linked to -- the same `queue_board_post_if_linked` call
+    the interactive posting path makes. `None` (Link off, or the standalone
+    admin CLI) simply keeps the post local.
+
+    `rehearsal` marks a launch a SysOp made to *check* the door -- the
+    compatibility screen's test launch, or the DOS probe -- rather than a
+    caller playing it. Such a launch does not drain the outbound hook: a
+    SysOp trying a door out must not publish its content to a real board,
+    and a probe which runs the game for twelve seconds on every preflight
+    would do it repeatedly.
+    """
     profile = door.profile
     stop_grace = profile.stop_grace_seconds if profile else DOOR_STOP_GRACE_SECONDS
     start = time.monotonic()
@@ -445,7 +472,8 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             lease = NodeLease(root, identity, profile.max_sessions)
         workdir = Path(tempfile.mkdtemp(prefix="netbbs-door-"))
         info_path = await lane.run(_write_door_info, workdir, session, player, world_path is not None,
-                                   effective_wall_limit(profile, wall_time_limit_seconds))
+                                   effective_wall_limit(profile, wall_time_limit_seconds), door.id,
+                                   rehearsal)
         info = json.loads(info_path.read_text(encoding="utf-8"))
         width = profile.width if profile and profile.width else session.terminal_width
         height = profile.height if profile and profile.height else session.terminal_height
@@ -618,6 +646,19 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             except Exception as exc:
                 errors.append(exc)
             finally:
+                if workdir is not None and not rehearsal:
+                    # Issue #520, and strictly before the workdir goes: the
+                    # door has already been stopped above, so nothing races
+                    # its own writes here, and a request left un-drained
+                    # would be deleted along with the directory rather than
+                    # answered. A failure is logged, never turned into an
+                    # error: a door which exited cleanly must not be
+                    # reported as having crashed because its drop directory
+                    # was unreadable.
+                    try:
+                        await lane.run(drain_outbound, door, workdir, node_identity=node_identity)
+                    except Exception as exc:
+                        _logger.warning("door %r outbound drain failed: %s", door.name, exc)
                 if workdir is not None:
                     shutil.rmtree(workdir, ignore_errors=True)
                 if lease:

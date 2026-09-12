@@ -1183,7 +1183,12 @@ async def _fetch_remote_file(
     import aiohttp
 
     from netbbs.link.file_transfer import FileTransferError
-    from netbbs.link.transport import LinkTransportError, dialable_base_urls_for_peer, fetch_next_file_chunk
+    from netbbs.link.transport import (
+        LinkTransportError,
+        RemoteFileWithdrawnError,
+        dialable_base_urls_for_peer,
+        fetch_next_file_chunk,
+    )
 
     base_urls = dialable_base_urls_for_peer(link_context.link_node, remote_file.origin_fingerprint)
     if not base_urls:
@@ -1222,6 +1227,21 @@ async def _fetch_remote_file(
                 await session.write_line(
                     colored(f"  … {transfer.bytes_received}/{transfer.total_size} bytes", fg_color=MUTED_COLOR)
                 )
+    except RemoteFileWithdrawnError:
+        # Design doc §11.2, issue #479: the origin no longer has the file
+        # its catalogue entry described, and has said so under its own
+        # signature -- `fetch_next_file_chunk` has already dropped the
+        # entry. Say which of those two things happened; a generic
+        # "transfer failed" invites the caller to keep retrying something
+        # that can never work.
+        await session.write_line(
+            colored(
+                f"The origin no longer has {sanitize_text(remote_file.filename)!r} — it was deleted "
+                "or expired there. Removed from this area's catalogue.",
+                fg_color=ERROR_COLOR,
+            )
+        )
+        return
     except (LinkProtocolError, LinkTransportError, FileTransferError) as exc:
         await session.write_line(colored(f"Fetch failed: {exc}", fg_color=ERROR_COLOR))
         return

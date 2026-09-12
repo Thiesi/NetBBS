@@ -26,7 +26,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from queue import Queue, Empty
 
 import pytest
@@ -4263,3 +4263,87 @@ def test_no_world_is_migrated_for_a_tone(tmp_path):
     conn, _ = _painted_world(tmp_path, "noupgrade.db")
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     conn.close()
+
+
+# -- the node's display timezone (issue #515) ------------------------------
+#
+# The drop file carries `timezone`, the node's display zone as an IANA name
+# (door_api 2, added by issue #469). The door used to print every absolute
+# instant as UTC while the rest of the node showed local time, so the same
+# system told a caller two different times for the same moment.
+
+
+_A_MOMENT = datetime(2026, 10, 10, 12, 19, tzinfo=dt_timezone.utc)
+_MIDWINTER = datetime(2026, 1, 10, 12, 19, tzinfo=dt_timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _restore_display_timezone():
+    """Every test leaves the door on UTC: the zone is module state."""
+    yield
+    wd.apply_timezone(None)
+
+
+def test_absolute_stamps_use_the_nodes_timezone():
+    wd.apply_timezone("Europe/Berlin")
+    assert wd.when(_A_MOMENT) == "2026-10-10 14:19 CEST"
+
+
+def test_the_named_zone_follows_daylight_saving():
+    # The abbreviation is read off the converted instant, not pasted on, so a
+    # winter deadline says CET and a summer one CEST.
+    wd.apply_timezone("Europe/Berlin")
+    assert wd.when(_A_MOMENT).endswith("CEST")
+    assert wd.when(_MIDWINTER).endswith("CET")
+    assert wd.when(_MIDWINTER).startswith("2026-01-10 13:19")
+
+
+def test_the_feed_clock_converts_too():
+    wd.apply_timezone("Asia/Tokyo")
+    assert wd.clock(_A_MOMENT) == "21:19"
+
+
+@pytest.mark.parametrize("name", [None, "", "   ", "Not/AZone", 12345, [], {"tz": "x"}])
+def test_an_unusable_timezone_falls_back_to_utc(name):
+    # A door that raised here would be worse than one printing UTC: `zoneinfo`
+    # has no system database on Windows and depends on the `tzdata` package,
+    # so resolution can fail on a perfectly healthy node.
+    wd.apply_timezone(name)
+    assert wd.when(_A_MOMENT) == "2026-10-10 12:19 UTC"
+
+
+def test_a_missing_zoneinfo_database_still_renders(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_tzdata(name, *args, **kwargs):
+        if name == "zoneinfo":
+            raise ImportError("no zoneinfo on this host")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_tzdata)
+    wd.apply_timezone("Europe/Berlin")
+    assert wd.when(_A_MOMENT) == "2026-10-10 12:19 UTC"
+
+
+def test_no_screen_hardcodes_utc_any_more():
+    # One helper, so a new screen cannot reintroduce a fixed zone by copying
+    # the line above it -- which is how 15 of them came to say UTC.
+    source = _WAR_DIALER_PATH.read_text(encoding="utf-8")
+    assert 'strftime("%Y-%m-%d %H:%M UTC")' not in source
+    assert '.astimezone(timezone.utc).strftime' not in source
+
+
+def test_the_door_adopts_the_timezone_from_its_drop_file(tmp_path, monkeypatch):
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({
+        "handle": "Thiesi", "user_id": 1, "terminal_width": 80,
+        "terminal_height": 24, "color_depth": "truecolor",
+        "node_name": "ReLink", "timezone": "Asia/Tokyo",
+        "war_dialer_owner": "0" * 32,
+    }), encoding="utf-8")
+    monkeypatch.setenv("NETBBS_DOOR_INFO", str(info))
+    loaded = wd._load_door_info()
+    wd.apply_timezone(loaded.get("timezone"))
+    assert wd.when(_A_MOMENT) == "2026-10-10 21:19 JST"

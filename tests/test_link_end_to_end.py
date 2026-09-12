@@ -39,9 +39,12 @@ duplicate the identical helpers between themselves).
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 
 import aiohttp
+import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board, get_board_by_name
@@ -62,7 +65,12 @@ from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import FileChunkRequest, LinkNode
 from netbbs.link.store import load_link_node
 from netbbs.link.sync import run_link_sync
-from netbbs.link.transport import LinkServer, fetch_next_file_chunk, request_file_chunk
+from netbbs.link.transport import (
+    LinkServer,
+    LinkTransportError,
+    fetch_next_file_chunk,
+    request_file_chunk,
+)
 from netbbs.net import chat_flow, file_flow
 from netbbs.net.char_input import InputHistory
 from tests.test_chat_flow_moderation import FakeSession
@@ -77,6 +85,7 @@ from netbbs.mail import list_inbox, list_sent
 from netbbs.search import search_channel_messages, search_posts
 from netbbs.activity import board_read_cursor, record_board_seen, record_channel_seen, unread_channel_count, unread_post_count
 from netbbs.storage.database import Database
+from netbbs.timeutil import utc_now_iso
 from netbbs.storage.execution import DatabaseLane
 
 
@@ -1330,6 +1339,615 @@ def test_remote_file_browse_and_fetch_via_the_live_interactive_ui_flow(tmp_path)
         fetched_entry = get_file(seed.db, entry.file_id)
         assert fetched_entry.filename == "game.bin"
         assert download_file(fetched_entry) == content
+    finally:
+        dialer.close()
+        seed.close()
+
+
+# -- catalogue withdrawal when a file outlives nothing (design doc §11.2, issue #479) --
+
+
+def _catalogued_remote_file(tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content):
+    """Shared setup: a linked area whose one upload has reached the seed
+    as a catalogue entry, with nothing fetched yet."""
+    from netbbs.moderation.roles import BoardPermission, grant_permissions
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(dialer.db, "downloads", creator=creator)
+    grant_permissions(
+        dialer.db, creator, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.DELETE, granted_by=creator,
+    )
+    entry = upload_file(dialer.db, area, creator, "game.bin", content)
+    link_file_area(dialer.db, area, node_identity=dialer_identity)
+    queue_file_descriptor_if_linked(dialer.db, entry, area, node_identity=dialer_identity)
+    return creator, area, entry
+
+
+def test_remote_file_fetch_withdraws_a_catalogue_entry_whose_file_the_origin_deleted(tmp_path):
+    """Design doc §11.2, issue #479: once a Linked area announces its
+    uploads, a peer's catalogue can outlive the file it describes.
+    Deleting the file removes the only origin row that could serve the
+    bytes, and before this the peer kept listing the entry and failed
+    every fetch of it with a generic transfer error. The origin now says
+    so under its own signature, and the entry goes away for good."""
+    from netbbs.files.entries import delete_file
+    from netbbs.link.transport import RemoteFileWithdrawnError
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    content = os.urandom(4096)
+    creator, area, entry = _catalogued_remote_file(
+        tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content
+    )
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+
+                # The origin deletes the file the catalogue describes.
+                delete_file(dialer.db, entry, deleted_by=creator)
+
+                with pytest.raises(RemoteFileWithdrawnError):
+                    await fetch_next_file_chunk(
+                        seed_node, session, f"http://127.0.0.1:{dialer_server.port}",
+                        seed.lane, remote_file,
+                    )
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert get_remote_file(seed.db, entry.file_id) is None
+        carried_area = get_file_area_by_name(seed.db, "downloads")
+        assert list_remote_files(seed.db, carried_area) == []
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_remote_file_withdrawal_signed_by_anyone_but_the_origin_changes_nothing(tmp_path):
+    """The reason a withdrawal is signed at all: acting on it deletes
+    local catalogue state, so an unsigned HTTP status -- producible by
+    anything that intercepted or misdirected the request -- must not be
+    enough. A withdrawal that does not verify against the origin's
+    current signing key is refused and the entry survives."""
+    from netbbs.link.events import build_file_withdrawal
+    from netbbs.link.protocol import LinkProtocolError
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    impostor_identity = bootstrap_node_identity("impostor")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    content = os.urandom(4096)
+    creator, area, entry = _catalogued_remote_file(
+        tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content
+    )
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+
+                # A 410 carrying a withdrawal signed by somebody else
+                # entirely -- what a middlebox or a misdirected request
+                # could produce.
+                import netbbs.link.transport as transport_module
+
+                async def refuse_as_gone(node, session, base_url, chunk_request, **kwargs):
+                    # Built from the live request, so the only thing wrong
+                    # with it is who signed it.
+                    forged = build_file_withdrawal(
+                        signing_identity=impostor_identity.signing_key,
+                        file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at=utc_now_iso(),
+                    )
+                    raise transport_module.RemoteFileWithdrawnError("gone", forged)
+
+                original = transport_module.request_file_chunk
+                transport_module.request_file_chunk = refuse_as_gone
+                try:
+                    with pytest.raises(LinkProtocolError):
+                        await fetch_next_file_chunk(
+                            seed_node, session, f"http://127.0.0.1:{dialer_server.port}",
+                            seed.lane, remote_file,
+                        )
+                finally:
+                    transport_module.request_file_chunk = original
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert get_remote_file(seed.db, entry.file_id) is not None
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_remote_file_withdrawal_discards_a_partial_transfer_and_its_staging_file(tmp_path):
+    """A withdrawal has to clean up what the abandoned fetch left behind
+    -- the `link_file_transfers` row, its chunk records and the staging
+    file -- not merely unlist the entry. Nothing would ever come back for
+    them, and `remote_files`' own foreign key would refuse the delete."""
+    from netbbs.files.entries import delete_file
+    from netbbs.link.transport import RemoteFileWithdrawnError
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    content = os.urandom(300_000)
+    creator, area, entry = _catalogued_remote_file(
+        tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content
+    )
+    staging_paths: list[str] = []
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+                dialer_base_url = f"http://127.0.0.1:{dialer_server.port}"
+
+                # One chunk only -- a genuinely half-finished transfer.
+                transfer = await fetch_next_file_chunk(
+                    seed_node, session, dialer_base_url, seed.lane, remote_file, chunk_size=100_000,
+                )
+                assert transfer.status == "in_progress"
+                assert transfer.temp_path is not None
+                staging_paths.append(transfer.temp_path)
+                assert os.path.exists(transfer.temp_path)
+
+                delete_file(dialer.db, entry, deleted_by=creator)
+                with pytest.raises(RemoteFileWithdrawnError):
+                    await fetch_next_file_chunk(
+                        seed_node, session, dialer_base_url, seed.lane, remote_file, chunk_size=100_000,
+                    )
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert get_remote_file(seed.db, entry.file_id) is None
+        assert seed.db.connection.execute(
+            "SELECT COUNT(*) AS n FROM link_file_transfers"
+        ).fetchone()["n"] == 0
+        assert seed.db.connection.execute(
+            "SELECT COUNT(*) AS n FROM link_file_transfer_chunks"
+        ).fetchone()["n"] == 0
+        assert not os.path.exists(staging_paths[0])
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_remote_file_already_fetched_survives_its_origin_dropping_its_own_copy(tmp_path):
+    """Bytes this node has already fetched and verified are its own. That
+    the origin later deleted its copy is not a reason to un-list a real,
+    downloadable local file (design doc §11.2, issue #479)."""
+    from netbbs.link.files import withdraw_remote_file
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    content = os.urandom(4096)
+    creator, area, entry = _catalogued_remote_file(
+        tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content
+    )
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+                transfer = await fetch_next_file_chunk(
+                    seed_node, session, f"http://127.0.0.1:{dialer_server.port}",
+                    seed.lane, remote_file,
+                )
+                assert transfer.status == "completed"
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        fetched = get_remote_file(seed.db, entry.file_id)
+        assert fetched.fetched_file_id == entry.file_id
+        assert withdraw_remote_file(seed.db, fetched) is False
+        assert get_remote_file(seed.db, entry.file_id) is not None
+        assert download_file(get_file(seed.db, entry.file_id)) == content
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_remote_file_withdrawal_cannot_be_spoofed_with_the_files_own_descriptor(tmp_path):
+    """The sharpest form of the problem (Codex review of #500): the
+    `file_descriptor` being withdrawn is gossiped to the whole mesh,
+    signed by the very same origin key, and names the very same
+    `file_id`. "Signed by the origin, names this file" therefore
+    describes a document any interceptor already holds, and only
+    `object_type` tells the two apart -- so it is checked before the
+    signature ever matters, not after."""
+    from netbbs.link.transport import RemoteFileWithdrawnError
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    content = os.urandom(4096)
+    creator, area, entry = _catalogued_remote_file(
+        tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content
+    )
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+
+                # The genuine, already-published descriptor for this very
+                # file, replayed into the `withdrawal` slot of a 410.
+                descriptor = json.loads(
+                    dialer.db.connection.execute(
+                        "SELECT link_event_json FROM files WHERE file_id = ?", (entry.file_id,)
+                    ).fetchone()["link_event_json"]
+                )
+                assert descriptor["envelope"]["object_type"] == "file_descriptor"
+                assert descriptor["envelope"]["payload"]["file_id"] == remote_file.file_id
+
+                import netbbs.link.transport as transport_module
+
+                async def serve_the_descriptor_as_a_withdrawal(*args, **kwargs):
+                    return transport_module._parse_withdrawal_body(
+                        json.dumps({"error": "gone", "withdrawal": descriptor}), "http://spoofed"
+                    )
+
+                original = transport_module.request_file_chunk
+                transport_module.request_file_chunk = serve_the_descriptor_as_a_withdrawal
+                try:
+                    # Refused while still being parsed, so it never even
+                    # reaches the withdrawal path -- an ordinary failed
+                    # fetch, not a RemoteFileWithdrawnError.
+                    with pytest.raises(LinkTransportError) as raised:
+                        await fetch_next_file_chunk(
+                            seed_node, session, f"http://127.0.0.1:{dialer_server.port}",
+                            seed.lane, remote_file,
+                        )
+                    assert not isinstance(raised.value, RemoteFileWithdrawnError)
+                finally:
+                    transport_module.request_file_chunk = original
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert get_remote_file(seed.db, entry.file_id) is not None
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_remote_file_withdrawal_issued_to_another_node_or_gone_stale_changes_nothing(tmp_path):
+    """A signature is durable; a recorded 410 must not be. The withdrawal
+    is bound to one requester and one transfer, and checked for freshness
+    on the same five-minute window `InventoryRequest` uses -- otherwise a
+    withdrawal captured off the wire stays usable forever, including
+    after the origin restores the file from backup, when the entry it
+    deletes describes bytes the origin is serving again."""
+    from netbbs.link.events import build_file_withdrawal
+    from netbbs.link.protocol import LinkProtocolError
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    content = os.urandom(4096)
+    creator, area, entry = _catalogued_remote_file(
+        tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content
+    )
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+                transfer_id = compute_transfer_id(
+                    entry.file_id, seed_node.identity.fingerprint
+                )
+
+                import netbbs.link.transport as transport_module
+
+                # Genuine origin signature every time, and every other
+                # field taken from the live request -- each of these is
+                # wrong in exactly one way, so each is refused by the
+                # check it is aimed at.
+                def issued_elsewhere(chunk_request):
+                    return build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
+                        requester_fingerprint="somebody-else",
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at=utc_now_iso(),
+                    )
+
+                def other_transfer(chunk_request):
+                    return build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id="some-other-transfer",
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at=utc_now_iso(),
+                    )
+
+                def replayed_nonce(chunk_request):
+                    return build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce="a-nonce-from-some-earlier-request",
+                        created_at=utc_now_iso(),
+                    )
+
+                def stale(chunk_request):
+                    return build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key, file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at="2026-01-01T00:00:00+00:00",
+                    )
+
+                original = transport_module.request_file_chunk
+                try:
+                    for build in (issued_elsewhere, other_transfer, replayed_nonce, stale):
+                        async def refuse(node, session, base_url, chunk_request, _b=build, **kwargs):
+                            raise transport_module.RemoteFileWithdrawnError("gone", _b(chunk_request))
+
+                        transport_module.request_file_chunk = refuse
+                        with pytest.raises(LinkProtocolError):
+                            await fetch_next_file_chunk(
+                                seed_node, session, f"http://127.0.0.1:{dialer_server.port}",
+                                seed.lane, remote_file,
+                            )
+                        assert get_remote_file(seed.db, entry.file_id) is not None
+                finally:
+                    transport_module.request_file_chunk = original
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert get_remote_file(seed.db, entry.file_id) is not None
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_a_withdrawal_refused_because_the_fetch_won_reports_the_fetch(tmp_path):
+    """Codex review of #500. `withdraw_remote_file` deliberately refuses
+    to remove an entry another session has just finished fetching -- but
+    the refusal has to reach the caller. Re-raising regardless told them
+    their fetch had failed and the entry had been removed, and by then
+    neither was true: the bytes are local and the entry is still listed.
+
+    The interleaving matters and is built here rather than assumed. A
+    transfer that is already `completed` short-circuits at the top of
+    `fetch_next_file_chunk`, so the withdrawal path is only reachable
+    when the other session finishes *during* this request -- after the
+    transfer was read as in-progress, before the response is handled.
+    The stubbed transport does exactly that: it completes the transfer,
+    then reports the file gone."""
+    from netbbs.link.events import build_file_withdrawal
+    from netbbs.link.file_transfer import build_chunk_for_serving
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    content = os.urandom(4096)
+    creator, area, entry = _catalogued_remote_file(
+        tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content
+    )
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+                transfer_id = compute_transfer_id(
+                    entry.file_id, seed_node.identity.fingerprint
+                )
+
+                import netbbs.link.transport as transport_module
+
+                async def another_session_finishes_then_gone(
+                    node, session, base_url, chunk_request, **kwargs
+                ):
+                    withdrawal = build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key,
+                        file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at=utc_now_iso(),
+                    )
+                    running = get_transfer(seed.db, transfer_id)
+                    while running is not None and running.status == "in_progress":
+                        index = running.next_chunk_index
+                        chunk_bytes, _size, _total, is_last = build_chunk_for_serving(
+                            dialer.db, file_id=remote_file.file_id, chunk_index=index,
+                            max_chunk_size=running.chunk_size,
+                        )
+                        running = apply_received_chunk(
+                            seed.db, running, chunk_index=index, chunk_bytes=chunk_bytes,
+                            claimed_chunk_sha256=hashlib.sha256(chunk_bytes).hexdigest(),
+                            is_last=is_last, remote_file=remote_file,
+                        )
+                    raise transport_module.RemoteFileWithdrawnError("gone", withdrawal)
+
+                original = transport_module.request_file_chunk
+                transport_module.request_file_chunk = another_session_finishes_then_gone
+                try:
+                    result = await fetch_next_file_chunk(
+                        seed_node, session, f"http://127.0.0.1:{dialer_server.port}",
+                        seed.lane, remote_file,
+                    )
+                finally:
+                    transport_module.request_file_chunk = original
+                assert result.status == "completed"
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert get_remote_file(seed.db, entry.file_id) is not None
+        assert download_file(get_file(seed.db, entry.file_id)) == content
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_a_withdrawal_is_refused_when_the_origin_is_no_longer_a_peer(tmp_path):
+    """Codex review of #500: the origin can leave `node.peers` between
+    sending the chunk request and handling the answer. Its signing key is
+    exactly what tells a genuine withdrawal from a forged 410, so there
+    is no verdict to report -- and reporting the *refused* one would have
+    told the caller the origin withdrew an entry that is still listed."""
+    from netbbs.link.events import build_file_withdrawal
+    from netbbs.link.protocol import LinkProtocolError
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    content = os.urandom(4096)
+    creator, area, entry = _catalogued_remote_file(
+        tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content
+    )
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+
+                import netbbs.link.transport as transport_module
+
+                async def drop_the_peer_then_report_gone(
+                    node, session, base_url, chunk_request, **kwargs
+                ):
+                    withdrawal = build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key,
+                        file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at=utc_now_iso(),
+                    )
+                    # The origin stops being a completed peer while this
+                    # request is in flight.
+                    seed_node.peers.pop(remote_file.origin_fingerprint, None)
+                    raise transport_module.RemoteFileWithdrawnError("gone", withdrawal)
+
+                original = transport_module.request_file_chunk
+                transport_module.request_file_chunk = drop_the_peer_then_report_gone
+                try:
+                    with pytest.raises(LinkProtocolError):
+                        await fetch_next_file_chunk(
+                            seed_node, session, f"http://127.0.0.1:{dialer_server.port}",
+                            seed.lane, remote_file,
+                        )
+                finally:
+                    transport_module.request_file_chunk = original
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert get_remote_file(seed.db, entry.file_id) is not None
     finally:
         dialer.close()
         seed.close()

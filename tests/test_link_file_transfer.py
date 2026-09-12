@@ -20,11 +20,13 @@ from netbbs.auth.users import create_user
 from netbbs.files.areas import create_file_area
 from netbbs.files.entries import upload_file
 from netbbs.link.file_transfer import (
+    FileNoLongerHeldError,
     FileTransferError,
     apply_received_chunk,
     build_chunk_for_serving,
     compute_transfer_id,
     get_or_create_transfer,
+    get_transfer,
 )
 from netbbs.link.files import (
     link_file_area,
@@ -125,11 +127,59 @@ def test_get_or_create_transfer_is_idempotent(origin_db, puller_db, origin_ident
     assert first.id == second.id
 
 
-def test_zero_byte_file_starts_completed(origin_db, puller_db, origin_identity, puller_identity):
+def test_zero_byte_file_is_fetched_rather_than_declared_complete(
+    origin_db, puller_db, origin_identity, puller_identity
+):
+    """Codex review of #500. An empty file used to be marked `completed`
+    the moment its transfer row was created -- no round trip, and
+    crucially no `_finalize_transfer`, so no `files` row and no
+    `fetched_file_id`. The caller was told the file had been fetched and
+    verified and was available via /download, and none of that was true.
+
+    It now takes the ordinary path for its one empty chunk, which is what
+    produces real local state -- and what lets an origin deliver a
+    withdrawal for an empty file at all (§11.2)."""
+    from netbbs.files.entries import download_file, get_file
+    from netbbs.link.files import get_remote_file
+
     entry, remote_file = _linked_remote_file(origin_db, puller_db, origin_identity, puller_identity, content=b"")
     transfer = get_or_create_transfer(puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint)
+    assert transfer.status == "in_progress"
+    assert transfer.next_chunk_index == 0
+
+    transfer = _drive_transfer(
+        origin_db, puller_db, remote_file,
+        requester_fingerprint=puller_identity.fingerprint, chunk_size=100_000,
+    )
     assert transfer.status == "completed"
-    assert transfer.next_chunk_index is None
+    assert get_remote_file(puller_db, remote_file.file_id).fetched_file_id == entry.file_id
+    assert download_file(get_file(puller_db, entry.file_id)) == b""
+
+
+def test_zero_byte_file_can_be_withdrawn_by_its_origin(
+    origin_db, puller_db, origin_identity, puller_identity
+):
+    """The half of the same defect this issue is actually about: an empty
+    file that never reached its origin could never be told the origin had
+    dropped it, so its catalogue entry stayed phantom permanently."""
+    from netbbs.files.entries import delete_file
+
+    _entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=b""
+    )
+    transfer = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint
+    )
+    assert transfer.status == "in_progress"
+
+    # The origin drops the file before the one chunk is asked for.
+    origin_db.connection.execute("DELETE FROM files WHERE file_id = ?", (remote_file.file_id,))
+    origin_db.connection.commit()
+
+    with pytest.raises(FileNoLongerHeldError):
+        build_chunk_for_serving(
+            origin_db, file_id=remote_file.file_id, chunk_index=0, max_chunk_size=transfer.chunk_size,
+        )
 
 
 def test_full_transfer_across_multiple_chunks_reassembles_correctly(
@@ -314,10 +364,11 @@ def test_finalize_rejects_a_reassembly_not_matching_the_catalogued_hash(
             claimed_chunk_sha256=hashlib.sha256(chunk_bytes).hexdigest(), is_last=is_last,
             remote_file=tampered_remote_file,
         )
-    failed = get_or_create_transfer(
-        puller_db, tampered_remote_file, requester_fingerprint=puller_identity.fingerprint, chunk_size=100_000,
-    )
-    assert failed.status == "failed"
+    # Observed with `get_transfer`, not `get_or_create_transfer`: the
+    # latter deliberately reopens a failed transfer so a caller can retry
+    # (see test_a_failed_transfer_can_be_retried), which would hide the
+    # status this test is about.
+    assert get_transfer(puller_db, transfer.transfer_id).status == "failed"
 
 
 def test_build_chunk_for_serving_rejects_unknown_file_id(origin_db, puller_db, origin_identity, puller_identity):
@@ -344,3 +395,223 @@ def test_build_chunk_for_serving_marks_the_final_chunk(origin_db, puller_db, ori
     assert chunk_bytes == b"x" * 10
     assert total_size == 10
     assert is_last is True
+
+
+def test_applying_a_chunk_after_the_transfer_was_withdrawn_fails_cleanly(
+    origin_db, puller_db, origin_identity, puller_identity, tmp_path
+):
+    """Design doc §11.2, issue #479 (Codex review of #500): two local
+    sessions fetching the same remote file share one deterministic
+    transfer row, and their network requests happen outside the database
+    lane. If the origin withdraws the file between them, the withdrawal
+    deletes that row -- and its staging file -- while the other chunk is
+    still in flight.
+
+    That chunk must fail the way every other chunk failure does, through
+    `FileTransferError`, and must not recreate the staging file on its
+    way to a foreign-key violation nobody catches."""
+    from netbbs.link.files import withdraw_remote_file
+
+    content = os.urandom(200_000)
+    _entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=content
+    )
+    transfer = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint,
+        chunk_size=100_000,
+    )
+    chunk_bytes, _size, _total, is_last = build_chunk_for_serving(
+        origin_db, file_id=remote_file.file_id, chunk_index=0, max_chunk_size=transfer.chunk_size,
+    )
+    transfer = apply_received_chunk(
+        puller_db, transfer, chunk_index=0, chunk_bytes=chunk_bytes,
+        claimed_chunk_sha256=hashlib.sha256(chunk_bytes).hexdigest(), is_last=is_last,
+        remote_file=remote_file,
+    )
+    staging_path = transfer.temp_path
+    assert staging_path is not None and os.path.exists(staging_path)
+
+    # The other session's fetch gets the withdrawal and acts on it first.
+    assert withdraw_remote_file(puller_db, remote_file) is True
+    assert not os.path.exists(staging_path)
+
+    # This session's chunk, already in flight, lands afterwards.
+    next_bytes, _size, _total, next_is_last = build_chunk_for_serving(
+        origin_db, file_id=remote_file.file_id, chunk_index=1, max_chunk_size=transfer.chunk_size,
+    )
+    with pytest.raises(FileTransferError, match="no longer exists"):
+        apply_received_chunk(
+            puller_db, transfer, chunk_index=1, chunk_bytes=next_bytes,
+            claimed_chunk_sha256=hashlib.sha256(next_bytes).hexdigest(), is_last=next_is_last,
+            remote_file=remote_file,
+        )
+    assert not os.path.exists(staging_path)
+
+
+def test_withdrawal_refuses_an_entry_another_session_just_finished_fetching(
+    origin_db, puller_db, origin_identity, puller_identity
+):
+    """Codex review of #500: the "never withdraw a fetched entry" guard
+    is only worth anything if it reads the *stored* value. A caller's
+    `RemoteFile` is a snapshot taken before a network round trip, and two
+    sessions fetching the same file share one transfer -- so the other
+    one can finish, promote the content and set `fetched_file_id` while
+    this withdrawal is still in flight. Trusting the snapshot deletes a
+    real, downloadable local file's catalogue row."""
+    from netbbs.link.files import get_remote_file, withdraw_remote_file
+
+    content = os.urandom(4096)
+    _entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=content
+    )
+    assert remote_file.fetched_file_id is None
+    stale_snapshot = remote_file
+
+    # The other session completes the fetch.
+    _drive_transfer(
+        origin_db, puller_db, remote_file,
+        requester_fingerprint=puller_identity.fingerprint, chunk_size=100_000,
+    )
+    assert get_remote_file(puller_db, remote_file.file_id).fetched_file_id is not None
+
+    # This session's withdrawal arrives afterwards, still holding the
+    # snapshot from before.
+    assert withdraw_remote_file(puller_db, stale_snapshot) is False
+    assert get_remote_file(puller_db, remote_file.file_id) is not None
+
+
+def test_starting_a_transfer_for_an_already_withdrawn_entry_fails_cleanly(
+    origin_db, puller_db, origin_identity, puller_identity
+):
+    """The mirror of the mid-transfer case (Codex review of #500): two
+    callers browse the same entry, the first one's verified withdrawal
+    removes it, and the second then starts a fetch from its cached
+    `RemoteFile`. That must not insert a child row against a deleted
+    parent and surface `sqlite3.IntegrityError` to a UI which handles
+    `FileTransferError` and nothing else."""
+    from netbbs.link.files import withdraw_remote_file
+
+    content = os.urandom(4096)
+    _entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=content
+    )
+    assert withdraw_remote_file(puller_db, remote_file) is True
+
+    with pytest.raises(FileTransferError, match="no longer in this area's catalogue"):
+        get_or_create_transfer(
+            puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint,
+            chunk_size=100_000,
+        )
+
+
+def test_a_failed_transfer_can_be_retried(origin_db, puller_db, origin_identity, puller_identity):
+    """Codex review of #500: `_finalize_transfer` records `'failed'` when
+    reassembled content does not match the catalogue's own hash, and
+    nothing ever cleared it. Selecting the file again returned that
+    stale failure without contacting anybody -- the fetch could never be
+    retried, and if the origin had since dropped the file, its
+    withdrawal could never arrive either."""
+    from netbbs.link.files import get_remote_file
+
+    content = os.urandom(4096)
+    entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=content
+    )
+    transfer = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint
+    )
+
+    # A last chunk whose own hash is honest but whose bytes are not the
+    # catalogued file: per-chunk verification passes, whole-file fails.
+    wrong = os.urandom(len(content))
+    with pytest.raises(FileTransferError):
+        apply_received_chunk(
+            puller_db, transfer, chunk_index=0, chunk_bytes=wrong,
+            claimed_chunk_sha256=hashlib.sha256(wrong).hexdigest(), is_last=True,
+            remote_file=remote_file,
+        )
+    assert get_transfer(puller_db, transfer.transfer_id).status == "failed"
+
+    # Selecting it again reopens the transfer instead of replaying the
+    # old failure, and a clean fetch then succeeds.
+    reopened = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint
+    )
+    assert reopened.status == "in_progress"
+    assert reopened.bytes_received == 0
+    assert reopened.next_chunk_index == 0
+
+    finished = _drive_transfer(
+        origin_db, puller_db, remote_file,
+        requester_fingerprint=puller_identity.fingerprint, chunk_size=100_000,
+    )
+    assert finished.status == "completed"
+    assert get_remote_file(puller_db, remote_file.file_id).fetched_file_id == entry.file_id
+
+
+def test_a_chunk_from_before_a_reset_cannot_mutate_the_reopened_transfer(
+    origin_db, puller_db, origin_identity, puller_identity
+):
+    """Codex review of #500. Two sessions can have chunks of the same
+    transfer in flight; one response fails whole-file verification and a
+    retry reopens the transfer before the other arrives. The reused
+    deterministic `transfer_id` and the cleared chunk records mean the
+    stale response would otherwise be applied at its *old* index --
+    validated against the caller's pre-reset snapshot -- landing the
+    final chunk at the start of a fresh staging file."""
+    content = os.urandom(300_000)
+    _entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=content
+    )
+    transfer = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint,
+        chunk_size=100_000,
+    )
+    first, _s, _t, _last = build_chunk_for_serving(
+        origin_db, file_id=remote_file.file_id, chunk_index=0, max_chunk_size=transfer.chunk_size,
+    )
+    transfer = apply_received_chunk(
+        puller_db, transfer, chunk_index=0, chunk_bytes=first,
+        claimed_chunk_sha256=hashlib.sha256(first).hexdigest(), is_last=False,
+        remote_file=remote_file,
+    )
+    # The other session's next chunk, captured before anything resets.
+    stale_snapshot = transfer
+    stale_index = transfer.next_chunk_index
+    stale_bytes, _s, _t, _last = build_chunk_for_serving(
+        origin_db, file_id=remote_file.file_id, chunk_index=stale_index,
+        max_chunk_size=transfer.chunk_size,
+    )
+
+    # This session's attempt fails whole-file verification, and the retry
+    # reopens the transfer from zero.
+    wrong = os.urandom(len(content))
+    with pytest.raises(FileTransferError):
+        apply_received_chunk(
+            puller_db, transfer, chunk_index=stale_index, chunk_bytes=wrong,
+            claimed_chunk_sha256=hashlib.sha256(wrong).hexdigest(), is_last=True,
+            remote_file=remote_file,
+        )
+    reopened = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint,
+        chunk_size=100_000,
+    )
+    assert reopened.status == "in_progress"
+    assert reopened.next_chunk_index == 0
+
+    # The pre-reset response finally lands. It must be refused, not
+    # written at its old index.
+    with pytest.raises(FileTransferError, match="expected"):
+        apply_received_chunk(
+            puller_db, stale_snapshot, chunk_index=stale_index, chunk_bytes=stale_bytes,
+            claimed_chunk_sha256=hashlib.sha256(stale_bytes).hexdigest(), is_last=False,
+            remote_file=remote_file,
+        )
+    assert get_transfer(puller_db, transfer.transfer_id).bytes_received == 0
+
+    # And a clean retry still completes.
+    finished = _drive_transfer(
+        origin_db, puller_db, remote_file,
+        requester_fingerprint=puller_identity.fingerprint, chunk_size=100_000,
+    )
+    assert finished.status == "completed"
