@@ -31,6 +31,7 @@ import argparse
 import ipaddress
 import math
 import tomllib
+from urllib.parse import urlparse
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -362,6 +363,42 @@ class NodeConfig:
                 raise ConfigError(f"{name}.port must be between 1 and 65535, got {transport.port}")
             if not transport.host.strip():
                 raise ConfigError(f"{name}.host must not be empty")
+            if transport.public_url is not None:
+                # Codex review of #482, unaddressed at merge: this value
+                # is handed to callers as the base of a transfer link, so
+                # a scheme-less or authority-less string does not fail
+                # here -- it fails in somebody's browser, resolved
+                # relative to whatever page they were on, or printed to a
+                # terminal caller as a URL that identifies nothing.
+                try:
+                    parsed = urlparse(transport.public_url)
+                except ValueError as exc:
+                    # `urlparse` raises on some malformed authorities --
+                    # `http://[` among them -- so the check meant to turn
+                    # a typo into a clear diagnostic could itself escape
+                    # as a traceback past `main`'s `ConfigError` handler
+                    # (Codex review of #508).
+                    raise ConfigError(
+                        f"{name}.public_url is not a usable URL ({exc}), got "
+                        f"{transport.public_url!r}"
+                    ) from exc
+                if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                    raise ConfigError(
+                        f"{name}.public_url must be an absolute http:// or https:// URL, got "
+                        f"{transport.public_url!r}"
+                    )
+                if parsed.query or parsed.fragment or parsed.params:
+                    # A transfer link is this value with `/transfer/<token>`
+                    # appended, so anything after the path silently breaks
+                    # every link the node prints (Codex review of #508): a
+                    # query puts the token in the wrong place, and a
+                    # fragment never reaches the server at all. A path
+                    # prefix is fine and stays supported -- that is how a
+                    # node behind a reverse proxy subpath is reached.
+                    raise ConfigError(
+                        f"{name}.public_url must not carry a query or fragment (a path prefix is "
+                        f"fine), got {transport.public_url!r}"
+                    )
 
         # Only an *explicit* `enabled = true` validates the Link block at
         # config-load time. A silent config (`None`, design doc §16 issue
@@ -663,6 +700,8 @@ def _transport_from_toml(data: dict, name: str, current: TransportConfig) -> Tra
     if unknown:
         raise ConfigError(f"[{name}] has unknown setting(s): {', '.join(sorted(unknown))}")
     public_url = table.get("public_url", current.public_url)
+    if public_url is not None and not isinstance(public_url, str):
+        raise ConfigError(f"[{name}] public_url must be a string, got {type(public_url).__name__}")
     return TransportConfig(
         enabled=bool(table.get("enabled", current.enabled)),
         host=str(table.get("host", current.host)),

@@ -626,13 +626,43 @@ def _store_upload(
     """Store and announce in one database job -- the same pairing
     `netbbs.net.file_flow._handle_upload` makes for a Zmodem upload, and
     for the same reason (issue #464): a file that lands without its
-    catalogue entry is never revisited."""
+    catalogue entry is never revisited.
+
+    The two are *not* one transaction, and the announcement failing must
+    not be reported as the upload failing (Codex review of #482,
+    unaddressed at merge). `upload_file_from_temp` has already moved the
+    bytes into content-addressed storage and committed the `files` row
+    by the time a descriptor is signed, so a failure there leaves a
+    genuinely stored file. Telling the caller it "could not be stored"
+    invites them to upload it again -- producing a duplicate of something
+    that already exists -- while the real consequence, a Linked area that
+    never announces this file, goes unmentioned.
+
+    So the announcement is best-effort and says so. Nothing re-queues it
+    afterwards; `has_queued_file_descriptor` can see the gap but nothing
+    acts on it, which is worth knowing before relying on this path for a
+    Linked area.
+    """
     entry = upload_file_from_temp(
         db, area, user, filename,
         temp_path=temp_path, sha256=sha256, size_bytes=size_bytes, description=description,
     )
     if announce_identity is not None:
-        queue_file_descriptor_if_linked(db, entry, area, node_identity=announce_identity)
+        try:
+            queue_file_descriptor_if_linked(db, entry, area, node_identity=announce_identity)
+        except Exception:
+            # Rolled back before the failure is swallowed (Codex review of
+            # #508). `queue_file_descriptor_if_linked` can fail at its own
+            # `commit()`, and this connection is the lane's, shared with
+            # every later job: leaving it inside a failed transaction makes
+            # the next `BEGIN` fail, or lets an unrelated commit persist the
+            # descriptor this log says was never announced.
+            db.connection.rollback()
+            _logger.warning(
+                "transfer: stored %r in area %r but could not queue its Link descriptor; "
+                "the file is available locally and will not be announced to peers",
+                entry.filename, area.name, exc_info=True,
+            )
     return entry
 
 

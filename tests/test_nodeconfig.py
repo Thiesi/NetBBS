@@ -813,3 +813,70 @@ def test_non_finite_relay_timeouts_are_rejected(tmp_path, value):
     )
     with pytest.raises(ConfigError, match="live_relay_rendezvous_timeout_seconds"):
         load_config(["--config", str(config_file)])
+
+
+def test_a_public_url_without_a_scheme_is_refused():
+    """Codex review of #482, unaddressed at merge. This value is handed
+    to callers as the base of a transfer link, so a scheme-less or
+    authority-less string does not fail at load -- it fails in somebody's
+    browser, resolved against whatever page they were on, or reaches a
+    terminal caller as a URL identifying nothing."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    def web_config(public_url):
+        return NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=public_url)
+        )
+
+    for bad in ("netbbs.example.org", "//netbbs.example.org", "ftp://netbbs.example.org", "https://"):
+        with pytest.raises(ConfigError, match="public_url"):
+            web_config(bad).validate()
+
+    for good in ("http://netbbs.example.org", "https://netbbs.example.org:8443/bbs"):
+        web_config(good).validate()
+
+
+def test_a_non_string_public_url_is_refused(tmp_path):
+    """The same value arriving from TOML as a number or a table used to
+    be coerced with `str()` and accepted."""
+    from netbbs.net.nodeconfig import ConfigError, load_config
+
+    path = tmp_path / "netbbs.toml"
+    path.write_text("[web]\nenabled = true\npublic_url = 8080\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="public_url"):
+        load_config(["--config", str(path)])
+
+
+def test_a_public_url_that_cannot_be_parsed_is_a_config_error():
+    """Codex review of #508: `urlparse` raises on some malformed
+    authorities, so the check meant to turn an operator typo into a clear
+    diagnostic could itself escape as a traceback past `main`'s
+    `ConfigError` handler."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    config = NodeConfig(
+        web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url="http://[")
+    )
+    with pytest.raises(ConfigError, match="public_url"):
+        config.validate()
+
+
+def test_a_public_url_with_a_query_or_fragment_is_refused():
+    """Codex review of #508: a transfer link is this value with
+    `/transfer/<token>` appended, so a query puts the token in the wrong
+    place and a fragment never reaches the server -- every printed link
+    fails, silently. A path prefix stays supported: that is how a node
+    behind a reverse-proxy subpath is reached."""
+    from netbbs.net.nodeconfig import ConfigError, NodeConfig, TransportConfig
+
+    def web_config(public_url):
+        return NodeConfig(
+            web=TransportConfig(enabled=True, host="127.0.0.1", port=8080, public_url=public_url)
+        )
+
+    for bad in ("https://bbs.example.org?proxy=1", "https://bbs.example.org#web"):
+        with pytest.raises(ConfigError, match="query or fragment"):
+            web_config(bad).validate()
+
+    # A subpath is legitimate and must keep working.
+    web_config("https://bbs.example.org/bbs").validate()

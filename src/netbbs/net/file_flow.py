@@ -1979,9 +1979,30 @@ async def _handle_upload(
                 description=description,
             )
             if link_context is not None:
-                queue_file_descriptor_if_linked(
-                    db, stored, area, node_identity=link_context.node_identity
-                )
+                # Best-effort, and deliberately after the file is
+                # committed rather than inside its transaction (Codex
+                # review of #482): `upload_file_from_temp` has already
+                # moved the bytes and written the row, so a signing or
+                # database failure here must not turn a stored file into
+                # a reported upload failure. The Linked area simply does
+                # not announce this one; nothing re-queues it.
+                try:
+                    queue_file_descriptor_if_linked(
+                        db, stored, area, node_identity=link_context.node_identity
+                    )
+                except Exception:
+                    # Rolled back before swallowing, as on the HTTP path
+                    # (Codex review of #508): this is the lane's shared
+                    # connection, and a failure inside
+                    # `queue_file_descriptor_if_linked`'s own commit would
+                    # otherwise leave it in a failed transaction for every
+                    # later job.
+                    db.connection.rollback()
+                    _logger.warning(
+                        "files: stored %r in area %r but could not queue its Link descriptor; "
+                        "the file is available locally and will not be announced to peers",
+                        stored.filename, area.name, exc_info=True,
+                    )
             return stored
 
         entry = await lane.run(_store_and_announce)
