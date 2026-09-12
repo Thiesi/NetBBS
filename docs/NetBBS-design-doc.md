@@ -2841,8 +2841,13 @@ catalogue knows.
 The origin says so when asked. A chunk request (§11.3) for a `file_id` this
 node holds no row for is answered **HTTP 410 with a signed `file_withdrawal`**
 — `file_id`, `requester_fingerprint`, `transfer_id`, `request_nonce`,
-`created_at`, `nonce`, signed by the origin's current signing key, the same key
-that signed the `file_descriptor` being withdrawn.
+`created_at`, `nonce`, signed by the origin's **current** signing key. That is
+the same origin *identity* that signed the `file_descriptor` being withdrawn,
+but not necessarily the same *key*: a descriptor is immutable and keeps the
+signature it was created with, while an operational signing key rotates (§12).
+An implementation that verified a withdrawal against the descriptor's own key
+would reject every legitimate one issued after a rotation; the current key is
+resolved through the origin's transition chain, as everywhere else.
 
 Acting on one is irreversible in a way discarding a bad chunk is not: once the
 `remote_files` row is gone, the `file_descriptor` still in `link_events` means
@@ -2867,7 +2872,9 @@ all of them before deleting anything:
   freshness a recorded 410 stays usable indefinitely — including after the
   origin restores the file from backup, when the entry it deletes would describe
   bytes the origin is serving again;
-- **the signature verifies** against the origin's current signing key.
+- **the signature verifies** against the origin's current signing key — and an
+  envelope that cannot be canonicalized fails this check rather than raising,
+  since it could not have carried a valid signature anyway.
 
 Any failure refuses the withdrawal and changes nothing. On success the requester
 deletes its `remote_files` row along with the fetch state that existed only to

@@ -913,7 +913,22 @@ whenever a signed object authorizes a deletion:
   is what varies, so the withdrawal echoes it and the requester checks it.
   Freshness is then an outer bound, not the binding.
 
-The 410 body carrying no usable withdrawal is an ordinary failed fetch.
+The 410 body carrying no usable withdrawal is an ordinary failed fetch, and so
+is an envelope that cannot be canonicalized: `canonical_bytes` refuses floats,
+and `netbbs_protocol: 1.0` compares equal to `1` and so passes every shape
+check, so a fabricated response could abort a fetch with an uncaught
+`ContentIdError` before its invalid signature was ever examined. Verification of
+an uncanonicalizable envelope is a verification *failure*. This applies to the
+signed objects parsed straight off an HTTP response — `file_chunk_descriptor`
+and `file_withdrawal` — which have nothing between the wire and the verify call,
+unlike the gossiped types that reach `handle_events`.
+
+**"Signed by the origin" is an identity, not a key.** A `file_descriptor` is
+immutable and keeps the signature it was created with; an operational signing
+key rotates. Anything verifying a later object against "the key that signed the
+descriptor" rejects every legitimate object issued after a rotation. Resolve the
+current key from the origin's transition chain, and say *identity* in prose that
+a second implementation might read as normative.
 
 **Deleting a `remote_files` row is not a bare DELETE.** `link_file_transfers`
 holds a foreign key to it, and a partial transfer owns a staging file nothing

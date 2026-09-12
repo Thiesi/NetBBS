@@ -1141,3 +1141,63 @@ def test_a_wrong_length_signature_is_rejected_rather_than_raised():
     verify_key = nacl.signing.SigningKey.generate().verify_key
     for length in (0, 1, 63, 65, 200):
         assert verify_signature(verify_key, b"message", b"x" * length) is False
+
+
+def test_a_withdrawal_envelope_that_cannot_be_canonicalized_fails_verification():
+    """Codex review of #500: `netbbs_protocol: 1.0` compares equal to `1`,
+    so it passes every shape check `from_dict` applies -- and then
+    `canonical_bytes` refuses the float, which used to escape as an
+    uncaught `ContentIdError` before the (invalid) signature was ever
+    examined. An envelope that cannot be canonicalized could not have
+    carried a valid signature, so this is a verification failure."""
+    from netbbs.link.events import (
+        FileChunkDescriptor,
+        FileWithdrawal,
+        build_file_chunk_descriptor,
+        build_file_withdrawal,
+        verify_file_chunk_descriptor,
+        verify_file_withdrawal,
+    )
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    identity = bootstrap_node_identity("origin")
+    verify_key = identity.signing_key.verify_key
+
+    withdrawal = build_file_withdrawal(
+        signing_identity=identity.signing_key, file_id="f", requester_fingerprint="r",
+        transfer_id="t", request_nonce="n", created_at="2026-01-01T00:00:00+00:00",
+    ).to_dict()
+    withdrawal["envelope"]["netbbs_protocol"] = 1.0
+    assert verify_file_withdrawal(FileWithdrawal.from_dict(withdrawal), verify_key) is False
+
+    # The chunk descriptor is parsed off a response the same way and had
+    # the same hazard.
+    descriptor = build_file_chunk_descriptor(
+        signing_identity=identity.signing_key, file_id="f", chunk_index=0,
+        chunk_sha256="a" * 64, chunk_size=1, total_size=1, is_last=True,
+        created_at="2026-01-01T00:00:00+00:00",
+    ).to_dict()
+    descriptor["envelope"]["netbbs_protocol"] = 1.0
+    assert verify_file_chunk_descriptor(FileChunkDescriptor.from_dict(descriptor), verify_key) is False
+
+
+def test_a_withdrawal_verifies_after_the_origin_rotates_its_signing_key():
+    """The descriptor is immutable and keeps its original signature; the
+    signing key rotates. Verifying a withdrawal against "the key that
+    signed the descriptor" would reject every legitimate one issued after
+    a rotation -- which is why the docs now say same *identity*, resolved
+    key (Codex review of #500)."""
+    from netbbs.link.events import build_file_withdrawal, verify_file_withdrawal
+    from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
+
+    identity = bootstrap_node_identity("origin")
+    before = identity.signing_key.verify_key
+    rotated = rotate_operational_key(identity, purpose="signing")
+    assert bytes(rotated.signing_key.verify_key) != bytes(before)
+
+    withdrawal = build_file_withdrawal(
+        signing_identity=rotated.signing_key, file_id="f", requester_fingerprint="r",
+        transfer_id="t", request_nonce="n", created_at="2026-01-01T00:00:00+00:00",
+    )
+    assert verify_file_withdrawal(withdrawal, rotated.signing_key.verify_key) is True
+    assert verify_file_withdrawal(withdrawal, before) is False

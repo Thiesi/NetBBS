@@ -64,7 +64,7 @@ from typing import Any
 
 import nacl.signing
 
-from netbbs.boards.content_id import canonical_json_bytes, compute_content_id
+from netbbs.boards.content_id import ContentIdError, canonical_json_bytes, compute_content_id
 from netbbs.identity.keys import Identity, verify_signature
 
 # Versioning mandatory from the first byte, not inferred.
@@ -1385,9 +1385,14 @@ class FileWithdrawal:
     Signed for the same reason every chunk descriptor is: this deletes a
     peer's local catalogue row, and an unsigned HTTP status could be
     produced by anything that intercepted or misdirected the request. The
-    requester verifies it against the origin's current signing key -- the
-    same key that signed the `file_descriptor` being withdrawn -- and
-    changes nothing if it does not verify.
+    requester verifies it against the origin's *current* signing key.
+
+    That is the same origin identity that signed the `file_descriptor`
+    being withdrawn, but not necessarily the same key: a descriptor is
+    immutable and keeps the signature it was created with, while an
+    operational signing key rotates (§12). Resolving the current key
+    through the origin's transition chain is what makes a withdrawal
+    issued after a rotation verify at all.
 
     **A valid signature is necessary and nowhere near sufficient here,**
     and `from_dict` enforces the rest (Codex review of #500). The
@@ -1472,8 +1477,9 @@ def build_file_withdrawal(
     nonce: str | None = None,
 ) -> FileWithdrawal:
     """Build and sign one `file_withdrawal`, per design doc §11.2. Always
-    signed by `signing_identity` -- the origin's current signing key, the
-    same key that signed the file's own `file_descriptor`.
+    signed by `signing_identity` -- the origin's *current* signing key,
+    which after a rotation (§12) is no longer the key that signed the
+    file's own immutable `file_descriptor`. Same identity, resolved key.
 
     Every binding field comes from the chunk request being answered.
     `request_nonce` is the one that makes the result single-use: it is
@@ -1501,7 +1507,9 @@ def verify_file_withdrawal(
     *current signing key* -- same division of responsibility as
     `verify_file_chunk_descriptor`. The envelope's own shape is already
     settled by `from_dict`; this is only the signature."""
-    return verify_signature(signing_verify_key, canonical_bytes(withdrawal.envelope), withdrawal.signature)
+    return _verify_canonical_envelope(
+        signing_verify_key, withdrawal.envelope, withdrawal.signature
+    )
 
 
 @dataclass(frozen=True)
@@ -1559,9 +1567,12 @@ def build_file_chunk_descriptor(
     nonce: str | None = None,
 ) -> FileChunkDescriptor:
     """Build and sign one `file_chunk_descriptor`, per design doc §11.3.
-    Always signed by `signing_identity` -- the serving origin's current
-    signing key, the same key that signed this file's own
-    `file_descriptor`."""
+    Always signed by `signing_identity` -- the serving origin's *current*
+    signing key. That is the same origin identity that signed this file's
+    own `file_descriptor`, though after a rotation (§12) no longer the
+    same key: the descriptor is immutable and keeps its original
+    signature, so a requester resolves the current key rather than
+    reusing that one."""
     payload = {
         "file_id": file_id,
         "chunk_index": chunk_index,
@@ -1584,7 +1595,36 @@ def verify_file_chunk_descriptor(
     """Verify `descriptor`'s signature against the claimed origin's
     *current signing key* -- same division of responsibility as
     `verify_file_descriptor`."""
-    return verify_signature(signing_verify_key, canonical_bytes(descriptor.envelope), descriptor.signature)
+    return _verify_canonical_envelope(
+        signing_verify_key, descriptor.envelope, descriptor.signature
+    )
+
+
+def _verify_canonical_envelope(
+    signing_verify_key: nacl.signing.VerifyKey, envelope: dict, signature: bytes
+) -> bool:
+    """Signature check for the two signed objects that arrive as an HTTP
+    *response* rather than through `handle_events` -- `file_chunk_
+    descriptor` and `file_withdrawal`.
+
+    An envelope that cannot be canonicalized cannot carry a valid
+    signature, so that is a verification failure and is reported as one
+    (Codex review of #500). It was previously an uncaught
+    `ContentIdError` escaping into the caller: `canonical_bytes` refuses
+    floats, and a fabricated 410 or chunk response only has to encode
+    `netbbs_protocol` as `1.0` -- which compares equal to `1`, so it
+    passes every shape check -- to abort a fetch with an unhandled
+    exception before its invalid signature was ever examined.
+
+    These two need it where the gossiped types do not: they are parsed
+    straight off a response, on a transport that is plain HTTP unless a
+    deployment says otherwise, with nothing between the wire and here.
+    """
+    try:
+        message = canonical_bytes(envelope)
+    except ContentIdError:
+        return False
+    return verify_signature(signing_verify_key, message, signature)
 
 
 @dataclass(frozen=True)
