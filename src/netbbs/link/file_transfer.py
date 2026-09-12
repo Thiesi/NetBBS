@@ -254,11 +254,22 @@ def apply_received_chunk(
     # has a parent, leaking the file and surfacing a raw SQLite error to
     # a caller. FileTransferError is what every caller of this function
     # already handles.
-    if get_transfer(db, transfer.transfer_id) is None:
+    current = get_transfer(db, transfer.transfer_id)
+    if current is None:
         raise FileTransferError(
             f"transfer {transfer.transfer_id!r} no longer exists -- the file's origin withdrew it "
             "while this chunk was in flight"
         )
+    # Every decision below reads the *stored* transfer, not the caller's
+    # (Codex review of #500). `transfer` is a snapshot taken before a
+    # network round trip, so it is stale by definition -- and the row can
+    # have been reset underneath it since: another session's response
+    # failing whole-file verification, then a retry reopening the
+    # transfer. Validating `chunk_index` against the snapshot would
+    # accept that pre-reset response at its old position, append it to a
+    # fresh staging file as though it were the first chunk, and fail the
+    # reopened attempt too.
+    transfer = current
 
     already_applied = db.connection.execute(
         "SELECT 1 FROM link_file_transfer_chunks WHERE transfer_id = ? AND chunk_index = ?",

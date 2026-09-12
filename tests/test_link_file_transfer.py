@@ -547,3 +547,71 @@ def test_a_failed_transfer_can_be_retried(origin_db, puller_db, origin_identity,
     )
     assert finished.status == "completed"
     assert get_remote_file(puller_db, remote_file.file_id).fetched_file_id == entry.file_id
+
+
+def test_a_chunk_from_before_a_reset_cannot_mutate_the_reopened_transfer(
+    origin_db, puller_db, origin_identity, puller_identity
+):
+    """Codex review of #500. Two sessions can have chunks of the same
+    transfer in flight; one response fails whole-file verification and a
+    retry reopens the transfer before the other arrives. The reused
+    deterministic `transfer_id` and the cleared chunk records mean the
+    stale response would otherwise be applied at its *old* index --
+    validated against the caller's pre-reset snapshot -- landing the
+    final chunk at the start of a fresh staging file."""
+    content = os.urandom(300_000)
+    _entry, remote_file = _linked_remote_file(
+        origin_db, puller_db, origin_identity, puller_identity, content=content
+    )
+    transfer = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint,
+        chunk_size=100_000,
+    )
+    first, _s, _t, _last = build_chunk_for_serving(
+        origin_db, file_id=remote_file.file_id, chunk_index=0, max_chunk_size=transfer.chunk_size,
+    )
+    transfer = apply_received_chunk(
+        puller_db, transfer, chunk_index=0, chunk_bytes=first,
+        claimed_chunk_sha256=hashlib.sha256(first).hexdigest(), is_last=False,
+        remote_file=remote_file,
+    )
+    # The other session's next chunk, captured before anything resets.
+    stale_snapshot = transfer
+    stale_index = transfer.next_chunk_index
+    stale_bytes, _s, _t, _last = build_chunk_for_serving(
+        origin_db, file_id=remote_file.file_id, chunk_index=stale_index,
+        max_chunk_size=transfer.chunk_size,
+    )
+
+    # This session's attempt fails whole-file verification, and the retry
+    # reopens the transfer from zero.
+    wrong = os.urandom(len(content))
+    with pytest.raises(FileTransferError):
+        apply_received_chunk(
+            puller_db, transfer, chunk_index=stale_index, chunk_bytes=wrong,
+            claimed_chunk_sha256=hashlib.sha256(wrong).hexdigest(), is_last=True,
+            remote_file=remote_file,
+        )
+    reopened = get_or_create_transfer(
+        puller_db, remote_file, requester_fingerprint=puller_identity.fingerprint,
+        chunk_size=100_000,
+    )
+    assert reopened.status == "in_progress"
+    assert reopened.next_chunk_index == 0
+
+    # The pre-reset response finally lands. It must be refused, not
+    # written at its old index.
+    with pytest.raises(FileTransferError, match="expected"):
+        apply_received_chunk(
+            puller_db, stale_snapshot, chunk_index=stale_index, chunk_bytes=stale_bytes,
+            claimed_chunk_sha256=hashlib.sha256(stale_bytes).hexdigest(), is_last=False,
+            remote_file=remote_file,
+        )
+    assert get_transfer(puller_db, transfer.transfer_id).bytes_received == 0
+
+    # And a clean retry still completes.
+    finished = _drive_transfer(
+        origin_db, puller_db, remote_file,
+        requester_fingerprint=puller_identity.fingerprint, chunk_size=100_000,
+    )
+    assert finished.status == "completed"
