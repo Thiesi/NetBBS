@@ -5806,12 +5806,46 @@ customs and combat screens.
 frame shadow, gauge tracks and separators; `plasma` `#ff5abe` the brand, the
 rank and the cursor; `gold` `#ffc83c` hotkeys and credits and nothing else;
 `ink` `#e8f0ff` values -- the thing the caller reads off the row; `slate`
-`#7f8fae` labels, hints and units; and `mint` `#6cf2a0` / `amber` `#ffb347` /
+`#b39b7d` labels, hints and units; and `mint` `#6cf2a0` / `amber` `#ffb347` /
 `alarm` `#ff5c6c` for good, caution and danger on gauges and severity glyphs.
 A hotkey is always gold and bold; a value is always ink; a label is always
 slate; chrome is never the colour of content; one accent carries the eye per
 screen. That the hotkey, label, value and frame colours differ, and that all
 four appear on a drawn screen, is asserted rather than eyeballed.
+
+The label role is deliberately the one drawn from outside the cockpit's own hue
+(issue #519). It was `#7f8fae` -- a desaturated *blue* on a blue screen -- so a
+label read as the same colour one shade down rather than as a different kind of
+thing: measured on the command deck, `deep`, `hull`, `ink` and that label colour
+were 78.7% of visible characters in one band. Warm rather than neutral because a
+label has to separate, not merely differ, and desaturated so it cannot be
+mistaken for `gold` or `amber`, which mean money and hotkeys. War Dialer's own
+label role made the same mistake in green and was moved the same way.
+
+A preview count inside a label is a *value*, not part of the label: the service
+menu writes `Board: 4 offers` with the count in `ink` between two `slate`
+fragments, because the count is what a caller opens the menu to read. Without
+the colon the label read as a sentence -- subject "Board 4", verb "offers" --
+and a caller asked what the numbers meant (issue #518). Counts agree in number
+with their noun.
+
+**A screen replaces the one before it** (issue #516). A door owns the terminal
+for its whole session, so every paged screen clears and repaints rather than
+printing underneath its predecessor: a session was one long scroll, and a
+caller's terminal history filled with superseded copies of the command deck.
+The clear lives in `draw_page`, the single path every paged screen already goes
+through, not sprinkled per screen -- a per-screen rule applied to most screens
+and not the rest is how the colour was lost one slice at a time. It is
+unconditional rather than following the host's `redraw_in_place` preference,
+which is opt-in because clearing a *menu* costs scrollback a caller may still
+want; a door's own screens are not that, and War Dialer has always cleared.
+
+What that replaces has to survive it. The launch banner is wiped by the first
+deck the caller lands on, and everything it said is on that deck already -- the
+station, the day and the credits in the status band, the tracked contract in the
+alerts -- except a futures order that has come due, which was the one thing on
+it a caller had to act on. That is an alert row now, where the contract says
+something a caller must answer belongs.
 
 **Truecolour is the design target**, degrading to 256, to 16 (`basic`), to
 monochrome, to plain ASCII, in that order, each deliberate rather than

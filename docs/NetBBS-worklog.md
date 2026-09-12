@@ -6697,3 +6697,21 @@ prompt. A prompt needs `_dlen(prompt) < width`, not `<=`: one that exactly fills
 the row leaves the cursor nowhere to sit but the next line. The door draws at
 `min(78, terminal_width)`, so the 40-column floor and the 78-column cap are live
 paths for the same string.
+
+Voidrunner's `style_body_line` returns a row that already carries SGR untouched:
+a component's decision beats a pattern's guess. So a row needing one token
+coloured differently from the rest of it cannot get that from the tokeniser --
+it has to be composed that way where it is built. The service menu's preview
+count is the case that matters: `menu_grid` styles its own cells, so the count
+inside `Board: 4 offers` is picked out there rather than by any later pass.
+
+The door clears the terminal in exactly one place, `draw_page`, which every
+paged screen already routes through. A clear added per screen is the same shape
+of mistake as a colour rule applied per screen: it holds for most of them and
+silently not the rest. A test asserts the file contains one clear sequence.
+
+Because a screen now replaces what preceded it, the launch banner is wiped by
+the first screen the caller lands on. Anything it uniquely said has to move onto
+a screen: everything in Voidrunner's was already on the command deck except a
+matured futures order, which became an alert row. Check what a pre-screen
+preamble says before making a door clear.
