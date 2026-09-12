@@ -1376,6 +1376,25 @@ the emulator, game and NetBBS itself must not run as root.
    service account is permitted, rather than simply leaving NetBBS's own. If
    your service runs under a login class or unit file which sets a hard CPU
    limit, that hard limit still applies and `0` cannot exceed it.
+   **Stop grace** is how long a door gets to exit after `SIGTERM` before it is
+   killed, and it is reached far more often than the name suggests: on every
+   caller disconnect and every timeout, not only at node shutdown. The default
+   is 5 seconds, replacing a fixed half-second which was long enough for a
+   process that exits on the signal and too short for one which flushes
+   anything first — a DOS game writing its scores out through the emulator,
+   for instance.
+
+   Raising it costs nothing for a door which exits promptly: the wait ends the
+   moment the process does, so only a door which refuses to exit ever waits
+   the full period. Raise it for a game you have seen lose progress when a
+   caller drops mid-session; lower it only if you know the door writes nothing
+   on the way out.
+
+   This buys time, not a guarantee. A door which handles `SIGTERM` gets the
+   chance to finish; one which ignores it is killed at the deadline either
+   way, and one which the operating system kills outright never saw the signal
+   at all. If a particular game still loses data on an abrupt disconnect,
+   establish whether it handles `SIGTERM` before raising this further.
 5. **Check setup** reports static problems. For DOS, run **Emulator capability
    probe** to verify headless startup, inherited COM1, CP437 echo and optional
    FOSSIL using NetBBS's own fixture, without launching the game. It requires

@@ -105,6 +105,30 @@ def test_input_row_is_painted_on_entry_with_the_prompt_marker(lane, hub, presenc
     assert expected_prompt in text
 
 
+def test_resize_during_initial_preferences_load_rechecks_the_height(
+    lane, hub, presence, mailbox, channel, alice, monkeypatch
+):
+    """A real resize can arrive while initial database preferences load."""
+    session = FakeSession(["/quit"])
+
+    def resize_while_loading_truecolor(_session, _db, _user):
+        session.terminal_height = 3
+        return False
+
+    monkeypatch.setattr(chat_flow, "effective_truecolor", resize_while_loading_truecolor)
+    action = asyncio.run(
+        asyncio.wait_for(
+            chat_flow._chat_loop(
+                session, lane, hub, presence, mailbox, InputHistory(), channel, alice
+            ),
+            timeout=2,
+        )
+    )
+
+    assert isinstance(action, chat_flow._Quit)
+    assert "\x1b[1;0r" not in _written_text(session)
+
+
 def test_input_row_is_redrawn_empty_after_a_command(lane, hub, presence, mailbox, channel, alice):
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/away brb", "/quit"]))
     text = _written_text(session)
@@ -174,6 +198,7 @@ class _LiveTypingSession(Session):
 
     def __init__(self):
         self._queue: asyncio.Queue[int] = asyncio.Queue()
+        self._output_changed = asyncio.Event()
         self.written: list[str] = []
         self.terminal_width = 80
         self.node_display_name = "NetBBS"
@@ -197,9 +222,18 @@ class _LiveTypingSession(Session):
 
     async def write(self, text: str) -> None:
         self.written.append(text)
+        self._output_changed.set()
 
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\r\n")
+        self._output_changed.set()
+
+    async def wait_for_output(self, text: str, *, count: int = 1) -> None:
+        """Wait until the chat loop has emitted an observable repaint."""
+        async with asyncio.timeout(2):
+            while self.output.count(text) < count:
+                self._output_changed.clear()
+                await self._output_changed.wait()
 
     async def read_line(
         self, echo: bool = True, history=None, completer=None, *,
@@ -648,17 +682,18 @@ def test_repeated_threshold_crossings_track_the_current_height_each_time(
         task = asyncio.create_task(
             chat_flow._chat_loop(session, lane, hub, presence, mailbox, InputHistory(), channel, alice)
         )
-        await asyncio.sleep(0.05)
+        region = "\x1b[1;21r"
+        await session.wait_for_output(region)
 
         session.terminal_height = 3  # shrink below threshold (4): hand the screen back
         session.feed("one")
         session.feed_enter()
-        await asyncio.sleep(0.05)
+        await session.wait_for_output("\x1b[r\x1b[2J\x1b[H")
 
         session.terminal_height = 24  # grow back: re-pin at the new size
         session.feed("two")
         session.feed_enter()
-        await asyncio.sleep(0.05)
+        await session.wait_for_output(region, count=2)
 
         session.feed("/quit")  # ends "active" -- exit cleanup must run
         session.feed_enter()

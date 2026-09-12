@@ -29,7 +29,7 @@ def _candidate(door, draft):
         return replace(door, executable_path=draft["executable_path"], args=args, profile=None)
     value = {k: draft[k] for k in asdict(DoorProfile())}
     for key in ("width", "height", "baud", "security_level", "time_limit", "cpu_seconds",
-                "max_sessions", "memory_mb"):
+                "max_sessions", "memory_mb", "stop_grace_seconds"):
         try:
             value[key] = int(value[key])
         except (TypeError, ValueError) as exc:
@@ -192,6 +192,9 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
              "0 removes it and leaves only the wall-clock limit.")
     add("max_sessions", "n", "Maximum simultaneous callers", "Limits")
     add("memory_mb", "y", "Memory ceiling (MiB)", "Limits")
+    add("stop_grace_seconds", "5", "Stop grace (seconds)", "Limits",
+        help="How long this door gets to exit after SIGTERM before it is killed, on a caller disconnect, "
+             "a timeout or node shutdown. A door which exits promptly never waits this long; raise it for one which writes game data on the way out.")
     add("multinode_certified", "z", "Multi-node certified by SysOp", "Limits", bool_field("multinode_certified", "Certified"))
     add("resize_signal", "3", "Signal door on terminal resize", "Terminal", bool_field("resize_signal", "Signal"),
         help="Native stdio/socket doors only, and only while columns and rows are 0. Rewrites door_info.json with "
