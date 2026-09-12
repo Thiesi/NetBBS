@@ -840,16 +840,15 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
             # these were unreachable by any walk: War Dialer's scanline was
             # rebuilt in issue #517 with no panel to review it on.
             #
-            # A healthy door here is *waiting for input*, so it has to be killed
-            # rather than allowed to exit -- but killing it unconditionally would
-            # lose `finish`'s guarantee that a door which crashed on startup
-            # never publishes a panel. So ask first: a process that has already
-            # exited nonzero printed its masthead on the way down.
-            code = running.proc.poll()
-            if code not in (None, 0):
-                raise SystemExit(f"{door.name} exited {code} while drawing its "
-                                 f"first screen")
-            running.kill()
+            # Finished like any other walk, not killed. Killing looked necessary
+            # because the door is waiting for input here -- but `finish` closes
+            # stdin first, and reaching EOF is exactly how every other walk gets
+            # its door to exit. Going through it keeps the guarantee that a door
+            # which exits nonzero never publishes a panel, including one that
+            # crashes *after* the settle window while preparing its first
+            # interactive screen, which a `poll()` taken at this instant cannot
+            # see.
+            running.finish()
             return [running.read().split(CLEAR)[0]]
         index = 0
         while index < len(keys):

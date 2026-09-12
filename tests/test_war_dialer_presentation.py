@@ -4497,17 +4497,40 @@ def test_the_action_bar_never_overflows_the_width_it_was_given(terminal):
         assert sum(wd._char_width(ch) for ch in _ANSI_RE.sub("", row)) <= width
 
 
-def test_a_crashed_door_never_publishes_a_first_screen(tmp_path):
-    """`^` kills a healthy door, which is waiting for input -- but a door that
-    already exited nonzero printed its masthead on the way down, and `finish`'s
-    refusal to certify a crash has to survive that shortcut."""
+@pytest.mark.parametrize("delay", [0.0, 1.0], ids=["immediate", "after-settle"])
+def test_a_crashed_door_never_publishes_a_first_screen(tmp_path, delay):
+    """A door that exits nonzero must not publish, whenever it dies.
+
+    `^` looked like it had to kill the door, since one waiting for input will
+    not exit on its own -- but `finish` closes stdin first, and EOF is exactly
+    how every other walk ends its door. A `poll()` taken at the moment of
+    capture sees only a door that died inside the 0.75s settle window; one
+    crashing a second later, while preparing its first interactive screen, was
+    still publishable.
+    """
     gallery = _gallery()
     door = tmp_path / "crasher.py"
-    door.write_text("import sys\n"
+    door.write_text("import sys, time\n"
                     "sys.stdout.write('W A R   D I A L E R' + chr(13) + chr(10))\n"
                     "sys.stdout.flush()\n"
+                    f"time.sleep({delay})\n"
                     "sys.exit(3)\n", encoding="utf-8")
     state = tmp_path / "state"
     state.mkdir()
     with pytest.raises(SystemExit, match="exited 3"):
         gallery.capture(door, state, b"^", 80, 24, {}, expect=False)
+
+
+def test_a_door_waiting_for_input_still_publishes_its_first_screen(tmp_path):
+    """The healthy case the crash check must not break: a real door is sitting
+    at a prompt when its masthead is photographed."""
+    gallery = _gallery()
+    door = tmp_path / "waiting.py"
+    door.write_text("import sys\n"
+                    "sys.stdout.write('W A R   D I A L E R' + chr(13) + chr(10))\n"
+                    "sys.stdout.flush()\n"
+                    "sys.stdin.read(1)\n", encoding="utf-8")
+    state = tmp_path / "state"
+    state.mkdir()
+    pages = gallery.capture(door, state, b"^", 80, 24, {}, expect=False)
+    assert "W A R   D I A L E R" in "".join(pages)
