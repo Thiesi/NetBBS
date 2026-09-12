@@ -49,7 +49,8 @@ from netbbs.auth.users import DOOR_LABEL_SUFFIX, User, get_user_by_id
 from netbbs.boards.boards import Board, _row_to_board
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
 from netbbs.boards.posts import PostError, create_labelled_post
-from netbbs.moderation.log import record_action
+from netbbs.moderation.log import record_action, record_action_without_commit
+from netbbs.search import reindex_post
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -72,10 +73,12 @@ _RESULT_SUFFIX = ".result.json"
 #: beside the node database so a backup carries it.
 _RESULTS_DIRNAME = "door-outbound"
 
-#: Results kept per door. A door reads the outcome of what it just wrote; it
-#: has no use for the hundredth-oldest, and an unbounded directory beside the
-#: node database is a slow leak nobody would notice.
-_RESULTS_KEPT = 32
+#: Results kept per door. Sized against what one drain can actually produce,
+#: not against a round number: a door cannot read a result until its next
+#: launch, so keeping fewer than a single permitted session can generate would
+#: prune outcomes before anybody could ever see them. Bounded so the directory
+#: beside the node database is not a slow leak nobody notices.
+#: Defined below `_MAX_REQUESTS_PER_DRAIN`, which it depends on.
 
 #: Default ceiling, per door, per rolling hour. One number rather than one
 #: per target kind: two knobs would be two knobs nobody tunes, and the SysOp
@@ -97,11 +100,19 @@ _MAX_REQUESTS_PER_DRAIN = MAX_POSTS_PER_HOUR + 16
 #: database work waits behind it. Scanning stops here instead.
 _MAX_REQUESTS_SCANNED = 4 * _MAX_REQUESTS_PER_DRAIN
 
+_RESULTS_KEPT = _MAX_REQUESTS_PER_DRAIN
+
 #: Largest request we will read into memory. A door can stream a file to disk
 #: without it counting against its own `RLIMIT_AS`; `read_text()` and
-#: `json.loads()` would then allocate all of it inside NetBBS. Sized well
-#: above a legitimate post so nothing real is refused by it.
-_MAX_REQUEST_BYTES = MAX_SUBJECT_BYTES + MAX_BODY_BYTES + 16 * 1024
+#: `json.loads()` would then allocate all of it inside NetBBS.
+#:
+#: The board limits count *decoded* bytes, but this measures the JSON file on
+#: disk, where one character can become six (`\uXXXX`). Sizing this at the
+#: decoded limit plus a little would refuse a perfectly legal post whose body
+#: happens to be non-ASCII -- so the escaping factor is paid for explicitly
+#: rather than assumed away.
+_JSON_ESCAPE_FACTOR = 6
+_MAX_REQUEST_BYTES = (MAX_SUBJECT_BYTES + MAX_BODY_BYTES) * _JSON_ESCAPE_FACTOR + 16 * 1024
 
 #: Longest label we will mint, matching `_MAX_USERNAME_LENGTH`, because the
 #: label federates as `local_user_id` and a peer validates it as a handle.
@@ -385,6 +396,15 @@ def _resolve_board(db: Database, door_id: int, requested: object) -> tuple[Board
     return None, f"board {requested!r} is not allowlisted for this door"
 
 
+def _is_storable(text: str) -> bool:
+    """Whether `text` survives the trip to the database and back."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _is_request(name: str) -> bool:
     """A finished request, not a result and not a half-written file.
 
@@ -562,6 +582,17 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, request
         _write_result(db, door.id, request, {"status": "rejected",
                                 "reason": "request needs a non-empty 'subject' and a 'body' string"})
         return "malformed request"
+    if not _is_storable(subject) or not _is_storable(body):
+        # Python's JSON decoder accepts an escaped lone surrogate such as
+        # "\ud800" and hands back a `str` that passes every check above, but
+        # which cannot be encoded as UTF-8. Left to reach SQLite it raises
+        # outside the exceptions this drain expects, so one malformed request
+        # would stop every later one in the same session being answered.
+        _write_result(db, door.id, request, {
+            "status": "rejected",
+            "reason": "request contains text which is not valid Unicode",
+        })
+        return "malformed request"
 
     board, problem = _resolve_board(db, door.id, payload.get("board"))
     if board is None:
@@ -573,17 +604,33 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, request
         _write_result(db, door.id, request, {"status": "rejected", "reason": reason})
         return reason
 
+    # One transaction for the post, the rate debit and the audit entry. The
+    # same shape `netbbs.auth.users` uses for a key removal and its audit
+    # insert, and for the same reason: a post that exists with no entry saying
+    # a door wrote it would make "every accepted post is audit-logged" false,
+    # and one that exists without its rate debit hands the door back budget it
+    # has already spent. `reindex_post` stays outside deliberately -- see
+    # `create_labelled_post`'s own docstring.
+    db.connection.execute("BEGIN IMMEDIATE")
     try:
-        post = create_labelled_post(db, board, config.label, subject, body)
+        post = create_labelled_post(db, board, config.label, subject, body, commit=False)
+        db.connection.execute(
+            "INSERT INTO door_outbound_history (door_id, created_at) VALUES (?, ?)",
+            (door.id, utc_now_iso()),
+        )
+        record_action_without_commit(
+            db, actor=actor, action="door_outbound_post", object_type="board",
+            object_id=board.id,
+            detail=f"door={door.name!r} label={config.label!r} post={post.post_id}")
     except PostError as exc:
+        db.connection.rollback()
         _write_result(db, door.id, request, {"status": "rejected", "reason": str(exc)})
         return "post refused"
-
-    db.connection.execute(
-        "INSERT INTO door_outbound_history (door_id, created_at) VALUES (?, ?)",
-        (door.id, utc_now_iso()),
-    )
+    except (sqlite3.Error, OSError, ValueError):
+        db.connection.rollback()
+        raise
     db.connection.commit()
+    reindex_post(db, board.id, post.post_id)
 
     if node_identity is not None:
         # Same call the interactive path makes, and for the same reason: a
@@ -601,15 +648,12 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, request
             # door might act on by posting again.
             _logger.warning("could not queue door post %s for Link: %s", post.post_id, exc)
 
-    record_action(db, actor=actor, action="door_outbound_post", object_type="board",
-                  object_id=board.id,
-                  detail=f"door={door.name!r} label={config.label!r} post={post.post_id}")
     _write_result(db, door.id, request, {"status": "posted", "post_id": post.post_id,
                             "board": board.name, "moderated": board.moderated})
     return None
 
 
-def door_info_block(db: Database, door_id: int) -> dict | None:
+def door_info_block(db: Database, door_id: int, *, rehearsal: bool = False) -> dict | None:
     """What a door is told about its own hook, or `None` when it has none.
 
     A door needs its label to know how it will appear, and its targets to
@@ -619,7 +663,7 @@ def door_info_block(db: Database, door_id: int) -> dict | None:
     config = outbound_config(db, door_id)
     if config is None:
         return None
-    return {
+    block = {
         "label": config.label,
         "directory": OUTBOUND_DIRNAME,
         # Absolute, and outside the working directory on purpose: the workdir
@@ -629,3 +673,10 @@ def door_info_block(db: Database, door_id: int) -> dict | None:
         "boards": [board.name for board in targets(db, door_id)],
         "posts_per_hour": config.posts_per_hour,
     }
+    if rehearsal:
+        # A SysOp testing a door still gets a working drop directory, so the
+        # door exercises the same code path it will use in earnest -- but
+        # nothing it writes is published. Saying so lets the door report the
+        # truth to the SysOp watching the test instead of claiming a post.
+        block["rehearsal"] = True
+    return block

@@ -201,6 +201,8 @@ def create_labelled_post(
     author_label: str,
     subject: str,
     body: str,
+    *,
+    commit: bool = True,
 ) -> Post:
     """
     Create a post authored by a *label* rather than by a local account
@@ -238,6 +240,18 @@ def create_labelled_post(
     exactly as the interactive path does; it needs a `Post`, not a
     `User`, and builds `local_user_id` from `author_label`, so a label
     author federates with no special case.
+
+    `commit=False` leaves the row in the caller's open transaction and
+    skips the search reindex, so a caller can make the post and whatever
+    must accompany it -- a rate debit, an audit entry -- succeed or fail
+    together. Such a caller owns the commit *and* must call
+    `netbbs.search.reindex_post` afterwards. Leaving the reindex out of
+    the transaction is deliberate rather than an oversight: it commits on
+    its own, which would end the caller's transaction early, and it is
+    documented as idempotent and safe to call after any mutation. A crash
+    between the two leaves a post missing from the search index until the
+    next reindex, which is a far smaller thing to lose than the audit
+    entry saying a door wrote it.
     """
     _check_content_length(subject, body)
     closed_row = db.connection.execute(
@@ -269,13 +283,15 @@ def create_labelled_post(
             """,
             (post_id, board.id, author_label, subject, body, created_at, status, post_id),
         )
-        db.connection.commit()
+        if commit:
+            db.connection.commit()
     except sqlite3.IntegrityError as exc:
         raise PostError(
             "could not create post — identical content posted twice in the same instant?"
         ) from exc
 
-    reindex_post(db, board.id, post_id)
+    if commit:
+        reindex_post(db, board.id, post_id)
     return get_post(db, post_id)
 
 

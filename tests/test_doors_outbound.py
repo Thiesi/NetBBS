@@ -571,3 +571,83 @@ def test_results_do_not_accumulate_without_limit(db, door, sysop, board, tmp_pat
 
     kept = list(results_dir(db, door.id).glob("*.result.json"))
     assert len(kept) <= _RESULTS_KEPT
+
+
+# -- review round 2 -------------------------------------------------------
+
+
+def test_a_post_its_rate_debit_and_its_audit_entry_are_all_or_nothing(
+        db, door, sysop, board, tmp_path, monkeypatch):
+    """"Every accepted post is audit-logged" has to be true even when the
+    audit insert is what fails. The post used to commit on its own first, so a
+    failure afterwards left a post nothing recorded and no budget spent."""
+    import sqlite3 as sqlite
+
+    from netbbs.doors import outbound as module
+
+    _enable(db, door, sysop, board)
+
+    def explode(*args, **kwargs):
+        raise sqlite.OperationalError("audit table is unavailable")
+
+    monkeypatch.setattr(module, "record_action_without_commit", explode)
+    _request(tmp_path, subject="Season 1", body="...")
+
+    with pytest.raises(sqlite.OperationalError):
+        drain(db, door, tmp_path)
+
+    assert _posts(db, board, sysop) == [], "the post must not survive its audit entry"
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM door_outbound_history WHERE door_id = ?", (door.id,)
+    ).fetchone()[0] == 0, "nor may the rate debit"
+
+
+def test_results_are_kept_for_everything_one_permitted_session_can_produce(db):
+    """A door cannot read a result until its next launch, so pruning below what
+    a single drain can answer would discard outcomes before anyone sees them."""
+    from netbbs.doors.outbound import _MAX_REQUESTS_PER_DRAIN, _RESULTS_KEPT
+
+    assert _RESULTS_KEPT >= _MAX_REQUESTS_PER_DRAIN
+
+
+def test_a_legal_non_ascii_post_is_not_refused_for_size(db, door, sysop, board, tmp_path):
+    """The board limit counts decoded bytes; the file on disk is JSON, where
+    one character can become six. Sizing the cap at the decoded limit refused
+    perfectly legal posts that happened not to be ASCII."""
+    _enable(db, door, sysop, board)
+    body = "é" * 40_000
+    assert len(body.encode("utf-8")) < 200_000, "still inside the board's own limit"
+    request = _request(tmp_path, subject="Season 1", body=body)
+    assert request.stat().st_size > 216_684, "and past the cap as it was sized before"
+
+    assert drain(db, door, tmp_path) == (1, 0)
+    assert _result(db, door, request)["status"] == "posted"
+
+
+def test_one_unstorable_request_does_not_strand_the_others(db, door, sysop, board, tmp_path):
+    """Python's JSON decoder accepts an escaped lone surrogate and returns a
+    `str` which cannot be encoded as UTF-8. Reaching SQLite it raised outside
+    the exceptions the drain expects, so a single bad request stopped every
+    later one from being answered at all."""
+    _enable(db, door, sysop, board)
+    directory = tmp_path / OUTBOUND_DIRNAME
+    directory.mkdir(exist_ok=True)
+    bad = directory / "a-bad.json"
+    bad.write_text('{"subject": "Season", "body": "\\ud800"}', encoding="utf-8")
+    good = _request(tmp_path, name="b-good", subject="Season", body="...")
+
+    assert drain(db, door, tmp_path) == (1, 1)
+    assert "not valid Unicode" in _result(db, door, bad)["reason"]
+    assert _result(db, door, good)["status"] == "posted"
+
+
+def test_a_door_under_test_is_told_the_post_will_not_be_published(db, door, sysop, board):
+    """A rehearsal keeps a working drop directory so the door exercises the
+    same path it will use in earnest, but nothing it writes is published --
+    so it has to be able to tell, or it reports a post that never happened."""
+    from netbbs.doors.outbound import door_info_block
+
+    _enable(db, door, sysop, board)
+
+    assert "rehearsal" not in door_info_block(db, door.id)
+    assert door_info_block(db, door.id, rehearsal=True)["rehearsal"] is True

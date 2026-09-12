@@ -6597,63 +6597,74 @@ post with no local account behind it takes. With no account there is nothing
 to exclude from login, listings, mail or moderation, and no infrastructure
 level band is needed.
 
-The label ends in a reserved suffix and is checked for collisions against both
-accounts and other doors when the hook is switched on. Chat resolves a stored
-author by username where boards resolve by id, so a label equal to a real
-handle would let a door speak in that account's nick and verified-name
-styling. The suffix reservation is forward-only; the enable-time check is what
-protects a database that predates it.
+Boards resolve a stored author by id; chat resolves by username. A posting
+label equal to a real handle therefore renders in chat with that account's
+nick and verified-name styling. Labels are unique across accounts and doors
+and are checked NOCASE when the hook is switched on. The reserved suffix is
+refused at registration forward-only, because a database predating the rule
+may already hold such a name; the enable-time check is what actually protects
+the door path.
 
-The allowlist is the only gate. Level is deliberately not a second one,
-because two gates can disagree at post time where only one was visible when
-the SysOp made the decision. Transport is a file drop, chosen so a DOS door
-can use it at all; a socket cannot cross the emulator boundary. Requests are
-drained after the door exits and strictly before its working directory is torn
-down.
+A label federates as `local_user_id`, so it must satisfy the username grammar
+and length. It is stored rather than derived: two distinct door names can
+reduce to the same slug, and a derived label would not survive a rename.
 
-A refusal is always written back and never queued: a held post publishes after
-the allowlist is revoked, which is the surprise the switch exists to prevent.
-Refusals are audit-logged once per rate window rather than once per attempt,
-since record_action commits immediately and a door in a retry loop would
-otherwise make the audit trail the incident. The rate window counts from its
-own history table, not from posts, so deleting a door's output cannot hand it
-back the budget it just spent.
+The allowlist is the only gate on the door posting path. Level is deliberately
+not a second one: two gates can disagree at post time, over a conflict the
+SysOp never saw when they chose the board. Identity gates (age, verified name)
+are enforced in the flow layer for callers and do not apply to a door, which
+has no birthdate; the allowlist screen says so where the board is chosen.
+
+The transport is a file drop rather than a socket, so that a DOS guest can be
+served: a socket cannot cross the emulator boundary. Suffix matching is
+case-insensitive because DOS writes 8.3 names in upper case. A DOS guest still
+cannot read `door_info.json` -- it names a host path -- so it cannot yet learn
+its label or drop directory, and the hook is in practice for locally launched
+native doors. A remote (RLogin) registration shares no filesystem and can
+never use it at all.
+
+A result must outlive the launch that produced it. The door's working
+directory is deleted when the run ends, so an outcome written there can never
+be read -- not during the run, and not on the next launch. Results live in a
+durable per-door directory named in the launch metadata.
+
+Bounds on this path are sized against the largest value the product itself
+permits, not against round numbers: the per-drain cap is not below the highest
+hourly ceiling a SysOp may set, and retained results are not fewer than one
+drain can produce. Otherwise a permitted configuration loses work silently.
+
+The drain runs on the shared database lane, so it bounds what it enumerates
+rather than what it slices: materializing and sorting a whole directory first
+lets one door in a write loop stall every caller's database work. It also
+checks a request's size before reading it, since a door can stream a file to
+disk without it counting against its own address-space limit.
+
+Request size is measured on the JSON file, where one character can become six;
+the board limits count decoded bytes. A cap set at the decoded limit refuses
+legal non-ASCII posts. Python's JSON decoder also accepts an escaped lone
+surrogate and returns a `str` that cannot be encoded as UTF-8, which raises
+outside the exceptions a drain expects and strands every later request in the
+same session, so text is checked for storability before use.
 
 A door posts on a named SysOp's authority. If that account is deleted the hook
-lapses rather than posting unattributably, which is also what keeps every
-accepted post audit-loggable.
+lapses rather than posting unattributably; another SysOp vouches for it
+without disturbing the identity or the allowlist. The post, its rate debit and
+its audit entry commit in one transaction, so neither a post with no audit
+entry nor one with no budget spent is reachable; the search reindex stays
+outside it, being idempotent and safe after any mutation.
 
-Review round on the outbound hook found that its central promise was not
-deliverable. A refusal was written into the door's per-launch working
-directory, which is deleted the moment the run ends, so no door could ever
-read one -- neither during the run nor on its next launch, which the contract
-explicitly offered. Results now live in a durable per-door directory beside
-the node database, named in the launch metadata, pruned to the most recent
-few, and released when the hook is switched off. A decision that cannot be
-observed from outside is worth re-checking against the code that implements
-it, not just against the code that records it.
+A launch a SysOp made to check a door is not a launch a caller made to play
+it. Test launches and the DOS probe do not publish, and the launch metadata
+says so, so a door can report the truth to the SysOp watching rather than
+claiming a post it did not make.
 
-A SysOp's test launch would have published for real. The compatibility
-screen's test and the DOS probe both run the actual game, and the probe runs
-it on every preflight, so trying a door out would have posted its content
-repeatedly. Both are rehearsals now.
+Rate history is counted from its own table rather than from posts, so deleting
+a door's output cannot return budget it has already spent. Refusals are
+audit-logged once per rate window: `record_action` commits immediately, so a
+door in a retry loop would otherwise make the audit trail the incident.
 
-A lapsed hook had only a destructive way out. When the enabling account is
-deleted the screen said to switch the door on again, but with a configuration
-present the only available action turned it off, releasing the label and the
-allowlist. The instruction and the available action disagreed and the action
-was the damaging one; vouching now restores the authority alone.
-
-Three bounds were wrong in the same direction: the per-drain cap sat below the
-highest hourly ceiling a SysOp may set, so a permitted configuration could
-lose posts silently; the drop directory was materialized and sorted whole
-before any cap applied, so a door in a write loop would stall the shared
-database lane for every caller; and a request was parsed before its size was
-checked, so a file streamed to disk outside the door's own address-space limit
-would be allocated inside NetBBS. Size a cap against the largest value the
-product itself permits, and bound the scan rather than the slice.
-
-The suffix check was case-sensitive, which excluded the 8.3 upper-case names
-DOS produces -- and DOS doors were the stated reason for choosing a file drop
-over a socket. A justification that the implementation does not honour is
-worth testing directly.
+Testing method for this class of change: a decision recorded in prose is not
+evidence the code delivers it. Each promise here has a test that fails when
+the mechanism behind it is removed, including the ones about durability and
+ordering, which pass trivially against an implementation that never keeps the
+promise at all.

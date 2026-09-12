@@ -97,7 +97,7 @@ def _minted_once(db, key: str) -> str:
 
 
 def _write_door_info(db, workdir, session, player, war_dialer=False, session_limit_seconds=None,
-                     door_id=None):
+                     door_id=None, rehearsal=False):
     info = {"handle": player.username, "user_id": player.id,
             "terminal_width": session.terminal_width, "terminal_height": session.terminal_height,
             "color_depth": "truecolor" if effective_truecolor(session, db, player) else "256",
@@ -124,7 +124,8 @@ def _write_door_info(db, workdir, session, player, war_dialer=False, session_lim
         # An opaque namespace belongs to the node database and survives its backup.
         # It is not a credential and does not depend on a mutable display name.
         info["war_dialer_owner"] = _minted_once(db, "war_dialer_owner")
-    if door_id is not None and (outbound := door_info_block(db, door_id)) is not None:
+    if door_id is not None and (
+            outbound := door_info_block(db, door_id, rehearsal=rehearsal)) is not None:
         # Issue #520. Present only for a door whose SysOp switched the hook
         # on, so the overwhelming majority of doors see exactly what they saw
         # at door_api 2. The door is told its own label and which boards it
@@ -471,7 +472,8 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             lease = NodeLease(root, identity, profile.max_sessions)
         workdir = Path(tempfile.mkdtemp(prefix="netbbs-door-"))
         info_path = await lane.run(_write_door_info, workdir, session, player, world_path is not None,
-                                   effective_wall_limit(profile, wall_time_limit_seconds), door.id)
+                                   effective_wall_limit(profile, wall_time_limit_seconds), door.id,
+                                   rehearsal)
         info = json.loads(info_path.read_text(encoding="utf-8"))
         width = profile.width if profile and profile.width else session.terminal_width
         height = profile.height if profile and profile.height else session.terminal_height

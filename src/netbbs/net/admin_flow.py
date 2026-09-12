@@ -13562,6 +13562,23 @@ async def _draw_door_detail(
     await session.write("Choice: ")
 
 
+def _door_target_description(board: Board) -> str | None:
+    """What a SysOp needs to know about a board before allowing a door to post.
+
+    A door is not a person: it has no birthdate and no verified name, so an
+    age or name requirement cannot apply to it, and the door posts whatever
+    the SysOp allowed. That is the intended behaviour -- the allowlist is the
+    only gate -- but it is not obvious from a board's name, so it is said here,
+    where the choice is actually made, rather than left to be discovered.
+    """
+    notes = []
+    if board.moderated:
+        notes.append("moderated — holds this door's posts for approval")
+    if board.min_age or board.name_requirement:
+        notes.append("age/name gated for callers — a door is not subject to that")
+    return "; ".join(notes) if notes else board.description
+
+
 async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: User, door: Door) -> None:
     """Switch one door's outbound hook on or off, and curate its allowlist.
 
@@ -13667,8 +13684,7 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
             board = await pick_item(
                 session, await lane.run(list_boards, order_by="alphabetical"),
                 name_of=lambda b: b.name, stable_id_of=lambda b: b.id,
-                description_of=lambda b: ("moderated — holds this door's posts for approval"
-                                          if b.moderated else b.description),
+                description_of=lambda b: _door_target_description(b),
                 title="Which board may it post to?", empty_message="No message boards yet.",
                 description_level=description_level,
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,

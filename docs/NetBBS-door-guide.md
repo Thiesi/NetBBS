@@ -1814,6 +1814,11 @@ test for it:
 }
 ```
 
+If `"rehearsal": true` is present, a SysOp is *testing* this door rather than
+a caller playing it. The drop directory works exactly as it always does, so
+your posting path is exercised, but nothing written is published and no result
+comes back. Say so rather than reporting a post you did not make.
+
 `directory` is relative to the directory holding `door_info.json`, and NetBBS
 has already created it. To post, write one JSON file there:
 
