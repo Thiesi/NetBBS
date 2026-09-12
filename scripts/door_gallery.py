@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import importlib.util
 import json
 import os
 import pathlib
@@ -58,7 +59,15 @@ sys.path.insert(0, str(SCRIPTS))
 import website_ansi_to_html as term  # noqa: E402
 
 SPAN = re.compile(r'<span style="([^"]*)">(.*?)</span>')
+ANSI = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 CLEAR = "\x1b[2J\x1b[H"
+# A row's frame edge, in either spelling. The plain preset draws the box in ASCII
+# (`|` where Unicode has `┃`), and stripping only the Unicode one left every entry
+# row beginning with a character before its `[K]` marker -- so under that preset
+# no walk that names an entry by what it is could find one.
+FRAME_EDGE = re.compile(r"^[\s┃|]*")
+#: A screen's own statement of which page this is, which it prints for this.
+PAGE_NOTE = re.compile(r"page (\d+)/(\d+)")
 
 # A keystroke is isolated by the silence around it: comfortably more than War
 # Dialer's 20ms burst window, and enough quiet afterwards for the door to have
@@ -73,6 +82,51 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 # career or world: registration and the first-visit guide belong to the fixture,
 # not to every panel. The key is the one the door's own dispatch uses -- check it
 # there, not in the action bar, before adding a walk.
+#
+# The suffixes exist because how much fits a page depends on the terminal, so a
+# walk can name a place or an entry but never a page number:
+#
+#   `*`  press this key until the screen stops changing, then photograph that.
+#        War Dialer's switchboard is two pages at 80x24 and eleven at 40x12, so a
+#        fixed number of Next presses photographed page two twice at one size and
+#        never reached the feed, the orders or the season card at another.
+#   `?`  page forward until the screen offers this key, then press it. The scene
+#        hub shows all seven entries at 80x24 and four at 40x12, so `I5` reached
+#        "Your season reports" at one size and a key the picker was ignoring at
+#        another.
+#   `#`  press whichever key the screen offers first, for a walk that wants *an*
+#        entry rather than a named one. The root picker marks the caller's own
+#        holdings `[-]`, so which digit it accepts depends on the fixture's own
+#        history -- naming one there broke the build twice as the fixture grew.
+#   `%`  photograph this screen and every page after it, turning them with this
+#        key. Must end the walk. `*` fast-forwards, and a card stack's pages are
+#        *different cards*: at forty columns the switchboard is fourteen pages,
+#        and keeping only the first, the second and the last published three of
+#        them -- the scene, the feed, the orders and most of the season card were
+#        in no panel at any size. Use it where paging changes what kind of
+#        information is on the screen (a card stack, the rules, a preview's
+#        stakes and then its terms), not where it merely shows the next rows of
+#        the same table: page two of the scene table is the same drawing with
+#        different data in it, and reviewing it again costs a panel and teaches
+#        nothing.
+#  `{X}` press the key of the entry whose own rows say X, paging to find it. The
+#        one selector that survives a changed world: which digit a Public PBX is
+#        depends on what the caller happens to hold, and the three owner services
+#        are three different screens -- a PBX removes Heat, a Warez Hub adds it
+#        and rolls for a bust, a Carrier Switch does neither -- so `G1?$` reviewed
+#        one of the three and nothing said so.
+#   `$`  page to the last page and press the last key offered there, for an entry
+#        a picker appends after a variable list. The exchange control screen puts
+#        the owner service after however many crew transfers the holding happens
+#        to offer, so `3` meant the service only for as long as the fixture kept
+#        exactly two of them -- and a digit that lands on a transfer instead
+#        publishes a garrison preview under the service's caption.
+#
+# A walk photographs one screen: the one it is looking at when its keys run out.
+# Passing *through* a picker on the way somewhere else therefore reviews nothing
+# of it, so a screen on the way to another screen needs a walk of its own that
+# stops there. `SHOWS` names what each walk's screen must say, and the build
+# refuses to publish a panel that does not say it.
 WALKS: dict[str, list[tuple[str, bytes]]] = {
     "voidrunner": [
         ("Command Deck", b""),
@@ -96,29 +150,338 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Navigation Chart, map", b"CV"),
     ],
     "war_dialer": [
-        ("Switchboard", b""),
-        ("The scene", b"I"),
-        ("Territory map", b"E"),
+        # Before the career exists: the guide every new caller is handed, paged
+        # with any key, which is why it is walked with Enter rather than [N].
+        ("First visit", b"\r%"),
+        # What a caller is handed when a season closed while they were away: the
+        # receipt, waiting, with the key that keeps it unread.
+        ("While you were away", b""),
+        # And the switchboard inside the last forty-eight hours, where the reset
+        # card opens the stack ahead of everything else (design doc).
+        ("Switchboard, season closing", b"N%"),
+        # The switchboard is a card stack paged with [N]: two pages at eighty
+        # columns and fourteen at forty, where the gauges, the scene, the feed,
+        # the orders and the season card each get their own (issue #494).
+        ("Switchboard", b"N%"),
+        ("BBS scene", b"I"),
+        ("Crew insignia", b"I1?"),
+        ("Insignia preview", b"I1?1?"),
+        # Committing the insignia is its own screen, and the only result screen
+        # in the door that reports a change costing nothing.
+        ("Insignia chosen", b"I1?1?A"),
+        ("Neutral dossiers", b"I2?"),
+        ("Scene bulletins", b"I3?"),
+        ("Season results", b"I4?"),
+        ("Your season reports", b"I5?"),
+        ("Hall of Fame", b"I6?"),
+        # The last hub entry is the caller's own display screen; no other walk
+        # opens it.
+        ("Display options", b"I7?"),
+        ("The scene", b"E"),
+        # A digit on the scene screen is the exchange's own number, so it opens
+        # that exchange's card wherever the table has been paged to. Exchange 1
+        # is the caller's own and 3 is the rival's, and the card reads differently
+        # for each: a holding has posted crew and income, a target has a capture
+        # price and the odds of taking it.
+        # `?` would prove nothing here: the table offers `inspect [1]-[9] [0]` as
+        # a range rather than a key each, and takes the digit on any page.
+        ("Exchange card", b"E1N%"),
+        ("Exchange card, a target", b"E3N%"),
         ("Rank", b"B"),
         ("Rivals", b"V"),
+        # The raid dispatch is its own pair of screens, and the raid preview is
+        # the only one in the door that draws an empty gauge on purpose: a
+        # rival's crew strength is private, so there are no odds to show.
+        ("Raid targets", b"R"),
+        ("Raid preview", b"R#N%"),
         ("Log", b"H"),
         ("Contract board", b"J"),
         # An action's preview is two pickers deep: the board, the approach, and
-        # only then the terms the player is actually asked to accept.
-        ("Job preview", b"J11"),
-        ("Trade preview", b"T"),
-        ("Recruit preview", b"C"),
+        # only then the terms the player is actually asked to accept. Each of the
+        # three is a screen, so each is a walk: a walk to the preview passes
+        # through the approach picker and photographs only the preview.
+        ("Choose approach", b"J1?"),
+        ("Job preview", b"J1?1?N%"),
+        ("Trade preview", b"TN%"),
+        ("Recruit preview", b"CN%"),
+        # Recruiting is the one action whose outcome is fixed, so the result
+        # screen it commits to is the same in every panel.
+        ("Action result", b"C" + b"N*" + b"A"),
         ("Crew development", b"S"),
+        ("Crew preview", b"S1?N%"),
         ("Root exchange", b"X"),
+        ("Root preview", b"X#N%"),
         ("Garrisons", b"G"),
+        ("Exchange control", b"G1?"),
+        # The transfer preview and the owner service are both behind the control
+        # screen. The service is the entry after the transfers, and how many of
+        # those there are is the fixture's business, so it is named as the last
+        # one rather than by a digit that would silently come to mean a transfer.
+        ("Garrison preview", b"G1?1?N%"),
+        ("Owner service preview", b"G{CARRIER SWITCH}$N%"),
+        ("Owner service preview, a Warez Hub", b"G{WAREZ HUB}$N%"),
+        ("Owner service preview, a Public PBX", b"G{PUBLIC PBX}$N%"),
         ("Operations", b"O"),
-        ("Help", b"?"),
+        ("Case an operation", b"O1?"),
+        # With an operation saved, the hub's first entry is the operation itself:
+        # continue it, or abandon it. Every screen from here needs a world that
+        # has already cased one, which `SETUP` plays before the panel is taken.
+        ("Active operation", b"O1?"),
+        ("Prepare preview", b"O1?1?N%"),
+        ("Execute preview", b"O1?1?N%"),
+        ("Abandon preview", b"O1?2?N%"),
+        ("Operation abandoned", b"O1?2?" + b"N*" + b"A"),
+        # The step-stakes card is two pickers past the hub: the contract, the
+        # approach, and only then the terms the caller is asked to accept.
+        ("Operation approach", b"O1?1?"),
+        ("Case preview", b"O1?1?1?N%"),
+        # Recon names its target first and prices it second; which rival the
+        # fixture offers first is its own business, hence `#`.
+        ("Rival recon", b"O2?"),
+        ("Recon preview", b"O2?#N%"),
+        # Both readings of the dossier list: the empty state a caller meets
+        # first, and one holding a snapshot. A snapshot expires after a day, which
+        # rules it out of the cached fixture but not out of `SETUP` -- that runs
+        # against this panel's own copy, minutes before the photograph.
+        ("Your dossiers", b"O3?"),
+        ("Your dossiers, a snapshot", b"O3?"),
+        ("Help", b"?N%"),
     ],
 }
 
 # Keys that take a brand-new career or world through everything a first launch
-# asks, so a panel never opens on registration or the first-visit guide.
+# asks, so a panel never opens on registration or the first-visit guide -- and
+# then far enough into the game that the screens about *having* something are
+# reachable at all. War Dialer's fixture captures exchange 1: it is unclaimed in
+# a fresh world, so the attempt is a certainty rather than a dice roll, and
+# without it every garrison screen was a panel of "No exchanges held" and the
+# switchboard's holdings and income gauges were permanently zero.
 ONBOARDING: dict[str, bytes] = {"voidrunner": b"\rY", "war_dialer": b"\r\r"}
+
+# Keys pressed after `seed()` has given the world its company and its past, to
+# put the caller back in the game: dismiss the crackdown receipt the archived
+# season left unread, then capture exchange 2 so the garrison screens exist.
+RESUME: dict[str, bytes] = {"war_dialer": b"\r" + b"X#" + b"N*" + b"A" + b"\r"}
+
+
+def load_door(door: pathlib.Path):
+    """The door as a module, for seeding a world through its own functions."""
+    spec = importlib.util.spec_from_file_location(f"gallery_{door.stem}", door)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    # Registered before it runs: `@dataclass` resolves a field's type through
+    # `sys.modules[cls.__module__]`, which is not there yet otherwise.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def seed_war_dialer(door: pathlib.Path, state: pathlib.Path) -> None:
+    """Rivals, receipts and one closed season.
+
+    A gallery built from a brand-new world reviews empty states: the rival
+    directory says there are no other crews, recon has nothing to choose, the
+    feed and the log are empty, and the season archive and Hall of Fame have no
+    rows -- so the rebuilt rival table, toned receipts, podium and recognition
+    cards appear in no panel at all.
+
+    Everything that can be done by the door's own functions is: players are
+    created with `load_or_create_player`, receipts with `record_event`, and the
+    season is closed by rewinding the anchor and letting `_settle_world` archive
+    it exactly as a real rollover would. The rank counters are written directly,
+    because the only other way to give a rival a Rank is to play dozens of turns
+    for them, and a fixture is allowed to start partway in.
+    """
+    game = load_door(door)
+    conn = game.connect(state / "war-dialer.db")
+    try:
+        now = game.now_utc()
+        season = game.current_world_season(conn, now)
+        for user_id, handle in ((2, "Kilobaud"), (3, "Nightline")):
+            game.load_or_create_player(conn, user_id, handle, now, season)
+        with conn:
+            # Old enough to be raidable, and ranked enough to take a medal.
+            conn.execute("UPDATE players SET created_at=?, crew_recruited_total=12, "
+                         "successful_raids=4, successful_jobs=6 WHERE user_id=2",
+                         (game.to_iso(now - game.GRACE * 3),))
+            conn.execute("UPDATE players SET created_at=?, crew_recruited_total=3 "
+                         "WHERE user_id=3", (game.to_iso(now - game.GRACE * 3),))
+            # Close the season the way a rollover does: rewind the anchor and let
+            # the door's own settle archive it, podium, receipts and all.
+            anchor = game.get_or_create_season_anchor(conn, now)
+            conn.execute("INSERT INTO meta(key,value) VALUES ('season_anchor',?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         (game.to_iso(anchor - game.SEASON),))
+        with game._write_transaction(conn):
+            game._settle_world(conn, game.now_utc())
+        now = game.now_utc()
+        with conn:
+            # The new season's live state: a rival holding so the ring shows one,
+            # and ranks so the standings table and the ladder have something in
+            # them. Counters again, for the same reason as above.
+            conn.execute("UPDATE players SET crew_recruited_total=12, successful_raids=4, "
+                         "successful_jobs=6 WHERE user_id=2")
+            conn.execute("UPDATE players SET crew_recruited_total=3 WHERE user_id=3")
+            conn.execute("UPDATE exchanges SET controller_user_id=2, garrison=3, "
+                         "controlled_since=? WHERE id=3", (game.to_iso(now),))
+        game.record_event(conn, 1, "Kilobaud",
+                          "Kilobaud raided you and got away with $340! "
+                          "All-attacker raid shield: 24 hours.", now)
+        game.record_event(conn, 1, None,
+                          "Rooted 212-555 Uptown Exchange; +$2/hour and +50 Rank.", now,
+                          seen=True)
+    finally:
+        conn.close()
+
+
+SEED = {"war_dialer": seed_war_dialer}
+
+# Keys played against a panel's own copy of the fixture, in a separate launch
+# whose screens are thrown away, before the walk that is photographed.
+#
+# One fixture is one world in one state, and some screens only exist in another:
+# an operation has to have been cased before there is a Prepare step to preview,
+# or an Abandon entry to refuse. Rather than a second fixture, or reaching into
+# the world's tables, the panel plays its way there -- so the state behind every
+# panel is one a caller reaches by playing, and the setup is read as the sequence
+# of keys it is. Each panel has its own copy, so these cost that panel's turns
+# and nobody else's.
+# A result screen takes any key to leave, and at the one size setup runs at the
+# casing receipt is a single page, so one Enter dismisses it and the next sequence
+# starts on the switchboard rather than spending its first key on the receipt.
+CASE_AN_OPERATION = b"O1?1?1?" + b"N*" + b"A"   # contract, approach, preview, Act
+PREPARE_IT = b"\r" + b"O1?1?" + b"N*" + b"A"    # continue the saved one, preview, Act
+# Walks that want a world nobody has played, rather than the cached fixture: the
+# first-visit guide exists only before there is a career, and `base_fixture` was
+# driving it and throwing the screens away. A fresh state costs this panel the
+# door's own registration, which is what a new caller pays too.
+FRESH: dict[str, set[str]] = {"war_dialer": {"First visit"}}
+
+
+def _rewind_anchor(door: pathlib.Path, state: pathlib.Path, back) -> None:
+    """Move this panel's world `back` through its own season clock.
+
+    Where a screen depends on where the world is in its season, no key can take it
+    there -- so the anchor is moved through the door's own helpers, exactly as
+    `seed_war_dialer` does to archive one. Keys remain the first resort: this is
+    only for what a clock decides.
+    """
+    game = load_door(door)
+    conn = game.connect(state / "war-dialer.db")
+    try:
+        anchor = game.get_or_create_season_anchor(conn, game.now_utc())
+        with conn:
+            conn.execute("INSERT INTO meta(key,value) VALUES ('season_anchor',?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         (game.to_iso(anchor - back(game)),))
+    finally:
+        conn.close()
+
+
+def past_the_rollover(door: pathlib.Path, state: pathlib.Path) -> None:
+    """A season has closed since the caller was last here."""
+    _rewind_anchor(door, state, lambda game: game.SEASON)
+
+
+def one_day_from_reset(door: pathlib.Path, state: pathlib.Path) -> None:
+    """Inside the last forty-eight hours, where the reset card opens the stack."""
+    _rewind_anchor(door, state, lambda game: game.SEASON - game.DAY)
+
+
+PREPARED: dict[str, dict[str, object]] = {
+    "war_dialer": {"While you were away": past_the_rollover,
+                   "Switchboard, season closing": one_day_from_reset},
+}
+
+SETUP: dict[str, dict[str, bytes]] = {
+    "war_dialer": {
+        # The three owner services are three different previews, and which
+        # exchange is which role is the world's business, not a digit's. Bay and
+        # Gulf are the Warez Hub and the Public PBX that `EXCHANGE_SEEDS` leaves
+        # unclaimed and undefended in every world, so capturing either is a
+        # certainty rather than a dice roll -- named, because the picker lists
+        # exchanges by short name and a position would drift. One capture each:
+        # a capture posts a crew member, and the caller keeps enough for one.
+        "Owner service preview, a Warez Hub": b"X{Bay}" + b"N*" + b"A",
+        "Owner service preview, a Public PBX": b"X{Gulf}" + b"N*" + b"A",
+        # Buy the recon whose dossier the next walk reads.
+        "Your dossiers, a snapshot": b"O2?#" + b"N*" + b"A",
+        "Active operation": CASE_AN_OPERATION,
+        "Prepare preview": CASE_AN_OPERATION,
+        "Abandon preview": CASE_AN_OPERATION,
+        "Operation abandoned": CASE_AN_OPERATION,
+        "Execute preview": CASE_AN_OPERATION + PREPARE_IT,
+    },
+}
+
+# What has to be legible on the screen a walk stops at, checked against the
+# painted panel rather than the door's bytes. A caption is a claim about a
+# picture, and a walk drives a picker whose entries move as the fixture grows:
+# without this the gallery could publish the exchange control screen's transfer
+# preview under "Owner service preview" and read as a complete review. Every walk
+# of a door listed here must name its screen, so a new walk cannot be added
+# unchecked.
+SHOWS: dict[str, dict[str, str]] = {
+    "war_dialer": {
+        "First visit": "FIRST VISIT",
+        "While you were away": "WHILE YOU WERE AWAY",
+        "Switchboard, season closing": "SEASON RESET",
+        "Switchboard": "SWITCHBOARD",
+        "BBS scene": "BBS SCENE",
+        "Crew insignia": "CREW INSIGNIA",
+        "Insignia preview": "INSIGNIA PREVIEW",
+        "Insignia chosen": "CREW IDENTITY",
+        "Neutral dossiers": "NEUTRAL DOSSIERS",
+        "Scene bulletins": "SCENE BULLETINS",
+        "Season results": "SEASON RESULTS",
+        "Your season reports": "YOUR SEASON REPORTS",
+        "Hall of Fame": "HALL OF FAME",
+        "Display options": "DISPLAY",
+        "The scene": "THE SCENE",
+        "Exchange card": "DEFENCE",
+        "Exchange card, a target": "YOUR ODDS",
+        "Rank": "SEASON STANDINGS",
+        "Rivals": "RIVAL DIRECTORY",
+        "Raid targets": "RAID TARGETS",
+        "Raid preview": "RAID PREVIEW",
+        "Log": "EVENT LOG",
+        "Contract board": "CONTRACT BOARD",
+        "Choose approach": "CHOOSE APPROACH",
+        "Job preview": "JOB PREVIEW",
+        "Trade preview": "TRADE PREVIEW",
+        "Recruit preview": "RECRUIT PREVIEW",
+        "Action result": "ACTION RESULT",
+        "Crew development": "CREW DEVELOPMENT",
+        "Crew preview": "CREW PREVIEW",
+        "Root exchange": "ROOT EXCHANGE",
+        "Root preview": "ROOT PREVIEW",
+        "Garrisons": "YOUR GARRISONS",
+        "Exchange control": "EXCHANGE CONTROL",
+        "Garrison preview": "GARRISON PREVIEW",
+        # Each of the three says which service it is in its own terms, so the
+        # mark is the service rather than the screen: a panel that showed the
+        # wrong holding's service would otherwise pass. A mark is matched against
+        # the painted rows, so it has to be short enough not to be wrapped across
+        # two of them -- "Warez outlet:" is broken in half at forty columns.
+        "Owner service preview": "Recruit:",
+        "Owner service preview, a Warez Hub": "outlet:",
+        "Owner service preview, a Public PBX": "Lay Low:",
+        "Operations": "OPERATIONS / RECON",
+        "Case an operation": "CASE AN OPERATION",
+        "Active operation": "ACTIVE OPERATION",
+        "Prepare preview": "PREPARE PREVIEW",
+        "Execute preview": "EXECUTE PREVIEW",
+        "Abandon preview": "ABANDON PREVIEW",
+        "Operation abandoned": "OPERATION ABANDONED",
+        "Operation approach": "OPERATION APPROACH",
+        "Case preview": "CASE PREVIEW",
+        "Rival recon": "RIVAL RECON",
+        "Recon preview": "RECON PREVIEW",
+        "Your dossiers": "YOUR DOSSIERS",
+        "Your dossiers, a snapshot": "Last-known intelligence",
+        "Help": "HOW TO PLAY",
+    },
+}
 
 # Every preset a caller can choose, applied to the fixture's copy rather than
 # passed as a flag: Voidrunner keeps its display style in the career (all four of
@@ -256,9 +619,154 @@ class Door:
         time.sleep(QUIET)  # every key arrives alone; a burst is discarded as paste
         with self.lock:
             before = len(self.out)
+        if self.proc.poll() is not None:
+            # Writing to a closed pipe raises `OSError: [Errno 22]` on Windows,
+            # which says nothing about the walk that ran out of door.
+            raise SystemExit(f"{self.door.name} had already exited (code "
+                             f"{self.proc.poll()}) when {key!r} was pressed at "
+                             f"{self.size}: a key before it left the game")
         self.proc.stdin.write(key)
         self.proc.stdin.flush()
         self.settle(before, f"key {key!r}", expect=expect)
+
+    #: How a screen says which keys it will accept right now. Matched on the hint
+    #: row rather than on the frame, because Fast mode has no frame -- and an
+    #: entry's own `[2]` marker can be on the screen while the entry's last row,
+    #: and therefore its key, is on the next page.
+    OFFERS = ("pick ", "no choice on this page", "inspect ")
+
+    def offered(self) -> str:
+        """The screen's own list of the keys it will take, or "" if it offers none."""
+        for row in ANSI.sub("", last_screen(self.read())).split("\r\n"):
+            row = row.strip()
+            if row.startswith(self.OFFERS):
+                return row
+        return ""
+
+    def press_first_offered(self, *, limit: int = 24) -> None:
+        """Press the first key the screen offers, paging forward to find one.
+
+        The root picker's first page can legitimately offer nothing at forty
+        columns: the caller's own holdings are marked `[-]`, and one unselectable
+        entry is most of a twelve-row page, so the choices are on page two.
+        """
+        for _ in range(limit):
+            keys = re.findall(r"\[(\w)\]", self.offered())
+            if keys:
+                self.press(keys[0].encode())
+                return
+            before = last_screen(self.read())
+            self.press(b"N")
+            if last_screen(self.read()) == before:
+                break
+        raise SystemExit(f"{self.door.name} offered no key at {self.size}:\n"
+                         f"{self.offered()!r}")
+
+    def press_matching(self, text: str, *, limit: int = 24) -> None:
+        """Press the key of the entry whose own rows contain `text`.
+
+        A picker draws `[K]` against the first row of an entry and indents the
+        rest, so the entry owning a row is the nearest key above it. Which key
+        that is and whether it can be pressed yet are two different pages: at
+        forty columns the garrison list shows `[2] Bay  WAREZ HUB` at the foot of
+        page one while offering only `[1]`, and page two offers `[2]` with the
+        name nowhere on it. So remember the key the text belongs to, and keep
+        paging until the screen will take it.
+        """
+        wanted = None
+        for _ in range(limit):
+            screen = ANSI.sub("", last_screen(self.read()))
+            key = None
+            for row in screen.split("\r\n"):
+                stripped = FRAME_EDGE.sub("", row)
+                found = re.match(r"\[(\w)\]", stripped)
+                if found:
+                    key = found.group(1)
+                if wanted is None and key and text in stripped:
+                    wanted = key
+            if wanted and f"[{wanted}]" in self.offered():
+                self.press(wanted.encode())
+                return
+            before = last_screen(self.read())
+            self.press(b"N")
+            if last_screen(self.read()) == before:
+                break
+        raise SystemExit(f"{self.door.name} offered no entry saying {text!r} at "
+                         f"{self.size}"
+                         + (f" (found it as [{wanted}], never offered)" if wanted else ""))
+
+    def press_pages(self, key: bytes, *, limit: int = 32) -> list[str]:
+        """This screen and every page after it, turned with `key`.
+
+        War Dialer prints `page i/n` in the border for exactly this -- its own
+        `page_note` calls the counter "the handle a scripted walk uses to know
+        whether there is another page to turn" -- so stop on page n rather than
+        on "the screen stopped changing". For a screen that is merely paged those
+        are the same end; for one that *leaves* when its last page is
+        acknowledged they are not, and the first-visit guide takes any key and
+        then hands the caller the switchboard -- which "until it stops changing"
+        photographed twice under the guide's name. A screen that prints no
+        counter has exactly one page: `page_note` writes one whenever there is
+        more than one, and Fast mode, which has no border to write it into, puts
+        it in the title row for the same reason.
+        """
+        pages = [last_screen(self.read())]
+        for _ in range(limit):
+            note = PAGE_NOTE.search(ANSI.sub("", pages[-1]))
+            if not note or note.group(1) == note.group(2):
+                break
+            self.press(key)
+            page = last_screen(self.read())
+            if page == pages[-1]:
+                break
+            pages.append(page)
+        return pages
+
+    def press_last_offered(self, *, limit: int = 24) -> None:
+        """Page to the last page and press the last key offered there.
+
+        The only stable way to name an entry a picker appends after a list whose
+        length is the fixture's business: the exchange control screen's owner
+        service sits after one crew transfer per offer the holding can make.
+        """
+        self.press_to_end(b"N", limit=limit)
+        keys = re.findall(r"\[(\w)\]", self.offered())
+        if not keys:
+            raise SystemExit(f"{self.door.name} offered no key on its last page "
+                             f"at {self.size}:\n{self.offered()!r}")
+        self.press(keys[-1].encode())
+
+    def press_when_offered(self, key: bytes, *, limit: int = 24) -> None:
+        """Page forward until the screen offers `key`, then press it.
+
+        How many entries fit a page depends on the terminal, so a walk can name
+        the entry it wants but never the page the entry is on: the scene hub
+        offers all seven at 80x24 and four at 40x12.
+        """
+        wanted = f"[{key.decode()}]"
+        for _ in range(limit):
+            if wanted in self.offered():
+                self.press(key)
+                return
+            before = last_screen(self.read())
+            self.press(b"N")
+            if last_screen(self.read()) == before:
+                break
+        raise SystemExit(f"{self.door.name} never offered {wanted} at {self.size}:\n"
+                         f"{self.offered()!r}")
+
+    def press_to_end(self, key: bytes, *, limit: int = 24) -> None:
+        """Press `key` until the screen it redraws stops changing.
+
+        A paging key on the last page still redraws -- the door clears and draws
+        the same page again -- so "stopped changing" is the only signal for "this
+        is the end", and it is the same end at every terminal size.
+        """
+        for _ in range(limit):
+            before = last_screen(self.read())
+            self.press(key)
+            if last_screen(self.read()) == before:
+                return
 
     def read(self) -> str:
         with self.lock:
@@ -297,21 +805,66 @@ class Door:
 
 
 def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, height: int,
-            info_extra: dict, *, expect: bool = True) -> str:
-    """Drive a walk and return the screen it is looking at when it is done."""
+            info_extra: dict, *, expect: bool = True) -> list[str]:
+    """Drive a walk and return the screen -- or pages -- it ends on."""
     running = Door(door, state, width, height, info_extra)
+    pages: list[str] | None = None
     try:
         running.settle()
-        for index in range(len(keys)):
-            running.press(keys[index:index + 1], expect=expect)
-        screen = running.read()
+        index = 0
+        while index < len(keys):
+            key, suffix = keys[index:index + 1], keys[index + 1:index + 2]
+            if suffix == b"%":
+                if index + 2 != len(keys):
+                    raise SystemExit(f"`%` photographs where a walk stops, so it has "
+                                     f"to end one: {keys!r}")
+                pages = running.press_pages(key)
+                index += 2
+                continue
+            if suffix == b"*":
+                running.press_to_end(key)
+                index += 2
+                continue
+            if suffix == b"?":
+                running.press_when_offered(key)
+                index += 2
+                continue
+            if key == b"#":
+                running.press_first_offered()
+                index += 1
+                continue
+            if key == b"$":
+                running.press_last_offered()
+                index += 1
+                continue
+            if key == b"{":
+                end = keys.index(b"}", index)
+                running.press_matching(keys[index + 1:end].decode())
+                index = end + 1
+                continue
+            running.press(key, expect=expect)
+            index += 1
+        if pages is None:
+            pages = [last_screen(running.read())]
     except BaseException:
         # A door that hung or crashed the build must not outlive it, or a failed
         # gallery leaves a process per panel behind.
         running.kill()
         raise
     running.finish()
-    return screen
+    return pages
+
+
+def blank_world(door: pathlib.Path, state: pathlib.Path) -> None:
+    """Create the world a fresh walk will play, without playing any of it.
+
+    A display preset is written *into* the world, and a world nobody has opened
+    has no tables to write it to -- `no such table: meta` on the first-visit
+    panel. The door's own `connect` builds and migrates the schema; it registers
+    nobody, so the caller is still new and the guide is still to come.
+    """
+    game = load_door(door)
+    game.connect(state / f"{door.stem.replace('_', '-')}.db").close()
 
 
 def apply_preset(state: pathlib.Path, extra: dict) -> dict:
@@ -351,17 +904,31 @@ def base_fixture(door_name: str, door: pathlib.Path, root_dir: pathlib.Path,
     """
     fixture = root_dir / "fixtures" / door_name
     if fresh:
-        shutil.rmtree(fixture, ignore_errors=True)
-    if fixture.exists():
+        remove(fixture)
+    # A directory is not a fixture; a world or a saves directory inside one is.
+    # `--fresh` deletes through a tree the door's SQLite handle may still be
+    # holding, and on Windows that can take the files and leave the directory
+    # behind -- after which a bare existence check accepted a world with no
+    # schema in it and failed every panel with `no such table: meta`.
+    if any(fixture.glob("*.db")) or any(fixture.glob("saves")):
         return fixture
+    remove(fixture)
     staging = pathlib.Path(tempfile.mkdtemp(prefix="gallery-fixture-"))
     try:
         state = staging / "state"
         state.mkdir()
         # First-launch keys are the one place a key may find nothing to answer.
         capture(door, state, ONBOARDING[door_name], 80, 24, {}, expect=False)
-        fixture.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(state), str(fixture))
+        if door_name in SEED:
+            SEED[door_name](door, state)
+            capture(door, state, RESUME[door_name], 80, 24, {})
+        # Move the state *into* the fixture directory entry by entry rather than
+        # moving the directory itself: if Windows would not let the old fixture
+        # go, `shutil.move` treats it as a destination and nests the staging
+        # directory inside it, and every panel then opens a world with no schema.
+        fixture.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(state.iterdir()):
+            shutil.move(str(entry), str(fixture / entry.name))
     finally:
         remove(staging)
     return fixture
@@ -396,6 +963,19 @@ def to_html(screen: str, width: int, height: int, styles: dict[str, str]) -> str
     return "\n".join(out) or "&nbsp;"
 
 
+def painted(screen: str, width: int, height: int) -> str:
+    """The panel's text as one line, read back through the emulator that paints it.
+
+    Checking the door's bytes would not do: a heading is styled, so in the byte
+    stream its words are separated by the sequences that colour them, and a
+    screen drawn with cursor moves says nothing in the order it was written.
+    """
+    canvas = term.Screen(width, height)
+    canvas.feed(screen)
+    rows = ["".join(char for char, _ in row) for row in canvas.cells]
+    return " ".join(" ".join(rows).split())
+
+
 def build(door_name: str, widths: list[int], heights: dict[int, int],
           out_dir: pathlib.Path, fresh: bool) -> pathlib.Path:
     door = ROOT / "src/netbbs/doors/bundled" / f"{door_name}.py"
@@ -404,6 +984,12 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
     out_dir.mkdir(parents=True, exist_ok=True)
     fixture = base_fixture(door_name, door, out_dir, fresh)
 
+    shows = SHOWS.get(door_name, {})
+    unnamed = [label for label, _ in WALKS[door_name] if label not in shows]
+    if shows and unnamed:
+        raise SystemExit("every walk must say what its screen shows; "
+                         f"{door_name} does not for: {', '.join(unnamed)}")
+
     shots = [(label, keys, preset, extra, width, heights.get(width, 24))
              for label, keys in WALKS[door_name]
              for preset, extra in PRESETS[door_name].items()
@@ -411,14 +997,31 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
 
     run_dir = pathlib.Path(tempfile.mkdtemp(prefix="gallery-run-"))
 
-    def shoot(shot) -> str:
-        _, keys, _, extra, width, height = shot
+    def shoot(shot) -> list[str]:
+        label, keys, _, extra, width, height = shot
         work = pathlib.Path(tempfile.mkdtemp(dir=run_dir))
         try:
             state = work / "state"
-            shutil.copytree(fixture, state)
+            if label in FRESH.get(door_name, ()):
+                state.mkdir(parents=True)
+                blank_world(door, state)
+            else:
+                shutil.copytree(fixture, state)
             info_extra = apply_preset(state, extra)
-            return last_screen(capture(door, state, keys, width, height, info_extra))
+            prepare = PREPARED.get(door_name, {}).get(label)
+            if prepare:
+                prepare(door, state)
+            setup = SETUP.get(door_name, {}).get(label)
+            if setup:
+                # A launch of its own, at one size, so the setup keys never have
+                # to work at every terminal; what it draws is thrown away.
+                capture(door, state, setup, 80, 24, info_extra)
+            return capture(door, state, keys, width, height, info_extra)
+        except BaseException as exc:
+            # A build of nine hundred panels that dies must say which walk died:
+            # the bare exception names a key and a size, and never the screen.
+            raise SystemExit(f"{label} at {width}x{height} {shot[2]} "
+                             f"({keys!r}): {type(exc).__name__}: {exc}") from exc
         finally:
             remove(work)
 
@@ -432,16 +1035,40 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
     finally:
         remove(run_dir)
 
+    # A panel that is not the screen its caption names is worse than a missing
+    # one: it reads as a review of a screen nobody has looked at. The mark has to
+    # be on one of the walk's pages rather than on all of them -- a card stack
+    # carries each heading on the page holding that card, and `DEFENCE` is on page
+    # one of the exchange card while page two is its terms -- and every page has
+    # to have something on it.
+    wrong = [f"  {label} at {width}x{height} {preset}: no {shows[label]!r} on any of "
+             f"{len(pages)} page(s)"
+             for (label, _, preset, _, width, height), pages in zip(shots, screens)
+             if label in shows
+             and not any(shows[label] in painted(screen, width, height) for screen in pages)]
+    wrong += [f"  {label} at {width}x{height} {preset} page {number} is blank"
+              for (label, _, preset, _, width, height), pages in zip(shots, screens)
+              for number, screen in enumerate(pages, 1)
+              if not painted(screen, width, height).strip()]
+    if wrong:
+        raise SystemExit(f"{door_name}: a walk did not end on the screen it names:\n"
+                         + "\n".join(wrong))
+
     styles: dict[str, str] = {}
     sections, panels, current = [], [], shots[0][0]
-    for (label, _, preset, _, width, height), screen in zip(shots, screens):
+    for (label, _, preset, _, width, height), pages in zip(shots, screens):
         if label != current:
             sections.append(f'<section><h2>{html.escape(current)}</h2>'
                             f'<div class="row">{"".join(panels)}</div></section>')
             panels, current = [], label
-        panels.append(
-            f'<figure><figcaption>{html.escape(f"{width}x{height} · {preset}")}</figcaption>'
-            f'<div class="screen"><pre>{to_html(screen, width, height, styles)}</pre></div></figure>')
+        for number, screen in enumerate(pages, 1):
+            caption = f"{width}x{height} · {preset}"
+            if len(pages) > 1:
+                caption += f" · page {number}/{len(pages)}"
+            panels.append(
+                f'<figure><figcaption>{html.escape(caption)}</figcaption>'
+                f'<div class="screen"><pre>{to_html(screen, width, height, styles)}</pre>'
+                f'</div></figure>')
     sections.append(f'<section><h2>{html.escape(current)}</h2>'
                     f'<div class="row">{"".join(panels)}</div></section>')
 
