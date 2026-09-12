@@ -2235,6 +2235,83 @@ registration meant a sender's own outbound `link_message` could never be
 recognized when its acknowledgement came back, so it was rejected
 unconditionally, every time).
 
+### Push sizing is a budget problem, not a slicing problem (issue #478)
+
+A per-pass push whose size grows with everything this node has ever originated
+cannot be fixed by slicing it into per-request-sized batches. The peer's
+per-source request budget (`LinkRequestThrottle`, `request_rate_capacity`
+20/`request_rate_refill_per_minute` 60) bounds how many *requests* a pass may
+make at all, so past roughly 3,800 originated events a pass spent the whole
+budget on the same early batches, took a 429, and restarted at the first batch
+next pass. Slicing converts "one oversized request refused in full" into "the
+tail is never reached" — quieter, equally broken.
+
+What removes the backlog rather than pacing it: an `InventoryRequest` is
+already documented as exhaustive (every carried resource, each mapped to the
+full set of content IDs held), so the same body that asks "what am I missing?"
+already states everything the responder could want back. The responder
+therefore answers both directions at once — `events` plus a `wanted` list of
+declared IDs it lacks — and the push sends exactly those. One request per pass,
+shrinking to nothing as the peer catches up, no persisted per-peer cursor, no
+extra round trip.
+
+**Cap the push, never `wanted`.** The two are not interchangeable, and getting
+it backwards reintroduces the same starvation in a quieter form. `wanted` is
+ordered by the *responder*; prefix-capping it lets IDs the requester is not
+allowed to push (content it merely carries) fill the page, get dropped by the
+requester's own filter, leave the responder unchanged, and come back identical
+forever. Capping after that filter truncates only events the requester can
+actually send, so the responder has them next pass and the list strictly
+shrinks. `wanted` needs no cap of its own: it is a subset of the IDs the
+requester just declared, which `client_max_size` already bounds.
+
+**Anything that rides along with a budgeted push must not eat the budget.**
+`key_transition`s are append-only and sent unconditionally; deriving the
+resource capacity as `cap - len(transitions)` reaches zero after ~99 rotations
+and stays there. Reserve a floor (half a request) and let a long history cost a
+second request instead.
+
+Two things do not fit that model and are stated rather than assumed.
+`key_transition`s are outside inventory scope, so a peer cannot ask for one;
+they stay unconditionally pushed every pass, which is affordable only because
+there are a handful of them. And a `wanted` entry this node merely *carries* is
+skipped: push has only ever carried self-originated content, and the requester
+reaches the rest through its own inventory pull.
+
+**`wanted` is required, and a missing one is not a compatibility case.** Every
+node on this mesh is upgraded together, so a 200 response omitting it is a
+broken responder and is rejected as malformed. Tolerating it would have been the
+compatibility layer, and removing that tolerance is what leaves a single meaning
+for "this pass produced no `wanted` list": the inventory exchange failed — a
+peer whose `/inventory` route errors while `/events` still accepts a push. That
+case still pushes, walking the originated history from a rotating per-peer
+offset held for the lifetime of one sync loop, because re-offering the same head
+every pass would never deliver the rest to such a peer, and an asymmetric one
+never dials back to pull it.
+
+**Accepting an event and projecting it locally are separate decisions, and
+both have to be recorded.** Every quota refusal (§13.9) keeps the event and
+declines only the local row — `board_genesis` past `max_carried_boards`,
+`file_descriptor` past `max_remote_files_per_area`. Anything that instead keeps
+*neither* cannot tell "declined this" from "never saw this" afterwards, which
+reads as a permanent gap: the resource is reported as wanted on every pass, its
+origin re-pushes the same prefix forever, and everything ordered behind it is
+starved. A refused `file_descriptor` was that case until it was made to persist
+its event like the others.
+
+**What `wanted` may consult is a disclosure boundary.** It is computed per
+declared resource, never against the global dedup set — that set spans
+`link_message`s, acknowledgements and `key_transition`s, which §8.8 keeps out of
+inventory, so consulting it turns the response into a membership oracle for any
+completed peer willing to file a known content ID under a fabricated resource.
+A resource this node has seen and declined wants nothing further; one it has
+never seen wants everything declared for it.
+
+**Test method.** Asserting only that the peer ends up holding everything proves
+nothing here — the old code converged too, via pull. Record the push requests
+themselves (wrap `netbbs.link.sync.push_events`) and assert both how many a
+pass made and what each carried.
+
 ### Linked boards
 
 A linked board uses the existing local board ID in its signed genesis; linking

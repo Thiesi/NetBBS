@@ -27,11 +27,11 @@ from netbbs.link.boards import link_board, queue_board_post_edit_if_linked, queu
 from netbbs.link.events import build_endpoint_descriptor
 from netbbs.link.mail import compose_link_message
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
-from netbbs.link.protocol import HelloMessage, LinkNode, PeerRecord
+from netbbs.link.protocol import MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode, PeerRecord
 from netbbs.link.onboarding import Participation, set_participation
 from netbbs.link.reliable_nodes import ReliableNode, set_cached_reliable_nodes
 from netbbs.link.sync import run_link_sync
-from netbbs.link.transport import LinkServer
+from netbbs.link.transport import LinkServer, LinkTransportError
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -40,9 +40,10 @@ def _hello_for(node: LinkNode, *, created_at: str = "2026-01-01T00:00:00+00:00")
     return node.build_hello(addresses=None, outgoing_only=True, created_at=created_at)
 
 
-async def _run_server(node: LinkNode, lane: DatabaseLane) -> LinkServer:
+async def _run_server(node: LinkNode, lane: DatabaseLane, **kwargs) -> LinkServer:
     server = LinkServer(
-        host="127.0.0.1", port=0, node=node, own_hello_provider=lambda: _hello_for(node), lane=lane
+        host="127.0.0.1", port=0, node=node, own_hello_provider=lambda: _hello_for(node), lane=lane,
+        **kwargs,
     )
     await server.start()
     return server
@@ -1712,3 +1713,503 @@ def test_sync_still_warns_when_a_retained_relay_is_offline(tmp_path, caplog):
         assert len(_isolation_warnings(caplog)) == 1
     finally:
         node_db.close()
+
+
+def _recording_push(monkeypatch):
+    """Wraps `netbbs.link.sync`'s own `push_events` so a test can see
+    exactly how many push requests one pass made and what each carried
+    -- the whole point of issue #478 is the shape of those requests, not
+    only what ends up on the peer."""
+    import netbbs.link.sync as sync_module
+
+    real_push = sync_module.push_events
+    calls: list[list[str]] = []
+
+    async def recording(node, session, base_url, events, **kwargs):
+        calls.append([event.content_id for event in events])
+        return await real_push(node, session, base_url, events, **kwargs)
+
+    monkeypatch.setattr(sync_module, "push_events", recording)
+    return calls
+
+
+def test_sync_pushes_only_the_events_the_seed_says_it_lacks(tmp_path, monkeypatch):
+    """Design doc §8.6/§8.8, issue #478: the inventory response now also
+    reports which of the requester's declared content IDs the seed
+    itself is missing, and the push sends exactly those. A second pass
+    against a seed already holding the first post must carry the new
+    post and nothing else -- before this, every pass re-offered the
+    node's entire originated history."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    genesis = link_board(dialer.db, board, node_identity=dialer_identity)
+    first = queue_board_post_if_linked(
+        dialer.db, create_post(dialer.db, board, creator, "one", "first"), board,
+        node_identity=dialer_identity,
+    )
+
+    calls = _recording_push(monkeypatch)
+    second_holder: list = []
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                seeds = [f"http://127.0.0.1:{seed_server.port}"]
+                first_pass = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, seeds,
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(first_pass)
+                second_holder.append(
+                    queue_board_post_if_linked(
+                        dialer.db, create_post(dialer.db, board, creator, "two", "second"), board,
+                        node_identity=dialer_identity,
+                    )
+                )
+                calls.clear()
+                second_pass = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, seeds,
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(second_pass)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        second = second_holder[0]
+        assert len(calls) == 1
+        pushed = set(calls[0])
+        assert second.content_id in pushed
+        assert genesis.content_id not in pushed
+        assert first.content_id not in pushed
+        assert second.content_id in seed_node.known_event_ids
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_push_is_one_request_however_much_this_node_has_originated(tmp_path, monkeypatch):
+    """The actual defect issue #478 names: the old push sliced its whole
+    originated history into `MAX_EVENTS_PER_REQUEST`-sized requests, so
+    a large node spent its peer's entire per-source request budget
+    (§13.9) on the same early slices every pass and never reached the
+    tail. A pass must now cost exactly one push request no matter how
+    many own events exist."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    link_board(dialer.db, board, node_identity=dialer_identity)
+    for i in range(MAX_EVENTS_PER_REQUEST + 10):
+        queue_board_post_if_linked(
+            dialer.db, create_post(dialer.db, board, creator, f"post {i}", "body"), board,
+            node_identity=dialer_identity,
+        )
+
+    calls = _recording_push(monkeypatch)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task, settle=2.0)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert len(calls) == 1
+        assert len(calls[0]) <= MAX_EVENTS_PER_REQUEST
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_eventually_pushes_the_tail_of_a_large_own_event_list(tmp_path):
+    """The converse half of issue #478: bounding one pass to a single
+    request must still converge. Each pass the seed's declared inventory
+    grows, so the next `wanted` list covers the next stretch -- the tail
+    is reached rather than starved behind the same early batches
+    forever."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    genesis = link_board(dialer.db, board, node_identity=dialer_identity)
+    posts = [
+        queue_board_post_if_linked(
+            dialer.db, create_post(dialer.db, board, creator, f"post {i}", "body"), board,
+            node_identity=dialer_identity,
+        )
+        for i in range(MAX_EVENTS_PER_REQUEST + 10)
+    ]
+    expected = {genesis.content_id} | {post.content_id for post in posts}
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=0.05,
+                    )
+                )
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 30.0
+                while not expected <= seed_node.known_event_ids and loop.time() < deadline:
+                    await asyncio.sleep(0.05)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert expected <= seed_node.known_event_ids
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_still_pushes_when_a_seeds_inventory_route_fails(tmp_path, monkeypatch):
+    """A seed whose `/inventory` route errors while `/events` still
+    accepts a push cannot say what it lacks, and that must not silence
+    the push -- a first-contact peer still has to receive this node's
+    genesis events."""
+    import netbbs.link.sync as sync_module
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    genesis = link_board(dialer.db, board, node_identity=dialer_identity)
+
+    async def broken_inventory_route(*args, **kwargs):
+        raise LinkTransportError("inventory route is down")
+
+    monkeypatch.setattr(sync_module, "request_inventory", broken_inventory_route)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert genesis.content_id in seed_node.known_event_ids
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_walks_its_own_events_while_a_seeds_inventory_route_stays_broken(tmp_path, monkeypatch):
+    """Codex review of #498, on the one reading of it that survives:
+    every node here runs the same release, so a peer that cannot say what
+    it lacks is a peer whose inventory route is *failing*, not an old
+    one. Re-offering the same leading page every pass would never deliver
+    the rest to such a seed -- and in an asymmetric topology it never
+    dials this node, so its own pull cannot make up the difference.
+
+    `MAX_EVENTS_PER_REQUEST` is lowered so more than one page exists
+    without needing hundreds of posts."""
+    import netbbs.link.sync as sync_module
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    genesis = link_board(dialer.db, board, node_identity=dialer_identity)
+    posts = [
+        queue_board_post_if_linked(
+            dialer.db, create_post(dialer.db, board, creator, f"post {i}", "body"), board,
+            node_identity=dialer_identity,
+        )
+        for i in range(11)
+    ]
+    expected = {genesis.content_id} | {post.content_id for post in posts}
+
+    monkeypatch.setattr(sync_module, "MAX_EVENTS_PER_REQUEST", 4)
+
+    async def broken_inventory_route(*args, **kwargs):
+        raise LinkTransportError("inventory route is down")
+
+    monkeypatch.setattr(sync_module, "request_inventory", broken_inventory_route)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=0.05,
+                    )
+                )
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 30.0
+                while not expected <= seed_node.known_event_ids and loop.time() < deadline:
+                    await asyncio.sleep(0.05)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert expected <= seed_node.known_event_ids
+    finally:
+        dialer.close()
+        seed.close()
+
+def test_sync_pushes_own_events_even_behind_a_wall_of_carried_ones(tmp_path):
+    """The asymmetric topology the Codex review of issue #478 named. The
+    dialer carries more events originated *elsewhere* than one request
+    holds, and the seed lacks all of them -- but the dialer may not push
+    carried content ("no relay from a stranger"), and the seed never
+    dials the dialer, so its own pull cannot resolve this either.
+
+    While the seed's `wanted` list was prefix-capped, those unsendable
+    IDs filled it, the filter dropped every one of them, the seed's
+    state never changed, and the identical page came back every pass:
+    the dialer's own file descriptor was never offered at all. The
+    carried board events are walked before file areas, so this ordering
+    is deterministic rather than incidental.
+    """
+    from netbbs.files.areas import create_file_area, get_file_area_by_name
+    from netbbs.files.entries import upload_file
+    from netbbs.link.boards import materialize_carried_board, materialize_carried_post
+    from netbbs.link.events import build_board_genesis, build_board_post
+    from netbbs.link.files import link_file_area, list_remote_files, queue_file_descriptor_if_linked
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    elsewhere_identity = bootstrap_node_identity("elsewhere")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    carried_genesis = build_board_genesis(
+        signing_identity=elsewhere_identity.signing_key,
+        origin_fingerprint=elsewhere_identity.fingerprint,
+        board_id="carried-board-id", name="Somebody Else's Board",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    materialize_carried_board(dialer.db, carried_genesis)
+    for i in range(MAX_EVENTS_PER_REQUEST + 10):
+        materialize_carried_post(
+            dialer.db,
+            build_board_post(
+                signing_identity=elsewhere_identity.signing_key,
+                home_node_fingerprint=elsewhere_identity.fingerprint,
+                local_user_id="wanderer", board_id="carried-board-id",
+                subject=f"post {i}", body="body", created_at="2026-01-01T00:00:00Z",
+                nonce=f"nonce-{i}",
+            ),
+            sender_fingerprint=elsewhere_identity.fingerprint,
+        )
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(dialer.db, "downloads", creator=creator)
+    entry = upload_file(dialer.db, area, creator, "game.bin", b"contents")
+    link_file_area(dialer.db, area, node_identity=dialer_identity)
+    own_descriptor = queue_file_descriptor_if_linked(
+        dialer.db, entry, area, node_identity=dialer_identity
+    )
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task, settle=2.0)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert own_descriptor.content_id in seed_node.known_event_ids
+        carried_area = get_file_area_by_name(seed.db, "downloads")
+        assert [f.filename for f in list_remote_files(seed.db, carried_area)] == ["game.bin"]
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_push_keeps_room_for_resource_events_behind_a_long_rotation_history(
+    tmp_path, monkeypatch,
+):
+    """A node's `key_transition` history is append-only and rides along
+    with every push. Spending the whole request budget on it would leave
+    resource events permanently unsent (Codex review of issue #478);
+    they keep at least half a request whatever the history looks like.
+    `MAX_EVENTS_PER_REQUEST` is lowered here so the condition is reached
+    with a handful of rotations instead of a hundred."""
+    import netbbs.link.sync as sync_module
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    genesis = link_board(dialer.db, board, node_identity=dialer_identity)
+
+    monkeypatch.setattr(sync_module, "MAX_EVENTS_PER_REQUEST", 10)
+    while len(dialer_identity.transitions) <= 12:
+        dialer_identity = rotate_operational_key(dialer_identity, purpose="signing")
+    dialer_node = LinkNode(identity=dialer_identity)
+
+    calls = _recording_push(monkeypatch)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task, settle=1.0)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        pushed = {content_id for call in calls for content_id in call}
+        assert genesis.content_id in pushed
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_push_is_not_pinned_by_a_resource_the_seed_refused_to_carry(tmp_path, monkeypatch):
+    """Codex review of #498, the end-to-end shape. The seed carries no
+    boards at all (`max_carried_boards=0`), so it accepts the dialer's
+    `board_genesis` and posts into protocol state and refuses only the
+    local materialization -- leaving no `boards` row for
+    `_all_board_events` to read.
+
+    Boards are walked before file areas, so while those accepted-but-
+    unmaterialized events stayed "wanted" they filled the push page on
+    every pass and the dialer's own file descriptor was never sent.
+    `MAX_EVENTS_PER_REQUEST` is lowered so one board's worth of posts
+    exceeds a page without needing hundreds of them."""
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import upload_file
+    from netbbs.link.files import link_file_area, queue_file_descriptor_if_linked
+    import netbbs.link.sync as sync_module
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    link_board(dialer.db, board, node_identity=dialer_identity)
+    for i in range(12):
+        queue_board_post_if_linked(
+            dialer.db, create_post(dialer.db, board, creator, f"post {i}", "body"), board,
+            node_identity=dialer_identity,
+        )
+
+    area = create_file_area(dialer.db, "downloads", creator=creator)
+    entry = upload_file(dialer.db, area, creator, "game.bin", b"contents")
+    link_file_area(dialer.db, area, node_identity=dialer_identity)
+    own_descriptor = queue_file_descriptor_if_linked(
+        dialer.db, entry, area, node_identity=dialer_identity
+    )
+
+    monkeypatch.setattr(sync_module, "MAX_EVENTS_PER_REQUEST", 5)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane, max_carried_boards=0)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=0.05,
+                    )
+                )
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 20.0
+                while (
+                    own_descriptor.content_id not in seed_node.known_event_ids
+                    and loop.time() < deadline
+                ):
+                    await asyncio.sleep(0.05)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert own_descriptor.content_id in seed_node.known_event_ids
+    finally:
+        dialer.close()
+        seed.close()

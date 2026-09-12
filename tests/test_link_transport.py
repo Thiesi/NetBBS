@@ -2018,8 +2018,9 @@ def test_request_inventory_lets_a_completed_peer_discover_carried_content_from_a
             await bob_server.stop()
 
     try:
-        events, more_available = asyncio.run(scenario())
+        events, more_available, wanted = asyncio.run(scenario())
         assert more_available is False
+        assert wanted == []
         content_ids = set()
         for raw in events:
             accepted = alice_node.handle_events(bob_identity.fingerprint, [raw])
@@ -2763,3 +2764,47 @@ def test_rate_limit_middleware_is_a_no_op_when_no_throttle_is_configured(tmp_pat
         assert asyncio.run(scenario()) == [200] * 5
     finally:
         bob.close()
+
+
+def test_inventory_response_without_a_wanted_list_is_refused_as_malformed(tmp_path):
+    """Every node on this mesh runs the same release, so a 200 that omits
+    `wanted` is a broken responder, not an older one. Accepting it would
+    quietly turn that into a degraded-but-working exchange; it is refused
+    like any other malformed response, which leaves "this node has no
+    wanted list" meaning exactly one thing: the call failed."""
+    from netbbs.link.store import build_inventory_request
+    from netbbs.link.transport import request_inventory
+
+    alice_identity = bootstrap_node_identity("alice")
+    alice_node = LinkNode(identity=alice_identity)
+    alice = _NodeDb(tmp_path, "alice")
+
+    async def _no_wanted_key(request: web.Request) -> web.Response:
+        return web.json_response({"events": [], "more_available": False})
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/link/v1/inventory/{fingerprint}", _no_wanted_key)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                inventory_request = await alice.lane.run(
+                    build_inventory_request,
+                    signing_identity=alice_identity.signing_key,
+                    requester_fingerprint=alice_identity.fingerprint,
+                    responder_fingerprint="whoever",
+                )
+                await request_inventory(
+                    alice_node, session, f"http://127.0.0.1:{site.port}", inventory_request
+                )
+        finally:
+            await runner.cleanup()
+
+    try:
+        with pytest.raises(LinkTransportError):
+            asyncio.run(scenario())
+    finally:
+        alice.close()

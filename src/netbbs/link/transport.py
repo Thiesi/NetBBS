@@ -166,6 +166,7 @@ from netbbs.link.store import (
     build_inventory_request,
     channel_event_diff,
     file_area_event_diff,
+    inventory_wanted_ids,
     save_candidate_descriptor,
     save_event,
     save_peer,
@@ -225,6 +226,15 @@ _DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS_PER_PEER = 4
 # deliberate, documented value -- sized to comfortably fit `netbbs.link.
 # protocol._MAX_EVENTS_PER_REQUEST` (200) worth of events.
 _LINK_CLIENT_MAX_SIZE_BYTES = 2 * 1024 * 1024
+
+# Issue #478: a peer's `wanted` list is a subset of the content IDs this
+# node's own `InventoryRequest` just declared, so it is already bounded
+# by the body size that request had to fit -- roughly 30,000 IDs at 2 MiB.
+# This is the backstop for a peer that answers with something else
+# entirely; it is not a page size, and must stay well above any legitimate
+# value (truncating `wanted` is what the Codex review of #478 showed pins
+# the same unsendable page forever).
+_MAX_WANTED_CONTENT_IDS = 50_000
 
 # Design doc §11.3, issue #89: `file_transfer.build_chunk_for_serving`
 # already clamps to its own internal ceiling, but the server also refuses
@@ -1815,7 +1825,25 @@ class LinkServer:
             file_area_events, file_area_truncated = [], True
         events = board_events + channel_events + file_area_events
         more_available = board_truncated or channel_truncated or file_area_truncated
-        return web.json_response({"events": events, "more_available": more_available})
+        # Issue #478: the other half of the same exchange. The request
+        # already declares everything the requester holds, so answering
+        # "and here is what *I* am missing from that" costs no extra
+        # round trip and lets the requester's push send exactly those
+        # events instead of re-offering its whole originated history
+        # every pass. Not capped by `response_limit`: this can never
+        # exceed the IDs the requester itself just declared, which
+        # `client_max_size` already bounds, and truncating it to a page
+        # would pin that page forever -- see `inventory_wanted_ids`. The
+        # push it provokes is capped on the requester's own side.
+        wanted = await self._lane.run(
+            inventory_wanted_ids,
+            requested_boards=inventory_request.boards,
+            requested_channels=inventory_request.channels,
+            requested_file_areas=inventory_request.file_areas,
+        )
+        return web.json_response(
+            {"events": events, "more_available": more_available, "wanted": wanted}
+        )
 
     async def _handle_trust_pull(self, request: web.Request) -> web.Response:
         """Serve one authenticated, issuer-filtered trust subscription page."""
@@ -2219,14 +2247,25 @@ async def request_inventory(
     inventory_request: InventoryRequest,
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> tuple[list[dict], bool]:
+) -> tuple[list[dict], bool, list[str]]:
     """
     Design doc §8.8, issue #85: ask a peer at `base_url` what it has for
     `inventory_request.boards` that this node doesn't already. Returns
     the raw event dicts it reports (already in `push_events`'s own wire
     shape -- the caller feeds them through `LinkNode.handle_events`
-    exactly as it would a push response, with no translation) and
-    whether more remain beyond the peer's own response cap.
+    exactly as it would a push response, with no translation),
+    whether more remain beyond the peer's own response cap, and (issue
+    #478) which of the `content_id`s this request declared the peer is
+    itself missing -- the list the caller's own push then sends.
+
+    `wanted` is **required**. A response without it is malformed and
+    refused like any other: every node on this mesh runs the same
+    release, so there is no such peer to accommodate, and treating a
+    missing key as "cannot say" would silently turn a broken responder
+    into a degraded-but-accepted one. The only way a caller ends up
+    without a `wanted` list is this whole call failing, which is a
+    different condition with a different answer (see `netbbs.link.sync.
+    _push_own_events`).
 
     Deliberately returns the raw dicts rather than applying them itself
     -- unlike `push_events` (whose sender already trusts its own
@@ -2254,8 +2293,16 @@ async def request_inventory(
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
 
     try:
-        return body["events"], bool(body["more_available"])
-    except (KeyError, TypeError) as exc:
+        wanted = body["wanted"]
+        if not isinstance(wanted, list) or not all(isinstance(i, str) for i in wanted):
+            raise LinkTransportError(f"malformed inventory response from {url}: bad wanted list")
+        if len(wanted) > _MAX_WANTED_CONTENT_IDS:
+            raise LinkTransportError(
+                f"inventory response from {url} claims to want {len(wanted)} content ids, more "
+                f"than the {_MAX_WANTED_CONTENT_IDS} any request this node sends could declare"
+            )
+        return body["events"], bool(body["more_available"]), wanted
+    except (KeyError, TypeError, AttributeError) as exc:
         raise LinkTransportError(f"malformed inventory response from {url}: {exc}") from exc
 
 
