@@ -1047,17 +1047,22 @@ terms but expose no action key. Disconnecting preserves the existing pending fig
 
 ### Saved display presets
 
-Station **[O] Display Options** offers **[1] Full palette**, **[2] 16-color**,
-**[3] Monochrome**, and **[4] Plain / ASCII artwork**. Full palette uses the
-terminal's existing truecolor or 256-color setting. Monochrome retains Unicode
-artwork without ANSI styling; Plain also substitutes ASCII decorations. Unicode
-letters and text input remain UTF-8 in every mode. Numeric telemetry and warning
-labels do not depend on color.
+Station **[O] Display Options** offers **[1] Full palette**, **[2] Full palette,
+no motion**, **[3] 16-color**, **[4] Monochrome**, and **[5] Plain / ASCII
+artwork**. Full palette uses the terminal's existing truecolor or 256-color
+setting; the second is the same palette with every reveal, tick and drain off.
+Monochrome retains Unicode artwork without ANSI styling; Plain also substitutes
+ASCII decorations for the whole glyph vocabulary. Unicode letters and text input
+remain UTF-8 in every mode. Numeric telemetry and warning labels do not depend on
+color. Each preset previews itself on that screen, drawn with what your own
+terminal can do.
 
 Selecting a different preset saves it immediately before acknowledging the
 change. **[B] Back**, paging, and selecting the current preset make no change.
 The preference applies from the first title on the next visit and survives
-retirement. Existing careers default to Full palette. No animation is added.
+retirement. Existing careers default to Full palette. Motion is on in the first
+and third and off in the other three; see "What Voidrunner looks like" for what
+it does and how to skip it.
 
 ### Ship and place portraits
 

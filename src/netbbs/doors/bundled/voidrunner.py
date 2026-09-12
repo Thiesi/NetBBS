@@ -6382,12 +6382,17 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
         stranded = 0
         while stranded < len(closing) and closing[len(closing) - 1 - stranded][:1] in (SECTION_MARK, STICKY_MARK):
             stranded += 1
-        carried = []
-        if stranded < len(closing):  # a page of nothing but rules has nowhere to send them
-            carried = closing[len(closing) - stranded:]
-            del closing[len(closing) - stranded:]
+        carried = closing[len(closing) - stranded:]
+        del closing[len(closing) - stranded:]
         pages.append((carried, {}))
         page_heading.append(None)
+        if not closing and len(pages) > 1:
+            # Everything that page had was a heading, and the headings have just
+            # left with their content: at the 40x12 floor a one-row body can hold
+            # a rule and nothing else, and a page of only a rule is a page of
+            # nothing (issue #493 review).
+            del pages[-2]
+            del page_heading[-2]
 
     def room_on(page_index: int) -> int:
         # The first page carries its heading in the flow, where the screen put
@@ -9849,13 +9854,20 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             outcome = "escaped"
         else:
             continue
+        lethal = None
         if ship.hull_hp <= 0 and outcome != "won":
+            # `destroy_ship` tows and patches, so the hull it leaves behind is
+            # higher than the one the shot produced. The bar drains to the hit
+            # that killed the ship; the patched hull is on the page that follows
+            # (issue #493 review).
+            lethal = 0
             lines.append(destroy_ship(world, patrol=patrol, hull_before=hull_before))
             outcome = "destroyed"
         combat.update(pirate=dataclasses.asdict(pirate), outcome=outcome, lines=lines)
         world.commit()
         drain_gauge(_mission_plain(pirate.name), opened_at[0], max(0, pirate.hp), pirate.hp_max, tone="danger")
-        drain_gauge("Your hull", opened_at[1], max(0, ship.hull_hp), hull_hp_max(ship))
+        drain_gauge("Your hull", opened_at[1],
+                    lethal if lethal is not None else max(0, ship.hull_hp), hull_hp_max(ship))
         page = 0
         if outcome is not None:
             report_hop(world, lines)

@@ -267,14 +267,22 @@ def test_a_heading_or_a_rule_is_never_the_last_row_of_a_page(monkeypatch):
     monkeypatch.setattr(vr, "_PALETTE", vr.Palette(truecolor=True))
     world = _world_with_seed(493)
     world.save.pilot.credits = 18_420
+    fighting, pirate = _world_with_pending_fight()
+    tactics = fighting.save.pending_travel["encounter"]["combat"]["tactics"]
+    combat = vr.combat_display_lines(fighting, pirate, ["Your shot connects."],
+                                     patrol=False, tactics=tactics)
     for lines, title in ((vr.shipyard_lines(world), "Engineering Yard"),
                          (vr.station_deck_lines(world), "Command Deck"),
-                         (vr.crew_roster_lines(world), "Crew Roster")):
+                         (vr.crew_roster_lines(world), "Crew Roster"),
+                         (combat, "Combat 1,200cr")):
         pages = vr._service_pages(lines, title, "[<] Prev [>] Next [B] Back: ")
-        for number, rows in enumerate(pages[:-1], 1):
+        for number, rows in enumerate(pages, 1):
             assert rows, f"{title}: empty page {number}"
-            assert rows[-1][:1] not in (vr.SECTION_MARK, vr.STICKY_MARK), \
-                f"{title} page {number} ends on a heading: {[plain(row) for row in rows]}"
+            assert any(row[:1] not in (vr.SECTION_MARK, vr.STICKY_MARK) for row in rows), \
+                f"{title} page {number} is nothing but headings"
+            if number < len(pages):
+                assert rows[-1][:1] not in (vr.SECTION_MARK, vr.STICKY_MARK), \
+                    f"{title} page {number} ends on a heading: {[plain(row) for row in rows]}"
         for rows in pages:
             assert len(rows) == len(set(rows)) or not any(
                 row[:1] == vr.STICKY_MARK for row in rows), "a heading was drawn twice"
