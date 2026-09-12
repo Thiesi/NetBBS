@@ -18,6 +18,7 @@ from netbbs.chat import ChatHub, DirectChatInvites, PresenceRegistry
 from netbbs.directory import get_vcard, has_bio, is_bio_visible
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_profiles import identity_for_fingerprint, name_key
+from netbbs.doors import get_door
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import reject_unhandled_key
@@ -30,6 +31,7 @@ from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls
 from netbbs.net.unicode_style_preference import unicode_style_enabled
+from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ALERT_COLOR,
     ERROR_COLOR,
@@ -181,16 +183,30 @@ def _who_entry_name(entry: _WhoEntry) -> str:
     return entry.username or "(unauthenticated)"
 
 
-def _who_entry_description(db: Database, entry: _WhoEntry, presence=None) -> str:
+def _who_entry_description(db: Database, entry: _WhoEntry, presence=None, viewer: User | None = None) -> str:
     if isinstance(entry, _RemoteWhoEntry):
         return f"on linked node {_remote_who_node_label(db, entry)}"
     when = format_for_display(entry.connected_at, db)
     # Issue #470: which door, not merely that they are in one. Remote entries
     # carry no door -- a linked node tells us presence, not activity.
     playing = presence.door_of(entry.session) if presence is not None else None
-    if playing:
-        return f"playing {sanitize_text(playing)} -- connected since {when}"
+    if playing and _door_visible_to(db, viewer, playing[0]):
+        return f"playing {sanitize_text(playing[1])} -- connected since {when}"
     return f"connected since {when}"
+
+
+def _door_visible_to(db: Database, viewer: User | None, door_id: int) -> bool:
+    """Whether `viewer` may be told this door's name at all.
+
+    The door picker already hides a door above the caller's play level, so
+    naming it here would advertise a restricted door -- a SysOp-only one, say
+    -- to someone who cannot open it. A door which has since been deleted is
+    treated as not visible rather than named from a stale entry.
+    """
+    if viewer is None:
+        return False
+    door = get_door(db, door_id)
+    return door is not None and meets_level(viewer, door.min_play_level)
 
 
 def _remote_who_node_label(db: Database, entry: _RemoteWhoEntry) -> str:
@@ -445,7 +461,7 @@ async def _caller_who_screen(
             session, await _load_entries(),
             name_of=_who_entry_name,
             stable_id_of=_stable_id,
-            description_of=lambda e: _who_entry_description(db, e, presence),
+            description_of=lambda e: _who_entry_description(db, e, presence, user),
             title="Who's online",
             empty_message="No one else is online right now.",
             # Issue #304: the network beyond this node, when the MRC

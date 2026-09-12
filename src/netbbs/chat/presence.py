@@ -62,7 +62,7 @@ class PresenceRegistry:
         check."""
         return set(self._session_counts)
 
-    def enter_door(self, session: object, door_name: str) -> None:
+    def enter_door(self, session: object, door_id: int, door_name: str) -> None:
         """Record that one *session* is playing `door_name` (issue #470).
 
         Keyed by session rather than by account, because both Who screens
@@ -71,13 +71,18 @@ class PresenceRegistry:
         both claim the door -- inflating the apparent player count and hiding
         which connection a SysOp actually needs to act on.
         """
-        self._doors[session] = door_name
+        self._doors[session] = (door_id, door_name)
 
     def leave_door(self, session: object) -> None:
         self._doors.pop(session, None)
 
-    def door_of(self, session: object) -> str | None:
-        """The door this session is in, or None."""
+    def door_of(self, session: object) -> tuple[int, str] | None:
+        """The `(id, name)` of the door this session is in, or None.
+
+        The id comes back too because a viewer below the door's play level
+        must not be told its name: Who's online would otherwise advertise a
+        restricted door that the door picker deliberately hides from them.
+        """
         return self._doors.get(session)
 
     def set_away(self, username: str, message: str) -> None:

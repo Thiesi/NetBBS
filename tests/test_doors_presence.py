@@ -34,8 +34,8 @@ def test_no_session_is_playing_anything_by_default():
 def test_entering_and_leaving_a_door_is_reported():
     presence, session = PresenceRegistry(), FakeSession()
 
-    presence.enter_door(session, "LORD")
-    assert presence.door_of(session) == "LORD"
+    presence.enter_door(session, 1, "LORD")
+    assert presence.door_of(session) == (1, "LORD")
 
     presence.leave_door(session)
     assert presence.door_of(session) is None
@@ -50,21 +50,21 @@ def test_one_account_with_two_sessions_reports_each_separately():
     presence.enter("carrier")
     presence.enter("carrier")
 
-    presence.enter_door(playing, "LORD")
+    presence.enter_door(playing, 1, "LORD")
 
-    assert presence.door_of(playing) == "LORD"
+    assert presence.door_of(playing) == (1, "LORD")
     assert presence.door_of(idle) is None, "the idle session claimed its sibling's door"
 
 
 def test_two_sessions_in_different_doors_do_not_erase_each_other():
     presence = PresenceRegistry()
     first, second = FakeSession(), FakeSession()
-    presence.enter_door(first, "LORD")
-    presence.enter_door(second, "TradeWars")
+    presence.enter_door(first, 1, "LORD")
+    presence.enter_door(second, 2, "TradeWars")
 
     presence.leave_door(second)
 
-    assert presence.door_of(first) == "LORD"
+    assert presence.door_of(first) == (1, "LORD")
     assert presence.door_of(second) is None
 
 
@@ -78,7 +78,7 @@ def test_a_vanished_session_cannot_stay_listed_as_playing():
     and a later object cannot inherit its door through a reused identity."""
     presence = PresenceRegistry()
     session = FakeSession()
-    presence.enter_door(session, "LORD")
+    presence.enter_door(session, 1, "LORD")
 
     del session
     gc.collect()
@@ -86,26 +86,61 @@ def test_a_vanished_session_cannot_stay_listed_as_playing():
     assert len(presence._doors) == 0
 
 
-def test_who_is_online_names_the_door(db):
+def test_who_is_online_names_the_door(db, player, tmp_path):
     from netbbs.net.directory_flow import _who_entry_description
 
+    door = create_door(db, "Blacksite", sys.executable, args=(), creator=player,
+                       profile=DoorProfile(install_dir=str(tmp_path)))
     presence, session = PresenceRegistry(), FakeSession()
     entry = _summary(session)
 
-    assert "playing" not in _who_entry_description(db, entry, presence)
+    assert "playing" not in _who_entry_description(db, entry, presence, player)
 
-    presence.enter_door(session, "Blacksite")
-    described = _who_entry_description(db, entry, presence)
+    presence.enter_door(session, door.id, door.name)
+    described = _who_entry_description(db, entry, presence, player)
 
     assert described.startswith("playing Blacksite"), described
     assert "connected since" in described, "the existing information is kept"
+
+
+def test_who_is_online_hides_a_door_the_viewer_may_not_play(db, player, tmp_path):
+    """The picker already hides a restricted door; naming it here would
+    advertise a SysOp-only game to someone who cannot open it."""
+    from netbbs.auth.users import create_user
+    from netbbs.net.directory_flow import _who_entry_description
+
+    restricted = create_door(db, "SysOp Only", sys.executable, args=(), creator=player,
+                             min_play_level=255, profile=DoorProfile(install_dir=str(tmp_path)))
+    presence, session = PresenceRegistry(), FakeSession()
+    presence.enter_door(session, restricted.id, restricted.name)
+    entry = _summary(session)
+
+    ordinary = create_user(db, "ordinary", password="hunter2", user_level=10)
+    sysop = create_user(db, "chief", password="hunter2", user_level=255)
+
+    assert "SysOp Only" not in _who_entry_description(db, entry, presence, ordinary)
+    assert "playing" not in _who_entry_description(db, entry, presence, ordinary)
+    assert "playing SysOp Only" in _who_entry_description(db, entry, presence, sysop)
+
+
+def test_who_is_online_does_not_name_a_deleted_door(db, player, tmp_path):
+    from netbbs.doors import delete_door
+    from netbbs.net.directory_flow import _who_entry_description
+
+    door = create_door(db, "Gone", sys.executable, args=(), creator=player,
+                       profile=DoorProfile(install_dir=str(tmp_path)))
+    presence, session = PresenceRegistry(), FakeSession()
+    presence.enter_door(session, door.id, door.name)
+    delete_door(db, door, deleted_by=player)
+
+    assert "playing" not in _who_entry_description(db, _summary(session), presence, player)
 
 
 def test_the_sysop_who_screen_names_the_door_too():
     from netbbs.net.admin_flow import _session_description
 
     presence, session = PresenceRegistry(), FakeSession()
-    presence.enter_door(session, "Blacksite")
+    presence.enter_door(session, 7, "Blacksite")
     entry = _summary(session)
 
     assert _session_description(entry, "%Y-%m-%d", "UTC", presence).startswith("playing Blacksite")
@@ -118,7 +153,7 @@ def test_the_sysop_who_screen_distinguishes_two_sessions_of_one_account():
 
     presence = PresenceRegistry()
     playing, idle = FakeSession(), FakeSession()
-    presence.enter_door(playing, "Blacksite")
+    presence.enter_door(playing, 7, "Blacksite")
 
     assert "playing" in _session_description(_summary(playing, session_id=1), "%Y-%m-%d", "UTC", presence)
     assert "playing" not in _session_description(_summary(idle, session_id=2), "%Y-%m-%d", "UTC", presence)
@@ -168,5 +203,5 @@ def test_a_real_launch_records_and_clears_presence(db, lane, player, tmp_path):
 
     asyncio.run(scenario())
 
-    assert during == ["Boom"], f"presence while the door ran: {during}"
+    assert [name for _, name in during] == ["Boom"], f"presence while the door ran: {during}"
     assert presence.door_of(session) is None, "a crashed door left the session playing"
