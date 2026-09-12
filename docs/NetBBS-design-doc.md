@@ -5871,10 +5871,30 @@ are specified in section 13.4 and the door guide.
 
 Compatibility extension (issues #296/#297):
 
-- A nullable, versioned profile preserves the original JSON/stdio API for
-  existing registrations. SysOps can explicitly remove a profile in the draft
-  editor without recreating the registration; executable/argv and game data
-  are retained. Native socket profiles require DOOR32 descriptor metadata.
+- A nullable, versioned profile preserves the original stdio API for existing
+  registrations: no drop files, no adapter, raw UTF-8 through stdin/stdout.
+  SysOps can explicitly remove a profile in the draft editor without recreating
+  the registration; executable/argv and game data are retained. Native socket
+  profiles require DOOR32 descriptor metadata.
+- The launch metadata file (`door_info.json`) is itself versioned, by a
+  `door_api` integer, and grows additively (issue #469): a reader treats any
+  absent field as unknown, and a door may refuse a version it does not
+  understand rather than probing for fields. Removing a profile restores the
+  stdio API but does not pin the metadata to an older version — the file is a
+  property of the platform, not of the profile. It never carries a credential,
+  an email address, a user level or a network address.
+- Which door a caller is in is presence, not catalogue data, and is scoped to
+  the viewer (issue #470). It is held per *session*, not per account: both Who
+  screens render a row per session, and the SysOp one acts on the row
+  selected, so an idle connection must never claim the door its sibling is
+  playing. A caller-facing screen names a door only when that viewer could
+  currently open it — the same `min_play_level` gate the door picker applies —
+  so Who can never advertise a door a caller is not allowed to see. A door
+  deleted since, or one whose registration no longer matches the activity
+  recorded, is omitted rather than named; door ids are reusable, so identity
+  is checked, not just the number. A SysOp screen names everything, being
+  SysOp-only already. Remote presence carries no door: a linked node reports
+  who is online, not what they are doing.
   Profiles add persistent installation directories,
   disposable node directories, exact CRLF classic drop files, native stdio,
   controlling PTYs, private inherited DOOR32 sockets, DOSBox-X COM1 sockets,
@@ -7555,12 +7575,12 @@ needs. Every status, stake and outcome is readable without colour. Fast mode is
 the one deliberately unframed layout: it omits optional art, flavour and motion
 and keeps every stake and net delta, and its title row carries the page counter
 the border would otherwise hold. Normal action results may add a short fictional
-vignette. War Dialer launch metadata includes the optional boolean
-`unicode_style`, copied from the caller's existing NetBBS preference. False
+vignette. War Dialer reads the optional boolean `unicode_style` from the launch
+metadata every door receives (§6, the `door_info.json` contract). False
 defaults to ASCII decorations; true or omission preserves the rich default. An
 explicit in-game ASCII choice wins. Changing monochrome/Fast alone does not
-freeze the inherited Unicode default. Unrelated doors receive no new fields; the
-existing native-door JSON boundary and supervision remain unchanged.
+freeze the inherited Unicode default. The native-door JSON boundary and
+supervision are otherwise unchanged.
 
 *Review.* A screen is reviewed by looking at it. `scripts/door_gallery.py
 war_dialer` renders every screen at 80x24, 64x20 and 40x12 in every preset, and

@@ -18,6 +18,7 @@ from netbbs.chat import ChatHub, DirectChatInvites, PresenceRegistry
 from netbbs.directory import get_vcard, has_bio, is_bio_visible
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_profiles import identity_for_fingerprint, name_key
+from netbbs.doors import list_doors
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import reject_unhandled_key
@@ -30,6 +31,7 @@ from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls
 from netbbs.net.unicode_style_preference import unicode_style_enabled
+from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ALERT_COLOR,
     ERROR_COLOR,
@@ -181,11 +183,40 @@ def _who_entry_name(entry: _WhoEntry) -> str:
     return entry.username or "(unauthenticated)"
 
 
-def _who_entry_description(db: Database, entry: _WhoEntry) -> str:
+def _who_entry_description(db: Database, entry: _WhoEntry, presence=None,
+                           playable: set | None = None) -> str:
     if isinstance(entry, _RemoteWhoEntry):
         return f"on linked node {_remote_who_node_label(db, entry)}"
     when = format_for_display(entry.connected_at, db)
+    # Issue #470: which door, not merely that they are in one. Remote entries
+    # carry no door -- a linked node tells us presence, not activity.
+    #
+    # `playable` is a pre-resolved set of registrations this viewer may open,
+    # built once through the lane: this runs per row on every redraw, and
+    # `resolve_display_preferences` already documents why a picker's
+    # description callback must not touch `db` itself.
+    playing = presence.door_of(entry.session) if presence is not None else None
+    if playing and playable is not None and playing in playable:
+        return f"playing {sanitize_text(playing[1])} -- connected since {when}"
     return f"connected since {when}"
+
+
+def playable_registrations(db: Database, viewer: User) -> set[tuple[int, str, str]]:
+    """Every door registration `viewer` may currently open, as identity triples.
+
+    Who names the door a session is in only when the viewer could open it
+    themselves -- the same `min_play_level` gate the door picker applies, so
+    Who can never advertise a restricted door to someone it is hidden from.
+
+    Identity is `(id, name, created_at)` rather than the id alone. `doors.id`
+    is an INTEGER PRIMARY KEY without AUTOINCREMENT, so deleting the highest
+    row frees its id, and a re-registration can reuse both the id and the
+    name; only the registration timestamp distinguishes it from the one whose
+    activity is still cached. Anything deleted, replaced or above the viewer's
+    level simply is not in the set.
+    """
+    return {(door.id, door.name, door.created_at) for door in list_doors(db)
+            if meets_level(viewer, door.min_play_level)}
 
 
 def _remote_who_node_label(db: Database, entry: _RemoteWhoEntry) -> str:
@@ -436,11 +467,15 @@ async def _caller_who_screen(
     # it could be read. [B]ack on the list itself is the way out.
     last_stable_id: int | None = None
     while True:
+        # Resolved once per draw, through the lane, because the description
+        # callback below runs synchronously for every row on every redraw.
+        playable = (await lane.run(playable_registrations, user) if lane is not None
+                    else playable_registrations(db, user))
         selected = await pick_item(
             session, await _load_entries(),
             name_of=_who_entry_name,
             stable_id_of=_stable_id,
-            description_of=lambda e: _who_entry_description(db, e),
+            description_of=lambda e: _who_entry_description(db, e, presence, playable),
             title="Who's online",
             empty_message="No one else is online right now.",
             # Issue #304: the network beyond this node, when the MRC

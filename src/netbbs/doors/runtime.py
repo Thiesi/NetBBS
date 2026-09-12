@@ -14,6 +14,7 @@ import os
 import secrets
 import shutil
 import signal
+import sqlite3
 import sys
 import tempfile
 import time
@@ -25,6 +26,7 @@ from netbbs.doors.endpoints import NodeLease, StreamEndpoint, pty_endpoint, sock
 from netbbs.doors.dropfiles import write_drop_files
 from netbbs.doors.profiles import preflight
 from netbbs.net.color_depth_preference import effective_truecolor
+from netbbs.timeutil import resolve_display_preferences
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.session import SessionClosedError
 from netbbs.moderation.log import record_action
@@ -56,20 +58,68 @@ class DoorRunResult:
     diagnostic: str = ""
 
 
-def _write_door_info(db, workdir, session, player, war_dialer=False):
+#: Version of the `door_info.json` contract (issue #469). 1 was the original
+#: six fields; 2 adds the caller/node metadata below. A door may refuse a
+#: platform it does not understand instead of probing for fields.
+DOOR_API_VERSION = 2
+
+
+def node_opaque_id(db) -> str:
+    """A stable, opaque identifier for this node, minted on first use.
+
+    Not a credential and not derived from the display name, which a SysOp can
+    change at will; a door which keys its world on the node needs something
+    that survives a rename. Lives in the node database, so it survives a
+    backup and restore with everything else.
+    """
+    return _minted_once(db, "node_opaque_id")
+
+
+def _minted_once(db, key: str) -> str:
+    """Read a node-scoped opaque value, minting it only on first use.
+
+    Read before write deliberately: an unconditional INSERT OR IGNORE takes
+    SQLite's write lock on *every* door launch, and a second connection holding
+    a write transaction -- a live administrative process, say -- would make
+    each launch wait out the busy timeout and then fail.
+    """
+    row = db.connection.execute("SELECT value FROM node_config WHERE key = ?", (key,)).fetchone()
+    if row is not None:
+        return row[0]
+    db.connection.execute("INSERT OR IGNORE INTO node_config (key, value) VALUES (?, ?)",
+                          (key, secrets.token_hex(16)))
+    db.connection.commit()
+    return db.connection.execute(
+        "SELECT value FROM node_config WHERE key = ?", (key,)).fetchone()[0]
+
+
+def _write_door_info(db, workdir, session, player, war_dialer=False, session_limit_seconds=None):
     info = {"handle": player.username, "user_id": player.id,
             "terminal_width": session.terminal_width, "terminal_height": session.terminal_height,
             "color_depth": "truecolor" if effective_truecolor(session, db, player) else "256",
-            "node_name": session.node_display_name}
+            "node_name": session.node_display_name,
+            "door_api": DOOR_API_VERSION,
+            # The caller's own display preference, so a door can match the
+            # glyph style they already chose rather than guessing.
+            "unicode_style": unicode_style_enabled(db, player),
+            "transport": getattr(session, "transport_name", "unknown"),
+            # Node-wide, not per-caller: NetBBS has one display timezone.
+            "timezone": resolve_display_preferences(db)[1],
+            # `node_fingerprint` is deliberately absent: the node's own Link
+            # identity is not in the database, so supplying it would mean
+            # threading the identity (or its directory and passphrase) down
+            # into the door runtime. Every reader treats a missing field as
+            # unknown, and `node_id` is what a door keying its world on the
+            # node actually needs today.
+            "node_id": node_opaque_id(db)}
+    if session_limit_seconds is not None:
+        # The effective wall clock for *this* launch, so a door can warn
+        # before it is cut off rather than being surprised by it.
+        info["session_limit_seconds"] = session_limit_seconds
     if war_dialer:
-        info["unicode_style"] = unicode_style_enabled(db, player)
         # An opaque namespace belongs to the node database and survives its backup.
         # It is not a credential and does not depend on a mutable display name.
-        db.connection.execute("INSERT OR IGNORE INTO node_config (key, value) VALUES (?, ?)",
-                              ("war_dialer_owner", secrets.token_hex(16)))
-        db.connection.commit()
-        info["war_dialer_owner"] = db.connection.execute(
-            "SELECT value FROM node_config WHERE key='war_dialer_owner'").fetchone()[0]
+        info["war_dialer_owner"] = _minted_once(db, "war_dialer_owner")
     path = workdir / "door_info.json"
     path.write_text(json.dumps(info), encoding="utf-8")
     return path
@@ -380,6 +430,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
     tail = bytearray()
     reason, exit_code = "failed_to_start", None
     mode_entered = False
+    handled_failure = False
     try:
         problems = await asyncio.to_thread(preflight, door, session)
         if problems:
@@ -393,7 +444,8 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             # Small local lock operation; no await that could lose an acquired lease on cancellation.
             lease = NodeLease(root, identity, profile.max_sessions)
         workdir = Path(tempfile.mkdtemp(prefix="netbbs-door-"))
-        info_path = await lane.run(_write_door_info, workdir, session, player, world_path is not None)
+        info_path = await lane.run(_write_door_info, workdir, session, player, world_path is not None,
+                                   effective_wall_limit(profile, wall_time_limit_seconds))
         info = json.loads(info_path.read_text(encoding="utf-8"))
         width = profile.width if profile and profile.width else session.terminal_width
         height = profile.height if profile and profile.height else session.terminal_height
@@ -514,8 +566,10 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
         reason = "caller_disconnected"
     except BlockingIOError as exc:
         reason = "busy"
+        handled_failure = True
         tail.extend(str(exc).encode())
-    except (OSError, ValueError, KeyError) as exc:
+    except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+        handled_failure = True
         tail.extend(str(exc).encode("utf-8", errors="replace")[:4096])
         _logger.warning("door %r failed preflight/start: %s", door.name, exc)
     finally:
@@ -577,7 +631,13 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                 errors.append(exc)
             for exc in errors:
                 _logger.error("door cleanup failed: %s", exc, exc_info=exc)
-            if errors and primary is None:
+            # A failure already turned into a reported reason must not be
+            # replaced by a secondary one from cleanup. The obvious case is a
+            # locked database: the launch fails, is handled, and then the
+            # audit write fails the same way -- and re-raising that would hand
+            # the caller an exception instead of the failure result they were
+            # about to be shown.
+            if errors and primary is None and not handled_failure:
                 raise errors[0]
             return diagnostic
 

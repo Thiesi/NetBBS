@@ -1373,6 +1373,48 @@ host data in the game installation. Run NetBBS unprivileged, never as root.
   files persist, but the OS releases locks at process exit/reboot. Do not
   remove lock files while NetBBS is running.
 
+### What a door is told: `door_info.json`
+
+Every **native** door -- stdio, PTY or socket -- is given the path to a small
+JSON file in `NETBBS_DOOR_INFO`. It is the NetBBS-native alternative to the
+classic drop files, and such a door may use either or both.
+
+Two kinds of registration deliberately get none of it:
+
+- A **DOS** door. `NETBBS_DOOR_INFO` is set in the emulator's *host*
+  environment and names a host path; nothing inside the guest sets it, and a
+  DOS path could not reach it anyway. Give a DOS game the classic
+  [drop files](#register-and-test-inside-netbbs) instead — which is what the
+  DOS templates configure, and what a DOS-era program can actually read.
+- A **remote** (RLogin) registration. NetBBS launches no process for it, so
+  there is no environment to carry a path and no filesystem in common. The
+  RFC 1282 handshake conveys only the configured local and remote identity
+  strings and a terminal type; everything else about that caller stays on
+  this side of the connection.
+
+| Field | Meaning |
+| --- | --- |
+| `door_api` | Contract version, currently `2`. Refuse a version you do not understand rather than probing for fields. |
+| `handle` | The caller's NetBBS handle. |
+| `user_id` | Their stable numeric id on this node. |
+| `terminal_width`, `terminal_height` | Current geometry; rewritten mid-run if the caller resizes and the door opted in (see above). |
+| `color_depth` | `truecolor` or `256`. |
+| `unicode_style` | The caller's own NetBBS glyph preference, so a door can match what they already chose. |
+| `transport` | `telnet`, `ssh`, `web`, `local`, or `unknown`. Key decoding and latency assumptions differ, particularly for the browser terminal. |
+| `timezone` | The node's display timezone as an IANA name, for in-game clocks. Node-wide: NetBBS has no per-caller timezone. |
+| `node_name` | The node's display name, which a SysOp may change at any time. |
+| `node_id` | A stable, opaque per-node identifier which survives a rename. Key a door's world on this, not on `node_name`. Not a credential. |
+| `session_limit_seconds` | The effective wall-clock cap for *this* launch — the tighter of the profile's limit and any lower bound the launch itself imposes — so a door can warn before it is cut off. Absent when nothing bounds the run. |
+
+Treat every field as optional and absence as "unknown": that is how the file
+stays compatible as it grows. Two notes on what is deliberately **not** there.
+`node_fingerprint` (the Link identity) is not published yet — the node's own
+identity is not held in the database, so supplying it would mean threading it
+into the door runtime; `node_id` is what a door keying its world on the node
+needs today. And nothing here is a credential or a privilege: no password, no
+email, no user level, no IP address. A door learns who the caller says they
+are, not what they may do.
+
 **MANUAL — outside NetBBS:** create the installation directories and give the
 actual service account read/write/search access. For a service user/group both
 named `netbbs`, for example (substitute your real account names):
@@ -1545,6 +1587,44 @@ path first in argv. Java example: executable `/usr/pkg/java/openjdk17/bin/java`,
 argv `-jar /var/games/netbbs/game/game.jar {node_dir}`; adjust memory after
 checking the JVM's reservation needs. Do not assume that JVM path/package
 exists on your host. Install the runtime recommended by the game's author.
+
+### Installing a packaged Python door
+
+A door distributed as a Python package is the common third-party case, and
+`native-python-module.json` is its starting template: the executable is a
+virtualenv's own interpreter and argv runs a module rather than a script path.
+
+**MANUAL — outside NetBBS,** as the installation's owner (normally the service
+account, so prefix with `sudo -u netbbs` when that is a separate account):
+
+```sh
+sudo install -d -m 750 -o netbbs -g netbbs /var/games/netbbs/yourgame
+sudo -u netbbs python3 -m venv /var/games/netbbs/yourgame/.venv
+sudo -u netbbs /var/games/netbbs/yourgame/.venv/bin/pip install   /path/to/yourgame-1.0-py3-none-any.whl
+```
+
+Give the door its **own** virtualenv rather than NetBBS's: a door is
+operator-chosen third-party code, and sharing an environment with the BBS
+would let its dependencies decide NetBBS's. Point `executable_path` at that
+venv's `bin/python`, set argv to `["-m", "yourgame.door"]`, and set the
+installation directory to the package's own data root.
+
+Persistent game data belongs in the installation directory. NetBBS backs up
+its own state, not that directory, unless you turn on
+[door-installation backups](#backing-up-door-installations).
+
+Leave `max_sessions` at 1 until the game's own locking is proven; raising it
+requires **Multi-node certified by SysOp**, which is your statement that you
+tested concurrent play, not a switch that makes a door concurrent.
+
+A door which also needs a long-lived world process adds a
+[companion service](#doors-with-a-companion-service) to the same profile.
+
+An author can ship that whole profile as a JSON file beside the wheel; the
+Compatibility screen's **[J] Import JSON** accepts either a full template
+(`executable_path`, `args`, `profile`) or a bare profile object, so a SysOp
+imports one file instead of retyping fields. Check the paths in an imported
+file before saving: they are the author's, not yours.
 
 An optional `runner` is a fixed argv prefix, e.g. an operator-authored
 `["/usr/local/libexec/netbbs-door-wrapper"]` which finally execs its argv.

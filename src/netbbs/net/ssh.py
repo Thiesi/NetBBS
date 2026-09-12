@@ -106,6 +106,7 @@ def ensure_host_key(db: Database) -> Path:
 
 
 class SSHSession(Session):
+    transport_name = "ssh"
     """A single SSH client's shell session, wrapping an
     `asyncssh.SSHServerProcess`."""
 

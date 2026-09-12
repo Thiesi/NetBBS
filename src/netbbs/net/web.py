@@ -178,6 +178,7 @@ def _parse_input_events(data: str) -> list[str | _SpecialKey]:
 
 
 class WebSession(Session):
+    transport_name = "web"
     """A single browser client's terminal session, over a websocket."""
 
     #: Never, by construction (issue #475): this transport's raw I/O

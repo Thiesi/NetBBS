@@ -6582,8 +6582,15 @@ def _session_name(entry: SessionSummary) -> str:
     return f"(unauthenticated) {entry.peer_address or 'unknown address'}"
 
 
-def _session_description(entry: SessionSummary, display_format: str, display_timezone: str) -> str:
+def _session_description(entry: SessionSummary, display_format: str, display_timezone: str,
+                         presence=None) -> str:
     when = format_for_display(entry.connected_at, override_format=display_format, override_timezone=display_timezone)
+    # Issue #470: which door, not merely that someone is connected.
+    # No level check here, unlike the caller-facing Who screen: this screen is
+    # SysOp-only already, and a SysOp may see every door.
+    playing = presence.door_of(entry.session) if presence is not None else None
+    if playing:
+        return f"playing {sanitize_text(playing[1])} -- connected since {when}"
     return f"connected since {when}"
 
 
@@ -6614,7 +6621,8 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
         session, entries,
         name_of=_session_name,
         stable_id_of=lambda e: e.session_id,
-        description_of=lambda e: _session_description(e, display_format, display_timezone),
+        description_of=lambda e: _session_description(e, display_format, display_timezone,
+                                                      node_controls.presence),
         title="Active sessions",
         empty_message="No active sessions.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -13475,7 +13483,7 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
             await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice == "d":
             await session.write_line("")
-            deleted = await _delete_door_screen(session, lane, actor, door)
+            deleted = await _delete_door_screen(session, lane, actor, door, door_services=door_services)
             if deleted:
                 # The registration is gone, so nothing could reach its service
                 # again; without this the companion and its restart loop run
@@ -13581,10 +13589,19 @@ async def _door_service_action(session: Session, lane: DatabaseLane, actor: User
     await session.read_any_key()
 
 
-async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User, door: Door) -> bool:
+async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User, door: Door,
+                              *, door_services: Any = None) -> bool:
     await session.write_line(
         colored("\r\nThis permanently removes the door from the catalogue. This cannot be undone.", fg_color=MUTED_COLOR)
     )
+    if door.profile and door.profile.service and door_services is None:
+        # Standalone administration cannot reach a running node's supervisor,
+        # so the row goes but the companion keeps running and restarting with
+        # no catalogue entry and no control left to stop it.
+        await session.write_line(colored(
+            "This door has a companion service. This console cannot stop it: if a node is running, "
+            "it will keep supervising and restarting that process until the node is restarted.",
+            fg_color=ALERT_COLOR))
     await write_prompt(
         session, f"Type the door name {door.name!r} to confirm, or anything else to cancel: "
     )

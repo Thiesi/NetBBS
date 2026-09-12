@@ -141,6 +141,14 @@ class Session(ABC):
     #: discover it, by the transfer not starting.
     supports_zmodem: bool = True
 
+    #: Which transport carries this session (issue #469): "telnet", "ssh",
+    #: "web" or "local". A class attribute set by each transport, the same
+    #: shape as `supports_zmodem` above, rather than something inferred from
+    #: the class name. Doors are told this because key decoding and latency
+    #: assumptions genuinely differ -- the browser terminal in particular.
+    #: "unknown" is what a direct test construction gets.
+    transport_name: str = "unknown"
+
     #: Human-readable provenance for ``supports_truecolor``. Shown in the
     #: caller profile so a failed/missing capability report is diagnosable
     #: rather than inferred from appearance. Transport implementations replace

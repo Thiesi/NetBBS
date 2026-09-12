@@ -1,0 +1,11 @@
+{
+  "name": "Packaged Python door setup template",
+  "executable_path": "/var/games/netbbs/yourgame/.venv/bin/python",
+  "args": ["-m", "yourgame.door"],
+  "profile": {
+    "version": 1, "adapter": "native", "endpoint": "stdio",
+    "install_dir": "/var/games/netbbs/yourgame",
+    "drop_files": [], "encoding": "utf-8", "max_sessions": 1,
+    "environment": {"TERM": "ansi", "DOOR_EXAMPLE_SETTING": "replace or remove"}
+  }
+}

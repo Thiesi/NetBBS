@@ -31,6 +31,7 @@ from netbbs.net.session import Session, SessionClosedError
 
 
 class LocalCLISession(Session):
+    transport_name = "local"
     """A single local-terminal "connection" -- there's exactly one per
     `python -m netbbs.admin` process, for as long as it runs."""
 

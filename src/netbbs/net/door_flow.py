@@ -62,6 +62,7 @@ async def browse_doors(
     community_scoped: bool = False,
     title_prefix: str | None = None,
     door_services=None,
+    presence=None,
 ) -> None:
     """Pick a door and play it, looping back to the picker afterward so a
     caller can play another without re-entering the menu -- same
@@ -130,7 +131,16 @@ async def browse_doors(
                 await session.read_any_key()
                 continue
         await session.write_line(colored(f"\r\nLaunching {door.name}...", fg_color=MUTED_COLOR))
-        result = await run_door(session, lane, door, user)
+        # Issue #470: "3 callers in Blacksite" on Who's online is the best
+        # recruitment a multiplayer door can have on a BBS. Cleared in the
+        # `finally` so a crash or a disconnect cannot strand the entry.
+        if presence is not None:
+            presence.enter_door(session, door.id, door.name, door.created_at)
+        try:
+            result = await run_door(session, lane, door, user)
+        finally:
+            if presence is not None:
+                presence.leave_door(session)
         if not await _report_door_result(session, door, result):
             return
 
