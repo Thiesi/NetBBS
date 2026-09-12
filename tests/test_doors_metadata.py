@@ -117,3 +117,43 @@ def test_a_real_door_reads_the_effective_limit_not_the_profile_value(db, lane, p
 
     assert result.reason == "exited"
     assert b"API 2 LIMIT 30" in session.written, bytes(session.written)
+
+
+def test_a_second_launch_does_not_take_a_write_lock(db, tmp_path, player):
+    """An unconditional INSERT OR IGNORE locks on every launch.
+
+    With another connection holding a write transaction that turns each launch
+    into a busy-timeout wait and then a failure, so the id is read first and
+    minted only once.
+    """
+    import sqlite3
+
+    first = _info(db, tmp_path)["node_id"]
+
+    # A real second connection, holding a write transaction open.
+    blocker = sqlite3.connect(str(db.path), timeout=0.2)
+    blocker.execute("BEGIN IMMEDIATE")
+    blocker.execute("INSERT OR REPLACE INTO node_config (key, value) VALUES ('probe', 'held')")
+    try:
+        again = _info(db, tmp_path)["node_id"]
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert again == first, "the id changed between launches"
+
+
+def test_the_war_dialer_namespace_is_also_read_before_it_is_written(db, tmp_path, player):
+    import sqlite3
+
+    first = _info(db, tmp_path, war_dialer=True)["war_dialer_owner"]
+
+    blocker = sqlite3.connect(str(db.path), timeout=0.2)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        again = _info(db, tmp_path, war_dialer=True)["war_dialer_owner"]
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert again == first

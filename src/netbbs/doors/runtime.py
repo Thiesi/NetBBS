@@ -14,6 +14,7 @@ import os
 import secrets
 import shutil
 import signal
+import sqlite3
 import sys
 import tempfile
 import time
@@ -71,11 +72,25 @@ def node_opaque_id(db) -> str:
     that survives a rename. Lives in the node database, so it survives a
     backup and restore with everything else.
     """
+    return _minted_once(db, "node_opaque_id")
+
+
+def _minted_once(db, key: str) -> str:
+    """Read a node-scoped opaque value, minting it only on first use.
+
+    Read before write deliberately: an unconditional INSERT OR IGNORE takes
+    SQLite's write lock on *every* door launch, and a second connection holding
+    a write transaction -- a live administrative process, say -- would make
+    each launch wait out the busy timeout and then fail.
+    """
+    row = db.connection.execute("SELECT value FROM node_config WHERE key = ?", (key,)).fetchone()
+    if row is not None:
+        return row[0]
     db.connection.execute("INSERT OR IGNORE INTO node_config (key, value) VALUES (?, ?)",
-                          ("node_opaque_id", secrets.token_hex(16)))
+                          (key, secrets.token_hex(16)))
     db.connection.commit()
     return db.connection.execute(
-        "SELECT value FROM node_config WHERE key='node_opaque_id'").fetchone()[0]
+        "SELECT value FROM node_config WHERE key = ?", (key,)).fetchone()[0]
 
 
 def _write_door_info(db, workdir, session, player, war_dialer=False, session_limit_seconds=None):
@@ -104,11 +119,7 @@ def _write_door_info(db, workdir, session, player, war_dialer=False, session_lim
     if war_dialer:
         # An opaque namespace belongs to the node database and survives its backup.
         # It is not a credential and does not depend on a mutable display name.
-        db.connection.execute("INSERT OR IGNORE INTO node_config (key, value) VALUES (?, ?)",
-                              ("war_dialer_owner", secrets.token_hex(16)))
-        db.connection.commit()
-        info["war_dialer_owner"] = db.connection.execute(
-            "SELECT value FROM node_config WHERE key='war_dialer_owner'").fetchone()[0]
+        info["war_dialer_owner"] = _minted_once(db, "war_dialer_owner")
     path = workdir / "door_info.json"
     path.write_text(json.dumps(info), encoding="utf-8")
     return path
@@ -555,7 +566,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
     except BlockingIOError as exc:
         reason = "busy"
         tail.extend(str(exc).encode())
-    except (OSError, ValueError, KeyError) as exc:
+    except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
         tail.extend(str(exc).encode("utf-8", errors="replace")[:4096])
         _logger.warning("door %r failed preflight/start: %s", door.name, exc)
     finally:
