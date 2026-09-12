@@ -1879,3 +1879,75 @@ def test_a_withdrawal_refused_because_the_fetch_won_reports_the_fetch(tmp_path):
     finally:
         dialer.close()
         seed.close()
+
+
+def test_a_withdrawal_is_refused_when_the_origin_is_no_longer_a_peer(tmp_path):
+    """Codex review of #500: the origin can leave `node.peers` between
+    sending the chunk request and handling the answer. Its signing key is
+    exactly what tells a genuine withdrawal from a forged 410, so there
+    is no verdict to report -- and reporting the *refused* one would have
+    told the caller the origin withdrew an entry that is still listed."""
+    from netbbs.link.events import build_file_withdrawal
+    from netbbs.link.protocol import LinkProtocolError
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    content = os.urandom(4096)
+    creator, area, entry = _catalogued_remote_file(
+        tmp_path, dialer, dialer_identity, dialer_node, seed, seed_node, content
+    )
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+
+                import netbbs.link.transport as transport_module
+
+                async def drop_the_peer_then_report_gone(
+                    node, session, base_url, chunk_request, **kwargs
+                ):
+                    withdrawal = build_file_withdrawal(
+                        signing_identity=dialer_identity.signing_key,
+                        file_id=entry.file_id,
+                        requester_fingerprint=seed_node.identity.fingerprint,
+                        transfer_id=chunk_request.transfer_id,
+                        request_nonce=chunk_request.authorization.nonce,
+                        created_at=utc_now_iso(),
+                    )
+                    # The origin stops being a completed peer while this
+                    # request is in flight.
+                    seed_node.peers.pop(remote_file.origin_fingerprint, None)
+                    raise transport_module.RemoteFileWithdrawnError("gone", withdrawal)
+
+                original = transport_module.request_file_chunk
+                transport_module.request_file_chunk = drop_the_peer_then_report_gone
+                try:
+                    with pytest.raises(LinkProtocolError):
+                        await fetch_next_file_chunk(
+                            seed_node, session, f"http://127.0.0.1:{dialer_server.port}",
+                            seed.lane, remote_file,
+                        )
+                finally:
+                    transport_module.request_file_chunk = original
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert get_remote_file(seed.db, entry.file_id) is not None
+    finally:
+        dialer.close()
+        seed.close()

@@ -2610,13 +2610,26 @@ async def _withdraw_if_the_origin_really_said_so(
     Any failure raises `LinkProtocolError` and changes nothing.
 
     Returns whether the catalogue entry was actually removed. `False`
-    means a verified withdrawal was deliberately not applied -- the entry
-    is already fetched, so the bytes are local and staying -- which the
-    caller has to tell apart from a removal before reporting anything.
+    means one specific thing: a *verified* withdrawal was deliberately
+    not applied, because the entry is already fetched and those bytes are
+    local and staying. The caller reports the fetch on that basis, so
+    nothing unverified may return it (Codex review of #500).
+
+    An origin that has left `node.peers` between sending the request and
+    handling the answer therefore raises rather than returning `False`.
+    Its signing key is exactly what is needed to tell a genuine
+    withdrawal from a forged 410, and without it there is no verdict to
+    report -- least of all "the origin withdrew this", which is what a
+    `False` here would have made the UI say about an entry that is still
+    listed.
     """
     origin_peer = node.peers.get(remote_file.origin_fingerprint)
     if origin_peer is None:
-        return False
+        raise LinkProtocolError(
+            f"file {remote_file.file_id!r}'s own origin "
+            f"({remote_file.origin_fingerprint!r}) is no longer a completed peer -- cannot verify "
+            "the withdrawal it claims to have sent, refusing"
+        )
     payload = exc.withdrawal.payload
     if payload.get("file_id") != remote_file.file_id:
         raise LinkProtocolError(

@@ -1119,3 +1119,25 @@ def test_endpoint_descriptor_live_relays_included_when_given(node_signing):
         created_at="2026-01-01T00:00:00Z", live_relays=[],
     )
     assert "live_relays" not in bare.payload
+
+
+def test_a_wrong_length_signature_is_rejected_rather_than_raised():
+    """Pins an assumption `verify_file_withdrawal` and every other
+    `verify_*` in this module rest on: PyNaCl refuses a detached
+    signature that is not exactly 64 bytes by raising
+    `nacl.exceptions.ValueError`, which subclasses `CryptoError` -- so
+    `netbbs.identity.keys.verify_signature` catches it and returns
+    `False` rather than letting it escape as a bare `ValueError`.
+
+    Raised in the Codex review of #500 as an uncaught-exception path. It
+    is not one, but nothing was asserting the property, and a future
+    PyNaCl that raised the builtin instead would turn every signature
+    check in this module into an uncaught failure on attacker-supplied
+    input."""
+    import nacl.signing
+
+    from netbbs.identity.keys import verify_signature
+
+    verify_key = nacl.signing.SigningKey.generate().verify_key
+    for length in (0, 1, 63, 65, 200):
+        assert verify_signature(verify_key, b"message", b"x" * length) is False
