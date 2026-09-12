@@ -839,6 +839,16 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
             # screen clears. `last_screen` keeps what follows the clear, so
             # these were unreachable by any walk: War Dialer's scanline was
             # rebuilt in issue #517 with no panel to review it on.
+            #
+            # A healthy door here is *waiting for input*, so it has to be killed
+            # rather than allowed to exit -- but killing it unconditionally would
+            # lose `finish`'s guarantee that a door which crashed on startup
+            # never publishes a panel. So ask first: a process that has already
+            # exited nonzero printed its masthead on the way down.
+            code = running.proc.poll()
+            if code not in (None, 0):
+                raise SystemExit(f"{door.name} exited {code} while drawing its "
+                                 f"first screen")
             running.kill()
             return [running.read().split(CLEAR)[0]]
         index = 0

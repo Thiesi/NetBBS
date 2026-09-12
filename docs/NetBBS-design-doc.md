@@ -7818,7 +7818,7 @@ of rows. The frame costs two rows and four columns, charged to each screen's own
 page budget, and is dropped only in Fast mode, which is deliberately text-only:
 there is no narrower terminal to drop it for, since 40x12 is the floor (issue
 #495). One frame holds a stack of cards: the screen's title goes in the top
-border and each card after the first is opened by a `┣━ HEADING ━┫` rule, which
+border and each card after the first is opened by a `├─ HEADING ─┤` rule, which
 costs a row of the same budget as the rows under it. The border's right-hand end
 carries the page counter first -- always spelled `page N/M`, and the handle a
 scripted walk uses to know whether there is another page -- and then whatever

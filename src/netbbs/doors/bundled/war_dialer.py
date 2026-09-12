@@ -2917,14 +2917,25 @@ def _key_grid(p: Palette, texts: list[tuple[str, str]], width: int) -> list[str]
     widest column count is tried first because more columns means fewer rows.
     """
     sizes = [_dlen(f"[{key}] {text}") for key, text in texts]
-    for columns in range(len(texts), 0, -1):
-        spans = [max(sizes[start::columns] or [1]) for start in range(columns)]
-        if sum(spans) + 2 * (columns - 1) <= width or columns == 1:
-            break
+    columns, spans, gap = 1, [max(sizes or [1])], 2
+    for count in range(len(texts), 0, -1):
+        widths = [max(sizes[start::count] or [1]) for start in range(count)]
+        # A narrower gutter before a whole column: one column fewer costs a row
+        # off a twelve-row terminal's content, and the keys still line up. At
+        # 40x12 the dashboard reserves a column and lays the bar out at 39, so
+        # the two-space grid dropped to three columns and five rows where the
+        # contract says four -- and a test written at 40 could not see it.
+        for spacing in (2, 1):
+            if sum(widths) + spacing * (count - 1) <= width or count == 1:
+                columns, spans, gap = count, widths, spacing
+                break
+        else:
+            continue
+        break
     rows = []
     for start in range(0, len(texts), columns):
         chunk = texts[start:start + columns]
-        rows.append("  ".join(
+        rows.append((" " * gap).join(
             sty(p.amber + BOLD, f"[{key}]") + " " + sty(p.mint, text)
             + " " * max(0, spans[index] - _dlen(f"[{key}] {text}"))
             for index, (key, text) in enumerate(chunk)).rstrip())

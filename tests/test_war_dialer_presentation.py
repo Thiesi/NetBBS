@@ -4474,3 +4474,40 @@ def test_full_labels_are_kept_when_shortening_would_not_save_a_row():
     entries = tuple((key, f"Label{key}", "L") for key in "AB")
     rows = " ".join(_ANSI_RE.sub("", row) for row in wd.key_bar(p, entries, 78, 1))
     assert "LabelA" in rows and "LabelB" in rows
+
+
+def test_the_action_bar_keeps_its_four_rows_at_the_terminal_floor():
+    """The contract calls this bar four rows of a twelve-row terminal.
+
+    `draw_dashboard` reserves a column and lays the bar out at `width - 1`, so
+    the production width at a 40-column terminal is 39, not 40. A grid with a
+    fixed two-space gutter dropped to three columns and five rows there, taking
+    a fifth row out of a twelve-row terminal's content -- and a test written at
+    40 could not see it, which is why this one asks the dashboard's own width.
+    """
+    p = wd.Palette(truecolor=True)
+    assert len(wd.switchboard_bar(p, 40 - 1, 2)) <= 4
+
+
+@pytest.mark.parametrize("terminal", [40, 64, 80])
+def test_the_action_bar_never_overflows_the_width_it_was_given(terminal):
+    p = wd.Palette(truecolor=True)
+    width = terminal - 1
+    for row in wd.switchboard_bar(p, width, 2):
+        assert sum(wd._char_width(ch) for ch in _ANSI_RE.sub("", row)) <= width
+
+
+def test_a_crashed_door_never_publishes_a_first_screen(tmp_path):
+    """`^` kills a healthy door, which is waiting for input -- but a door that
+    already exited nonzero printed its masthead on the way down, and `finish`'s
+    refusal to certify a crash has to survive that shortcut."""
+    gallery = _gallery()
+    door = tmp_path / "crasher.py"
+    door.write_text("import sys\n"
+                    "sys.stdout.write('W A R   D I A L E R' + chr(13) + chr(10))\n"
+                    "sys.stdout.flush()\n"
+                    "sys.exit(3)\n", encoding="utf-8")
+    state = tmp_path / "state"
+    state.mkdir()
+    with pytest.raises(SystemExit, match="exited 3"):
+        gallery.capture(door, state, b"^", 80, 24, {}, expect=False)
