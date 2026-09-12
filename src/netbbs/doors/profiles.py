@@ -43,6 +43,11 @@ class DoorProfile:
     security_level: int = 10
     time_limit: int = 3600
     memory_mb: int = 256
+    #: Seconds a door gets to exit after SIGTERM before it is killed, on a
+    #: caller disconnect, a timeout or node shutdown. A door which exits on
+    #: the signal never waits this long; one which flushes game data first
+    #: needs more than the 0.5 s this replaced.
+    stop_grace_seconds: int = 5
     max_sessions: int = 1
     multinode_certified: bool = False
     environment: dict[str, str] = field(default_factory=dict)
@@ -60,7 +65,7 @@ class DoorProfile:
             raise ProfileError("encoding must be utf-8, cp437, or raw")
         for name, low, high in (("width", 0, 500), ("height", 0, 200), ("baud", 300, 115200),
                                 ("security_level", 0, 255), ("time_limit", 1, 3600), ("max_sessions", 1, 36),
-                                ("memory_mb", 64, 2048)):
+                                ("memory_mb", 64, 2048), ("stop_grace_seconds", 1, 60)):
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ProfileError(f"{name} must be between {low} and {high}")
