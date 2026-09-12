@@ -50,6 +50,16 @@ CHANNEL_TYPE_COLOR = 208  # orange — a channel's [pub]/[invite]/[hidden] tag i
                           # chat status line, distinct from the channel name itself
                           # so the two independent facts (which channel, what kind
                           # of channel) read as separate fields rather than one run
+GATE_COLOR = 208  # orange — an access gate a resource carries (a minimum age, a
+                  # name requirement) shown as a tag beside its name in a SysOp
+                  # resource list. Same reasoning as CHANNEL_TYPE_COLOR, whose
+                  # value it shares: "what this thing is called" and "who is
+                  # allowed near it" are two independent facts, and a gate that
+                  # renders in the same shade as the levels beside it is how a
+                  # gated resource came to look identical to an ungated one.
+                  # A separate named constant rather than reusing
+                  # CHANNEL_TYPE_COLOR directly, matching this module's own
+                  # "one constant per meaning" convention.
 TOPIC_COLOR = 141  # light purple — the chat status line's quoted channel topic
 PRIVILEGE_COLOR = 196  # red — a user's own moderator/SysOp badge ("[mod]",
                        # "[sysop]") in the chat status line, distinct from the

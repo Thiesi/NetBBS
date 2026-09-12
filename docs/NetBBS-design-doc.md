@@ -510,6 +510,38 @@ a picker and persists nothing before `[S]ave`. The deliberate exceptions are
 once-only first-run decisions (Link participation, node name, managed DNS,
 the Unicode-style probe) and type-the-name confirmations before deletes.
 
+### 3.6 Resource lists (issue #528)
+
+A list row's secondary text is either prose or a record, and the two render
+differently.
+
+Prose stays prose: a moderation reason, a log message, a peer fingerprint, an
+author attribution. These render as `pick_item`'s single trailing description
+string, muted, exactly as they always have.
+
+A *record* — a row whose secondary text is several independent fields — is a
+table. `pick_item` takes `columns` and `column_values_of`, and renders a
+`LABEL_COLOR` heading row above fixed columns, each column separately
+coloured. This covers the SysOp's board, file-area, chat-channel and
+Community listers. The distinction is whether the fields can be compared down
+a page: levels, status and gates can, and a sentence stapling them together
+prevents it.
+
+Two rules follow from that, and are normative for any future list:
+
+- **A resource's access gates appear wherever the resource is listed.** A
+  minimum age or a name requirement changes who may enter, and a list that
+  omits them shows a gated resource as identical to an open one. A gate is
+  coloured (`GATE_COLOR`) only when present, so an ungated row stays quiet
+  and a gated one is visible while scanning.
+- **A table that does not fit becomes prose again.** Below the width at which
+  the name column stays readable, the row falls back to the flat description
+  form. The decision is made per render against the live terminal width, not
+  once on entry. A truncated table is worse than the sentence it replaced.
+
+Cells are measured and padded in display columns, never character counts, so
+a CJK name does not shift the columns after it.
+
 ---
 
 ## 4. Accounts, authentication, identity, and addressing

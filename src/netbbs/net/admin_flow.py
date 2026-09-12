@@ -307,7 +307,7 @@ from netbbs.net.char_input import (
 from netbbs.net.confirm import prompt_yes_no, prompt_yes_no_or_keep
 from netbbs.net.draft_storage import DraftPruneReport, prune_stale_drafts
 from netbbs.net.help_overlay import show_help
-from netbbs.net.picker import pick_item
+from netbbs.net.picker import ListColumn, pick_item
 from netbbs.net.resource_editor import (
     FieldSpec,
     bool_field,
@@ -442,6 +442,7 @@ from netbbs.rendering import (
     ALERT_COLOR,
     CLOCK_COLOR,
     ERROR_COLOR,
+    GATE_COLOR,
     HEADER_COLOR,
     LABEL_COLOR,
     MENU_KEY_COLOR,
@@ -11088,6 +11089,8 @@ async def _list_communities_screen(session: Session, lane: DatabaseLane, actor: 
         name_of=lambda c: c.name,
         stable_id_of=lambda c: c.id,
         description_of=_community_description,
+        columns=_COMMUNITY_COLUMNS,
+        column_values_of=_community_columns,
         title="Communities",
         empty_message="No Communities yet.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -11485,6 +11488,8 @@ async def _list_boards_screen(
         name_of=lambda b: b.name,
         stable_id_of=lambda b: b.id,
         description_of=_board_description,
+        columns=_BOARD_COLUMNS,
+        column_values_of=_board_columns,
         title="Message boards",
         empty_message="No message boards yet.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -11502,6 +11507,115 @@ def _board_description(board: Board) -> str:
     read_level = board.min_read_level if board.min_read_level is not None else "inherit"
     write_level = board.min_write_level if board.min_write_level is not None else "inherit"
     return f"read {read_level}/write {write_level}, {status}"
+
+
+# -- Columnar resource lists (issue #528) -----------------------------
+#
+# `_board_description` above, and its file-area/channel/Community
+# siblings, are kept as-is and still used: `pick_item` falls back to
+# them on a terminal too narrow for a table. The column definitions
+# below are the wide-terminal form of the same information, plus the
+# gates that never fitted into a one-line sentence at all.
+
+
+def _level_cell(value: int | None) -> str:
+    """A level column's cell. `None` means "inherit from the Community
+    or the node default" -- a real and different answer from any
+    number, so it is spelled out rather than shown as a blank."""
+    return str(value) if value is not None else "inherit"
+
+
+def _gate_cell(min_age: int | None, name_requirement: str | None) -> tuple[str, SegmentColor]:
+    """The gates column, and the point of the exercise (issue #528).
+
+    A resource can be gated on caller age, on identity attestation, or
+    both, and none of it appeared anywhere in a list row -- so an area
+    that turns away most of the node read exactly like one that turns
+    away nobody. Shown as compact tags rather than prose because this
+    is a column, and colored `GATE_COLOR` only when a gate is actually
+    present: an ungated row should stay quiet, and a gated one should
+    catch the eye while scanning.
+
+    `name` is attestation required; `name+` additionally displays the
+    attested real name alongside the caller's posts
+    ("verified_and_displayed").
+    """
+    tags: list[str] = []
+    if min_age is not None:
+        tags.append(f"{min_age}+")
+    if name_requirement == "verified_and_displayed":
+        tags.append("name+")
+    elif name_requirement:
+        tags.append("name")
+    if not tags:
+        return ("-", MUTED_COLOR)
+    return (" ".join(tags), GATE_COLOR)
+
+
+# Read/write levels are right-aligned so the numbers form a column that
+# can be compared down the page; the words beside them are not.
+_LEVEL_COLUMNS = [
+    ListColumn("read", 7, VALUE_COLOR, align_right=True),
+    ListColumn("write", 7, VALUE_COLOR, align_right=True),
+]
+_STATUS_COLUMN = ListColumn("status", 9, VALUE_COLOR)
+# Ten, not nine: `_prompt_min_age` parses a bare `int()` with no
+# upper bound, so "100+ name+" is reachable from the UI, and a
+# gates column that truncates the gate is worse than no column.
+_GATES_COLUMN = ListColumn("gates", 10, GATE_COLOR)
+
+_BOARD_COLUMNS = [*_LEVEL_COLUMNS, _STATUS_COLUMN, _GATES_COLUMN]
+_AREA_COLUMNS = _BOARD_COLUMNS
+_CHANNEL_COLUMNS = [
+    # A channel has one level, not a read/write split, and its own
+    # visibility/membership pair in place of moderation.
+    ListColumn("level", 5, VALUE_COLOR, align_right=True),
+    ListColumn("access", 14, VALUE_COLOR),
+    _GATES_COLUMN,
+]
+_COMMUNITY_COLUMNS = [*_LEVEL_COLUMNS, ListColumn("listed", 6, VALUE_COLOR), _GATES_COLUMN]
+
+
+def _board_columns(board: Board) -> list[str | tuple[str, SegmentColor]]:
+    return [
+        _level_cell(board.min_read_level),
+        _level_cell(board.min_write_level),
+        "moderated" if board.moderated else "open",
+        _gate_cell(board.min_age, board.name_requirement),
+    ]
+
+
+def _area_columns(area: FileArea) -> list[str | tuple[str, SegmentColor]]:
+    return [
+        _level_cell(area.min_read_level),
+        _level_cell(area.min_write_level),
+        "moderated" if area.moderated else "open",
+        _gate_cell(area.min_age, area.name_requirement),
+    ]
+
+
+def _channel_columns(channel: Channel) -> list[str | tuple[str, SegmentColor]]:
+    access = [] if not channel.members_only else ["members"]
+    if channel.hidden:
+        access.append("hidden")
+    return [
+        str(channel.min_level),
+        "+".join(access) if access else "open",
+        _gate_cell(channel.min_age, channel.name_requirement),
+    ]
+
+
+def _community_columns(community: Community) -> list[str | tuple[str, SegmentColor]]:
+    """A Community's own columns are its *defaults* -- the floor every
+    board, area and channel inside it inherits unless it sets its own.
+    Exactly as invisible as a leaf resource's gates were, and with
+    wider consequences, since one edit here moves every child at once."""
+    return [
+        _level_cell(community.default_min_read_level),
+        _level_cell(community.default_min_write_level),
+        "no" if community.hidden else "yes",
+        _gate_cell(community.default_min_age, community.default_name_requirement),
+    ]
 
 
 async def _board_detail_screen(
@@ -12589,6 +12703,8 @@ async def _list_areas_screen(
         name_of=lambda a: a.name,
         stable_id_of=lambda a: a.id,
         description_of=_area_description,
+        columns=_AREA_COLUMNS,
+        column_values_of=_area_columns,
         title="File areas",
         empty_message="No file areas yet.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -14095,6 +14211,8 @@ async def _list_channels_screen(
         name_of=lambda c: c.name,
         stable_id_of=lambda c: c.id,
         description_of=_channel_description,
+        columns=_CHANNEL_COLUMNS,
+        column_values_of=_channel_columns,
         title="Chat channels",
         empty_message="No chat channels yet.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
