@@ -7745,14 +7745,40 @@ slice 9 wording).** The door is a phosphor terminal, not a page of sentences.
 your handle, the cursor), `amber` `#ffb000` (money and hotkeys), `cyan`
 `#38d6ff` (NPC operators and neutral data), `magenta` `#ff3caa` (rival crews and
 raids against you), `alarm` `#ff4d4d` (losses and bust risk), `ink` `#d7ffe9`
-(values) and `grey` `#7f9a8c` (labels). A hotkey is always amber and bold. An
+(values) and `grey` `#8a8fc4` (labels). A hotkey is always amber and bold. An
 exchange's owner colour is the same on the ring, in the table and in the feed.
 Chrome never shares a colour with content.
 
-*Glyph vocabulary.* Frames `┏━┓ ┃ ┗━┛ ┣━┫`; owner nodes `◆ ◈ ◉ ◇`; crew `●○`;
-turns `▮▯`; meters `█░`; sparklines `▁▂▃`; insignia and badges `⟦ ⟧`; ring links
-`═ ║`; the brand `▚`; the prompt `›`. Every one has an ASCII substitute, and the
-`ascii_art`/`plain` preset is the one place that can prove none was forgotten.
+The label role is the one that must not be drawn from the screen's own hue
+(issue #519). It was `#7f9a8c` -- 256-index 108, which is `#87af87`, sage green
+-- so labels were specified as a green to sit on a green screen and vanished
+into it: measured on the switchboard, phosphor, phosphor-dim, mint, ink and
+that label colour were 78.5% of visible characters in one narrow band. A cool
+slate is off-hue from every green and clear of the established meanings of
+amber, cyan, magenta and alarm.
+
+*Glyph vocabulary.* Frames `┌─┐ │ └─┘ ├─┤`; owner nodes `◆ ◈ ◉ ◇`; crew `●○`;
+turns `▮▯`; meters `█░`; the scanline's ramp `▓▒░`; sparklines `▁▂▃`; insignia
+and badges `⟦ ⟧`; ring links `═ ║`; the brand `▚`; the prompt `›`. Every one has
+an ASCII substitute, and the `ascii_art`/`plain` preset is the one place that
+can prove none was forgotten.
+
+Frames are **light**, not heavy (issue #517). A run of heavy `━` shows visible
+gaps at the cell seams in many monospace fonts, so the border read as a failed
+render rather than a box -- reported from a real terminal on which Voidrunner's
+light frame is clean. The scanline draws the ramp above rather than the frame's
+own glyph: it used to be a run of `━` inset two columns and joined to nothing
+between two borders made of the same character, which read as a border that had
+failed to draw. Block elements are full-cell by construction, so they cannot
+show those seams, and a ramp fades in density as well as colour -- which is the
+only fade that survives the monochrome preset, where a role returns no SGR at
+all and the old three-band version was perfectly flat.
+
+The ring closes. Its stems stand in the same columns as the nodes they join --
+a node cell is three columns and a link two, so node `i` begins at `i * 5` --
+rather than at the row's extreme ends, where they sat two columns past the last
+node and left the loop reading as two chains with a pair of verticals floating
+between them. No corner glyphs are needed: the node glyph is its own corner.
 
 *Components.* The door carries its own copy, like every other helper in its one
 self-contained file: `meter`, `pips`, `dots`, `sparkline`, `label_value`/`chip`,
@@ -7829,7 +7855,7 @@ of rows. The frame costs two rows and four columns, charged to each screen's own
 page budget, and is dropped only in Fast mode, which is deliberately text-only:
 there is no narrower terminal to drop it for, since 40x12 is the floor (issue
 #495). One frame holds a stack of cards: the screen's title goes in the top
-border and each card after the first is opened by a `┣━ HEADING ━┫` rule, which
+border and each card after the first is opened by a `├─ HEADING ─┤` rule, which
 costs a row of the same budget as the rows under it. The border's right-hand end
 carries the page counter first -- always spelled `page N/M`, and the handle a
 scripted walk uses to know whether there is another page -- and then whatever
@@ -7838,11 +7864,19 @@ tells a caller nothing, so the screen's own name is the half that truncates.
 Hotkeys are written `[K] Label` everywhere the door prints, the rule Voidrunner
 adopted in issue #400: the key is not always the label's first letter
 (`[E] Map`, `[X] Root`), so that is the only spelling that carries every case.
-The switchboard's action bar is packed to the width it has rather than hand-typed:
-full labels first, short labels when the full ones would not leave the page a row
-to stand on. Every key keeps a name at every supported size; the keys-only tier
-below that went with the terminals it was for (issue #495). A key is never
-dropped. Paging shares the switchboard's prompt row rather than its action bar,
+The switchboard's action bar is laid out on a grid rather than hand-typed or
+packed to the width (issue #517): every cell begins a column, so the keys line
+up down the screen instead of landing wherever the previous label happened to
+end. Columns are sized to their own contents, not to one global cell -- a single
+wide label among short ones would otherwise pad every column to its width. Full
+labels first, short labels when the full ones would not leave the page a row to
+stand on, and full labels kept when shortening would not actually save a row:
+spending the labels *and* the row is the worst of both. Every key keeps a name at
+every supported size; the keys-only tier below that went with the terminals it
+was for (issue #495). A key is never dropped. Alignment costs a row where packing
+fit one more entry per line, and that row comes out of the page's content budget:
+fifteen entries with full labels need eight columns to fit two rows, and eight
+columns of their own widths do not fit eighty. Paging shares the switchboard's prompt row rather than its action bar,
 which is already four rows of a twelve-row terminal. A bar written with
 `out_prompt` leaves its row unterminated on purpose, so whatever reads it has to
 close that row before the next screen draws; the first visit every caller saw had

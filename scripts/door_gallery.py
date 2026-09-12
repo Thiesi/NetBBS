@@ -65,7 +65,9 @@ CLEAR = "\x1b[2J\x1b[H"
 # (`|` where Unicode has `┃`), and stripping only the Unicode one left every entry
 # row beginning with a character before its `[K]` marker -- so under that preset
 # no walk that names an entry by what it is could find one.
-FRAME_EDGE = re.compile(r"^[\s┃|]*")
+# Both weights of vertical: War Dialer moved from heavy to light in issue
+# #517, Voidrunner has always drawn light, and the ASCII presets use "|".
+FRAME_EDGE = re.compile(r"^[\s┃││|]*")
 #: A screen's own statement of which page this is, which it prints for this.
 PAGE_NOTE = re.compile(r"page (\d+)/(\d+)")
 
@@ -164,6 +166,10 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Navigation Chart, map", b"CV"),
     ],
     "war_dialer": [
+        # The masthead, drawn before the first screen clears: `^` keeps what a
+        # walk would otherwise throw away. Its scanline is the door's only
+        # gradient, and had no panel to be reviewed on at all.
+        ("Masthead", b"^"),
         # Before the career exists: the guide every new caller is handed, paged
         # with any key, which is why it is walked with Enter rather than [N].
         ("First visit", b"\r%"),
@@ -437,6 +443,9 @@ SETUP: dict[str, dict[str, bytes]] = {
 # unchecked.
 SHOWS: dict[str, dict[str, str]] = {
     "war_dialer": {
+        # `painted` collapses runs of spaces, so the letter-spaced wordmark is
+        # matched single-spaced; Fast mode draws no art and says it plainly.
+        "Masthead": {"*": "W A R D I A L E R", "fast": "WAR DIALER"},
         "First visit": "FIRST VISIT",
         "While you were away": "WHILE YOU WERE AWAY",
         "Switchboard, season closing": "SEASON RESET",
@@ -825,6 +834,22 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
     pages: list[str] | None = None
     try:
         running.settle()
+        if keys == b"^":
+            # The masthead, and anything else a door draws before its first
+            # screen clears. `last_screen` keeps what follows the clear, so
+            # these were unreachable by any walk: War Dialer's scanline was
+            # rebuilt in issue #517 with no panel to review it on.
+            #
+            # Finished like any other walk, not killed. Killing looked necessary
+            # because the door is waiting for input here -- but `finish` closes
+            # stdin first, and reaching EOF is exactly how every other walk gets
+            # its door to exit. Going through it keeps the guarantee that a door
+            # which exits nonzero never publishes a panel, including one that
+            # crashes *after* the settle window while preparing its first
+            # interactive screen, which a `poll()` taken at this instant cannot
+            # see.
+            running.finish()
+            return [running.read().split(CLEAR)[0]]
         index = 0
         while index < len(keys):
             key, suffix = keys[index:index + 1], keys[index + 1:index + 2]
@@ -1108,6 +1133,17 @@ def to_html(screen: str, width: int, height: int, styles: dict[str, str]) -> str
     return "\n".join(out) or "&nbsp;"
 
 
+def shown(mark: str | dict[str, str], preset: str) -> str:
+    """What a walk's screen must say under this preset.
+
+    Usually one string for every preset. A dict is for the screen a preset
+    deliberately draws differently: Fast mode omits optional art, so War
+    Dialer's masthead is `WAR DIALER - Season n` there and the letter-spaced
+    wordmark everywhere else, and no single marker covers both.
+    """
+    return mark.get(preset, mark["*"]) if isinstance(mark, dict) else mark
+
+
 def painted(screen: str, width: int, height: int) -> str:
     """The panel's text as one line, read back through the emulator that paints it.
 
@@ -1189,11 +1225,12 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
     # carries each heading on the page holding that card, and `DEFENCE` is on page
     # one of the exchange card while page two is its terms -- and every page has
     # to have something on it.
-    wrong = [f"  {label} at {width}x{height} {preset}: no {shows[label]!r} on any of "
-             f"{len(pages)} page(s)"
+    wrong = [f"  {label} at {width}x{height} {preset}: no {shown(shows[label], preset)!r} "
+             f"on any of {len(pages)} page(s)"
              for (label, _, preset, _, width, height, _fixture), pages in zip(shots, screens)
              if label in shows
-             and not any(shows[label] in painted(screen, width, height) for screen in pages)]
+             and not any(shown(shows[label], preset) in painted(screen, width, height)
+                         for screen in pages)]
     wrong += [f"  {label} at {width}x{height} {preset} page {number} is blank"
               for (label, _, preset, _, width, height, _fixture), pages in zip(shots, screens)
               for number, screen in enumerate(pages, 1)

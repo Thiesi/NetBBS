@@ -207,7 +207,14 @@ class Palette:
         "magenta": ((0xFF, 0x3C, 0xAA), 199),
         "alarm": ((0xFF, 0x4D, 0x4D), 203),
         "ink": ((0xD7, 0xFF, 0xE9), 195),
-        "grey": ((0x7F, 0x9A, 0x8C), 108),
+        # A label is the one role that has to separate from the screen, and
+        # this one was specified as a green to sit on a green screen: xterm 108
+        # is #87AF87, sage. Measured on the switchboard, phosphor, phosphor-dim,
+        # mint, ink and this accounted for 78.5% of visible characters in one
+        # narrow band (issue #519). A cool slate is off-hue from every green,
+        # clear of amber, cyan, magenta and alarm, and mid-luminance so it still
+        # recedes behind the values it labels.
+        "grey": ((0x8A, 0x8F, 0xC4), 103),
     }
 
     def __init__(self, truecolor: bool):
@@ -324,10 +331,14 @@ _MONOCHROME = False
 # contract). Every screen draws through `gl()`, so a preset is one lookup
 # rather than a second layout.
 _GLYPHS = {
-    "tl": ("┏", "+"), "tr": ("┓", "+"),
-    "bl": ("┗", "+"), "br": ("┛", "+"),
-    "h": ("━", "-"), "v": ("┃", "|"),
-    "ml": ("┣", "+"), "mr": ("┫", "+"),
+    # Light box-drawing, not heavy (issue #517). A run of heavy `━` shows
+    # visible gaps at the cell seams in many monospace fonts, so the border
+    # read as a failed render rather than a box. Voidrunner's light frame does
+    # not have the problem on the same terminal, which is the evidence.
+    "tl": ("┌", "+"), "tr": ("┐", "+"),
+    "bl": ("└", "+"), "br": ("┘", "+"),
+    "h": ("─", "-"), "v": ("│", "|"),
+    "ml": ("├", "+"), "mr": ("┤", "+"),
     "mine": ("◆", "#"), "rival": ("◈", "%"),
     "npc": ("◉", "@"), "free": ("◇", "."),
     "crew_on": ("●", "*"), "crew_off": ("○", "."),
@@ -335,6 +346,11 @@ _GLYPHS = {
     "meter_on": ("█", "#"), "meter_off": ("░", "."),
     "ins_l": ("⟦", "["), "ins_r": ("⟧", "]"),
     "link_h": ("═", "="), "link_v": ("║", "|"),
+    # The scanline's own ramp: block elements, deliberately not the frame's
+    # glyph. Blocks are full-cell by construction, so they cannot show the
+    # seams heavy box-drawing does, and they fade in density as well as
+    # colour -- which is the only fade left under the monochrome preset.
+    "scan_hi": ("▓", "#"), "scan_mid": ("▒", "+"), "scan_lo": ("░", "."),
     "brand": ("▚", "#"), "cursor": ("█", "_"),
     "bullet": ("●", "*"), "rise": ("▲", "^"), "fall": ("▼", "v"),
     "sep": ("·", "-"), "stage": ("▸", ">"), "medal": ("•", "*"),
@@ -2761,8 +2777,16 @@ def scene_map(p: Palette, exchanges: list[Exchange], viewer_id: int | None,
             parts.append(sty(style + BOLD, glyph) + sty(p.grey, f"{exchange.id:>2}"))
         return "".join(parts)
 
+    # The stems stand in the same columns as the nodes they join, which is what
+    # closes the ring: a node cell is three columns and a link two, so node `i`
+    # begins at `i * 5` and the last one at `(half - 1) * 5`. They used to be
+    # placed at 0 and `span - 1`, two columns past the last node, so the loop
+    # read as two chains with a pair of verticals floating between them -- the
+    # docstring above claimed it closed while the drawing said otherwise. No
+    # corner glyphs are needed for this; the node glyph is its own corner.
     stem = sty(p.phosphor_dim, gl("link_v"))
-    middle = stem + " " * max(0, span - 2) + (stem if len(bottom) == half else "")
+    last_column = (half - 1) * 5
+    middle = stem + " " * max(0, last_column - 1) + (stem if len(bottom) == half else "")
     return [side(top), middle, side(bottom)]
 
 
@@ -2864,24 +2888,57 @@ def key_bar(p: Palette, entries: tuple, width: int, budget: int) -> list[str]:
     The bar lives outside the frame, where the cursor waits. Short labels are
     the only thing ever spent when the rows would not fit the budget -- never a
     key, and never a label entirely.
+
+    Laid out on a grid rather than packed to the width (issue #517): every cell
+    is the same size, filled row-major, so each `[K]` begins a column and the
+    keys line up down the screen. Packed rows put them wherever the previous
+    label happened to end, which is the same paragraph-of-options shape
+    Voidrunner's service menu gave up for `menu_grid`.
     """
+    attempts = []
     for short in (False, True):
-        rows: list[str] = []
-        row, used = "", 0
-        for key, label, brief in entries:
-            text = brief if short else label
-            entry = sty(p.amber + BOLD, f"[{key}]") + " " + sty(p.mint, text)
-            size = _dlen(f"[{key}] {text}")
-            if row and used + 1 + size > width:
-                rows.append(row)
-                row, used = entry, size
-            else:
-                row = f"{row} {entry}" if row else entry
-                used = used + 1 + size if row != entry else size
-        if row:
-            rows.append(row)
-        if len(rows) <= budget or short:
+        texts = [(key, brief if short else label) for key, label, brief in entries]
+        rows = _key_grid(p, texts, width)
+        if len(rows) <= budget:
             return rows
+        attempts.append(rows)
+    # Neither fits the budget. Prefer whichever is shorter, and full labels on a
+    # tie -- spending the labels *and* keeping the extra row is the worst of
+    # both, which is what returning the short attempt unconditionally did.
+    return min(attempts, key=len) if len(attempts[1]) < len(attempts[0]) else attempts[0]
+
+
+def _key_grid(p: Palette, texts: list[tuple[str, str]], width: int) -> list[str]:
+    """Lay `[K] Label` entries out row-major on the widest grid that fits.
+
+    Columns are sized to their own contents rather than to one global cell:
+    a single wide label -- `[G] Garrison` among a row of four-letter verbs --
+    otherwise pads every column to its width and wastes most of the row. The
+    widest column count is tried first because more columns means fewer rows.
+    """
+    sizes = [_dlen(f"[{key}] {text}") for key, text in texts]
+    columns, spans, gap = 1, [max(sizes or [1])], 2
+    for count in range(len(texts), 0, -1):
+        widths = [max(sizes[start::count] or [1]) for start in range(count)]
+        # A narrower gutter before a whole column: one column fewer costs a row
+        # off a twelve-row terminal's content, and the keys still line up. At
+        # 40x12 the dashboard reserves a column and lays the bar out at 39, so
+        # the two-space grid dropped to three columns and five rows where the
+        # contract says four -- and a test written at 40 could not see it.
+        for spacing in (2, 1):
+            if sum(widths) + spacing * (count - 1) <= width or count == 1:
+                columns, spans, gap = count, widths, spacing
+                break
+        else:
+            continue
+        break
+    rows = []
+    for start in range(0, len(texts), columns):
+        chunk = texts[start:start + columns]
+        rows.append((" " * gap).join(
+            sty(p.amber + BOLD, f"[{key}]") + " " + sty(p.mint, text)
+            + " " * max(0, spans[index] - _dlen(f"[{key}] {text}"))
+            for index, (key, text) in enumerate(chunk)).rstrip())
     return rows
 
 
@@ -2961,14 +3018,28 @@ def compose(chunks: list[str], width: int, *, gap: str = "   ") -> list[str]:
 
 
 def scanline(p: Palette, width: int, *, trailing: str = "") -> str:
-    """A rule that fades mint -> phosphor -> shadow, with an optional chip at
-    its end."""
-    rule = gl("h")
+    """Phosphor afterglow decaying along a rule, with an optional chip at its end.
+
+    Two things were wrong with the version this replaces (issue #517). It drew
+    the frame's own `━`, inset two columns and joined to nothing between two
+    borders made of the same character, so it read as a border that had failed
+    to draw. And it was not a fade: three flat blocks of a third of the width
+    each, with hard edges at the thirds.
+
+    It fades twice now, in density and in colour, and the density half is the
+    one that matters most -- the monochrome preset returns no SGR at all, so a
+    colour-only fade is perfectly flat for those callers.
+    """
     span = max(3, width - (_dlen(trailing) + 2 if trailing else 0))
-    third = span // 3
-    return (sty(p.mint, rule * third) + sty(p.phosphor, rule * third)
-            + sty(p.phosphor_dim, rule * (span - 2 * third))
-            + ("  " + trailing if trailing else ""))
+    stops = ((p.mint, gl("scan_hi")), (p.phosphor, gl("scan_mid")),
+             (p.phosphor_dim, gl("scan_lo")))
+    out = []
+    for index in range(span):
+        # Which third of the run this cell is in, without accumulating the
+        # rounding error a per-stop slice width would.
+        style, glyph = stops[min(len(stops) - 1, index * len(stops) // span)]
+        out.append(sty(style, glyph))
+    return "".join(out) + ("  " + trailing if trailing else "")
 
 
 def paginate_cards(blocks: list[tuple[str, list[str]]],
