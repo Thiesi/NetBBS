@@ -2987,7 +2987,7 @@ def _walk_screens(conn, palette, width, height, monkeypatch, *, keys=()):
     wd.show_territory(palette, conn, width, height, player=player)
     wd.show_player_directory(palette, conn, 1, width, height, standings=True)
     wd.show_player_directory(palette, conn, 1, width, height)
-    wd.show_event_history(palette, conn, 1, width, height, own_handle=player.handle)
+    wd.show_event_history(palette, conn, 1, width, height)
     wd.draw_help(palette, width, height)
     wd.draw_help(palette, width, height, onboarding=True)
     wd.confirm_action(palette, conn, player, "root", width, height,
@@ -3068,7 +3068,7 @@ def test_an_exchange_reads_the_same_colour_on_the_map_the_table_and_the_feed(tmp
     assert _colour_before(rows[2], wd.gl("rival")) == palette.magenta
     # A rival's own move against you is the same magenta in the feed.
     events = wd.history_events(conn, 1)
-    feed = wd.feed(palette, events, 72, own_handle="Thiesi")
+    feed = wd.feed(palette, events, 72)
     raided = next(row for row in feed if "Kilobaud" in row)
     assert _colour_before(raided, wd.gl("bullet")) == palette.magenta
     assert _colour_before(raided, "Kilobaud") == palette.magenta
@@ -3241,19 +3241,19 @@ def test_a_key_that_skips_the_masthead_does_not_reach_the_next_screen(monkeypatc
 def test_the_log_tones_your_own_receipts_the_way_the_dashboard_does(tmp_path, monkeypatch):
     conn, now = _painted_world(tmp_path, "tone.db")
     palette = wd.Palette(True)
-    # A receipt the caller caused records their own handle; one a rival caused
-    # records the rival's. Both screens have to agree about which is which.
-    wd.record_event(conn, 1, "Thiesi", "Reinforced 212-555 Uptown Exchange with 1.", now,
+    # A receipt the caller caused records no actor; one a rival caused records the
+    # rival's handle. Both screens have to agree about which is which.
+    wd.record_event(conn, 1, None, "Reinforced 212-555 Uptown Exchange with 1.", now,
                     seen=True)
     events = wd.history_events(conn, 1)
-    feed = wd.feed(palette, events, 72, own_handle="Thiesi")
+    feed = wd.feed(palette, events, 72)
     own_feed = next(row for row in feed if "Reinforced" in row)
     assert _colour_before(own_feed, wd.gl("bullet")) == palette.phosphor
     written: list[str] = []
     monkeypatch.setattr(wd, "out", written.append)
     monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
     monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
-    wd.show_event_history(palette, conn, 1, 78, 24, own_handle="Thiesi")
+    wd.show_event_history(palette, conn, 1, 78, 24)
     own_log = next(row for row in "".join(written).split("\r\n") if "Reinforced" in row)
     assert palette.magenta not in own_log, "your own receipt read as hostile in the log"
     assert palette.ink in own_log
@@ -3267,7 +3267,7 @@ def test_the_feed_wraps_wide_glyphs_without_losing_the_tail(tmp_path, monkeypatc
     # characters would be clipped by the frame and lose the end of the receipt.
     wd.record_event(conn, 1, "界" * 12, "界" * 12 + " raided you and got away with $5.",
                     now)
-    rows = wd.feed(palette, wd.history_events(conn, 1), 60, own_handle="Thiesi", limit=1)
+    rows = wd.feed(palette, wd.history_events(conn, 1), 60, limit=1)
     assert len(rows) > 1, "a wide receipt has to carry onto another row"
     for row in rows:
         assert wd._dlen(row) <= 60, (wd._dlen(row), row)
@@ -3452,7 +3452,7 @@ def test_the_unread_receipt_page_shows_how_to_keep_it_unread(tmp_path, monkeypat
     monkeypatch.setattr(wd, "out", written.append)
     monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 40)
     monkeypatch.setattr(wd, "read_input_key", lambda: "B")
-    wd.show_event_history(palette, conn, 1, 40, 12, unseen_only=True, own_handle="Thiesi")
+    wd.show_event_history(palette, conn, 1, 40, 12, unseen_only=True)
     screen = _ANSI_RE.sub("", "".join(written))
     assert "Press any key to continue" in screen
     assert "[B] Back keeps this page unread" in screen
@@ -3674,6 +3674,12 @@ COMPOSED = {f"{name.upper()} PREVIEW" for name in
 # fixture is not in that state" but "no reasonable sequence of keys puts it
 # there". Anything not listed here must be photographed; that is the whole
 # argument of the gallery.
+# Where a walk's mark is finer than the screen's own title: one screen with three
+# texts. The owner service is marked on the service itself, so a panel that showed
+# the wrong holding's service fails the build instead of passing under the title
+# they share.
+FINER_MARKS = {"SERVICE PREVIEW": ("Recruit:", "outlet:", "Lay Low:")}
+
 UNREACHABLE = {
     "FIRST VISIT": "the first-launch guide, which every fixture is past by construction",
     "FED CRACKDOWN": "drawn as a season rolls over, which is the clock and not a key",
@@ -3706,7 +3712,8 @@ def test_every_screen_the_door_can_draw_is_photographed_by_a_walk():
     unphotographed = sorted(
         title for title in titles | COMPOSED
         if title not in UNREACHABLE
-        and not any(mark == title or mark in title for mark in shown))
+        and not any(mark == title or mark in title for mark in shown)
+        and not all(mark in shown for mark in FINER_MARKS.get(title, ())))
     assert not unphotographed, (
         "these screens appear in no gallery panel; add a walk that ends on each, "
         f"or excuse it in UNREACHABLE with a reason: {unphotographed}")
@@ -3715,6 +3722,7 @@ def test_every_screen_the_door_can_draw_is_photographed_by_a_walk():
     stale = sorted(title for title in UNREACHABLE
                    if title not in titles | COMPOSED
                    or any(mark == title for mark in shown))
+    stale += sorted(title for title in FINER_MARKS if title not in titles | COMPOSED)
     assert not stale, f"excused but reachable or gone: {stale}"
 
 
@@ -3728,9 +3736,10 @@ def test_a_walk_is_named_by_an_entry_a_picker_cannot_move():
     """
     gallery = _gallery()
     walks = dict(gallery.WALKS["war_dialer"])
-    # Pick the holding, then the appended entry by position -- `N%` after it only
-    # turns the preview's own pages.
-    assert walks["Owner service preview"].startswith(b"G1?$")
+    # Pick the holding by the role it is, then the appended entry by position --
+    # `N%` after that only turns the preview's own pages.
+    assert walks["Owner service preview"] == b"G{CARRIER SWITCH}$N%"
+    assert not re.search(rb"\d", walks["Owner service preview"])
     # The suffix is explained where the others are, so the next walk can use it.
     source = (Path(gallery.__file__).read_text(encoding="utf-8")
               if gallery.__file__ else "")
@@ -3807,3 +3816,186 @@ def test_a_card_stack_is_photographed_page_by_page():
     for label in ("Active operation", "Prepare preview", "Execute preview",
                   "Abandon preview", "Operation abandoned"):
         assert gallery.SETUP["war_dialer"][label].startswith(b"O1?1?1?")
+
+
+def test_the_root_picker_lists_your_own_exchanges_as_holdings(tmp_path, monkeypatch):
+    """The card was fixed and the picker was not, which is half a fix.
+
+    An owned exchange went through `exchange_entry_rows` with "already yours"
+    appended, so it still carried a capture price, root Heat and the odds of an
+    attack on the caller's own garrison -- for the one entry the picker refuses
+    to let them choose.
+    """
+    conn, now = _painted_world(tmp_path, "rootpick.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    monkeypatch.setattr(wd, "read_input_key", lambda: "B")
+    wd.do_root_exchange(palette, conn, player, now, __import__("random").Random(1), 78, 24)
+    rows = [row.strip("┃ ") for row in _ANSI_RE.sub("", _last_screen("".join(written))).split("\r\n")]
+    # The caller's own entry is the unselectable one, and runs until the next key.
+    start = next(index for index, row in enumerate(rows) if row.startswith("[-]"))
+    end = next(index for index in range(start + 1, len(rows))
+               if re.match(r"\[\w\]", rows[index]))
+    own = " ".join(rows[start:end])
+    for absent in ("capture $", "odds", "heat +"):
+        assert absent not in own, (absent, own)
+    for present in ("posted", "defence", "Service:", "Already yours"):
+        assert present in own, (present, own)
+    # And a target still says what taking it would cost and what the odds are.
+    target = " ".join(rows[end:end + 3])
+    for present in ("capture $", "odds", "heat +"):
+        assert present in target, (present, target)
+    conn.close()
+
+
+def test_a_retained_result_is_one_card_with_its_own_name(tmp_path):
+    """Flattened into one card, a record split wherever the page happened to end.
+
+    The Hall of Fame put a winner's medal and handle on page one and their
+    season, Rank, placement and closing time alone on page two, attached to
+    nothing at all.
+    """
+    conn, now = _painted_world(tmp_path, "hall.db")
+    palette = wd.Palette(True)
+    with conn:
+        conn.execute("INSERT INTO seasons (number, ended_at, status, players) VALUES "
+                     "(1, ?, 'completed', 2)", (wd.to_iso(now),))
+        for user_id, handle, place, medal in ((1, "Thiesi", 1, "Gold"),
+                                              (2, "Kilobaud", 2, "Silver")):
+            conn.execute("INSERT INTO season_results (season, user_id, handle, rank, placement, "
+                         "medal, insignia) VALUES (1, ?, ?, ?, ?, ?, 'modem')",
+                         (user_id, handle, 900 - place, place, medal))
+    rows = conn.execute("SELECT r.*,s.players,s.ended_at FROM season_results r "
+                        "JOIN seasons s ON s.number=r.season ORDER BY r.placement").fetchall()
+    # The Hall heads each card with the crew, because one season holds several.
+    hall = wd.recognition_cards(palette, rows, 36, hall=True)
+    assert [heading for heading, _ in hall] == ["THIESI", "KILOBAUD"]
+    # A caller's own history heads each with the season, because every card is
+    # theirs -- and then the facts do not repeat it.
+    mine = wd.recognition_cards(palette, rows[:1], 36, hall=False)
+    assert [heading for heading, _ in mine] == ["SEASON 1"]
+    assert "season" not in _ANSI_RE.sub("", " ".join(mine[0][1]))
+    # Paginated at the forty-column floor, a medal is never orphaned from the
+    # facts that describe it: every page of a split card repeats its heading.
+    pages = wd.paginate_cards(hall, 6)
+    for page in pages:
+        for heading, page_rows in page:
+            assert heading, (heading, page_rows)
+    conn.close()
+
+
+def test_your_own_receipts_survive_a_change_of_handle(tmp_path):
+    """A receipt's actor is the *other* party, not a name to compare.
+
+    Toning on "the recorded handle differs from the one you hold now" turned a
+    caller's whole history hostile the day they renamed on the BBS, and would
+    have made a former rival's raids read as the caller's own work if they took
+    that rival's handle.
+    """
+    conn, now = _painted_world(tmp_path, "rename.db")
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    # The door's own garrison move, through the resolver rather than by hand.
+    held = next(e for e in wd.list_exchanges(conn, 1) if e.controller_user_id == 1)
+    conn.execute("UPDATE players SET crew=4 WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    wd.resolve_garrison(conn, player, held.id, 1, wd.now_utc(), expected_exchange=held)
+    wd.record_event(conn, 1, "Kilobaud", "Kilobaud raided you and got away with $10!",
+                    wd.now_utc())
+
+    def tones():
+        events = wd.history_events(conn, 1)
+        rows = wd.feed(palette, events, 72, limit=10)
+        mine = next(row for row in rows if "Reinforced" in row)
+        theirs = next(row for row in rows if "raided you" in row)
+        return (_colour_before(mine, wd.gl("bullet")), _colour_before(theirs, wd.gl("bullet")))
+
+    assert tones() == (palette.phosphor, palette.magenta)
+    # Rename the caller, and then take the rival's old handle for good measure.
+    for handle in ("Carrier", "Kilobaud"):
+        conn.execute("UPDATE players SET handle=? WHERE user_id=1", (handle,))
+        conn.commit()
+        assert tones() == (palette.phosphor, palette.magenta), handle
+    conn.close()
+
+
+def test_a_world_from_before_the_rename_fix_is_repaired_once(tmp_path):
+    """Legacy rows carry the caller's handle; the migration clears exactly those."""
+    conn, now = _painted_world(tmp_path, "migrate.db")
+    # Written the way the door used to: the caller's own handle on their own row.
+    with conn:
+        conn.execute("INSERT INTO events (target_user_id, actor_handle, summary_text, "
+                     "created_at, seen_at) VALUES (1, 'Thiesi', 'Reinforced it.', ?, ?)",
+                     (wd.to_iso(now), wd.to_iso(now)))
+        conn.execute("INSERT INTO events (target_user_id, actor_handle, summary_text, "
+                     "created_at, seen_at) VALUES (1, 'Kilobaud', 'Kilobaud raided you.', ?, NULL)",
+                     (wd.to_iso(now),))
+        conn.execute("PRAGMA user_version=10")
+    wd.ensure_schema(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == wd.WORLD_SCHEMA_VERSION
+    actors = [row[0] for row in conn.execute(
+        "SELECT actor_handle FROM events ORDER BY id").fetchall()]
+    assert "Thiesi" not in actors, actors      # the caller's own receipt, repaired
+    assert "Kilobaud" in actors                # the raid against them, untouched
+    conn.close()
+
+
+def test_each_owner_service_has_its_own_panel():
+    """One walk reviewed one of three screens, and nothing said so.
+
+    A Public PBX's Lay Low *removes* Heat, a Warez Hub's outlet adds it and rolls
+    for a bust, and a Carrier Switch does neither -- the three role-specific paths
+    two earlier rounds had to fix. `G1?$` photographed whichever role the fixture
+    happened to have captured, which was always the Carrier Switch.
+    """
+    gallery = _gallery()
+    walks = dict(gallery.WALKS["war_dialer"])
+    marks = gallery.SHOWS["war_dialer"]
+    for label, role, mark in (("Owner service preview", b"{CARRIER SWITCH}", "Recruit:"),
+                              ("Owner service preview, a Warez Hub", b"{WAREZ HUB}", "outlet:"),
+                              ("Owner service preview, a Public PBX", b"{PUBLIC PBX}", "Lay Low:")):
+        # Named by the role it is, not by the digit it happens to be.
+        assert walks[label] == b"G" + role + b"$N%", (label, walks[label])
+        # And marked on the service itself, so the wrong holding's would fail.
+        assert marks[label] == mark
+    # The two holdings the caller does not start with are captured by name, since
+    # a picker lists exchanges by short name and a position would drift.
+    assert gallery.SETUP["war_dialer"]["Owner service preview, a Warez Hub"].startswith(b"X{Bay}")
+    assert gallery.SETUP["war_dialer"]["Owner service preview, a Public PBX"].startswith(b"X{Gulf}")
+
+
+@pytest.mark.parametrize("value,signed,expected", [
+    (7.86231, False, "7.9"), (15.0, False, "15"), (0.0, False, "0"),
+    (-7.86231, True, "-7.9"), (4.0, True, "+4"), (0.04, True, "+0"),
+])
+def test_heat_reads_to_one_decimal(value, signed, expected):
+    """Heat decays, so `:g` printed `7.86231` beside `15.9` on the same screen.
+
+    Found by photographing a Public PBX's service preview: the gauge read
+    `8 -7.86231 = 0` and the terms promised to "Remove 7.86231 Heat now".
+    """
+    assert wd.heat_amount(value, signed=signed) == expected
+
+
+def test_a_service_that_removes_heat_says_how_much_in_the_same_words(tmp_path):
+    """The gauge chip and the terms agree, and both read like every other figure."""
+    conn, now = _painted_world(tmp_path, "laylow-text.db")
+    palette = wd.Palette(True)
+    pbx = next(e for e in wd.list_exchanges(conn, 1) if e.role == "pbx")
+    conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=? "
+                 "WHERE id=?", (wd.to_iso(now), pbx.id))
+    conn.execute("UPDATE players SET heat=7.86231 WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    pbx = next(e for e in wd.list_exchanges(conn, 1) if e.id == pbx.id)
+    cards = wd.stakes_cards(palette, "service", player, pbx, 72)
+    text = _ANSI_RE.sub("", " ".join(row for _, rows in cards for row in rows))
+    assert "-7.9" in text, text
+    assert "Remove 7.9 Heat now" in text, text
+    assert "7.86231" not in text, text
+    conn.close()

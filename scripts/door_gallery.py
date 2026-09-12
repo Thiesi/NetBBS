@@ -102,6 +102,12 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 #        the same table: page two of the scene table is the same drawing with
 #        different data in it, and reviewing it again costs a panel and teaches
 #        nothing.
+#  `{X}` press the key of the entry whose own rows say X, paging to find it. The
+#        one selector that survives a changed world: which digit a Public PBX is
+#        depends on what the caller happens to hold, and the three owner services
+#        are three different screens -- a PBX removes Heat, a Warez Hub adds it
+#        and rolls for a bust, a Carrier Switch does neither -- so `G1?$` reviewed
+#        one of the three and nothing said so.
 #   `$`  page to the last page and press the last key offered there, for an entry
 #        a picker appends after a variable list. The exchange control screen puts
 #        the owner service after however many crew transfers the holding happens
@@ -196,7 +202,9 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # those there are is the fixture's business, so it is named as the last
         # one rather than by a digit that would silently come to mean a transfer.
         ("Garrison preview", b"G1?1?N%"),
-        ("Owner service preview", b"G1?$N%"),
+        ("Owner service preview", b"G{CARRIER SWITCH}$N%"),
+        ("Owner service preview, a Warez Hub", b"G{WAREZ HUB}$N%"),
+        ("Owner service preview, a Public PBX", b"G{PUBLIC PBX}$N%"),
         ("Operations", b"O"),
         ("Case an operation", b"O1?"),
         # With an operation saved, the hub's first entry is the operation itself:
@@ -327,6 +335,15 @@ CASE_AN_OPERATION = b"O1?1?1?" + b"N*" + b"A"   # contract, approach, preview, A
 PREPARE_IT = b"\r" + b"O1?1?" + b"N*" + b"A"    # continue the saved one, preview, Act
 SETUP: dict[str, dict[str, bytes]] = {
     "war_dialer": {
+        # The three owner services are three different previews, and which
+        # exchange is which role is the world's business, not a digit's. Bay and
+        # Gulf are the Warez Hub and the Public PBX that `EXCHANGE_SEEDS` leaves
+        # unclaimed and undefended in every world, so capturing either is a
+        # certainty rather than a dice roll -- named, because the picker lists
+        # exchanges by short name and a position would drift. One capture each:
+        # a capture posts a crew member, and the caller keeps enough for one.
+        "Owner service preview, a Warez Hub": b"X{Bay}" + b"N*" + b"A",
+        "Owner service preview, a Public PBX": b"X{Gulf}" + b"N*" + b"A",
         "Active operation": CASE_AN_OPERATION,
         "Prepare preview": CASE_AN_OPERATION,
         "Abandon preview": CASE_AN_OPERATION,
@@ -376,7 +393,14 @@ SHOWS: dict[str, dict[str, str]] = {
         "Garrisons": "YOUR GARRISONS",
         "Exchange control": "EXCHANGE CONTROL",
         "Garrison preview": "GARRISON PREVIEW",
-        "Owner service preview": "SERVICE PREVIEW",
+        # Each of the three says which service it is in its own terms, so the
+        # mark is the service rather than the screen: a panel that showed the
+        # wrong holding's service would otherwise pass. A mark is matched against
+        # the painted rows, so it has to be short enough not to be wrapped across
+        # two of them -- "Warez outlet:" is broken in half at forty columns.
+        "Owner service preview": "Recruit:",
+        "Owner service preview, a Warez Hub": "outlet:",
+        "Owner service preview, a Public PBX": "Lay Low:",
         "Operations": "OPERATIONS / RECON",
         "Case an operation": "CASE AN OPERATION",
         "Active operation": "ACTIVE OPERATION",
@@ -566,6 +590,39 @@ class Door:
         raise SystemExit(f"{self.door.name} offered no key at {self.size}:\n"
                          f"{self.offered()!r}")
 
+    def press_matching(self, text: str, *, limit: int = 24) -> None:
+        """Press the key of the entry whose own rows contain `text`.
+
+        A picker draws `[K]` against the first row of an entry and indents the
+        rest, so the entry owning a row is the nearest key above it. Which key
+        that is and whether it can be pressed yet are two different pages: at
+        forty columns the garrison list shows `[2] Bay  WAREZ HUB` at the foot of
+        page one while offering only `[1]`, and page two offers `[2]` with the
+        name nowhere on it. So remember the key the text belongs to, and keep
+        paging until the screen will take it.
+        """
+        wanted = None
+        for _ in range(limit):
+            screen = ANSI.sub("", last_screen(self.read()))
+            key = None
+            for row in screen.split("\r\n"):
+                stripped = row.strip("\u2503 ")
+                found = re.match(r"\[(\w)\]", stripped)
+                if found:
+                    key = found.group(1)
+                if wanted is None and key and text in stripped:
+                    wanted = key
+            if wanted and f"[{wanted}]" in self.offered():
+                self.press(wanted.encode())
+                return
+            before = last_screen(self.read())
+            self.press(b"N")
+            if last_screen(self.read()) == before:
+                break
+        raise SystemExit(f"{self.door.name} offered no entry saying {text!r} at "
+                         f"{self.size}"
+                         + (f" (found it as [{wanted}], never offered)" if wanted else ""))
+
     def press_pages(self, key: bytes, *, limit: int = 24) -> list[str]:
         """This screen and every page after it, turned with `key`.
 
@@ -695,6 +752,11 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
             if key == b"$":
                 running.press_last_offered()
                 index += 1
+                continue
+            if key == b"{":
+                end = keys.index(b"}", index)
+                running.press_matching(keys[index + 1:end].decode())
+                index = end + 1
                 continue
             running.press(key, expect=expect)
             index += 1

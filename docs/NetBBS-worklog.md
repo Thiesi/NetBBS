@@ -5045,6 +5045,47 @@ abandon preview and its receipt are panels rather than exemptions. What stays
 excused is what no sequence of keys reaches: fifteen spent turns, an emptied
 wallet, a season rollover, a world with no rivals in it.
 
+**A screen with three versions needs three panels.** One walk opened whichever
+owner service the fixture happened to hold, which was always the Carrier Switch --
+so the Public PBX's *negative* Heat gauge and the Warez Hub's bust gauge, the two
+role-specific paths earlier rounds had to fix, were reviewed at no size and
+nothing said they were missing. Each has a walk now, and each is marked on its own
+service text rather than on the screen's title, so a panel showing the wrong
+holding's service fails the build instead of passing it.
+
+**Name a picker entry by what it is.** Which digit a Public PBX is depends on what
+the caller holds, so `{X}` presses the key of the entry whose own rows say X. Two
+pages can disagree about that: at forty columns the garrison list draws
+`[2] Bay  WAREZ HUB` at the foot of page one while offering only `[1]`, and page
+two offers `[2]` with the name nowhere on it -- so the selector remembers which
+key the text belonged to and keeps paging until the screen will take it. A mark,
+likewise, is matched against painted rows and must be short enough not to be
+wrapped across two of them: "Warez outlet:" is broken in half at the floor.
+
+**Heat reads to one decimal, because Heat decays.** `:g` printed a gauge reading
+`8 -7.86231 = 0` and terms promising to "Remove 7.86231 Heat now", two rows above
+the same screen's `Heat: 15.9 + 4 = 19.9`. `heat_amount` is the one formatter, and
+it drops a pointless `.0` so a whole number still reads as one. Found the first
+time anyone looked at a Public PBX's service preview.
+
+**A record is a card, or pagination will cut it in half.** Flattening every
+retained season result into one `RETAINED RESULTS` block let `paginate_cards`
+break wherever a page happened to end: the Hall of Fame put a winner's medal and
+handle on page one and their season, Rank, placement and closing time alone on
+page two, attached to nothing. One card per record keeps it together where it fits
+and repeats its heading where it does not -- and the heading is the identity that
+was being orphaned, which is the crew in the Hall and the season in a caller's own
+history.
+
+**A receipt's actor is the other party, not a name to compare.** The feed and the
+log decided "this is mine" by comparing the handle stored on the event against the
+handle the caller holds *now*, and the door recorded the caller's own handle on
+their own garrison receipts. Renaming on the BBS therefore turned a caller's whole
+history hostile magenta, and taking a former rival's handle would have made that
+rival's raids read as the caller's own work. Self-authored receipts now record no
+actor at all, `hostile` is simply "an actor is named", and a schema-11 migration
+clears the legacy rows it can still identify.
+
 **A holding is not a target, on the card as well as in the picker.**
 `garrison_entry_rows` had said so in its own docstring for two rounds while the
 scene's exchange card, for an exchange the caller already controlled, gauged
@@ -5053,7 +5094,10 @@ already hold -- directly above a line telling them to use Garrison, for an
 exchange the root picker will not even offer. The card now reads as a holding when
 it is one (posted crew, what it pays, how long it has been held, its service) and
 as a target when it is not. Its own walk photographs both, which is how this was
-found at all.
+found at all. The root picker was the other half of the same fix, found a round
+later: it still sent an owned exchange through the target renderer and appended
+"already yours", so the one entry it refuses to let a caller choose was the one
+quoting them a capture price, its Heat and the odds against their own garrison.
 
 **An entry a picker appends after a variable list is named as the last one, not
 by a digit.** Exchange Control offers one transfer per move the holding can make

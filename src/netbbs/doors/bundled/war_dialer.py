@@ -1215,7 +1215,7 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
-WORLD_SCHEMA_VERSION = 10
+WORLD_SCHEMA_VERSION = 11
 _OPERATION_COLUMNS = {"operation_contract", "operation_approach", "operation_stage", "successful_operations"}
 
 # Versioned schema contract: future additions need a new numbered migration.
@@ -1341,6 +1341,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     fresh.execute("PRAGMA user_version=9")
                     _migrate_world_v10(fresh)
                     fresh.execute("PRAGMA user_version=10")
+                    _migrate_world_v11(fresh)
+                    fresh.execute("PRAGMA user_version=11")
             finally:
                 fresh.close()
             try:
@@ -1411,6 +1413,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if version < 10:
             _migrate_world_v10(conn)
             conn.execute("PRAGMA user_version=10")
+        if version < 11:
+            _migrate_world_v11(conn)
+            conn.execute("PRAGMA user_version=11")
         _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
 
 
@@ -1559,6 +1564,20 @@ def _migrate_world_v10(conn: sqlite3.Connection) -> None:
                  "handle TEXT NOT NULL CHECK (length(handle) <= 80), rank INTEGER NOT NULL CHECK (rank >= 0), "
                  "placement INTEGER NOT NULL, medal TEXT NOT NULL CHECK (medal IN ('', 'Gold', 'Silver', 'Bronze')), "
                  "insignia TEXT NOT NULL, PRIMARY KEY(season,user_id), UNIQUE(season,placement))")
+
+
+def _migrate_world_v11(conn: sqlite3.Connection) -> None:
+    """Clear the actor from receipts a caller wrote about themselves.
+
+    Self-authored rows used to record the caller's own handle, which the feed and
+    the log compared against the handle they happen to hold now. Matching on that
+    same handle is the only evidence those rows carry, so this repairs every
+    caller who has not yet renamed -- and from here on nothing is recorded to
+    repair.
+    """
+    conn.execute("UPDATE events SET actor_handle=NULL WHERE actor_handle IS NOT NULL AND "
+                 "actor_handle=(SELECT handle FROM players WHERE players.user_id="
+                 "events.target_user_id)")
 
 
 def _archive_season(conn: sqlite3.Connection, old: int, current: int, now: datetime) -> None:
@@ -2278,6 +2297,16 @@ def _prune_events(conn: sqlite3.Connection, user_id: int) -> None:
 
 def record_event(conn: sqlite3.Connection, target_user_id: int, actor_handle: str | None, summary_text: str,
                  now: datetime, *, seen: bool = False) -> None:
+    """Add one receipt to a caller's log.
+
+    `actor_handle` is the *other* party who did this to them -- a rival who raided
+    them, or whoever took their exchange. A receipt for the caller's own action,
+    and anything the season machinery writes, records none, and that is what the
+    feed and the log tone on: comparing a stored handle against the caller's
+    current one turned their whole history hostile the day they renamed, and
+    taking a former rival's handle would have made that rival's raids read as
+    their own work.
+    """
     with nullcontext() if conn.in_transaction else _write_transaction(conn):
         conn.execute(
             "INSERT INTO events (target_user_id, actor_handle, summary_text, created_at, seen_at) VALUES (?, ?, ?, ?, ?)",
@@ -2479,7 +2508,10 @@ def resolve_garrison(conn: sqlite3.Connection, player: Player, exchange_id: int,
         if not remaining:
             record_scene(conn, "abandon", exchange.id, now, actor_handle=actor.handle)
         verb = f"Reinforced {exchange.name} with {change}" if change > 0 else f"Withdrew {-change} from {exchange.name}"
-        record_event(conn, actor.user_id, actor.handle,
+        # No actor: this is the caller's own receipt, and `actor_handle` names the
+        # *other* party. Recording their own handle made the row read as hostile
+        # the moment they changed it on the BBS.
+        record_event(conn, actor.user_id, None,
                      verb + (f"; garrison now {remaining}." if remaining else "; exchange abandoned and income stopped. Reclaiming it earns no capture Rank."), now, seen=True)
     return remaining == 0
 
@@ -2775,18 +2807,17 @@ def table(p: Palette, headers: list[str], rows: list[list], aligns: str,
     return out_rows
 
 
-def feed(p: Palette, events: list[GameEvent], width: int, *, own_handle: str = "",
-         limit: int = 6) -> list[str]:
+def feed(p: Palette, events: list[GameEvent], width: int, *, limit: int = 6) -> list[str]:
     """The latest receipts, toned by who caused them.
 
-    A raid or a capture attempt against you records the attacker's handle, your
-    own garrison move records yours, and the season machinery records none -- so
-    the row's colour comes from the event itself, not from reading its words.
+    A raid or a capture attempt against you records the attacker's handle; your
+    own moves and the season machinery record none -- so the row's colour comes
+    from the event itself, not from reading its words or from comparing a handle
+    the caller is free to change.
     """
     rows: list[str] = []
     for event in events[:limit]:
-        actor = _event_plain(event.actor_handle or "")
-        hostile = bool(actor) and actor != _event_plain(own_handle)
+        hostile = bool(event.actor_handle)
         bullet = sty((p.magenta if hostile else p.phosphor) + (BOLD if event.seen_at is None else ""),
                      gl("bullet"))
         stamp = from_iso(event.created_at).astimezone(timezone.utc).strftime("%H:%M")
@@ -3194,16 +3225,15 @@ def _event_plain(text: str) -> str:
                    if ch in "\r\n\t" or not unicodedata.category(ch).startswith("C"))
 
 
-def event_pages(p: Palette, events: list[GameEvent], width: int, body_rows: int,
-                *, own_handle: str = "") -> list[list[tuple[str, int | None]]]:
+def event_pages(p: Palette, events: list[GameEvent], width: int,
+                body_rows: int) -> list[list[tuple[str, int | None]]]:
     """The log as a toned feed. Only the final displayed line of an event makes
     it eligible for acknowledgement, so a page never acknowledges a record whose
     tail the caller has not seen."""
     lines: list[tuple[str, int | None]] = []
     for event in events:
         stamp = from_iso(event.created_at).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        actor = _event_plain(event.actor_handle or "")
-        hostile = bool(actor) and actor != _event_plain(own_handle)
+        hostile = bool(event.actor_handle)
         fresh = event.seen_at is None
         head = (sty((p.magenta if hostile else p.phosphor) + (BOLD if fresh else ""), gl("bullet"))
                 + " " + sty(p.grey, stamp) + "  "
@@ -3220,7 +3250,7 @@ def event_pages(p: Palette, events: list[GameEvent], width: int, body_rows: int,
 
 def show_event_history(
     p: Palette, conn: sqlite3.Connection, user_id: int, width: int, height: int,
-    *, unseen_only: bool = False, own_handle: str = "",
+    *, unseen_only: bool = False,
 ) -> None:
     events = unseen_events(conn, user_id) if unseen_only else history_events(conn, user_id)
     if unseen_only and not events:
@@ -3239,7 +3269,7 @@ def show_event_history(
             + sty(p.grey, " keeps this page unread")]
            if unseen_only else key_bar(p, LOG_BAR, width, 1))
     body_rows = max(1, height - len(bar) - frame_cost(p, width))
-    pages = event_pages(p, events, _panel_width(p, width), body_rows, own_handle=own_handle)
+    pages = event_pages(p, events, _panel_width(p, width), body_rows)
     page_index = 0
     while True:
         page = pages[page_index]
@@ -3273,8 +3303,7 @@ def show_event_history(
                 for event in events:
                     if event.id in complete_ids and event.seen_at is None:
                         event.seen_at = to_iso(acknowledged_at)
-                pages = event_pages(p, events, _panel_width(p, width), body_rows,
-                                    own_handle=own_handle)
+                pages = event_pages(p, events, _panel_width(p, width), body_rows)
     out(f"{ESC}[2J{ESC}[H")
 
 
@@ -3479,7 +3508,7 @@ def dashboard_cards(p: Palette, state: DashboardState, now: datetime,
         beside = compose([ring[0]] + legend, width)
         cards.append(("THE SCENE",
                       beside + ring[1:] if len(beside) == 1 else ring + compose(legend, width)))
-    cards.append(("FEED", feed(p, state.recent, width, own_handle=player.handle, limit=4)))
+    cards.append(("FEED", feed(p, state.recent, width, limit=4)))
     cards.append(("ORDERS", prose_card(p, next_steps(state, now), width)))
     notes = [note for note in dashboard_notes(state, now) if note not in reset]
     cards.append(("SEASON", prose_card(p, notes, width)))
@@ -4003,13 +4032,14 @@ def podium_rows(p: Palette, entries: list[tuple[str, str, int]], width: int) -> 
     return rows or [sty(p.grey, "No positive Rank; no medals awarded.")]
 
 
-def recognition_rows(p: Palette, row, width: int) -> list[str]:
+def recognition_rows(p: Palette, row, width: int, *, named: bool = False) -> list[str]:
     """One retained season result as a two-row card: the medal and the handle
     that earned it, then the season, the final Rank and the placement.
 
     A card rather than a table row because a five-column table cannot shrink
     below its badges, and a forty-column terminal would lose the medal -- which
-    is the one thing on the screen a caller came to see.
+    is the one thing on the screen a caller came to see. `named` is for a card
+    whose own heading already carries the season, so the chip does not repeat it.
     """
     medal = row["medal"] or ""
     symbol = INSIGNIA[row["insignia"]][0] if row["insignia"] in INSIGNIA else "?"
@@ -4017,12 +4047,30 @@ def recognition_rows(p: Palette, row, width: int) -> list[str]:
             else sty(p.grey, "no medal"),
             sty(p.phosphor, gl("ins_l") + symbol + gl("ins_r")) + " "
             + sty(p.mint, _fit(_event_plain(row["handle"]), max(8, width // 2)))]
-    facts = [label_value(p, "season", str(row["season"]), style=p.cyan),
-             label_value(p, "rank", f"{row['rank']:,}", style=p.mint),
-             label_value(p, "place", f"#{row['placement']} of {row['players']}", style=p.ink),
-             label_value(p, "closed",
-                         from_iso(row["ended_at"]).strftime("%Y-%m-%d %H:%M UTC"), style=p.grey)]
+    facts = ([] if named else [label_value(p, "season", str(row["season"]), style=p.cyan)]) + [
+        label_value(p, "rank", f"{row['rank']:,}", style=p.mint),
+        label_value(p, "place", f"#{row['placement']} of {row['players']}", style=p.ink),
+        label_value(p, "closed",
+                    from_iso(row["ended_at"]).strftime("%Y-%m-%d %H:%M UTC"), style=p.grey)]
     return compose(head, width) + compose(facts, width)
+
+
+def recognition_cards(p: Palette, rows, width: int, *, hall: bool) -> list[tuple[str, list[str]]]:
+    """One card per retained result, headed by whatever identifies it.
+
+    Flattened into a single card, `paginate_cards` split records wherever a page
+    happened to end: at forty columns the Hall of Fame put Silver's medal and
+    handle on page one and the season, Rank, placement and closing time alone on
+    page two, attached to nothing. A card each keeps a record together where it
+    fits and repeats its heading where it does not -- and the heading is the
+    identity that was being orphaned: the crew in the Hall, where one season holds
+    several of them, and the season in a caller's own history, where every record
+    is theirs.
+    """
+    return [(_fit(_event_plain(row["handle"]).upper(), max(8, width - 12)) if hall
+             else f"SEASON {row['season']}",
+             recognition_rows(p, row, width, named=not hall))
+            for row in rows]
 
 
 def show_season_recognition(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, height: int, *, hall: bool = False) -> None:
@@ -4043,9 +4091,8 @@ def show_season_recognition(p: Palette, conn: sqlite3.Connection, user_id: int, 
             + [label_value(p, "best rank", f"{max(row['rank'] for row in rows):,}", style=p.mint),
                label_value(p, "best placement", f"#{min(row['placement'] for row in rows)}",
                            style=p.mint)], inner)))
-    retained = [row for entry in rows for row in recognition_rows(p, entry, inner)]
-    if retained:
-        cards.append(("RETAINED RESULTS", retained))
+    if rows:
+        cards += recognition_cards(p, rows, inner, hall=hall)
     else:
         cards.append(("", prose_card(p, [
             "No medals awarded in the retained archive yet." if hall else
@@ -4363,6 +4410,16 @@ def read_menu_choice(valid: str) -> str:
             return key
 
 
+def heat_amount(value: float, *, signed: bool = False) -> str:
+    """A Heat figure the way every other Heat figure on the screen reads.
+
+    Heat is a decaying float, so `:g` prints `7.86231` where the same screen says
+    `15.9` two rows below. One decimal, and no pointless `.0` on a whole number.
+    """
+    text = f"{value:+.1f}" if signed else f"{value:.1f}"
+    return text[:-2] if text.endswith(".0") else text
+
+
 def action_block_reason(action: str, player: Player, target: Exchange | Player | JobChoice | CrewChoice | None = None) -> str | None:
     reasons = []
     if player.turns_used >= TURNS_PER_DAY:
@@ -4399,7 +4456,7 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
     if action == "service":
         lines += [f"{target.name}: {exchange_terms(target)[4]}.", "Ownership is checked again at Act."]
         if target.role == "pbx":
-            return lines + [f"Remove {min(15, player.heat):g} Heat now; Heat cannot fall below zero.",
+            return lines + [f"Remove {heat_amount(min(15, player.heat))} Heat now; Heat cannot fall below zero.",
                             "No cash/crew/Rank change, bust roll or support consumption."]
         if target.role == "carrier":
             return lines + ["Guaranteed +1 available crew and +10 Rank. No Heat, bust roll or support consumption."]
@@ -4552,7 +4609,8 @@ def stakes_cards(p: Palette, action: str, player: Player, target, width: int, *,
         heat_row = (sty(p.grey, "HEAT") + " " + meter(p, projected, 100, gauge, climb=True)
                     + " " + sty(p.ink, f"{player.heat:.0f}"))
         if heat:
-            heat_row += (sty(p.phosphor if heat < 0 else p.alarm, f" {heat:+g}")
+            heat_row += (sty(p.phosphor if heat < 0 else p.alarm,
+                             " " + heat_amount(heat, signed=True))
                          + sty(p.grey, f" = {projected:.0f}"))
         stakes += compose([heat_row, risk], width)
     blocked = (crew_block_reason(player, target) if action == "crew"
@@ -5023,9 +5081,15 @@ def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: 
         return False
     exchanges = list_exchanges(conn, player.user_id)
     inner = _panel_width(p, max(1, w - 1))
-    rendered = [(exchange_entry_rows(p, exchange, player, inner - 4)
-                 + ([sty(p.grey, "already yours")] if exchange.controller_user_id == player.user_id
-                    else []),
+    # Your own exchanges stay in the list -- the picker is the scene in order, and
+    # leaving holes in it would hide the shape of the map -- but they are holdings,
+    # not targets: a capture price, root Heat and odds against your own garrison
+    # describe an action this picker will not even offer.
+    rendered = [((garrison_entry_rows(p, exchange, player, inner - 4)
+                  + prose_rows(p, "Already yours; [G] Garrison manages it and opens its "
+                               "service.", inner - 4, style=p.grey))
+                 if exchange.controller_user_id == player.user_id
+                 else exchange_entry_rows(p, exchange, player, inner - 4),
                  exchange.controller_user_id != player.user_id) for exchange in exchanges]
     choice = pick_record_page(p, "ROOT EXCHANGE", [], w, height, rendered=rendered,
                               trailing="capture price, defence and your odds")
@@ -5351,8 +5415,7 @@ def main() -> int:
         draw_title(palette, info, player.season_number, w)
         if is_new_player:
             draw_help(palette, w, height, onboarding=True)
-        show_event_history(palette, conn, player.user_id, w, height, unseen_only=True,
-                           own_handle=player.handle)
+        show_event_history(palette, conn, player.user_id, w, height, unseen_only=True)
 
         page_index = 0
         while True:
@@ -5387,8 +5450,7 @@ def main() -> int:
                 elif choice == "V":
                     show_player_directory(palette, conn, user_id, w, height)
                 elif choice == "H":
-                    show_event_history(palette, conn, player.user_id, w, height,
-                                       own_handle=player.handle)
+                    show_event_history(palette, conn, player.user_id, w, height)
                 elif choice == "T":
                     do_trade_warez(palette, conn, player, action_now, rng, w, height)
                 elif choice == "C":
