@@ -136,6 +136,11 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Exchange card", b"E1?"),
         ("Rank", b"B"),
         ("Rivals", b"V"),
+        # The raid dispatch is its own pair of screens, and the raid preview is
+        # the only one in the door that draws an empty gauge on purpose: a
+        # rival's crew strength is private, so there are no odds to show.
+        ("Raid targets", b"R"),
+        ("Raid preview", b"R#"),
         ("Log", b"H"),
         ("Contract board", b"J"),
         # An action's preview is two pickers deep: the board, the approach, and

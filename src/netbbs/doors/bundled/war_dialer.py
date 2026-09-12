@@ -4670,7 +4670,11 @@ def rival_entry_rows(p: Palette, attacker: Player, rival: Player, now: datetime,
                     label_value(p, "rank", f"{rank_score(rival):,}", style=p.mint)], width)
     rows += compose([label_value(p, "raid", verdict,
                                  style=p.phosphor if verdict == "eligible" else p.grey)], width)
-    rows += prose_rows(p, reason, width, style=p.grey)
+    # The full reason only earns a row where it says something the verdict does
+    # not: a shield names the moment it expires. "Eligible" under `raid eligible`
+    # is the same word twice.
+    if verdict in ("newcomer", "recovering"):
+        rows += prose_rows(p, reason, width, style=p.grey)
     if note:
         rows += prose_rows(p, note, width, style=p.grey)
     return rows
