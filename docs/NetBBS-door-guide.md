@@ -1313,6 +1313,35 @@ host data in the game installation. Run NetBBS unprivileged, never as root.
   files persist, but the OS releases locks at process exit/reboot. Do not
   remove lock files while NetBBS is running.
 
+### What a door is told: `door_info.json`
+
+Every door is given the path to a small JSON file in `NETBBS_DOOR_INFO`. It
+is the NetBBS-native alternative to the classic drop files, and a door may
+use either or both.
+
+| Field | Meaning |
+| --- | --- |
+| `door_api` | Contract version, currently `2`. Refuse a version you do not understand rather than probing for fields. |
+| `handle` | The caller's NetBBS handle. |
+| `user_id` | Their stable numeric id on this node. |
+| `terminal_width`, `terminal_height` | Current geometry; rewritten mid-run if the caller resizes and the door opted in (see above). |
+| `color_depth` | `truecolor` or `256`. |
+| `unicode_style` | The caller's own NetBBS glyph preference, so a door can match what they already chose. |
+| `transport` | `telnet`, `ssh`, `web`, `local`, or `unknown`. Key decoding and latency assumptions differ, particularly for the browser terminal. |
+| `timezone` | The node's display timezone as an IANA name, for in-game clocks. Node-wide: NetBBS has no per-caller timezone. |
+| `node_name` | The node's display name, which a SysOp may change at any time. |
+| `node_id` | A stable, opaque per-node identifier which survives a rename. Key a door's world on this, not on `node_name`. Not a credential. |
+| `session_limit_seconds` | The effective wall-clock cap for *this* launch — the tighter of the profile's limit and any lower bound the launch itself imposes — so a door can warn before it is cut off. Absent when nothing bounds the run. |
+
+Treat every field as optional and absence as "unknown": that is how the file
+stays compatible as it grows. Two notes on what is deliberately **not** there.
+`node_fingerprint` (the Link identity) is not published yet — the node's own
+identity is not held in the database, so supplying it would mean threading it
+into the door runtime; `node_id` is what a door keying its world on the node
+needs today. And nothing here is a credential or a privilege: no password, no
+email, no user level, no IP address. A door learns who the caller says they
+are, not what they may do.
+
 **MANUAL — outside NetBBS:** create the installation directories and give the
 actual service account read/write/search access. For a service user/group both
 named `netbbs`, for example (substitute your real account names):

@@ -682,12 +682,16 @@ def test_war_dialer_path_probes_run_outside_event_loop(db, lane, player, tmp_pat
 
 
 @pytest.mark.parametrize('unicode_enabled', [False, True])
-def test_war_dialer_metadata_forwards_only_the_existing_unicode_choice(db, player, tmp_path, unicode_enabled):
+def test_metadata_forwards_the_existing_unicode_choice_to_every_door(db, player, tmp_path, unicode_enabled):
+    """Issue #469 widened this: it was War-Dialer-only, and is now the
+    caller's preference every door gets, so a door can match the glyph style
+    they already chose. `war_dialer_owner` stays War-Dialer-only."""
     from netbbs.doors.runtime import _write_door_info
     from netbbs.net.unicode_style_preference import set_unicode_style_enabled
     set_unicode_style_enabled(db, player, unicode_enabled)
     info = json.loads(_write_door_info(db, tmp_path, FakeSession(), player, war_dialer=True).read_text(encoding='utf-8'))
     assert info['unicode_style'] is unicode_enabled
     unrelated = json.loads(_write_door_info(db, tmp_path, FakeSession(), player).read_text(encoding='utf-8'))
-    assert 'unicode_style' not in unrelated and 'war_dialer_owner' not in unrelated
-    assert set(info) - set(unrelated) == {'unicode_style', 'war_dialer_owner'}
+    assert unrelated['unicode_style'] is unicode_enabled
+    assert 'war_dialer_owner' not in unrelated
+    assert set(info) - set(unrelated) == {'war_dialer_owner'}
