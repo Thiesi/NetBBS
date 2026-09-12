@@ -62,7 +62,7 @@ class PresenceRegistry:
         check."""
         return set(self._session_counts)
 
-    def enter_door(self, session: object, door_id: int, door_name: str) -> None:
+    def enter_door(self, session: object, door_id: int, door_name: str, created_at: str) -> None:
         """Record that one *session* is playing `door_name` (issue #470).
 
         Keyed by session rather than by account, because both Who screens
@@ -71,13 +71,17 @@ class PresenceRegistry:
         both claim the door -- inflating the apparent player count and hiding
         which connection a SysOp actually needs to act on.
         """
-        self._doors[session] = (door_id, door_name)
+        self._doors[session] = (door_id, door_name, created_at)
 
     def leave_door(self, session: object) -> None:
         self._doors.pop(session, None)
 
-    def door_of(self, session: object) -> tuple[int, str] | None:
-        """The `(id, name)` of the door this session is in, or None.
+    def door_of(self, session: object) -> tuple[int, str, str] | None:
+        """The `(id, name, created_at)` of the door this session is in, or None.
+
+        The registration timestamp rides along because an id is reusable and a
+        name can be re-registered: only all three together identify the
+        registration this activity actually belongs to.
 
         The id comes back too because a viewer below the door's play level
         must not be told its name: Who's online would otherwise advertise a

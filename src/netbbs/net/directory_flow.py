@@ -18,7 +18,7 @@ from netbbs.chat import ChatHub, DirectChatInvites, PresenceRegistry
 from netbbs.directory import get_vcard, has_bio, is_bio_visible
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_profiles import identity_for_fingerprint, name_key
-from netbbs.doors import get_door
+from netbbs.doors import list_doors
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import reject_unhandled_key
@@ -183,37 +183,40 @@ def _who_entry_name(entry: _WhoEntry) -> str:
     return entry.username or "(unauthenticated)"
 
 
-def _who_entry_description(db: Database, entry: _WhoEntry, presence=None, viewer: User | None = None) -> str:
+def _who_entry_description(db: Database, entry: _WhoEntry, presence=None,
+                           playable: set | None = None) -> str:
     if isinstance(entry, _RemoteWhoEntry):
         return f"on linked node {_remote_who_node_label(db, entry)}"
     when = format_for_display(entry.connected_at, db)
     # Issue #470: which door, not merely that they are in one. Remote entries
     # carry no door -- a linked node tells us presence, not activity.
+    #
+    # `playable` is a pre-resolved set of registrations this viewer may open,
+    # built once through the lane: this runs per row on every redraw, and
+    # `resolve_display_preferences` already documents why a picker's
+    # description callback must not touch `db` itself.
     playing = presence.door_of(entry.session) if presence is not None else None
-    if playing and _door_visible_to(db, viewer, *playing):
+    if playing and playable is not None and playing in playable:
         return f"playing {sanitize_text(playing[1])} -- connected since {when}"
     return f"connected since {when}"
 
 
-def _door_visible_to(db: Database, viewer: User | None, door_id: int, door_name: str) -> bool:
-    """Whether `viewer` may be told this door's name at all.
+def playable_registrations(db: Database, viewer: User) -> set[tuple[int, str, str]]:
+    """Every door registration `viewer` may currently open, as identity triples.
 
-    The door picker already hides a door above the caller's play level, so
-    naming it here would advertise a restricted door -- a SysOp-only one, say
-    -- to someone who cannot open it. A door deleted since is treated as not
-    visible rather than named from a stale entry.
+    Who names the door a session is in only when the viewer could open it
+    themselves -- the same `min_play_level` gate the door picker applies, so
+    Who can never advertise a restricted door to someone it is hidden from.
 
-    The name is checked too, not only the id: `doors.id` is an INTEGER PRIMARY
-    KEY without AUTOINCREMENT, so deleting the highest row frees its id for the
-    next registration. Checking the id alone would authorise a cached name
-    against a *different* door's play level -- letting a public replacement
-    expose the restricted name it replaced.
+    Identity is `(id, name, created_at)` rather than the id alone. `doors.id`
+    is an INTEGER PRIMARY KEY without AUTOINCREMENT, so deleting the highest
+    row frees its id, and a re-registration can reuse both the id and the
+    name; only the registration timestamp distinguishes it from the one whose
+    activity is still cached. Anything deleted, replaced or above the viewer's
+    level simply is not in the set.
     """
-    if viewer is None:
-        return False
-    door = get_door(db, door_id)
-    return (door is not None and door.name == door_name
-            and meets_level(viewer, door.min_play_level))
+    return {(door.id, door.name, door.created_at) for door in list_doors(db)
+            if meets_level(viewer, door.min_play_level)}
 
 
 def _remote_who_node_label(db: Database, entry: _RemoteWhoEntry) -> str:
@@ -464,11 +467,15 @@ async def _caller_who_screen(
     # it could be read. [B]ack on the list itself is the way out.
     last_stable_id: int | None = None
     while True:
+        # Resolved once per draw, through the lane, because the description
+        # callback below runs synchronously for every row on every redraw.
+        playable = (await lane.run(playable_registrations, user) if lane is not None
+                    else playable_registrations(db, user))
         selected = await pick_item(
             session, await _load_entries(),
             name_of=_who_entry_name,
             stable_id_of=_stable_id,
-            description_of=lambda e: _who_entry_description(db, e, presence, user),
+            description_of=lambda e: _who_entry_description(db, e, presence, playable),
             title="Who's online",
             empty_message="No one else is online right now.",
             # Issue #304: the network beyond this node, when the MRC

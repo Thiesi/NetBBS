@@ -135,7 +135,7 @@ async def browse_doors(
         # recruitment a multiplayer door can have on a BBS. Cleared in the
         # `finally` so a crash or a disconnect cannot strand the entry.
         if presence is not None:
-            presence.enter_door(session, door.id, door.name)
+            presence.enter_door(session, door.id, door.name, door.created_at)
         try:
             result = await run_door(session, lane, door, user)
         finally:
