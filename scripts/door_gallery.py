@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import importlib.util
 import json
 import os
 import pathlib
@@ -86,6 +87,10 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 #        hub shows all seven entries at 80x24 and four at 40x12, so `I5` reached
 #        "Your season reports" at one size and a key the picker was ignoring at
 #        another.
+#   `#`  press whichever key the screen offers first, for a walk that wants *an*
+#        entry rather than a named one. The root picker marks the caller's own
+#        holdings `[-]`, so which digit it accepts depends on the fixture's own
+#        history -- naming one there broke the build twice as the fixture grew.
 WALKS: dict[str, list[tuple[str, bytes]]] = {
     "voidrunner": [
         ("Command Deck", b""),
@@ -139,12 +144,13 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Job preview, terms", b"J1?1?N"),
         ("Trade preview", b"T"),
         ("Recruit preview", b"C"),
+        # Recruiting is the one action whose outcome is fixed, so the result
+        # screen it commits to is the same in every panel.
+        ("Action result", b"C" + b"N*" + b"A"),
         ("Crew development", b"S"),
         ("Crew preview", b"S1?"),
         ("Root exchange", b"X"),
-        # Exchange 1 is the one the fixture captured, so the root picker marks it
-        # `[-]`; 2 is the first one still worth attacking.
-        ("Root preview", b"X2?"),
+        ("Root preview", b"X#"),
         ("Garrisons", b"G"),
         ("Exchange control", b"G1?"),
         # The transfer preview and the owner service are both behind the control
@@ -171,8 +177,85 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
 # a fresh world, so the attempt is a certainty rather than a dice roll, and
 # without it every garrison screen was a panel of "No exchanges held" and the
 # switchboard's holdings and income gauges were permanently zero.
-ONBOARDING: dict[str, bytes] = {"voidrunner": b"\rY",
-                                "war_dialer": b"\r\r" + b"X1?" + b"N*" + b"A" + b"\r"}
+ONBOARDING: dict[str, bytes] = {"voidrunner": b"\rY", "war_dialer": b"\r\r"}
+
+# Keys pressed after `seed()` has given the world its company and its past, to
+# put the caller back in the game: dismiss the crackdown receipt the archived
+# season left unread, then capture exchange 2 so the garrison screens exist.
+RESUME: dict[str, bytes] = {"war_dialer": b"\r" + b"X#" + b"N*" + b"A" + b"\r"}
+
+
+def load_door(door: pathlib.Path):
+    """The door as a module, for seeding a world through its own functions."""
+    spec = importlib.util.spec_from_file_location(f"gallery_{door.stem}", door)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    # Registered before it runs: `@dataclass` resolves a field's type through
+    # `sys.modules[cls.__module__]`, which is not there yet otherwise.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def seed_war_dialer(door: pathlib.Path, state: pathlib.Path) -> None:
+    """Rivals, receipts and one closed season.
+
+    A gallery built from a brand-new world reviews empty states: the rival
+    directory says there are no other crews, recon has nothing to choose, the
+    feed and the log are empty, and the season archive and Hall of Fame have no
+    rows -- so the rebuilt rival table, toned receipts, podium and recognition
+    cards appear in no panel at all.
+
+    Everything that can be done by the door's own functions is: players are
+    created with `load_or_create_player`, receipts with `record_event`, and the
+    season is closed by rewinding the anchor and letting `_settle_world` archive
+    it exactly as a real rollover would. The rank counters are written directly,
+    because the only other way to give a rival a Rank is to play dozens of turns
+    for them, and a fixture is allowed to start partway in.
+    """
+    game = load_door(door)
+    conn = game.connect(state / "war-dialer.db")
+    try:
+        now = game.now_utc()
+        season = game.current_world_season(conn, now)
+        for user_id, handle in ((2, "Kilobaud"), (3, "Nightline")):
+            game.load_or_create_player(conn, user_id, handle, now, season)
+        with conn:
+            # Old enough to be raidable, and ranked enough to take a medal.
+            conn.execute("UPDATE players SET created_at=?, crew_recruited_total=12, "
+                         "successful_raids=4, successful_jobs=6 WHERE user_id=2",
+                         (game.to_iso(now - game.GRACE * 3),))
+            conn.execute("UPDATE players SET created_at=?, crew_recruited_total=3 "
+                         "WHERE user_id=3", (game.to_iso(now - game.GRACE * 3),))
+            # Close the season the way a rollover does: rewind the anchor and let
+            # the door's own settle archive it, podium, receipts and all.
+            anchor = game.get_or_create_season_anchor(conn, now)
+            conn.execute("INSERT INTO meta(key,value) VALUES ('season_anchor',?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         (game.to_iso(anchor - game.SEASON),))
+        with game._write_transaction(conn):
+            game._settle_world(conn, game.now_utc())
+        now = game.now_utc()
+        with conn:
+            # The new season's live state: a rival holding so the ring shows one,
+            # and ranks so the standings table and the ladder have something in
+            # them. Counters again, for the same reason as above.
+            conn.execute("UPDATE players SET crew_recruited_total=12, successful_raids=4, "
+                         "successful_jobs=6 WHERE user_id=2")
+            conn.execute("UPDATE players SET crew_recruited_total=3 WHERE user_id=3")
+            conn.execute("UPDATE exchanges SET controller_user_id=2, garrison=3, "
+                         "controlled_since=? WHERE id=3", (game.to_iso(now),))
+        game.record_event(conn, 1, "Kilobaud",
+                          "Kilobaud raided you and got away with $340! "
+                          "All-attacker raid shield: 24 hours.", now)
+        game.record_event(conn, 1, None,
+                          "Rooted 212-555 Uptown Exchange; +$2/hour and +50 Rank.", now,
+                          seen=True)
+    finally:
+        conn.close()
+
+
+SEED = {"war_dialer": seed_war_dialer}
 
 # Every preset a caller can choose, applied to the fixture's copy rather than
 # passed as a flag: Voidrunner keeps its display style in the career (all four of
@@ -328,6 +411,25 @@ class Door:
                 return row
         return ""
 
+    def press_first_offered(self, *, limit: int = 24) -> None:
+        """Press the first key the screen offers, paging forward to find one.
+
+        The root picker's first page can legitimately offer nothing at forty
+        columns: the caller's own holdings are marked `[-]`, and one unselectable
+        entry is most of a twelve-row page, so the choices are on page two.
+        """
+        for _ in range(limit):
+            keys = re.findall(r"\[(\w)\]", self.offered())
+            if keys:
+                self.press(keys[0].encode())
+                return
+            before = last_screen(self.read())
+            self.press(b"N")
+            if last_screen(self.read()) == before:
+                break
+        raise SystemExit(f"{self.door.name} offered no key at {self.size}:\n"
+                         f"{self.offered()!r}")
+
     def press_when_offered(self, key: bytes, *, limit: int = 24) -> None:
         """Page forward until the screen offers `key`, then press it.
 
@@ -413,6 +515,10 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
                 running.press_when_offered(key)
                 index += 2
                 continue
+            if key == b"#":
+                running.press_first_offered()
+                index += 1
+                continue
             running.press(key, expect=expect)
             index += 1
         screen = running.read()
@@ -477,6 +583,9 @@ def base_fixture(door_name: str, door: pathlib.Path, root_dir: pathlib.Path,
         state.mkdir()
         # First-launch keys are the one place a key may find nothing to answer.
         capture(door, state, ONBOARDING[door_name], 80, 24, {}, expect=False)
+        if door_name in SEED:
+            SEED[door_name](door, state)
+            capture(door, state, RESUME[door_name], 80, 24, {})
         # Move the state *into* the fixture directory entry by entry rather than
         # moving the directory itself: if Windows would not let the old fixture
         # go, `shutil.move` treats it as a destination and nests the staging

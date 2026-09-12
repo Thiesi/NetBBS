@@ -2573,9 +2573,21 @@ def pips(p: Palette, remaining: int, total: int, *, cap: int = 15) -> str:
 
 
 def dots(p: Palette, filled: int, total: int, *, cap: int = 6, style: str = "") -> str:
-    """Crew or defence strength as `●●●○`, capped so a large crew stays a chip."""
-    total = max(0, min(int(total), cap))
-    filled = max(0, min(int(filled), total))
+    """Crew or defence strength as `●●●○`, capped so a large pool stays a chip.
+
+    The cap scales both halves together. Clamping them independently lit every
+    dot for ten free crew beside ten posted -- a gauge reading "all of it" for
+    exactly half, and showing no change at all across a large transfer.
+    """
+    total, filled = max(0, int(total)), max(0, int(filled))
+    filled = min(filled, total)
+    if total > cap:
+        scaled = int(round(filled * cap / total))
+        if filled and not scaled:
+            scaled = 1  # some of it is never none of it
+        if scaled == cap and filled < total:
+            scaled = cap - 1  # and not all of it is never all of it
+        filled, total = scaled, cap
     return (sty(style or p.phosphor, gl("crew_on") * filled)
             + sty(p.phosphor_dim, gl("crew_off") * (total - filled)))
 
@@ -3352,11 +3364,16 @@ def dashboard_notes(state: DashboardState, now: datetime) -> list[str]:
 
 
 def heat_chip(p: Palette, player: Player) -> str:
-    """The warning beside the Heat gauge, or nothing when there is no roll."""
-    projected = player.heat + TRADE_WAREZ_HEAT
-    if player.heat >= HEAT_BUST_THRESHOLD:
-        return sty(p.alarm + BOLD, f"{gl('rise')} bust risk")
+    """The warning beside the Heat gauge, or nothing when there is no roll.
+
+    Judged on what a trade *would leave*, not on where Heat stands: at 79 Heat a
+    trade crosses the threshold and rolls, so "near bust" was the wrong word for
+    it -- and the advice on the same screen already told the caller to wait.
+    """
+    projected = player.heat + adjusted_heat(player, "trade", TRADE_WAREZ_HEAT)
     if projected > HEAT_BUST_THRESHOLD:
+        return sty(p.alarm + BOLD, f"{gl('rise')} bust risk")
+    if projected > HEAT_BUST_THRESHOLD - 10:
         return sty(p.amber, f"{gl('rise')} near bust")
     return ""
 
@@ -4208,11 +4225,16 @@ def exchange_entry_rows(p: Palette, exchange: Exchange, player: Player | None,
     chunks = [label_value(p, "owner", _fit(owner_label(exchange), 20), style=style),
               sty(p.grey, "defence") + " " + dots(p, exchange.garrison, 4, cap=4)
               + sty(p.grey, f" {defence}"),
-              label_value(p, "income", f"${exchange.income_per_hour}/hr", style=p.amber),
-              label_value(p, "heat", f"+{base_heat}", style=p.alarm)]
-    if player is not None:
-        chance = 1.0 if not exchange_occupied(exchange) else success_chance(player.crew, defence)
-        chunks.append(label_value(p, "odds", f"{chance:.0%}", style=p.cyan))
+              label_value(p, "income", f"${exchange.income_per_hour}/hr", style=p.amber)]
+    # A narrow terminal spends three rows on an entry rather than five: the Heat
+    # and the odds are on the preview this entry opens, one keystroke away, and
+    # an entry taller than its page is an entry a caller has to scroll to pick.
+    if width >= 44:
+        chunks.append(label_value(p, "heat", f"+{base_heat}", style=p.alarm))
+        if player is not None:
+            chance = (1.0 if not exchange_occupied(exchange)
+                      else success_chance(player.crew, defence))
+            chunks.append(label_value(p, "odds", f"{chance:.0%}", style=p.cyan))
     rows += compose(chunks, width)
     return rows
 
@@ -4435,20 +4457,24 @@ def action_odds(action: str, player: Player, target, *, operation: bool = False)
 
 
 def preview_heat(action: str, player: Player, target, *, operation: bool = False) -> float:
-    """The Heat this attempt would add, after specialty and support effects.
+    """The *signed* change to Heat this attempt would commit.
 
     An owner service is whichever service the exchange's role actually performs:
-    only a Warez Hub adds Heat and rolls for a bust, and a preview that showed
-    one above terms correctly saying there is no roll would be advertising a
-    risk the commit does not take.
+    a Warez Hub adds Heat and rolls for a bust, a Carrier Switch changes none,
+    and a Public PBX's Lay Low *removes* up to fifteen -- which is the whole
+    reason a caller opens it. Reporting that as no change left the prominent
+    gauge at the Heat the terms immediately below promised to reduce.
     """
+    if action == "service" and isinstance(target, Exchange):
+        if target.role == "pbx":
+            return -min(15, player.heat)
+        return adjusted_heat(player, action, 4) if target.role == "hub" else 0
     job = job_terms(target if isinstance(target, JobChoice) else JobChoice()) if action == "job" else None
     base = {"trade": TRADE_WAREZ_HEAT, "recruit": 0, "job": job[4] if job else JOB_HEAT,
             "raid": RAID_HEAT,
             "root": exchange_terms(target)[2] if action == "root" and isinstance(target, Exchange)
             else ROOT_EXCHANGE_HEAT,
-            "service": 4 if isinstance(target, Exchange) and target.role == "hub" else 0,
-            "crew": 0, "recon": 0}.get(action, 0)
+            "service": 0, "crew": 0, "recon": 0}.get(action, 0)
     return adjusted_heat(player, action, base)
 
 
@@ -4457,9 +4483,9 @@ def stakes_cards(p: Palette, action: str, player: Player, target, width: int, *,
                  terms: list[str] | None = None) -> list[tuple[str, list[str]]]:
     """What a caller is being asked to accept, before the terms spell it out.
 
-    Cost in amber, odds as a bar, the Heat it would add as a climbing gauge and
-    a risk badge on top -- then the authoritative terms underneath, unchanged.
-    Nothing here decides anything: Back still spends nothing.
+    Cost in amber, odds as a bar, the Heat the commit would leave as a climbing
+    gauge and a risk badge on top -- then the authoritative terms underneath,
+    unchanged. Nothing here decides anything: Back still spends nothing.
     """
     cost = action_cost(action, player, target)
     gauge = max(6, min(18, width // 3))
@@ -4480,7 +4506,7 @@ def stakes_cards(p: Palette, action: str, player: Player, target, width: int, *,
                            + " " + sty(p.cyan, f"{odds:.0%}")], width)
     heat = preview_heat(action, player, target, operation=operation)
     if action != "recruit":
-        projected = player.heat + heat
+        projected = clamp(player.heat + heat, 0, 10_000)
         if rolls_for_bust(action, target):
             chance = min(HEAT_BUST_CHANCE_CAP,
                          max(0, projected - HEAT_BUST_THRESHOLD) * HEAT_BUST_CHANCE_PER_POINT)
@@ -4492,7 +4518,8 @@ def stakes_cards(p: Palette, action: str, player: Player, target, width: int, *,
         heat_row = (sty(p.grey, "HEAT") + " " + meter(p, projected, 100, gauge, climb=True)
                     + " " + sty(p.ink, f"{player.heat:.0f}"))
         if heat:
-            heat_row += sty(p.alarm, f" +{heat:g}") + sty(p.grey, f" = {projected:.0f}")
+            heat_row += (sty(p.phosphor if heat < 0 else p.alarm, f" {heat:+g}")
+                         + sty(p.grey, f" = {projected:.0f}"))
         stakes += compose([heat_row, risk], width)
     blocked = (crew_block_reason(player, target) if action == "crew"
                else action_block_reason(action, player, target))

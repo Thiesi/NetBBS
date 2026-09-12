@@ -3556,3 +3556,69 @@ def test_raid_authorization_stays_above_the_ui_boundary():
     # And the direction of the dependency: the domain helper takes no palette.
     assert "p: Palette" not in source[source.index("def raid_block"):
                                      source.index("def raid_eligibility_reason")]
+
+
+def test_lay_low_previews_the_heat_it_will_leave(tmp_path):
+    """A PBX's service removes Heat, which is the reason a caller opens it.
+
+    Reporting it as no change left the prominent gauge at the Heat the terms
+    immediately below promised to reduce: 78 above "remove up to 15 Heat".
+    """
+    conn, now = _painted_world(tmp_path, "laylow.db")
+    palette = wd.Palette(True)
+    pbx = next(e for e in wd.list_exchanges(conn, 1) if e.role == "pbx")
+    conn.execute("UPDATE exchanges SET controller_user_id=1, garrison=1, controlled_since=? "
+                 "WHERE id=?", (wd.to_iso(now), pbx.id))
+    conn.execute("UPDATE players SET heat=78 WHERE user_id=1")
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    pbx = next(e for e in wd.list_exchanges(conn, 1) if e.id == pbx.id)
+    assert wd.preview_heat("service", player, pbx) == -15
+    stakes = next(rows for heading, rows in wd.stakes_cards(palette, "service", player, pbx, 72)
+                  if heading == "STAKES")
+    text = _ANSI_RE.sub("", " ".join(stakes))
+    assert "78 -15 = 63" in text, text
+    # A reduction is not an alarm.
+    heat_row = next(row for row in stakes if "HEAT" in _ANSI_RE.sub("", row))
+    assert _colour_before(heat_row, "-15") == palette.phosphor
+    # Less Heat than the caller has, on the gauge itself.
+    assert heat_row.count(wd.gl("meter_on")) < wd.meter(palette, 78, 100, 18).count(wd.gl("meter_on"))
+    conn.close()
+
+
+def test_capped_dots_keep_their_proportion():
+    """A gauge that lights every dot for half a pool is worse than no gauge."""
+    palette = wd.Palette(True)
+    lit = wd.gl("crew_on")
+    half = wd.dots(palette, 10, 20, cap=6)
+    assert half.count(lit) == 3, _ANSI_RE.sub("", half)
+    assert wd.dots(palette, 20, 20, cap=6).count(lit) == 6  # all of it is all of it
+    assert wd.dots(palette, 0, 20, cap=6).count(lit) == 0  # and none is none
+    assert wd.dots(palette, 1, 40, cap=6).count(lit) == 1  # some is never none
+    assert wd.dots(palette, 39, 40, cap=6).count(lit) == 5  # and not-all is never all
+    # A transfer at the top of the range still moves the gauge.
+    before = wd.dots(palette, 10, 20, cap=6).count(lit)
+    after = wd.dots(palette, 14, 20, cap=6).count(lit)
+    assert after > before
+
+
+@pytest.mark.parametrize("heat,expected", [(0, ""), (72, "near bust"), (79, "bust risk"),
+                                           (95, "bust risk")])
+def test_the_heat_chip_warns_about_what_a_trade_would_leave(tmp_path, heat, expected):
+    """At 79 Heat a trade crosses the threshold and rolls.
+
+    Judging the chip on where Heat stands called that "near bust" while the
+    advice on the same screen told the caller to wait for a risk-free trade.
+    """
+    conn, now = _painted_world(tmp_path, f"chip-{heat}.db")
+    conn.execute("UPDATE players SET heat=?, specialty='', support='' WHERE user_id=1", (heat,))
+    conn.commit()
+    palette = wd.Palette(True)
+    player = wd.refresh_player(conn, 1, now)
+    chip = _ANSI_RE.sub("", wd.heat_chip(palette, player))
+    assert (expected in chip if expected else chip == ""), (heat, chip)
+    if expected == "bust risk":
+        # The same screen's advice agrees: it offers a wait, not a free trade.
+        state = wd.dashboard_state(conn, 1, now)
+        assert any("without a bust roll" in line for line in wd.next_steps(state, now))
+    conn.close()

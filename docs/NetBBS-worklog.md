@@ -4968,6 +4968,27 @@ share cannot live below the file's UI-layer marker: a presentation-only edit
 would otherwise be able to change whether a raid is permitted. A test asserts the
 source order, because that is the actual invariant.
 
+**A gauge that caps has to cap proportionally.** Clamping the filled count and
+the total independently lit every dot for ten available crew beside ten posted --
+a gauge reading "all of it" for exactly half, and showing no movement at all
+across a large transfer. `dots` and `meter` both scale the fill to the capped
+total, keeping "some is never none" and "not all is never all".
+
+**A preview's Heat is a signed change, not an addition.** A Public PBX's Lay Low
+*removes* up to fifteen, which is the whole reason a caller opens it; treating
+every service as an addition left the prominent gauge at the Heat the terms
+immediately below promised to reduce. And a warning chip is judged on what the
+action would *leave*: at 79 Heat a trade crosses the threshold and rolls, so
+"near bust" was the wrong word for it while the advice on the same screen already
+told the caller to wait.
+
+**A gallery fixture that grows invalidates any walk that names a number.** `X1?`
+broke when the fixture captured exchange 1, and `X2?` broke when it captured 2 --
+the picker marks the caller's own holdings `[-]`. A walk that wants *an* entry now
+says `#` (press whichever key the screen offers, paging to find one) instead of
+naming a digit. Keep a digit only where the identity matters, such as the scene
+hub's seventh entry being the Display screen.
+
 **A test that drives the door by reading its own output has to read what a caller
 reads.** Once a bar is styled segment by segment, `[A] Act` is a hotkey in amber
 followed by a label in mint and is no longer a contiguous run of bytes on the
