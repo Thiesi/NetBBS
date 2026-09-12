@@ -125,6 +125,12 @@ The standing principle is:
   row in its paginator before it was ever printed. Each door's contract is
   normative for that door: see "the War Dialer presentation contract" and "The
   Voidrunner presentation contract" in the design document.
+- **The public site's source is `web/`, not a published artifact.** Both pages
+  of www.netbbs.org live in the repo and are reviewed as a diff; `web/README.md`
+  has the deploy procedure, the checkers to run afterwards, and the line-ending
+  and capture rules that are easy to get wrong. Before v7.2.0 the source was two
+  Claude Artifacts, which made every edit cost a full re-read of 650 KB of
+  per-character markup; those copies are historical now.
 - **Treat migrations as immutable.** Never edit a shipped migration. Test
   migrations against realistic related data, especially before rebuilding a
   table which is a foreign-key parent.
