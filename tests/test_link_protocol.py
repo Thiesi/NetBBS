@@ -3473,3 +3473,20 @@ def test_secondhand_descriptor_refresh_is_gated_on_protocol_version(tmp_path, cl
     future = EndpointDescriptor(envelope=envelope, signature=bob.identity.signing_key.sign(canonical_bytes(envelope)))
     assert me.handle_peer_list(carol.identity.fingerprint, PeerListMessage(descriptors=[future])) == []
     assert me.peers[bob.identity.fingerprint].descriptor.payload["created_at"] == "2026-09-03T10:00:00+00:00"
+
+
+def test_parse_aware_timestamp_refuses_an_unrepresentable_instant():
+    """Codex review of #500: `fromisoformat` accepts
+    `0001-01-01T00:00:00+23:59` quite happily -- it is converting it to
+    UTC that runs off the end of the representable range, so the failure
+    arrives from `astimezone` as `OverflowError`, not from parsing.
+
+    Every remotely-supplied timestamp in `netbbs.link.protocol` goes
+    through this helper, including on the unauthenticated-reachable
+    inventory and trust-pull paths, so anything it can raise other than
+    `LinkProtocolError` escapes a handler written for that one type."""
+    from netbbs.link.protocol import LinkProtocolError, _parse_aware_timestamp
+
+    for value in ("0001-01-01T00:00:00+23:59", "9999-12-31T23:59:59-23:59"):
+        with pytest.raises(LinkProtocolError, match="representable"):
+            _parse_aware_timestamp(value, field_name="test.created_at")

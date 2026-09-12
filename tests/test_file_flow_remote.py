@@ -287,3 +287,47 @@ def test_fetch_reports_an_unreachable_origin(db, lane, alice, node_identity, rem
         "SELECT fetched_file_id FROM remote_files WHERE file_id = ?", (remote_file.file_id,)
     ).fetchone()
     assert row["fetched_file_id"] is None
+
+
+def test_fetch_reports_a_withdrawn_file_instead_of_a_generic_transfer_error(
+    db, lane, alice, node_identity, remote_node_identity, monkeypatch,
+):
+    """Design doc §11.2, issue #479: the fetch a caller actually started
+    must say *why* it cannot work -- the origin no longer has the file --
+    rather than reporting the generic transfer failure that invites
+    retrying something that can never succeed."""
+    import netbbs.link.transport as transport_module
+    from netbbs.link.events import build_file_withdrawal
+    from netbbs.link.store import save_peer
+
+    area, remote_file = _carried_area_with_one_remote_file(db, node_identity, remote_node_identity)
+    origin_node = LinkNode(identity=remote_node_identity)
+    peer = origin_node.handle_hello(origin_node.build_hello(
+        addresses=[{"protocol": "http", "address": "127.0.0.1", "port": 9}],
+        outgoing_only=False,
+        created_at="2026-09-04T09:30:00+00:00",
+    ))
+    save_peer(db, peer)
+    link_context = _link_context_for(node_identity)
+    link_context.link_node.peers[peer.fingerprint] = peer
+
+    withdrawal = build_file_withdrawal(
+        signing_identity=remote_node_identity.signing_key,
+        file_id=remote_file.file_id,
+        requester_fingerprint=node_identity.fingerprint,
+        transfer_id="irrelevant-here",
+        request_nonce="irrelevant-here",
+        created_at="2026-09-04T09:31:00+00:00",
+    )
+
+    async def gone(*args, **kwargs):
+        raise transport_module.RemoteFileWithdrawnError("gone", withdrawal)
+
+    monkeypatch.setattr(transport_module, "fetch_next_file_chunk", gone)
+    session = FakeSession(["/remote", "0", "1", "y"])
+
+    asyncio.run(file_flow._show_area(session, lane, area, alice, link_context=link_context))
+
+    output = _written(session)
+    assert "no longer has" in output
+    assert "Removed from this area's catalogue" in output

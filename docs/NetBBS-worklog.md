@@ -895,6 +895,108 @@ themselves prove propagation while proving nothing about whether anything calls
 it. Drive the flow and assert against `load_own_file_area_events`, which is
 what `netbbs.link.sync` actually pushes.
 
+### A catalogue entry outliving its file (issue #479)
+
+Publishing descriptors made a peer's catalogue able to describe a file the
+origin has since deleted or swept. The fix is the origin's signed 410 answer to
+a chunk request — `file_withdrawal` — not a gossiped tombstone.
+
+Why not the tombstone the boards side has: a `file_descriptor_tombstone` is
+retained and re-offered forever, and an area with `max_file_age_days` produces
+one per swept file indefinitely. That grows the own-events list without bound,
+in the same place issue #478 had just finished bounding. The point-to-point
+answer covers deletion and expiry together with no retained state at all.
+
+**Sign anything that deletes remote state — and then check more than the
+signature.** A bare 410 would have been enough to make a peer drop a catalogue
+row, and anything that intercepted or misdirected the request could produce one.
+But a signature alone is a weak check here for two reasons worth remembering
+whenever a signed object authorizes a deletion:
+
+- **another signed object may satisfy the same predicate.** The `file_descriptor`
+  being withdrawn is gossiped mesh-wide and names the same `file_id`, and until
+  the origin rotates its signing key it is signed by the very key the later
+  object is verified against — which is exactly when the confusion is
+  exploitable. Only `object_type` tells it from a withdrawal. Validate the
+  envelope — protocol version, object type, payload shape — before the signature
+  is worth anything. The gossiped event classes get this for free because
+  `handle_events` dispatches on `object_type`; anything parsed outside that
+  dispatch does not, and `from_dict` is where it belongs.
+- **a signature is durable, so it replays.** Bind the object to the *request*
+  it answers, and check `created_at` freshness besides, the way
+  `InventoryRequest` does. The binding has to be something that varies per
+  request: `requester_fingerprint` narrows it to a node and `transfer_id` to a
+  fetch, but `transfer_id` is content-derived from `(file_id, requester)` and is
+  therefore identical across every retry — relying on it leaves the whole
+  freshness window open to replay. The chunk request's own authorization nonce
+  is what varies, so the withdrawal echoes it and the requester checks it.
+  Freshness is then an outer bound, not the binding.
+
+The 410 body carrying no usable withdrawal is an ordinary failed fetch, and so
+is an envelope that cannot be canonicalized: `canonical_bytes` refuses floats,
+and `netbbs_protocol: 1.0` compares equal to `1` and so passes every shape
+check, so a fabricated response could abort a fetch with an uncaught
+`ContentIdError` before its invalid signature was ever examined. Verification of
+an uncanonicalizable envelope is a verification *failure*. This applies to the
+signed objects parsed straight off an HTTP response — `file_chunk_descriptor`
+and `file_withdrawal` — which have nothing between the wire and the verify call,
+unlike the gossiped types that reach `handle_events`.
+
+**"Signed by the origin" is an identity, not a key.** A `file_descriptor` is
+immutable and keeps the signature it was created with; an operational signing
+key rotates. Anything verifying a later object against "the key that signed the
+descriptor" rejects every legitimate object issued after a rotation. Resolve the
+current key from the origin's transition chain, and say *identity* in prose that
+a second implementation might read as normative.
+
+**Deleting a `remote_files` row is not a bare DELETE.** `link_file_transfers`
+holds a foreign key to it, and a partial transfer owns a staging file nothing
+else would ever return for. Remove the chunk records, the transfer rows and the
+row itself in one transaction, then the staging files — never the other way
+round, or a failed commit strands a transfer that still believes it has one.
+
+**A deletion that races in-flight work has to be handled where the work lands,
+at every ordering.** Two local sessions fetching the same remote file share one
+deterministic transfer row, and their network requests happen outside the
+database lane, so a withdrawal answering one can delete that row while the
+other's work is still in the air. Three orderings, three guards, and finding one
+of them is not finding the class:
+
+- the withdrawal lands mid-transfer — `apply_received_chunk` checks the row
+  still exists before writing, or it recreates the staging file on the way to a
+  foreign-key violation, leaking the file and surfacing a raw
+  `sqlite3.IntegrityError` to a caller that only handles `FileTransferError`;
+- the withdrawal lands before the transfer starts — `get_or_create_transfer`
+  checks the `remote_files` parent still exists, for the same reason;
+- the *fetch* lands first — `withdraw_remote_file` re-reads `fetched_file_id`
+  from the row rather than trusting the caller's `RemoteFile`, which is a
+  snapshot taken before a network round trip. Trusting it deletes the catalogue
+  row of a file this node has already fetched, verified and promoted.
+
+The general rule: **a domain object that crossed a network call is stale by
+definition.** Re-read anything the decision actually turns on, inside the
+transaction that acts on it.
+
+**A status only one code path can produce must not be written anywhere else.**
+An empty file's transfer was marked `completed` at row creation, but `completed`
+is what `_finalize_transfer` produces -- so the row claimed an outcome that had
+never happened: no `files` row, no `fetched_file_id`, and a caller told the file
+was fetched and downloadable when it was neither. Empty files take the ordinary
+path for their one empty chunk instead.
+
+**Every remotely-supplied timestamp must fail as `LinkProtocolError`.**
+`_parse_aware_timestamp` is the single funnel for them, including on routes an
+unauthenticated peer can reach, and callers are written to catch that one type.
+`datetime.fromisoformat` accepts `0001-01-01T00:00:00+23:59` without complaint;
+it is `astimezone` that runs off the representable range and raises
+`OverflowError`, so the failure does not come from the parse step where one
+would look for it.
+
+**The trade-off is deliberate and belongs in the docs, not in a comment.** A
+stale entry stays listed until somebody tries to fetch it. Listing reports what
+the origin last announced; the first fetch attempt reconciles that with what it
+still holds, permanently.
+
 ### Local mail
 
 Local asynchronous mail is distinct from real-time `/msg` and future Link

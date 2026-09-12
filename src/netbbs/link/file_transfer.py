@@ -44,6 +44,22 @@ class FileTransferError(Exception):
     catalogued hash."""
 
 
+class FileNoLongerHeldError(FileTransferError):
+    """Raised by `build_chunk_for_serving` when this node has no `files`
+    row for the requested `file_id` at all -- design doc §11.2, issue
+    #479.
+
+    Deliberately its own type rather than the generic message it used to
+    share with an out-of-range `chunk_index`. "This file is gone" is the
+    one serving-side failure a requester can act on: it means that
+    requester's catalogue entry has outlived the file it describes (the
+    origin deleted it, or `netbbs.files.entries._sweep_expired_files`
+    purged it past its area's grace period), and nothing else tells it
+    so. Every other failure here is a bad request, where the requester's
+    own state is fine.
+    """
+
+
 def compute_transfer_id(file_id: str, requester_fingerprint: str) -> str:
     """Deterministic `transfer_id` (design doc §11.3) -- a resumed or
     retried fetch of the same file by the same requester always
@@ -104,17 +120,64 @@ def get_or_create_transfer(
     The requester's own row tracking a fetch of `remote_file` -- created
     once, on first request, and found again (unchanged) on every
     subsequent call for the same `(remote_file, requester_fingerprint)`
-    pair, since `transfer_id` is deterministic. A file with `size_bytes
-    == 0` starts (and immediately reports) `'completed'` with no chunk
-    ever requested -- there is nothing to fetch.
+    pair, since `transfer_id` is deterministic.
+
+    An empty file is fetched like any other, one round trip for its one
+    empty chunk (Codex review of #500). Short-circuiting it to
+    `'completed'` at creation looked harmless -- there are no bytes to
+    move -- but `'completed'` is the state `_finalize_transfer` produces,
+    and nothing had produced it: no `files` row, no `fetched_file_id`, so
+    the caller was told the file was "fetched and verified, available via
+    /download now" when nothing had been fetched and nothing was
+    downloadable. It also meant an empty file never reached its origin at
+    all, so a withdrawal (§11.2) could not be delivered for one and its
+    catalogue entry stayed phantom forever. `build_chunk_for_serving`
+    already serves chunk 0 of a zero-byte file, so this needs nothing new
+    on the serving side.
+
+    Nothing repairs a `'completed'` row left behind by the old
+    short-circuit: no database in existence has one (confirmed with the
+    SysOp), so a repair path would be code that can never run.
+
+    A `'failed'` transfer, by contrast, is reopened here (Codex review of
+    #500). `_finalize_transfer` records that status when reassembled
+    content does not match the catalogue's own hash -- a real outcome,
+    and one nothing else ever cleared, so selecting the file again
+    returned the old failure without contacting anybody: the fetch could
+    never be retried, and if the origin had since dropped the file its
+    withdrawal could never arrive either. Reopening makes the retry a
+    caller asked for actually happen.
+
+    Raises `FileTransferError` if `remote_file`'s catalogue row is gone
+    (Codex review of #500). `remote_file` is a snapshot a caller picked
+    out of a listing, and another session's verified `file_withdrawal`
+    can remove that row in between -- two callers browsing the same area
+    is ordinary. The insert below would otherwise violate
+    `link_file_transfers`' foreign key and raise `sqlite3.IntegrityError`
+    at a UI that handles `FileTransferError` and nothing else. This is
+    the mirror of `apply_received_chunk`'s own vanished-row check; that
+    one covers a withdrawal arriving mid-transfer, this one covers it
+    arriving before the transfer starts.
     """
     transfer_id = compute_transfer_id(remote_file.file_id, requester_fingerprint)
     existing = get_transfer(db, transfer_id)
-    if existing is not None:
+    if existing is not None and existing.status != "failed":
         return existing
+    if existing is not None:
+        _reopen_failed_transfer(db, existing)
+        return get_transfer(db, transfer_id)
+
+    still_catalogued = db.connection.execute(
+        "SELECT 1 FROM remote_files WHERE file_id = ?", (remote_file.file_id,)
+    ).fetchone()
+    if still_catalogued is None:
+        raise FileTransferError(
+            f"{remote_file.filename!r} is no longer in this area's catalogue -- its origin "
+            "withdrew it"
+        )
 
     now = utc_now_iso()
-    status = "completed" if remote_file.size_bytes == 0 else "in_progress"
+    status = "in_progress"
     db.connection.execute(
         """
         INSERT INTO link_file_transfers
@@ -126,6 +189,29 @@ def get_or_create_transfer(
     )
     db.connection.commit()
     return get_transfer(db, transfer_id)
+
+
+def _reopen_failed_transfer(db: Database, transfer: TransferState) -> None:
+    """Clear a failed transfer back to a fresh start (design doc §11.3;
+    Codex review of #500).
+
+    Everything the failed attempt accumulated has to go: its chunk
+    records, its byte count, and its staging path -- `_finalize_transfer`
+    already removed the staging file itself when the reassembly failed,
+    so the stored path points at nothing. Keeping any of it would either
+    trip the already-applied dedup or resume from a byte count no file
+    backs.
+    """
+    with db.connection:
+        db.connection.execute(
+            "DELETE FROM link_file_transfer_chunks WHERE transfer_id = ?", (transfer.transfer_id,)
+        )
+        db.connection.execute(
+            """UPDATE link_file_transfers
+               SET status = 'in_progress', bytes_received = 0, temp_path = NULL, updated_at = ?
+               WHERE transfer_id = ?""",
+            (utc_now_iso(), transfer.transfer_id),
+        )
 
 
 def apply_received_chunk(
@@ -147,7 +233,9 @@ def apply_received_chunk(
     transfer's current state unchanged -- the exact-dedup mechanism the
     design doc names for a duplicate/resent chunk request.
 
-    Raises `FileTransferError` if the received bytes don't hash to
+    Raises `FileTransferError` if the transfer row has gone while this
+    chunk was in flight (its origin withdrew the file -- see below), if
+    the received bytes don't hash to
     `claimed_chunk_sha256` (the requester's own integrity check,
     independent of the signature covering the *claim*), if `chunk_index`
     doesn't match what this transfer actually expects next (out-of-order
@@ -156,6 +244,33 @@ def apply_received_chunk(
     already applies), or if the reassembled whole-file content doesn't
     match `remote_file.sha256` once the last chunk lands.
     """
+    # The transfer may have been withdrawn while this chunk was in
+    # flight (design doc 11.2, issue #479; Codex review of #500): two
+    # local sessions fetching the same remote file share this one
+    # deterministic row, and a withdrawal answering one of them deletes
+    # it -- along with the staging file -- before the other's response
+    # gets here. Checked first, so nothing below recreates that staging
+    # file only to fail its own insert on a foreign key that no longer
+    # has a parent, leaking the file and surfacing a raw SQLite error to
+    # a caller. FileTransferError is what every caller of this function
+    # already handles.
+    current = get_transfer(db, transfer.transfer_id)
+    if current is None:
+        raise FileTransferError(
+            f"transfer {transfer.transfer_id!r} no longer exists -- the file's origin withdrew it "
+            "while this chunk was in flight"
+        )
+    # Every decision below reads the *stored* transfer, not the caller's
+    # (Codex review of #500). `transfer` is a snapshot taken before a
+    # network round trip, so it is stale by definition -- and the row can
+    # have been reset underneath it since: another session's response
+    # failing whole-file verification, then a retry reopening the
+    # transfer. Validating `chunk_index` against the snapshot would
+    # accept that pre-reset response at its old position, append it to a
+    # fresh staging file as though it were the first chunk, and fail the
+    # reopened attempt too.
+    transfer = current
+
     already_applied = db.connection.execute(
         "SELECT 1 FROM link_file_transfer_chunks WHERE transfer_id = ? AND chunk_index = ?",
         (transfer.transfer_id, chunk_index),
@@ -273,13 +388,17 @@ def build_chunk_for_serving(
     requested chunk's raw bytes plus `(chunk_size, total_size, is_last)`
     for the caller to sign into a `FileChunkDescriptor`.
 
-    Raises `FileTransferError` for an unknown `file_id` or an
-    out-of-range `chunk_index` -- a malformed/abusive request is refused
-    outright, never silently served a truncated or empty chunk.
+    Raises `FileNoLongerHeldError` for a `file_id` this node holds no row
+    for at all -- the one failure the requester can act on (issue #479:
+    its catalogue entry has outlived the file, so the caller signs a
+    `file_withdrawal` in reply) -- and a plain `FileTransferError` for an
+    out-of-range `chunk_index`. A malformed/abusive request is refused
+    outright either way, never silently served a truncated or empty
+    chunk.
     """
     row = db.connection.execute("SELECT * FROM files WHERE file_id = ?", (file_id,)).fetchone()
     if row is None:
-        raise FileTransferError(f"no such file_id known to this node: {file_id!r}")
+        raise FileNoLongerHeldError(f"no such file_id known to this node: {file_id!r}")
 
     total_size = row["size_bytes"]
     chunk_size = max(1, min(max_chunk_size, _DEFAULT_CHUNK_SIZE))
