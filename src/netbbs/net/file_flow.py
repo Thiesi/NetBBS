@@ -126,9 +126,12 @@ from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.rendering import (
     ERROR_COLOR,
     HEADER_COLOR,
+    AUTHOR_COLOR,
+    DATE_COLOR,
+    EMPHASIS_COLOR,
     MENU_KEY_COLOR,
-    METADATA_COLOR,
     MUTED_COLOR,
+    RULE_COLOR,
     SUCCESS_COLOR,
     VALUE_COLOR,
     MenuEntry,
@@ -141,6 +144,7 @@ from netbbs.rendering import (
     menu_grid,
     menu_key,
     sanitize_text,
+    strip_ansi,
     screen_title,
     visible_width,
 )
@@ -621,15 +625,6 @@ async def _read_file_choice(
                 if highlighted is not None and 0 <= highlighted < len(page.entries):
                     await session.write_line("")
                     return ("download", page.entries[highlighted].filename, highlighted)
-                elif page.entries:
-                    # Issue #527's open question. Enter's only meaning
-                    # on this screen is "act on the cursor", so with no
-                    # cursor yet it places one rather than refusing --
-                    # the same row Down already moves to from the
-                    # unhighlighted state. Enter is then never a key
-                    # that does nothing, which is what produced the
-                    # report in the first place.
-                    return ("highlight", None, 0)
                 else:
                     await session.write("\a")
                     return ("none", None, highlighted)
@@ -1346,6 +1341,24 @@ def _uploader_display_name(db: Database, entry, *, name_requirement: str | None)
     return sanitize_text(present_link_author_label(db, entry.uploader_label))
 
 
+def _uploader_cell(padded: str) -> str:
+    """AUTHOR_COLOR over an uploader label that may already carry a
+    colour of its own.
+
+    A verified real name arrives pre-styled from
+    `netbbs.attestation.format_name_for_resource`, and an SGR reset
+    restores no outer colour -- so wrapping the whole cell would colour
+    the name, then leave everything after the verified unit uncoloured.
+    Composed beside it instead of around it, the same way
+    `netbbs.net.chat_flow._colored_around` already handles an author
+    label that may or may not bring its own styling (issue #298).
+    """
+    marker = padded.find(chr(27))
+    if marker == -1:
+        return colored(padded, fg_color=AUTHOR_COLOR)
+    return colored(padded[:marker], fg_color=AUTHOR_COLOR) + padded[marker:]
+
+
 async def _render_file_page(
     session: Session,
     lane: DatabaseLane,
@@ -1376,7 +1389,7 @@ async def _render_file_page(
 
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     accent = await lane.run(effective_accent_color_256)
-    divider_color = 238 if truecolor else MUTED_COLOR
+    divider_color = 238 if truecolor else RULE_COLOR
     rule_char = "─" if unicode_style else "-"
 
     idx_w, name_w, size_w, date_w, uploader_w = _file_column_widths(session.terminal_width)
@@ -1403,10 +1416,6 @@ async def _render_file_page(
         is_highlighted = highlighted == (position - 1)
         marker = ">" if is_highlighted else " "
         idx_label = f"{marker}[{position:2d}]"
-        if is_highlighted:
-            idx_cell = colored(idx_label, fg_color=accent, bold=True)
-        else:
-            idx_cell = colored(idx_label, fg_color=MENU_KEY_COLOR)
 
         name_clean = sanitize_text(entry.filename)
         name_cut = cut_to_width(name_clean, name_w)
@@ -1414,14 +1423,9 @@ async def _render_file_page(
             name_padded = name_cut + " " * (name_w - visible_width(name_cut))
         else:
             name_padded = name_cut
-        name_cell = colored(name_padded, fg_color=accent, bold=is_highlighted)
 
         size_str = _format_size(entry.size_bytes)
         size_padded = f"{size_str:>{size_w}}"
-        if is_highlighted:
-            size_cell = colored(size_padded, fg_color=accent, bold=True)
-        else:
-            size_cell = colored(size_padded, fg_color=VALUE_COLOR)
 
         when = format_for_display(entry.created_at, override_format=display_format, override_timezone=display_timezone)
         date_cut = cut_to_width(when, date_w)
@@ -1429,17 +1433,50 @@ async def _render_file_page(
             date_padded = date_cut + " " * (date_w - visible_width(date_cut))
         else:
             date_padded = date_cut
-        date_cell = colored(date_padded, fg_color=METADATA_COLOR)
 
         uploader_display = await lane.run(_uploader_display_name, entry, name_requirement=name_requirement)
         vis_u = visible_width(uploader_display)
         if vis_u <= uploader_w:
-            uploader_cell = uploader_display + " " * (uploader_w - vis_u)
+            uploader_padded = uploader_display + " " * (uploader_w - vis_u)
         else:
-            uploader_cell = colored_truncate([(uploader_display, None)], uploader_w)
+            uploader_padded = colored_truncate([(uploader_display, None)], uploader_w)
 
-        row_cells = [idx_cell, name_cell, size_cell, date_cell, uploader_cell]
-        await session.write_line(" ".join(row_cells))
+        cells = [idx_label, name_padded, size_padded, date_padded, uploader_padded]
+        if is_highlighted:
+            # One reverse-video bar for the whole row, not per-cell color
+            # plus bold (dogfood feedback: "the cursor is small, and the
+            # color change highlighting the selected row barely
+            # noticeable, not least because it uses the same color as
+            # some elements of the line do" -- the highlight was the
+            # accent color the filename already had, so the only real
+            # signal was the bold). Reverse cannot be composed with the
+            # per-cell colors: `colored()` resets at the end of every
+            # segment, so a row of colored cells inside one REVERSE would
+            # cancel the attribute at the first cell boundary. The cells
+            # therefore go out plain inside a single inverted run, which
+            # is also what makes the bar solid rather than striped.
+            # `strip_ansi`, not the raw cells (Codex review): a verified
+            # uploader name brings its own colour and its own reset, and
+            # that reset would end the reverse run partway along the
+            # column -- striping the bar this commit exists to make
+            # solid. The `(=...=)` markers survive stripping, and
+            # `set_display_name` refuses `=` at write time, so the
+            # unforgeability the colour also signals is still on screen
+            # while the row is under the cursor.
+            await session.write_line(colored(strip_ansi(" ".join(cells)), reverse=True))
+        else:
+            idx_cell = colored(idx_label, fg_color=MENU_KEY_COLOR)
+            name_cell = colored(name_padded, fg_color=accent)
+            # Three columns that used to be VALUE_COLOR, METADATA_COLOR
+            # and no color at all -- two greys and the terminal default,
+            # which is how a row of five fields came to read as one run
+            # of text. The size is the figure a caller actually compares
+            # down the column, so it takes EMPHASIS_COLOR; the date and
+            # the uploader are separate facts and now say so.
+            size_cell = colored(size_padded, fg_color=EMPHASIS_COLOR)
+            date_cell = colored(date_padded, fg_color=DATE_COLOR)
+            uploader_cell = _uploader_cell(uploader_padded)
+            await session.write_line(" ".join([idx_cell, name_cell, size_cell, date_cell, uploader_cell]))
         # Every line, not just the first (issue #463): a description
         # read out of an archive's FILE_ID.DIZ is up to ten lines of
         # deliberate layout, and collapsing it into one would throw
@@ -1453,7 +1490,7 @@ async def _render_file_page(
             if not line.strip():
                 await session.write_line("")
                 continue
-            await session.write_line(f"      {colored(sanitize_text(line), fg_color=MUTED_COLOR)}")
+            await session.write_line(f"      {colored(sanitize_text(line), fg_color=VALUE_COLOR)}")
 
 
 def _description_draft_path(db: Database, entry: FileEntry, user: User) -> Path:

@@ -84,13 +84,18 @@ refuses to silently create a replacement. Choose an explicit override or complet
 the migration. An explicit path for a new independent node deliberately selects
 its own world; it does not adopt the old world's users or records.
 
-War Dialer validates its stored schema and upgrades supported older worlds
-transactionally. A failed upgrade rolls
-back its schema/data changes and version marker. Newer versions, incomplete or
-unrelated schemas, and corrupt files are refused with a caller-facing error;
-startup does not replace them with an empty world. Existing zero-byte files are
-also refused. First creation atomically publishes a complete database and requires
-a filesystem supporting hard links; an unsupported filesystem fails clearly.
+War Dialer records schema version 10 in SQLite `user_version`. It validates that
+marker at startup, and the first permitted launch upgrades the world to schema 10
+transactionally. A failed upgrade rolls back its schema/data changes and version
+marker. Newer versions, incomplete or unrelated schemas, and corrupt files are
+refused with a caller-facing error; startup does not replace them with an empty
+world. Existing zero-byte files are also refused. First creation atomically
+publishes a complete database and requires a filesystem supporting hard links; an
+unsupported filesystem fails clearly.
+
+Old binaries refuse schema 10: never mix game versions against one world. Stop
+active sessions and take a verified backup including the world component before
+activating a version that upgrades.
 
 **MANUAL — outside NetBBS, failed upgrade or unreadable world:** stop game sessions
 and preserve the original world and any WAL/SHM sidecars. Diagnose a copy. Use a

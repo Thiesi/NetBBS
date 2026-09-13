@@ -2826,6 +2826,23 @@ class LinkNode:
                 # naturally a no-op here (payload.get("subject", "")
                 # falls back to "") -- no synthetic dict needed.
                 self._check_board_post_content_size(channel_message.payload, sender_fingerprint, "channel_message")
+                # Before `known_event_ids`/`events` are touched, like every
+                # other check on this branch (Codex review). `created_at`
+                # is rendered on every entry into the channel now that chat
+                # timestamps default on, so an unparseable one is a
+                # protocol-level refusal rather than something to discover
+                # at materialization: a rejection raised after acceptance
+                # would leave the process considering an unpersisted event
+                # known -- retries skip it, and it is gossiped onward --
+                # while `persist_accepted_events` turns the raised
+                # `LinkChannelsError` into a 500 on a direct push and an
+                # aborted inventory sync. `.get`, not `[...]`, so a payload
+                # missing the field entirely is a `LinkProtocolError` too
+                # rather than a `KeyError` nothing is written to catch.
+                _parse_aware_timestamp(
+                    channel_message.payload.get("created_at"),
+                    field_name="channel_message.created_at",
+                )
 
                 author = channel_message.payload.get("author", {})
                 author_kind = author.get("kind")

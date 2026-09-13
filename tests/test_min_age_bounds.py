@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 
 from netbbs.net.admin_flow import MIN_AGE_CEILING, MIN_AGE_FLOOR, _prompt_min_age
+from netbbs.net.char_input import InputCancelled
 
 
 class FakeSession:
@@ -33,6 +34,14 @@ class FakeSession:
     @property
     def output(self) -> str:
         return "".join(self.written)
+
+
+class CancellingSession(FakeSession):
+    """Escape: `read_line(cancellable=True)` raises instead of
+    returning, and the prompt must read that as "leave it alone"."""
+
+    async def read_line(self, echo: bool = True, **kwargs) -> str:
+        raise InputCancelled()
 
 
 def _ask(answer: str, *, current: int | None = None):
@@ -59,8 +68,20 @@ def test_the_ceiling_itself_is_accepted():
     assert _ask(str(MIN_AGE_CEILING))[:2] == (MIN_AGE_CEILING, True)
 
 
-def test_blank_still_keeps_the_current_value():
-    assert _ask("", current=21)[:2] == (21, True)
+def test_blank_now_clears_the_gate():
+    """Issue #557: this used to keep 21. On a screen whose text fields
+    read an emptied line as "clear", a SysOp clearing the line to remove
+    an age gate watched the gate stay -- and the screen afterwards looked
+    exactly like one where it had worked, because the value was never on
+    the line to begin with."""
+    assert _ask("", current=21)[:2] == (None, True)
+
+
+def test_escape_keeps_the_current_value():
+    """What "blank" used to mean, on a key of its own."""
+    session = CancellingSession("")
+    value, ok = asyncio.run(_prompt_min_age(session, current=21))
+    assert (value, ok) == (21, True)
 
 
 def test_none_still_clears_the_gate():
@@ -113,6 +134,12 @@ def test_the_prompt_states_the_range():
     assert f"{MIN_AGE_FLOOR}-{MIN_AGE_CEILING}" in session.output
 
 
-def test_the_prompt_still_offers_none():
+def test_the_prompt_states_the_convention_it_uses():
+    """`none` is still accepted (see `test_none_still_clears_the_gate`)
+    but is no longer advertised: the prompt names the three keys that
+    do something instead, which is what a caller needs to be told."""
     _, _, session = _ask("18")
-    assert "'none'" in session.output
+    assert "Enter saves" in session.output
+    assert "blank clears" in session.output
+    assert "Esc keeps" in session.output
+    assert "blank = keep" not in session.output

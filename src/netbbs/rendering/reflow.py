@@ -402,7 +402,8 @@ def _render_segment(text: str, color: _SegmentColor) -> str:
 
 
 def colored_truncate(
-    segments: Sequence[tuple[str, _SegmentColor]], width: int, *, ellipsis: str = "..."
+    segments: Sequence[tuple[str, _SegmentColor]], width: int, *, ellipsis: str = "...",
+    ellipsis_color: _SegmentColor = None,
 ) -> str:
     """
     Like `truncate`, but for a line built from several differently-
@@ -428,6 +429,14 @@ def colored_truncate(
     cut mid-sequence leaves an unterminated code that bleeds its color
     into everything printed afterward (see `colored()`'s own docstring
     on exactly that failure mode).
+
+    `ellipsis_color` styles the ellipsis the same way a segment is
+    styled, and defaults to leaving it unstyled as it always was. It
+    exists for a row whose styling is a property of the *whole line*
+    rather than of each field -- `netbbs.net.picker`'s reverse-video
+    cursor, where an unstyled "..." ends the inverted run three columns
+    early and breaks the one thing a selection bar has to be, which is
+    continuous (Codex review).
 
     `width` is display columns, not characters (design doc, dogfood
     feature request) -- each segment's own share of the budget is
@@ -456,5 +465,5 @@ def colored_truncate(
         if piece:
             rendered.append(_render_segment(piece, color))
         budget -= display_width(piece)
-    rendered.append(ellipsis)
+    rendered.append(_render_segment(ellipsis, ellipsis_color) if ellipsis else ellipsis)
     return "".join(rendered)
