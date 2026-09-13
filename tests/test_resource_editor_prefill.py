@@ -155,10 +155,18 @@ def test_a_value_too_wide_for_one_row_is_edited_like_any_other():
 def test_the_window_is_sized_to_the_room_the_prompt_left():
     """The prompt is written on its own line precisely so the whole
     terminal width is available -- `viewport` is columns from the cursor
-    to the right edge, not the terminal width in general."""
+    to the right edge, not the terminal width in general.
+
+    Handed over as a callable, not a number: a caller who shrinks their
+    terminal mid-edit would otherwise keep getting rows sized for the
+    terminal they had."""
     draft = {"description": "x" * 200}
     session = _edit(draft, "")
-    assert session.offered_viewport == session.terminal_width
+    assert callable(session.offered_viewport)
+    assert session.offered_viewport() == session.terminal_width
+
+    session.terminal_width = 40
+    assert session.offered_viewport() == 40, "the width is read again, not remembered"
 
 
 def test_a_value_that_fits_still_gets_the_editable_prompt():
@@ -190,3 +198,18 @@ def test_a_tab_is_normalized_before_the_width_is_judged():
     session = _edit(draft, "a b")
     assert "\t" not in session.offered_initial
     assert session.offered_initial == "a b"
+
+
+def test_the_fallback_prompt_scrolls_too():
+    """It is reached for a value too *long* to seed, not too wide -- and
+    whoever is replacing such a value is about to type something long
+    themselves, straight into the soft-wrap this change exists to
+    remove. Only the inline branch opted in at first (Codex review)."""
+    from netbbs.net.char_input import MAX_LINE_LENGTH
+
+    draft = {"description": "x" * (MAX_LINE_LENGTH + 1)}
+    session = _edit(draft, "a replacement")
+    assert session.offered_initial == ""
+    assert callable(session.offered_viewport)
+    # The prompt shares this row, so the window gets what it leaves.
+    assert 8 <= session.offered_viewport() < session.terminal_width

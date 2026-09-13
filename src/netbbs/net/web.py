@@ -458,7 +458,7 @@ class WebSession(Session):
         list_candidates: CandidateListPrinter | None = None,
         initial: str = "",
         cancellable: bool = False,
-        viewport: int | None = None,
+        viewport: int | Callable[[], int] | None = None,
     ) -> str:
         """
         Read one line, with the same cursor-addressable editing,
@@ -519,7 +519,7 @@ class WebSession(Session):
         list_candidates: CandidateListPrinter | None = None,
         initial: str = "",
         cancellable: bool = False,
-        viewport: int | None = None,
+        viewport: int | Callable[[], int] | None = None,
     ) -> str:
         # Issue #529, mirroring `netbbs.net.char_input._read_line_
         # editable` exactly -- this transport is a separate
@@ -536,10 +536,18 @@ class WebSession(Session):
         # behaves differently over web than over Telnet/SSH. xterm.js
         # soft-wraps and clamps `CSI D`/`CSI C` to one row exactly as a
         # real terminal does, so the bug and the fix are identical here.
-        window = LineViewport(viewport) if viewport is not None and completer is None else None
+        window = (
+            LineViewport(viewport() if callable(viewport) else viewport)
+            if viewport is not None and completer is None
+            else None
+        )
 
         async def show() -> None:
             if window is not None:
+                if callable(viewport):
+                    # Re-read every render: a browser tab resized
+                    # mid-edit changes this (Codex review).
+                    window.resize(viewport())
                 await window.render(self.write, line, cursor)
 
         if line:

@@ -196,3 +196,87 @@ def test_the_cursor_stays_inside_the_window():
     for cursor in range(0, len(_LONG) + 1, 7):
         _, _, _, column = window._layout(list(_LONG), cursor)
         assert 0 <= column <= _WIDTH
+
+
+# -- What the first review round found ---------------------------------
+
+
+@pytest.mark.parametrize("width", [20, 40, 80])
+def test_nothing_is_ever_drawn_into_the_final_column(width):
+    """A VT terminal that has just printed into the last column leaves
+    its cursor there with a wrap pending, rather than one cell beyond
+    it -- so the `CSI D` that follows lands one column left of where the
+    arithmetic expects, and every edit after that acts on a different
+    character than the caret sits on. One column of margin removes the
+    whole class (Codex review)."""
+    window = LineViewport(width)
+    for cursor in (0, 1, len(_LONG) // 2, len(_LONG)):
+        left, visible, right, _ = window._layout(list(_LONG), cursor)
+        assert display_width(left + visible + right) < width
+
+
+def test_home_on_a_long_value_puts_the_caret_on_the_first_character():
+    """The case the margin bug actually bit: after Home the payload
+    filled the row exactly, and the caret came to rest on the marker
+    instead of the text."""
+    window = LineViewport(_WIDTH)
+    window._layout(list(_LONG), len(_LONG))  # scrolled to the end first
+    left, visible, _, column = window._layout(list(_LONG), 0)
+    assert column == len(left)
+    assert visible.startswith(_LONG[0])
+
+
+def test_positioning_a_long_buffer_does_not_walk_it_all():
+    """`_layout` ran on the event loop and advanced `start` one
+    character at a time, re-measuring the whole prefix each time --
+    quadratic in a buffer that can legitimately be 4,096 characters,
+    which stalls unrelated network work (Codex review)."""
+    import time
+
+    window = LineViewport(_WIDTH)
+    line = list("x" * 4096)
+
+    started = time.perf_counter()
+    for cursor in range(0, 4097, 256):
+        window._layout(line, cursor)
+    elapsed = time.perf_counter() - started
+
+    # Generous by three orders of magnitude against the quadratic
+    # version, which took seconds here; this is about the shape of the
+    # cost, not about the exact machine.
+    assert elapsed < 1.0, f"{elapsed:.2f}s to position a full buffer"
+
+
+def test_a_resized_terminal_is_drawn_for_as_it_is_now():
+    """The width was read once, when the field opened, so shrinking the
+    terminal mid-edit kept producing rows sized for the old one -- which
+    the smaller terminal then soft-wrapped, recreating exactly the
+    divergence this exists to prevent (Codex review)."""
+    width = {"value": 80}
+    recorder = Recorder(40)
+    result = asyncio.run(
+        read_line(
+            FakeSource(b"abc" + _ENTER), recorder.write,
+            initial=_LONG, viewport=lambda: width["value"],
+        )
+    )
+    assert result == _LONG + "abc"
+
+    # And again, with the terminal shrinking between keystrokes.
+    class Shrinking:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            return 80 if self.calls < 3 else 40
+
+    shrinking = Shrinking()
+    recorder = Recorder(40)
+    asyncio.run(
+        read_line(
+            FakeSource(b"abcdef" + _ENTER), recorder.write,
+            initial=_LONG, viewport=shrinking,
+        )
+    )
+    assert shrinking.calls > 3, "the width is read once per render, not once per read"

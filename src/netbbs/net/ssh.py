@@ -189,7 +189,7 @@ class SSHSession(Session):
         list_candidates: char_input.CandidateListPrinter | None = None,
         initial: str = "",
         cancellable: bool = False,
-        viewport: int | None = None,
+        viewport: int | Callable[[], int] | None = None,
     ) -> str:
         # live_buffer/lock/list_candidates pass straight through to
         # char_input.read_line unchanged -- see that function's

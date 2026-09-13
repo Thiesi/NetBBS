@@ -916,8 +916,18 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
             # "blank = keep" answer, so a value that cannot be edited
             # in place can still be replaced or left alone.
             shown = current if current else "(blank)" if required else "(none)"
-            await write_prompt(session, f"[{shown}] ({_KEEP_HINT}): ")
-            raw = (await session.read_line()).strip()
+            prompt_text = f"[{shown}] ({_KEEP_HINT}): "
+            await write_prompt(session, prompt_text)
+            # This branch scrolls too (Codex review). It is reached for a
+            # value too *long* to seed, not too wide -- and whoever is
+            # replacing such a value is about to type something long
+            # themselves, straight into the soft-wrap this whole change
+            # exists to remove. The prompt shares this row, so the
+            # window gets what it leaves.
+            prompt_width = display_width(_normalize_tabs(sanitize_text(prompt_text)))
+            raw = (await session.read_line(
+                viewport=lambda: max(8, session.terminal_width - prompt_width),
+            )).strip()
             if raw:
                 draft[key] = raw
             return
@@ -931,8 +941,13 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
             # terminal width -- `viewport` is columns from where the
             # cursor is now to the right edge, not the terminal width in
             # general, and this is the one place those are the same.
+            #
+            # A callable, not a number: a caller who shrinks their
+            # terminal mid-edit would otherwise keep getting rows sized
+            # for the terminal they had (Codex review).
             raw = (await session.read_line(
-                initial=current, cancellable=True, viewport=session.terminal_width
+                initial=current, cancellable=True,
+                viewport=lambda: session.terminal_width,
             )).strip()
         except InputCancelled:
             # Esc: they changed their mind. Nothing is written, and the

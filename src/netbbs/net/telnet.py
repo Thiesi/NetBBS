@@ -236,7 +236,7 @@ class TelnetSession(Session):
         list_candidates: char_input.CandidateListPrinter | None = None,
         initial: str = "",
         cancellable: bool = False,
-        viewport: int | None = None,
+        viewport: int | Callable[[], int] | None = None,
     ) -> str:
         """
         Read one line of input, character by character, echoing (or

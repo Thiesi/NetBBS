@@ -242,7 +242,7 @@ class Session(ABC):
         list_candidates: CandidateListPrinter | None = None,
         initial: str = "",
         cancellable: bool = False,
-        viewport: int | None = None,
+        viewport: int | Callable[[], int] | None = None,
     ) -> str:
         """
         Read one line of input from the client.

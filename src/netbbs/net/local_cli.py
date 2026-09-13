@@ -75,7 +75,7 @@ class LocalCLISession(Session):
         list_candidates: char_input.CandidateListPrinter | None = None,
         initial: str = "",
         cancellable: bool = False,
-        viewport: int | None = None,
+        viewport: int | Callable[[], int] | None = None,
     ) -> str:
         # live_buffer/lock/list_candidates are never actually passed by
         # this session's one caller (the standalone `python -m

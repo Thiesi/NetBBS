@@ -303,27 +303,74 @@ class LineViewport:
         self.start = 0
         self.col = 0
 
+    def resize(self, width: int) -> None:
+        """Adopt a new terminal width (Codex review).
+
+        The width was read once, when the field was opened, so a caller
+        who shrank their terminal mid-edit kept getting rows sized for
+        the old one -- which the smaller terminal then soft-wrapped,
+        recreating exactly the divergence this class exists to prevent.
+        Callers that can see a live width hand one in per render.
+        """
+        self.width = max(1, width)
+
+    def _fits_from(self, line: list[str], cursor: int, budget: int) -> int:
+        """The earliest index from which `line[index:cursor]` still fits
+        `budget` columns.
+
+        Walks back from the cursor, so the work is bounded by the window
+        rather than by the buffer (Codex review). Advancing `start` one
+        character at a time and re-measuring the whole prefix each time
+        made this quadratic in the buffer length -- and it runs
+        synchronously on the event loop, so a 4,096-character carried
+        description could stall unrelated network work for seconds.
+        """
+        total = 0
+        index = cursor
+        while index > 0:
+            width = char_width(line[index - 1])
+            if total + width > budget:
+                break
+            total += width
+            index -= 1
+        return index
+
     def _layout(self, line: list[str], cursor: int) -> tuple[str, str, str, int]:
         """`(left marker, visible text, right marker, cursor column)`."""
-        text = "".join(line)
-        overflowing = display_width(text) > self.width
-        markers = overflowing and self.width >= _MIN_MARKER_WIDTH
+        # Never the final cell (Codex review). A VT terminal that has
+        # just printed into the last column leaves the cursor there with
+        # a wrap pending rather than one cell beyond it, so the
+        # `CSI D` that follows lands one column left of where the
+        # arithmetic expects -- and every edit after that acts on a
+        # different character than the caret is sitting on. One column
+        # of margin costs nothing and removes the whole class.
+        usable = max(1, self.width - 1)
+
+        # Bounded: enough to know whether it overflows, not the width of
+        # a 4,096-character value nobody is going to see.
+        overflowing = display_width(cut_to_width("".join(line), usable + 1)) > usable
+        markers = overflowing and usable >= _MIN_MARKER_WIDTH
         # Reserved whenever markers are in play, even where nothing is
         # hidden on that side, so the text does not jump sideways by a
         # column as the cursor crosses either edge.
-        text_columns = max(1, self.width - (2 if markers else 0))
+        text_columns = max(1, usable - (2 if markers else 0))
 
         if not overflowing:
             self.start = 0
         else:
             if cursor < self.start:
                 self.start = cursor
-            # One column short of the full window, so a cursor sitting
-            # at the end of the visible text has somewhere to be.
-            while display_width("".join(line[self.start:cursor])) > text_columns - 1:
-                self.start += 1
+            # One column short of the window, so a cursor sitting at the
+            # end of the visible text has somewhere to be.
+            earliest = self._fits_from(line, cursor, text_columns - 1)
+            if self.start < earliest:
+                self.start = earliest
 
-        visible = cut_to_width("".join(line[self.start:]), text_columns)
+        # At least one column per character, so no more than
+        # `text_columns` of them can be drawn -- slicing to that keeps
+        # the join bounded by the window too.
+        tail = line[self.start:self.start + text_columns + 1]
+        visible = cut_to_width("".join(tail), text_columns)
         hidden_right = len(visible) < len(line) - self.start
         left = ("<" if self.start > 0 else " ") if markers else ""
         right = (">" if hidden_right else " ") if markers else ""
@@ -665,7 +712,7 @@ async def read_line(
     list_candidates: CandidateListPrinter | None = None,
     initial: str = "",
     cancellable: bool = False,
-    viewport: int | None = None,
+    viewport: int | Callable[[], int] | None = None,
 ) -> str:
     """
     Read one line of input, echoing (or masking, if `echo=False`) as it
@@ -763,7 +810,7 @@ async def _read_line_editable(
     list_candidates: CandidateListPrinter | None = None,
     initial: str = "",
     cancellable: bool = False,
-    viewport: int | None = None,
+    viewport: int | Callable[[], int] | None = None,
 ) -> str:
     # `initial` (issue #529) starts the buffer populated and the cursor
     # at its end, so the caller can edit an existing value instead of
@@ -792,10 +839,18 @@ async def _read_line_editable(
     # the cursor column disagreeing with the terminal. No caller combines
     # the two, and a completion prompt (chat commands, a picker search)
     # is short by nature.
-    window = LineViewport(viewport) if viewport is not None and completer is None else None
+    window = (
+        LineViewport(viewport() if callable(viewport) else viewport)
+        if viewport is not None and completer is None
+        else None
+    )
 
     async def show() -> None:
         if window is not None:
+            if callable(viewport):
+                # Re-read every render, so a terminal resized mid-edit
+                # is drawn for as it is now (Codex review).
+                window.resize(viewport())
             await window.render(write, line, cursor)
 
     if line:
