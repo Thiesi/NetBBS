@@ -970,6 +970,102 @@ def test_a_node_with_nothing_carried_yet_discovers_a_new_board_via_multi_hop_inv
     c.close()
 
 
+@pytest.mark.parametrize(
+    "created_at",
+    [
+        "invalid",
+        "",
+        "2026-13-45T99:99:99Z",
+        "2026-01-01 12:00:00",          # no timezone
+        "0001-01-01T00:00:00+23:59",    # parses, then overflows converting to UTC
+    ],
+)
+def test_a_channel_message_with_an_unusable_timestamp_is_refused_before_it_is_remembered(
+    tmp_path, clock, created_at
+):
+    """`created_at` is remote input that every channel entry now formats,
+    because chat timestamps default on -- so one unparseable value would
+    otherwise make the channel permanently unenterable.
+
+    Refused at the protocol boundary rather than at materialization, and
+    the second assertion is why (Codex review): a rejection raised after
+    acceptance leaves the process considering an unpersisted event
+    *known*, so retries skip it and it is gossiped onward -- while the
+    exception itself escapes `persist_accepted_events`, turning a direct
+    push into a 500 and aborting an inventory sync, instead of the normal
+    protocol rejection every other bad payload gets.
+    """
+    a = spawn_node(tmp_path, "a")
+    b = spawn_node(tmp_path, "b")
+    transport = ScriptedTransport()
+    for node in (a, b):
+        transport.register(node)
+
+    a_node = LinkNode(identity=a.identity)
+    b_node = LinkNode(identity=b.identity)
+    _exchange_hellos(transport, a, a_node, b, b_node, clock)
+
+    genesis = build_channel_genesis(
+        signing_identity=a.identity.signing_key, origin_fingerprint=a.fingerprint,
+        channel_id="carried-lobby", name="Lobby", created_at=clock.now_iso(),
+    )
+    message = build_channel_message(
+        signing_identity=a.identity.signing_key, home_node_fingerprint=a.fingerprint,
+        local_user_id="wanderer", channel_id="carried-lobby", body="hello there",
+        created_at=created_at,
+    )
+
+    # The genesis alone is fine and is accepted, so the refusal below is
+    # about the timestamp and not about an unknown channel.
+    assert b_node.handle_events(a.fingerprint, [genesis.to_dict()]) == [genesis.content_id]
+
+    with pytest.raises(LinkProtocolError):
+        b_node.handle_events(a.fingerprint, [message.to_dict()])
+
+    assert message.content_id not in b_node.known_event_ids
+    assert message.content_id not in b_node.events
+
+
+def test_a_channel_message_missing_created_at_entirely_is_a_protocol_error(tmp_path, clock):
+    """A payload with no `created_at` at all is a `LinkProtocolError` --
+    but not, it turns out, for the reason the check was written to cover.
+
+    Removing the field changes the canonical bytes, so the *signature*
+    fails first and the timestamp check is never reached. A signed event
+    therefore cannot arrive with the field missing, and the `KeyError` a
+    `payload["created_at"]` would have raised is unreachable in practice.
+    The check still uses `.get`, because a guard that depends on a
+    signature check upstream staying exactly where it is today is not a
+    guard -- and this test records which one actually fires.
+    """
+    a = spawn_node(tmp_path, "a")
+    b = spawn_node(tmp_path, "b")
+    transport = ScriptedTransport()
+    for node in (a, b):
+        transport.register(node)
+
+    a_node = LinkNode(identity=a.identity)
+    b_node = LinkNode(identity=b.identity)
+    _exchange_hellos(transport, a, a_node, b, b_node, clock)
+
+    genesis = build_channel_genesis(
+        signing_identity=a.identity.signing_key, origin_fingerprint=a.fingerprint,
+        channel_id="carried-lobby", name="Lobby", created_at=clock.now_iso(),
+    )
+    b_node.handle_events(a.fingerprint, [genesis.to_dict()])
+
+    message = build_channel_message(
+        signing_identity=a.identity.signing_key, home_node_fingerprint=a.fingerprint,
+        local_user_id="wanderer", channel_id="carried-lobby", body="hello there",
+        created_at=clock.now_iso(),
+    )
+    raw = message.to_dict()
+    del raw["envelope"]["payload"]["created_at"]
+
+    with pytest.raises(LinkProtocolError):
+        b_node.handle_events(a.fingerprint, [raw])
+
+
 def test_a_node_converges_via_multi_hop_channel_inventory_when_the_origin_is_already_known(tmp_path, clock):
     """Design doc §9.6, issue #87: the channel-side counterpart to the
     board multi-hop test above, same shape exactly."""

@@ -15,6 +15,9 @@ from netbbs.files.entries import upload_file
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.file_flow import _file_column_widths, _show_area
 from netbbs.rendering import (
+    AUTHOR_COLOR,
+    DATE_COLOR,
+    EMPHASIS_COLOR,
     HEADER_COLOR,
     MENU_KEY_COLOR,
     MUTED_COLOR,
@@ -177,6 +180,121 @@ def test_columnar_verified_name_display_no_truncation(tmp_path, monkeypatch):
 
     lane.close()
     db.close()
+
+
+# -- Row presentation (dogfood feedback) --
+
+
+def test_each_column_of_a_row_is_separately_colored(tmp_path, monkeypatch):
+    """Dogfood feedback: "descriptions are barely readable, file sizes and
+    uploader names are better".
+
+    They were better because there were only ever three shades on the row
+    -- VALUE_COLOR for the size, METADATA_COLOR for the date, MUTED_COLOR
+    for the description -- plus an uploader column with no color at all,
+    inheriting whatever the caller's terminal defaults to. Five fields now
+    read as five fields.
+    """
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
+    session = FakeSession(lines=["b"], width=80)
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(_show_area(session, lane, area, user))
+    output = session.output
+
+    # The size, right-aligned in its column and now the brightest field
+    # on the row -- it is the figure a caller compares down the column.
+    assert f"\x1b[38;5;{EMPHASIS_COLOR}m" in output
+    # The date and the uploader, each its own hue rather than a grey and
+    # the terminal default.
+    assert f"\x1b[38;5;{DATE_COLOR}m" in output
+    assert f"\x1b[38;5;{AUTHOR_COLOR}m" in output
+    # The uploader is no longer the one field on the row with no color.
+    assert f"\x1b[38;5;{AUTHOR_COLOR}malice" in output
+
+    # The description, lifted off the muted floor onto the shade the size
+    # and uploader used to have.
+    assert colored("Package 0 archive release.", fg_color=VALUE_COLOR) in output
+    assert colored("Package 0 archive release.", fg_color=MUTED_COLOR) not in output
+
+    lane.close()
+    db.close()
+
+
+def test_the_highlighted_row_is_a_reverse_video_bar(tmp_path, monkeypatch):
+    """Dogfood feedback: "the cursor is small, and the color change
+    highlighting the selected row barely noticeable, not least because it
+    uses the same color as some elements of the line do".
+
+    It was the accent color the filename already carried, so the only
+    thing separating a highlighted row from its neighbours was bold.
+    """
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    area, user = _setup_area(db, count=3, monkeypatch=monkeypatch)
+    session = FakeInteractiveSession(editor_keys=[EditorKey(EditorKeyKind.DOWN)])
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(_show_area(session, lane, area, user))
+    output = session.output
+    reverse = "\x1b[7m"
+
+    rows = [line for line in output.split(chr(10)) if ">[ 1]" in line]
+    assert rows, "the highlighted row was never drawn"
+    bar = rows[-1]
+    assert bar.startswith(reverse), bar
+    # One inverted run for the whole row, not a reversed cell beside
+    # colored ones: nothing on the row sets a foreground color, and the
+    # filename's own accent is gone while it is under the cursor.
+    assert bar.count(reverse) == 1, bar
+    assert "\x1b[38;5;" not in bar, bar
+    assert "pkg0.tar.gz" in bar
+
+    # The rows either side of it are untouched, so the bar reads as one
+    # row rather than a change of theme.
+    others = [line for line in output.split(chr(10)) if " [ 2]" in line]
+    assert others and reverse not in others[-1], others
+
+    lane.close()
+    db.close()
+
+
+def test_a_verified_uploader_does_not_stripe_the_highlighted_bar(tmp_path, monkeypatch):
+    """Codex review. `format_name_for_resource` returns the `(=...=)`
+    unit already wrapped in VERIFIED_COLOR and terminated by its own
+    reset -- and an SGR reset ends whatever run it lands inside. Nesting
+    that in one outer reverse span stopped the bar halfway along the
+    uploader column, which is the striped highlight this change exists to
+    remove.
+    """
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "verified_docs", creator=alice, name_requirement="verified_and_displayed")
+    upload_file(db, area, alice, "release.zip", b"zip data")
+    attest_name(db, alice, "Alice Wonderland", verifier=sysop)
+
+    session = FakeInteractiveSession(editor_keys=[EditorKey(EditorKeyKind.DOWN)], width=100)
+    lane = DatabaseLane(db_path)
+    asyncio.run(_show_area(session, lane, area, alice))
+    lane.close()
+    db.close()
+
+    rows = [line for line in session.output.split(chr(10)) if ">[ 1]" in line]
+    assert rows, "the highlighted row was never drawn"
+    bar = rows[-1]
+    # One inverted run, opened once and closed once: no colour of any
+    # kind survives inside it, so nothing can end it early.
+    assert bar.count("\x1b[7m") == 1, bar
+    assert "\x1b[38;5;" not in bar, bar
+    assert bar.count("\x1b[0m") == 1, bar
+    # The verified name is still legible under the cursor, markers and
+    # all -- `set_display_name` refuses `=` at write time, so the unit is
+    # still unforgeable without its colour.
+    assert "(=Alice Wonderland=)" in bar, bar
 
 
 # -- Numbered Download Shortcuts (Line mode) --

@@ -112,10 +112,10 @@ async def _join_and_wait(lane, hub, presence, channel, user, session):
 # -- /timestamps command itself ---------------------------------------------
 
 
-def test_timestamps_bare_invocation_toggles_from_default_off(db, lane, hub, presence, alice, channel):
+def test_timestamps_bare_invocation_toggles_from_default_on(db, lane, hub, presence, alice, channel):
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps", "/quit"]))
-    assert "Chat timestamps are now on." in _written_text(session)
-    assert timestamps_enabled(db, alice) is True
+    assert "Chat timestamps are now off." in _written_text(session)
+    assert timestamps_enabled(db, alice) is False
 
 
 def test_timestamps_on_enables_the_preference(db, lane, hub, presence, alice, channel):
@@ -133,18 +133,20 @@ def test_timestamps_off_disables_the_preference(db, lane, hub, presence, alice, 
 
 def test_timestamps_bare_invocation_flips_the_state(db, lane, hub, presence, alice, channel):
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps", "/quit"]))
-    assert "Chat timestamps are now on." in _written_text(session)
-    assert timestamps_enabled(db, alice) is True
+    assert "Chat timestamps are now off." in _written_text(session)
+    assert timestamps_enabled(db, alice) is False
 
     session2 = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps", "/quit"]))
-    assert "Chat timestamps are now off." in _written_text(session2)
-    assert timestamps_enabled(db, alice) is False
+    assert "Chat timestamps are now on." in _written_text(session2)
+    assert timestamps_enabled(db, alice) is True
 
 
 def test_timestamps_invalid_argument_shows_usage(db, lane, hub, presence, alice, channel):
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps bogus", "/quit"]))
     assert "Usage: /timestamps" in _written_text(session)
-    assert timestamps_enabled(db, alice) is False
+    # Unchanged, whatever the default happens to be -- a rejected
+    # argument must not silently toggle anything.
+    assert timestamps_enabled(db, alice) is True
 
 
 # -- rendering: own live message ---------------------------------------------
@@ -158,7 +160,8 @@ def test_own_message_is_prefixed_when_enabled(db, lane, hub, presence, alice, ch
     assert "hello there" in text
 
 
-def test_own_message_is_not_prefixed_by_default(lane, hub, presence, alice, channel):
+def test_own_message_is_not_prefixed_when_disabled(db, lane, hub, presence, alice, channel):
+    set_timestamps_enabled(db, alice, False)
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["hello there", "/quit"]))
     text = _written_text(session)
     assert _TIMESTAMP_PATTERN.search(text) is None
@@ -175,7 +178,7 @@ def test_timestamp_preference_is_per_recipient_for_broadcast_messages(db, lane, 
     its own preference, not a single shared rendering decision baked in
     at broadcast time."""
     set_timestamps_enabled(db, bob, True)  # recipient opts in
-    # alice (sender) leaves the default (off)
+    set_timestamps_enabled(db, alice, False)  # sender opts out
 
     async def scenario():
         watcher = FakeSession()
@@ -232,6 +235,7 @@ def test_timestamp_preference_applies_to_me_action_for_an_opted_in_recipient(
     db, lane, hub, presence, alice, bob, channel
 ):
     set_timestamps_enabled(db, bob, True)
+    set_timestamps_enabled(db, alice, False)  # the actor, so the two sides differ
 
     async def scenario():
         watcher = FakeSession()
@@ -266,7 +270,8 @@ def test_scrollback_replay_is_prefixed_for_a_recipient_with_the_preference_on(db
     assert _TIMESTAMP_PATTERN.search(text) is not None
 
 
-def test_scrollback_replay_is_not_prefixed_by_default(lane, hub, presence, alice, channel):
+def test_scrollback_replay_is_not_prefixed_when_disabled(db, lane, hub, presence, alice, channel):
+    set_timestamps_enabled(db, alice, False)
     asyncio.run(_run(lane, hub, presence, channel, alice, ["hello there", "/quit"]))
 
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/quit"]))

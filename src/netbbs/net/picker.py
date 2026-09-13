@@ -56,6 +56,7 @@ from netbbs.rendering import (
     LABEL_COLOR,
     MENU_KEY_COLOR,
     MUTED_COLOR,
+    VALUE_COLOR,
     MenuEntry,
     SegmentColor,
     action_bar,
@@ -176,6 +177,26 @@ class ListColumn:
     width: int
     color: SegmentColor = MUTED_COLOR
     align_right: bool = False
+
+
+def _reverse_row(text: str) -> str:
+    """Every segment of a highlighted row, inverted.
+
+    Dogfood feedback on the file listing, which applies to every list in
+    the product: a cursor drawn as "the accent color, but bold" is nearly
+    invisible when the row's own name is already that accent color. A
+    reverse-video bar is the convention terminal UIs have used for a
+    selected row since before any of this, and it does not depend on the
+    caller's palette at all.
+
+    Applied per segment rather than around the finished row because
+    `colored_truncate` styles segments individually and `colored()`
+    resets after each one: a single REVERSE around the outside would be
+    cancelled at the first segment boundary. Segments are adjacent, so
+    inverting each one draws a continuous bar -- the padding inside a
+    cell is part of its own segment and inverts with it.
+    """
+    return colored(text, reverse=True)
 
 
 def _pad_cell(text: str, width: int, *, align_right: bool) -> str:
@@ -938,7 +959,7 @@ async def pick_item(
             if is_highlighted:
                 key_color = lambda txt: colored(txt, fg_color=accent_color, bold=True)
                 item_name_color = lambda txt: colored(txt, fg_color=accent_color, bold=True)
-                desc_color = 252
+                desc_color = VALUE_COLOR
             else:
                 key_color = MENU_KEY_COLOR
                 item_name_color = accent_color
@@ -977,7 +998,12 @@ async def pick_item(
                     else:
                         cell_text = _pad_cell(sanitize_text(text), column.width, align_right=column.align_right)
                     segments.append((cell_text, item_name_color if is_highlighted else color))
-                await session.write_line(colored_truncate(segments, render_width))
+                if is_highlighted:
+                    segments = [(text, _reverse_row) for text, _ in segments]
+                await session.write_line(colored_truncate(
+                    segments, render_width,
+                    ellipsis_color=_reverse_row if is_highlighted else None,
+                ))
                 continue
 
             segments = [
@@ -1014,7 +1040,15 @@ async def pick_item(
                 segments.append((sanitize_text(name_of(item)), item_name_color))
             if description:
                 segments.append((f" - {sanitize_text(description)}", desc_color))
-            await session.write_line(colored_truncate(segments, render_width))
+            if is_highlighted:
+                segments = [(text, _reverse_row) for text, _ in segments]
+            # The ellipsis too, or a row long enough to truncate -- which on
+            # a 40-column terminal is most of them -- ends its bar three
+            # columns short (Codex review).
+            await session.write_line(colored_truncate(
+                segments, render_width,
+                ellipsis_color=_reverse_row if is_highlighted else None,
+            ))
 
         # Read before the nav block rather than after it: the
         # descriptive-nav floor now weighs the trailer's rows too, so it

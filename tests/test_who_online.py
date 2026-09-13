@@ -26,7 +26,7 @@ from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.session import Session
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls
-from netbbs.rendering import ACCENT_COLOR, MENU_KEY_COLOR, METADATA_COLOR, colored
+from netbbs.rendering import ACCENT_COLOR, MENU_KEY_COLOR, MUTED_COLOR, colored
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -158,7 +158,7 @@ def test_who_screen_lists_other_online_users_and_excludes_self(tmp_path):
         # selector, identity, and connected-since metadata.
         assert colored("  01. ", fg_color=MENU_KEY_COLOR) in text
         assert colored("bob", fg_color=ACCENT_COLOR) in text
-        assert f"\x1b[38;5;{METADATA_COLOR}m - connected since " in text
+        assert f"\x1b[38;5;{MUTED_COLOR}m - connected since " in text
 
     asyncio.run(scenario())
     database.close()

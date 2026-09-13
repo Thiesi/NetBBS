@@ -64,6 +64,8 @@ from zoneinfo import available_timezones
 import nacl.signing
 
 from netbbs.auth.users import (
+    NEW_ACCOUNT_SENTINEL,
+    SYSOP_LEVEL,
     AuthError,
     User,
     UserManagementError,
@@ -268,7 +270,12 @@ from netbbs.link.work_items import (
     replay_work_item,
 )
 from netbbs.moderation.blocklist import BlocklistError, block_user, is_blocked, unblock_user
-from netbbs.moderation.log import list_actions_for_target_user, list_recent_actions, record_action
+from netbbs.moderation.log import (
+    list_actions_for_target_user,
+    list_recent_actions,
+    record_action,
+    record_action_without_commit,
+)
 from netbbs.mrc.protocol import display_roster_entry, room_name_error
 from netbbs.mrc.bridge import MrcBridge, MrcState, MrcStatus
 from netbbs.mrc.settings import (
@@ -303,6 +310,7 @@ from netbbs.moderation.roles import (
 )
 from netbbs.net.char_input import (
     HELP_KEY,
+    InputCancelled,
     REDRAW_KEY,
     REFRESH_KEY,
     EditorKey,
@@ -442,6 +450,7 @@ from netbbs.net.chat_channel_picker_banner import (
     load_chat_channel_picker_banner,
     set_chat_channel_picker_banner_enabled,
 )
+from netbbs.permissions.levels import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
     ALERT_COLOR,
@@ -483,6 +492,14 @@ from netbbs.rendering import (
     truncate,
     visible_width,
     wrap_to_width,
+)
+from netbbs.guest import (
+    guest_user,
+    pre_login_notice,
+    set_guest_user,
+    set_guest_user_without_commit,
+    set_pre_login_notice,
+    set_pre_login_notice_without_commit,
 )
 from netbbs.session_history import previous_callers_enabled, set_previous_callers_enabled
 from netbbs.storage.database import Database
@@ -1528,6 +1545,7 @@ async def _system_menu(
                 utc_now_iso(), override_format=display_format, override_timezone=display_timezone
             ),
             "previous_callers_enabled": previous_callers_enabled(db),
+            "guest_username": (lambda u: u.username if u is not None else None)(guest_user(db)),
             "trust_exceptions": len(list_sole_authorities(db)),
             "description_level": menu_description_level(db, actor),
             "unicode_style": unicode_style_enabled(db, actor),
@@ -1567,6 +1585,11 @@ async def _system_menu(
         elif choice == "j":
             await session.write_line("")
             await _link_participation_screen(session, lane, actor)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == "g":
+            await session.write_line("")
+            await _guest_access_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "t":
@@ -1730,6 +1753,20 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable-node seeds and relays, on or off"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
+        MenuEntry(
+            label=menu_key("G", "uest access"),
+            brief=(
+                # Sanitized here because `menu_grid` does not do it for
+                # its callers (Codex review). Account creation rejects a
+                # username carrying C1 controls or a bidi override, but
+                # deliberately left rows that predate that check valid --
+                # so designating one of those could have injected
+                # terminal control into the SysOp's own Settings menu.
+                f"Guest login as {sanitize_text(stats['guest_username'])}"
+                if stats["guest_username"]
+                else "Guest login off; pre-login notice"
+            ),
+        ),
         MenuEntry(
             label=menu_key("V", "ious callers", prefix="Pre"),
             brief=(
@@ -1943,6 +1980,166 @@ async def _node_name_screen(session: Session, lane: DatabaseLane, actor: User) -
             await _draw_node_name_screen(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Guest login and the pre-login notice (issue #531).
+
+    One screen for both because they are one feature in use: the notice
+    is how a caller learns the guest credentials exist. See
+    `netbbs.guest` for why guest login is only an authentication
+    shortcut and never a new kind of account.
+
+    A draft editor rather than a prompt chain, per design doc §3.5 --
+    two values, changed independently, nothing written before [S]ave.
+    """
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+
+    def _load(db: Database) -> dict:
+        current = guest_user(db)
+        return {
+            "guest_username": current.username if current is not None else "",
+            "notice": pre_login_notice(db),
+        }
+
+    draft = await lane.run(_load)
+
+    async def save(draft: dict):
+        name = (draft["guest_username"] or "").strip()
+        account = None
+        if name:
+            def _check(db: Database) -> User | None:
+                try:
+                    return get_user_by_username(db, name)
+                except AuthError:
+                    return None
+
+            account = await lane.run(_check)
+            if account is None:
+                # Raised, not returned: a bare `return None` closes the
+                # editor and discards the notice typed alongside it
+                # (issue #282's own lesson, learned the hard way).
+                raise AuthError(
+                    f"No account named {name!r}. Guest login names an existing account; "
+                    "create it first, then designate it here."
+                )
+            if account.username.strip().lower() == NEW_ACCOUNT_SENTINEL:
+                # `new` is how a caller asks to register, and `_login`
+                # acts on it before the guest branch is reached -- so an
+                # account with this name can be designated, saved, and
+                # then never actually sign anybody in (Codex review).
+                # `RESERVED_USERNAMES` has refused the name since, so
+                # only an account predating that check can be here.
+                raise AuthError(
+                    f"{name!r} is how a caller asks to create an account, so it cannot be the "
+                    "guest account. Rename it first."
+                )
+            if meets_level(account, SYSOP_LEVEL):
+                # The one refusal worth hard-coding. Everything else
+                # about what a guest may do is the account's level and
+                # per-object grants -- but a passwordless SysOp login is
+                # not a policy choice a SysOp should be able to make by
+                # typing a name into a field.
+                raise AuthError(
+                    f"{name!r} is a SysOp account. Guest login skips the password, so it cannot "
+                    "be a SysOp."
+                )
+
+        def _apply(db: Database) -> None:
+            # Validated and written inside one `BEGIN IMMEDIATE`, the
+            # same shape `netbbs.auth.users.delete_user` uses -- and for
+            # the same reason, since that is the writer this is racing
+            # (Codex review, three rounds on this one paragraph).
+            #
+            # Resolving the account and designating it as two separate
+            # statements is a check-then-act: a delete landing in
+            # between runs its own designation-clearing hook *before*
+            # the stale designation is written, so nothing clears it
+            # afterwards -- and if the freed id and creation timestamp
+            # are later handed to a new account, that account has
+            # passwordless login. Doing it in one lane callback
+            # serializes this process but not the standalone admin CLI
+            # or any other connection; a write transaction is what
+            # actually excludes them.
+            db.connection.execute("BEGIN IMMEDIATE")
+            try:
+                if account is not None:
+                    still_there = get_user_by_id(db, account.id)
+                    if still_there is None or still_there.created_at != account.created_at:
+                        raise AuthError(
+                            f"{name!r} was removed while you were editing. Nothing was changed."
+                        )
+                set_guest_user_without_commit(db, account)
+                set_pre_login_notice_without_commit(db, draft["notice"] or "")
+                record_action_without_commit(
+                    db, actor=actor, action="set_guest_access",
+                    detail=f"guest={name or '(off)'} notice={'set' if draft['notice'] else '(none)'}",
+                )
+            except BaseException:
+                db.connection.rollback()
+                raise
+            else:
+                db.connection.commit()
+
+        await lane.run(_apply)
+        return True
+
+    fields = [
+        FieldSpec(
+            key="guest_username", hotkey="g", menu_text=menu_key("G", "uest account"),
+            label="Guest account",
+            render=lambda d: d.get("guest_username") or "(guest login off)",
+            # Two Codex rounds landed on this one field. It could not
+            # be cleared at all at first -- the shared `text_field` read
+            # a blank entry as "keep", which is right for a name that
+            # must always be *something* and wrong for a setting whose
+            # off switch is emptiness. A `'none'` sentinel fixed that and
+            # introduced a smaller bug of its own: `RESERVED_USERNAMES`
+            # holds only `new`, so an account genuinely named "none"
+            # could never be designated.
+            #
+            # Neither is needed now. Issue #529 gave `text_field` the
+            # current value as an editable prefill, so erasing it and
+            # pressing Enter *is* the clear -- no sentinel, no word a
+            # SysOp cannot type.
+            prompt=text_field("guest_username"),
+            brief="Account that signs in without a password",
+            help=(
+                "An existing account callers may sign in as without a password. It stays an "
+                "ordinary account: its level and per-object permissions decide what a guest can "
+                "reach, and it keeps its own password for normal sign-in. Clear this field to "
+                "turn guest login off. A SysOp account cannot be used."
+            ),
+        ),
+        FieldSpec(
+            key="notice", hotkey="n", menu_text=menu_key("N", "otice"),
+            label="Pre-login notice",
+            render=lambda d: d.get("notice") or "(none)",
+            prompt=text_field("notice"),
+            brief="Shown before the login prompt",
+            help=(
+                "A short line shown after the welcome banner and before the username prompt -- "
+                "where you tell callers the guest account exists. Telnet and web only: an SSH "
+                "caller has already proven who they are before there is anything to show."
+            ),
+        ),
+    ]
+
+    result = await edit_resource_draft(
+        session, lane,
+        title="Guest access",
+        fields=fields, draft=draft, save=save, error_type=AuthError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=unicode_style, collapsed=collapsed,
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+    if result is not None:
+        await session.write_line("Guest access settings saved.")
 
 
 async def _rename_node_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -2269,13 +2466,17 @@ def _stable_id_for(key: str) -> int:
 def _float_field(
     key: str, *, label: str, minimum: float | None = None, maximum: float | None = None
 ) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
-    """A numeric editor field with the module's "blank = keep" convention
-    and a friendly rejection instead of a leaked float() exception (a
-    dogfood report against the old trust-domain wizard)."""
+    """A numeric editor field opening on its current value (`_EDIT_HINT`,
+    issue #557) with a friendly rejection instead of a leaked float()
+    exception (a dogfood report against the old trust-domain wizard)."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await write_prompt(session, f"{label} [{draft.get(key)}] (blank = keep): ")
-        raw = (await session.read_line()).strip()
+        await session.write_line(colored(f"{label} ({_EDIT_HINT}):", fg_color=MUTED_COLOR))
+        try:
+            raw = (await _read_seeded_line(session, initial=str(draft.get(key)))).strip()
+        except InputCancelled:
+            await session.write_line("")
+            return
         if not raw:
             return
         try:
@@ -5162,18 +5363,26 @@ def _mrc_state_line(status: MrcStatus, *, unicode_style: bool) -> str:
 
 
 def _optional_text_field(key: str) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
-    """`text_field`'s blank-keeps convention plus an explicit way to
-    clear an optional value (`-`), since the INFO fields are the only
-    free-text settings on the node a SysOp may legitimately want empty."""
+    """`text_field`'s own convention (`_CLEAR_HINT`, issue #557) for the
+    INFO fields -- the only free-text settings on the node a SysOp may
+    legitimately want empty.
+
+    This used to be a third spelling of the same idea: blank kept the
+    value and a typed `-` cleared it, on a screen whose other text
+    fields clear by emptying the line. `-` is still accepted, for the
+    muscle memory it already built and because it is the only way to
+    clear a field whose current value is too long to seed inline.
+    """
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         current = draft.get(key) or ""
-        await session.write(f"[{current or '(none)'}] (blank = keep, - = clear): ")
-        raw = (await session.read_line()).strip()
-        if raw == "-":
-            draft[key] = ""
-        elif raw:
-            draft[key] = raw
+        await session.write_line(colored(f"({_CLEAR_HINT}):", fg_color=MUTED_COLOR))
+        try:
+            raw = (await _read_seeded_line(session, initial=current)).strip()
+        except InputCancelled:
+            await session.write_line("")
+            return
+        draft[key] = "" if raw == "-" else raw
 
     return prompt
 
@@ -10412,10 +10621,16 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
 
 
 async def _read_int(session: Session, *, default: int) -> int | None:
-    """Reads a line: blank keeps `default`, a valid integer replaces
-    it, anything else shows a cancellation message and returns `None`
-    -- callers should treat `None` as "abort the current screen"."""
-    raw = (await session.read_line()).strip()
+    """Reads a line opening on `default`: Enter saves what is shown, Esc
+    leaves it alone, a valid integer replaces it, anything else shows a
+    cancellation message and returns `None` -- callers should treat
+    `None` as "abort the current screen". See `_EDIT_HINT` (issue #557)
+    for why this no longer asks for a value against an empty line."""
+    try:
+        raw = (await _read_seeded_line(session, initial=str(default))).strip()
+    except InputCancelled:
+        await session.write_line("")
+        return default
     if not raw:
         return default
     try:
@@ -10426,8 +10641,9 @@ async def _read_int(session: Session, *, default: int) -> int | None:
 
 
 async def _prompt_optional_int(session: Session, label: str, *, current: int | None) -> tuple[int | None, bool]:
-    """Generic nullable-int prompt -- same "blank = keep, 'none' =
-    clear" shape as `_prompt_min_age` below, factored out separately
+    """Generic nullable-int prompt -- the same open-on-the-current-value
+    shape as `_prompt_min_age` below (see `_CLEAR_HINT`), factored out
+    separately
     (rather than having that function delegate here) so its existing
     "no gate" wording -- already asserted on by
     tests/test_admin_flow.py and tests/test_board_pagination_ui.py --
@@ -10440,18 +10656,81 @@ async def _prompt_optional_int(session: Session, label: str, *, current: int | N
     `default_min_read_level`/`default_min_write_level`. "Clear" is the
     accurate word in both cases, not "no gate" (a level isn't a gate
     the way age/name-requirement are)."""
-    shown = current if current is not None else "none"
-    await write_prompt(session, f"{label} [{shown}] (blank = keep, 'none' = clear): ")
-    raw = (await session.read_line()).strip()
-    if not raw:
+    await session.write_line(colored(f"{label} ({_CLEAR_HINT}):", fg_color=MUTED_COLOR))
+    try:
+        raw = (await _read_seeded_line(
+            session, initial="" if current is None else str(current)
+        )).strip()
+    except InputCancelled:
+        await session.write_line("")
         return current, True
-    if raw.lower() == "none":
+    if not raw or raw.lower() == "none":
         return None, True
     try:
         return int(raw), True
     except ValueError:
         await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
         return None, False
+
+
+#: Issue #557. Both prompts below open on the field's current value and
+#: read an empty line as "clear", which is the convention issue #529
+#: established for the text fields on these same Create/Edit screens.
+#:
+#: Before this they were the other half of a screen with two answers for
+#: the same gesture: a text field's empty submit cleared the value, a
+#: gate's kept it, and each said so in its own prompt text. A SysOp
+#: learns the convention on whichever field they meet first. Applied to
+#: an age gate, "clear the line to clear the value" silently left the
+#: gate in place -- and the screen afterwards looks exactly like one
+#: where it worked, because the value was never on the line to begin
+#: with. That is the same shape of harm as #540 (a gate nobody intended,
+#: in force, with nothing on screen connecting it to what the operator
+#: did), from the other direction.
+#:
+#: Escape is what "blank" used to mean, now on a key of its own instead
+#: of overloaded onto the empty string. `none` stays accepted as an
+#: explicit spelling for the muscle memory it already built.
+_CLEAR_HINT = "Enter saves, blank clears, Esc keeps"
+
+#: The same convention for a field with no null state to clear *to* --
+#: a channel's own `min_level`, an MRC hub port, a trust weight. There is
+#: no third answer to invent here: the value is in the buffer, so Enter
+#: saves what is shown and Escape leaves it alone, which is exactly what
+#: `netbbs.net.resource_editor`'s text fields say. An emptied line has no
+#: meaning for a field that must hold a number, and cannot be reached by
+#: accident now that the line starts populated, so it is read as "no
+#: change" rather than turned into an error a caller would only ever see
+#: by deleting a value on purpose.
+_EDIT_HINT = "Enter saves, Esc cancels"
+
+
+async def _read_seeded_line(session: Session, *, initial: str) -> str:
+    """Read one line opening on `initial`, with a row to do it in.
+
+    Every prompt below writes its label as a line of its own and then
+    calls this, which is `netbbs.net.resource_editor.text_field`'s shape
+    and for its reason (issue #546, Codex review): `read_line` moves its
+    cursor with single-row `CSI D`/`CSI C`, so a value that soft-wraps
+    onto a second row makes every Home, Left, Backspace and tail redraw
+    clamp to the row it is on while the logical cursor walks into text
+    above -- the display and the value that would be saved diverge,
+    silently.
+
+    The prompt occupying its own line is what makes `viewport` the whole
+    terminal width rather than "whatever was left after the label", which
+    on the supported 40-column floor is frequently nothing: these labels
+    are longer than 40 columns on their own. A callable, not a number, so
+    a caller who resizes mid-edit gets rows sized for the terminal they
+    now have.
+
+    Raises `InputCancelled` on Escape, which every caller reads as
+    "leave the value alone".
+    """
+    return await session.read_line(
+        initial=initial, cancellable=True,
+        viewport=lambda: session.terminal_width, viewport_owns_row=True,
+    )
 
 
 #: Bounds for an age gate (issue #540). `0` stays accepted and keeps its
@@ -10466,18 +10745,23 @@ MIN_AGE_CEILING = 120
 async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int | None, bool]:
     """Shared min_age prompt for board/channel/area create+edit screens
     (design doc §18). Returns `(value, ok)` -- `ok=False`
-    means the caller should cancel; blank keeps `current` (which may
-    itself already be `None`, meaning no gate), `'none'` clears any
-    existing gate, otherwise a plain integer sets it."""
-    label = current if current is not None else "none"
-    await write_prompt(
-        session,
-        f"Minimum age [{label}] (blank = keep, 'none' = no gate, {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}): ",
+    means the caller should cancel.
+
+    Opens on the current gate, if any. Enter saves what is shown, an
+    emptied line (or the explicit word `none`) clears the gate, and
+    Escape leaves it alone -- see `_CLEAR_HINT` for why this is no longer
+    "blank = keep"."""
+    await session.write_line(
+        colored(f"Minimum age ({_CLEAR_HINT}, {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}):", fg_color=MUTED_COLOR)
     )
-    raw = (await session.read_line()).strip()
-    if not raw:
+    try:
+        raw = (await _read_seeded_line(
+            session, initial="" if current is None else str(current)
+        )).strip()
+    except InputCancelled:
+        await session.write_line("")
         return current, True
-    if raw.lower() == "none":
+    if not raw or raw.lower() == "none":
         return None, True
     try:
         value = int(raw)
@@ -10732,7 +11016,10 @@ def _int_field(key: str, label: str) -> Callable[[Session, DatabaseLane, dict], 
     int`, is the right underlying primitive here)."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await write_prompt(session, f"{label} [{draft.get(key)}]: ")
+        # No `[current]` in the prompt any more: the value is in the
+        # line the caller is editing, so showing it twice would read as
+        # two different numbers.
+        await session.write_line(colored(f"{label} ({_EDIT_HINT}):", fg_color=MUTED_COLOR))
         value = await _read_int(session, default=draft.get(key))
         if value is not None:
             draft[key] = value

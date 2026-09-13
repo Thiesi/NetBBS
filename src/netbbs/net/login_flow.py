@@ -37,6 +37,7 @@ from netbbs.auth.users import (
     authenticate_password_async,
     create_user_async,
     get_user_by_username,
+    touch_last_login,
 )
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry, list_pending_invitations_for_user
 from netbbs.config import RegistrationMode, get_node_display_name, get_registration_mode
@@ -59,14 +60,25 @@ from netbbs.net.session import Session, SessionClosedError, write_preformatted_l
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, SequenceScheduler, format_remaining_seconds
 from netbbs.net.throttle import LoginThrottle
+
+# What a terminal is assumed to be before it has said (issue #531,
+# Codex review). Anything drawn ahead of the first `read_line` predates
+# Telnet's NAWS response, so `Session.terminal_width` is still its
+# default there however narrow the real screen is. 40 columns is the
+# floor this project already builds doors against (the 40x12 door
+# floor), and the only thing drawn this early is the pre-login notice:
+# a few sentences, which lose nothing by being narrow.
+_PRE_NEGOTIATION_WIDTH = 40
 from netbbs.net.unicode_style_preference import (
     set_unicode_style_enabled,
     unicode_style_enabled,
     unicode_style_ever_set,
 )
+from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
 from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
+    ACCENT_COLOR,
     ALERT_COLOR,
     ERROR_COLOR,
     HEADER_COLOR,
@@ -81,6 +93,7 @@ from netbbs.rendering import (
     sanitize_text,
     screen_title,
     status_badge,
+    wrap_to_width,
 )
 from netbbs.session_history import record_session_end, record_session_start
 from netbbs.storage.database import Database
@@ -1006,6 +1019,27 @@ async def _login(
     whether they're blocked.
     """
     registration_mode = get_registration_mode(db)
+
+    # The SysOp's own pre-login notice (issue #531), above the
+    # sign-in screen it belongs to: it is how a caller learns the
+    # guest credentials exist at all. Sanitized and wrapped, unlike
+    # the welcome banner drawn before it -- that is authored ANSI art
+    # placed on the node's filesystem, this is typed in the BBS.
+    notice = pre_login_notice(db)
+    if notice:
+        await session.write_line("")
+        # Wrapped at a conservative width rather than the session's
+        # (Codex review). This is drawn before the first `read_line`,
+        # and on Telnet that read is what consumes the client's NAWS
+        # response -- so `terminal_width` is still its 80-column default
+        # here even for a caller on a 40-column screen, and wrapping to
+        # 80 would hand a narrow terminal rows it has to soft-wrap
+        # itself, breaking them wherever the column happens to fall
+        # rather than at a space. Wrapping narrow costs an 80-column
+        # caller nothing but a shorter line on a notice that is at most
+        # a few sentences.
+        for line in wrap_to_width(sanitize_text(notice), _PRE_NEGOTIATION_WIDTH):
+            await session.write_line(colored(line, fg_color=ACCENT_COLOR))
     await session.write_line(
         "\r\n"
         + screen_title(
@@ -1057,6 +1091,88 @@ async def _login(
             if new_user is not None:
                 return new_user
             continue
+
+        # Issue #531: an authentication shortcut, and nothing more.
+        # The password prompt is skipped; everything after it is not.
+        # `guest_login_for` re-checks, at the moment of use, that the
+        # designated account still exists, is neither disabled nor
+        # awaiting approval, is not a SysOp, and is the account whose
+        # name was actually typed -- see `netbbs.guest` for why each of
+        # those has to happen here rather than when the designation was
+        # saved. Anything short of all of them falls through to the
+        # ordinary password path.
+        guest = guest_login_for(db, username)
+        if guest is not None:
+            # Through the same budget the password path uses (Codex
+            # review). Guest login is the one way into this node that
+            # needs no credential, so without this a single peer could
+            # sit in a reconnect loop spinning sessions -- each holding
+            # a socket and a session task, each committing a
+            # `last_login_at` -- and neither `allow_attempt` (reached
+            # only from the password path below) nor the concurrent-
+            # unauthenticated slot (released the moment `_login`
+            # returns) was in its way.
+            #
+            # The cost of reusing `allow_attempt` wholesale is that a
+            # flood aimed at the guest name drains that name's own
+            # bucket and briefly refuses other guests too. That is the
+            # bound every account on the node already has, and it is a
+            # far better failure than admitting the flood.
+            if not throttle.allow_attempt(source=session.peer_address, username=username):
+                return LoginOutcome.THROTTLED
+            if is_blocked(db, guest):
+                await session.write_line(
+                    colored("Your access to this system has been revoked.", fg_color=ERROR_COLOR)
+                )
+                return LoginOutcome.BLOCKED
+            await session.write_line("")
+            # The same bookkeeping every other authentication path does
+            # on its way out: a guest account that logs in daily should
+            # not look like one that never has.
+            #
+            # And then re-checked, because `touch_last_login` re-fetches
+            # (Codex review). The `write_line` above awaits transport
+            # I/O; a SysOp promoting the guest in that window meant the
+            # *refreshed* row -- level 255 by then -- was what came back
+            # and what the session ran as. Validating the row actually
+            # returned closes that, and closes any future window opened
+            # by something else awaiting between here and the return.
+            refreshed = touch_last_login(db, guest)
+            if refreshed is None or not guest_is_eligible(db, refreshed):
+                # `None` is the account having been deleted in that same
+                # window -- a refusal, not a crash (Codex review: this
+                # used to subscript the missing row and drop the
+                # session).
+                await session.write_line(
+                    colored("Guest access is not available.", fg_color=ERROR_COLOR)
+                )
+                continue
+            if is_blocked(db, refreshed):
+                # Checked again, against the refreshed row, for the same
+                # reason the eligibility check is (Codex review). A block
+                # landing while the `write_line` above awaited transport
+                # I/O would otherwise have been applied to a caller who
+                # had already passed the pre-await check -- and the
+                # session-revocation watcher would not have caught it
+                # afterwards either, since `account_still_active` reads
+                # account status and not the blocklist.
+                await session.write_line(
+                    colored("Your access to this system has been revoked.", fg_color=ERROR_COLOR)
+                )
+                return LoginOutcome.BLOCKED
+
+            # This session proved no credential (Codex review). It is
+            # still an ordinary account in every other respect -- that
+            # is the whole design -- but "may manage this account's
+            # credentials" is a question about *how the caller got in*,
+            # not about the account, and an anonymous caller who can add
+            # an SSH key has turned temporary public access into a
+            # permanent one that outlives guest access being switched
+            # off. Recorded on the session because that is what the
+            # property describes; `netbbs.net.ssh_key_screen` refuses on
+            # it.
+            session.authenticated_without_credential = True
+            return refreshed
 
         try:
             await session.write(colored("Password: ", fg_color=LABEL_COLOR, bold=True))

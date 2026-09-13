@@ -20,6 +20,7 @@ from netbbs.rendering.theme import (
     ERROR_COLOR,
     HEADER_COLOR,
     METADATA_COLOR,
+    RULE_COLOR,
     MUTED_COLOR,
     SUCCESS_COLOR,
     VALUE_COLOR,
@@ -435,7 +436,7 @@ def screen_title(
             divider_basis_width = max(divider_basis_width, display_width(subtitle))
             lines.append(colored(cut_to_width(subtitle, width), fg_color=METADATA_COLOR))
     rule_char = "─" if unicode_style else "-"
-    lines.append(colored(rule_char * min(width, max(12, divider_basis_width)), fg_color=METADATA_COLOR))
+    lines.append(colored(rule_char * min(width, max(12, divider_basis_width)), fg_color=RULE_COLOR))
     result = "\r\n".join(lines)
     return f"{clear_screen()}{result}" if clear else result
 

@@ -78,6 +78,7 @@ from netbbs.rendering import (
     ERROR_COLOR,
     LABEL_COLOR,
     METADATA_COLOR,
+    RULE_COLOR,
     MUTED_COLOR,
     SUCCESS_COLOR,
     VALUE_COLOR,
@@ -317,7 +318,7 @@ async def _render_message(
     await session.write_line("")
     rule_char = "─" if unicode_style else "-"
     truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
-    divider_color = 238 if truecolor else METADATA_COLOR
+    divider_color = 238 if truecolor else RULE_COLOR
     divider = colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
     await session.write_line(divider)
     body = reflow(sanitize_text(message.body, allow_newlines=True), width=session.terminal_width)

@@ -762,6 +762,32 @@ class LiveChannelBridge:
                 pass
 
 
+def remote_origin_fingerprint(db: Database, channel: Channel, own_fingerprint: str) -> str | None:
+    """The fingerprint of `channel`'s origin node, when that is somebody
+    else -- otherwise `None`.
+
+    "Somebody else" folds together the two cases that mean there is
+    nothing to dial: a channel that is not Linked at all, and a channel
+    this node originated itself. Both are ordinary states, not failures,
+    which is the distinction `ensure_live_subscription`'s own `None`
+    return cannot carry -- it also means "Linked, but the origin would
+    not answer just now". A caller that shows the caller a notice needs
+    those apart; see `netbbs.net.chat_flow`, where everyone entering a
+    purely local channel was told the real-time link to its origin was
+    down.
+    """
+    origin_fingerprint = channel_origin_fingerprint(db, channel)
+    if origin_fingerprint is None or origin_fingerprint == own_fingerprint:
+        return None
+    return origin_fingerprint
+
+
+def has_remote_origin(db: Database, channel: Channel, own_fingerprint: str) -> bool:
+    """`remote_origin_fingerprint` as the yes/no a caller deciding whether
+    to say anything needs, so the question is asked in one place."""
+    return remote_origin_fingerprint(db, channel, own_fingerprint) is not None
+
+
 async def ensure_live_subscription(
     *,
     channel: Channel,
@@ -796,8 +822,10 @@ async def ensure_live_subscription(
     origin_fingerprint`) is dispatched through it like every other
     business-logic call from `netbbs.net`.
     """
-    origin_fingerprint = await lane.run(channel_origin_fingerprint, channel)
-    if origin_fingerprint is None or origin_fingerprint == node_identity.fingerprint:
+    origin_fingerprint = await lane.run(
+        remote_origin_fingerprint, channel, node_identity.fingerprint
+    )
+    if origin_fingerprint is None:
         return None  # not linked, or this node is the origin -- nothing to dial
     session = registry.get(origin_fingerprint)
     if session is None:
