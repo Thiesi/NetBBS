@@ -45,7 +45,7 @@ from typing import Awaitable, Callable, Protocol, Sequence
 
 from netbbs.net.session import SessionClosedError
 from netbbs.rendering.ansi import reject_keystroke
-from netbbs.rendering.width import char_width, display_width
+from netbbs.rendering.width import char_width, cut_to_width, display_width
 
 # Control byte values relevant to character-mode line building.
 _CR = 0x0D
@@ -259,6 +259,92 @@ def move_cursor(count: int, *, forward: bool) -> str:
     if count <= 0:
         return ""
     return f"\x1b[{count}{'C' if forward else 'D'}"
+
+
+# Below this the two marker columns would cost more than they explain,
+# so a very narrow viewport simply scrolls without them.
+_MIN_MARKER_WIDTH = 12
+
+
+class LineViewport:
+    """A one-row window over a line buffer wider than the row (issue
+    #546).
+
+    `move_cursor` emits `CSI D`/`CSI C`, which move within *one physical
+    row*. A buffer wider than the terminal soft-wraps onto a second row,
+    and from that point Home, Left, Backspace and every tail redraw
+    clamp at the row they are on while the logical cursor walks into
+    text a row above: the display and the value that will be saved
+    diverge, silently. Typing 80+ characters into a prompt has always
+    done this; issue #529's pre-filled fields made it reachable by
+    simply opening a long description, which is how it was found.
+
+    The fix is to never emit more than one row. This keeps a window over
+    the buffer, scrolls it to follow the cursor, and redraws the whole
+    window on every edit -- at most `width` columns, so cheaper than it
+    sounds. `<` and `>` mark text scrolled out of view either side; a
+    window with no room to spare for them scrolls without them rather
+    than spending a third of a narrow field on decoration.
+
+    `width` is the columns available **from the cursor's current column
+    to the right edge**, not the terminal width: this class never learns
+    where the prompt ended, so the caller that wrote the prompt is the
+    one that knows. `netbbs.net.resource_editor.text_field` puts its
+    prompt on its own line precisely so it can pass the whole width.
+
+    Everything is relative -- `col` tracks where the terminal cursor
+    sits in columns from the window's left edge, and every render moves
+    back by exactly that much before drawing. No absolute positioning,
+    so this is correct wherever on the row the window happens to start.
+    """
+
+    def __init__(self, width: int):
+        self.width = max(1, width)
+        self.start = 0
+        self.col = 0
+
+    def _layout(self, line: list[str], cursor: int) -> tuple[str, str, str, int]:
+        """`(left marker, visible text, right marker, cursor column)`."""
+        text = "".join(line)
+        overflowing = display_width(text) > self.width
+        markers = overflowing and self.width >= _MIN_MARKER_WIDTH
+        # Reserved whenever markers are in play, even where nothing is
+        # hidden on that side, so the text does not jump sideways by a
+        # column as the cursor crosses either edge.
+        text_columns = max(1, self.width - (2 if markers else 0))
+
+        if not overflowing:
+            self.start = 0
+        else:
+            if cursor < self.start:
+                self.start = cursor
+            # One column short of the full window, so a cursor sitting
+            # at the end of the visible text has somewhere to be.
+            while display_width("".join(line[self.start:cursor])) > text_columns - 1:
+                self.start += 1
+
+        visible = cut_to_width("".join(line[self.start:]), text_columns)
+        hidden_right = len(visible) < len(line) - self.start
+        left = ("<" if self.start > 0 else " ") if markers else ""
+        right = (">" if hidden_right else " ") if markers else ""
+        column = len(left) + display_width("".join(line[self.start:cursor]))
+        return left, visible, right, column
+
+    async def render(self, write: WriteFunc, line: list[str], cursor: int) -> None:
+        left, visible, right, column = self._layout(line, cursor)
+        payload = left + visible + right
+        # Back to the window's left edge, clear what was there, redraw,
+        # then step forward-by-moving-back to where the cursor belongs.
+        await write(move_cursor(self.col, forward=False) + "\x1b[K" + payload)
+        drawn = len(left) + display_width(visible) + len(right)
+        await write(move_cursor(drawn - column, forward=False))
+        self.col = column
+
+    def reset(self) -> None:
+        """Forget where the cursor was -- for a caller that has just
+        written a newline, after which the window starts over."""
+        self.start = 0
+        self.col = 0
 
 
 async def redraw_tail(
@@ -579,6 +665,7 @@ async def read_line(
     list_candidates: CandidateListPrinter | None = None,
     initial: str = "",
     cancellable: bool = False,
+    viewport: int | None = None,
 ) -> str:
     """
     Read one line of input, echoing (or masking, if `echo=False`) as it
@@ -619,6 +706,7 @@ async def read_line(
     return await _read_line_editable(
         source, write, history, completer, live_buffer=live_buffer, lock=lock,
         list_candidates=list_candidates, initial=initial, cancellable=cancellable,
+        viewport=viewport,
     )
 
 
@@ -675,6 +763,7 @@ async def _read_line_editable(
     list_candidates: CandidateListPrinter | None = None,
     initial: str = "",
     cancellable: bool = False,
+    viewport: int | None = None,
 ) -> str:
     # `initial` (issue #529) starts the buffer populated and the cursor
     # at its end, so the caller can edit an existing value instead of
@@ -690,8 +779,30 @@ async def _read_line_editable(
     # typed path would have refused.
     line: list[str] = list(initial[:_MAX_LINE_LENGTH])
     cursor = len(line)
+
+    # Issue #546. With a viewport, every echo in this function goes
+    # through `show` instead of writing incrementally: the window has to
+    # be free to scroll on any edit, including one that would otherwise
+    # have been a single character appended at the cursor. Without one --
+    # every caller that has not opted in -- the incremental writes below
+    # are exactly what they were.
+    #
+    # Ignored when a `completer` is supplied: `apply_tab_completion` does
+    # its own incremental drawing, which would leave the window's idea of
+    # the cursor column disagreeing with the terminal. No caller combines
+    # the two, and a completion prompt (chat commands, a picker search)
+    # is short by nature.
+    window = LineViewport(viewport) if viewport is not None and completer is None else None
+
+    async def show() -> None:
+        if window is not None:
+            await window.render(write, line, cursor)
+
     if line:
-        await write("".join(line))
+        if window is not None:
+            await show()
+        else:
+            await write("".join(line))
     overwrite = False
     history_index = 0  # 0 == "not recalling", editing the in-progress line
     saved_in_progress: list[str] | None = None
@@ -747,6 +858,8 @@ async def _read_line_editable(
                     submitted = "".join(line)
                     line = []
                     cursor = 0
+                    if window is not None:
+                        window.reset()
                     await write("\r\n")
                     break
 
@@ -755,9 +868,12 @@ async def _read_line_editable(
                         move_back = char_width(line[cursor - 1])
                         del line[cursor - 1]
                         cursor -= 1
-                        await redraw_tail(
-                            write, move_back=move_back, edit_pos=cursor, line=line, new_cursor=cursor
-                        )
+                        if window is not None:
+                            await show()
+                        else:
+                            await redraw_tail(
+                                write, move_back=move_back, edit_pos=cursor, line=line, new_cursor=cursor
+                            )
                     continue
 
                 if b == _TAB:
@@ -789,26 +905,43 @@ async def _read_line_editable(
                     if key == "LEFT":
                         if cursor > 0:
                             cursor -= 1
-                            await write(move_cursor(char_width(line[cursor]), forward=False))
+                            if window is not None:
+                                await show()
+                            else:
+                                await write(move_cursor(char_width(line[cursor]), forward=False))
                     elif key == "RIGHT":
                         if cursor < len(line):
                             width = char_width(line[cursor])
                             cursor += 1
-                            await write(move_cursor(width, forward=True))
+                            if window is not None:
+                                await show()
+                            else:
+                                await write(move_cursor(width, forward=True))
                     elif key == "HOME":
                         if cursor > 0:
-                            await write(move_cursor(display_width("".join(line[:cursor])), forward=False))
-                            cursor = 0
+                            if window is not None:
+                                cursor = 0
+                                await show()
+                            else:
+                                await write(move_cursor(display_width("".join(line[:cursor])), forward=False))
+                                cursor = 0
                     elif key == "END":
                         if cursor < len(line):
-                            await write(move_cursor(display_width("".join(line[cursor:])), forward=True))
-                            cursor = len(line)
+                            if window is not None:
+                                cursor = len(line)
+                                await show()
+                            else:
+                                await write(move_cursor(display_width("".join(line[cursor:])), forward=True))
+                                cursor = len(line)
                     elif key == "DELETE":
                         if cursor < len(line):
                             del line[cursor]
-                            await redraw_tail(
-                                write, move_back=0, edit_pos=cursor, line=line, new_cursor=cursor
-                            )
+                            if window is not None:
+                                await show()
+                            else:
+                                await redraw_tail(
+                                    write, move_back=0, edit_pos=cursor, line=line, new_cursor=cursor
+                                )
                     elif key == "INSERT":
                         overwrite = not overwrite
                     elif key in ("UP", "DOWN") and history is not None:
@@ -827,9 +960,12 @@ async def _read_line_editable(
                             move_back = display_width("".join(line[:cursor]))
                             line = recalled
                             cursor = len(line)
-                            await redraw_tail(
-                                write, move_back=move_back, edit_pos=0, line=line, new_cursor=cursor
-                            )
+                            if window is not None:
+                                await window.render(write, line, cursor)
+                            else:
+                                await redraw_tail(
+                                    write, move_back=move_back, edit_pos=0, line=line, new_cursor=cursor
+                                )
                     continue
 
                 if b < 0x20:
@@ -850,7 +986,9 @@ async def _read_line_editable(
                     edit_pos = cursor
                     line[cursor] = char
                     cursor += 1
-                    if same_width:
+                    if window is not None:
+                        await show()
+                    elif same_width:
                         # The common case (an ASCII overwrite, or any
                         # same-width replacement) needs only the literal
                         # character written -- the terminal's own
@@ -891,7 +1029,9 @@ async def _read_line_editable(
                 edit_pos = cursor
                 line.insert(cursor, char)
                 cursor += 1
-                if cursor == len(line):
+                if window is not None:
+                    await show()
+                elif cursor == len(line):
                     # Appending at the end -- the common case while
                     # typing normally -- needs only the one character
                     # written, not a full (empty) tail reprint.
