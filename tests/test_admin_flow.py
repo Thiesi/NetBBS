@@ -8763,3 +8763,31 @@ def test_user_picker_refresh_clears_a_remembered_search(db, lane, sysop):
     text = _visible(_written_text(session))
     after = _last_render(text, "Sorted by: Level")
     assert "bob" in after, "refresh cleared the search, so the sort kept it clear"
+
+
+def test_user_picker_filtered_to_empty_still_offers_the_way_back(db, lane, sysop):
+    """A search followed by a visibility change can empty the page while
+    the roster still has selectable accounts -- and the empty screen
+    advertised only the live keys and Back, though [S]earch (blank
+    clears), [G]oto and Ctrl-H all still work. Hiding them made the way
+    out undiscoverable rather than unavailable (issue #537, Codex
+    review)."""
+    from netbbs.auth.users import set_user_disabled
+
+    for name in ("alice", "alina"):
+        create_user(db, name, password="hunter2", user_level=10)
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    set_user_disabled(db, bob, True, changed_by=sysop)
+
+    # Narrow to ali*, then switch to disabled-only: no ali* is disabled.
+    session = FakeSession(["u", "l", "s", "ali", "v", "v", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    # The empty screen writes its standing state and *then* its keys, so
+    # the slice runs from the message to the end rather than up to the
+    # label the way a populated page's does.
+    after = text[text.rindex("No users match that view."):]
+    assert "Showing: Disabled users only" in after, "it says which filter emptied it"
+    assert "[S]earch" in after, "and offers the key that clears the search"
+    assert "[G]oto" in after

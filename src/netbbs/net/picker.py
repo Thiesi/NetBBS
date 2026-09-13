@@ -605,6 +605,12 @@ async def pick_item(
     # and the SysOp was bounced out to create one elsewhere and
     # come back -- the dead end issue #530 was filed about.
     if not items and refresh is None and on_create is None:
+        # Resolved first: a callable masthead is empty until something
+        # awaits it, and this return happens before the render that
+        # normally would (Codex review) -- so the screen that shows
+        # nothing else would have shown no masthead either, unlike the
+        # identical case with a plain string.
+        await _refresh_masthead()
         prefix = _masthead_prefix()
         if prefix:
             await write_preformatted_line(session, prefix)
@@ -672,6 +678,16 @@ async def pick_item(
             await session.write_line(colored(f"\r\n{empty_message}", fg_color=MUTED_COLOR))
             dash = "—" if unicode_style else "-"
             keys = []
+            if working_set is not items and items:
+                # The list is empty because a search or a filter made it
+                # so, not because there is nothing here (Codex review).
+                # [S]earch with a blank query clears back to everything,
+                # [G]oto reaches any row by its reference, and Ctrl-H
+                # explains both -- and the handlers accept all three, so
+                # hiding them made the way out undiscoverable rather
+                # than unavailable.
+                keys.append(menu_key("S", "earch"))
+                keys.append(menu_key("G", "oto #"))
             if on_create is not None:
                 # The whole point of staying here (issue #530): an empty
                 # list with a way out of being empty.
