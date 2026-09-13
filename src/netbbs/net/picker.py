@@ -42,10 +42,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Sequence, TypeVar
+from typing import Awaitable, Callable, Mapping, Sequence, TypeVar
 
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
 from netbbs.net.help_overlay import show_help
+from netbbs.rendering.ansi import strip_ansi
+from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.session import Session, write_preformatted_line
 from netbbs.rendering import (
     ACCENT_COLOR,
@@ -268,6 +270,9 @@ async def pick_item(
     on_sort: Callable[[], Awaitable[Sequence[T] | None]] | None = None,
     on_create: Callable[[], Awaitable[T | None]] | None = None,
     sort_label: Callable[[], str] | None = None,
+    live_keys: Mapping[str, Callable[[], Awaitable[Sequence[T] | None]]] | None = None,
+    live_nav: Sequence[MenuEntry] = (),
+    live_label: Callable[[], str] | None = None,
     description_level: str = "off",
     redraw_in_place: bool = False,
     unicode_style: bool = False,
@@ -275,7 +280,7 @@ async def pick_item(
     accent_color: int = ACCENT_COLOR,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     start_stable_id: int | None = None,
-    masthead: str = "",
+    masthead: str | Callable[[], Awaitable[str]] = "",
 ) -> T | None:
     """
     Let the user browse/search/jump through `items` and pick one, or
@@ -538,10 +543,40 @@ async def pick_item(
         return session.terminal_width, session.terminal_height
 
     def _header_lines() -> int:
-        if not columns:
-            return 0
-        width, _ = _dimensions()
-        return 1 if _table_widths(width, columns, 1) is not None else 0
+        # Everything this screen draws above the item list and does not
+        # already reserve elsewhere: the column heading, and the
+        # masthead.
+        #
+        # The masthead was never counted (issue #537). It is written
+        # immediately above the title on every render, so a one-line
+        # masthead cost a page one row it had not paid for -- the same
+        # accounting gap issue #538 found in the trailer, one block
+        # further up. Measured rather than assumed to be one line,
+        # because a SysOp-authored masthead can be several.
+        lines = 0
+        if masthead_text and not redraw_in_place:
+            # The blank row `_masthead_prefix` adds to get off the
+            # "Choice: " line (Codex review). It is a physical row, and
+            # every physical row this screen draws has to be in the
+            # budget or it is the next one to push the prompt off the
+            # bottom.
+            lines += 1
+        if masthead_text:
+            # Measured through the same wrapping `write_preformatted_line`
+            # performs, not by counting `\r\n` pairs (Codex review): that
+            # writer normalizes lone LFs and wraps a row wider than the
+            # terminal, so an authored masthead could occupy more rows
+            # than the reservation knew about -- which puts item rows and
+            # the choice prompt below the viewport, the same way every
+            # other unpaid-for row in this budget did.
+            width, _ = _dimensions()
+            wrapped = wrap_terminal_text(masthead_text, max(1, width))
+            lines += wrapped.count("\r\n") + 1
+        if columns:
+            width, _ = _dimensions()
+            if _table_widths(width, columns, 1) is not None:
+                lines += 1
+        return lines
 
     # `sort_label` is documented as read fresh on *every render* -- not
     # on every internal call (issue #538). Sizing a page now needs the
@@ -571,7 +606,7 @@ async def pick_item(
                 # Issue #538: the trailer is a real line too, and whether
                 # it takes one depends on these.
                 trailer=_trailer_text(_sort_label_text(), refresh is not None),
-                unicode_style=unicode_style, shapes=shapes,
+                unicode_style=unicode_style, shapes=shapes, live_nav=live_nav,
             )
 
         # The answer decides its own question (Codex review,
@@ -617,6 +652,19 @@ async def pick_item(
             for shapes in (_SHAPES_ONE_PAGE, _SHAPES_TWO_PAGES, _SHAPES_MANY_PAGES)
         )
 
+    # A caller can hand over a coroutine instead of a string, and then
+    # it is re-read on every render (issue #537, Codex review). The
+    # SysOp console's condensed status line goes here, and captured once
+    # it kept reporting "Backup: never" while another session completed
+    # a backup -- stale precisely on a screen that had just advertised
+    # Ctrl-R as a way to see current reality.
+    masthead_text = "" if callable(masthead) else masthead
+
+    async def _refresh_masthead() -> None:
+        nonlocal masthead_text
+        if callable(masthead):
+            masthead_text = await masthead()
+
     def _masthead_prefix() -> str:
         # Same clear_screen()-ordering hazard `_draw_main_menu`'s own
         # masthead handling documents: the clear (if `redraw_in_place`)
@@ -624,9 +672,17 @@ async def pick_item(
         # branch in `_render` below) *before* `screen_title`'s own
         # returned string too, since `screen_title` embeds its own
         # clear_screen() inside whatever it returns.
-        if not masthead:
+        if not masthead_text:
             return ""
-        return (clear_screen() if redraw_in_place else "") + masthead
+        if redraw_in_place:
+            return clear_screen() + masthead_text
+        # Without an in-place redraw the cursor is still sitting after
+        # "Choice: " (and after the letter a live key echoed), and
+        # `write_preformatted_line` only adds a *trailing* newline -- so
+        # the masthead ran on as "Choice: aBackup: ..." (Codex review).
+        # The screen this replaced wrote a newline before every
+        # state-change render for exactly this reason.
+        return "\r\n" + masthead_text
 
     # `on_create` keeps an empty list interactive for the same reason
     # `refresh` already does (issue #112): there is something to do
@@ -635,6 +691,12 @@ async def pick_item(
     # and the SysOp was bounced out to create one elsewhere and
     # come back -- the dead end issue #530 was filed about.
     if not items and refresh is None and on_create is None:
+        # Resolved first: a callable masthead is empty until something
+        # awaits it, and this return happens before the render that
+        # normally would (Codex review) -- so the screen that shows
+        # nothing else would have shown no masthead either, unlike the
+        # identical case with a plain string.
+        await _refresh_masthead()
         prefix = _masthead_prefix()
         if prefix:
             await write_preformatted_line(session, prefix)
@@ -665,6 +727,19 @@ async def pick_item(
     page_end = 0
     page_history: list[int] = []
     highlighted: int | None = None
+    # The search that narrowed `working_set`, if one did (issue #537,
+    # Codex review). A re-sort or a filter replaces the backing set, and
+    # without remembering this it also silently threw the search away --
+    # so a SysOp who found three accounts and then pressed [L] to order
+    # them by level got the whole roster back. The screen this replaced
+    # reapplied its query after every such change.
+    active_query: str | None = None
+
+    def _matching(candidates: Sequence[T], query: str) -> list[T]:
+        return [item for item in candidates if query.lower() in name_of(item).lower()]
+
+    def _narrowed(candidates: Sequence[T]) -> Sequence[T]:
+        return _matching(candidates, active_query) if active_query else candidates
     if start_stable_id is not None:
         for start_index, item in enumerate(working_set):
             if stable_id_of(item) == start_stable_id:
@@ -707,6 +782,9 @@ async def pick_item(
 
     async def _render_frozen() -> Sequence[T]:
         nonlocal page_start, page_end, highlighted
+        # Before `_header_lines` measures it or `_masthead_prefix` draws
+        # it, so a callable masthead is current for both.
+        await _refresh_masthead()
         render_width, render_height = _dimensions()
         if not working_set:
             page_start = 0
@@ -727,14 +805,37 @@ async def pick_item(
                 await session.write(clear_screen())
             await session.write_line(colored(f"\r\n{empty_message}", fg_color=MUTED_COLOR))
             dash = "—" if unicode_style else "-"
+            keys = []
+            if working_set is not items and items:
+                # The list is empty because a search or a filter made it
+                # so, not because there is nothing here (Codex review).
+                # [S]earch with a blank query clears back to everything,
+                # [G]oto reaches any row by its reference, and Ctrl-H
+                # explains both -- and the handlers accept all three, so
+                # hiding them made the way out undiscoverable rather
+                # than unavailable.
+                keys.append(menu_key("S", "earch"))
+                keys.append(menu_key("G", "oto #"))
             if on_create is not None:
                 # The whole point of staying here (issue #530): an empty
                 # list with a way out of being empty.
-                trailer = f"{menu_key('C', 'reate')}  {menu_key('B', 'ack')} {dash} Ctrl-L: redraw"
-            else:
-                trailer = f"{menu_key('B', 'ack')} {dash} Ctrl-L: redraw"
+                keys.append(menu_key("C", "reate"))
+            # A caller's own keys belong here too (issue #537, Codex
+            # review). A filter is exactly what can empty this list --
+            # "disabled users only" on a node with none -- and the
+            # branch that shows the result was hiding both the state
+            # that caused it and the key that undoes it. An empty list
+            # is the moment a SysOp most needs to know which filter is
+            # on.
+            keys.extend(entry.label for entry in live_nav)
+            keys.append(menu_key("B", "ack"))
+            trailer = f"{'  '.join(keys)} {dash} Ctrl-L: redraw"
             if refresh is not None:
                 trailer += ", Ctrl-R: refresh"
+            if live_label is not None:
+                standing = sanitize_text(live_label())
+                if standing:
+                    await session.write_line(colored(f"\r\n{standing}", fg_color=MUTED_COLOR))
             await session.write_line(f"\r\n{trailer}")
             await session.write("Choice: ")
             return []
@@ -772,7 +873,7 @@ async def pick_item(
         if highlighted is not None and highlighted >= len(page_items):
             highlighted = None
 
-        if masthead:
+        if masthead_text:
             await write_preformatted_line(session, _masthead_prefix())
         await session.write_line(
             "\r\n" + screen_title(
@@ -780,7 +881,7 @@ async def pick_item(
                 breadcrumb=(session.node_display_name, *breadcrumb),
                 subtitle=f"page {page_index + 1}/{total_pages}, {len(working_set)} total",
                 width=render_width,
-                clear=False if masthead else redraw_in_place,
+                clear=False if masthead_text else redraw_in_place,
                 unicode_style=unicode_style, collapsed=collapsed,
                 header_color=header_color, node_name_gradient=session.node_name_gradient)
         )
@@ -934,6 +1035,7 @@ async def pick_item(
                 else _SHAPES_TWO_PAGES if total_pages == 2
                 else _SHAPES_MANY_PAGES
             ),
+            live_nav=live_nav,
             # The frozen pair, like everything else this render draws
             # (Codex review). The previous commit gave this function the
             # parameters and then failed to pass them here, which left
@@ -960,6 +1062,30 @@ async def pick_item(
         # active sort mode being a mystery), not a one-time hint the
         # way the rest of this trailer is -- it must survive truncation
         # ahead of the boilerplate instructions below it.
+        trailer = ""
+        if sort_label is not None:
+            # `_sort_label_text`, not `sort_label()` directly: the page
+            # budget has already read it this render, and the contract
+            # is one read per render. Calling it again here consumed a
+            # second value from a label that changes between reads, so
+            # the trailer showed the mode *after* the one the page was
+            # sized for -- which the integration of #538 and #537 caught
+            # and neither branch could.
+            trailer = f"Sort: {_sort_label_text()}"
+        if live_label is not None:
+            # Beside the sort label and ahead of the boilerplate, for the
+            # same reason: it is standing state, not a hint. A list whose
+            # rows are filtered without saying so is a list with rows
+            # missing for no visible reason -- precisely what the SysOp
+            # who asked for the account filter did not want.
+            standing = sanitize_text(live_label())
+            if standing:
+                trailer = f"{trailer}, {standing}" if trailer else standing
+        boilerplate = "or type a 2-digit number to select; Ctrl-L: redraw"
+        if refresh is not None:
+            boilerplate += ", Ctrl-R: refresh"
+        boilerplate += ", Ctrl-H: help"
+        trailer = f"{trailer}; {boilerplate}" if trailer else boilerplate
         # Dogfood-reported regression, and a real dogfood-reported
         # *re*-regression on top of the original fix: with sort mode
         # (and/or refresh) active, nav + separator + trailer could run
@@ -1023,6 +1149,7 @@ async def pick_item(
             await _show_picker_help(
                 session, on_sort=on_sort, has_refresh=refresh is not None, header_color=header_color,
                 unicode_style=unicode_style, has_create=on_create is not None,
+                live_nav=live_nav,
             )
             page_items = await _render()
             continue
@@ -1032,6 +1159,12 @@ async def pick_item(
                 await session.write("\a")
                 continue
             items = await refresh()
+            # Ctrl-R's contract, and its help text, is that it clears an
+            # active search -- so the remembered query goes with it
+            # (Codex review). Left behind, the next sort silently
+            # resurrected a search the caller had just been told was
+            # gone.
+            active_query = None
             working_set = items
             page_start = 0
             page_history.clear()
@@ -1167,7 +1300,13 @@ async def pick_item(
                 continue
             await session.write_line("")
             await session.write("Search: ")
-            search_completer = _search_completer([name_of(item) for item in working_set])
+            # From `items`, not `working_set` (Codex review): the query
+            # below searches the full set, so completing only from the
+            # narrowed one meant Tab could not offer a name that Enter
+            # would have found. After narrowing to `ali*`, typing `b`
+            # and pressing Tab completed nothing while Enter selected
+            # `bob`.
+            search_completer = _search_completer([name_of(item) for item in items])
             query = (await session.read_line(completer=search_completer)).strip()
             if not query:
                 # Empty search clears back to the full, unfiltered list
@@ -1175,19 +1314,25 @@ async def pick_item(
                 # (a no-op in that case) and "clear filter" when a
                 # previous search narrowed working_set, without needing
                 # two separate commands for what's really one action.
+                active_query = None
                 working_set = items
                 page_start = 0
                 page_history.clear()
                 highlighted = None
                 page_items = await _render()
                 continue
-            matches = [item for item in items if query.lower() in name_of(item).lower()]
+            matches = _matching(items, query)
             if not matches:
                 await session.write_line(colored("No matches.", fg_color=ERROR_COLOR))
                 await session.write("Choice: ")
                 continue
             if len(matches) == 1:
                 return matches[0]
+            # Recorded only now (Codex review). Setting it before the
+            # match check meant a search that found nothing still became
+            # the "active" one, and the next re-sort then applied it and
+            # emptied a list the caller had never narrowed.
+            active_query = query
             working_set = matches
             page_start = 0
             page_history.clear()
@@ -1202,7 +1347,34 @@ async def pick_item(
             new_items = await on_sort()
             if new_items is not None:
                 items = new_items
-                working_set = new_items
+                working_set = _narrowed(new_items)
+                page_start = 0
+                page_history.clear()
+                highlighted = None
+            page_items = await _render()
+            continue
+
+        if live_keys and char_lower in live_keys:
+            # A caller's own key, dispatched exactly as `[O]rder` is: it
+            # replaces the working set, and the screen forgets its page
+            # and its highlight either way. What differs is only what the
+            # callback does.
+            #
+            # This exists because the account lister has four of them
+            # (issue #537) -- three sort dimensions that flip direction
+            # when pressed again, and a three-state visibility cycle --
+            # and they were why that screen was a hand-rolled copy of
+            # this one rather than a call to it. A SysOp asked for single
+            # keystrokes on a fifty-account roster by name; routing them
+            # through a prompt to reuse this screen would have paid for
+            # its features with the thing they asked for.
+            #
+            # Checked *after* this screen's own keys, so a caller cannot
+            # shadow `[N]ext` or `[B]ack` by accident.
+            new_items = await live_keys[char_lower]()
+            if new_items is not None:
+                items = new_items
+                working_set = _narrowed(new_items)
                 page_start = 0
                 page_history.clear()
                 highlighted = None
@@ -1336,6 +1508,7 @@ async def _show_picker_help(
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     unicode_style: bool = False,
     has_create: bool = False,
+    live_nav: Sequence[MenuEntry] = (),
 ) -> None:
     """Ctrl-H's own content for this screen (dogfood feature request --
     the shared picker had no on-demand help at all, only the terse
@@ -1383,6 +1556,18 @@ async def _show_picker_help(
         ]
     if on_sort is not None:
         lines += ["", colored("Order", fg_color=header_color, bold=True), "  Changes how this list is sorted."]
+    for entry in live_nav:
+        # A caller's own keys, explained here too (issue #537, Codex
+        # review). This overlay's contract is that it explains every
+        # command in the nav row, and it matters most exactly where the
+        # nav row is least explanatory: a short terminal collapses to
+        # the compact bar, which shows `[A]lphabetical` and nothing
+        # about what it does.
+        lines += [
+            "",
+            colored(strip_ansi(entry.label), fg_color=header_color, bold=True),
+            f"  {entry.brief}." if entry.brief else "",
+        ]
     lines += [
         "", colored("Back", fg_color=header_color, bold=True), "  Returns without picking anything.",
         "", colored("Ctrl-L", fg_color=header_color, bold=True), "  Redraws the current page in place.",
@@ -1442,7 +1627,7 @@ _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV = 5
 
 def _nav_entries(
     on_sort: Callable | None, *, include_next: bool = True, include_prev: bool = True,
-    on_create: Callable | None = None,
+    on_create: Callable | None = None, live_nav: Sequence[MenuEntry] = (),
 ) -> list[MenuEntry]:
     # Dogfood-reported UI issue: [N]ext/[P]rev used to be shown even when
     # there was no next/previous page to go to -- pressing them just bell-
@@ -1465,6 +1650,10 @@ def _nav_entries(
     entries.append(MenuEntry(label=menu_key("G", "oto #"), brief="Jump to an item's #"))
     if on_sort is not None:
         entries.append(MenuEntry(label=menu_key("O", "rder"), brief="Change sort order"))
+    # A caller's own keys, appended after this screen's (issue #537) --
+    # last, so the standard paging entries stay where a SysOp expects
+    # them however many the caller adds.
+    entries.extend(live_nav)
     if on_create is not None:
         # Issue #530. Offered on a populated list as well as an
         # empty one: the original reasoning -- that this only bites
@@ -1544,7 +1733,7 @@ def _render_nav(
     session: Session, on_sort: Callable | None, description_level: str,
     *, include_next: bool = True, include_prev: bool = True,
     width: int | None = None, height: int | None = None,
-    on_create: Callable | None = None,
+    on_create: Callable | None = None, live_nav: Sequence[MenuEntry] = (),
     trailer: str = "", unicode_style: bool = False,
     reserve: bool = False, shapes: Sequence[tuple[bool, bool]] = _SHAPES_MANY_PAGES,
 ) -> str:
@@ -1565,6 +1754,7 @@ def _render_nav(
     height = session.terminal_height if height is None else height
     entries = _nav_entries(
         on_sort, include_next=include_next, include_prev=include_prev, on_create=on_create,
+        live_nav=live_nav,
     )
     if description_level != "off":
         descriptive = menu_grid(
@@ -1703,6 +1893,7 @@ def _trailer_rows(
 def _page_size(
     session: Session, on_sort: Callable | None, description_level: str, *, header_lines: int = 0,
     width: int | None = None, height: int | None = None, on_create: Callable | None = None,
+    live_nav: Sequence[MenuEntry] = (),
     trailer: str = "", unicode_style: bool = False,
     shapes: Sequence[tuple[bool, bool]] = _SHAPES_MANY_PAGES,
 ) -> int:
@@ -1727,6 +1918,7 @@ def _page_size(
     # use, because a page has to fit whichever page it turns out to be.
     nav = _render_nav(
         session, on_sort, description_level, width=width, height=height, on_create=on_create,
+        live_nav=live_nav,
         trailer=trailer, unicode_style=unicode_style, reserve=True,
         shapes=shapes,
     )

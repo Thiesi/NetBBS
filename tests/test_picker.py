@@ -699,10 +699,22 @@ def test_search_tab_with_no_matching_candidates_does_not_change_the_query():
     assert result["value"] is None
 
 
-def test_search_tab_completion_reflects_the_current_working_set_not_the_full_list():
-    # Candidates for Tab are drawn from `working_set` -- confirms a
-    # completion offered mid-search doesn't ever suggest an item already
-    # filtered out by an earlier search.
+def test_search_tab_completion_offers_what_the_search_will_actually_find():
+    # Candidates for Tab come from `items`, the full set -- because that
+    # is the set pressing Enter searches.
+    #
+    # This test used to assert the opposite: that completion is scoped
+    # to the already-narrowed `working_set`, so it never suggests
+    # something an earlier search filtered out. That reads well on its
+    # own and contradicts the thing it is completing *for* (issue #537,
+    # Codex review). A search always searches the full set -- the
+    # `[S]earch` key's own gate says so in as many words -- so scoping
+    # only the completion meant Tab could not offer a name that Enter
+    # would select: after narrowing to "al*", typing "amb" and pressing
+    # Tab completed nothing, while Enter on it selected "amber".
+    #
+    # Two behaviours that disagree are worse than either, and the search
+    # is the one with the documented rule.
     result = {}
     items = ["alpha", "alligator", "amber"]
 
@@ -728,14 +740,18 @@ def test_search_tab_completion_reflects_the_current_working_set_not_the_full_lis
             writer.write(b"s")
             await writer.drain()
             await _read_until_quiet(reader)
-            writer.write(b"a\t")  # Tab, scoped to the narrowed working_set
+            writer.write(b"a\t")  # Tab, over everything a search can reach
             await writer.drain()
             data = await _read_until_quiet(reader)
-            assert b"amber" not in data  # excluded by the earlier search, not just prefix
             assert b"alpha" in data
             assert b"alligator" in data
+            # Offered even though the earlier search narrowed it away,
+            # because Enter on "amber" would select it.
+            assert b"amber" in data
 
-            writer.write(b"pha\r\n")  # finish typing "alpha" -> unique substring match
+            # "a" is now the common prefix of all three, so Tab
+            # extends nothing and lists them; type the rest.
+            writer.write(b"lpha\r\n")  # -> unique substring match
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()

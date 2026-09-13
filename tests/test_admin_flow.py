@@ -119,6 +119,22 @@ def _written_text(session: FakeSession) -> str:
     return "".join(session.written)
 
 
+def _last_render(text: str, marker: str) -> str:
+    """Everything drawn by the render that most recently showed
+    `marker`.
+
+    The screen redraws in place, so cumulative output still holds every
+    earlier page. Slicing from the marker itself worked while the
+    filter/sort lines were drawn *above* the list; `pick_item` puts that
+    standing state in its trailer, below the rows (issue #537), so the
+    page is what comes *before* the last marker and after the render
+    before it. Anchored on the blank line each render opens with.
+    """
+    end = text.rindex(marker)
+    start = text.rfind("Choice: ", 0, end)
+    return text[start if start != -1 else 0 : end]
+
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -1189,12 +1205,10 @@ def test_user_picker_visibility_toggle_hides_disabled_users_on_first_press(db, l
     text = _written_text(session)
     marker = "Showing: Active users only (disabled hidden)"
     assert marker in text
-    # rindex, not index/`in`: the screen redraws in place, and the
-    # cumulative output still contains the very first, pre-toggle render
-    # (where both users are visible) earlier in the text -- only what
-    # comes after the *last* render reflects the current filter (same
-    # pitfall this codebase already hit with the A/R/L sort toggle).
-    after = text[text.rindex(marker):]
+    # The *last* render, not the whole transcript: the screen redraws in
+    # place, so the cumulative output still contains the first,
+    # pre-toggle page where both users were visible.
+    after = _last_render(text, marker)
     assert "alice" in after
     assert "bob" not in after
 
@@ -1211,7 +1225,7 @@ def test_user_picker_visibility_toggle_shows_only_disabled_on_second_press(db, l
     text = _written_text(session)
     marker = "Showing: Disabled users only"
     assert marker in text
-    after = text[text.rindex(marker):]
+    after = _last_render(text, marker)
     assert "bob" in after
     assert "alice" not in after
 
@@ -1230,7 +1244,7 @@ def test_user_picker_visibility_toggle_returns_to_all_on_third_press(db, lane, s
     # rindex: "All users" is also the *initial* pre-toggle state, so a
     # naive `.index()` would match the very first render instead of the
     # one after the third press.
-    after = text[text.rindex(marker):]
+    after = _last_render(text, marker)
     assert "alice" in after
     assert "bob" in after
 
@@ -6703,15 +6717,23 @@ def test_condensed_status_line_fits_a_narrow_terminal(db, lane, sysop):
 
 def test_user_picker_page_size_reserves_a_line_for_the_condensed_status_line(lane):
     # Code review follow-up (PR #216): the condensed status line (issue
-    # #206) added one more line to this screen's own render -- without a
-    # matching bump to _USER_PICKER_RESERVED_LINES, a full page on a
+    # #206) is one more line this screen draws, and a full page on a
     # standard 24-row terminal pushed the nav/choice prompt past the
-    # viewport.
-    from netbbs.net.admin_flow import _USER_PICKER_RESERVED_LINES, _user_picker_page_size
+    # viewport without it being reserved for.
+    #
+    # It used to be reserved by a constant in a bespoke page-size
+    # calculation. Issue #537 retired that screen in favour of
+    # `pick_item`, where the status line is the picker's `masthead` --
+    # so the claim is now that a masthead costs the page its rows, which
+    # `_header_lines` is what answers.
+    from netbbs.net.picker import _page_size
 
     session = FakeSession([])
     session.terminal_height = 24
-    assert _user_picker_page_size(session) == 24 - _USER_PICKER_RESERVED_LINES
+    session.terminal_width = 80
+    without = _page_size(session, None, "off", header_lines=0, width=80, height=24)
+    with_status = _page_size(session, None, "off", header_lines=1, width=80, height=24)
+    assert with_status == without - 1
 
 
 # -- node-wide timestamp display format/timezone ----------------------------
@@ -8659,3 +8681,113 @@ def test_a_remote_door_is_told_outbound_cannot_work_for_it(db, lane, sysop):
 
     assert "has no way to hand anything back" in _written_text(session)
     assert outbound_config(db, door.id) is None, "the switch must not be reachable at all"
+
+
+def test_user_picker_keeps_an_active_search_across_a_sort(db, lane, sysop):
+    """A re-sort or a filter replaces the backing set, and used to throw
+    the search away with it -- so a SysOp who found three accounts and
+    pressed [L] to order them by level got the whole roster back. The
+    screen this replaced reapplied its query after every such change
+    (issue #537, Codex review)."""
+    for name in ("alice", "alina", "bob"):
+        create_user(db, name, password="hunter2", user_level=10)
+
+    # Search "ali" (matches alice and alina, not bob), then re-sort.
+    session = FakeSession(["u", "l", "s", "ali", "l", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    marker = "Sorted by: Level"
+    assert marker in text
+    after = _last_render(text, marker)
+    assert "alice" in after and "alina" in after
+    assert "bob" not in after, "the search survived the re-sort"
+
+
+def test_user_picker_status_line_is_re_read_on_every_render(db, lane, sysop):
+    """Captured once, it kept reporting the backup state the screen
+    opened with -- while another session completed a backup, on a screen
+    that advertises Ctrl-R as the way to see current reality (issue
+    #537, Codex review)."""
+    import netbbs.net.admin_flow as admin
+
+    reads = []
+    original = admin._load_condensed_status_line
+
+    async def counting(lane_, *, unicode_style, terminal_width):
+        reads.append(len(reads) + 1)
+        return f"Status read {len(reads)}"
+
+    admin._load_condensed_status_line = counting
+    try:
+        create_user(db, "alice", password="hunter2", user_level=10)
+        # Open the list, press a live key (which redraws), then leave.
+        session = FakeSession(["u", "l", "l", "b", "b", "b"])
+        _run(session, lane, sysop)
+    finally:
+        admin._load_condensed_status_line = original
+
+    assert len(reads) >= 2, f"read {len(reads)} time(s); a redraw must re-read it"
+    text = _visible(_written_text(session))
+    assert f"Status read {len(reads)}" in text, "and the newest read is what is shown"
+
+
+def test_user_picker_forgets_a_search_that_found_nothing(db, lane, sysop):
+    """Recording the query before checking for matches meant a search
+    that found nothing still became the "active" one -- and the next
+    re-sort applied it and emptied a list the SysOp had never narrowed
+    (issue #537, Codex review)."""
+    for name in ("alice", "bob"):
+        create_user(db, name, password="hunter2", user_level=10)
+
+    # Search for something absent, then re-sort by level.
+    session = FakeSession(["u", "l", "s", "zzz", "l", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    after = _last_render(text, "Sorted by: Level")
+    assert "alice" in after and "bob" in after, "the roster is still there"
+
+
+def test_user_picker_refresh_clears_a_remembered_search(db, lane, sysop):
+    """Ctrl-R's contract, and its help text, is that it clears an active
+    search -- so the remembered query has to go with it, or the next
+    sort resurrects a search the SysOp was just told was gone."""
+    for name in ("alice", "alina", "bob"):
+        create_user(db, name, password="hunter2", user_level=10)
+
+    # Narrow to ali*, refresh, then re-sort: bob must be back.
+    session = FakeSession(["u", "l", "s", "ali", "CTRL+r", "l", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    after = _last_render(text, "Sorted by: Level")
+    assert "bob" in after, "refresh cleared the search, so the sort kept it clear"
+
+
+def test_user_picker_filtered_to_empty_still_offers_the_way_back(db, lane, sysop):
+    """A search followed by a visibility change can empty the page while
+    the roster still has selectable accounts -- and the empty screen
+    advertised only the live keys and Back, though [S]earch (blank
+    clears), [G]oto and Ctrl-H all still work. Hiding them made the way
+    out undiscoverable rather than unavailable (issue #537, Codex
+    review)."""
+    from netbbs.auth.users import set_user_disabled
+
+    for name in ("alice", "alina"):
+        create_user(db, name, password="hunter2", user_level=10)
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    set_user_disabled(db, bob, True, changed_by=sysop)
+
+    # Narrow to ali*, then switch to disabled-only: no ali* is disabled.
+    session = FakeSession(["u", "l", "s", "ali", "v", "v", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    # The empty screen writes its standing state and *then* its keys, so
+    # the slice runs from the message to the end rather than up to the
+    # label the way a populated page's does.
+    after = text[text.rindex("No users match that view."):]
+    assert "Showing: Disabled users only" in after, "it says which filter emptied it"
+    assert "[S]earch" in after, "and offers the key that clears the search"
+    assert "[G]oto" in after
