@@ -792,6 +792,45 @@ peers raise the strong warning above and continue to permit interaction.
 Root and operational keys are generated at initial bootstrap. Rotation is a
 guided SysOp action. Root-key custody is part of ordinary node backup and
 restore rather than requiring an HSM or offline ceremony.
+### 4.6 Guest login (issue #531)
+
+A node may designate one **existing account** as its guest identity. Typing
+that account's name at the login prompt starts a session as that user without
+a password prompt.
+
+That is the whole feature, and the boundary is deliberate: guest login is an
+*authentication* shortcut and never an authorization model. The guest is an
+ordinary account, so levels, per-object permissions, age and name gates,
+moderation, auditing and Link trust apply to it exactly as to any other
+caller, and **no code anywhere branches on whether a caller is a guest**. A
+SysOp says what a guest may do the same way they say it for anybody else: by
+setting the guest account's level, and by granting or withholding per-object
+permissions.
+
+Three consequences follow, and are intended rather than gaps:
+
+- Writing is not blocked structurally. A guest meeting a board's write level
+  may post; the level is the mechanism.
+- The account keeps its password and can still be signed into normally.
+  Turning guest access off is one configuration change and leaves the account
+  untouched.
+- Everything after authentication still runs. A blocked guest is refused, a
+  disabled guest is refused, and a guest account that has been deleted stops
+  being special -- the name falls through to the ordinary password prompt
+  rather than matching something unintended.
+
+A SysOp account may not be designated. Everything else about guest access is
+policy the SysOp chooses, but a passwordless SysOp login is not a choice worth
+offering.
+
+The **pre-login notice** is a short SysOp-authored line shown above the
+sign-in screen -- the place a caller learns the guest account exists at all.
+Unlike the welcome banner, which is authored ANSI art placed on the node's
+filesystem and deliberately neither sanitized nor wrapped, the notice is typed
+in the BBS and goes through the ordinary text path. It reaches Telnet and web
+callers only: SSH has proven identity before there is any pre-login moment to
+use.
+
 
 ---
 

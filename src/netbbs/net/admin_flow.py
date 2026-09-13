@@ -484,6 +484,12 @@ from netbbs.rendering import (
     visible_width,
     wrap_to_width,
 )
+from netbbs.guest import (
+    guest_username,
+    pre_login_notice,
+    set_guest_username,
+    set_pre_login_notice,
+)
 from netbbs.session_history import previous_callers_enabled, set_previous_callers_enabled
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -1528,6 +1534,7 @@ async def _system_menu(
                 utc_now_iso(), override_format=display_format, override_timezone=display_timezone
             ),
             "previous_callers_enabled": previous_callers_enabled(db),
+            "guest_username": guest_username(db),
             "trust_exceptions": len(list_sole_authorities(db)),
             "description_level": menu_description_level(db, actor),
             "unicode_style": unicode_style_enabled(db, actor),
@@ -1567,6 +1574,11 @@ async def _system_menu(
         elif choice == "j":
             await session.write_line("")
             await _link_participation_screen(session, lane, actor)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == "g":
+            await session.write_line("")
+            await _guest_access_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "t":
@@ -1730,6 +1742,14 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable-node seeds and relays, on or off"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
+        MenuEntry(
+            label=menu_key("G", "uest access"),
+            brief=(
+                f"Guest login as {stats['guest_username']}"
+                if stats["guest_username"]
+                else "Guest login off; pre-login notice"
+            ),
+        ),
         MenuEntry(
             label=menu_key("V", "ious callers", prefix="Pre"),
             brief=(
@@ -1943,6 +1963,112 @@ async def _node_name_screen(session: Session, lane: DatabaseLane, actor: User) -
             await _draw_node_name_screen(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Guest login and the pre-login notice (issue #531).
+
+    One screen for both because they are one feature in use: the notice
+    is how a caller learns the guest credentials exist. See
+    `netbbs.guest` for why guest login is only an authentication
+    shortcut and never a new kind of account.
+
+    A draft editor rather than a prompt chain, per design doc §3.5 --
+    two values, changed independently, nothing written before [S]ave.
+    """
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+
+    def _load(db: Database) -> dict:
+        return {
+            "guest_username": guest_username(db) or "",
+            "notice": pre_login_notice(db),
+        }
+
+    draft = await lane.run(_load)
+
+    async def save(draft: dict):
+        name = (draft["guest_username"] or "").strip()
+        if name:
+            def _check(db: Database) -> User | None:
+                try:
+                    return get_user_by_username(db, name)
+                except AuthError:
+                    return None
+
+            account = await lane.run(_check)
+            if account is None:
+                # Raised, not returned: a bare `return None` closes the
+                # editor and discards the notice typed alongside it
+                # (issue #282's own lesson, learned the hard way).
+                raise AuthError(
+                    f"No account named {name!r}. Guest login names an existing account; "
+                    "create it first, then designate it here."
+                )
+            if meets_level(account, SYSOP_LEVEL):
+                # The one refusal worth hard-coding. Everything else
+                # about what a guest may do is the account's level and
+                # per-object grants -- but a passwordless SysOp login is
+                # not a policy choice a SysOp should be able to make by
+                # typing a name into a field.
+                raise AuthError(
+                    f"{name!r} is a SysOp account. Guest login skips the password, so it cannot "
+                    "be a SysOp."
+                )
+
+        def _apply(db: Database) -> None:
+            set_guest_username(db, name or None)
+            set_pre_login_notice(db, draft["notice"] or "")
+            record_action(
+                db, actor=actor, action="set_guest_access",
+                detail=f"guest={name or '(off)'} notice={'set' if draft['notice'] else '(none)'}",
+            )
+
+        await lane.run(_apply)
+        return True
+
+    fields = [
+        FieldSpec(
+            key="guest_username", hotkey="g", menu_text=menu_key("G", "uest account"),
+            label="Guest account",
+            render=lambda d: d.get("guest_username") or "(guest login off)",
+            prompt=text_field("guest_username"),
+            brief="Account that signs in without a password",
+            help=(
+                "An existing account callers may sign in as without a password. It stays an "
+                "ordinary account: its level and per-object permissions decide what a guest can "
+                "reach, and it keeps its own password for normal sign-in. Clear this field to "
+                "turn guest login off. A SysOp account cannot be used."
+            ),
+        ),
+        FieldSpec(
+            key="notice", hotkey="n", menu_text=menu_key("N", "otice"),
+            label="Pre-login notice",
+            render=lambda d: d.get("notice") or "(none)",
+            prompt=text_field("notice"),
+            brief="Shown before the login prompt",
+            help=(
+                "A short line shown after the welcome banner and before the username prompt -- "
+                "where you tell callers the guest account exists. Telnet and web only: an SSH "
+                "caller has already proven who they are before there is anything to show."
+            ),
+        ),
+    ]
+
+    result = await edit_resource_draft(
+        session, lane,
+        title="Guest access",
+        fields=fields, draft=draft, save=save, error_type=AuthError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=unicode_style, collapsed=collapsed,
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+    if result is not None:
+        await session.write_line("Guest access settings saved.")
 
 
 async def _rename_node_screen(session: Session, lane: DatabaseLane, actor: User) -> None:

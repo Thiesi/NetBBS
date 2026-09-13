@@ -64,9 +64,11 @@ from netbbs.net.unicode_style_preference import (
     unicode_style_enabled,
     unicode_style_ever_set,
 )
+from netbbs.guest import guest_user, is_guest_login, pre_login_notice
 from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
+    ACCENT_COLOR,
     ALERT_COLOR,
     ERROR_COLOR,
     HEADER_COLOR,
@@ -81,6 +83,7 @@ from netbbs.rendering import (
     sanitize_text,
     screen_title,
     status_badge,
+    wrap_to_width,
 )
 from netbbs.session_history import record_session_end, record_session_start
 from netbbs.storage.database import Database
@@ -369,6 +372,17 @@ async def _run_authenticated_session(
         # never blocks anyone by itself, unlike the post-authentication
         # `[M]aintenance mode` rejection a non-SysOp still gets further
         # down for actually trying to log in while this is on.
+        # The SysOp's own pre-login notice (issue #531), between the
+        # banner and the prompt: it is how a caller learns the guest
+        # credentials exist at all. Sanitized and wrapped, unlike the
+        # banner above -- that is authored ANSI art placed on the
+        # node's filesystem, this is typed in the BBS.
+        notice = pre_login_notice(db)
+        if notice:
+            await session.write_line("")
+            for line in wrap_to_width(sanitize_text(notice), session.terminal_width):
+                await session.write_line(colored(line, fg_color=ACCENT_COLOR))
+
         if node_controls is not None and node_controls.maintenance.is_lockdown_active():
             await session.write_line(colored(f"\r\n{LOCKDOWN_NOTICE}", fg_color=ALERT_COLOR, bold=True))
         try:
@@ -1006,6 +1020,17 @@ async def _login(
     whether they're blocked.
     """
     registration_mode = get_registration_mode(db)
+
+    # The SysOp's own pre-login notice (issue #531), above the
+    # sign-in screen it belongs to: it is how a caller learns the
+    # guest credentials exist at all. Sanitized and wrapped, unlike
+    # the welcome banner drawn before it -- that is authored ANSI art
+    # placed on the node's filesystem, this is typed in the BBS.
+    notice = pre_login_notice(db)
+    if notice:
+        await session.write_line("")
+        for line in wrap_to_width(sanitize_text(notice), session.terminal_width):
+            await session.write_line(colored(line, fg_color=ACCENT_COLOR))
     await session.write_line(
         "\r\n"
         + screen_title(
@@ -1057,6 +1082,25 @@ async def _login(
             if new_user is not None:
                 return new_user
             continue
+
+        if is_guest_login(db, username):
+            # Issue #531: an authentication shortcut, and nothing
+            # more. The password prompt is skipped; everything after
+            # it is not. `is_blocked` still runs, the account's level
+            # and per-object permissions still decide what it can
+            # reach, and a guest account that has since been deleted
+            # resolves to `None` here and falls through to the
+            # ordinary password path rather than letting the name
+            # match something unintended.
+            guest = guest_user(db)
+            if guest is not None:
+                if is_blocked(db, guest):
+                    await session.write_line(
+                        colored("Your access to this system has been revoked.", fg_color=ERROR_COLOR)
+                    )
+                    return LoginOutcome.BLOCKED
+                await session.write_line("")
+                return guest
 
         try:
             await session.write(colored("Password: ", fg_color=LABEL_COLOR, bold=True))
