@@ -1,0 +1,20 @@
+External installs are manual. See docs/NetBBS-door-guide.md. Templates need
+local paths and game setup.
+
+[1m[38;5;51mHarbor Lights / Door compatibility[0m
+[38;5;240m----------------------------------[0m
+[1m[38;5;246mRUNTIME[0m
+[38;5;75m  Setup template[0m: [38;5;248m(none)[0m
+[38;5;75m  Import JSON[0m: [38;5;248m(none)[0m
+[38;5;75m  Restore original API on Save[0m: [38;5;248mFalse[0m
+[38;5;75m  Adapter[0m: [38;5;248mdosbox[0m
+[38;5;75m  I/O endpoint[0m: [38;5;248msocketpair[0m
+[38;5;75m  Executable/runtime path[0m: [38;5;248m/usr/pkg/bin/dosbox-x[0m
+[38;5;75m  Arguments[0m: [38;5;248m(none)[0m
+
+[[1m[38;5;46mP[0m] Setup template  [[1m[38;5;46mJ[0m] Import JSON  [[1m[38;5;46m1[0m] Restore original API on Save
+[[1m[38;5;46mA[0m] Adapter  [[1m[38;5;46mI[0m] I/O endpoint  [[1m[38;5;46mE[0m] Executable/runtime path  [[1m[38;5;46mG[0m] Arguments
+[[1m[38;5;46mS[0m]ave  [[1m[38;5;46mB[0m]ack
+[38;5;248m(Ctrl-H for help on these fields)[0m
+[38;5;248m(Section 1 of 6 -- PgUp/PgDn to switch)[0m
+Choice: 

@@ -58,19 +58,37 @@ def xterm256(index: int) -> tuple[int, int, int]:
     return (grey, grey, grey)
 
 
+#: What the embedded terminal's own CSS paints when a cell names no colour
+#: of its own -- `.term{background:#0a0c10}` and `pre.term-body{color:#c7cad4}`
+#: in both pages. Reverse video swaps *effective* colours, so an inverted
+#: cell that set neither has to be given these explicitly: there is no
+#: "unset" for the swap to exchange.
+DEFAULT_FG = (0xC7, 0xCA, 0xD4)
+DEFAULT_BG = (0x0A, 0x0C, 0x10)
+
+
 @dataclass(frozen=True)
 class Style:
     fg: tuple[int, int, int] | None = None
     bg: tuple[int, int, int] | None = None
     bold: bool = False
     underline: bool = False
+    reverse: bool = False
 
     def css(self) -> str:
         parts = []
-        if self.fg:
-            parts.append("color:rgb(%d,%d,%d)" % self.fg)
-        if self.bg:
-            parts.append("background:rgb(%d,%d,%d)" % self.bg)
+        fg, bg = self.fg, self.bg
+        if self.reverse:
+            # SGR 7. A selected row in `pick_item` and in the file listing is
+            # one inverted run as of v7.5.0, and dropping the attribute --
+            # which this converter did until the captures were redone for
+            # that release -- renders the cursor as ordinary text, in the
+            # one shot chosen to show it.
+            fg, bg = bg or DEFAULT_BG, fg or DEFAULT_FG
+        if fg:
+            parts.append("color:rgb(%d,%d,%d)" % fg)
+        if bg:
+            parts.append("background:rgb(%d,%d,%d)" % bg)
         if self.bold:
             parts.append("font-weight:600")
         if self.underline:
@@ -155,6 +173,10 @@ class Screen:
                 self.style = replace(self.style, underline=True)
             elif p == 24:
                 self.style = replace(self.style, underline=False)
+            elif p == 7:
+                self.style = replace(self.style, reverse=True)
+            elif p == 27:
+                self.style = replace(self.style, reverse=False)
             elif 30 <= p <= 37:
                 self.style = replace(self.style, fg=xterm256(p - 30))
             elif 90 <= p <= 97:

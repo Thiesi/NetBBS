@@ -1,0 +1,8 @@
+
+[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;246mDirectory[0m[38;5;246m › [0m[38;5;51mkeeper[0m
+[38;5;246mMember profile[0m
+[38;5;240m──────────────────────────────────[0m
+[38;5;75mMember since: [0m[38;5;246m04.11.2025 18:22[0m
+[1m[38;5;51mBio[0m
+[38;5;252mRuns this node from a NetBSD box in Kiel. Wrote most of what you are looking at.
+Around most evenings; leave a message on Announcements and I will see it.[0m

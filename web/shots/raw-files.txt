@@ -1,0 +1,21 @@
+
+[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;246mFiles[0m[38;5;246m › [0m[38;5;51mUtilities[0m
+[38;5;246m4 files on this page[0m
+[38;5;240m─────────────────────────────────[0m
+
+[1m[38;5;51m #   Filename                    Size Date             Uploader                      [0m
+[38;5;238m──── ────────────────────── ───────── ──────────────── ──────────────────────────────[0m
+[7m>[ 1] backup-rotate.sh           132 B 02.09.2026 19:41 otto                          [0m
+      [38;5;252mNightly backup rotation, seven days retained.[0m
+[38;5;46m [ 2][0m [38;5;220mnetbbs-7.5.0.tar.gz   [0m [38;5;255m  2.6 MiB[0m [38;5;110m04.09.2026 08:16[0m [38;5;79mkeeper                        [0m
+      [38;5;252mThe current release, source distribution.[0m
+[38;5;46m [ 3][0m [38;5;220mansi-preset-pack.zip  [0m [38;5;255m 46.9 KiB[0m [38;5;110m07.09.2026 21:03[0m [38;5;79mwren                          [0m
+      [38;5;252mTwelve masthead presets, 80 and 132 columns.[0m
+[38;5;46m [ 4][0m [38;5;220mwelcome.txt           [0m [38;5;255m     48 B[0m [38;5;110m09.09.2026 17:28[0m [38;5;79mkeeper                        [0m
+
+  [[1m[38;5;46mB[0m]ack
+[38;5;248m    Return to the previous menu[0m
+  [[1m[38;5;46m1-4[0m] or /download <name|#> — receive via Zmodem
+  [[1m[38;5;46mU[0m]pload
+[38;5;248m    Send a file via Zmodem[0m
+Choice or command: 
