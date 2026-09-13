@@ -572,6 +572,64 @@ def authorize_public_key(db: Database, username: str, verify_key: nacl.signing.V
     return _touch_last_login(db, row)
 
 
+def touch_last_login(db: Database, user: User) -> User | None:
+    """Record that `user` has just signed in and return the refreshed
+    row, or `None` if the account is no longer the account `user` names.
+
+    The `User`-shaped counterpart to `_touch_last_login`, which every
+    password and key path already reaches through its own `sqlite3.Row`.
+    Guest login (issue #531) resolves an account without going through
+    either, and skipping this left `last_login_at` stale on an account
+    that was signing in daily.
+
+    The `None` is not defensive padding (Codex review): the guest path
+    calls this *after* awaiting transport I/O, so a SysOp deleting the
+    designated account in that window left `fetchone()` returning
+    nothing and `_touch_last_login` subscripting it -- a `TypeError`
+    that dropped the caller's whole session instead of the refusal the
+    login path already knows how to say. Callers holding a row they
+    read in the same breath will simply never see it.
+    """
+    # One transaction across the identity check, the update and the
+    # re-read (Codex review). As three separate statements, a delete
+    # landing between them left `_touch_last_login` updating no rows and
+    # then subscripting a re-fetch that returned nothing -- a
+    # `TypeError` that dropped the caller's session instead of the
+    # refusal this path knows how to give -- and a replacement inserted
+    # in that window could take the login timestamp before eligibility
+    # turned it away. `BEGIN IMMEDIATE` is what actually excludes the
+    # other writer, which is `delete_user`, which uses the same.
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = db.connection.execute(
+            "SELECT * FROM users WHERE id = ? AND created_at = ?", (user.id, user.created_at)
+        ).fetchone()
+        if row is None:
+            # Ended explicitly, not left open (Codex review). Returning
+            # from inside the `try` skipped both the rollback handler
+            # and the `else` commit, so the `BEGIN IMMEDIATE` above
+            # stayed active on the shared connection: every later
+            # operation that opens its own transaction would fail with
+            # "cannot start a transaction within a transaction", and
+            # other connections would stay write-locked until something
+            # unrelated happened to end it.
+            db.connection.rollback()
+            return None
+        now = utc_now_iso()
+        db.connection.execute(
+            "UPDATE users SET last_login_at = ? WHERE id = ?", (now, row["id"])
+        )
+        updated = db.connection.execute(
+            "SELECT * FROM users WHERE id = ?", (row["id"],)
+        ).fetchone()
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
+    return _row_to_user(updated)
+
+
 def _touch_last_login(db: Database, row: sqlite3.Row) -> User:
     now = utc_now_iso()
     db.connection.execute(
@@ -1030,12 +1088,22 @@ def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
     `BEGIN IMMEDIATE` transaction rather than as a plain check-then-act
     sequence.
     """
+    from netbbs.guest import clear_designation_for_deleted_user
     from netbbs.moderation.log import record_action_without_commit
 
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         current = _get_user_by_id(db, target.id)
         _refuse_if_last_sysop(db, current, removes_active_sysop=True)
+        # Issue #531, Codex review. Guest login keys its designation on
+        # `(id, created_at)`, and neither is unique on its own -- rowids
+        # are reused, and two fast creations can share a timestamp (see
+        # `list_users`' own note on sorting by id rather than
+        # `created_at`). Dropped here, in the same transaction as the
+        # delete, so a recreated account cannot inherit passwordless
+        # access however the numbers fall. Imported inside the function:
+        # `netbbs.guest` imports from this module.
+        clear_designation_for_deleted_user(db, current.id)
         # Logged *before* deleting, not after: on a self-delete
         # (deleted_by == target), record_action's own actor_user_id FK
         # would otherwise reference a row that's already gone. Logging

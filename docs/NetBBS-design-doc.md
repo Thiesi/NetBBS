@@ -797,6 +797,75 @@ peers raise the strong warning above and continue to permit interaction.
 Root and operational keys are generated at initial bootstrap. Rotation is a
 guided SysOp action. Root-key custody is part of ordinary node backup and
 restore rather than requiring an HSM or offline ceremony.
+### 4.6 Guest login (issue #531)
+
+A node may designate one **existing account** as its guest identity. Typing
+that account's name at the login prompt starts a session as that user without
+a password prompt.
+
+That is the whole feature, and the boundary is deliberate: guest login is an
+*authentication* shortcut and never an authorization model. The guest is an
+ordinary account, so levels, per-object permissions, age and name gates,
+moderation, auditing and Link trust apply to it exactly as to any other
+caller, and **no code anywhere branches on whether a caller is a guest**. A
+SysOp says what a guest may do the same way they say it for anybody else: by
+setting the guest account's level, and by granting or withholding per-object
+permissions.
+
+Three consequences follow, and are intended rather than gaps:
+
+- Writing is not blocked structurally. A guest meeting a board's write level
+  may post; the level is the mechanism.
+- The account keeps its password. The designation does not touch the
+  credential, and turning guest access off -- one configuration change, leaving
+  the account untouched -- restores ordinary sign-in for it.
+
+  While guest access is *on*, though, typing that name on Telnet or web signs
+  in as the guest: that is the feature, and there is deliberately no second
+  path that offers the password prompt for it instead. The designated account
+  is a node identity rather than a person's, so a SysOp who needs to act on it
+  either turns guest access off for the moment or works on it from the SysOp
+  console, which reaches everything about it including its keys. SSH is
+  unaffected -- a key has already proven identity before the login flow runs.
+- Everything after authentication still runs, and is re-checked at the moment
+  of use rather than when the designation was saved. A blocked guest is
+  refused. A disabled or not-yet-approved account is refused. An account
+  promoted to SysOp after being designated is refused -- otherwise designating
+  an ordinary account and then promoting it would be a passwordless route to
+  SysOp. And a deleted guest stops being special, falling through to the
+  ordinary password prompt.
+- The designation records the account's **id and creation timestamp**, and both
+  must match. Neither a name nor an id alone is an identity: a name resolves to
+  whatever row holds it now, and `users.id` is `INTEGER PRIMARY KEY` without
+  `AUTOINCREMENT`, so SQLite hands a freed rowid to the next account created.
+  Either alone would hand passwordless access to a replacement account.
+- A guest session **may not manage the account's credentials.** The guest is an
+  ordinary account in every other respect, but whether a session may touch an
+  SSH key is a question about how that session authenticated, not about the
+  account. The rule covers the whole key screen, not adding alone: a caller who
+  proved nothing must not be able to mint a credential that outlives guest
+  access being switched off, nor to strip the keys off a password-backed
+  account -- removing the primary key changes the fingerprint its Link events
+  are authored under. Signing in with the account's own password reaches key
+  management normally.
+- The re-checks are applied to the row that is **ultimately returned**, not
+  only to the one first resolved. The login path awaits transport I/O and then
+  re-reads the account to stamp `last_login_at`; a promotion, a block or a
+  deletion landing in that window would otherwise have been read too early to
+  matter. A deletion is a refusal like any other, not an error.
+
+A SysOp account may not be designated. Everything else about guest access is
+policy the SysOp chooses, but a passwordless SysOp login is not a choice worth
+offering.
+
+The **pre-login notice** is a short SysOp-authored line shown above the
+sign-in screen -- the place a caller learns the guest account exists at all.
+Unlike the welcome banner, which is authored ANSI art placed on the node's
+filesystem and deliberately neither sanitized nor wrapped, the notice is typed
+in the BBS and goes through the ordinary text path. It reaches Telnet and web
+callers only: SSH has proven identity before there is any pre-login moment to
+use.
+
 
 ---
 

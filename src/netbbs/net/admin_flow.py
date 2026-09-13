@@ -64,6 +64,8 @@ from zoneinfo import available_timezones
 import nacl.signing
 
 from netbbs.auth.users import (
+    NEW_ACCOUNT_SENTINEL,
+    SYSOP_LEVEL,
     AuthError,
     User,
     UserManagementError,
@@ -268,7 +270,12 @@ from netbbs.link.work_items import (
     replay_work_item,
 )
 from netbbs.moderation.blocklist import BlocklistError, block_user, is_blocked, unblock_user
-from netbbs.moderation.log import list_actions_for_target_user, list_recent_actions, record_action
+from netbbs.moderation.log import (
+    list_actions_for_target_user,
+    list_recent_actions,
+    record_action,
+    record_action_without_commit,
+)
 from netbbs.mrc.protocol import display_roster_entry, room_name_error
 from netbbs.mrc.bridge import MrcBridge, MrcState, MrcStatus
 from netbbs.mrc.settings import (
@@ -442,6 +449,7 @@ from netbbs.net.chat_channel_picker_banner import (
     load_chat_channel_picker_banner,
     set_chat_channel_picker_banner_enabled,
 )
+from netbbs.permissions.levels import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
     ALERT_COLOR,
@@ -483,6 +491,14 @@ from netbbs.rendering import (
     truncate,
     visible_width,
     wrap_to_width,
+)
+from netbbs.guest import (
+    guest_user,
+    pre_login_notice,
+    set_guest_user,
+    set_guest_user_without_commit,
+    set_pre_login_notice,
+    set_pre_login_notice_without_commit,
 )
 from netbbs.session_history import previous_callers_enabled, set_previous_callers_enabled
 from netbbs.storage.database import Database
@@ -1528,6 +1544,7 @@ async def _system_menu(
                 utc_now_iso(), override_format=display_format, override_timezone=display_timezone
             ),
             "previous_callers_enabled": previous_callers_enabled(db),
+            "guest_username": (lambda u: u.username if u is not None else None)(guest_user(db)),
             "trust_exceptions": len(list_sole_authorities(db)),
             "description_level": menu_description_level(db, actor),
             "unicode_style": unicode_style_enabled(db, actor),
@@ -1567,6 +1584,11 @@ async def _system_menu(
         elif choice == "j":
             await session.write_line("")
             await _link_participation_screen(session, lane, actor)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == "g":
+            await session.write_line("")
+            await _guest_access_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "t":
@@ -1730,6 +1752,20 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable-node seeds and relays, on or off"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
+        MenuEntry(
+            label=menu_key("G", "uest access"),
+            brief=(
+                # Sanitized here because `menu_grid` does not do it for
+                # its callers (Codex review). Account creation rejects a
+                # username carrying C1 controls or a bidi override, but
+                # deliberately left rows that predate that check valid --
+                # so designating one of those could have injected
+                # terminal control into the SysOp's own Settings menu.
+                f"Guest login as {sanitize_text(stats['guest_username'])}"
+                if stats["guest_username"]
+                else "Guest login off; pre-login notice"
+            ),
+        ),
         MenuEntry(
             label=menu_key("V", "ious callers", prefix="Pre"),
             brief=(
@@ -1943,6 +1979,166 @@ async def _node_name_screen(session: Session, lane: DatabaseLane, actor: User) -
             await _draw_node_name_screen(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Guest login and the pre-login notice (issue #531).
+
+    One screen for both because they are one feature in use: the notice
+    is how a caller learns the guest credentials exist. See
+    `netbbs.guest` for why guest login is only an authentication
+    shortcut and never a new kind of account.
+
+    A draft editor rather than a prompt chain, per design doc §3.5 --
+    two values, changed independently, nothing written before [S]ave.
+    """
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+
+    def _load(db: Database) -> dict:
+        current = guest_user(db)
+        return {
+            "guest_username": current.username if current is not None else "",
+            "notice": pre_login_notice(db),
+        }
+
+    draft = await lane.run(_load)
+
+    async def save(draft: dict):
+        name = (draft["guest_username"] or "").strip()
+        account = None
+        if name:
+            def _check(db: Database) -> User | None:
+                try:
+                    return get_user_by_username(db, name)
+                except AuthError:
+                    return None
+
+            account = await lane.run(_check)
+            if account is None:
+                # Raised, not returned: a bare `return None` closes the
+                # editor and discards the notice typed alongside it
+                # (issue #282's own lesson, learned the hard way).
+                raise AuthError(
+                    f"No account named {name!r}. Guest login names an existing account; "
+                    "create it first, then designate it here."
+                )
+            if account.username.strip().lower() == NEW_ACCOUNT_SENTINEL:
+                # `new` is how a caller asks to register, and `_login`
+                # acts on it before the guest branch is reached -- so an
+                # account with this name can be designated, saved, and
+                # then never actually sign anybody in (Codex review).
+                # `RESERVED_USERNAMES` has refused the name since, so
+                # only an account predating that check can be here.
+                raise AuthError(
+                    f"{name!r} is how a caller asks to create an account, so it cannot be the "
+                    "guest account. Rename it first."
+                )
+            if meets_level(account, SYSOP_LEVEL):
+                # The one refusal worth hard-coding. Everything else
+                # about what a guest may do is the account's level and
+                # per-object grants -- but a passwordless SysOp login is
+                # not a policy choice a SysOp should be able to make by
+                # typing a name into a field.
+                raise AuthError(
+                    f"{name!r} is a SysOp account. Guest login skips the password, so it cannot "
+                    "be a SysOp."
+                )
+
+        def _apply(db: Database) -> None:
+            # Validated and written inside one `BEGIN IMMEDIATE`, the
+            # same shape `netbbs.auth.users.delete_user` uses -- and for
+            # the same reason, since that is the writer this is racing
+            # (Codex review, three rounds on this one paragraph).
+            #
+            # Resolving the account and designating it as two separate
+            # statements is a check-then-act: a delete landing in
+            # between runs its own designation-clearing hook *before*
+            # the stale designation is written, so nothing clears it
+            # afterwards -- and if the freed id and creation timestamp
+            # are later handed to a new account, that account has
+            # passwordless login. Doing it in one lane callback
+            # serializes this process but not the standalone admin CLI
+            # or any other connection; a write transaction is what
+            # actually excludes them.
+            db.connection.execute("BEGIN IMMEDIATE")
+            try:
+                if account is not None:
+                    still_there = get_user_by_id(db, account.id)
+                    if still_there is None or still_there.created_at != account.created_at:
+                        raise AuthError(
+                            f"{name!r} was removed while you were editing. Nothing was changed."
+                        )
+                set_guest_user_without_commit(db, account)
+                set_pre_login_notice_without_commit(db, draft["notice"] or "")
+                record_action_without_commit(
+                    db, actor=actor, action="set_guest_access",
+                    detail=f"guest={name or '(off)'} notice={'set' if draft['notice'] else '(none)'}",
+                )
+            except BaseException:
+                db.connection.rollback()
+                raise
+            else:
+                db.connection.commit()
+
+        await lane.run(_apply)
+        return True
+
+    fields = [
+        FieldSpec(
+            key="guest_username", hotkey="g", menu_text=menu_key("G", "uest account"),
+            label="Guest account",
+            render=lambda d: d.get("guest_username") or "(guest login off)",
+            # Two Codex rounds landed on this one field. It could not
+            # be cleared at all at first -- the shared `text_field` read
+            # a blank entry as "keep", which is right for a name that
+            # must always be *something* and wrong for a setting whose
+            # off switch is emptiness. A `'none'` sentinel fixed that and
+            # introduced a smaller bug of its own: `RESERVED_USERNAMES`
+            # holds only `new`, so an account genuinely named "none"
+            # could never be designated.
+            #
+            # Neither is needed now. Issue #529 gave `text_field` the
+            # current value as an editable prefill, so erasing it and
+            # pressing Enter *is* the clear -- no sentinel, no word a
+            # SysOp cannot type.
+            prompt=text_field("guest_username"),
+            brief="Account that signs in without a password",
+            help=(
+                "An existing account callers may sign in as without a password. It stays an "
+                "ordinary account: its level and per-object permissions decide what a guest can "
+                "reach, and it keeps its own password for normal sign-in. Clear this field to "
+                "turn guest login off. A SysOp account cannot be used."
+            ),
+        ),
+        FieldSpec(
+            key="notice", hotkey="n", menu_text=menu_key("N", "otice"),
+            label="Pre-login notice",
+            render=lambda d: d.get("notice") or "(none)",
+            prompt=text_field("notice"),
+            brief="Shown before the login prompt",
+            help=(
+                "A short line shown after the welcome banner and before the username prompt -- "
+                "where you tell callers the guest account exists. Telnet and web only: an SSH "
+                "caller has already proven who they are before there is anything to show."
+            ),
+        ),
+    ]
+
+    result = await edit_resource_draft(
+        session, lane,
+        title="Guest access",
+        fields=fields, draft=draft, save=save, error_type=AuthError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=unicode_style, collapsed=collapsed,
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+    if result is not None:
+        await session.write_line("Guest access settings saved.")
 
 
 async def _rename_node_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
