@@ -154,14 +154,43 @@ def test_a_deleted_guest_account_falls_back_to_the_password_prompt(db):
 
 
 def test_the_notice_is_shown_before_the_username_prompt(db):
+    import re
+
     create_user(db, "alice", password="correct", user_level=10)
     set_pre_login_notice(db, "Here for NetBBS? Sign in as 'guest' to download.")
 
     _, session = _login(db, ["alice", "correct"])
 
     text = "".join(session.written)
-    assert "Sign in as 'guest' to download." in text
+    # Wrapped, so the sentence is reassembled before it is looked for.
+    flat = " ".join(re.sub(chr(27) + r"\[[0-9;]*m", "", text).split())
+    assert "Sign in as 'guest' to download." in flat
     assert text.index("download.") < text.index("Username:")
+
+
+def test_the_notice_is_wrapped_narrow_enough_for_a_terminal_that_has_not_spoken(db):
+    """It is drawn before the first `read_line`, which on Telnet is what
+    consumes the client's NAWS response -- so the session still reports
+    its 80-column default even for a 40-column caller (Codex review).
+    Wrapping to that default hands a narrow terminal rows it has to
+    break itself, wherever the column falls rather than at a space."""
+    import re
+
+    from netbbs.net.login_flow import _PRE_NEGOTIATION_WIDTH
+    from netbbs.rendering.width import display_width
+
+    create_user(db, "alice", password="correct", user_level=10)
+    set_pre_login_notice(db, "Here for NetBBS? " + "Sign in as 'guest' to download the releases. " * 4)
+
+    _, session = _login(db, ["alice", "correct"])
+
+    notice_rows = [
+        re.sub(chr(27) + r"\[[0-9;]*m", "", line)
+        for line in "".join(session.written).splitlines()
+        if "guest" in line
+    ]
+    assert notice_rows
+    assert all(display_width(row) <= _PRE_NEGOTIATION_WIDTH for row in notice_rows)
 
 
 def test_no_notice_means_nothing_extra_is_written(db):
@@ -295,3 +324,34 @@ def test_the_account_vanishing_during_the_final_await_is_a_refusal(db):
 
     assert result is login_flow.LoginOutcome.ATTEMPTS_EXHAUSTED
     assert "Guest access is not available." in "".join(session.written)
+
+
+# -- Guest admission is bounded ----------------------------------------
+
+
+def test_guest_login_spends_the_same_budget_a_password_attempt_does(db):
+    """Guest login is the one way in that needs no credential, so
+    without this a single peer could sit in a reconnect loop spinning
+    sessions -- each holding a socket and a session task, each
+    committing a `last_login_at`. `allow_attempt` is reached only from
+    the password path, and the concurrent-unauthenticated slot is
+    released the moment `_login` returns (Codex review).
+    """
+    from tests.test_login_outcomes import _throttle_config
+
+    guest = create_user(db, "guest", password="hunter2", user_level=1)
+    set_guest_user(db, guest)
+
+    throttle = _throttle(_throttle_config(per_source_capacity=2, per_source_refill_per_minute=0))
+    admitted = 0
+    for _ in range(5):
+        session = FakeSession(["guest"])
+        result = asyncio.run(
+            login_flow._login(session, db, throttle, idle_timeout=5.0)
+        )
+        if result is login_flow.LoginOutcome.THROTTLED:
+            break
+        admitted += 1
+
+    assert admitted == 2, f"{admitted} guest sessions admitted from one source"
+    assert result is login_flow.LoginOutcome.THROTTLED

@@ -2028,6 +2028,21 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
                 )
 
         def _apply(db: Database) -> None:
+            # Re-read in the same lane call that writes (Codex review).
+            # Resolving the account in one call and designating it in
+            # another is a check-then-act: a second SysOp deleting it in
+            # that gap runs the deletion's own designation-clearing hook
+            # *before* the stale designation exists, so nothing clears
+            # it afterwards -- and if the freed id and timestamp are
+            # then handed to a new account, that account has
+            # passwordless login. Rare, and cheap to close: the write
+            # simply refuses a name that is no longer there.
+            if account is not None:
+                still_there = get_user_by_id(db, account.id)
+                if still_there is None or still_there.created_at != account.created_at:
+                    raise AuthError(
+                        f"{name!r} was removed while you were editing. Nothing was changed."
+                    )
             set_guest_user(db, account)
             set_pre_login_notice(db, draft["notice"] or "")
             record_action(

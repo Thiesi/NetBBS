@@ -60,6 +60,15 @@ from netbbs.net.session import Session, SessionClosedError, write_preformatted_l
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, SequenceScheduler, format_remaining_seconds
 from netbbs.net.throttle import LoginThrottle
+
+# What a terminal is assumed to be before it has said (issue #531,
+# Codex review). Anything drawn ahead of the first `read_line` predates
+# Telnet's NAWS response, so `Session.terminal_width` is still its
+# default there however narrow the real screen is. 40 columns is the
+# floor this project already builds doors against (the 40x12 door
+# floor), and the only thing drawn this early is the pre-login notice:
+# a few sentences, which lose nothing by being narrow.
+_PRE_NEGOTIATION_WIDTH = 40
 from netbbs.net.unicode_style_preference import (
     set_unicode_style_enabled,
     unicode_style_enabled,
@@ -1019,7 +1028,17 @@ async def _login(
     notice = pre_login_notice(db)
     if notice:
         await session.write_line("")
-        for line in wrap_to_width(sanitize_text(notice), session.terminal_width):
+        # Wrapped at a conservative width rather than the session's
+        # (Codex review). This is drawn before the first `read_line`,
+        # and on Telnet that read is what consumes the client's NAWS
+        # response -- so `terminal_width` is still its 80-column default
+        # here even for a caller on a 40-column screen, and wrapping to
+        # 80 would hand a narrow terminal rows it has to soft-wrap
+        # itself, breaking them wherever the column happens to fall
+        # rather than at a space. Wrapping narrow costs an 80-column
+        # caller nothing but a shorter line on a notice that is at most
+        # a few sentences.
+        for line in wrap_to_width(sanitize_text(notice), _PRE_NEGOTIATION_WIDTH):
             await session.write_line(colored(line, fg_color=ACCENT_COLOR))
     await session.write_line(
         "\r\n"
@@ -1084,6 +1103,23 @@ async def _login(
         # ordinary password path.
         guest = guest_login_for(db, username)
         if guest is not None:
+            # Through the same budget the password path uses (Codex
+            # review). Guest login is the one way into this node that
+            # needs no credential, so without this a single peer could
+            # sit in a reconnect loop spinning sessions -- each holding
+            # a socket and a session task, each committing a
+            # `last_login_at` -- and neither `allow_attempt` (reached
+            # only from the password path below) nor the concurrent-
+            # unauthenticated slot (released the moment `_login`
+            # returns) was in its way.
+            #
+            # The cost of reusing `allow_attempt` wholesale is that a
+            # flood aimed at the guest name drains that name's own
+            # bucket and briefly refuses other guests too. That is the
+            # bound every account on the node already has, and it is a
+            # far better failure than admitting the flood.
+            if not throttle.allow_attempt(source=session.peer_address, username=username):
+                return LoginOutcome.THROTTLED
             if is_blocked(db, guest):
                 await session.write_line(
                     colored("Your access to this system has been revoked.", fg_color=ERROR_COLOR)
