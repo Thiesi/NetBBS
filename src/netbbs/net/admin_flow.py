@@ -3625,13 +3625,19 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
     list have no arrow keys?" -- had that one-word answer: because it is
     not the picker.
 
-    The capabilities that forced the fork now exist in `pick_item`:
-    `on_sort` for the three modes and their direction, and `on_filter`
-    (added for this screen) for the visibility cycle. Both are prompts
-    rather than four top-level hotkeys, which is what every other picker
-    in the console does with the same kind of choice, and both keep the
-    property they were built for: the trailer always says what is sorted
-    how and what is being shown.
+    The capabilities that forced the fork are in `pick_item` now, and
+    the four keys are still four keys. `live_keys` maps a character to a
+    callback that returns a new working set, `live_nav` puts the entries
+    in the nav row, and `live_label` puts the standing state in the
+    trailer beside `Sort:` -- so [A]/[R]/[L] still re-sort in one press
+    (the active one again flipping direction) and [V] still cycles
+    all -> active-only -> disabled-only.
+
+    Expressing them as `[O]rder`-style prompts was the obvious way to
+    fit them into what `pick_item` already had, and it was the wrong
+    trade: a SysOp asked for single keystrokes on a fifty-account roster
+    by name, and paying for this screen's features with the thing they
+    asked for is not a refactor, it is a regression with a tidy diff.
 
     The filter scopes search and goto too, as it did before -- the whole
     point of hiding a class of accounts is to stop having to reach them

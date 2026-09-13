@@ -959,6 +959,12 @@ async def pick_item(
                 await session.write("\a")
                 continue
             items = await refresh()
+            # Ctrl-R's contract, and its help text, is that it clears an
+            # active search -- so the remembered query goes with it
+            # (Codex review). Left behind, the next sort silently
+            # resurrected a search the caller had just been told was
+            # gone.
+            active_query = None
             working_set = items
             page_index = 0
             highlighted = None
@@ -1106,7 +1112,6 @@ async def pick_item(
                 highlighted = None
                 page_items = await _render()
                 continue
-            active_query = query
             matches = _matching(items, query)
             if not matches:
                 await session.write_line(colored("No matches.", fg_color=ERROR_COLOR))
@@ -1114,6 +1119,11 @@ async def pick_item(
                 continue
             if len(matches) == 1:
                 return matches[0]
+            # Recorded only now (Codex review). Setting it before the
+            # match check meant a search that found nothing still became
+            # the "active" one, and the next re-sort then applied it and
+            # emptied a list the caller had never narrowed.
+            active_query = query
             working_set = matches
             page_index = 0
             highlighted = None

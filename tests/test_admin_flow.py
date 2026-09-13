@@ -8730,3 +8730,36 @@ def test_user_picker_status_line_is_re_read_on_every_render(db, lane, sysop):
     assert len(reads) >= 2, f"read {len(reads)} time(s); a redraw must re-read it"
     text = _visible(_written_text(session))
     assert f"Status read {len(reads)}" in text, "and the newest read is what is shown"
+
+
+def test_user_picker_forgets_a_search_that_found_nothing(db, lane, sysop):
+    """Recording the query before checking for matches meant a search
+    that found nothing still became the "active" one -- and the next
+    re-sort applied it and emptied a list the SysOp had never narrowed
+    (issue #537, Codex review)."""
+    for name in ("alice", "bob"):
+        create_user(db, name, password="hunter2", user_level=10)
+
+    # Search for something absent, then re-sort by level.
+    session = FakeSession(["u", "l", "s", "zzz", "l", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    after = _last_render(text, "Sorted by: Level")
+    assert "alice" in after and "bob" in after, "the roster is still there"
+
+
+def test_user_picker_refresh_clears_a_remembered_search(db, lane, sysop):
+    """Ctrl-R's contract, and its help text, is that it clears an active
+    search -- so the remembered query has to go with it, or the next
+    sort resurrects a search the SysOp was just told was gone."""
+    for name in ("alice", "alina", "bob"):
+        create_user(db, name, password="hunter2", user_level=10)
+
+    # Narrow to ali*, refresh, then re-sort: bob must be back.
+    session = FakeSession(["u", "l", "s", "ali", "CTRL+r", "l", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    after = _last_render(text, "Sorted by: Level")
+    assert "bob" in after, "refresh cleared the search, so the sort kept it clear"

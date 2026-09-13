@@ -4437,19 +4437,31 @@ screen; pressing a different mode's key switches to it, always starting
 ascending; a `Sorted by: {label} {↑/↓}` line shows the current mode.
 
 **Bespoke picker vs. extending the shared `pick_item` (Thiesi's own
-follow-up dogfood request).** The live A/R/L sort-toggle screen was built
-as its own loop in `admin_flow.py` (`_pick_target_user`), deliberately
+follow-up dogfood request) -- decided one way, then reversed by what it
+cost (issue #537).** The live A/R/L sort-toggle screen was first built as
+its own loop in `admin_flow.py` (`_pick_target_user`), deliberately
 duplicating `netbbs.net.picker.pick_item`'s pagination/search/goto
-machinery rather than adding sort-toggle support to `pick_item` itself.
-`pick_item` is a shared component used by boards, channels, and file
-areas too, none of which have asked for live sort toggles; extending it
-for a single consumer's need risks over-fitting its interface around one
-caller's shape before a second real consumer exists. Matches this
-project's own established convention (see `netbbs.link.files.
-_file_area_from_row`'s own docstring) of duplicating a small private
-helper across modules rather than reaching into another module's private
-internals -- a shared abstraction should be designed against a real
-second consumer, not an imagined future one.
+machinery rather than adding sort-toggle support to `pick_item` itself:
+extending a shared component for a single consumer risks over-fitting its
+interface before a second real consumer exists, and a shared abstraction
+should be designed against a real second consumer rather than an imagined
+one.
+
+That reasoning was sound and the outcome was not. A fork does not stand
+still: `pick_item` gained cursor navigation, `Ctrl-L`/`Ctrl-R`/`Ctrl-H`,
+reopening on the page you left, and columnar rows, and the user list --
+the console's most-used list -- inherited none of them. The dogfood
+question that reopened it was "why does this screen have no arrow keys?",
+and the answer was that it is not the picker.
+
+It is a `pick_item` call now. The four live keys are *not* expressed as
+prompts, which was the obvious way to fit them into what the picker had
+and would have spent a named SysOp request to buy a refactor:
+`live_keys`/`live_nav`/`live_label` let a caller register its own
+top-level keys, and the account list registers the same four. The
+standing rule this replaces: **prefer the shared screen, and extend it
+with a general affordance when a real caller needs one -- a fork stops
+receiving everything the shared screen learns next.**
 
 **`list_users(order_by="registered"/"registered_desc")` had no tie-break
 on `created_at` (found via a flaky new test, not by inspection).**
