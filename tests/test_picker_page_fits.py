@@ -199,7 +199,10 @@ def test_the_descriptive_nav_floor_counts_what_the_page_budget_counts():
                 session, None, "brief", width=width, height=height,
                 trailer=trailer, unicode_style=False,
             )
-            descriptive = "\r\n" in nav
+            # Not "does it span rows": `action_bar` wraps to two rows at
+            # 40 columns all by itself. The descriptive form is the one
+            # that carries each entry's brief under it.
+            descriptive = "Return without picking" in nav
             if descriptive and size > 1:
                 assert size >= _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV, (
                     f"{width}x{height}: descriptive nav left only {size} items"
@@ -253,4 +256,50 @@ def test_opening_on_a_stored_item_lands_on_a_page_that_holds_it():
         )
     )
     # No IndexError, and the page it opened on is the page it drew.
+    assert session.rows_on_screen() <= 24
+
+
+# -- What the third review round found ---------------------------------
+
+
+@pytest.mark.parametrize("width,height", [(120, 24), (120, 20), (100, 24), (80, 20)])
+@pytest.mark.parametrize("count", [5, 79])
+def test_the_budget_and_the_floor_measure_the_same_nav(width, height, count):
+    """They used to measure different things: the floor took the tallest
+    shape, the page budget took the both-Next-and-Prev default. At
+    120x24 that difference was six rows off the bottom (Codex review).
+
+    `count=5` is a single-page list, whose neither-Next-nor-Prev nav was
+    excluded from "tallest" on the assumption it must be shorter --
+    `menu_grid` is non-monotonic across its column threshold, so it can
+    be ten rows where the six-entry form is four."""
+    session = FakeSession(width, height)
+    asyncio.run(
+        pick_item(
+            session, list(range(1, count + 1)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none",
+            description_level="brief", sort_label=lambda: "Activity", on_sort=None,
+        )
+    )
+    assert session.rows_on_screen() <= height
+
+
+def test_a_shrinking_page_does_not_keep_a_highlight_it_lost():
+    """`sort_label` is read fresh per render by contract, so a label
+    that wraps differently shrinks the page under a highlight taken from
+    the previous one -- and `page_items[highlighted]` then raised
+    `IndexError` on Enter (Codex review)."""
+    labels = iter(["Activity", "Activity, newest first, with every archived entry included too"])
+    session = FakeSession(80, 24, [_UP := "\x1b[A", "\r"])
+    asyncio.run(
+        pick_item(
+            session, list(range(1, 80)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none",
+            sort_label=lambda: next(labels, "Activity"), on_sort=None,
+        )
+    )
     assert session.rows_on_screen() <= 24

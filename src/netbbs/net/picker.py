@@ -625,7 +625,7 @@ async def pick_item(
             frozen = None
 
     async def _render_frozen() -> Sequence[T]:
-        nonlocal page_index
+        nonlocal page_index, highlighted
         render_width, render_height = _dimensions()
         if not working_set:
             page_index = 0
@@ -658,6 +658,16 @@ async def pick_item(
             return []
 
         page_size = _sized_page_size()
+        # A render recomputes the page size, and `sort_label` is read
+        # fresh each time by contract -- so a label that wraps
+        # differently can shrink the page under a highlight taken from
+        # the last one, and `page_items[highlighted]` then raised
+        # `IndexError` on Enter (Codex review). The highlight is
+        # cleared rather than clamped: the row it pointed at may not be
+        # on this page at all, and moving somebody's selection silently
+        # is worse than asking them to make it again.
+        if highlighted is not None and highlighted >= page_size:
+            highlighted = None
         total_pages = _total_pages()
         page_index = max(0, min(page_index, total_pages - 1))
         start = page_index * page_size
@@ -1346,6 +1356,43 @@ def _nav_entries(
     return entries
 
 
+# Every shape a real page's nav can take. `(False, False)` is a
+# single-page list, which is *not* safely omittable as shorter: issue
+# #550's own review found `menu_grid` non-monotonic across its column
+# threshold, so a five-entry single-page nav can be ten rows where the
+# six-entry one is four. An assumption about which is taller is exactly
+# what this enumeration exists to stop making.
+_NAV_SHAPES = ((True, True), (True, False), (False, True), (False, False))
+
+
+def _tallest_nav(
+    session: Session, on_sort: Callable | None, description_level: str,
+    *, width: int, height: int, on_create: Callable | None,
+) -> str:
+    """The tallest nav block any page of this list could render.
+
+    A page has to fit whichever page it turns out to be, so both the
+    descriptive-nav floor and the page budget measure this rather than
+    the shape of the page in hand. They used to measure different
+    things -- the floor took the tallest, the budget took the
+    both-Next-and-Prev default -- and at 120x24 that difference was six
+    rows off the bottom of the screen.
+    """
+    return max(
+        (
+            menu_grid(
+                [("", _nav_entries(
+                    on_sort, include_next=next_here, include_prev=prev_here,
+                    on_create=on_create,
+                ))],
+                width=width, height=height, description_level=description_level,
+            )
+            for next_here, prev_here in _NAV_SHAPES
+        ),
+        key=lambda nav: nav.count("\r\n"),
+    )
+
+
 def _render_nav(
     session: Session, on_sort: Callable | None, description_level: str,
     *, include_next: bool = True, include_prev: bool = True,
@@ -1388,21 +1435,9 @@ def _render_nav(
         # Deciding from that settles something else worth having too:
         # the nav no longer changes shape underneath the caller when
         # they press [N].
-        tallest = max(
-            (
-                menu_grid(
-                    [("", _nav_entries(
-                        on_sort, include_next=next_here, include_prev=prev_here,
-                        on_create=on_create,
-                    ))],
-                    width=width, height=height, description_level=description_level,
-                )
-                # Every combination a real page can be in: the only one
-                # that cannot happen is "neither", on a single-page
-                # list -- and that one is shorter than the rest anyway.
-                for next_here, prev_here in ((True, True), (True, False), (False, True))
-            ),
-            key=lambda nav: nav.count("\r\n"),
+        tallest = _tallest_nav(
+            session, on_sort, description_level,
+            width=width, height=height, on_create=on_create,
         )
         descriptive_lines = tallest.count("\r\n") + 1
         # The same arithmetic `_page_size` will do, including the
@@ -1517,6 +1552,15 @@ def _page_size(
         session, on_sort, description_level, width=width, height=height, on_create=on_create,
         trailer=trailer, unicode_style=unicode_style,
     )
+    # The tallest shape, not this call's default one (Codex review).
+    # `_render_nav` above answers "which form", which is all the budget
+    # needs from it; how many rows that form costs is a question about
+    # every page, and `_tallest_nav` is the one place that answers it.
+    if "\r\n" in nav:
+        nav = _tallest_nav(
+            session, on_sort, description_level,
+            width=width, height=height, on_create=on_create,
+        )
     nav_lines = nav.count("\r\n") + 1
     trailer_lines = _trailer_rows(
         nav, trailer,
