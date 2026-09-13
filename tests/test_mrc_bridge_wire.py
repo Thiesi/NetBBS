@@ -8,6 +8,7 @@ one caller, CTCP, and the hub moving, renaming or terminating a session.
 from __future__ import annotations
 
 import asyncio
+import time
 
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub, ParticipantId
@@ -156,6 +157,37 @@ def test_ctcp_requests_are_answered_from_the_targets_nick_and_bounded(db, lane, 
     asyncio.run(scenario())
 
 
+class _FreezableClock:
+    """`time.monotonic`, until a test freezes it (issue #536).
+
+    `MrcBridge` already takes a `clock`, but handing it a fully fake one
+    from construction would stall the connection-stability timing it
+    also uses that clock for. This runs real until `freeze()`, which is
+    all the reply-allowance assertion needs: a token bucket that cannot
+    refill while the burst is being measured.
+
+    Without it the test depended on the steps between spending two
+    tokens and sending the burst taking under 0.2 s -- `REPLY_RATE_PER_
+    SECOND` is 10.0, so those two were back by then on any host slower
+    than the one it was written on, the burst got its full allowance,
+    and the assertion about which line carried the notice failed. It
+    got *worse* when other sleeps in the suite were lengthened, which is
+    how it was identified.
+    """
+
+    def __init__(self) -> None:
+        self._frozen: float | None = None
+
+    def __call__(self) -> float:
+        return time.monotonic() if self._frozen is None else self._frozen
+
+    def freeze(self) -> None:
+        self._frozen = time.monotonic()
+
+    def thaw(self) -> None:
+        self._frozen = None
+
+
 def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, lobby, alice):
     async def scenario():
         fake = FakeMrcHub()
@@ -165,7 +197,8 @@ def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, l
         hub = ChatHub()
         alice_queue = hub.join(lobby.name, ParticipantId("alice", 1))
         carol_queue = hub.join(lobby.name, ParticipantId("carol", 7))
-        bridge = await _connected_bridge(db, lane, hub, fake, reply_burst=5)
+        clock = _FreezableClock()
+        bridge = await _connected_bridge(db, lane, hub, fake, reply_burst=5, clock=clock)
         try:
             await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM:")) == 2)
             assert bridge.send_hub_command(lobby, "alice", "LIST") is None
@@ -182,6 +215,12 @@ def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, l
             other = create_channel(db, "other", creator=alice)
             assert bridge.send_hub_command(other, "alice", "LIST") == "this channel isn't bridged to MRC"
             # A burst past the per-caller allowance is cut short, and said so once.
+            # Frozen first (issue #536): alice has spent two of her five
+            # on the LIST replies above, and at 10 tokens/second those
+            # two come back in 0.2s -- less time than the steps between
+            # took on a POSIX host, which handed the burst its full
+            # allowance and moved the notice.
+            clock.freeze()
             for i in range(8):
                 await fake.send_line(f"SERVER~~~alice~~~line {i}~")
             got = []
@@ -191,6 +230,7 @@ def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, l
             texts = [n.text for n in got]
             assert texts[:3] == ["line 0", "line 1", "line 2"]
             assert "cut short" in texts[3]
+            clock.thaw()
             await asyncio.sleep(0.1)
             assert alice_queue.empty()
         finally:

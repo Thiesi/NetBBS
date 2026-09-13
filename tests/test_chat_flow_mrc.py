@@ -134,10 +134,32 @@ async def _run(lane, hub, presence, channel, user, lines, *, mrc_bridge=None, wh
     while hub.participant_count(channel.name) == 0:
         assert asyncio.get_running_loop().time() < deadline, "caller never joined"
         await asyncio.sleep(0.01)
-    await while_joined()
+    # `while_joined` is handed the session so it can wait for what it
+    # pushed to actually arrive, rather than sleeping a fixed interval
+    # and hoping (issue #536). The join above already waits on a
+    # condition; inbound delivery deserves the same treatment.
+    await while_joined(session)
     for line in lines:
         session.inputs.put_nowait(line)
     return session, await asyncio.wait_for(task, timeout=4)
+
+
+async def _wait_for(predicate, *, what: str, timeout: float = 5.0) -> None:
+    """Wait until `predicate()` holds, or fail saying what never came.
+
+    Issue #536: several tests here pushed a line into the fake hub, slept
+    a fixed fraction of a second, and asserted. That is a bet on the host
+    being fast enough -- one this project lost the first time the suite
+    ran on its own NetBSD box, where the same tests failed
+    deterministically. A generous timeout costs nothing when the
+    condition is met promptly, which is the normal case, and the failure
+    message names what was being waited for instead of leaving a missing
+    line of text to be reverse-engineered.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        assert asyncio.get_running_loop().time() < deadline, f"timed out waiting for {what}"
+        await asyncio.sleep(0.01)
 
 
 def _text(session: FakeSession) -> str:
@@ -184,9 +206,12 @@ def test_inbound_mrc_line_is_rendered_as_an_external_author(db, lane, hub, prese
     async def scenario():
         rig = await _rig(db, lane, hub, channel)
         try:
-            async def push():
+            async def push(session):
                 await rig.fake.send_line("bob~Other~lobby~~~lobby~|12greetings \x1b[31mfrom afar~")
-                await asyncio.sleep(0.15)
+                await _wait_for(
+                    lambda: "greetings from afar" in _text(session),
+                    what="the inbound MRC line to be rendered",
+                )
 
             session, _ = await _run(
                 lane, hub, presence, channel, alice, ["/quit"], mrc_bridge=rig.bridge, while_joined=push,

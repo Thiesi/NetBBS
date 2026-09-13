@@ -14,10 +14,15 @@ import asyncio
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ParticipantId
 from netbbs.mrc.settings import set_mrc_room
+from netbbs.chat.mailbox import MessageMailbox
+from netbbs.net import chat_flow
+from netbbs.net.char_input import InputHistory
 from tests.test_chat_flow_mrc import (  # noqa: F401 -- fixtures and helpers
+    _QueueSession,
     _rig,
     _run,
     _text,
+    _wait_for,
     alice,
     channel,
     db,
@@ -27,6 +32,31 @@ from tests.test_chat_flow_mrc import (  # noqa: F401 -- fixtures and helpers
     sysop,
 )
 from tests.test_chat_flow_mrc_open_rooms import _bridge_on, _browse, _visible_text
+
+
+async def _browse_until(lane, hub, presence, user, inputs, *, mrc_bridge, until, what):
+    """`_browse`, but the last scripted input is held back until `until`
+    holds (issue #536).
+
+    `_browse` feeds a fixed list and the session ends when it runs dry,
+    so an assertion about something the hub *replies* with is a race:
+    on a slower host the reply lands after the session has already
+    finished and rendered nothing. Waiting for the reply before quitting
+    removes the window rather than widening it.
+    """
+    session = _QueueSession()
+    task = asyncio.create_task(
+        chat_flow.browse_channels(
+            session, lane, hub, presence, MessageMailbox(), InputHistory(), user, mrc_bridge=mrc_bridge,
+        )
+    )
+    for line in inputs[:-1]:
+        session.inputs.put_nowait(line)
+    await _wait_for(lambda: until(session), what=what, timeout=5.0)
+    session.inputs.put_nowait(inputs[-1])
+    await asyncio.wait_for(task, timeout=4)
+    return session
+
 
 
 def test_away_is_mirrored_to_the_hub(db, lane, hub, presence, channel, alice):
@@ -60,8 +90,10 @@ def test_the_hubs_welcome_is_shown_once_per_session(db, lane, hub, presence, ali
         try:
             # 0,1 enters #first (the only entries are first and second);
             # /join second moves to a second MRC room in the same session.
-            session = await _browse(
+            session = await _browse_until(
                 lane, hub, presence, alice, ["0", "1", "/join second", "/quit"], mrc_bridge=bridge,
+                until=lambda s: "[MRC] MOTD reply line 1" in _visible_text(s),
+                what="the hub's MOTD reply to be rendered",
             )
             text = _visible_text(session)
             assert text.count("Joined") == 2
