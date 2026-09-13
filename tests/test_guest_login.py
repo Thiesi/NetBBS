@@ -310,3 +310,25 @@ def test_the_name_is_still_matched_case_insensitively(tmp_path):
     assert guest_login_for(db, "GUEST") is not None
     assert guest_login_for(db, "  Guest  ") is not None
     db.close()
+
+
+def test_a_refused_refresh_leaves_no_transaction_open(tmp_path):
+    """`touch_last_login` opens `BEGIN IMMEDIATE`, and its "the account
+    is gone" path returned from inside the `try` -- skipping both the
+    rollback handler and the commit, and leaving the transaction active
+    on the shared connection (Codex review). Every later operation that
+    opens its own would then fail, and other connections would stay
+    write-locked until something unrelated ended it.
+    """
+    from netbbs.auth.users import touch_last_login
+
+    db, guest, sysop = _db(tmp_path)
+    delete_user(db, guest, deleted_by=sysop)
+
+    assert touch_last_login(db, guest) is None
+    assert db.connection.in_transaction is False
+
+    # And the connection is still usable for a write that opens its own.
+    survivor = create_user(db, "after", password="hunter2", user_level=1)
+    delete_user(db, survivor, deleted_by=sysop)
+    db.close()

@@ -605,6 +605,15 @@ def touch_last_login(db: Database, user: User) -> User | None:
             "SELECT * FROM users WHERE id = ? AND created_at = ?", (user.id, user.created_at)
         ).fetchone()
         if row is None:
+            # Ended explicitly, not left open (Codex review). Returning
+            # from inside the `try` skipped both the rollback handler
+            # and the `else` commit, so the `BEGIN IMMEDIATE` above
+            # stayed active on the shared connection: every later
+            # operation that opens its own transaction would fail with
+            # "cannot start a transaction within a transaction", and
+            # other connections would stay write-locked until something
+            # unrelated happened to end it.
+            db.connection.rollback()
             return None
         now = utc_now_iso()
         db.connection.execute(
