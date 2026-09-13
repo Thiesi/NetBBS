@@ -111,9 +111,9 @@ def test_the_backup_reads_the_nodes_answer_not_its_own_home(db, node_home, opera
     # Now we are the operator's shell.
     _as_home(monkeypatch, operator_home)
 
-    resolved, recorded_by_node = backup_module.voidrunner_save_directory(db.path)
+    resolved, provenance = backup_module.voidrunner_save_directory(db.path)
 
-    assert recorded_by_node is True
+    assert provenance == "node"
     assert resolved == (node_home / ".netbbs" / "voidrunner_saves").resolve()
 
 
@@ -127,11 +127,11 @@ def test_without_a_recorded_location_the_answer_is_marked_as_a_guess(operator_ho
     database = Database(tmp_path / "unrecorded.db")
     try:
         _as_home(monkeypatch, operator_home)
-        resolved, recorded_by_node = backup_module.voidrunner_save_directory(database.path)
+        resolved, provenance = backup_module.voidrunner_save_directory(database.path)
     finally:
         database.close()
 
-    assert recorded_by_node is False
+    assert provenance == "guess"
     assert resolved == (operator_home / ".netbbs" / "voidrunner_saves").resolve()
 
 
@@ -140,13 +140,13 @@ def test_no_database_at_all_still_resolves(operator_home, tmp_path, monkeypatch)
     SysOp console, and by anything older that has not been updated."""
     _as_home(monkeypatch, operator_home)
 
-    resolved, recorded_by_node = backup_module.voidrunner_save_directory()
+    resolved, provenance = backup_module.voidrunner_save_directory()
 
-    assert recorded_by_node is False
+    assert provenance == "guess"
     assert resolved == (operator_home / ".netbbs" / "voidrunner_saves").resolve()
 
     missing, guessed = backup_module.voidrunner_save_directory(tmp_path / "not-a-database.db")
-    assert (missing, guessed) == (resolved, False)
+    assert (missing, guessed) == (resolved, "guess")
 
 
 # -- a guess is never reported as a finding (Codex review) -------------
@@ -185,7 +185,7 @@ def test_a_guessed_directory_that_exists_is_still_marked_as_a_guess(
 
     manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["voidrunner"] is not None, "the guess was captured"
-    assert manifest["voidrunner"]["location_recorded_by_node"] is False
+    assert manifest["voidrunner"]["source_provenance"] == "guess"
 
 
 def test_a_recorded_directory_is_marked_as_recorded(db, node_home, tmp_path, monkeypatch):
@@ -206,7 +206,7 @@ def test_a_recorded_directory_is_marked_as_recorded(db, node_home, tmp_path, mon
     import json
 
     manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["voidrunner"]["location_recorded_by_node"] is True
+    assert manifest["voidrunner"]["source_provenance"] == "node"
 
 
 def test_the_manifest_records_where_the_run_looked_even_when_it_found_nothing(
@@ -237,5 +237,70 @@ def test_the_manifest_records_where_the_run_looked_even_when_it_found_nothing(
     manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["voidrunner"] is None, "nothing was captured"
     looked_in = manifest["voidrunner_source"]
-    assert looked_in["recorded_by_node"] is False
+    assert looked_in["provenance"] == "guess"
     assert looked_in["directory"] == str((operator_home / ".netbbs" / "voidrunner_saves").resolve())
+
+
+def test_an_operator_supplied_path_is_not_claimed_as_the_nodes_answer(
+    operator_home, node_home, tmp_path, monkeypatch
+):
+    """Codex review. `--voidrunner-save-dir` marked the source as
+    node-recorded, so an archive made from an old or stopped node claimed
+    the node had confirmed a directory it never recorded -- which defeats
+    the only reason to write the provenance down at all.
+    """
+    from netbbs.backup import create_backup
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    explicit = node_home / ".netbbs" / "voidrunner_saves"
+    (explicit / "leaderboard.json").write_text("[]", encoding="utf-8")
+
+    database = Database(tmp_path / "unrecorded.db")
+    identity_dir = tmp_path / "identity"
+    bootstrap_node_identity("thisnode").save(identity_dir)
+    database.close()
+
+    _as_home(monkeypatch, operator_home)
+    destination = tmp_path / "backup-explicit"
+    create_backup(
+        db_path=tmp_path / "unrecorded.db", identity_dir=identity_dir,
+        destination=destination, voidrunner_save_dir=explicit,
+    )
+
+    import json
+
+    manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["voidrunner_source"]["provenance"] == "operator"
+    assert manifest["voidrunner"]["source_provenance"] == "operator"
+
+def test_a_door_profile_cannot_move_the_voidrunner_save_directory():
+    """Why the node's recorded path is authoritative, pinned.
+
+    The launch path applies `env.update(profile.environment)` *after*
+    `_door_environment` composed the base, so a door profile setting
+    `VOIDRUNNER_SAVE_DIR` would win over the node's own resolution -- and
+    the node would then be recording a directory the game never writes
+    to, with the backup trusting it. That was raised in review as a live
+    defect, and it is not one, because `DoorProfile` refuses the key: the
+    environment allowlist is `TERM`, `LANG`, `LC_ALL`, `TZ`, `PATH`,
+    `WAR_DIALER_DB_PATH` and `DOOR_*`, and nothing else.
+
+    So the only override that reaches a door is the *node process's* own
+    `VOIDRUNNER_SAVE_DIR`, which `_default_save_dir` already honours and
+    `record_voidrunner_save_dir` therefore records correctly.
+
+    This test exists because that is a dependency between two modules
+    with nothing else holding it together. Whoever adds
+    `VOIDRUNNER_SAVE_DIR` to the allowlist will fail here, and should
+    read this before deciding what the backup ought to record when two
+    doors disagree -- one archive holds one Voidrunner component.
+    """
+    from netbbs.doors.profiles import DoorProfile, ProfileError
+
+    with pytest.raises(ProfileError):
+        DoorProfile(environment={"VOIDRUNNER_SAVE_DIR": "/tmp/elsewhere"}).validate()
+
+    # The one that is permitted, for contrast: War Dialer's world path is
+    # profile-settable, which is why `war_dialer_world_path` reads the
+    # profile and this module's Voidrunner equivalent does not have to.
+    DoorProfile(environment={"WAR_DIALER_DB_PATH": "/tmp/world.db"}).validate()

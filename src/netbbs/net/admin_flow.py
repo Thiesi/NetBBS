@@ -4908,9 +4908,9 @@ async def _backup_status_screen(
             colored("Voidrunner source: ", fg_color=LABEL_COLOR)
             # `[0]`: this screen runs *inside* the node, so the recorded
             # location and the one this process would resolve are the same
-            # answer by construction -- the flag that says which one it was
-            # matters only to the backup CLI, which is a different process
-            # with a different home (issue #555).
+            # answer by construction -- the provenance that says which one
+            # it was matters only to the backup CLI, which is a different
+            # process with a different home (issue #555).
             + colored(sanitize_text(str(voidrunner_save_directory()[0])), fg_color=METADATA_COLOR)
         )
         await session.write_line(
