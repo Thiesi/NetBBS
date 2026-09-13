@@ -41,6 +41,7 @@ of how the list is currently sorted or filtered.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Sequence, TypeVar
 
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
@@ -50,6 +51,7 @@ from netbbs.rendering import (
     ACCENT_COLOR,
     ERROR_COLOR,
     HEADER_COLOR,
+    LABEL_COLOR,
     MENU_KEY_COLOR,
     MUTED_COLOR,
     MenuEntry,
@@ -58,11 +60,13 @@ from netbbs.rendering import (
     clear_screen,
     colored,
     colored_truncate,
+    display_width,
     menu_grid,
     menu_key,
     reject_keystroke,
     sanitize_text,
     screen_title,
+    truncate_to_width,
     visible_width,
     wrap_to_width,
 )
@@ -83,6 +87,155 @@ _RESERVED_LINES = 6
 # netbbs.net.telnet, just avoided entirely here by fixing the width).
 _MAX_PAGE_SIZE = 99
 
+# -- Optional columnar rows (issue #528) ------------------------------
+#
+# A picker row is `selector + permanent reference + name + description`,
+# where the description is one flat string in one flat color. That is
+# right for the many callers whose secondary text really is prose -- a
+# moderation reason, a log message, a peer fingerprint. It is wrong for
+# the SysOp's resource lists, where the "description" is actually four
+# independent fields stapled into a sentence:
+#
+#     02. (#1) Test - read 100/write 100, open
+#
+# Nothing lines up down the page, nothing is separately colored, and
+# there is nowhere to put the fields that were left out -- which is how
+# an age- and name-gated area came to look exactly like an open one.
+#
+# `columns` is opt-in and additive. A caller that passes none renders
+# byte-for-byte as before; a caller that passes some gets a header row
+# and fixed columns, and `description_of` is ignored for that picker.
+
+# A table needs enough room for the name to still be a name. Below this
+# the columns are dropped and the caller's flat `description_of` is used
+# instead -- a truncated table is worse than the prose it replaced.
+_MIN_TABLE_NAME_WIDTH = 12
+
+# The floor for a *fallback* row's name is far lower than a table's,
+# deliberately (Codex review). The fallback's description leads with the
+# gates, and on a 40-column Community list a 12-column name floor left
+# too little room for "default 18+ name+" -- cutting the gate to
+# "default 18+..." and hiding the name requirement entirely, which is
+# the failure this whole issue exists to remove. Design doc §3.6 ranks
+# who-may-enter above everything else in the row, so the name yields
+# first. Four columns still distinguish one row from the next when
+# scanning; nothing does if the gate is gone.
+_MIN_FALLBACK_NAME_WIDTH = 4
+
+# ...and past this the table stops spanning the terminal instead of
+# stretching. A name column that grows without limit puts twenty blank
+# columns between a resource's name and its levels on a wide terminal,
+# which is precisely the "which row am I on" problem a table is
+# supposed to solve. Long names still truncate rather than wrap, as
+# they always did.
+_MAX_TABLE_NAME_WIDTH = 40
+
+# Two spaces between columns: one reads as a word break rather than a
+# column boundary at a glance, which is the whole point of the exercise.
+_COLUMN_GUTTER = 2
+
+# Width of the selector segment ("  01. "), which carries no header.
+_SELECTOR_WIDTH = 6
+
+
+# What the write path does to a tab, done here so a cell is measured at
+# the width it will actually occupy. Carriage returns and newlines go
+# with it: neither can survive inside a row, and leaving them to be
+# measured as zero-width would corrupt the whole table rather than one
+# cell. Ordinary spaces are left exactly as they are -- see `_pad_cell`.
+def _normalize_tabs(text: str) -> str:
+    return text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
+@dataclass(frozen=True)
+class ListColumn:
+    """One fixed-width column of a picker's row table.
+
+    `color` is the column's default; an individual cell overrides it by
+    returning a `(text, color)` pair instead of a bare string, which is
+    how a gate tag can light up only on the rows that carry one.
+    """
+
+    header: str
+    width: int
+    color: SegmentColor = MUTED_COLOR
+    align_right: bool = False
+
+
+def _pad_cell(text: str, width: int, *, align_right: bool) -> str:
+    """Fit `text` to exactly `width` display columns.
+
+    Measured in display width, not `len` -- a CJK name is two columns
+    per character, and padding it by character count is how a table's
+    columns wander from row to row.
+
+    Tabs are normalized first (AGENTS.md: "Width measurement must
+    normalize tabs"). `sanitize_text` deliberately preserves a tab, and
+    `display_width` scores it zero (it is category Cc), but the write
+    path renders it as one visible space -- so a name carrying a tab
+    would be padded a column too wide and shift every column after it.
+
+    Only tabs, and each becomes exactly one space (Codex review). An
+    earlier version collapsed every whitespace *run* via
+    `" ".join(text.split())`, which went too far: `Session.write_line`
+    preserves runs of ordinary spaces, and resource names are stored
+    with their internal spacing intact and must be unique by exact
+    name -- so "Ops East" and "Ops  East" are two different boards, and
+    collapsing them rendered both identically, leaving a SysOp unable
+    to tell which row a selection would act on.
+    """
+    text = _normalize_tabs(text)
+    if display_width(text) > width:
+        text = truncate_to_width(text, width, ellipsis="…" if width > 1 else "")
+    padding = " " * max(0, width - display_width(text))
+    return padding + text if align_right else text + padding
+
+
+def _table_widths(
+    terminal_width: int, columns: Sequence[ListColumn], reference_width: int
+) -> tuple[int, int] | None:
+    """`(reference_width, name_width)` for a columnar page, or `None`
+    when this terminal is too narrow to hold the table at all.
+
+    `reference_width` in is the widest `stable_id_of` on the page (the
+    same per-page, not per-list, measurement the flat rows already
+    use); out, it is that clamped to at least the "#" heading above it.
+    """
+    reference = max(reference_width, display_width("#"))
+    fixed = (
+        _SELECTOR_WIDTH
+        + reference
+        + _COLUMN_GUTTER
+        + sum(column.width + _COLUMN_GUTTER for column in columns)
+    )
+    name_width = terminal_width - fixed
+    if name_width < _MIN_TABLE_NAME_WIDTH:
+        return None
+    return reference, min(name_width, _MAX_TABLE_NAME_WIDTH)
+
+
+def _table_header(
+    columns: Sequence[ListColumn], *, reference_width: int, name_width: int
+) -> str:
+    """The heading row, aligned to the same grid the rows below use.
+
+    Headings are `LABEL_COLOR` -- the palette's "field name" role, the
+    same one the draft editor gives the labels down its own left edge.
+    That is the distinction the report was asking for: the heading says
+    what a column means, the cells under it are values, and the two
+    should not read as the same kind of text.
+    """
+    parts = [
+        " " * _SELECTOR_WIDTH,
+        _pad_cell("#", reference_width, align_right=True),
+        " " * _COLUMN_GUTTER,
+        _pad_cell("NAME", name_width, align_right=False),
+    ]
+    for column in columns:
+        parts.append(" " * _COLUMN_GUTTER)
+        parts.append(_pad_cell(column.header.upper(), column.width, align_right=column.align_right))
+    return colored("".join(parts).rstrip(), fg_color=LABEL_COLOR, bold=True)
+
 
 async def pick_item(
     session: Session,
@@ -92,6 +245,8 @@ async def pick_item(
     stable_id_of: Callable[[T], int],
     description_of: Callable[[T], str | None] = lambda item: None,
     name_segments_of: Callable[[T], Sequence[tuple[str, SegmentColor]]] | None = None,
+    columns: Sequence[ListColumn] | None = None,
+    column_values_of: Callable[[T], Sequence[str | tuple[str, SegmentColor]]] | None = None,
     title: str,
     breadcrumb: Sequence[str] = (),
     empty_message: str,
@@ -149,6 +304,34 @@ async def pick_item(
     path already follows -- distinguishable field colors are a
     normal-row affordance, not something a cursor selection needs on
     top of its own already-unambiguous marker.
+
+    `columns`/`column_values_of` (issue #528) replace the single flat
+    `description_of` string with a real table: a `LABEL_COLOR` heading
+    row, fixed columns, and independent per-column colors. Opt-in and
+    additive -- a caller that passes neither renders byte-for-byte as
+    before, and every existing caller does exactly that. Built for the
+    SysOp's resource lists, whose "description" was never prose in the
+    first place but four independent fields stapled into a sentence
+    (`read 100/write 100, open`), with nowhere to put the age and name
+    gates that were consequently invisible.
+
+    Both must be supplied together. `description_of` is ignored while a
+    table is in effect, rather than being rendered as a further column:
+    the callers that want a table and the callers that want prose are
+    disjoint, and rendering both would just reintroduce the ragged
+    trailing string the table exists to remove.
+
+    A cell is a bare string in its column's default color, or a
+    `(text, color)` pair to override it for that row alone -- how a
+    gate tag lights up only on the rows that carry one. Cells are
+    padded and truncated by *display* width, so a CJK name does not
+    shift the columns after it.
+
+    Falls back to `description_of` on a terminal too narrow to hold the
+    table with a readable name column (`_MIN_TABLE_NAME_WIDTH`): a
+    truncated table is worse than the prose it replaced. That decision
+    is made per render against the live terminal width, so a caller
+    that resizes mid-session gets whichever form actually fits.
 
     `breadcrumb` supplies ancestor location segments (e.g. a category
     or Community name) between the node name and `title` — a real
@@ -286,6 +469,66 @@ async def pick_item(
     `screen_title` call below and the redraw-in-place clear (if wanted)
     is issued by hand *before* the masthead instead.
     """
+    if (columns is None) != (column_values_of is None):
+        raise ValueError("pick_item: columns and column_values_of must be given together")
+    if columns is not None and name_segments_of is not None:
+        # Both want to own the name half of the row. Nobody does this
+        # today, and silently dropping one of them is exactly the kind
+        # of thing that costs an afternoon later -- so it fails here
+        # instead, loudly, the first time anyone tries.
+        raise ValueError("pick_item: name_segments_of and columns are mutually exclusive")
+
+    # The heading row is a real line on a real terminal, and this
+    # screen's page size is computed against the terminal's height, not
+    # assumed. Reserving it here rather than inside `_page_size` keeps
+    # that function's existing signature honest for every non-columnar
+    # caller, which reserve nothing extra.
+    #
+    # Only reserved when a table would actually be drawn: on a terminal
+    # too narrow for one, the rows fall back to the flat form and there
+    # is no heading, so reserving a line for it would cost the page an
+    # item for nothing. Probed with the narrowest possible reference
+    # column, so the error can only ever fall on the side of reserving
+    # a line that does get used.
+    #
+    # Read fresh on every call, never captured (Codex review): the
+    # table decision itself is already made per render against the live
+    # terminal width, so a session that opens narrow and is then
+    # widened before a redraw would otherwise draw a heading that the
+    # page size had not reserved -- one item too many on every page,
+    # pushing the prompt past the bottom of the screen. Both now read
+    # the same live width at the same moment.
+    # One render, one set of dimensions (Codex review). `_render`
+    # computes its page size and then, several awaits later, decides
+    # whether a table fits -- and `netbbs.net.web.WebSession._read_loop`
+    # mutates `terminal_width` from its own task whenever the caller
+    # resizes the browser. Read live at both points, those two could
+    # disagree within a single render: a header drawn that the page
+    # size had not reserved, so the page runs a line past the bottom of
+    # the screen. Not a race between two people -- one caller dragging
+    # a window. `_render` freezes the pair on entry and everything it
+    # calls measures against the frozen copy; nothing outside a render
+    # is interleaved with awaits, so those keep reading live values.
+    frozen: tuple[int, int] | None = None
+
+    def _dimensions() -> tuple[int, int]:
+        if frozen is not None:
+            return frozen
+        return session.terminal_width, session.terminal_height
+
+    def _header_lines() -> int:
+        if not columns:
+            return 0
+        width, _ = _dimensions()
+        return 1 if _table_widths(width, columns, 1) is not None else 0
+
+    def _sized_page_size() -> int:
+        width, height = _dimensions()
+        return _page_size(
+            session, on_sort, description_level,
+            header_lines=_header_lines(), width=width, height=height,
+        )
+
     def _masthead_prefix() -> str:
         # Same clear_screen()-ordering hazard `_draw_main_menu`'s own
         # masthead handling documents: the clear (if `redraw_in_place`)
@@ -310,16 +553,26 @@ async def pick_item(
     if start_stable_id is not None:
         for start_index, item in enumerate(working_set):
             if stable_id_of(item) == start_stable_id:
-                start_page_size = _page_size(session, on_sort, description_level)
+                start_page_size = _sized_page_size()
                 page_index = start_index // start_page_size
                 highlighted = start_index % start_page_size
                 break
 
     def _total_pages() -> int:
-        return max(1, math.ceil(len(working_set) / _page_size(session, on_sort, description_level)))
+        return max(1, math.ceil(len(working_set) / _sized_page_size()))
 
     async def _render() -> Sequence[T]:
+        nonlocal page_index, frozen
+        # Freeze for the duration of this render; see `_dimensions`.
+        frozen = (session.terminal_width, session.terminal_height)
+        try:
+            return await _render_frozen()
+        finally:
+            frozen = None
+
+    async def _render_frozen() -> Sequence[T]:
         nonlocal page_index
+        render_width, render_height = _dimensions()
         if not working_set:
             page_index = 0
             prefix = _masthead_prefix()
@@ -333,7 +586,7 @@ async def pick_item(
             await session.write("Choice: ")
             return []
 
-        page_size = _page_size(session, on_sort, description_level)
+        page_size = _sized_page_size()
         total_pages = _total_pages()
         page_index = max(0, min(page_index, total_pages - 1))
         start = page_index * page_size
@@ -346,7 +599,7 @@ async def pick_item(
                 title,
                 breadcrumb=(session.node_display_name, *breadcrumb),
                 subtitle=f"page {page_index + 1}/{total_pages}, {len(working_set)} total",
-                width=session.terminal_width,
+                width=render_width,
                 clear=False if masthead else redraw_in_place,
                 unicode_style=unicode_style, collapsed=collapsed,
                 header_color=header_color, node_name_gradient=session.node_name_gradient)
@@ -362,6 +615,17 @@ async def pick_item(
         # within one screen), so every name starts at the same column
         # regardless of how many digits its own id happens to have.
         max_id_width = max((len(str(stable_id_of(item))) for item in page_items), default=1)
+        # Issue #528. Decided per render against the live terminal
+        # width, so a resize mid-session gets whichever form actually
+        # fits rather than the one that fitted on entry. `None` here
+        # means "too narrow for a table", and every row below falls
+        # back to the flat `description_of` form unchanged.
+        table = _table_widths(render_width, columns, max_id_width) if columns else None
+        if table is not None:
+            reference_width, name_width = table
+            await session.write_line(
+                _table_header(columns, reference_width=reference_width, name_width=name_width)
+            )
         for position, item in enumerate(page_items, start=1):
             # Two numbers shown per line, deliberately: the 2-digit
             # prefix is what to press to select *this item, right now,
@@ -399,22 +663,91 @@ async def pick_item(
                 item_name_color = accent_color
                 desc_color = MUTED_COLOR
 
-            segments: list[tuple[str, SegmentColor]] = [
+            if table is not None:
+                # Columnar row (issue #528). The parentheses around the
+                # permanent reference are dropped here and only here:
+                # the "#" heading above the column already says what
+                # the number is, which is the job "(#N)" was doing on a
+                # row with no headings to explain it. `goto` stays just
+                # as discoverable -- arguably more so, since the column
+                # is now labelled.
+                reference_width, name_width = table
+                segments: list[tuple[str, SegmentColor]] = [
+                    (f"{marker}{position:02d}. ", key_color),
+                    (_pad_cell(id_str, reference_width, align_right=True) + " " * _COLUMN_GUTTER, MUTED_COLOR),
+                    (_pad_cell(sanitize_text(name_of(item)), name_width, align_right=False), item_name_color),
+                ]
+                # Short-changed rows are padded rather than left to
+                # `zip`'s silent truncation: a caller that returns too
+                # few cells should lose a value, never the alignment of
+                # every row after it.
+                cells = list(column_values_of(item))
+                cells += [""] * (len(columns) - len(cells))
+                last = len(columns) - 1
+                for index, (column, cell) in enumerate(zip(columns, cells)):
+                    text, color = cell if isinstance(cell, tuple) else (cell, column.color)
+                    segments.append((" " * _COLUMN_GUTTER, MUTED_COLOR))
+                    # The final left-aligned column is truncated but not
+                    # padded: padding it would trail every row with
+                    # spaces the header (which is rstripped) does not
+                    # have, and nothing is aligned against them anyway.
+                    if index == last and not column.align_right:
+                        cell_text = truncate_to_width(sanitize_text(text), column.width)
+                    else:
+                        cell_text = _pad_cell(sanitize_text(text), column.width, align_right=column.align_right)
+                    segments.append((cell_text, item_name_color if is_highlighted else color))
+                await session.write_line(colored_truncate(segments, render_width))
+                continue
+
+            segments = [
                 (f"{marker}{position:02d}. ", key_color),
                 (f"(#{id_str}) {id_padding}", MUTED_COLOR),
             ]
             if name_segments_of is not None:
                 for text, color in name_segments_of(item):
                     segments.append((sanitize_text(text), item_name_color if is_highlighted else color))
+            elif columns is not None and description:
+                # A columnar picker that fell back to prose because the
+                # terminal is too narrow (Codex review). The whole row
+                # is truncated at the terminal width, so an unbounded
+                # name pushes the description off the end -- and for
+                # these callers the description is where the gates
+                # live, so a long-named gated resource went back to
+                # looking exactly like an open one. Design doc §3.6
+                # promises gates wherever a resource is listed, and a
+                # long name is not an exemption.
+                #
+                # Bounded only for these callers: the ~30 pickers whose
+                # secondary text really is prose keep their unbounded
+                # name and lose the tail of a sentence instead, which
+                # is the right trade when the tail is a sentence.
+                fixed = display_width(f"{marker}{position:02d}. ") + display_width(f"(#{id_str}) {id_padding}")
+                room = render_width - fixed - display_width(f" - {description}")
+                name_text = sanitize_text(name_of(item))
+                if room < display_width(name_text):
+                    name_text = _pad_cell(
+                        name_text, max(_MIN_FALLBACK_NAME_WIDTH, room), align_right=False
+                    ).rstrip()
+                segments.append((name_text, item_name_color))
             else:
                 segments.append((sanitize_text(name_of(item)), item_name_color))
             if description:
                 segments.append((f" - {sanitize_text(description)}", desc_color))
-            await session.write_line(colored_truncate(segments, session.terminal_width))
+            await session.write_line(colored_truncate(segments, render_width))
 
         nav = _render_nav(
             session, on_sort, description_level,
             include_next=page_index < total_pages - 1, include_prev=page_index > 0,
+            # The frozen pair, like everything else this render draws
+            # (Codex review). The previous commit gave this function the
+            # parameters and then failed to pass them here, which left
+            # the exact split it was meant to close: items sized against
+            # the snapshot while the nav block re-measured itself
+            # against a width that had changed underneath it. A render
+            # beginning at 15 rows picks a compact nav; growing to 16
+            # before this call switches it to the six-line descriptive
+            # form, and the page runs off the bottom.
+            width=render_width, height=render_height,
         )
         # Folded into this same trailing line, not a line of its own
         # (issue #102's own "document it somewhere discoverable"
@@ -463,12 +796,12 @@ async def pick_item(
             # descriptions existed at all -- but only when it actually
             # fits; see the comment above for why a hard cut here was
             # the wrong tradeoff.
-            available_for_trailer = session.terminal_width - visible_width(last_nav_line) - visible_width(separator)
+            available_for_trailer = render_width - visible_width(last_nav_line) - visible_width(separator)
             if trailer and visible_width(trailer) <= max(0, available_for_trailer):
                 await session.write_line(f"\r\n{nav}{separator}{trailer}")
             else:
                 await session.write_line(f"\r\n{nav}")
-                for wrapped in wrap_to_width(trailer, session.terminal_width):
+                for wrapped in wrap_to_width(trailer, render_width):
                     await session.write_line(wrapped)
         else:
             # `menu_grid`'s own last line, unlike `action_bar`'s, is
@@ -479,7 +812,7 @@ async def pick_item(
             # Its own line(s) instead, wrapped rather than cut for the
             # same reason as the `off` branch above.
             await session.write_line(f"\r\n{nav}")
-            for wrapped in wrap_to_width(trailer, session.terminal_width):
+            for wrapped in wrap_to_width(trailer, render_width):
                 await session.write_line(wrapped)
         await session.write("Choice: ")
         return page_items
@@ -900,15 +1233,20 @@ def _nav_entries(on_sort: Callable | None, *, include_next: bool = True, include
 def _render_nav(
     session: Session, on_sort: Callable | None, description_level: str,
     *, include_next: bool = True, include_prev: bool = True,
+    width: int | None = None, height: int | None = None,
 ) -> str:
+    # Dimensions may be supplied by a caller that has frozen them for
+    # one render (see `pick_item`'s `_dimensions`); otherwise read live.
+    width = session.terminal_width if width is None else width
+    height = session.terminal_height if height is None else height
     entries = _nav_entries(on_sort, include_next=include_next, include_prev=include_prev)
     if description_level != "off":
         descriptive = menu_grid(
-            [("", entries)], width=session.terminal_width, height=session.terminal_height,
+            [("", entries)], width=width, height=height,
             description_level=description_level,
         )
         descriptive_lines = descriptive.count("\r\n") + 1
-        available = session.terminal_height - (_RESERVED_LINES - 1 + descriptive_lines)
+        available = height - (_RESERVED_LINES - 1 + descriptive_lines)
         if max(1, min(_MAX_PAGE_SIZE, available)) >= _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV:
             return descriptive
     # `menu_grid` always renders one entry per line, even with
@@ -917,10 +1255,13 @@ def _render_nav(
     # Reached either because the caller's preference is "off", or
     # because the descriptive form above didn't clear the page-size
     # floor.
-    return action_bar([e.label for e in entries], width=session.terminal_width)
+    return action_bar([e.label for e in entries], width=width)
 
 
-def _page_size(session: Session, on_sort: Callable | None, description_level: str) -> int:
+def _page_size(
+    session: Session, on_sort: Callable | None, description_level: str, *, header_lines: int = 0,
+    width: int | None = None, height: int | None = None,
+) -> int:
     # `_RESERVED_LINES` was calibrated against the nav row always being
     # exactly 1 line -- still true for `description_level="off"`
     # (`action_bar`), so the reserved budget only needs to grow past
@@ -931,5 +1272,5 @@ def _page_size(session: Session, on_sort: Callable | None, description_level: st
     # see `_nav_entries`' own docstring-comment for why this must stay the
     # worst-case (tallest possible) reservation.
     nav_lines = _render_nav(session, on_sort, description_level).count("\r\n") + 1
-    available = session.terminal_height - (_RESERVED_LINES - 1 + nav_lines)
+    available = session.terminal_height - (_RESERVED_LINES - 1 + nav_lines + header_lines)
     return max(1, min(_MAX_PAGE_SIZE, available))
