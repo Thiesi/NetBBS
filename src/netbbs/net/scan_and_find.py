@@ -208,13 +208,10 @@ async def _new_scan_screen(
             status = "caught up"
         else:
             status = f"{item.unread} unread"
-        line = f"{prefix}{item.kind.replace('_', ' ')}, {status}"
-        if item.name_gate_unmet:
-            # Still here as well as beside the name: this is what the
-            # fallback prose row carries when the row is too narrow for
-            # the segments to help either.
-            line = f"{NAME_GATE_NOTE} -- {line}"
-        return line
+        # The gate is not repeated here: it is already in front of the
+        # name, and `pick_item` renders both callbacks every time, so a
+        # copy would simply say it twice (Codex review).
+        return f"{prefix}{item.kind.replace('_', ' ')}, {status}"
 
     positions = {id(item): index for index, item in enumerate(items, start=1)}
 
@@ -226,9 +223,15 @@ async def _new_scan_screen(
         exactly like an ungated one -- which is the whole bug (Codex
         review).
         """
-        segments: list[tuple[str, SegmentColor]] = [(item.name, None)]
+        segments: list[tuple[str, SegmentColor]] = []
         if item.name_gate_unmet:
-            segments.append((f" ({NAME_GATE_NOTE})", GATE_COLOR))
+            # In *front* of the name, exactly as `channel_name_segments`
+            # does it (Codex review -- this copy kept the old order
+            # while claiming the fix). `colored_truncate` cuts from the
+            # end, so a name long enough to fill the row takes anything
+            # behind it with it.
+            segments.append((f"({NAME_GATE_NOTE}) ", GATE_COLOR))
+        segments.append((item.name, None))
         return segments
 
     selected = await pick_item(

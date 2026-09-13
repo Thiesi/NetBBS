@@ -1155,13 +1155,16 @@ def _meets_live_participation_requirements(db: Database, channel: Channel, user:
 #: not meet. One string, because three screens say it: this module's own
 #: picker, its sectioned variant, and `[N]ew scan`
 #: (`netbbs.net.scan_and_find`, which imports it).
-# Short on purpose (Codex review). The 40-column floor this project
-# builds to leaves about sixteen columns after a selector, a reference
-# and an ordinary channel name -- and a note that gets truncated tells a
-# caller no more than no note at all. The full sentence is one keystroke
+# Short, but not at the cost of the point (Codex review, twice). The
+# 40-column floor this project builds to leaves little room once a
+# selector, a reference and a channel name have had theirs, and a note
+# that gets truncated tells a caller no more than no note at all -- but
+# "needs a name" was wrong as well as short. Every caller *has* a name;
+# what this gate wants is a *verified* one, and the difference is the
+# whole action a caller has to take. The full sentence is one keystroke
 # away, in the refusal itself: "This channel requires a verified real
 # name to participate."
-NAME_GATE_NOTE = "needs a name"
+NAME_GATE_NOTE = "needs verification"
 _NAME_GATE_NOTE = NAME_GATE_NOTE
 
 
@@ -1226,17 +1229,22 @@ def _channel_description(hub: ChatHub, channel: Channel, needs_name: set[int] | 
     and had nothing to act on. "needs a verified name" is something they
     can act on.
     """
-    # The note is *not* here: it rides with the name, where truncation
-    # cannot reach it -- see `channel_name_segments`. `needs_name` is
-    # still accepted so the fallback prose form (a row too narrow for
-    # segments to help) can carry it.
+    # The note is *not* here. It rides with the name, in front of it,
+    # where the row cannot cut it -- see `channel_name_segments`.
+    #
+    # And only there (Codex review): `pick_item` renders
+    # `name_segments_of` and `description_of` both, always, with no
+    # either/or fallback between them -- so a copy here was a second one
+    # on screen, reading "(needs verification) verified-only - needs
+    # verification -- ...", spending the width that should have gone to
+    # the description it was crowding out.
+    #
+    # `needs_name` stays in the signature for the callers that have not
+    # got a name-segment callback to hand, and for the tests that ask
+    # this function what a row says.
     online = hub.participant_count(channel.name)
-    parts = []
-    if needs_name is not None and channel.id in needs_name:
-        parts.append(NAME_GATE_NOTE)
-    if channel.description:
-        parts.append(channel.description)
-    return f"{' -- '.join(parts)} ({online} online)".strip()
+    base = channel.description or ""
+    return f"{base} ({online} online)".strip()
 
 
 def _chat_author_label(db: Database, channel: Channel, user: User) -> str:

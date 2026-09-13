@@ -545,7 +545,7 @@ Two rules follow from that, and are normative for any future list:
   Caller-facing pickers carry gate metadata too, since issue #541 closed
   the gap this paragraph used to describe -- but only the part of it a
   caller can act on. A channel whose name requirement they do not meet is
-  still listed, and says so ("needs a verified name"), in both the chat
+  still listed, and says so ("needs verification"), in both the chat
   channel picker and `[N]ew scan`. It is not hidden: a name requirement is
   a *participation* gate rather than a content restriction, unlike an age
   gate, which does hide the resource. The note is placed ahead of any

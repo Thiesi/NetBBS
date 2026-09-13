@@ -64,30 +64,50 @@ def test_a_gated_channel_is_still_listed(db, sysop, caller):
 # -- and what the list now says about it -------------------------------
 
 
-def test_the_line_says_a_name_is_needed(db, sysop, caller):
+def test_the_row_says_verification_is_needed(db, sysop, caller):
+    from netbbs.net.chat_flow import channel_name_segments
+
     channel = create_channel(db, "verified-only", creator=sysop, name_requirement="verified")
-    assert _NOTE in _channel_description(ChatHub(), channel, {channel.id})
+    segments = channel_name_segments(channel, {channel.id})
+    assert _NOTE in "".join(text for text, _ in segments)
 
 
-def test_it_says_nothing_once_the_caller_has_a_name(db, sysop, caller):
+def test_the_note_says_what_is_missing(db, sysop):
+    """Every caller has a name; what this gate wants is a *verified*
+    one, and that difference is the whole action a caller has to take
+    (Codex review). A note that drops it is short and useless."""
+    assert "verif" in _NOTE
+
+
+def test_it_says_nothing_once_the_caller_is_verified(db, sysop, caller):
+    from netbbs.net.chat_flow import channel_name_segments
+
     channel = create_channel(db, "verified-only", creator=sysop, name_requirement="verified")
     attest_name(db, caller, "Real Person", verifier=sysop)
     # The caller now meets it, so the channel is not in the gated set.
-    assert _NOTE not in _channel_description(ChatHub(), channel, set())
+    assert channel_name_segments(channel, set()) == [("verified-only", None)]
 
 
 def test_an_ungated_channel_says_nothing(db, sysop, caller):
     channel = create_channel(db, "lobby", creator=sysop)
     assert _NOTE not in _channel_description(ChatHub(), channel, set())
+    from netbbs.net.chat_flow import channel_name_segments
+
+    assert _NOTE not in "".join(t for t, _ in channel_name_segments(channel, set()))
 
 
-def test_the_description_and_the_count_are_still_there(db, sysop):
+def test_the_description_carries_no_second_copy_of_the_note(db, sysop):
+    """`pick_item` renders `name_segments_of` and `description_of` both,
+    always -- there is no either/or between them -- so a copy in the
+    description was a second one on screen, crowding out the very
+    description it sat in front of (Codex review)."""
     channel = create_channel(
         db, "verified-only", creator=sysop,
         description="Attested callers only", name_requirement="verified",
     )
     line = _channel_description(ChatHub(), channel, {channel.id})
-    assert "Attested callers only" in line and "0 online" in line and _NOTE in line
+    assert "Attested callers only" in line and "0 online" in line
+    assert _NOTE not in line
 
 
 def test_a_caller_with_no_gate_set_at_all_is_unchanged(db, sysop):
@@ -123,25 +143,9 @@ def test_a_requirement_inherited_from_a_community_counts(db, sysop, caller):
 # -- the note survives a narrow row ------------------------------------
 
 
-def test_the_note_comes_before_the_description(db, sysop):
-    """`pick_item` clips the whole row to the terminal width, so
-    anything after a free-form description is the first thing lost --
-    and on a narrow terminal a gated channel would have looked exactly
-    like an ungated one again, which is the bug (Codex review)."""
-    channel = create_channel(
-        db, "verified-only", creator=sysop,
-        description="A very long description that will certainly be clipped on a narrow terminal",
-        name_requirement="verified",
-    )
-    line = _channel_description(ChatHub(), channel, {channel.id})
-    assert line.startswith(_NOTE)
-
-
 def test_a_channel_with_no_description_still_reads_properly(db, sysop):
     channel = create_channel(db, "verified-only", creator=sysop, name_requirement="verified")
-    line = _channel_description(ChatHub(), channel, {channel.id})
-    assert line.startswith(_NOTE)
-    assert not line.startswith(f"{_NOTE} -- ("), "no dangling separator before the count"
+    assert _channel_description(ChatHub(), channel, {channel.id}) == "(0 online)"
 
 
 # -- and New scan says it too ------------------------------------------
