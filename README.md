@@ -1,5 +1,7 @@
 # NetBBS
 
+![NetBBS — Boards. Chat. Door games. Connected.](docs/images/netbbs-banner.jpg)
+
 Door games: see the [operator setup and compatibility guide](docs/NetBBS-door-guide.md)
 for native, DOSBox-X and remote doors, manual prerequisites, and tested limits.
 
