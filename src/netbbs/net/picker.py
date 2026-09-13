@@ -557,14 +557,30 @@ async def pick_item(
 
     def _sized_page_size() -> int:
         width, height = _dimensions()
-        return _page_size(
-            session, on_sort, description_level,
-            header_lines=_header_lines(), width=width, height=height, on_create=on_create,
-            # Issue #538: the trailer is a real line too, and whether it
-            # takes one depends on these.
-            trailer=_trailer_text(_sort_label_text(), refresh is not None),
-            unicode_style=unicode_style,
-        )
+
+        def measure(single_page: bool) -> int:
+            return _page_size(
+                session, on_sort, description_level,
+                header_lines=_header_lines(), width=width, height=height, on_create=on_create,
+                # Issue #538: the trailer is a real line too, and whether
+                # it takes one depends on these.
+                trailer=_trailer_text(_sort_label_text(), refresh is not None),
+                unicode_style=unicode_style, single_page=single_page,
+            )
+
+        # Two passes, because the answer decides its own question
+        # (Codex review). A list that fits one page never draws Next or
+        # Prev, so it should not be priced against those shapes -- but
+        # whether it fits one page is what the price decides. Price it
+        # as a paginated list first; only if it fits that page is it
+        # worth asking the cheaper question, and only if it fits *that*
+        # page too is the cheaper answer self-consistent.
+        paginated = measure(single_page=False)
+        if len(working_set) <= paginated:
+            single = measure(single_page=True)
+            if len(working_set) <= single:
+                return single
+        return paginated
 
     def _masthead_prefix() -> str:
         # Same clear_screen()-ordering hazard `_draw_main_menu`'s own
@@ -824,6 +840,10 @@ async def pick_item(
         nav = _render_nav(
             session, on_sort, description_level,
             include_next=page_index < total_pages - 1, include_prev=page_index > 0,
+            # The same fact the budget used: a one-page list cannot
+            # draw Next or Prev, so it must not be priced against
+            # nav shapes it will never render.
+            single_page=total_pages <= 1,
             # The frozen pair, like everything else this render draws
             # (Codex review). The previous commit gave this function the
             # parameters and then failed to pass them here, which left
@@ -1367,7 +1387,7 @@ _NAV_SHAPES = ((True, True), (True, False), (False, True), (False, False))
 
 def _tallest_nav(
     session: Session, on_sort: Callable | None, description_level: str,
-    *, width: int, height: int, on_create: Callable | None,
+    *, width: int, height: int, on_create: Callable | None, single_page: bool = False,
 ) -> str:
     """The tallest nav block any page of this list could render.
 
@@ -1387,7 +1407,14 @@ def _tallest_nav(
                 ))],
                 width=width, height=height, description_level=description_level,
             )
-            for next_here, prev_here in _NAV_SHAPES
+            for next_here, prev_here in (
+            # A list that fits one page can never draw Next or Prev, so
+            # reserving for them costs it the descriptive nav for no
+            # reason (Codex review): four items on a 120x20 terminal fit
+            # in nineteen rows with an eight-row nav, and were being
+            # priced against a ten-row shape they cannot render.
+            ((False, False),) if single_page else _NAV_SHAPES
+        )
         ),
         key=lambda nav: nav.count("\r\n"),
     )
@@ -1399,7 +1426,7 @@ def _render_nav(
     width: int | None = None, height: int | None = None,
     on_create: Callable | None = None,
     trailer: str = "", unicode_style: bool = False,
-    reserve: bool = False,
+    reserve: bool = False, single_page: bool = False,
 ) -> str:
     """The nav block for this page, or -- with `reserve` -- the tallest
     block any page of this list could produce in the *same form*.
@@ -1449,7 +1476,7 @@ def _render_nav(
         # they press [N].
         tallest = _tallest_nav(
             session, on_sort, description_level,
-            width=width, height=height, on_create=on_create,
+            width=width, height=height, on_create=on_create, single_page=single_page,
         )
         descriptive_lines = tallest.count("\r\n") + 1
         # The same arithmetic `_page_size` will do, including the
@@ -1481,7 +1508,10 @@ def _render_nav(
     # The reservation takes the worst-case entry list, since a compact
     # bar wraps and one more entry can cost it a row.
     if reserve:
-        entries = _nav_entries(on_sort, include_next=True, include_prev=True, on_create=on_create)
+        entries = _nav_entries(
+            on_sort, include_next=not single_page, include_prev=not single_page,
+            on_create=on_create,
+        )
     return action_bar([e.label for e in entries], width=width)
 
 
@@ -1546,7 +1576,7 @@ def _trailer_rows(
 def _page_size(
     session: Session, on_sort: Callable | None, description_level: str, *, header_lines: int = 0,
     width: int | None = None, height: int | None = None, on_create: Callable | None = None,
-    trailer: str = "", unicode_style: bool = False,
+    trailer: str = "", unicode_style: bool = False, single_page: bool = False,
 ) -> int:
     # `_RESERVED_LINES` was calibrated against the nav row always being
     # exactly 1 line -- still true for `description_level="off"`
@@ -1570,6 +1600,7 @@ def _page_size(
     nav = _render_nav(
         session, on_sort, description_level, width=width, height=height, on_create=on_create,
         trailer=trailer, unicode_style=unicode_style, reserve=True,
+        single_page=single_page,
     )
     nav_lines = nav.count("\r\n") + 1
     trailer_lines = _trailer_rows(

@@ -330,3 +330,40 @@ def test_falling_back_to_the_compact_nav_does_not_cost_the_page():
         trailer=trailer, unicode_style=False,
     )
     assert size >= _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV, f"only {size} choices fit"
+
+
+@pytest.mark.parametrize("width,height", [(120, 20), (100, 24), (80, 24)])
+def test_a_single_page_list_keeps_its_descriptions(width, height):
+    """A list that fits one page can never draw Next or Prev, so
+    reserving rows for those shapes costs it the descriptive nav for no
+    reason -- four items on a 120x20 terminal fit in nineteen rows with
+    an eight-row nav, and were priced against a ten-row shape they
+    cannot render (Codex review)."""
+    session = FakeSession(width, height)
+    asyncio.run(
+        pick_item(
+            session, [1, 2, 3, 4],
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none", description_level="brief",
+        )
+    )
+    text = "".join(session.written)
+    assert "Return without picking" in text, "the descriptions the caller asked for"
+    assert session.rows_on_screen() <= height
+
+
+@pytest.mark.parametrize("width,height", [(120, 20), (80, 24), (50, 24), (40, 20)])
+def test_a_paginated_list_still_fits(width, height):
+    """The other half of the same trade: the moment a list needs pages,
+    it is priced against the nav those pages will draw."""
+    session = FakeSession(width, height, ["n", "b"])
+    asyncio.run(
+        pick_item(
+            session, list(range(1, 80)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none", description_level="brief",
+        )
+    )
+    assert session.rows_on_screen() <= height
