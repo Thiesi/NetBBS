@@ -87,7 +87,7 @@ games, drive the door as a subprocess through `scripts/door_gallery.py` and
 convert with `website_ansi_to_html.py`.
 
 **Every embedded capture is reproducible.** `website_capture_screens.py --list`
-names the nine NetBBS screens; `website_capture_chat_mrc.py`,
+names the ten NetBBS screens; `website_capture_chat_mrc.py`,
 `website_capture_door_menu.py` and `website_capture_door_profile.py` cover the
 other three. The raw ANSI for each lives in `shots/raw-<name>.txt` and its
 converted form in `shots/shot-<name>.html`, so a capture can be regenerated,
@@ -100,7 +100,7 @@ layout the product had replaced several releases earlier, and every grey on
 both pages was a `MUTED_COLOR` the palette no longer used. **A capture nobody
 can regenerate is a screenshot of a product you no longer ship.**
 
-Regenerate all twelve, convert each at its own geometry, then re-embed:
+Regenerate all thirteen, convert each at its own geometry, then re-embed:
 
 ```sh
 for s in $(PYTHONPATH=src python scripts/website_capture_screens.py --list); do
