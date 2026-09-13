@@ -3736,7 +3736,12 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
         # how pick_item draws a block above its own title on every
         # render. Its row is budgeted now -- see the picker's
         # _header_lines, which never counted a masthead until this.
-        masthead=await _load_condensed_status_line(
+        # A coroutine, not a captured string: this line reports backup
+        # state, and another session completing a backup while the
+        # screen is open used to leave it saying "never" until the SysOp
+        # left and came back -- on a screen that advertises Ctrl-R
+        # (Codex review).
+        masthead=lambda: _load_condensed_status_line(
             lane, unicode_style=unicode_style, terminal_width=session.terminal_width
         ),
         accent_color=await lane.run(effective_accent_color_256),

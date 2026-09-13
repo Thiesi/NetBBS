@@ -266,7 +266,7 @@ async def pick_item(
     accent_color: int = ACCENT_COLOR,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     start_stable_id: int | None = None,
-    masthead: str = "",
+    masthead: str | Callable[[], Awaitable[str]] = "",
 ) -> T | None:
     """
     Let the user browse/search/jump through `items` and pick one, or
@@ -534,14 +534,14 @@ async def pick_item(
         # further up. Measured rather than assumed to be one line,
         # because a SysOp-authored masthead can be several.
         lines = 0
-        if masthead and not redraw_in_place:
+        if masthead_text and not redraw_in_place:
             # The blank row `_masthead_prefix` adds to get off the
             # "Choice: " line (Codex review). It is a physical row, and
             # every physical row this screen draws has to be in the
             # budget or it is the next one to push the prompt off the
             # bottom.
             lines += 1
-        if masthead:
+        if masthead_text:
             # Measured through the same wrapping `write_preformatted_line`
             # performs, not by counting `\r\n` pairs (Codex review): that
             # writer normalizes lone LFs and wraps a row wider than the
@@ -550,7 +550,7 @@ async def pick_item(
             # the choice prompt below the viewport, the same way every
             # other unpaid-for row in this budget did.
             width, _ = _dimensions()
-            wrapped = wrap_terminal_text(masthead, max(1, width))
+            wrapped = wrap_terminal_text(masthead_text, max(1, width))
             lines += wrapped.count("\r\n") + 1
         if columns:
             width, _ = _dimensions()
@@ -566,6 +566,19 @@ async def pick_item(
             live_nav=live_nav,
         )
 
+    # A caller can hand over a coroutine instead of a string, and then
+    # it is re-read on every render (issue #537, Codex review). The
+    # SysOp console's condensed status line goes here, and captured once
+    # it kept reporting "Backup: never" while another session completed
+    # a backup -- stale precisely on a screen that had just advertised
+    # Ctrl-R as a way to see current reality.
+    masthead_text = "" if callable(masthead) else masthead
+
+    async def _refresh_masthead() -> None:
+        nonlocal masthead_text
+        if callable(masthead):
+            masthead_text = await masthead()
+
     def _masthead_prefix() -> str:
         # Same clear_screen()-ordering hazard `_draw_main_menu`'s own
         # masthead handling documents: the clear (if `redraw_in_place`)
@@ -573,17 +586,17 @@ async def pick_item(
         # branch in `_render` below) *before* `screen_title`'s own
         # returned string too, since `screen_title` embeds its own
         # clear_screen() inside whatever it returns.
-        if not masthead:
+        if not masthead_text:
             return ""
         if redraw_in_place:
-            return clear_screen() + masthead
+            return clear_screen() + masthead_text
         # Without an in-place redraw the cursor is still sitting after
         # "Choice: " (and after the letter a live key echoed), and
         # `write_preformatted_line` only adds a *trailing* newline -- so
         # the masthead ran on as "Choice: aBackup: ..." (Codex review).
         # The screen this replaced wrote a newline before every
         # state-change render for exactly this reason.
-        return "\r\n" + masthead
+        return "\r\n" + masthead_text
 
     # `on_create` keeps an empty list interactive for the same reason
     # `refresh` already does (issue #112): there is something to do
@@ -636,6 +649,9 @@ async def pick_item(
 
     async def _render_frozen() -> Sequence[T]:
         nonlocal page_index
+        # Before `_header_lines` measures it or `_masthead_prefix` draws
+        # it, so a callable masthead is current for both.
+        await _refresh_masthead()
         render_width, render_height = _dimensions()
         if not working_set:
             page_index = 0
@@ -686,7 +702,7 @@ async def pick_item(
         start = page_index * page_size
         page_items = working_set[start : start + page_size]
 
-        if masthead:
+        if masthead_text:
             await write_preformatted_line(session, _masthead_prefix())
         await session.write_line(
             "\r\n" + screen_title(
@@ -694,7 +710,7 @@ async def pick_item(
                 breadcrumb=(session.node_display_name, *breadcrumb),
                 subtitle=f"page {page_index + 1}/{total_pages}, {len(working_set)} total",
                 width=render_width,
-                clear=False if masthead else redraw_in_place,
+                clear=False if masthead_text else redraw_in_place,
                 unicode_style=unicode_style, collapsed=collapsed,
                 header_color=header_color, node_name_gradient=session.node_name_gradient)
         )

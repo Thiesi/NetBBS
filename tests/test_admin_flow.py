@@ -8702,3 +8702,31 @@ def test_user_picker_keeps_an_active_search_across_a_sort(db, lane, sysop):
     after = _last_render(text, marker)
     assert "alice" in after and "alina" in after
     assert "bob" not in after, "the search survived the re-sort"
+
+
+def test_user_picker_status_line_is_re_read_on_every_render(db, lane, sysop):
+    """Captured once, it kept reporting the backup state the screen
+    opened with -- while another session completed a backup, on a screen
+    that advertises Ctrl-R as the way to see current reality (issue
+    #537, Codex review)."""
+    import netbbs.net.admin_flow as admin
+
+    reads = []
+    original = admin._load_condensed_status_line
+
+    async def counting(lane_, *, unicode_style, terminal_width):
+        reads.append(len(reads) + 1)
+        return f"Status read {len(reads)}"
+
+    admin._load_condensed_status_line = counting
+    try:
+        create_user(db, "alice", password="hunter2", user_level=10)
+        # Open the list, press a live key (which redraws), then leave.
+        session = FakeSession(["u", "l", "l", "b", "b", "b"])
+        _run(session, lane, sysop)
+    finally:
+        admin._load_condensed_status_line = original
+
+    assert len(reads) >= 2, f"read {len(reads)} time(s); a redraw must re-read it"
+    text = _visible(_written_text(session))
+    assert f"Status read {len(reads)}" in text, "and the newest read is what is shown"
