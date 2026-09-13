@@ -879,16 +879,18 @@ def test_pagination_adapts_to_negotiated_terminal_height():
             writer.write(b"x\r\n")
             await writer.drain()
 
+            # Four a page at 80x12 since #538/#550 corrected the
+            # budget -- six drew more rows than the terminal had.
             text1 = (await _read_until_quiet(reader)).decode()
-            assert "item01" in text1 and "item06" in text1
-            assert "item07" not in text1
+            assert "item01" in text1 and "item04" in text1
+            assert "item05" not in text1
 
             writer.write(b"n")
             await writer.drain()
             text2 = (await _read_until_quiet(reader)).decode()
-            assert "item07" in text2 and "item12" in text2
+            assert "item05" in text2 and "item08" in text2
 
-            writer.write(b"02")  # 2nd item on page 2 -> item08
+            writer.write(b"02")  # 2nd item on page 2 -> item06
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()
@@ -897,7 +899,7 @@ def test_pagination_adapts_to_negotiated_terminal_height():
             await server.stop()
 
     asyncio.run(scenario())
-    assert result["value"] == "item08"
+    assert result["value"] == "item06"
 
 
 def test_description_level_brief_shows_nav_descriptions():
@@ -945,9 +947,13 @@ def test_description_level_brief_reserves_extra_lines_for_the_taller_nav_block()
     rather than 1 column of 10), so `_page_size` must reserve more
     lines than the `description_level="off"` case -- otherwise the item
     list plus the now-taller nav block would overflow a real terminal
-    of this height. At a negotiated 80x20 terminal: off reserves 6
-    lines (page size 14), brief reserves 11 (page size 9) -- verified
-    here by checking exactly 9 of 20 items appear on page 1."""
+    of this height. At a negotiated 80x20 terminal: off leaves 12 items
+    a page, brief leaves 7 -- verified here by checking exactly 7 of 20
+    items appear on page 1.
+
+    The numbers were 14 and 9 until #538/#550 found that a page drew two
+    rows more than the terminal had; the claim -- brief reserves
+    strictly more -- is the same one."""
     result = {}
     items = [f"item{i:02d}" for i in range(1, 21)]
 
@@ -969,8 +975,8 @@ def test_description_level_brief_reserves_extra_lines_for_the_taller_nav_block()
             await writer.drain()
 
             text = (await _read_until_quiet(reader)).decode()
-            assert "item01" in text and "item09" in text
-            assert "item10" not in text
+            assert "item01" in text and "item07" in text
+            assert "item08" not in text
 
             writer.write(b"b")
             await writer.drain()
@@ -1425,7 +1431,7 @@ def test_two_digit_selection_is_unaffected_by_an_active_highlight():
 
 def test_highlight_resets_to_unhighlighted_after_paging():
     result = {}
-    items = [f"item{i:02d}" for i in range(1, 21)]  # 2 pages at the default 18-per-page size
+    items = [f"item{i:02d}" for i in range(1, 21)]  # 2 pages at the default 16-per-page size
 
     async def handler(session: Session):
         result["value"] = await pick_item(
@@ -1440,12 +1446,14 @@ def test_highlight_resets_to_unhighlighted_after_paging():
             await skip_initial_negotiation(reader)
             await _read_until_quiet(reader)
 
-            writer.write(_UP)  # unhighlighted -> lands on page 1's last row (item18)
+            # 16 rows a page since #538/#550 corrected the budget --
+            # the old 18 drew two rows more than the terminal had.
+            writer.write(_UP)  # unhighlighted -> lands on page 1's last row (item16)
             await writer.drain()
             data = _visible(await _read_until_quiet(reader))
-            assert b"> 18." in data
+            assert b"> 16." in data
 
-            writer.write(b"n")  # page to page 2 (item19, item20)
+            writer.write(b"n")  # page to page 2 (item17 onward)
             await writer.drain()
             data = _visible(await _read_until_quiet(reader))
             assert b"> 01." not in data  # no stale highlight carried onto the new page
@@ -1454,7 +1462,7 @@ def test_highlight_resets_to_unhighlighted_after_paging():
             await writer.drain()
             data = _visible(await _read_until_quiet(reader))
             assert b"> 01." in data
-            assert b"item19" in data
+            assert b"item17" in data
 
             writer.write(b"b")
             await writer.drain()
@@ -1504,12 +1512,12 @@ def test_start_stable_id_reopens_already_highlighted_on_the_matching_row():
 
 def test_start_stable_id_opens_directly_on_the_page_containing_that_item():
     result = {}
-    items = [f"item{i:02d}" for i in range(1, 21)]  # 2 pages at the default 18-per-page size
+    items = [f"item{i:02d}" for i in range(1, 21)]  # 2 pages at the default 16-per-page size
 
     async def handler(session: Session):
         result["value"] = await pick_item(
             session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1,
-            title="Items", empty_message="none", start_stable_id=19,  # item19, page 2's first row
+            title="Items", empty_message="none", start_stable_id=17,  # item17, page 2's first row
         )
 
     async def scenario():
@@ -1520,7 +1528,7 @@ def test_start_stable_id_opens_directly_on_the_page_containing_that_item():
             data = _visible(await _read_until_quiet(reader))
             assert re.search(rb"page 2/2", data)
             assert b"> 01." in data
-            assert b"item19" in data
+            assert b"item17" in data
 
             writer.write(b"b")
             await writer.drain()
@@ -1729,10 +1737,12 @@ def test_stable_index_correct_on_second_page():
             await server.stop()
 
     data = asyncio.run(scenario())
-    # Default terminal height (80x24, no NAWS sent) gives page_size=18,
-    # so page 2 starts at item19: absolute index 19, not restarted at 1.
-    assert b"01. (#19) item19" in _visible(data)
-    assert b"02. (#20) item20" in _visible(data)
+    # Default terminal height (80x24, no NAWS sent) gives page_size=16
+    # (18 until #538/#550 found the page drawing two rows more than the
+    # terminal had), so page 2 starts at item17: absolute index 17, not
+    # restarted at 1.
+    assert b"01. (#17) item17" in _visible(data)
+    assert b"02. (#18) item18" in _visible(data)
 
 
 # -- genuine stable-ID/position decoupling (not just index-based IDs) -----
@@ -2111,7 +2121,7 @@ def test_ctrl_r_refresh_resets_page_index_and_clears_search_filter():
     search filter to it". Also confirms the page index resets even if
     it was sitting on page 2+ of the old (larger) working set."""
     result = {}
-    initial_items = [f"item{i}" for i in range(1, 21)]  # 20 -> 2 pages at page_size 18
+    initial_items = [f"item{i}" for i in range(1, 21)]  # 20 -> 2 pages at page_size 16
     refreshed_items = ["fresh"]
     stable_ids = {f"item{i}": i for i in range(1, 21)}
     stable_ids["fresh"] = 100

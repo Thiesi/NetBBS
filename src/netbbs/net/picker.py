@@ -73,10 +73,24 @@ from netbbs.rendering import (
 
 T = TypeVar("T")
 
-# Lines reserved on screen for the title, blank spacing, and the
-# footer/prompt — subtracted from the negotiated terminal height (see
-# netbbs.net.telnet's NAWS handling) to compute how many items actually
-# fit on one page without scrolling off screen.
+# Rows a page spends on everything that is not an item or the nav
+# block: the leading blank, the title, the "page 1/5, 79 total" counter,
+# the rule under it, the blank line above the nav, and the prompt. Six,
+# each one counted (issue #538, Codex review) -- subtracted from the
+# negotiated terminal height (see netbbs.net.telnet's NAWS handling).
+#
+# It was six before too, but the budget then subtracted `_RESERVED_LINES
+# - 1`, on the belief that the spare line paid for the trailer. Measured
+# against what a render actually writes, it did not: with descriptions
+# off the picker drew 26 rows on a 24-row terminal at *every* width,
+# including 80, where this was thought to be fine. Two rows over -- the
+# unpaid trailer, and this off-by-one.
+#
+# With descriptions on it looked fine on page 1 only because the nav
+# block is reserved at its worst case (`_render_nav` is asked for the
+# tallest form, with both Next and Prev) while page 1 renders without
+# Prev. Two rows of slack that happened to cover the shortfall -- and
+# stopped covering it on page 2, where the nav really is that tall.
 _RESERVED_LINES = 6
 
 # Selection numbers are always exactly two digits (01-99), zero-padded,
@@ -523,11 +537,78 @@ async def pick_item(
         width, _ = _dimensions()
         return 1 if _table_widths(width, columns, 1) is not None else 0
 
+    # `sort_label` is documented as read fresh on *every render* -- not
+    # on every internal call (issue #538). Sizing a page now needs the
+    # trailer, which needs the label, and `_sized_page_size` runs
+    # several times per render; calling through would have turned one
+    # read per render into four, which a caller whose label changes
+    # between reads would notice. Cached per render instead, so the
+    # contract holds exactly as before.
+    render_generation = 0
+    label_cache: tuple[int, str] | None = None
+
+    def _sort_label_text() -> str:
+        nonlocal label_cache
+        if sort_label is None:
+            return ""
+        if label_cache is None or label_cache[0] != render_generation:
+            label_cache = (render_generation, sanitize_text(sort_label()))
+        return label_cache[1]
+
     def _sized_page_size() -> int:
         width, height = _dimensions()
-        return _page_size(
-            session, on_sort, description_level,
-            header_lines=_header_lines(), width=width, height=height, on_create=on_create,
+
+        def measure(shapes: Sequence[tuple[bool, bool]]) -> int:
+            return _page_size(
+                session, on_sort, description_level,
+                header_lines=_header_lines(), width=width, height=height, on_create=on_create,
+                # Issue #538: the trailer is a real line too, and whether
+                # it takes one depends on these.
+                trailer=_trailer_text(_sort_label_text(), refresh is not None),
+                unicode_style=unicode_style, shapes=shapes,
+            )
+
+        # The answer decides its own question (Codex review,
+        # repeatedly): how many rows a page gets depends on how tall the
+        # nav is, how tall the nav can be depends on how many pages
+        # there are, and how many pages there are depends on how many
+        # rows a page gets.
+        #
+        # A size is *valid* when the page it produces fits the nav that
+        # page will actually draw -- which is the only property that
+        # matters, since the render picks its nav from the page count.
+        # Of the valid sizes, the largest shows the most rows.
+        #
+        # Asking "does this shape set's own page count match the
+        # assumption" was not enough: seven items at 40x20 make every
+        # assumption contradict its own result (one page needs 6 rows
+        # and 6 rows is two pages; two pages allows 11 and 11 is one
+        # page), and the fallback then drew a one-page nav on a size
+        # measured for the tallest. 21 rows on a 20-row terminal.
+        total = len(working_set)
+
+        def shapes_for(pages: int) -> Sequence[tuple[bool, bool]]:
+            if pages <= 1:
+                return _SHAPES_ONE_PAGE
+            return _SHAPES_TWO_PAGES if pages == 2 else _SHAPES_MANY_PAGES
+
+        def pages_at(size: int) -> int:
+            return max(1, math.ceil(total / size)) if total else 1
+
+        valid = []
+        for shapes in (_SHAPES_ONE_PAGE, _SHAPES_TWO_PAGES, _SHAPES_MANY_PAGES):
+            size = measure(shapes)
+            if size <= measure(shapes_for(pages_at(size))):
+                valid.append(size)
+        if valid:
+            return max(valid)
+        # Nothing is valid at this geometry -- too short for any nav this
+        # list can draw. The smallest candidate keeps the most of the
+        # page on screen; the floor in `_render_nav` has already fallen
+        # back to the compact bar by here.
+        return min(
+            measure(shapes)
+            for shapes in (_SHAPES_ONE_PAGE, _SHAPES_TWO_PAGES, _SHAPES_MANY_PAGES)
         )
 
     def _masthead_prefix() -> str:
@@ -555,33 +636,75 @@ async def pick_item(
         return None
 
     working_set: Sequence[T] = items
-    page_index = 0
+    # Where this page *starts*, as an index into `working_set` -- not
+    # which page it is (Codex review).
+    #
+    # `page_index * page_size` only means one thing while `page_size`
+    # holds still, and it does not: `sort_label` is read fresh per
+    # render by contract, and a label that wraps changes the trailer's
+    # height and therefore the page size. At 80x24 with a label
+    # alternating short and two-line, page 1 held items 1-16, page 2
+    # started at 16, and page 3 at 33 -- so [N]ext twice showed item 16
+    # twice and never showed 31 or 32 at all. An exception would have
+    # been the better failure, and the highlight guards had just made
+    # sure there was not one.
+    page_start = 0
+    # Where the rendered page ended, and where the pages before it
+    # began (Codex review). Deriving either from a freshly measured page
+    # size is what kept going wrong: that size can differ from the one
+    # the visible page was drawn with -- a resize between renders, or a
+    # `sort_label` that wraps differently -- so [N]ext advanced past a
+    # boundary that was never there, and [P]rev landed between two.
+    # Recorded rather than recomputed.
+    page_end = 0
+    page_history: list[int] = []
     highlighted: int | None = None
     if start_stable_id is not None:
         for start_index, item in enumerate(working_set):
             if stable_id_of(item) == start_stable_id:
                 start_page_size = _sized_page_size()
-                page_index = start_index // start_page_size
+                page_start = (start_index // start_page_size) * start_page_size
+                # The pages [P]rev will walk back through, as though the
+                # caller had paged here (Codex review). Without them the
+                # fallback derived the previous boundary from live
+                # geometry, so a picker opened on item 20 and then grown
+                # a little showed rows 15-28 and, on [P]rev, rows 1-16 --
+                # repeating two.
+                page_history = [
+                    boundary for boundary in range(0, page_start, start_page_size)
+                ]
                 highlighted = start_index % start_page_size
                 break
 
     def _total_pages() -> int:
         return max(1, math.ceil(len(working_set) / _sized_page_size()))
 
-    async def _render() -> Sequence[T]:
-        nonlocal page_index, frozen
+    async def _render(*, keep_generation: bool = False) -> Sequence[T]:
+        nonlocal page_start, frozen, render_generation
         # Freeze for the duration of this render; see `_dimensions`.
         frozen = (session.terminal_width, session.terminal_height)
+        # A new render is a new read of `sort_label`; see its cache.
+        #
+        # `keep_generation` is for the one caller that has *already*
+        # measured a page in this generation: `start_stable_id`'s
+        # placement (Codex review). Bumping here would re-read a label
+        # whose text can differ between reads, and a label that wraps
+        # differently gives a different page size -- so a target placed
+        # at index 15 of a 16-item page could be highlighted on a page
+        # that turned out to hold 14, and Enter raised `IndexError`.
+        if not keep_generation:
+            render_generation += 1
         try:
             return await _render_frozen()
         finally:
             frozen = None
 
     async def _render_frozen() -> Sequence[T]:
-        nonlocal page_index
+        nonlocal page_start, page_end, highlighted
         render_width, render_height = _dimensions()
         if not working_set:
-            page_index = 0
+            page_start = 0
+            page_history.clear()
             prefix = _masthead_prefix()
             if prefix:
                 await write_preformatted_line(session, prefix)
@@ -611,10 +734,37 @@ async def pick_item(
             return []
 
         page_size = _sized_page_size()
+        # A render recomputes the page size, and `sort_label` is read
+        # fresh each time by contract -- so a label that wraps
+        # differently can shrink the page under a highlight taken from
+        # the last one, and `page_items[highlighted]` then raised
+        # `IndexError` on Enter (Codex review). The highlight is
+        # cleared rather than clamped: the row it pointed at may not be
+        # on this page at all, and moving somebody's selection silently
+        # is worse than asking them to make it again.
         total_pages = _total_pages()
-        page_index = max(0, min(page_index, total_pages - 1))
-        start = page_index * page_size
-        page_items = working_set[start : start + page_size]
+        # Clamped to a real row, then turned into a page number *for
+        # display only* -- the offset itself stays absolute, so a page
+        # size that changes under it moves the window without ever
+        # skipping a row or repeating one.
+        page_start = max(0, min(page_start, max(0, len(working_set) - 1)))
+        # The ordinal is how many pages were actually walked to get
+        # here, not `page_start // page_size` (Codex review): the size
+        # can differ from the one those pages were drawn with, so the
+        # division renamed the page under the caller -- an 80x22 picker
+        # showing "page 1/2" grew to 80x24, and [N]ext then showed the
+        # last item as "page 1/1".
+        page_index = len(page_history)
+        total_pages = max(total_pages, page_index + 1)
+        page_items = working_set[page_start : page_start + page_size]
+        page_end = page_start + len(page_items)
+        # Against what was actually sliced, not against the nominal page
+        # size (Codex review): the last page is shorter than a full one,
+        # so an index inside `page_size` can still be outside
+        # `page_items` -- which is `IndexError` on Enter, the thing this
+        # guard exists to stop.
+        if highlighted is not None and highlighted >= len(page_items):
+            highlighted = None
 
         if masthead:
             await write_preformatted_line(session, _masthead_prefix())
@@ -759,9 +909,25 @@ async def pick_item(
                 segments.append((f" - {sanitize_text(description)}", desc_color))
             await session.write_line(colored_truncate(segments, render_width))
 
+        # Read before the nav block rather than after it: the
+        # descriptive-nav floor now weighs the trailer's rows too, so it
+        # has to exist by the time that decision is made. The full
+        # reasoning for what goes in it is below, where it is drawn.
+        trailer = _trailer_text(_sort_label_text(), refresh is not None)
         nav = _render_nav(
             session, on_sort, description_level,
-            include_next=page_index < total_pages - 1, include_prev=page_index > 0,
+            # From the offset, not the derived page number: they are
+            # the same thing only while the page size holds still, and
+            # the offset is the half that is authoritative.
+            include_next=page_start + len(page_items) < len(working_set),
+            include_prev=page_start > 0,
+            # The same shapes the budget used: a list only ever draws
+            # the navs its own page count allows.
+            shapes=(
+                _SHAPES_ONE_PAGE if total_pages <= 1
+                else _SHAPES_TWO_PAGES if total_pages == 2
+                else _SHAPES_MANY_PAGES
+            ),
             # The frozen pair, like everything else this render draws
             # (Codex review). The previous commit gave this function the
             # parameters and then failed to pass them here, which left
@@ -772,6 +938,9 @@ async def pick_item(
             # before this call switches it to the six-line descriptive
             # form, and the page runs off the bottom.
             width=render_width, height=render_height, on_create=on_create,
+            # So the descriptive-nav floor weighs the same rows the page
+            # budget does -- see `_render_nav` (Codex review).
+            trailer=trailer, unicode_style=unicode_style,
         )
         # Folded into this same trailing line, not a line of its own
         # (issue #102's own "document it somewhere discoverable"
@@ -785,14 +954,6 @@ async def pick_item(
         # active sort mode being a mystery), not a one-time hint the
         # way the rest of this trailer is -- it must survive truncation
         # ahead of the boilerplate instructions below it.
-        trailer = ""
-        if sort_label is not None:
-            trailer = f"Sort: {sanitize_text(sort_label())}"
-        boilerplate = "or type a 2-digit number to select; Ctrl-L: redraw"
-        if refresh is not None:
-            boilerplate += ", Ctrl-R: refresh"
-        boilerplate += ", Ctrl-H: help"
-        trailer = f"{trailer}; {boilerplate}" if trailer else boilerplate
         # Dogfood-reported regression, and a real dogfood-reported
         # *re*-regression on top of the original fix: with sort mode
         # (and/or refresh) active, nav + separator + trailer could run
@@ -841,7 +1002,10 @@ async def pick_item(
         await session.write("Choice: ")
         return page_items
 
-    page_items = await _render()
+    # The first render reuses the generation the placement above
+    # measured in, so both see the same `sort_label` and the same page
+    # size -- see `_render`.
+    page_items = await _render(keep_generation=start_stable_id is not None)
     while True:
         key = await _read_navigable_key(session, distinguish_ctrl_h=True)
 
@@ -863,7 +1027,8 @@ async def pick_item(
                 continue
             items = await refresh()
             working_set = items
-            page_index = 0
+            page_start = 0
+            page_history.clear()
             highlighted = None
             page_items = await _render()
             continue
@@ -953,9 +1118,10 @@ async def pick_item(
             return None
 
         if char_lower == "n":
-            if page_index < _total_pages() - 1:
+            if page_end < len(working_set):
                 await session.write_line("")
-                page_index += 1
+                page_history.append(page_start)
+                page_start = page_end
                 highlighted = None
                 page_items = await _render()
             else:
@@ -963,9 +1129,15 @@ async def pick_item(
             continue
 
         if char_lower == "p":
-            if page_index > 0:
+            if page_start > 0:
                 await session.write_line("")
-                page_index -= 1
+                # The start this page was reached from, not a
+                # subtraction: the size may have changed since, and the
+                # arithmetic then lands between two pages rather than on
+                # the one the caller was just looking at.
+                page_start = page_history.pop() if page_history else max(
+                    0, page_start - _sized_page_size()
+                )
                 highlighted = None
                 page_items = await _render()
             else:
@@ -998,7 +1170,8 @@ async def pick_item(
                 # previous search narrowed working_set, without needing
                 # two separate commands for what's really one action.
                 working_set = items
-                page_index = 0
+                page_start = 0
+                page_history.clear()
                 highlighted = None
                 page_items = await _render()
                 continue
@@ -1010,7 +1183,8 @@ async def pick_item(
             if len(matches) == 1:
                 return matches[0]
             working_set = matches
-            page_index = 0
+            page_start = 0
+            page_history.clear()
             highlighted = None
             page_items = await _render()
             continue
@@ -1023,7 +1197,8 @@ async def pick_item(
             if new_items is not None:
                 items = new_items
                 working_set = new_items
-                page_index = 0
+                page_start = 0
+                page_history.clear()
                 highlighted = None
             page_items = await _render()
             continue
@@ -1296,12 +1471,88 @@ def _nav_entries(
     return entries
 
 
+# Every shape a real page's nav can take. `(False, False)` is a
+# single-page list, which is *not* safely omittable as shorter: issue
+# #550's own review found `menu_grid` non-monotonic across its column
+# threshold, so a five-entry single-page nav can be ten rows where the
+# six-entry one is four. An assumption about which is taller is exactly
+# what this enumeration exists to stop making.
+# Every shape a page of a *paginated* list can take. "Neither" is not
+# one of them -- if there is more than one page, every page has a Next,
+# a Prev, or both -- and including it is not merely over-reserving
+# (Codex review): `menu_grid` is non-monotonic, so the impossible
+# five-entry shape can be ten rows where every possible one is six,
+# which forces the compact bar on a list with room for the
+# descriptions it asked for.
+# What a page of a list this long can actually look like.
+#
+# One page: no Next, no Prev. Two pages: the first has Next only, the
+# second Prev only -- *never* both, which is the shape a middle page
+# has. Three or more: all three are reachable. `menu_grid` is
+# non-monotonic, so an impossible shape is not merely a bigger number
+# (Codex review, three times now): at 40x21 the twelve-row middle-page
+# form failed the floor and cost a two-page list the descriptions it
+# asked for, while every shape it can render fits.
+_SHAPES_ONE_PAGE = ((False, False),)
+_SHAPES_TWO_PAGES = ((True, False), (False, True))
+_SHAPES_MANY_PAGES = ((True, True), (True, False), (False, True))
+
+
+def _tallest_nav(
+    session: Session, on_sort: Callable | None, description_level: str,
+    *, width: int, height: int, on_create: Callable | None,
+    shapes: Sequence[tuple[bool, bool]] = _SHAPES_MANY_PAGES,
+) -> str:
+    """The tallest nav block any page of this list could render.
+
+    A page has to fit whichever page it turns out to be, so both the
+    descriptive-nav floor and the page budget measure this rather than
+    the shape of the page in hand. They used to measure different
+    things -- the floor took the tallest, the budget took the
+    both-Next-and-Prev default -- and at 120x24 that difference was six
+    rows off the bottom of the screen.
+    """
+    return max(
+        (
+            menu_grid(
+                [("", _nav_entries(
+                    on_sort, include_next=next_here, include_prev=prev_here,
+                    on_create=on_create,
+                ))],
+                width=width, height=height, description_level=description_level,
+            )
+            for next_here, prev_here in (
+            # A list that fits one page can never draw Next or Prev, so
+            # reserving for them costs it the descriptive nav for no
+            # reason (Codex review): four items on a 120x20 terminal fit
+            # in nineteen rows with an eight-row nav, and were being
+            # priced against a ten-row shape they cannot render.
+            shapes
+        )
+        ),
+        key=lambda nav: nav.count("\r\n"),
+    )
+
+
 def _render_nav(
     session: Session, on_sort: Callable | None, description_level: str,
     *, include_next: bool = True, include_prev: bool = True,
     width: int | None = None, height: int | None = None,
     on_create: Callable | None = None,
+    trailer: str = "", unicode_style: bool = False,
+    reserve: bool = False, shapes: Sequence[tuple[bool, bool]] = _SHAPES_MANY_PAGES,
 ) -> str:
+    """The nav block for this page, or -- with `reserve` -- the tallest
+    block any page of this list could produce in the *same form*.
+
+    `_page_size` asks for the reservation and counts its rows, rather
+    than taking this page's block and guessing whether it is descriptive
+    (Codex review). Guessing meant looking for a line break, and a
+    compact `action_bar` wraps to two rows all by itself at 40 columns --
+    so a picker that had correctly fallen back to the compact form was
+    then priced as if it had ten rows of descriptive nav, cutting a page
+    that fits ten choices down to two.
+    """
     # Dimensions may be supplied by a caller that has frozen them for
     # one render (see `pick_item`'s `_dimensions`); otherwise read live.
     width = session.terminal_width if width is None else width
@@ -1314,22 +1565,140 @@ def _render_nav(
             [("", entries)], width=width, height=height,
             description_level=description_level,
         )
-        descriptive_lines = descriptive.count("\r\n") + 1
-        available = height - (_RESERVED_LINES - 1 + descriptive_lines)
+        # Measured against the *tallest* nav any page of this list can
+        # produce, rather than this page's own entries (Codex review,
+        # twice).
+        #
+        # `_page_size` prices the tallest nav a page could need, because
+        # a page has to fit whichever page it turns out to be. But the
+        # choice between the two nav forms was made from the entries of
+        # the page in hand, and page 1 has no `[P]rev`: at 80x16 the
+        # shorter list cleared the floor and drew the four-row
+        # descriptive form while the budget, pricing the taller list,
+        # had seen the floor fail and priced a one-row `action_bar`. The
+        # render drew three rows the page had not paid for.
+        #
+        # And "tallest" is not "most entries". `menu_grid` packs into
+        # more columns as the list grows, so at 120x16 the six-entry
+        # form is three columns and four rows while the five-entry one
+        # is a single column of ten -- the fuller list is the *shorter*
+        # layout. Taking the maximum over the page shapes that can
+        # actually occur is the only measure that holds both ways.
+        #
+        # Deciding from that settles something else worth having too:
+        # the nav no longer changes shape underneath the caller when
+        # they press [N].
+        tallest = _tallest_nav(
+            session, on_sort, description_level,
+            width=width, height=height, on_create=on_create, shapes=shapes,
+        )
+        descriptive_lines = tallest.count("\r\n") + 1
+        # The same arithmetic `_page_size` will do, including the
+        # trailer (Codex review). This floor decides whether the taller
+        # nav is worth its rows by asking how many items would be left;
+        # answering with a different sum than the one that actually
+        # sizes the page meant accepting the descriptive form on the
+        # promise of five items and then delivering three. Two pieces of
+        # code that must agree about a height should be one piece of
+        # code -- so this asks `_trailer_rows` rather than approximating
+        # it, which is why the trailer reaches this function at all.
+        available = height - (
+            _RESERVED_LINES + descriptive_lines
+            + _trailer_rows(
+                tallest, trailer,
+                width=width, unicode_style=unicode_style,
+                description_level=description_level,
+            )
+        )
         if max(1, min(_MAX_PAGE_SIZE, available)) >= _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV:
-            return descriptive
+            return tallest if reserve else descriptive
     # `menu_grid` always renders one entry per line, even with
     # descriptions off -- unlike `action_bar`'s packed single-line row,
     # that's not a byte-for-byte-compatible substitute at this level.
     # Reached either because the caller's preference is "off", or
     # because the descriptive form above didn't clear the page-size
     # floor.
+    #
+    # The reservation takes the worst-case entry list, since a compact
+    # bar wraps and one more entry can cost it a row.
+    if reserve:
+        # The worst case among the shapes this list can render.
+        entries = max(
+            (
+                _nav_entries(
+                    on_sort, include_next=next_here, include_prev=prev_here,
+                    on_create=on_create,
+                )
+                for next_here, prev_here in shapes
+            ),
+            key=len,
+        )
     return action_bar([e.label for e in entries], width=width)
+
+
+def _trailer_text(sort_label_text: str, has_refresh: bool) -> str:
+    """The instruction line that follows the nav row.
+
+    Takes the already-read label rather than the callable, so the
+    caller controls how often `sort_label()` is actually consulted --
+    see `pick_item`'s own per-render cache.
+    """
+    text = f"Sort: {sort_label_text}" if sort_label_text else ""
+    boilerplate = "or type a 2-digit number to select; Ctrl-L: redraw"
+    if has_refresh:
+        boilerplate += ", Ctrl-R: refresh"
+    boilerplate += ", Ctrl-H: help"
+    return f"{text}; {boilerplate}" if text else boilerplate
+
+
+def _trailer_rows(
+    nav: str, trailer: str, *, width: int, unicode_style: bool, description_level: str
+) -> int:
+    """How many *physical* rows the trailer adds below the nav block.
+
+    Issue #538. `_page_size` measured the nav row and stopped, but the
+    trailer is folded onto the nav's last line only when it fits there;
+    otherwise it takes its own line, wrapped. Nothing told the page
+    budget which had happened -- so at 50-60 columns, where the
+    boilerplate alone is 63 columns and cannot sit beside a ~26-column
+    nav, the picker drew one line more than the terminal had and the top
+    of the page scrolled off.
+
+    Shared with the render rather than reimplemented beside it, for the
+    same reason `netbbs.net.resource_editor._field_value_lines` is
+    shared with its own fit-check: two pieces of code that must agree
+    about a height should be one piece of code.
+
+    Counted in full. The first version of this returned rows *beyond
+    the first*, on the reasoning that `_RESERVED_LINES` already paid for
+    one -- and that 80 columns never overflowed, so charging the whole
+    thing would take an item off every page there to fix a bug that only
+    existed at 50.
+
+    Both halves of that were wrong, and measuring said so (Codex
+    review). `_RESERVED_LINES` pays for no trailer line, and 80 columns
+    overflowed too -- by two rows, at every width, which is what a
+    rendered page turned out to draw versus what the budget had allowed.
+    The band at 50-60 columns was simply where somebody noticed. So the
+    page does lose items, and the reason it loses them is that they were
+    never on the screen.
+    """
+    if description_level == "off":
+        separator = " — " if unicode_style else " - "
+        last_nav_line = nav.rsplit("\r\n", 1)[-1]
+        room = width - visible_width(last_nav_line) - visible_width(separator)
+        if trailer and visible_width(trailer) <= max(0, room):
+            # Folded onto the nav line, which is already counted: this
+            # genuinely costs nothing.
+            return 0
+    return len(wrap_to_width(trailer, width)) if trailer else 0
 
 
 def _page_size(
     session: Session, on_sort: Callable | None, description_level: str, *, header_lines: int = 0,
     width: int | None = None, height: int | None = None, on_create: Callable | None = None,
+    trailer: str = "", unicode_style: bool = False,
+    shapes: Sequence[tuple[bool, bool]] = _SHAPES_MANY_PAGES,
 ) -> int:
     # `_RESERVED_LINES` was calibrated against the nav row always being
     # exactly 1 line -- still true for `description_level="off"`
@@ -1348,8 +1717,17 @@ def _page_size(
     # out for is exactly the split freezing them exists to prevent.
     width = session.terminal_width if width is None else width
     height = session.terminal_height if height is None else height
-    nav_lines = _render_nav(
+    # `reserve=True`: the tallest block of whichever form this list will
+    # use, because a page has to fit whichever page it turns out to be.
+    nav = _render_nav(
         session, on_sort, description_level, width=width, height=height, on_create=on_create,
-    ).count("\r\n") + 1
-    available = height - (_RESERVED_LINES - 1 + nav_lines + header_lines)
+        trailer=trailer, unicode_style=unicode_style, reserve=True,
+        shapes=shapes,
+    )
+    nav_lines = nav.count("\r\n") + 1
+    trailer_lines = _trailer_rows(
+        nav, trailer,
+        width=width, unicode_style=unicode_style, description_level=description_level,
+    )
+    available = height - (_RESERVED_LINES + nav_lines + header_lines + trailer_lines)
     return max(1, min(_MAX_PAGE_SIZE, available))
