@@ -585,6 +585,17 @@ async def pick_item(
             prefix = _masthead_prefix()
             if prefix:
                 await write_preformatted_line(session, prefix)
+            elif redraw_in_place:
+                # Codex review. This branch used to be a dead end that
+                # printed one line and returned, so nothing depended on
+                # it clearing; `_masthead_prefix` carried the clear, and
+                # returns "" when no masthead is configured -- which the
+                # Community and category pickers do not have. Now that
+                # an empty list is somewhere a caller stays and acts
+                # (issue #530), its initial render, Ctrl-L, and the
+                # return from a cancelled create were all appending
+                # below the editor instead of replacing it.
+                await session.write(clear_screen())
             await session.write_line(colored(f"\r\n{empty_message}", fg_color=MUTED_COLOR))
             dash = "—" if unicode_style else "-"
             if on_create is not None:
@@ -841,7 +852,7 @@ async def pick_item(
         if key.kind == EditorKeyKind.CTRL and key.char == "h":
             await _show_picker_help(
                 session, on_sort=on_sort, has_refresh=refresh is not None, header_color=header_color,
-                unicode_style=unicode_style,
+                unicode_style=unicode_style, has_create=on_create is not None,
             )
             page_items = await _render()
             continue
@@ -1143,6 +1154,7 @@ async def _show_picker_help(
     session: Session, *, on_sort: Callable | None, has_refresh: bool,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     unicode_style: bool = False,
+    has_create: bool = False,
 ) -> None:
     """Ctrl-H's own content for this screen (dogfood feature request --
     the shared picker had no on-demand help at all, only the terse
@@ -1176,6 +1188,18 @@ async def _show_picker_help(
         "to each entry -- works regardless of the current page, search filter, or sort "
         "order, unlike the 2-digit page-position number above.",
     ]
+    if has_create is not None and has_create:
+        # Listed before Order and Refresh, and worth describing even
+        # though the nav row already names it (Codex review): on an
+        # empty list this is the *only* action that resolves the state,
+        # while Search and Goto -- which this overlay does explain --
+        # can do nothing at all there.
+        lines += [
+            "",
+            colored("Create", fg_color=header_color, bold=True),
+            "  Makes a new one from here and selects it, without leaving what you were "
+            "editing to go and create it elsewhere.",
+        ]
     if on_sort is not None:
         lines += ["", colored("Order", fg_color=header_color, bold=True), "  Changes how this list is sorted."]
     lines += [

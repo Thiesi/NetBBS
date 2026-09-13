@@ -10628,7 +10628,18 @@ async def _pick_optional_category(
         # going back through `_load_top_level`'s filtering -- the SysOp
         # just made it for this resource, which is answer enough.
         return await _create_category_screen(
-            session, lane, actor, create=create, list_top_level=list_top_level, error_type=error_type,
+            session, lane, actor, create=create,
+            # The *filtered* loader, not the raw one (Codex review).
+            # `_load_top_level` hides categories used only by another
+            # Community; passing `list_top_level` straight through meant
+            # [C]reate -> [P]arent listed them again and let the new
+            # category be nested under one, walking around the same
+            # admin-side leak-prevention invariant
+            # `test_admin_category_picker_leak_prevention` exists to
+            # hold. The nested editor inherits the scope it was opened
+            # from.
+            list_top_level=_load_top_level,
+            error_type=error_type,
         )
 
     selected = await pick_item(

@@ -150,3 +150,26 @@ def test_the_create_key_is_rejected_when_no_caller_supplied_one():
     result, session = _pick(["c", "b"], [Item(1, "Politics")])
     assert result is None
     assert "\a" in "".join(session.written)
+
+
+# -- Codex review -----------------------------------------------------
+
+
+def test_an_interactive_empty_picker_clears_when_redrawing_in_place():
+    """The empty branch used to be a dead end that printed one line and
+    returned, so nothing depended on it clearing -- the clear rode along
+    inside `_masthead_prefix`, which returns "" when no masthead is
+    configured. The Community and category pickers have none, so an
+    empty list was appended below the editor instead of replacing it."""
+    async def create():
+        return None
+
+    _, session = _pick(["b"], [], on_create=create, redraw_in_place=True)
+    assert "\x1b[2J" in "".join(session.written)
+
+
+def test_a_dead_end_empty_picker_is_unchanged():
+    """No `on_create` means it still returns immediately, and still
+    writes nothing it did not write before."""
+    _, session = _pick([], [], redraw_in_place=True)
+    assert "\x1b[2J" not in "".join(session.written)
