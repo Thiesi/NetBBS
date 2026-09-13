@@ -3693,6 +3693,13 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
         visibility = _USER_VISIBILITY_MODES[(position + 1) % len(_USER_VISIBILITY_MODES)]
         return await lane.run(_load)
 
+    async def _reload() -> list[User]:
+        """Ctrl-R. The screen claims to inherit it, so it has to have it
+        (Codex review) -- `pick_item` rings the bell and keeps the stale
+        list when `refresh` is None, and an account list is exactly the
+        thing another session changes underneath you."""
+        return await lane.run(_load)
+
     live_keys = {key: _sort_key(key) for key in _USER_SORT_MODES}
     live_keys["v"] = _cycle_visibility
     live_nav = [
@@ -3711,6 +3718,7 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
         column_values_of=_user_columns,
         title=title,
         empty_message="No users match that view.",
+        refresh=_reload,
         live_keys=live_keys,
         live_nav=live_nav,
         live_label=_standing_label,

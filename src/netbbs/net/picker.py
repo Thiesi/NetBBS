@@ -46,6 +46,7 @@ from typing import Awaitable, Callable, Mapping, Sequence, TypeVar
 
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
 from netbbs.net.help_overlay import show_help
+from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.session import Session, write_preformatted_line
 from netbbs.rendering import (
     ACCENT_COLOR,
@@ -533,7 +534,16 @@ async def pick_item(
         # because a SysOp-authored masthead can be several.
         lines = 0
         if masthead:
-            lines += masthead.count("\r\n") + 1
+            # Measured through the same wrapping `write_preformatted_line`
+            # performs, not by counting `\r\n` pairs (Codex review): that
+            # writer normalizes lone LFs and wraps a row wider than the
+            # terminal, so an authored masthead could occupy more rows
+            # than the reservation knew about -- which puts item rows and
+            # the choice prompt below the viewport, the same way every
+            # other unpaid-for row in this budget did.
+            width, _ = _dimensions()
+            wrapped = wrap_terminal_text(masthead, max(1, width))
+            lines += wrapped.count("\r\n") + 1
         if columns:
             width, _ = _dimensions()
             if _table_widths(width, columns, 1) is not None:
@@ -616,14 +626,27 @@ async def pick_item(
                 await session.write(clear_screen())
             await session.write_line(colored(f"\r\n{empty_message}", fg_color=MUTED_COLOR))
             dash = "—" if unicode_style else "-"
+            keys = []
             if on_create is not None:
                 # The whole point of staying here (issue #530): an empty
                 # list with a way out of being empty.
-                trailer = f"{menu_key('C', 'reate')}  {menu_key('B', 'ack')} {dash} Ctrl-L: redraw"
-            else:
-                trailer = f"{menu_key('B', 'ack')} {dash} Ctrl-L: redraw"
+                keys.append(menu_key("C", "reate"))
+            # A caller's own keys belong here too (issue #537, Codex
+            # review). A filter is exactly what can empty this list --
+            # "disabled users only" on a node with none -- and the
+            # branch that shows the result was hiding both the state
+            # that caused it and the key that undoes it. An empty list
+            # is the moment a SysOp most needs to know which filter is
+            # on.
+            keys.extend(entry.label for entry in live_nav)
+            keys.append(menu_key("B", "ack"))
+            trailer = f"{'  '.join(keys)} {dash} Ctrl-L: redraw"
             if refresh is not None:
                 trailer += ", Ctrl-R: refresh"
+            if live_label is not None:
+                standing = sanitize_text(live_label())
+                if standing:
+                    await session.write_line(colored(f"\r\n{standing}", fg_color=MUTED_COLOR))
             await session.write_line(f"\r\n{trailer}")
             await session.write("Choice: ")
             return []
