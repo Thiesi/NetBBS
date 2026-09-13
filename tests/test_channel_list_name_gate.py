@@ -28,7 +28,7 @@ from netbbs.communities import create_community
 from netbbs.net.chat_flow import _channel_description, list_visible_channels_for
 from netbbs.storage.database import Database
 
-_NOTE = "needs a verified name"
+from netbbs.net.chat_flow import NAME_GATE_NOTE as _NOTE
 
 
 @pytest.fixture
@@ -118,3 +118,46 @@ def test_a_requirement_inherited_from_a_community_counts(db, sysop, caller):
     assert channel.name_requirement is None, "the channel's own field is unset"
     assert get_effective_name_requirement(db, channel) == "verified"
     assert not meets_name_requirement(db, caller, get_effective_name_requirement(db, channel))
+
+
+# -- the note survives a narrow row ------------------------------------
+
+
+def test_the_note_comes_before_the_description(db, sysop):
+    """`pick_item` clips the whole row to the terminal width, so
+    anything after a free-form description is the first thing lost --
+    and on a narrow terminal a gated channel would have looked exactly
+    like an ungated one again, which is the bug (Codex review)."""
+    channel = create_channel(
+        db, "verified-only", creator=sysop,
+        description="A very long description that will certainly be clipped on a narrow terminal",
+        name_requirement="verified",
+    )
+    line = _channel_description(ChatHub(), channel, {channel.id})
+    assert line.startswith(_NOTE)
+
+
+def test_a_channel_with_no_description_still_reads_properly(db, sysop):
+    channel = create_channel(db, "verified-only", creator=sysop, name_requirement="verified")
+    line = _channel_description(ChatHub(), channel, {channel.id})
+    assert line.startswith(_NOTE)
+    assert not line.startswith(f"{_NOTE} -- ("), "no dangling separator before the count"
+
+
+# -- and New scan says it too ------------------------------------------
+
+
+def test_the_scan_picker_answers_the_same_question(db, sysop, caller):
+    """`[N]ew scan` builds its own picker over the same channels, so
+    fixing one of the two caller-facing channel pickers fixes it only
+    for whoever happens to use that one (Codex review)."""
+    from netbbs.net.chat_flow import channel_name_gate_unmet
+
+    gated = create_channel(db, "verified-only", creator=sysop, name_requirement="verified")
+    open_one = create_channel(db, "lobby", creator=sysop)
+
+    assert channel_name_gate_unmet(db, caller, gated) is True
+    assert channel_name_gate_unmet(db, caller, open_one) is False
+
+    attest_name(db, caller, "Real Person", verifier=sysop)
+    assert channel_name_gate_unmet(db, caller, gated) is False

@@ -1137,6 +1137,29 @@ def _meets_live_participation_requirements(db: Database, channel: Channel, user:
     )
 
 
+#: What a caller is told about a channel whose name requirement they do
+#: not meet. One string, because three screens say it: this module's own
+#: picker, its sectioned variant, and `[N]ew scan`
+#: (`netbbs.net.scan_and_find`, which imports it).
+NAME_GATE_NOTE = "needs a verified name"
+_NAME_GATE_NOTE = NAME_GATE_NOTE
+
+
+def channel_name_gate_unmet(db: Database, user: User, channel: Channel) -> bool:
+    """Whether entering `channel` will ask `user` for a verified name
+    they have not got (issue #541).
+
+    Public because `[N]ew scan` builds its own picker over the same
+    channels and would otherwise reproduce the pick-then-get-refused
+    behaviour this was filed about -- fixing it in one of two
+    caller-facing channel pickers fixes it for whoever happens to use
+    that one (Codex review).
+
+    Reads the *effective* requirement, which is what entry enforces.
+    """
+    return not meets_name_requirement(db, user, get_effective_name_requirement(db, channel))
+
+
 def _channel_description(hub: ChatHub, channel: Channel, needs_name: set[int] | None = None) -> str:
     """The picker's per-channel line: description, who is in it, and
     whether it is going to ask for something this caller has not got.
@@ -1156,11 +1179,17 @@ def _channel_description(hub: ChatHub, channel: Channel, needs_name: set[int] | 
     can act on.
     """
     online = hub.participant_count(channel.name)
-    base = channel.description or ""
-    line = f"{base} ({online} online)".strip()
+    # The note comes first, ahead of the free-form description (Codex
+    # review). `pick_item` clips the whole row to the terminal width, so
+    # whatever sits after arbitrary prose is the first thing lost -- and
+    # on a narrow terminal a gated channel would then have looked exactly
+    # like an ungated one again, which is the bug this is fixing.
+    parts = []
     if needs_name is not None and channel.id in needs_name:
-        line = f"{line} -- needs a verified name"
-    return line
+        parts.append(_NAME_GATE_NOTE)
+    if channel.description:
+        parts.append(channel.description)
+    return f"{' -- '.join(parts)} ({online} online)".strip()
 
 
 def _chat_author_label(db: Database, channel: Channel, user: User) -> str:

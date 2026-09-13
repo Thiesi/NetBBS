@@ -37,7 +37,12 @@ from netbbs.mrc.bridge import MrcBridge
 from netbbs.net.board_flow import _show_board
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import InputHistory
-from netbbs.net.chat_flow import browse_channels, list_visible_channels_for
+from netbbs.net.chat_flow import (
+    NAME_GATE_NOTE,
+    browse_channels,
+    channel_name_gate_unmet,
+    list_visible_channels_for,
+)
 from netbbs.net.file_flow import enter_file_area
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.picker import pick_item
@@ -75,6 +80,13 @@ class _ScanItem:
     board: Board | None = None
     channel: Channel | None = None
     file_area: FileArea | None = None
+    # Issue #541: a channel this caller can see but not enter, because
+    # its effective name requirement asks for an attestation they have
+    # not got. Resolved while the rows are built, in the pass that is
+    # already reading them, and shown in the row -- otherwise this
+    # picker reproduces exactly the pick-it-and-be-refused behaviour the
+    # channel picker was just fixed for.
+    name_gate_unmet: bool = False
 
 
 async def _new_scan_screen(
@@ -140,6 +152,7 @@ async def _new_scan_screen(
                 _ScanItem(
                     kind="channel", name=channel.name, unread=unread_channel_count(db, user, channel),
                     followed=is_following(db, user, "channel", channel.id), channel=channel,
+                    name_gate_unmet=channel_name_gate_unmet(db, user, channel),
                 )
             )
 
@@ -184,7 +197,13 @@ async def _new_scan_screen(
             status = "caught up"
         else:
             status = f"{item.unread} unread"
-        return f"{prefix}{item.kind.replace('_', ' ')}, {status}"
+        line = f"{prefix}{item.kind.replace('_', ' ')}, {status}"
+        if item.name_gate_unmet:
+            # Ahead of the rest, for the same reason the channel picker
+            # puts it first: `pick_item` clips the row, so anything at
+            # the end is what a narrow terminal loses.
+            line = f"{NAME_GATE_NOTE} -- {line}"
+        return line
 
     selected = await pick_item(
         session, items,
