@@ -56,6 +56,7 @@ from netbbs.rendering import (
     LABEL_COLOR,
     MENU_KEY_COLOR,
     MUTED_COLOR,
+    VALUE_COLOR,
     MenuEntry,
     SegmentColor,
     action_bar,
@@ -938,7 +939,7 @@ async def pick_item(
             if is_highlighted:
                 key_color = lambda txt: colored(txt, fg_color=accent_color, bold=True)
                 item_name_color = lambda txt: colored(txt, fg_color=accent_color, bold=True)
-                desc_color = 252
+                desc_color = VALUE_COLOR
             else:
                 key_color = MENU_KEY_COLOR
                 item_name_color = accent_color

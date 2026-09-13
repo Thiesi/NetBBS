@@ -73,6 +73,7 @@ from netbbs.permissions import meets_level
 from netbbs.rendering import (
     METADATA_COLOR,
     MUTED_COLOR,
+    RULE_COLOR,
     MenuEntry,
     badge,
     colored,
@@ -1039,7 +1040,7 @@ async def _render_post_page(
     for position, post in enumerate(page.posts, start=1):
         if position > 1:
             rule_char = "─" if unicode_style else "-"
-            divider_color = 238 if effective_truecolor(session, db, user) else MUTED_COLOR
+            divider_color = 238 if effective_truecolor(session, db, user) else RULE_COLOR
             await session.write_line(colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color))
         when = format_for_display(post.created_at, db)
         edited_marker = f" {badge('edited')}" if post.is_edited else ""

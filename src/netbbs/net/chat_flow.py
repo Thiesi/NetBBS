@@ -183,6 +183,7 @@ from netbbs.rendering import (
     HEADER_COLOR,
     MENU_KEY_COLOR,
     MUTED_COLOR,
+    RULE_COLOR,
     NICK_COLOR,
     PRIVILEGE_COLOR,
     SELF_COLOR,
@@ -1577,7 +1578,7 @@ async def _deliver_remote_scrollback_snapshot(
         )
     )
     rule_char = "─" if unicode_style else "-"
-    divider_color = 238 if truecolor else MUTED_COLOR
+    divider_color = 238 if truecolor else RULE_COLOR
     await deliver(colored(rule_char * min(terminal_width, 78), fg_color=divider_color))
 
 
@@ -3575,7 +3576,7 @@ def _input_prompt(accent_color: int = ACCENT_COLOR, unicode_style: bool = False)
 
 def _shelf_divider(width: int, *, unicode_style: bool = False, truecolor: bool = False) -> str:
     rule_char = "─" if unicode_style else "-"
-    color = 238 if truecolor else MUTED_COLOR
+    color = 238 if truecolor else RULE_COLOR
     return colored(rule_char * width, fg_color=color)
 
 
@@ -4344,7 +4345,7 @@ async def _chat_loop(
                 )
             )
             rule_char = "─" if unicode_style else "-"
-            divider_color = 238 if truecolor else MUTED_COLOR
+            divider_color = 238 if truecolor else RULE_COLOR
             await session.write_line(
                 colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
             )

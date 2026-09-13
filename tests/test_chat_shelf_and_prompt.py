@@ -20,7 +20,7 @@ from netbbs.chat.presence import PresenceRegistry
 from netbbs.net import char_input, chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.net.unicode_style_preference import set_unicode_style_enabled
-from netbbs.rendering import MUTED_COLOR, clear_line, colored, move_cursor, save_cursor, set_scroll_region
+from netbbs.rendering import RULE_COLOR, clear_line, colored, move_cursor, save_cursor, set_scroll_region
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
@@ -94,17 +94,17 @@ def test_shelf_divider_styling_unicode_and_truecolor():
     shelf_u_tc = chat_flow._shelf_divider(width, unicode_style=True, truecolor=True)
     assert shelf_u_tc == colored("─" * width, fg_color=238)
 
-    # Unicode + 256color/standard: '─' with MUTED_COLOR
+    # Unicode + 256color/standard: '─' with RULE_COLOR
     shelf_u_std = chat_flow._shelf_divider(width, unicode_style=True, truecolor=False)
-    assert shelf_u_std == colored("─" * width, fg_color=MUTED_COLOR)
+    assert shelf_u_std == colored("─" * width, fg_color=RULE_COLOR)
 
     # ASCII + truecolor: '-' with color 238
     shelf_a_tc = chat_flow._shelf_divider(width, unicode_style=False, truecolor=True)
     assert shelf_a_tc == colored("-" * width, fg_color=238)
 
-    # ASCII + 256color/standard: '-' with MUTED_COLOR
+    # ASCII + 256color/standard: '-' with RULE_COLOR
     shelf_a_std = chat_flow._shelf_divider(width, unicode_style=False, truecolor=False)
-    assert shelf_a_std == colored("-" * width, fg_color=MUTED_COLOR)
+    assert shelf_a_std == colored("-" * width, fg_color=RULE_COLOR)
 
 
 # =========================================================================
@@ -237,7 +237,7 @@ def test_scrollback_divider_rule_rendered_between_history_and_live(db, lane, hub
     text = "".join(session.written)
 
     # Scrollback separator rule with unicode '─'
-    rule_unicode = colored("─" * 78, fg_color=MUTED_COLOR)
+    rule_unicode = colored("─" * 78, fg_color=RULE_COLOR)
     assert rule_unicode in text
 
     # Separator rule appears after history and before LIVE
@@ -266,7 +266,7 @@ def test_scrollback_divider_rule_ascii_when_unicode_disabled(db, lane, hub, pres
     text = "".join(session.written)
 
     # Scrollback separator rule with ASCII '-'
-    rule_ascii = colored("-" * 78, fg_color=MUTED_COLOR)
+    rule_ascii = colored("-" * 78, fg_color=RULE_COLOR)
     assert rule_ascii in text
 
 

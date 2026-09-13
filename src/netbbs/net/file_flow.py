@@ -129,6 +129,7 @@ from netbbs.rendering import (
     MENU_KEY_COLOR,
     METADATA_COLOR,
     MUTED_COLOR,
+    RULE_COLOR,
     SUCCESS_COLOR,
     VALUE_COLOR,
     MenuEntry,
@@ -1367,7 +1368,7 @@ async def _render_file_page(
 
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     accent = await lane.run(effective_accent_color_256)
-    divider_color = 238 if truecolor else MUTED_COLOR
+    divider_color = 238 if truecolor else RULE_COLOR
     rule_char = "─" if unicode_style else "-"
 
     idx_w, name_w, size_w, date_w, uploader_w = _file_column_widths(session.terminal_width)

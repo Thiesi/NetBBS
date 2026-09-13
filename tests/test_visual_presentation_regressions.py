@@ -25,7 +25,7 @@ from netbbs.net.board_flow import _render_post_page, _render_quoted_body
 from netbbs.net.mail_flow import _render_message
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
-from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, colored
+from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, RULE_COLOR, colored
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -200,7 +200,7 @@ def test_render_post_page_multiple_posts_divider_unicode(tmp_path):
         )
         output = _raw_text(session)
 
-        expected_rule = colored("─" * 78, fg_color=MUTED_COLOR)
+        expected_rule = colored("─" * 78, fg_color=RULE_COLOR)
         assert expected_rule in output
     finally:
         db.close()
@@ -223,7 +223,7 @@ def test_render_post_page_multiple_posts_divider_ascii_fallback(tmp_path):
         )
         output = _raw_text(session)
 
-        expected_rule = colored("-" * 78, fg_color=MUTED_COLOR)
+        expected_rule = colored("-" * 78, fg_color=RULE_COLOR)
         assert expected_rule in output
         assert "─" not in output
     finally:
@@ -311,7 +311,7 @@ def test_review_composition_body_framed_with_dividers():
     assert action is ReviewAction.CANCEL
     output = _raw_text(session)
 
-    expected_rule = colored("─" * 78, fg_color=MUTED_COLOR)
+    expected_rule = colored("─" * 78, fg_color=RULE_COLOR)
     # Rule should appear above and below body
     assert output.count(expected_rule) == 2
 
@@ -333,7 +333,7 @@ def test_review_composition_dividers_ascii_fallback():
     assert action is ReviewAction.CANCEL
     output = _raw_text(session)
 
-    expected_rule = colored("-" * 78, fg_color=MUTED_COLOR)
+    expected_rule = colored("-" * 78, fg_color=RULE_COLOR)
     assert output.count(expected_rule) == 2
     assert "─" not in output
 
@@ -361,7 +361,7 @@ def test_render_mail_message_dividers(tmp_path):
         output = _raw_text(session)
 
         # Body should be framed by horizontal divider rules
-        expected_rule = colored("─" * 78, fg_color=MUTED_COLOR)
+        expected_rule = colored("─" * 78, fg_color=RULE_COLOR)
         assert output.count(expected_rule) == 2
     finally:
         lane.close()
