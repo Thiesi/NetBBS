@@ -38,6 +38,14 @@ sys.path.insert(0, str(SCRIPTS))
 import door_gallery as gallery  # noqa: E402
 
 
+def fixtures_for(door_name: str) -> set[str]:
+    """Every fixture this door actually has: the default, the ones its walks
+    name, and the ones something knows how to build."""
+    return ({"base"}
+            | {walk[2] for walk in gallery.WALKS[door_name] if len(walk) > 2}
+            | {name for door, name in gallery.FIXTURE_BUILDERS if door == door_name})
+
+
 def capture_walk(door_name: str, label: str, width: int, height: int,
                  page: int, preset: str, fresh: bool, fixture_override=None,
                  setup_keys: str = "", expect: str | None = None) -> str:
@@ -54,7 +62,18 @@ def capture_walk(door_name: str, label: str, width: int, height: int,
     # for the deck is a career with nothing on it yet. A screenshot wants the
     # opposite: gauges that are partly full, a hold with something in it, a
     # record with a fight behind it.
-    fixture_name = fixture_override or fixture_name
+    if fixture_override:
+        # A name nobody builds is not an error to `base_fixture`: it falls
+        # back to `_onboard` and hands back a pristine career, so `--fixture
+        # playde` would quietly publish the empty-state screen this option
+        # exists to avoid -- the failure `base_fixture`'s own docstring
+        # records, where every panel drew the registration screen and the
+        # gallery still looked like it had built. Name them instead.
+        known = fixtures_for(door_name)
+        if fixture_override not in known:
+            raise SystemExit(f"{door_name} has no fixture {fixture_override!r}; "
+                             f"known: {', '.join(sorted(known))}")
+        fixture_name = fixture_override
 
     extra = gallery.PRESETS[door_name][preset]
     cache = ROOT / "build" / "gallery"
@@ -126,7 +145,8 @@ def main() -> None:
     parser.add_argument("--page", type=int, default=1,
                         help="which page, for a walk that ends on a card stack")
     parser.add_argument("--preset", default="auto")
-    parser.add_argument("--fixture", help="play the walk against another fixture")
+    parser.add_argument("--fixture",
+                        help="play the walk against another of the door's fixtures")
     parser.add_argument("--setup", default="",
                         help="keys played first, in a launch whose screens are discarded")
     parser.add_argument("--expect",
