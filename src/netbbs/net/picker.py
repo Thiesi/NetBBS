@@ -522,11 +522,33 @@ async def pick_item(
         width, _ = _dimensions()
         return 1 if _table_widths(width, columns, 1) is not None else 0
 
+    # `sort_label` is documented as read fresh on *every render* -- not
+    # on every internal call (issue #538). Sizing a page now needs the
+    # trailer, which needs the label, and `_sized_page_size` runs
+    # several times per render; calling through would have turned one
+    # read per render into four, which a caller whose label changes
+    # between reads would notice. Cached per render instead, so the
+    # contract holds exactly as before.
+    render_generation = 0
+    label_cache: tuple[int, str] | None = None
+
+    def _sort_label_text() -> str:
+        nonlocal label_cache
+        if sort_label is None:
+            return ""
+        if label_cache is None or label_cache[0] != render_generation:
+            label_cache = (render_generation, sanitize_text(sort_label()))
+        return label_cache[1]
+
     def _sized_page_size() -> int:
         width, height = _dimensions()
         return _page_size(
             session, on_sort, description_level,
             header_lines=_header_lines(), width=width, height=height,
+            # Issue #538: the trailer is a real line too, and whether it
+            # takes one depends on these.
+            trailer=_trailer_text(_sort_label_text(), refresh is not None),
+            unicode_style=unicode_style,
         )
 
     def _masthead_prefix() -> str:
@@ -562,9 +584,11 @@ async def pick_item(
         return max(1, math.ceil(len(working_set) / _sized_page_size()))
 
     async def _render() -> Sequence[T]:
-        nonlocal page_index, frozen
+        nonlocal page_index, frozen, render_generation
         # Freeze for the duration of this render; see `_dimensions`.
         frozen = (session.terminal_width, session.terminal_height)
+        # A new render is a new read of `sort_label`; see its cache.
+        render_generation += 1
         try:
             return await _render_frozen()
         finally:
@@ -761,14 +785,7 @@ async def pick_item(
         # active sort mode being a mystery), not a one-time hint the
         # way the rest of this trailer is -- it must survive truncation
         # ahead of the boilerplate instructions below it.
-        trailer = ""
-        if sort_label is not None:
-            trailer = f"Sort: {sanitize_text(sort_label())}"
-        boilerplate = "or type a 2-digit number to select; Ctrl-L: redraw"
-        if refresh is not None:
-            boilerplate += ", Ctrl-R: refresh"
-        boilerplate += ", Ctrl-H: help"
-        trailer = f"{trailer}; {boilerplate}" if trailer else boilerplate
+        trailer = _trailer_text(_sort_label_text(), refresh is not None)
         # Dogfood-reported regression, and a real dogfood-reported
         # *re*-regression on top of the original fix: with sort mode
         # (and/or refresh) active, nav + separator + trailer could run
@@ -1258,9 +1275,64 @@ def _render_nav(
     return action_bar([e.label for e in entries], width=width)
 
 
+def _trailer_text(sort_label_text: str, has_refresh: bool) -> str:
+    """The instruction line that follows the nav row.
+
+    Takes the already-read label rather than the callable, so the
+    caller controls how often `sort_label()` is actually consulted --
+    see `pick_item`'s own per-render cache.
+    """
+    text = f"Sort: {sort_label_text}" if sort_label_text else ""
+    boilerplate = "or type a 2-digit number to select; Ctrl-L: redraw"
+    if has_refresh:
+        boilerplate += ", Ctrl-R: refresh"
+    boilerplate += ", Ctrl-H: help"
+    return f"{text}; {boilerplate}" if text else boilerplate
+
+
+def _trailer_rows(
+    nav: str, trailer: str, *, width: int, unicode_style: bool, description_level: str
+) -> int:
+    """How many *physical* rows the trailer adds below the nav block.
+
+    Issue #538. `_page_size` measured the nav row and stopped, but the
+    trailer is folded onto the nav's last line only when it fits there;
+    otherwise it takes its own line, wrapped. Nothing told the page
+    budget which had happened -- so at 50-60 columns, where the
+    boilerplate alone is 63 columns and cannot sit beside a ~26-column
+    nav, the picker drew one line more than the terminal had and the top
+    of the page scrolled off.
+
+    Shared with the render rather than reimplemented beside it, for the
+    same reason `netbbs.net.resource_editor._field_value_lines` is
+    shared with its own fit-check: two pieces of code that must agree
+    about a height should be one piece of code.
+
+    Counted as rows *beyond the first*, because `_RESERVED_LINES`
+    already budgets one line for this. That is why 80 columns never
+    overflowed even though the trailer has its own line there: one line
+    was paid for. What was never paid for is the trailer **wrapping**,
+    which is what happens at 50-60 columns, where the boilerplate alone
+    is 63 columns wide. Returning the full row count here instead would
+    fix the narrow band by taking an item off every page at 80, which
+    trades a real bug for a real regression.
+    """
+    if description_level == "off":
+        separator = " — " if unicode_style else " - "
+        last_nav_line = nav.rsplit("\r\n", 1)[-1]
+        room = width - visible_width(last_nav_line) - visible_width(separator)
+        if trailer and visible_width(trailer) <= max(0, room):
+            # Folded onto the nav line: it costs nothing of its own, and
+            # the line `_RESERVED_LINES` set aside goes unused.
+            return 0
+    rows = len(wrap_to_width(trailer, width)) if trailer else 0
+    return max(0, rows - 1)
+
+
 def _page_size(
     session: Session, on_sort: Callable | None, description_level: str, *, header_lines: int = 0,
     width: int | None = None, height: int | None = None,
+    trailer: str = "", unicode_style: bool = False,
 ) -> int:
     # `_RESERVED_LINES` was calibrated against the nav row always being
     # exactly 1 line -- still true for `description_level="off"`
@@ -1279,8 +1351,11 @@ def _page_size(
     # out for is exactly the split freezing them exists to prevent.
     width = session.terminal_width if width is None else width
     height = session.terminal_height if height is None else height
-    nav_lines = _render_nav(
-        session, on_sort, description_level, width=width, height=height,
-    ).count("\r\n") + 1
-    available = height - (_RESERVED_LINES - 1 + nav_lines + header_lines)
+    nav = _render_nav(session, on_sort, description_level, width=width, height=height)
+    nav_lines = nav.count("\r\n") + 1
+    trailer_lines = _trailer_rows(
+        nav, trailer,
+        width=width, unicode_style=unicode_style, description_level=description_level,
+    )
+    available = height - (_RESERVED_LINES - 1 + nav_lines + header_lines + trailer_lines)
     return max(1, min(_MAX_PAGE_SIZE, available))
