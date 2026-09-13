@@ -303,6 +303,7 @@ from netbbs.moderation.roles import (
 )
 from netbbs.net.char_input import (
     HELP_KEY,
+    InputCancelled,
     REDRAW_KEY,
     REFRESH_KEY,
     EditorKey,
@@ -2269,13 +2270,19 @@ def _stable_id_for(key: str) -> int:
 def _float_field(
     key: str, *, label: str, minimum: float | None = None, maximum: float | None = None
 ) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
-    """A numeric editor field with the module's "blank = keep" convention
-    and a friendly rejection instead of a leaked float() exception (a
-    dogfood report against the old trust-domain wizard)."""
+    """A numeric editor field opening on its current value (`_EDIT_HINT`,
+    issue #557) with a friendly rejection instead of a leaked float()
+    exception (a dogfood report against the old trust-domain wizard)."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await write_prompt(session, f"{label} [{draft.get(key)}] (blank = keep): ")
-        raw = (await session.read_line()).strip()
+        await write_prompt(session, f"{label} ({_EDIT_HINT}): ")
+        try:
+            raw = (await session.read_line(
+                initial=str(draft.get(key)), cancellable=True,
+            )).strip()
+        except InputCancelled:
+            await session.write_line("")
+            return
         if not raw:
             return
         try:
@@ -5162,18 +5169,26 @@ def _mrc_state_line(status: MrcStatus, *, unicode_style: bool) -> str:
 
 
 def _optional_text_field(key: str) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
-    """`text_field`'s blank-keeps convention plus an explicit way to
-    clear an optional value (`-`), since the INFO fields are the only
-    free-text settings on the node a SysOp may legitimately want empty."""
+    """`text_field`'s own convention (`_CLEAR_HINT`, issue #557) for the
+    INFO fields -- the only free-text settings on the node a SysOp may
+    legitimately want empty.
+
+    This used to be a third spelling of the same idea: blank kept the
+    value and a typed `-` cleared it, on a screen whose other text
+    fields clear by emptying the line. `-` is still accepted, for the
+    muscle memory it already built and because it is the only way to
+    clear a field whose current value is too long to seed inline.
+    """
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         current = draft.get(key) or ""
-        await session.write(f"[{current or '(none)'}] (blank = keep, - = clear): ")
-        raw = (await session.read_line()).strip()
-        if raw == "-":
-            draft[key] = ""
-        elif raw:
-            draft[key] = raw
+        await session.write(f"({_CLEAR_HINT}): ")
+        try:
+            raw = (await session.read_line(initial=current, cancellable=True)).strip()
+        except InputCancelled:
+            await session.write_line("")
+            return
+        draft[key] = "" if raw == "-" else raw
 
     return prompt
 
@@ -10412,10 +10427,16 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
 
 
 async def _read_int(session: Session, *, default: int) -> int | None:
-    """Reads a line: blank keeps `default`, a valid integer replaces
-    it, anything else shows a cancellation message and returns `None`
-    -- callers should treat `None` as "abort the current screen"."""
-    raw = (await session.read_line()).strip()
+    """Reads a line opening on `default`: Enter saves what is shown, Esc
+    leaves it alone, a valid integer replaces it, anything else shows a
+    cancellation message and returns `None` -- callers should treat
+    `None` as "abort the current screen". See `_EDIT_HINT` (issue #557)
+    for why this no longer asks for a value against an empty line."""
+    try:
+        raw = (await session.read_line(initial=str(default), cancellable=True)).strip()
+    except InputCancelled:
+        await session.write_line("")
+        return default
     if not raw:
         return default
     try:
@@ -10426,8 +10447,9 @@ async def _read_int(session: Session, *, default: int) -> int | None:
 
 
 async def _prompt_optional_int(session: Session, label: str, *, current: int | None) -> tuple[int | None, bool]:
-    """Generic nullable-int prompt -- same "blank = keep, 'none' =
-    clear" shape as `_prompt_min_age` below, factored out separately
+    """Generic nullable-int prompt -- the same open-on-the-current-value
+    shape as `_prompt_min_age` below (see `_CLEAR_HINT`), factored out
+    separately
     (rather than having that function delegate here) so its existing
     "no gate" wording -- already asserted on by
     tests/test_admin_flow.py and tests/test_board_pagination_ui.py --
@@ -10440,18 +10462,53 @@ async def _prompt_optional_int(session: Session, label: str, *, current: int | N
     `default_min_read_level`/`default_min_write_level`. "Clear" is the
     accurate word in both cases, not "no gate" (a level isn't a gate
     the way age/name-requirement are)."""
-    shown = current if current is not None else "none"
-    await write_prompt(session, f"{label} [{shown}] (blank = keep, 'none' = clear): ")
-    raw = (await session.read_line()).strip()
-    if not raw:
+    await write_prompt(session, f"{label} ({_CLEAR_HINT}): ")
+    try:
+        raw = (await session.read_line(
+            initial="" if current is None else str(current), cancellable=True,
+        )).strip()
+    except InputCancelled:
+        await session.write_line("")
         return current, True
-    if raw.lower() == "none":
+    if not raw or raw.lower() == "none":
         return None, True
     try:
         return int(raw), True
     except ValueError:
         await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
         return None, False
+
+
+#: Issue #557. Both prompts below open on the field's current value and
+#: read an empty line as "clear", which is the convention issue #529
+#: established for the text fields on these same Create/Edit screens.
+#:
+#: Before this they were the other half of a screen with two answers for
+#: the same gesture: a text field's empty submit cleared the value, a
+#: gate's kept it, and each said so in its own prompt text. A SysOp
+#: learns the convention on whichever field they meet first. Applied to
+#: an age gate, "clear the line to clear the value" silently left the
+#: gate in place -- and the screen afterwards looks exactly like one
+#: where it worked, because the value was never on the line to begin
+#: with. That is the same shape of harm as #540 (a gate nobody intended,
+#: in force, with nothing on screen connecting it to what the operator
+#: did), from the other direction.
+#:
+#: Escape is what "blank" used to mean, now on a key of its own instead
+#: of overloaded onto the empty string. `none` stays accepted as an
+#: explicit spelling for the muscle memory it already built.
+_CLEAR_HINT = "Enter saves, blank clears, Esc keeps"
+
+#: The same convention for a field with no null state to clear *to* --
+#: a channel's own `min_level`, an MRC hub port, a trust weight. There is
+#: no third answer to invent here: the value is in the buffer, so Enter
+#: saves what is shown and Escape leaves it alone, which is exactly what
+#: `netbbs.net.resource_editor`'s text fields say. An emptied line has no
+#: meaning for a field that must hold a number, and cannot be reached by
+#: accident now that the line starts populated, so it is read as "no
+#: change" rather than turned into an error a caller would only ever see
+#: by deleting a value on purpose.
+_EDIT_HINT = "Enter saves, Esc cancels"
 
 
 #: Bounds for an age gate (issue #540). `0` stays accepted and keeps its
@@ -10466,18 +10523,24 @@ MIN_AGE_CEILING = 120
 async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int | None, bool]:
     """Shared min_age prompt for board/channel/area create+edit screens
     (design doc §18). Returns `(value, ok)` -- `ok=False`
-    means the caller should cancel; blank keeps `current` (which may
-    itself already be `None`, meaning no gate), `'none'` clears any
-    existing gate, otherwise a plain integer sets it."""
-    label = current if current is not None else "none"
+    means the caller should cancel.
+
+    Opens on the current gate, if any. Enter saves what is shown, an
+    emptied line (or the explicit word `none`) clears the gate, and
+    Escape leaves it alone -- see `_CLEAR_HINT` for why this is no longer
+    "blank = keep"."""
     await write_prompt(
         session,
-        f"Minimum age [{label}] (blank = keep, 'none' = no gate, {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}): ",
+        f"Minimum age ({_CLEAR_HINT}, {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}): ",
     )
-    raw = (await session.read_line()).strip()
-    if not raw:
+    try:
+        raw = (await session.read_line(
+            initial="" if current is None else str(current), cancellable=True,
+        )).strip()
+    except InputCancelled:
+        await session.write_line("")
         return current, True
-    if raw.lower() == "none":
+    if not raw or raw.lower() == "none":
         return None, True
     try:
         value = int(raw)
@@ -10732,7 +10795,10 @@ def _int_field(key: str, label: str) -> Callable[[Session, DatabaseLane, dict], 
     int`, is the right underlying primitive here)."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await write_prompt(session, f"{label} [{draft.get(key)}]: ")
+        # No `[current]` in the prompt any more: the value is in the
+        # line the caller is editing, so showing it twice would read as
+        # two different numbers.
+        await write_prompt(session, f"{label} ({_EDIT_HINT}): ")
         value = await _read_int(session, default=draft.get(key))
         if value is not None:
             draft[key] = value
