@@ -11,6 +11,7 @@ it was.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 
 import pytest
@@ -130,14 +131,96 @@ async def _run(lane, hub, presence, channel, user, lines, *, mrc_bridge=None, wh
     task = asyncio.create_task(
         chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user, mrc_bridge=mrc_bridge)
     )
-    deadline = asyncio.get_running_loop().time() + 2
-    while hub.participant_count(channel.name) == 0:
-        assert asyncio.get_running_loop().time() < deadline, "caller never joined"
+    # Both tasks' whole lifetimes are owned from here (AGENTS.md, "own
+    # async tasks" -- Codex review, the same finding `_browse_until`
+    # took one round earlier, and then the callback task this very fix
+    # introduced took one round after that).
+    # `while_joined` now waits on conditions that can time out or raise,
+    # and an early exit used to leave this loop running into the
+    # fixtures' teardown with its own exception unretrieved -- so a chat
+    # loop that died before rendering what was awaited was reported as
+    # the wait's five-second timeout instead.
+    callback = None
+    try:
+        # `_wait_for` watches the task too: a loop that has already
+        # finished means the condition will never hold, and whatever it
+        # died of is the failure worth reporting.
+        await _wait_for(
+            lambda: hub.participant_count(channel.name) > 0,
+            what="the caller to join the channel", timeout=2.0, task=task,
+        )
+        # `while_joined` is handed the session so it can wait for what
+        # it pushed to actually arrive, rather than sleeping a fixed
+        # interval and hoping (issue #536). The join above already waits
+        # on a condition; inbound delivery deserves the same treatment.
+        #
+        # Raced against the chat loop rather than simply awaited (Codex
+        # review). The callback does its own waiting, and a loop that
+        # dies while it waits would otherwise let it spend its whole
+        # timeout -- after which the timeout is the exception reported
+        # and the real one is retrieved and dropped by the cleanup
+        # below. Whichever finishes first decides.
+        callback = asyncio.ensure_future(while_joined(session))
+        await asyncio.wait({callback, task}, return_when=asyncio.FIRST_COMPLETED)
+        if task.done() and not callback.done():
+            callback.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await callback
+            # Re-raises whatever the loop died of. A loop that merely
+            # ended says so instead.
+            task.result()
+            raise AssertionError("the chat loop ended before while_joined finished")
+        await callback
+        for line in lines:
+            session.inputs.put_nowait(line)
+        return session, await asyncio.wait_for(task, timeout=4)
+    finally:
+        # `callback` included, and for the reason `task` is: an outer
+        # cancellation -- a test-level timeout, say -- can land while
+        # `asyncio.wait` is pending, and a callback left running then
+        # goes on driving the session and the bridge through the
+        # fixtures' teardown, with its own exception unretrieved.
+        # Cancelled first, then gathered, and nothing raised from here
+        # (Codex review). Cancelling a chat loop can raise from its own
+        # database/MRC leave cleanup, and awaiting each task in turn
+        # meant that exception replaced the assertion or callback
+        # failure this block is unwinding -- or, if the first one raised,
+        # meant the second was never cancelled at all. `return_exceptions`
+        # retrieves every outcome without letting any of them speak over
+        # the failure already in flight.
+        owned = [t for t in (callback, task) if t is not None]
+        for task_to_stop in owned:
+            task_to_stop.cancel()
+        await asyncio.gather(*owned, return_exceptions=True)
+
+
+async def _wait_for(predicate, *, what: str, timeout: float = 5.0, task=None) -> None:
+    """Wait until `predicate()` holds, or fail saying what never came.
+
+    Issue #536: several tests here pushed a line into the fake hub, slept
+    a fixed fraction of a second, and asserted. That is a bet on the host
+    being fast enough -- one this project lost the first time the suite
+    ran on its own NetBSD box, where the same tests failed
+    deterministically. A generous timeout costs nothing when the
+    condition is met promptly, which is the normal case, and the failure
+    message names what was being waited for instead of leaving a missing
+    line of text to be reverse-engineered.
+
+    `task`, if given, is the session driving the condition. Without it a
+    session that fails before rendering what is awaited is reported as a
+    timeout five seconds later, and the real exception is then lost to
+    the caller's cleanup -- the secondary failure replacing the actual
+    one (Codex review).
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if task is not None and task.done():
+            # Re-raises whatever the session died of; a session that
+            # simply ended says so, rather than timing out in silence.
+            task.result()
+            raise AssertionError(f"the session ended before {what}")
+        assert asyncio.get_running_loop().time() < deadline, f"timed out waiting for {what}"
         await asyncio.sleep(0.01)
-    await while_joined()
-    for line in lines:
-        session.inputs.put_nowait(line)
-    return session, await asyncio.wait_for(task, timeout=4)
 
 
 def _text(session: FakeSession) -> str:
@@ -184,9 +267,12 @@ def test_inbound_mrc_line_is_rendered_as_an_external_author(db, lane, hub, prese
     async def scenario():
         rig = await _rig(db, lane, hub, channel)
         try:
-            async def push():
+            async def push(session):
                 await rig.fake.send_line("bob~Other~lobby~~~lobby~|12greetings \x1b[31mfrom afar~")
-                await asyncio.sleep(0.15)
+                await _wait_for(
+                    lambda: "greetings from afar" in _text(session),
+                    what="the inbound MRC line to be rendered",
+                )
 
             session, _ = await _run(
                 lane, hub, presence, channel, alice, ["/quit"], mrc_bridge=rig.bridge, while_joined=push,

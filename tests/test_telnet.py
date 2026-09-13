@@ -746,6 +746,15 @@ def _new_environ_scenario(colorterm_value: bytes | None):
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await reader.readexactly(9)
             await reader.readexactly(len(_NEW_ENVIRON_REQUEST))
+            # Issue #536: the server sends _BINARY_REQUEST after this,
+            # and these scenarios go on to read the echo of the line
+            # they type. Leaving those six bytes in the stream made the
+            # echo read return `ff fb 00` instead, and the connection
+            # was then closed before the session had processed the
+            # line at all -- so the handler never ran and the assertion
+            # saw an empty capture. Only surfaced on a POSIX host,
+            # purely by timing; the byte mismatch is platform-neutral.
+            await reader.readexactly(len(_BINARY_REQUEST))
             if colorterm_value is not None:
                 body = (
                     bytes([NEW_ENVIRON_IS, NEW_ENVIRON_VAR])
@@ -803,6 +812,15 @@ def test_malformed_new_environ_subnegotiation_does_not_raise():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await reader.readexactly(9)
             await reader.readexactly(len(_NEW_ENVIRON_REQUEST))
+            # Issue #536: the server sends _BINARY_REQUEST after this,
+            # and these scenarios go on to read the echo of the line
+            # they type. Leaving those six bytes in the stream made the
+            # echo read return `ff fb 00` instead, and the connection
+            # was then closed before the session had processed the
+            # line at all -- so the handler never ran and the assertion
+            # saw an empty capture. Only surfaced on a POSIX host,
+            # purely by timing; the byte mismatch is platform-neutral.
+            await reader.readexactly(len(_BINARY_REQUEST))
             # Garbage body, not even starting with an IS marker.
             writer.write(bytes([IAC, SB, NEW_ENVIRON, 99, 99, 99, IAC, SE]))
             writer.write(b"x\r\n")
