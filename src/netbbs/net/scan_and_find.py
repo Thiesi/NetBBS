@@ -46,6 +46,7 @@ from netbbs.net.chat_flow import (
 from netbbs.net.file_flow import enter_file_area
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.picker import pick_item
+from netbbs.rendering import GATE_COLOR, SegmentColor
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -209,17 +210,32 @@ async def _new_scan_screen(
             status = f"{item.unread} unread"
         line = f"{prefix}{item.kind.replace('_', ' ')}, {status}"
         if item.name_gate_unmet:
-            # Ahead of the rest, for the same reason the channel picker
-            # puts it first: `pick_item` clips the row, so anything at
-            # the end is what a narrow terminal loses.
+            # Still here as well as beside the name: this is what the
+            # fallback prose row carries when the row is too narrow for
+            # the segments to help either.
             line = f"{NAME_GATE_NOTE} -- {line}"
         return line
 
     positions = {id(item): index for index, item in enumerate(items, start=1)}
+
+    def _name_segments(item: _ScanItem) -> list[tuple[str, SegmentColor]]:
+        """The gate note rides with the name here too (issue #541).
+
+        In the description it sat behind an unbounded name and was the
+        first thing a 40-column row lost, so a gated channel looked
+        exactly like an ungated one -- which is the whole bug (Codex
+        review).
+        """
+        segments: list[tuple[str, SegmentColor]] = [(item.name, None)]
+        if item.name_gate_unmet:
+            segments.append((f" ({NAME_GATE_NOTE})", GATE_COLOR))
+        return segments
+
     selected = await pick_item(
         session, items,
         name_of=lambda item: item.name,
         stable_id_of=lambda item: positions[id(item)],
+        name_segments_of=_name_segments,
         description_of=_description,
         title="New scan",
         empty_message="Nothing accessible yet.",

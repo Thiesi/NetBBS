@@ -161,3 +161,72 @@ def test_the_scan_picker_answers_the_same_question(db, sysop, caller):
 
     attest_name(db, caller, "Real Person", verifier=sysop)
     assert channel_name_gate_unmet(db, caller, gated) is False
+
+
+# -- where truncation cannot reach it ----------------------------------
+
+
+def test_the_note_rides_with_the_name(db, sysop):
+    """`pick_item` composes a row as selector, reference, name,
+    description -- and then truncates the whole thing. A note anywhere
+    in the description sits behind an unbounded channel name and is the
+    first thing a 40-column terminal loses, so the gated channel looks
+    ungated again (Codex review, twice)."""
+    from netbbs.net.chat_flow import channel_name_segments
+
+    channel = create_channel(db, "verified-only", creator=sysop, name_requirement="verified")
+    segments = channel_name_segments(channel, {channel.id})
+
+    # The note leads: `colored_truncate` cuts from the end, so anything
+    # behind an unbounded channel name can be cut away entirely, and a
+    # 42-character name takes a 40-column row by itself.
+    assert _NOTE in segments[0][0]
+    assert segments[0][1] is not None, "and carries its own colour"
+    assert segments[-1][0] == "verified-only"
+
+
+def test_an_ungated_channel_is_just_its_name(db, sysop):
+    from netbbs.net.chat_flow import channel_name_segments
+
+    channel = create_channel(db, "lobby", creator=sysop)
+    assert channel_name_segments(channel, set()) == [("lobby", None)]
+
+
+def test_a_narrow_row_keeps_the_note_and_drops_the_prose(db, sysop):
+    """The claim in one line: at 40 columns the gate survives and the
+    description is what goes."""
+    from netbbs.rendering import colored_truncate
+    from netbbs.rendering.ansi import strip_ansi
+    from netbbs.net.chat_flow import channel_name_segments
+
+    channel = create_channel(
+        db, "verified-only", creator=sysop,
+        description="A long description that will not fit on a narrow terminal",
+        name_requirement="verified",
+    )
+    segments = [("  01. ", None), ("(#1) ", None)]
+    segments += channel_name_segments(channel, {channel.id})
+    segments += [(" - " + _channel_description(ChatHub(), channel), None)]
+
+    row = strip_ansi(colored_truncate(segments, 40))
+    assert _NOTE in row, "the gate survives a narrow row"
+    assert "A long description" not in row, "and the prose is what goes"
+
+
+def test_even_a_name_wider_than_the_row_cannot_hide_the_note(db, sysop):
+    """The case that decided the order: a 42-character channel name
+    takes a 40-column row by itself, so a note behind it is gone
+    whatever its length."""
+    from netbbs.rendering import colored_truncate
+    from netbbs.rendering.ansi import strip_ansi
+    from netbbs.net.chat_flow import channel_name_segments
+
+    channel = create_channel(
+        db, "verified-only-channel-for-attested-callers", creator=sysop,
+        name_requirement="verified",
+    )
+    segments = [("  01. ", None), ("(#1) ", None)]
+    segments += channel_name_segments(channel, {channel.id})
+
+    row = strip_ansi(colored_truncate(segments, 40))
+    assert _NOTE in row

@@ -179,12 +179,14 @@ from netbbs.rendering import (
     ACCENT_COLOR,
     CHAT_BODY_COLOR,
     CHANNEL_TYPE_COLOR,
+    GATE_COLOR,
     HEADER_COLOR,
     MENU_KEY_COLOR,
     MUTED_COLOR,
     NICK_COLOR,
     PRIVILEGE_COLOR,
     SELF_COLOR,
+    SegmentColor,
     STATUS_BAR_BACKGROUND,
     SUCCESS_COLOR,
     TOPIC_COLOR,
@@ -631,6 +633,7 @@ async def _pick_channel(
             name_of=lambda c: c.name,
             stable_id_of=lambda c: c.id,
             description_of=lambda c: _channel_description(hub, c, needs_name),
+            name_segments_of=lambda c: channel_name_segments(c, needs_name),
             title=title,
             breadcrumb=picker_breadcrumb,
             empty_message="No chat channels are available to you yet.",
@@ -659,6 +662,16 @@ async def _pick_channel(
             return item.description or "(category)"
         return _channel_description(hub, item, needs_name)
 
+    def _name_segments(
+        item: Category | Channel | _MrcRoomsEntry,
+    ) -> list[tuple[str, SegmentColor]]:
+        # This list holds categories and the MRC section as well as
+        # channels, and only a channel can carry a name gate -- the
+        # others render exactly the name `render_name` gives them.
+        if isinstance(item, Channel):
+            return channel_name_segments(item, needs_name)
+        return [(render_name(item), None)]
+
     def stable_id(item: Category | Channel | _MrcRoomsEntry) -> int:
         if isinstance(item, _MrcRoomsEntry):
             return _MRC_SECTION_STABLE_ID
@@ -684,6 +697,7 @@ async def _pick_channel(
             on_sort=on_sort_mixed,
             sort_label=_sort_label,
             description_of=render_description,
+            name_segments_of=_name_segments,
             title=title,
             breadcrumb=picker_breadcrumb,
             empty_message="No chat channels are available to you yet.",
@@ -1141,7 +1155,13 @@ def _meets_live_participation_requirements(db: Database, channel: Channel, user:
 #: not meet. One string, because three screens say it: this module's own
 #: picker, its sectioned variant, and `[N]ew scan`
 #: (`netbbs.net.scan_and_find`, which imports it).
-NAME_GATE_NOTE = "needs a verified name"
+# Short on purpose (Codex review). The 40-column floor this project
+# builds to leaves about sixteen columns after a selector, a reference
+# and an ordinary channel name -- and a note that gets truncated tells a
+# caller no more than no note at all. The full sentence is one keystroke
+# away, in the refusal itself: "This channel requires a verified real
+# name to participate."
+NAME_GATE_NOTE = "needs a name"
 _NAME_GATE_NOTE = NAME_GATE_NOTE
 
 
@@ -1158,6 +1178,34 @@ def channel_name_gate_unmet(db: Database, user: User, channel: Channel) -> bool:
     Reads the *effective* requirement, which is what entry enforces.
     """
     return not meets_name_requirement(db, user, get_effective_name_requirement(db, channel))
+
+
+def channel_name_segments(
+    channel: Channel, needs_name: set[int] | None = None, *, name_color: SegmentColor = None,
+) -> list[tuple[str, SegmentColor]]:
+    """The row's name, with the gate note attached to it (issue #541).
+
+    Putting the note in the description was not enough, twice over
+    (Codex review). `pick_item` composes a row as selector, reference,
+    name, description -- and then truncates the whole thing -- so a note
+    anywhere in the description sits behind an unbounded channel name
+    and is the first thing a 40-column terminal loses. A gated channel
+    then looks exactly like an ungated one, which is the entire bug.
+
+    As a name segment it sits ahead of the description instead, so what
+    a narrow row gives up is the prose, and the thing a caller has to
+    act on survives.
+    """
+    segments: list[tuple[str, SegmentColor]] = []
+    if needs_name is not None and channel.id in needs_name:
+        # Ahead of the name, not after it. `colored_truncate` cuts from
+        # the end, so anything behind an unbounded channel name can be
+        # cut away entirely -- and a 42-character name on a 40-column
+        # terminal takes the whole row by itself. In front, the note
+        # cannot be lost however long the name is (Codex review).
+        segments.append((f"({NAME_GATE_NOTE}) ", GATE_COLOR))
+    segments.append((channel.name, name_color))
+    return segments
 
 
 def _channel_description(hub: ChatHub, channel: Channel, needs_name: set[int] | None = None) -> str:
@@ -1178,15 +1226,14 @@ def _channel_description(hub: ChatHub, channel: Channel, needs_name: set[int] | 
     and had nothing to act on. "needs a verified name" is something they
     can act on.
     """
+    # The note is *not* here: it rides with the name, where truncation
+    # cannot reach it -- see `channel_name_segments`. `needs_name` is
+    # still accepted so the fallback prose form (a row too narrow for
+    # segments to help) can carry it.
     online = hub.participant_count(channel.name)
-    # The note comes first, ahead of the free-form description (Codex
-    # review). `pick_item` clips the whole row to the terminal width, so
-    # whatever sits after arbitrary prose is the first thing lost -- and
-    # on a narrow terminal a gated channel would then have looked exactly
-    # like an ungated one again, which is the bug this is fixing.
     parts = []
     if needs_name is not None and channel.id in needs_name:
-        parts.append(_NAME_GATE_NOTE)
+        parts.append(NAME_GATE_NOTE)
     if channel.description:
         parts.append(channel.description)
     return f"{' -- '.join(parts)} ({online} online)".strip()
