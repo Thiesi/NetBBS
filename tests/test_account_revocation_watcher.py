@@ -69,7 +69,7 @@ class FakeSession:
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
-    async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
+    async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
         if self._inputs:
             return self._inputs.pop(0)
         await asyncio.Event().wait()

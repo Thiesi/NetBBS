@@ -1,7 +1,6 @@
 # NetBBS
 
-Door games: see the [operator setup and compatibility guide](docs/NetBBS-door-guide.md)
-for native, DOSBox-X and remote doors, manual prerequisites, and tested limits.
+![NetBBS — Boards. Chat. Door games. Connected.](docs/images/netbbs-banner.jpg)
 
 **[www.netbbs.org](https://www.netbbs.org)** — the project site, with a
 fuller pitch and real screenshots from a running node.
@@ -60,6 +59,9 @@ testing (this project's own dev sandbox routinely runs there), never a
 target for production semantics that depend on POSIX facilities (real
 signal delivery, `os.kill`-style liveness checks, POSIX file
 permissions, raw-mode terminal control).
+
+Door games: see the [operator setup and compatibility guide](docs/NetBBS-door-guide.md)
+for native, DOSBox-X and remote doors, manual prerequisites, and tested limits.
 
 ## Status
 

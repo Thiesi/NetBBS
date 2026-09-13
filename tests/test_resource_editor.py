@@ -333,11 +333,19 @@ def test_selecting_a_field_hotkey_runs_its_prompt_and_updates_the_draft():
     assert result == "Renamed"
 
 
-def test_a_blank_text_entry_keeps_the_current_draft_value():
+def test_a_blank_text_entry_now_clears_the_value():
+    """Issue #529 replaced "blank = keep" for this field type.
+
+    The prompt opens with the current value already in the buffer, so
+    an empty submit can only be a deliberate clear -- reading it as
+    "keep" would mean a caller who selected all and deleted watched the
+    old value come back. "Leave it alone" moved to Escape, covered in
+    tests/test_resource_editor_prefill.py.
+    """
     async def save(draft):
         return draft["name"]
 
-    session = FakeSession(["n", "", "s"])  # blank keeps "lobby"
+    session = FakeSession(["n", "", "s"])  # emptied line clears "lobby"
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -346,7 +354,7 @@ def test_a_blank_text_entry_keeps_the_current_draft_value():
             save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         )
     )
-    assert result == "lobby"
+    assert result == ""
 
 
 def test_save_raising_error_type_shows_a_message_and_keeps_the_draft_intact():
@@ -1546,9 +1554,9 @@ def test_hotkey_jump_primes_current_page_even_when_not_yet_paginated():
             super().__init__(inputs)
             self.terminal_height = 60
 
-        async def read_line(self, echo=True, history=None, completer=None):
+        async def read_line(self, echo=True, history=None, completer=None, **kwargs):
             self.terminal_height = 15
-            return await super().read_line(echo=echo, history=history, completer=completer)
+            return await super().read_line(echo=echo, history=history, completer=completer, **kwargs)
 
     # "g" = Group3's first field (f3_0, see _many_sectioned_fields's own
     # a-through-l hotkey layout) -- pressed while everything still fits.
