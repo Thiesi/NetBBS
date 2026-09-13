@@ -70,8 +70,8 @@ class _ScanItem:
     """One row in issue #56's `[N]ew scan` picker -- a board, channel,
     or file area `user` can currently access, with its computed unread
     state and follow status. Built fresh on every screen entry, never
-    persisted -- see `_new_scan_screen`'s own docstring for why
-    `stable_id_of=lambda item: id(item)` is the correct idiom here."""
+    persisted -- see `_new_scan_screen`'s own docstring for why the row's
+    own position is the right stable id here."""
 
     kind: str  # "board" | "channel" | "file_area"
     name: str
@@ -118,9 +118,19 @@ async def _new_scan_screen(
     yet seeing an empty screen.
 
     Built fresh every time this screen is entered -- a plain Python
-    list, never persisted -- so `stable_id_of=lambda item: id(item)`
-    is the correct idiom (same as `_who_screen`'s sessions, or the
-    Link status screen's in-memory peers), not a database id.
+    list, never persisted -- so there is no database id to use, the way
+    `_who_screen`'s sessions and the Link status screen's in-memory peers
+    have none either.
+
+    This one numbers its rows instead of using `id(item)` (issue #541,
+    Codex review). A `CPython` object address is around fifteen digits,
+    and `pick_item` prints the stable id beside every row as its `(#N)`
+    reference: at 40 columns that prefix plus an ordinary channel name
+    consumed the whole row, so the description -- including the
+    "needs a verified name" note this screen had just been given --
+    was clipped away before a caller could read it. A row number is
+    short, equally stable for as long as this list exists, and makes
+    `[G]oto #` mean something for the first time on this screen.
 
     Selecting a board/file area jumps straight to its first unread post/
     file via `initial_cursor`; selecting a channel enters it directly
@@ -205,10 +215,11 @@ async def _new_scan_screen(
             line = f"{NAME_GATE_NOTE} -- {line}"
         return line
 
+    positions = {id(item): index for index, item in enumerate(items, start=1)}
     selected = await pick_item(
         session, items,
         name_of=lambda item: item.name,
-        stable_id_of=lambda item: id(item),
+        stable_id_of=lambda item: positions[id(item)],
         description_of=_description,
         title="New scan",
         empty_message="Nothing accessible yet.",
