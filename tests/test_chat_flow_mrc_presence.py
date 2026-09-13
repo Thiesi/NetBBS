@@ -88,17 +88,13 @@ async def _browse_until(lane, hub, presence, user, before, after, *, mrc_bridge,
         # or the predicate raises -- this task is still running, and
         # would otherwise overlap the test's bridge and database
         # teardown, or surface later as an exception nobody retrieved.
-        if not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        else:
-            # Retrieved, not suppressed: `_wait_for` and the `await`
-            # above have already raised anything that mattered, and
-            # swallowing it here is what turned a real failure into a
-            # bare timeout.
-            with contextlib.suppress(BaseException):
-                task.exception()
+        #
+        # Cancelled, then gathered with `return_exceptions`, so that a
+        # browse loop raising from its own cleanup cannot speak over the
+        # failure this block is unwinding -- the same shape `_run` uses,
+        # for the same reason.
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     return session
 
 

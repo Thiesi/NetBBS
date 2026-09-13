@@ -180,18 +180,18 @@ async def _run(lane, hub, presence, channel, user, lines, *, mrc_bridge=None, wh
         # `asyncio.wait` is pending, and a callback left running then
         # goes on driving the session and the bridge through the
         # fixtures' teardown, with its own exception unretrieved.
-        for owned in (callback, task):
-            if owned is None:
-                continue
-            if not owned.done():
-                owned.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await owned
-            else:
-                # Retrieved, not suppressed: anything that mattered has
-                # already been raised by the waits above.
-                with contextlib.suppress(BaseException):
-                    owned.exception()
+        # Cancelled first, then gathered, and nothing raised from here
+        # (Codex review). Cancelling a chat loop can raise from its own
+        # database/MRC leave cleanup, and awaiting each task in turn
+        # meant that exception replaced the assertion or callback
+        # failure this block is unwinding -- or, if the first one raised,
+        # meant the second was never cancelled at all. `return_exceptions`
+        # retrieves every outcome without letting any of them speak over
+        # the failure already in flight.
+        owned = [t for t in (callback, task) if t is not None]
+        for task_to_stop in owned:
+            task_to_stop.cancel()
+        await asyncio.gather(*owned, return_exceptions=True)
 
 
 async def _wait_for(predicate, *, what: str, timeout: float = 5.0, task=None) -> None:
