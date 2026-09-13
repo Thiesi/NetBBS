@@ -18,11 +18,11 @@ Use project sources in this order:
 When these sources disagree, investigate and update the stale source. Do not
 choose whichever answer is most convenient.
 
-This ordering is for developers changing NetBBS. A SysOp running a node, not
-modifying it, wants `docs/NetBBS-operator-guide.md` (install/deploy/upgrade)
-and `docs/NetBBS-SysOp-Handbook.md` (day-to-day administration) instead —
-both stay consistent with the normative decisions here, but neither requires
-reading this document first.
+This is a developer reference. Start with the
+[developer handbook](NetBBS-Developer-Handbook.md) for practical entry points.
+The [SysOp handbook](NetBBS-SysOp-Handbook.md) covers installation and operation;
+the [user handbook](NetBBS-User-Handbook.md) covers everyday use. Neither requires
+reading this design reference first.
 
 ## Current status
 
@@ -30,14 +30,21 @@ reading this document first.
 - The post-Phase-2 local additions—Communities, identity attestation,
   asynchronous personal mail, and self-update foundations—are substantially
   implemented.
-- Phase 3 is active. NetBBS Link has real identity, canonical event encoding,
-  authenticated HTTP transport, persistent peer/event state, seed and peer
-  discovery, linked boards, tier-1 Link messages, outgoing-only-node relays,
-  and deterministic multi-node fault testing.
-- Phase 3 remains **private and experimental federation**. Phase 4 trust,
-  reputation, and quarantine are the public-federation readiness gate.
-- Later phases—real-time Link chat, advanced Link governance and Link
-  Communities, and door-game compatibility—remain future work.
+- Phase 3 connectivity and asynchronous services are implemented: signed
+  identity, discovery, persistent events/peers, linked boards/channels/file
+  catalogues, mail, catch-up, and relays.
+- Phase 4 trust, reputation, quarantine, and recovery controls are implemented.
+  NetBBS Link remains **private and experimental federation** pending issue
+  #131's human/operational checks and sustained dogfood (#83). Independent
+  implementation compatibility remains unclaimed (#71).
+- Phase 5 has authenticated live chat, presence, scrollback-on-join, live
+  private messages, and one-/two-relay paths. Cross-node `/dm` invitations and
+  simultaneous background channel memberships are not implemented.
+- Phase 7 has native, DOSBox-X, and remote door adapters, three bundled games,
+  companion services, and door API 3 with optional outbound board posting.
+  Compatibility is bounded to the documented host/game profiles.
+- Advanced Link governance, Link Communities, and the remaining deferred
+  protocol features are future work; current issues track their scope.
 
 Implementation status belongs beside the relevant design rule below and must be
 updated in place. Do not append victory narratives or test-count snapshots.
@@ -172,7 +179,7 @@ Consequences of the tier list, not separate rules:
   benefit.
 - User transports: Telnet, SSH, and web/xterm.js.
 - Asynchronous Link transport: signed HTTP+JSON.
-- Future real-time Link chat transport: Noise Protocol Framework.
+- Real-time Link chat transport: Noise Protocol Framework.
 
 ### 2.2 Modular boundaries
 
@@ -1544,6 +1551,10 @@ type's shape.
 **Canonicalization rule** (binding and language-independent — issue #11):
 
 - Compact JSON: no insignificant whitespace, `":"`/`","` separators only.
+- Serialize using ASCII escapes for non-ASCII characters, matching the
+  reference canonicalizer's `ensure_ascii=True`, then encode as UTF-8.
+  Supplementary characters use JSON surrogate-pair escapes. Equivalent
+  unescaped Unicode JSON is not the same signed byte representation.
 - Object keys sorted by exact Unicode codepoint sequence, at every nesting
   depth, after normalization (below).
 - Every string is recursively normalized to Unicode NFC before serialization —
@@ -1587,9 +1598,10 @@ the wire before that JSON becomes a candidate envelope.
 Golden test vectors (`tests/fixtures/link_canonical_vectors.json`, checked by
 `tests/test_link_canonical_vectors.py`) pin exact canonical bytes and content
 IDs for representative payloads, including Unicode normalization,
-omitted-versus-null, and integer-boundary cases. An independent,
-non-Python implementation of this format is compatible with NetBBS Link if
-and only if it reproduces every vector's canonical bytes exactly.
+omitted-versus-null, and integer-boundary cases. An independent implementation
+must reproduce them exactly for canonical-format compatibility. This is
+necessary but not sufficient for full Link interoperability: identity,
+authority, transport, lifecycle, and trust behavior also require validation.
 
 Existing Python behavior implements the rule above; it is not a separate,
 looser specification of its own.
@@ -4737,7 +4749,7 @@ refactor.
 - self-update foundations and scheduled checks;
 - registration-mode and account-lifecycle refinements.
 
-### Phase 3 — Link connectivity and asynchronous services — active
+### Phase 3 — Link connectivity and asynchronous services — implemented
 
 Implemented or substantially working:
 
@@ -4803,9 +4815,9 @@ cycle. Issue #71's independent non-Python interoperability proof is explicitly
 deprioritized and remains open as deferred validation rather than a Phase 4
 dependency.
 
-This decision advances trust/reputation implementation only. Phase 5
-(real-time Link chat), Phase 6 (advanced governance/Link Communities), and
-Phase 7 (doors) still require their own explicit sequencing decision.
+Trust/reputation implementation and the shipped Phase 5/7 features have since
+advanced. Phase 6 remains future work. Operational validation remains separate
+from implementation sequencing.
 
 The Phase 3 validation record is:
 
@@ -4839,15 +4851,13 @@ The Phase 3 validation record is:
   external implementation interoperability remains explicitly unclaimed, and
   every wire change still requires versioning and vector updates.
 
-Advancing development does not imply public federation. Phase 4 is now active
-and remains the public-readiness security gate. The issue #55 threat model is
-specified in §12; its persistence, protocol, enforcement, UI, and validation
-must ship before any public/untrusted federation claim.
+Advancing development does not imply public federation. Phase 4's persistence,
+protocol, enforcement, and UI are implemented; the remaining human/operational
+validation in #131 is still a public-readiness gate. The threat model is in §12.
 
-### Phase 4 — Trust, reputation, and public readiness — active
+### Phase 4 — Trust, reputation, and public readiness — implemented; operational gate open
 
-After #126, Phase 4 deliberately pauses for a bounded product-track interleave
-from issue #83's real-user dogfood feedback before foundation issue #127:
+Completed product work informed by dogfood includes:
 
 - direct-chat discoverability, single rendering, and field color (#134) —
   implemented: the pinned status row retains `/close` with a compact narrow-
@@ -4907,9 +4917,8 @@ from issue #83's real-user dogfood feedback before foundation issue #127:
   sections, plus a bio-preview/transport-diagnostic preamble) is the first
   real screen dense enough to exercise pagination in practice.
 
-This interleave does not change Phase 4's security dependencies or public-
-readiness gate. It applies the standing cadence between meaningful foundation
-work and complete user-visible slices; #127 resumes after this batch.
+These shipped improvements preserve Phase 4's security dependencies and
+public-readiness gate. Its implemented foundation is:
 
 - formal threat model from issue #55 — specified in §12;
 - persisted local trust inputs, projections, probation, and policy evaluation
@@ -4940,12 +4949,13 @@ No public/untrusted federation claim precedes this phase.
 
 ### Phase 5 — Real-time Link chat
 
-- Noise transport using node transport keys, with the direct-session and first
-  linked-channel vertical specified in §8.10 and tracked by issue #148;
-- Link-wide typed chat events, presence, and discovery;
-- multiple simultaneous channel memberships and unread/background delivery;
-- Link-wide live private chat, distinct from asynchronous Link messages;
-- decide whether and how trusted recent scrollback is offered to joining nodes.
+- Implemented: authenticated Noise transport and live linked-channel chat
+  (§8.10, #148), node-wide presence (#164), bounded trusted scrollback-on-join
+  (#194), live private messages and relay (#168/#219), and chained relays plus
+  cross-node `/private` (#270).
+- Not implemented: cross-node `/dm` invitation chats.
+- Deliberately deferred: simultaneous channel memberships with background
+  delivery; the existing durable unread model remains available.
 
 ### Phase 6 — Advanced Link governance and Link Communities
 
@@ -6315,7 +6325,7 @@ filesystem/network isolation regardless.
 
 ---
 
-## 16. Open design decisions
+## 16. Decisions and extension references
 
 GitHub issues are authoritative and may evolve beyond this summary.
 
@@ -6426,7 +6436,7 @@ requiring code changes.
 
 ### Issue #82 — operator-ready installation and release path — closed
 
-`docs/NetBBS-operator-guide.md` is the complete operator lifecycle:
+[SysOp handbook](NetBBS-SysOp-Handbook.md) is the complete operator lifecycle:
 install (a real, tested non-editable wheel build/install with no
 source-checkout dependency, now sourced only from official GitHub
 releases), first-SysOp bootstrap via the existing `netbbs.admin`
@@ -6767,54 +6777,28 @@ unqueried. Chunk bytes remain outside inventory entirely and unchanged by
 this issue, confirmed by both tests: a recovered catalogue entry lands
 with `fetched_file_id` still `NULL`.
 
-### Issue #55 — trust and quarantine — design specified
+### Issue #55 — trust and quarantine — implemented; operational validation open
 
 §12 specifies the Phase-4 attacker model, evidence classes, explicit reporter
 trust domains, Sybil/weight rules, signal bounds and lifetimes, probation,
-quarantine, reversibility, explainability, and required validation. Phase-4
-implementation remains separate roadmap work; completing the design issue does
-not itself make public federation safe.
+quarantine, reversibility, explainability, and required validation. The Phase-4
+implementation is shipped; #131 retains the human/operational readiness gate.
+Completing the implementation does not itself establish public federation safety.
 
-### Issue #63 — door isolation
+### Issue #63 — door isolation — superseded by the shipped door model
 
-Define process/jail/container boundaries, filesystem/network access, resource
-limits, terminal mediation, session capability API, audit, crash cleanup, and
-DOS adapter behavior.
+Issue #172 established the native door model; #296/#297 added legacy and browser
+adapters. Phase 7 above records the current contract. Native doors are trusted,
+same-user programs with resource limits and supervised cleanup, not filesystem
+or network containment. Door metadata is API version 3; companion services and
+the SysOp-enabled outbound board-posting hook are implemented.
 
-**Candidate approach, not yet committed — exposing Link to doors.** Rather than
-giving doors raw Link access, mediate it through the session capability API,
-sized per interaction latency:
-
-- real-time move exchange rides the future Phase 5 real-time Link chat
-  channel;
-- turn submission for asynchronous games (chess, TradeWars-style turns) maps
-  onto linked-board events on a shared game board, reusing existing
-  carry-materialization rather than new plumbing;
-- point-to-point in-game mail maps onto tier-1 `link_message`;
-- federated high-score lists fit neither primitive cleanly — they are shared,
-  mergeable state with concurrent writers, so they need an explicit
-  conflict-resolution rule (e.g. monotonic max per player) before they can
-  ride on either.
-
-To keep door-facing boards/channels invisible to ordinary users without new
-schema, consider gating them with an elevated minimum user level (e.g. 245)
-rather than a new visibility flag, since minimum-level is already a resource
-gate (§5.1) and sits safely below `SYSOP_LEVEL = 255`. This only works if:
-
-- door processes write under their own identity, not the player's own account
-  level. Answered for boards by issue #520, and the answer generalizes: the
-  identity is a *label* carried in `author_label` with no account behind it,
-  not a minted account (see the Phase 7 door bullets above for why an account
-  was rejected and what guards a label needs). A channel-facing identity
-  should take the same shape;
-- board/channel listing queries honor the minimum-level gate, not just entry,
-  so gated resources don't appear in listings for users below the threshold;
-- the level band used for infrastructure resources (e.g. 240–254) is a named
-  constant, so a future SysOp level-preset feature cannot hand that range to a
-  real user by accident. Note this band gates the *resources* -- keeping
-  door-facing boards and channels out of ordinary users' listings -- and is
-  not what hides a door's own identity, which needs no hiding because it is
-  not an account.
+The [developer handbook](NetBBS-Developer-Handbook.md#developing-a-native-door)
+is the integration entry point. The outbound hook posts as a distinct door label,
+with an explicit per-door board allowlist and rate ceiling. A linked destination
+can federate the post through the live node's identity. There is no generic
+session-capability API for chat, mail, real-time game moves, or federated scores;
+those extensions need their own protocol and authority decisions.
 
 ### Issue #165 — MRC gateway scoping — closed
 

@@ -87,8 +87,7 @@ specification.
 
 ### NetBBS Link
 
-Phase 3 is active and already contains working Link product surfaces, not
-only protocol scaffolding:
+Phase 3's connectivity and asynchronous product surfaces are implemented:
 
 - canonical JSON bytes with recursive Unicode NFC normalization and float
   rejection;
@@ -136,8 +135,8 @@ only protocol scaffolding:
 
 Important boundaries of the current Link implementation:
 
-- It is still private/experimental federation. Phase 4 trust and quarantine are
-  the public-readiness gate.
+- It is still private/experimental federation. Phase 4 trust and quarantine
+  are implemented; human/operational validation remains the public-readiness gate.
 - Synchronization is still seed/candidate driven rather than a public routing
   fabric, but bounded multi-hop metadata/content-event catch-up works through
   carriers. Relay mailboxes remain the separate single-hop reachability path
@@ -750,8 +749,8 @@ post's identity and feed position while projecting the newest approved content.
 
 On moderated boards, an edit re-enters moderation and the last approved version
 remains visible until approval. Self-authored linked edits form a linear event
-chain. Moderator edits and tombstones are deliberately separate future
-governance work.
+chain. Origin-authorized moderator edits and tombstones are implemented as
+separate event types on that chain; delegated Link moderation remains deferred.
 
 Expired content is delisted but remains directly reachable. Hard-deletion
 sweeps must not remove rows still referenced by replies or edit chains; such
@@ -2507,15 +2506,6 @@ of "who currently owns this board" silently wrong) but is actually a test/
 caller setup gap -- confirmed by tracing, not assumed, while writing this
 round's own multi-node convergence test.
 
-**Known, reproducible flaky test, not caused by this round, not yet
-diagnosed:** `tests/test_link_boards.py::test_queue_board_post_edit_chains_a_
-second_edit` fails intermittently (including in total isolation, no other
-tests involved) with a `previous_event_id`/`content_id` mismatch between two
-back-to-back `queue_board_post_edit_if_linked` calls on the same post chain.
-Reproduced multiple times across unrelated sessions; root cause not yet
-found. Worth a dedicated investigation before trusting that test as a
-regression signal.
-
 **Inventory-pull's per-kind request dict is documented as exhaustive; a
 responder must treat an absent ID as "requester has never seen this," not
 merely "requester didn't ask" (issue #94, found via a real 3-node dogfood
@@ -3183,15 +3173,10 @@ subject to the same bounded-scrollback trim local content already has;
 this is a deliberate consequence of treating a linked channel as genuinely
 the same kind of resource as a local one, not a data-loss surprise unique
 to Link. `queue_channel_message_if_linked` (the self-authored outbound
-path, mirroring `queue_board_post_if_linked`) exists and is tested but is
-**not wired into `netbbs.net.chat_flow`'s live interactive send path** --
-that file's message-send code has no existing `link_context` threading at
-all (unlike `netbbs.net.login_flow`'s board-post path), and adding it
-means threading a new parameter through several nested layers. A
-self-authored message on a linked channel does not yet actually leave the
-node through the live TUI as a result; received content still
-materializes and is browsable correctly. Worth a small, scoped follow-up
-issue rather than silently assuming this gap doesn't exist.
+path, mirroring `queue_board_post_if_linked`) is wired into the interactive
+chat send path through its database lane and Link context. Keep the durable
+queue operation alongside live delivery; a live frame alone does not provide
+restart or offline catch-up. Received events materialize into local scrollback.
 
 **Board closure, moderator edits, tombstones (design doc §9.5, issue #88).**
 All three new event types (`board_closure`, `board_post_moderator_edit`,
@@ -3466,11 +3451,18 @@ filesystem backup look unsuccessful. Store the last-success timestamp and path
 as one transaction so the dashboard can never pair a new timestamp with an old
 generation, and reload dashboard state when the Backup quick action returns.
 
-Back up in this order:
+Current capture starts with quiesced game components and optional door
+installations, then snapshots the database together with managed-DNS credentials,
+then captures content, identity, and extra artifacts. This ordering is observable
+in `create_backup`; do not infer a transaction spanning every independent file.
+Voidrunner and War Dialer require their maintenance/session guards; external door
+installation copies require the operator to stop writers first.
 
-1. database snapshot;
-2. content blobs;
-3. node identity material as part of the same recoverable set.
+The CLI's default Voidrunner directory follows its own process environment,
+which may differ from the service's `HOME` (#555). Explicit source paths are
+necessary for reliable operating instructions. Outbound door receipts under
+`door-outbound/` currently have no backup component (#556); their location beside
+the database does not imply capture.
 
 This ordering can leave harmless unreferenced blobs, but must not leave a
 restored database referring to blobs absent from the backup.
@@ -3715,7 +3707,7 @@ This is confirmed intentional, not an overlooked gap:
 apply/restart flow "isn't safely wired up yet, a real, substantially
 higher-stakes decision deliberately not bundled into this." The
 operator-facing upgrade path documented in
-`docs/NetBBS-operator-guide.md` is therefore installing the selected
+[SysOp handbook](NetBBS-SysOp-Handbook.md) is therefore installing the selected
 official GitHub-release wheel with pip (relying on `Database.__init__`'s
 own automatic-migration-or-fail-clearly behavior for schema safety), not this
 module's tarball/execv mechanism. Wiring `prepare_update`/
@@ -4269,12 +4261,7 @@ belong in issues, commits, or Git history.
 This list is intentionally broad. GitHub issues are authoritative for current
 status, ownership, and acceptance criteria.
 
-Current work spans the Phase 3 operational-validation track and active Phase 4
-implementation:
-
-- the bounded product-track dogfood interleave before #127 is implemented:
-  direct-chat polish (#134), safe composition (#133), confirmation consistency
-  (#135), and visual/capability verification plus named-surface polish (#136);
+Remaining validation and extension boundaries include:
 
 - independent non-Python interoperability validation is deprioritized and
   deferred (issue #71); Python canonical vectors remain authoritative and
@@ -4286,21 +4273,21 @@ implementation:
 - Link messages: tier1_home_node_key only (server-side decryption; tier2
   needs a real client-side decryption story first);
 - user-key and node-author signing tiers beyond current node-vouched users;
-- local search over carried board/file/channel content (issue #56's
-  remaining piece -- read/unread cursors, follows, and `[N]ew scan` are
-  done, see §6 below);
 - sustained multi-node dogfood continues independently, including restart and
   partition recovery (issue #83);
-- implementing §12 in bounded slices: local persistence/policy (#126), signed
+- §12 implementation: local persistence/policy (#126), signed
   subscriptions (#127), enforcement (#128), SysOp explanation/recovery
   workflows (#129), and remote attestation trust (#130) are implemented;
   automated adversarial validation/public-readiness evidence (#131) is covered,
   including real-transport domain-independence; its real-node manual and
   independently administered exercises remain pending.
 
-Later work includes Link chat, advanced governance and Link Communities,
-door-game sandboxing/API versioning, and other roadmap phases defined in the
-design document.
+Live Link chat, presence, private messages, relays, and scrollback-on-join are
+implemented. Door adapters, metadata API 3, companion services, and outbound
+board posting are implemented. Advanced governance, Link Communities,
+cross-node invitation chats, and the other explicit deferrals in the design
+document remain outside that scope. Do not describe native same-user door
+execution as filesystem/network containment.
 
 When an item is implemented, replace or remove the relevant statement here.
 Do not append a victory narrative.

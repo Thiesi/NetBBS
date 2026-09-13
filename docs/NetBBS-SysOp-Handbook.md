@@ -1,850 +1,679 @@
 # NetBBS SysOp Handbook
 
-This is a reference for running a NetBBS node day to day: what each SysOp
-feature is for, how to reach and use it, and what its failure/edge-case
-behavior looks like. It assumes no prior NetBBS development history.
+This handbook takes you from installation to running a community: accounts,
+content, networking, games, backups, upgrades, and troubleshooting. You need
+basic familiarity with your server's command line, but no Python programming.
 
-It is not the design document. `docs/NetBBS-design-doc.md` is the
-authoritative specification of product and protocol decisions — the "why"
-and the exact rules. This handbook is the "how do I actually do this
-tonight" companion; where the two disagree, the design doc wins, and this
-document should be corrected to match it.
-
-It is also not the engineering worklog. `docs/NetBBS-worklog.md` records
-non-obvious implementation invariants for developers changing the code. If
-you are running a node, not modifying it, you don't need that file.
-
-While you're at a live SysOp prompt, look for **Ctrl-H** — many screens now
-show short contextual help for their fields inline, when it's been
-authored (a `(Ctrl-H for help on these fields)` hint appears under the
-menu when it has). The fullscreen post/bio editor has its own equivalent,
-**Ctrl+G**, listing its keybinds. Neither replaces this handbook; both are
-meant for "what does this specific field do, right now," not the full
-picture.
+[All documentation](README.md) · [User handbook](NetBBS-User-Handbook.md) ·
+[Developer handbook](NetBBS-Developer-Handbook.md)
 
 ## Contents
 
-1. [Reaching the SysOp console](#1-reaching-the-sysop-console)
-2. [Accounts and registration](#2-accounts-and-registration)
-3. [Identity attestation and name requirements](#3-identity-attestation-and-name-requirements)
-4. [Resource gates](#4-resource-gates)
-5. [Content areas: boards, files, channels, categories](#5-content-areas-boards-files-channels-categories)
-6. [Communities](#6-communities)
-7. [Permissions and moderation](#7-permissions-and-moderation)
-8. [Chat](#8-chat)
-9. [Mail](#9-mail)
-10. [Post drafts: save and resume](#10-post-drafts-save-and-resume)
-11. [Node operations: sessions, maintenance, drain, shutdown](#11-node-operations-sessions-maintenance-drain-shutdown)
-12. [Trust policy and Link federation admin](#12-trust-policy-and-link-federation-admin)
-13. [System settings](#13-system-settings)
-14. [Backup and restore](#14-backup-and-restore)
-15. [Diagnostics and troubleshooting](#15-diagnostics-and-troubleshooting)
-16. [Getting more help](#16-getting-more-help)
+- [Installing NetBBS](#installing-netbbs)
+- [First account and configuration](#first-account-and-configuration)
+- [Running a service](#running-a-service)
+- [Caller connections and file transfers](#caller-connections-and-file-transfers)
+- [Using the SysOp console](#using-the-sysop-console)
+- [Accounts, permissions, and identity](#accounts-permissions-and-identity)
+- [Content and Communities](#content-and-communities)
+- [Door games](#door-games)
+- [NetBBS Link](#netbbs-link)
+- [MRC chat bridge](#mrc-chat-bridge)
+- [Daily operation](#daily-operation)
+- [State, backup, and recovery](#state-backup-and-recovery)
+- [Upgrading and removing NetBBS](#upgrading-and-removing-netbbs)
+- [Troubleshooting](#troubleshooting)
 
----
+## Installing NetBBS
 
-## 1. Reaching the SysOp console
+**NetBSD is the primary platform; mainstream Linux is supported.** Other
+POSIX systems are best effort. Windows is for development and testing.
+NetBBS needs Python 3.11 or newer and SQLite with FTS5 support for search.
+SQLite is the database engine included with Python; you do not install or
+administer a separate database server.
 
-Any account at level 255 (`SYSOP_LEVEL`) sees a `[S]ysOp` option on the
-main menu. Picking it opens the **SysOp operations console** — a
-dashboard, not a plain menu: it shows node mode (ONLINE/MAINTENANCE/
-LOCKDOWN), active session count, Link health (if Link is enabled),
-moderation queue totals (pending users/posts/files), backup and update-
-check recency, and recent Link diagnostics, all before you pick anything.
-Press `[R]` to refresh it after taking an action elsewhere.
+Obtain NetBBS from the official [GitHub releases](https://github.com/Thiesi/NetBBS/releases)
+or a tagged source archive. NetBBS itself is not distributed through PyPI,
+pkgsrc, or apt. Your operating system's package manager supplies prerequisites.
+The commands below use `/var/lib/netbbs` for state, a service account named
+`netbbs`, and `/etc/netbbs/netbbs.toml` for configuration. Substitute your paths
+consistently if you choose a different layout.
 
-From the console:
+### Prepare the host
 
-- `[U]sers` — accounts, registration mode, promote/demote, enable/disable,
-  identity-verification grants, deletion. See §2.
-- `[C]ontent` — boards, file areas, channels, categories, Communities,
-  granting/revoking moderator authority. See §5–§7.
-- `[O]perations` — node/session control, Link status, outbox, diagnostics,
-  log tailing, carried-post repair, backup status. See §11 and §15.
-- `[S]ettings` — welcome banner, node name, joining NetBBS Link through
-  the reliable nodes, update checks, timestamp format, trust policy. See
-  §12–§13.
-- Quick actions (`[N]ode`, `[L]ink status`, `[X]outbox`, `[K]ackup`) jump
-  directly to the same screens `[O]perations`/`[S]ettings` reach, when
-  their context is available (e.g. `[N]ode` only appears in a live
-  session, never from the standalone admin CLI below).
-- `[B]ack` returns to the main menu.
+**MANUAL — on the host:** install Python and its virtual-environment support.
+A virtual environment is a private installation directory for NetBBS and its
+libraries; it keeps them separate from other programs on your server.
 
-There's a second, non-interactive way in: `python -m netbbs.admin` runs
-the same admin screens against a database file directly, without a live
-session. It has no access to a running node's in-memory state, so
-anything session-specific (who's currently online, live maintenance mode,
-scheduling a drain) is unavailable there — the console tells you this
-plainly ("Live node controls unavailable in standalone mode") rather than
-silently omitting the option. Use it for account/content administration
-when the node process isn't running, or when scripting routine
-maintenance.
+On Debian/Ubuntu, install `python3-venv` for the Python version you use. On
+NetBSD, use pkgsrc packages such as `python312` and `py312-pip`. The SSH extra
+uses AsyncSSH and `cryptography`; a source build on NetBSD also needs Rust,
+a C compiler, Python headers, OpenSSL, libffi, and pkgconf. A typical pkgin
+package set is:
 
-Historical `[M]anage`/`[S]ystem` single-letter shortcuts from an older
-menu layout are still silently accepted (compatibility aliases) but no
-longer shown — don't expect to find them documented anywhere on screen.
+```sh
+pkgin install python312 py312-pip rust openssl libffi pkgconf
+```
 
----
+Install NetBSD's `comp` set if the C compiler is missing. Build requirements
+can change with dependency releases; use the
+[cryptography installation requirements](https://cryptography.io/en/latest/installation/)
+for the version pip selects. Rust is a build requirement, not a service you
+need to run. On Linux, prebuilt dependency wheels often avoid this toolchain.
 
-## 2. Accounts and registration
+Create the unprivileged account and directories **before** installing into them:
 
-### Levels
+```sh
+# Linux
+sudo useradd --system --user-group --home /var/lib/netbbs --create-home netbbs
+sudo install -d -m 750 -o netbbs -g netbbs /var/lib/netbbs /etc/netbbs
+```
 
-NetBBS has one integer level per account, not a separate "is SysOp" flag.
-`SYSOP_LEVEL = 255` is the reserved top level. Every gate in the system
-(board read/write, file access, channel join, admin menu access) compares
-against this one number.
+On NetBSD, the equivalent is:
 
-The node will never let you leave yourself with **zero usable SysOps** —
-promote, demote, disable, enable, approve, and delete operations that
-would leave no account at level 255 that is also enabled and not pending
-approval are rejected outright. You cannot lock yourself out this way even
-by accident.
+```sh
+sudo groupadd netbbs
+sudo useradd -g netbbs -d /var/lib/netbbs -m -s /bin/sh netbbs
+sudo install -d -m 750 -o netbbs -g netbbs /var/lib/netbbs /etc/netbbs
+```
 
-### Registration mode
+Skip account/group creation if they already exist. The supplied NetBSD service
+script needs a Bourne-compatible account shell such as `/bin/sh` because it
+starts the process through `su`; `/sbin/nologin` and csh are unsuitable for it.
+Run the application and games as this account, never root.
 
-`[U]sers` → `[R]egistration` sets one of three modes for the whole node:
+### Install a release
 
-- **open** — self-registration creates an immediately usable account.
-- **approval required** — self-registration creates a pending account
-  that cannot log in until a SysOp approves it.
-- **closed** — no public registration option at all; accounts are
-  SysOp-created only.
+**MANUAL — on the host:** download the desired wheel asset from GitHub Releases
+and make it readable by the service account. Replace the example wheel path
+and `VERSION` with the actual downloaded filename. On NetBSD, use `python3.12`
+in place of `python3` if that is your installed interpreter's name.
 
-This screen also shows how many accounts are currently waiting on
-approval. Approving (or rejecting, by simply not approving) a specific
-pending account happens on that account's own detail screen, not here —
-`[L]ist users`, pick them, `[A]pprove`.
+```sh
+sudo -u netbbs python3 -m venv /var/lib/netbbs/.venv
+sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m pip install --upgrade pip
+sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m pip install "/path/to/netbbs-VERSION-py3-none-any.whl[ssh,web]"
+/var/lib/netbbs/.venv/bin/python -m netbbs --version
+```
 
-Registration mode controls whether an account can exist and log in at
-all. It has nothing to do with what an *active* account is trusted to do
-over Link (that's trust/reputation — see §12) — these are deliberately
-separate axes.
+`--version` prints the package and database-schema versions without starting
+listeners. Choose extras according to what you enable:
 
-### Managing a specific account
+| Extra | Needed for |
+| --- | --- |
+| `ssh` | SSH caller connections, enabled by default |
+| `web` | Browser terminal, HTTP file-transfer links, **and NetBBS Link** |
+| Neither | A Telnet-only node with SSH, web, and NetBBS Link disabled |
 
-`[U]sers` → `[C]reate user`, or `[L]ist users`/`[P]romote/demote`/
-`[E]nable/disable`/`[D]elete user` (these four all land on the same
-per-account detail screen, just opened with a different picker title —
-there's no separate flow for each). From that detail screen:
+If the release has only a tagged source archive, unpack it, create a temporary
+build environment, run `python -m pip install build` and `python -m build`
+there, then install its `dist/` wheel as above. Production installs do not
+need the `dev` extra or an editable source checkout.
 
-- `[A]pprove` — only shown for a pending account; activates it.
-- `[L]evel` — set a new integer level. Blank cancels.
-- `[T]oggle enable/disabled` — disabling immediately terminates any live
-  session that account has open.
-- `[I]dentity verification` — grants or revokes `can_verify_identity` (see
-  §3). This is a narrow, separate permission, not another moderator tier
-  — it only ever controls whether the account can attest *other* users'
-  age/name, nothing else.
-- `[D]elete` — permanent. You must type the exact username to confirm.
-  Content they authored keeps its recorded author label (posts/files
-  don't become anonymous or vanish); moderator grants, channel
-  membership/invitations, preferences, and blocklist entries tied to the
-  account are removed. This cannot be undone.
+**NetBSD import problem:** if SSH fails with `libssl.so.3 not found` after a
+successful install, pkgsrc's `/usr/pkg/lib` may be missing from the runtime
+library search path. The supplied rc.d script sets `LD_LIBRARY_PATH` for the
+service. For an attended check, use:
 
----
+```sh
+sudo -u netbbs env LD_LIBRARY_PATH=/usr/pkg/lib /var/lib/netbbs/.venv/bin/python -c "import asyncssh"
+```
 
-## 3. Identity attestation and name requirements
+Do not substitute the base system's differently versioned OpenSSL library.
 
-This is the concrete example new SysOps have specifically asked about, so
-it gets full treatment here.
+## First account and configuration
 
-### The three states
+**MANUAL — on the host:** save this as `/etc/netbbs/netbbs.toml`, readable by
+the service account. This starts with SSH; browser access is covered below.
 
-Every board, file area, and channel (and a Community's own default, which
-they inherit from — see §4) can set `name_requirement` to one of three
-values:
+```toml
+[node]
+identity_dir = "/var/lib/netbbs/netbbs_identity"
+name = "MyCommunity"
 
-| Value | What it gates | What it shows |
-|---|---|---|
-| `none` | Nothing. | Nothing. |
-| `verified` | Caller must have a verified name attestation on file to post/join. | Nothing — the verification is required, but never displayed anywhere. |
-| `verified_and_displayed` | Same requirement as `verified`. | The caller's attested real name is shown alongside their posts, in this resource's own rendering, as `display_name_or_username (=Verified Real Name=)`. |
+[database]
+path = "/var/lib/netbbs/netbbs.db"
 
-A verified name **never overwrites** the account's own chosen display
-name — it's shown alongside it, in the `(=...=)` form, using a dedicated
-color so the marker survives even with color stripped. Disclosure is
-resource-scoped: a resource that requires `verified_and_displayed` shows
-the real name there and nowhere else the account didn't also require it.
+[ssh]
+enabled = true
+host = "0.0.0.0"
+port = 2222
 
-If a resource has `name_requirement` set to `verified` or
-`verified_and_displayed` and the caller has no verified name attestation
-at all, access fails closed — they simply can't post/join there, with no
-override.
+[telnet]
+enabled = false
 
-### Setting it: the toggle, not typed text
+[web]
+enabled = false
+```
 
-When creating or editing a board/file area/channel/Community, the shared
-draft-based editor screen shows a `[Q]uirement` field. **Press `Q`
-repeatedly** to cycle `none → verified → verified_and_displayed → none →
-...` — you do not type the value. (This used to require typing the exact
-literal string `verified_and_displayed`; that's gone.) The screen also
-shows `(Ctrl-H for help on these fields)` when help text is available —
-press Ctrl-H there for a one-line reminder of exactly this table.
+Create your first SysOp before starting a public listener:
 
-The same toggle exists for a Community's own `default_name_requirement`,
-which every board/area/channel in that Community inherits unless it sets
-its own explicit value (see §4 for the inheritance rule).
+```sh
+sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m netbbs.admin --db /var/lib/netbbs/netbbs.db
+```
 
-### Actually attesting someone's identity
+The interactive admin console asks for the first account and its password
+and/or public key. Use this supported bootstrap tool; `create_test_user.py`
+is a development helper. SysOp accounts have level **255**.
 
-Setting `name_requirement` only sets the *gate*. Someone still has to
-attest the age/name for a given account before that gate can be satisfied.
-Two separate things have to be true:
+First-run onboarding offers two independent choices:
 
-1. **Someone needs `can_verify_identity`.** This is a SysOp-only grant
-   (`[U]sers` → pick the account → `[I]dentity verification`), independent
-   of moderator status — a granted verifier does **not** need to be a
-   SysOp or a moderator of anything. A SysOp always has this ability
-   implicitly.
-2. **That verifier uses the `[V]erify` option on the main menu** (visible
-   only to accounts with `can_verify_identity` or SysOp level — it isn't
-   in the admin console at all, since a granted verifier may have no
-   other admin access). They pick a target account, see that account's
-   self-reported birthdate/display name plus any currently attested
-   values, and choose to attest a birthdate and/or a real name. This
-   overwrites any previous attestation for that attribute.
+- **Join NetBBS Link through the reliable nodes:** outgoing-only participation,
+  using the project's bootstrap and relay nodes. A distinct node name is required.
+- **Managed `<name>.netbbs.org` subdomain:** a public hostname managed through
+  the project's DNS service. This does not configure your router, TLS, or ports.
 
-Verified values always take precedence over self-reported profile values
-when a gate is checked. Age is computed from the attested birthdate at
-check time — it's never stored as a stale precomputed number.
+Read the choices before pressing Enter: the first-run choices default to yes.
+If not completed here, onboarding is offered at the first SysOp login.
 
-Attestations can optionally be shared with other Link nodes (opt-in,
-defaults off, resets to off on every re-verification) — that's a
-per-account preference on the account's own profile screen, not something
-a SysOp sets on their behalf.
+Transport and path settings come from the TOML file and command-line options;
+accounts, content, and many live settings are stored in the database. Command-line
+options override TOML settings. Run `python -m netbbs --help` using the installed
+interpreter for all supported switches. A TOML file is read only when supplied
+with `--config`; placing `netbbs.toml` in the working directory is not enough.
 
----
+Leave `[link] enabled` unset if you want the onboarding/Settings choice to decide
+participation. An explicit `enabled = false` or `true` overrides that choice.
+The TOML `[node] name` labels the cryptographic key files; it does not set the
+public display name. Set that through onboarding or **Settings → Node name**.
+Changing a label does not change a node's cryptographic identity.
 
-## 4. Resource gates
+## Running a service
 
-Boards, file areas, channels, and Communities share four gate types:
+**MANUAL — on the host:** download the service example from the same release's
+source tree. Examples are not installed by the wheel. Adjust paths and account
+names before installing it; [examples/README.md](../examples/README.md) describes
+both files.
 
-- minimum read level (boards/areas only — channels use a single join gate,
-  not separate read/write);
-- minimum write level;
-- minimum age;
-- name requirement (§3).
+For Linux, install [netbbs.service](../examples/netbbs.service) as
+`/etc/systemd/system/netbbs.service`, then:
 
-All of these are **nullable**, and null has a specific meaning: *inherit
-the containing Community's default, if any, otherwise fall back to the
-system default.* Setting an explicit value — including `0` or `none` —
-overrides inheritance entirely, even if that makes the resource *looser*
-than its Community's own default. A Community default is a default, not a
-mandatory floor or ceiling.
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now netbbs
+sudo systemctl status netbbs
+```
 
-In the shared draft-based editor screens, the numeric gates use a
-"`none` = clear" convention — clearing a field puts it back to
-inheriting, it doesn't set it to a hardcoded 0/none value.
+For NetBSD, install [netbbs.rc](../examples/netbbs.rc) as executable
+`/etc/rc.d/netbbs`, add `netbbs=YES` to `/etc/rc.conf`, then:
 
-Text fields open on their current value, already in the buffer and ready
-to edit (issue #529), so a long description can be amended rather than
-retyped:
+```sh
+sudo service netbbs start
+sudo service netbbs status
+```
 
-- **Enter** saves whatever is shown.
-- **Deleting everything, then Enter** clears the value. It does *not*
-  keep the old one — with the value already in the line, an empty submit
-  can only be deliberate.
-- **Esc** leaves the field exactly as it was. This is what "blank = keep"
-  used to mean, now on its own key.
+Check a real login as well as service status. The systemd example restarts on
+failure; NetBSD rc.d does not automatically restart a crashed node. If you
+need that behavior, arrange an external health check or supervisor yourself.
 
-A value too long or too wide to edit in one row falls back to the older
-prompt, which still shows the current value in brackets and still treats
-a blank entry as "keep". The prompt itself says which of the two you are
-looking at.
+NetBBS runs in the foreground. The service manager handles backgrounding.
+`systemctl stop netbbs` or `service netbbs stop` requests a graceful shutdown:
+callers are warned, then disconnected after the configured delay (60 seconds
+by default). Cleanup takes additional time. Increase the service stop timeout
+if you raise that delay or configure slow-stopping door services.
 
----
+The Linux unit restricts writable paths to `/var/lib/netbbs`. **MANUAL:** extend
+its `ReadWritePaths` if you put games or state elsewhere. NetBSD's example sets
+`HOME` to `netbbs_statedir`; remember this when locating Voidrunner saves.
 
-## 5. Content areas: boards, files, channels, categories
+## Caller connections and file transfers
 
-`[C]ontent` from the console reaches all of these. Each has the same
-overall shape: `[C]reate`/`[L]ist` (list opens a picker, which lands on a
-per-item detail screen with `[E]dit`/`[D]elete` and area-specific actions),
-plus a dedicated `[C]ategories` screen shared across all three content
-types.
-
-### Boards
-
-`[C]ontent` → `[M]essage boards`. A board's detail screen additionally
-offers `[P]ending` — the approval queue for posts awaiting moderation
-(only relevant if the board is set to require approval; see §7). If Link
-is enabled and the board isn't already Linked, `[L]ink this board`
-promotes it into Link scope.
-
-Boards support categories, immutable revision history for edits (an edit
-is a new revision, not destructive overwrite), and per-post pin/expiry-
-exemption (governed by the same edit permission, not a separate one).
-
-### File areas
-
-`[C]ontent` → `[F]ile areas`. Same create/list/edit/delete shape as
-boards, plus a pending-uploads queue and a `[G]C storage` action —
-reference-aware garbage collection for orphaned file blobs. GC always
-shows a dry-run report (what *would* be reclaimed) before asking you to
-confirm actually reclaiming it; it's a one-way filesystem operation the
-database can't undo, hence the two-step confirmation.
-
-File bytes are node-local. Over Link, only catalogue/descriptor metadata
-is distributed — files are fetched on demand in bounded chunks, not
-mirrored to every node automatically.
-
-**Transfers.** Zmodem needs a terminal that implements it, which most callers'
-clients do not (PuTTY has never had it, and neither has a browser tab). With the
-web listener enabled and `[web] public_url` set, the file screen offers a
-single-use HTTP link instead: `[W]eb transfer` on any terminal, and on the web
-client the page itself opens a drop target or starts the download. Links expire
-in ten minutes, work once, and re-check every permission when they are redeemed —
-see the operator guide for the reverse-proxy and TLS shape.
-
-**Descriptions and `FILE_ID.DIZ`.** An uploaded archive is read for a
-`FILE_ID.DIZ` member; when it has one, that text becomes the file's
-description with no work from whoever uploaded it. ZIP works out of the
-box (no dependency, and it is recognised by content, so a renamed `.zip`
-or a self-extracting `.exe` still gets read). `.lzh`/`.lha`/`.arj`/
-`.rar`/`.7z` need an unpacker on the node's `PATH`, and installing one
-is how you opt in — NetBBS never installs any:
-
-| format | install (pkgsrc) | provides |
+| Connection | Default | What to arrange |
 | --- | --- | --- |
-| `.lzh`, `.lha` | `archivers/lhasa` | `lha` |
-| `.arj`, `.7z` (and `.lzh` as a fallback) | `archivers/p7zip` | `7z`/`7za` |
-| `.rar` | `archivers/unrar` | `unrar` |
-
-Uploads are untrusted input, so an unpacker only ever gets to write to
-its own stdout (never to disk), runs under CPU/memory/process limits and
-a timeout, and is killed and reaped afterwards. Anything that doesn't
-work out — no archive, no DIZ, no unpacker installed, a corrupt member —
-leaves the file with no description and never fails the upload.
-
-Anyone can also describe a file by hand: `[E]` on the file listing edits
-the description of your own upload, or of any file in an area where you
-hold EDIT. Hand-written edits stay local — a file already announced to
-Link peers keeps the description they were told about.
-
-### Channels
-
-`[C]ontent` → Cha`[N]`nels. Channel visibility (listed/hidden) and join
-policy (open/members-only) are independent settings — a hidden-but-open
-channel is reachable by anyone who knows to `/join` it by name; that's
-obscurity, not real access control, so don't rely on it as one.
-
-A channel's detail screen also holds its `[M]RC room` mapping — the
-per-channel opt-in that bridges it to a room on the external Multi Relay
-Chat network (§8) — and, once mapped, `[P]ause MRC bridge`, which keeps
-the mapping but relays nothing either way until resumed.
-
-### Categories
-
-`[C]ontent` → `[C]ategories` manages the shared two-level category
-structure (top-level categories with optional subcategories) used by
-boards, file areas, and channels alike.
-
----
-
-## 6. Communities
-
-A Community is a topic-level container above boards/channels/file areas —
-it does not merge or change how those work, it just groups them and
-supplies inherited defaults (§4) plus Community-scoped moderator grants
-(§7). Every board/area/channel has zero or one Community; "Uncategorized"
-means no Community assigned, not a real row you can edit.
-
-`[C]ontent` → C`[O]`mmunities: create/list/edit/delete, same shared-editor
-shape as everything else, including the `[Q]` name-requirement toggle for
-`default_name_requirement`.
-
-**Deleting a Community** shows you the blast radius before you confirm:
-every member resource is set back to "no Community" (never deleted), and
-any Community-scoped moderator grants are revoked. Nothing about the
-boards/areas/channels themselves is touched otherwise.
-
-A Community can also be promoted into Link scope, the same object
-announced via a signed Link event rather than a separate type. Two
-same-named Link Communities from different origin nodes stay distinct —
-there's no cross-node name collision merging.
-
----
-
-## 7. Permissions and moderation
-
-### Granting/revoking moderator authority
-
-`[C]ontent` → `[G]rant moderator` (or `[R]evoke moderator`). Pick a
-target account, then a **scope**:
-
-- `[B]oard` / `[A]rea` / Cha`[N]`nel — one specific object.
-- `[X]` / `[Y]` / `[Z]` — blanket across *all* boards / all areas / all
-  channels on this node, including ones created later. You'll be asked
-  whether to narrow that blanket to just one Community's resources
-  instead of the whole node.
-
-Then a preset:
-
-- Boards/areas: **Full moderator** (edit + delete + approve) or
-  **Approver only**.
-- Channels: **Full moderator** (edit + moderate + manage members) or
-  **Moderator only**.
-
-A moderator does not need to be a SysOp — these are genuinely separate.
-Only a SysOp can grant/revoke authority or change node configuration in
-the first place. A blanket grant scoped to Link resources does **not**
-imply local authority over anything, and vice versa — a person who
-legitimately needs both gets both grants explicitly, there's no automatic
-crossover.
-
-Every grant/revoke, and every moderation action taken under it, is
-audit-logged.
-
-### Pending-content queues
-
-If a board/area requires approval (set on its own edit screen, alongside
-the other gates), new posts/uploads sit in a pending queue until a
-moderator with approve permission clears them — reachable from that
-board/area's own detail screen (`[P]ending`), not from a central sitewide
-queue. The SysOp console's dashboard shows the total pending count across
-everything, as an early-warning signal, not a place to act from directly.
-
-Local content maintenance follows `active → expired → deleted`, with a
-grace period between expiry and actual deletion. This is entirely
-node-local pruning — it never becomes a network-wide deletion instruction
-for a Linked resource.
-
----
-
-## 8. Chat
-
-Local real-time chat (channels, `/who`, `/whois`, `/names`, `/list`,
-`/join`, `/leave`, `/topic`, tab completion) needs no SysOp configuration
-beyond the channel's own gate/visibility settings covered in §5 and §4.
-Channel moderation (mute/ban/topic control) is a moderator-permission
-matter (§7), exercised in-channel by whoever holds it, not from the admin
-console.
-
-`/msg` and `/private` are ephemeral, online-only, and never silently fall
-back to persisted mail. `/msg user@node-fingerprint <text>`, `/private
-user@node-fingerprint` (and `[M]essage` on a remote entry in Who's online)
-reach a user on a linked node the same way, over a live session -- direct,
-or through one or two live relays when neither node can dial the other
-(design doc §8.10.3); when no live path exists the caller is told so
-plainly and pointed at Link mail. A separate mutual invite/accept direct-chat
-feature exists alongside these (reachable via the Who screen's
-`[I]nvite to chat`, or `/dm <user>` from inside a channel) — also fully
-ephemeral, no scrollback, and exclusive with channel chat (one active chat
-surface per session).
-
-### Inter-BBS chat: the MRC bridge
-
-MRC (Multi Relay Chat) is a public, unauthenticated inter-BBS chat network
-with one central hub, used by Mystic, Synchronet, ENiGMA½ and others.
-NetBBS can bridge individual channels to MRC rooms; nothing is bridged
-unless you say so, twice:
-
-1. `[S]ettings` → `[I]nter-BBS chat (MRC)`: enable the hub link and set
-   the site name this node presents as (default: the node's display
-   name). The public hub, TLS and its port are pre-filled; the INFO
-   fields (SysOp, description, telnet/SSH/web addresses) are what other
-   MRC users see with `/info`. Two switches under *About callers*, both
-   off, decide what the hub learns about each caller you announce:
-   `[U]SERIP` sends their connecting IP address (the hub uses it to ban
-   one caller rather than your whole board, and its documentation warns
-   that a caller without it may be dropped from room traffic routing),
-   `[M]etadata` sends their security level and your SysOp name. Their
-   terminal size is always sent, so the hub can format wide replies.
-   Saving applies immediately — no restart.
-2. On each channel you want on the network: `[C]ontent` → Cha`[N]`nels →
-   the channel → `[M]RC room`. Type the room name (`lobby` is the hub's
-   default room). One room maps to at most one channel.
-
-What callers experience in a bridged channel: an `[MRC]` badge on the
-status line; a one-line notice on joining that their handle (their
-username, spaces underscored) is now visible to everyone on that network;
-`/who`, `/names` and `/mrc` listing the room's MRC users; and MRC lines
-appearing as `user@site (MRC)` — an external, unverifiable author,
-never a local account. Private MRC messages reach only a caller who
-switched them on (see below); everyone else is told once per sender that
-somebody tried. On the wire a caller's line carries their
-handle the way every MRC client writes it (`<handle> text`, in the
-network's colour codes), so other boards see who said it.
-
-**Open rooms.** Mapping channels one by one suits a few curated rooms, but
-MRC rooms come and go. If you want callers to reach any room on the
-network, switch on `[O]pen rooms` in the same Settings screen. The chat
-channel picker then gains a `[Multi Relay Chat]` entry at the top level
-that opens its own list: rooms already open on this node (with how many
-callers are here and how many MRC users are there), rooms the node has
-heard of, and `[Open a room by name]`. A room a caller opens becomes a
-real channel named `mrc:<room>` — visible on your channel list and
-screens like any other, with the gates you set for open rooms (`Le[v]el`,
-`A[g]e`, `Re[q]uired name`), never Link-able, and excluded from the plain
-channel picker since the section is its place. Inside one, `/join <room>`
-opens another MRC room (an existing local channel of that name still
-wins), `/join mrc:<room>` works from anywhere, and `/rooms` asks the hub.
-A room the SysOp has mapped is that channel: opening it by name lands the
-caller in yours. Room names are at most 20 characters on the network; a
-longer one is refused rather than quietly shortened, when you map a
-channel as well as when a caller opens a room.
-
-Open rooms are bounded: a `[C]ap` (default 32; opening refuses past it,
-nothing is evicted), a `[R]etention` period (default 7 days) after which
-a room with nobody in it, no activity and no follower is retired together
-with its scrollback by the bridge itself (reported in the Diagnostics log
-and counted on the status screen), and a `Bloc[k]list` of rooms callers
-may not open. On an open room's channel screen, `[A]dopt` keeps it for
-good as an ordinary bridged channel and `Re[t]ire` removes it now. Rooms
-opened while the switch was on keep ageing out after you switch it off.
-MRC knows one identity per caller in one room, so a second session of the
-same account trying to enter a different MRC room is refused with the
-room it already holds.
-
-**Presence and welcome.** A caller's `/away` is mirrored to the network
-(and repeated on every reconnect), so MRC users see the same away state
-callers here see; the away message is cut to the network's 55
-characters, and a return is reported as activity, after which the hub
-decides when the caller stops showing as away. Topics are 55 characters
-on the network too, and passwords 20 (room passwords 32). The first MRC room a caller enters in a session shows
-the hub's banner and its message of the day; `/mrc motd` asks again. The
-network's size -- "MRC: 41 users on 12 boards" -- appears above Who's
-online, in the picker's Multi Relay Chat section and on Node > Chat
-bridge (MRC), refreshed every few minutes while anyone here is on the
-network. In a room a caller opened, the topic is the hub's: it shows on
-the status line as the hub sets it, and `/topic <text>` there asks the hub
-(which may require MRC Trust) rather than changing anything locally; in a
-channel you mapped, `/topic` keeps its usual local meaning. `/mrc
-register`, `/mrc identify`, `/mrc update password` and `/mrc roompass`
-ask for the password separately with echo off and send it once; NetBBS
-stores no MRC credentials. Each caller picks the colour their handle
-wears on MRC under `[P]rofile` → `[Y]our MRC nick colour`.
-
-**Private messages.** Off by default. A caller who wants them switches
-them on under `[P]rofile` → `[P]rivate MRC messages`; the switch applies
-the next time they enter an MRC room and covers both directions. From
-then on a private line from an MRC user rings the bell and shows as
-`[MRC private] bob@Other: text` to that caller alone; `/mrc msg <nick>
-<text>` answers anyone on the network (the hub keeps nicks unique, so
-the nick alone is the address) and `/mrc r <text>` answers whoever
-wrote last. The first private line in a session, either way,
-comes with a note that these messages are not private on that network:
-the hub and any client can read or spoof them. Private lines are never
-stored -- not in scrollback, not in search, not in any log. There is
-nothing for you to configure; a caller who leaves the switch off is told
-once per sender that somebody tried, as before.
-
-A caller can also stop the hub from answering `LASTSEEN` questions about
-their handle under `[P]rofile` → `[W]hen last seen on MRC`. Typing
-`!identify`, `!register`, `!update` or `!roompass` as chat in any channel
-is refused while the node has an MRC bridge, since the password would be
-recorded as chat and relayed as soon as the channel is bridged; the
-`/mrc` forms ask for it without echo.
-
-MRC users colour their lines with Mystic-style `|NN` codes. Those colours
-are shown by default; a caller who prefers plain text switches them off
-under `[P]rofile` → `[I]nter-BBS chat colours`. Either way an inbound
-line is sanitized before any code becomes a colour. A caller's own typed
-codes are not relayed — NetBBS callers speak in one house style.
-
-`/mrc` also asks the hub things on the caller's behalf: `/mrc rooms`,
-`/mrc who`, `/mrc bbses [search]`, `/mrc info <bbs>`, `/mrc motd`,
-`/mrc stats`, `/mrc help [topic]`, `/mrc lastseen <nick>`, `/mrc topics`, plus
-`/mrc send <command>` for any other server command, `/mrc ctcp <nick>
-VERSION|TIME|PING|CLIENTINFO`, and `/mrc msg <nick> <text>` / `/mrc r
-<text>` for a caller who opted in to private messages. The hub's reply
-is shown to that caller
-alone as `[MRC]` lines, bounded per caller. Network-wide broadcasts from
-trusted MRC users appear in every bridged channel as `[MRC broadcast]`.
-The bridge answers other clients' CTCP requests (VERSION, TIME in UTC,
-PING, CLIENTINFO) for any announced caller on its own, bounded per
-remote sender. If the hub moves a caller out of the mapped room (a
-password room, for instance) they are told and announced there again,
-at most once per minute; if the hub renames them they are told the new
-name; if the hub terminates the site's session the link stops until you
-change and save the MRC settings, like an `OLDVERSION` rejection.
-
-`[N]ode` → `[C]hat bridge (MRC)` shows the hub round trip, measured from
-the hub's answer to each keepalive, and the link state (connected,
-reconnecting, error, off), hub, last error, drop counters and every
-bridged channel with the hub's roster, plus `[R]econnect now`. To take a
-single channel off the network without touching the others, use its
-`[P]ause MRC bridge`; to take the whole node off, disable the link under
-Settings. The bridge's own warnings land in the Link diagnostic log.
-
-Phase 2/3 scope is one active channel membership per session at a time;
-simultaneous multi-channel membership and background delivery are later
-roadmap work, not currently available to configure around.
-
----
-
-## 9. Mail
-
-Local mail is a persistent, asynchronous domain, distinct from ephemeral
-chat `/msg`. It needs no SysOp setup — recipient mailboxes are bounded
-automatically (the oldest already-*read* message may be evicted to make
-room; unread mail is never silently discarded; if no safe eviction is
-possible, delivery fails explicitly rather than quietly dropping
-something). There's nothing to tune here today.
-
-Link mail extends this same mailbox rather than creating a second,
-parallel inbox UI — a message that arrived over Link looks like ordinary
-mail once delivered.
-
----
-
-## 10. Post drafts: save and resume
-
-Not SysOp-specific, but worth knowing since it changes what "cancelled" 
-means for every caller, including you when you're posting.
-
-Composing a new board post (or editing one) no longer forces a choice
-between finishing now or losing the work. In the line editor, `/exit` or
-`/quit` save the current draft and leave — distinct from `/cancel`, which
-still discards it outright. In the fullscreen editor, Ctrl+X's quit
-dialog gained a **"[K]eep draft & exit"** option alongside Save/Discard/
-Cancel.
-
-The next time you enter a board where you have a saved draft, you're
-proactively offered `[E]dit it, [D]elete it, or [I]gnore for now` before
-the ordinary post list even renders. Editing an existing post that you
-previously `/exit`ed out of works the same way, just triggered by
-re-opening that specific post rather than by entering the board.
-
-A saved draft that's genuinely abandoned (nobody ever comes back to resume
-or delete it) doesn't accumulate forever: `[O]perations` → `[P]rune
-drafts` (§11) removes any draft file older than 30 days, after a dry-run
-preview.
-
----
-
-## 11. Node operations: sessions, maintenance, drain, shutdown
-
-`[O]perations` → `[N]ode and sessions` (only present in a live session —
-see §1):
-
-- `[W]ho` — lists connected sessions.
-- `[M]aintenance mode` — blocks new non-SysOp logins. **Check this
-  screen if a user reports they can't log in and you don't remember
-  leaving anything on** — maintenance mode's status is shown
-  unconditionally on this screen (not just when active), specifically
-  because a SysOp toggling it and then getting distracted, with no
-  visible reminder, has actually happened and locked out real users
-  before this screen was changed to always show it.
-- `[D]rain` — schedules disconnecting non-SysOp sessions after a delay,
-  for planned maintenance. Anyone still connected sees a warning with the
-  remaining time as soon as they reconnect or the drain is scheduled
-  while they're active.
-- `[L]ock & drain` — maintenance mode plus a drain together, the normal
-  "I'm about to take this node down for a while" combination.
-- `[S]hutdown` — schedules the process itself stopping. A shutdown
-  triggered by an external signal (SIGTERM/SIGINT) rather than this
-  screen is shown as such and may not be cancellable from here, depending
-  on how it was triggered.
-
-`[O]perations` → `[P]rune drafts` (always present, not tied to a live
-session or Link) removes stale saved-post/bio draft files (§10) older
-than 30 days. Same dry-run-then-confirm shape as `[G]C storage` (§5):
-shows how many files and how much space would be freed first, asks
-separately before actually deleting. A draft still within the 30-day
-window is never touched, no matter how often you run this.
-
-`[O]perations` → `[A]udit log` (also always present) is the node-wide,
-read-only moderation/admin action trail — "did anything happen on this
-node recently," not scoped to a specific account/board/channel the way
-a per-account or per-object history view is. Toggle newest-first/
-oldest-first, then pick an entry for its full detail.
-
----
-
-## 12. Trust policy and Link federation admin
-
-This section only applies if Link (federation with other NetBBS nodes) is
-enabled on this node. It is genuinely advanced — see
-`docs/NetBBS-design-doc.md`'s trust/reputation/quarantine section for the
-full model (separate trust dimensions, probation, vouching, evidence
-classes, signed trust signals, quarantine effects) before making policy
-changes you don't have a clear mental model for yet. What follows is
-where things live, not the full semantics.
-
-`[S]ettings` → `[P]olicy trust` (or `[O]perations`/console `[L]` for a
-lighter-weight status view):
-
-- `[S]ubjects` — inspect/override effective trust state for a specific
-  remote node or remote user, across each trust dimension (identity
-  integrity, resource behavior, content conduct), plus their remote
-  age/name attestation acceptance state if applicable.
-- `[D]omains`, `[A]nchors`, `[R]eporters` — configure which trust
-  signal sources this node actually listens to.
-- `[I]dentity authorities` — which remote issuers this node accepts
-  identity attestations from at all, and for which attributes.
-- `[E]xceptions` — sole-authority exceptions; the console flags these
-  with a "SAFETY DEVIATION" badge whenever any exist, since they're a
-  deliberate deviation from the normal multi-source trust model and worth
-  a SysOp noticing they're still active.
-- `[H]istory` — trust-policy change history.
-
-`[O]perations` also has, when Link is enabled: `[L]ink status` (peer
-count, dial-reliability, relay activity, board/event counters — a
-current-state snapshot, not historical trend data yet), `[O]utbox`
-(outbound work items awaiting delivery/retry, with dead-letter/replay
-controls), `[D]iagnostics` and `[F]ollow log` (see §15), and
-`[R]epair carried posts` — a one-off, purely additive maintenance action
-for a node that carried boards before local materialization existed; a
-freshly-upgraded node reporting nothing to repair is expected, not an
-error.
-
----
-
-## 13. System settings
-
-`[S]ettings` (or the console's own quick actions):
-
-- `[W]elcome banner` — `[P]review` (renders exactly what a connecting
-  caller would see right now), `[E]nable`/`[D]isable`, e`[X]`dit (opens
-  the fullscreen ANSI-art editor, the same tool used for other ANSI
-  content, with its own crash-recovery autosave).
-- `[U]pdate` — release discovery and update-check settings. Scheduled checks
-  are on by default: the node checks at startup (unless an attempt occurred in
-  the preceding 15 minutes) and every 24 hours, records the outcome, and shows
-  it here and on the SysOp dashboard. They do not download, install, restart,
-  or pop up an unsolicited notification. This screen shows the running
-  version and recent history, can run an immediate manual check even when the
-  schedule is off, toggles startup/daily checks, and manages the optional
-  masked GitHub token used to raise the API rate limit. Deployment remains an
-  operator action: back up, stop the service, install the selected official
-  GitHub-release wheel with the existing extras, and start it again. See the
-  operator guide §6 for the full upgrade and rollback procedure.
-- `[T]imestamp format` — two independent, node-wide settings (not a
-  per-account preference): display *format* (the shape of a rendered
-  timestamp) and display *timezone* (which real instant it shows). Both
-  need to be right — fixing only one still leaves everyone looking at a
-  reshaped but wrong wall-clock time.
-- `[I]nter-BBS chat (MRC)` — the node-wide half of the MRC bridge (hub,
-  TLS, site name, INFO fields); see §8. Which channels are bridged is
-  decided per channel, on each channel's own screen.
-- `[P]olicy trust` — see §12.
-
----
-
-## 14. Backup and restore
-
-From a live node's SysOp console, open `[K] Backup` (directly from the
-dashboard or through Operations) and choose `[C]reate backup now`. NetBBS
-uses the running node's configured database and identity locations, asks for
-confirmation, and creates a timestamped directory under
-`<db-stem>_backups/` beside the database. The screen shows the completed path.
-This is a local backup; copy or synchronize it off-node separately if it is
-meant to protect against loss of the node itself.
-The screen also shows the effective Voidrunner save directory. Close all
-Voidrunner sessions before capture; the BBS may stay running. When that directory
-exists, careers, previous checkpoints, recovery copies and scores are included.
-
-The standalone command remains available for custom destinations and cron
-scheduling, and is the only supported restore entry point:
-
-```
-python -m netbbs.backup create --db path/to/netbbs.db --identity-dir path/to/identity --to path/to/new-backup-dir --voidrunner-save-dir path/to/voidrunner
-python -m netbbs.backup restore --from path/to/backup-dir --db path/to/netbbs.db --identity-dir path/to/identity --voidrunner-to path/to/voidrunner
+| SSH | Enabled, all interfaces, port 2222 | Install `ssh` extra; allow the chosen port |
+| Telnet | Disabled, loopback, port 2323 | Enable explicitly; plaintext credentials and traffic |
+| Web | Disabled, loopback, port 8080 | Install `web` extra; provide HTTPS through a reverse proxy |
+
+**MANUAL — outside NetBBS:** configure firewall rules, router forwarding,
+DNS, and the reverse proxy for the connection methods you offer. A bind
+address of `0.0.0.0` means all IPv4 interfaces; it is not an address to give
+callers. A loopback listener is reachable only from the same host.
+
+For a browser terminal and transfer links behind a proxy, replace the existing
+`[web]` table with:
+
+```toml
+[web]
+enabled = true
+host = "127.0.0.1"
+port = 8080
+public_url = "https://bbs.example.org"
 ```
 
-(`--db`/`--identity-dir` default to this node's standard locations if
-omitted; `--to`/`--from` are always required.) These examples include Voidrunner:
-use the service's actual game directory for capture and an explicit game directory
-for restore. `--voidrunner-save-dir` overrides the environment/default source;
-`--voidrunner-to` is required whenever the manifest contains a `voidrunner`
-component. Omit `--voidrunner-to` for older backups or archives without that
-component; they leave external careers untouched. Stop the node and all games
-before restoring.
+Point the HTTPS proxy at that local port, forwarding WebSocket upgrades as
+well as ordinary requests. Set its upload body limit at least as high as
+NetBBS's configured upload cap. Use a real hostname and certificate;
+`bbs.example.org` is a placeholder. Restart after changing listener settings.
 
-**Manual activation:** configure the restored service's `VOIDRUNNER_SAVE_DIR` to
-the chosen destination before restarting, then verify a real pilot's career and
-Hall of Fame record. This setting is not changed by the restore command. Keep the
-destination separate from the database, identity, content and other node paths.
+`public_url` supplies the externally reachable base address for transfer links.
+Without it, a node bound to a wildcard or loopback address cannot give remote
+terminal callers a usable link. A specific reachable bind address may be used
+as a fallback, but explicit configuration is preferable behind a proxy.
 
-A restore preserves the previous generation it replaced in a rollback directory rather than
-deleting it — the tool tells you where and reminds you it isn't removed
-automatically, so clean it up yourself once you're satisfied the restore
-is good.
+File transfers work through the browser, through short-lived browser links
+shown to terminal callers, or through Zmodem in a capable terminal client.
+PuTTY and ordinary SSH clients lack Zmodem. They need the web listener for
+browser transfers. SFTP is not provided by the NetBBS SSH server.
 
-A backup captures fourteen artifact groups as one recoverable set, not just
-the database: the database itself, content blobs, node identity
-(root/operational/transport keys), the SSH host key, managed-DNS credentials
-including rename-transition state, and every customizable banner and
-masthead, plus the Voidrunner component when present. A DB-only backup would
-silently lose the Link node identity and the
-SSH host key — the latter means every client gets a MITM warning on the next
-connection after a restore that skipped it.
+Transfer URLs contain bearer tokens: anyone holding one can use that transfer.
+Use HTTPS, avoid sharing or logging those links, and request a new link after
+expiry. The node's upload limit and any lower proxy limit both apply.
 
-The console's `[K] Backup` screen also shows when recent backups ran and where
-the last one went. The standalone `python -m netbbs.admin` version of that
-screen is status-only because it does not own the running node's configured
-identity path; use the backup CLI from that context.
+## Using the SysOp console
 
-Restore is staged and validated, not a blind in-place overwrite — it
-checks the backup before touching any live path, and can recover from
-being interrupted partway through. See
-`docs/NetBBS-disaster-recovery-drill.md` for a worked, documented
-end-to-end drill (corrupt/truncated backups, missing components, mid-
-switch interruption) if you want to actually rehearse this before you
-need it for real, which is strongly recommended before calling a node's
-disaster recovery "production ready."
+Log in as a level-255 account and press **[S]ysOp**. The dashboard shows
+node mode, active sessions, pending approvals, backup/update status, and
+NetBBS Link health when enabled. Refresh it after making changes elsewhere.
 
-Explicitly out of scope for the backup tool itself: encrypting backup
-contents at rest, off-site transport of a finished backup, and retention/
-rotation of old backups. Those are your responsibility as the operator,
-the same way they would be for any other cron-driven backup job.
+| Area | Purpose |
+| --- | --- |
+| Users | Accounts, registration, levels, approval, identity-verifier grants |
+| Content | Message boards, file areas, chat channels, Communities, doors, moderation |
+| Operations | Sessions, maintenance, audit log, backups, Link diagnostics |
+| Settings | Branding, timestamps, node name, network participation, update checks |
 
----
+Quick actions lead to the same screens. Use the displayed keys rather than
+old menu letters from release notes. **Back** leaves a screen. Draft editors
+keep changes local until **Save**; Back discards the draft. Arrow keys move
+between fields, and Enter or Space opens the selected field. Where available,
+**Ctrl+H** explains fields.
 
-## 15. Diagnostics and troubleshooting
+In current field prompts, the existing value is already in the input line:
+Enter accepts it, Escape cancels the field edit, and deleting all text clears
+it where the field permits an empty value. Do not assume an empty line means
+“keep the old value.”
 
-`[O]perations` (Link-enabled nodes):
+`python -m netbbs.admin --db /var/lib/netbbs/netbbs.db` is a second,
+**interactive** route to account/content administration without a caller
+connection. It cannot control a running process's sessions, maintenance, or
+live networking. Its Backup screen is status-only; use the backup CLI there.
 
-- `[D]iagnostics` — a bounded, warning-and-above-only log of Link-
-  related events, stored in the database (`link_diagnostic_log`), *not*
-  full content logging — it's sized/aged out automatically, not something
-  you need to manually prune.
-- `[F]ollow log` — tails that same log live while you watch, useful while
-  actively reproducing or waiting for a problem.
-- `[R]epair carried posts` — see §12.
+## Accounts, permissions, and identity
 
-If a user reports they can't log in: check `[N]ode` → maintenance mode
-first (§11) — this is the single most common self-inflicted cause and is
-easy to forget you left on.
+Choose registration mode under **Users → Registration**:
 
-If Link peers seem unhealthy: `[L]ink status` for the current snapshot,
-`[D]iagnostics`/`[F]ollow log` for what's actually failing, `[O]utbox` for
-anything stuck retrying or dead-lettered.
+- **Open:** new accounts can log in immediately.
+- **Approval required:** approve a pending account from its detail screen.
+- **Closed:** only SysOps create accounts.
 
-If something about a specific account's access doesn't make sense
-(can't post somewhere, can't verify someone, unexpectedly locked out):
-check that account's own detail screen (§2) for its level and
-`can_verify_identity` state, then the resource's own gate settings (§4),
-before assuming something is broken — most "this shouldn't be denied"
-reports turn out to be an inherited Community default the SysOp forgot
-was in effect, not a bug.
+An account's numeric level controls level-based access. Level 255 grants SysOp
+administration; ordinary levels express your local policy. NetBBS refuses an
+account change that would leave no enabled, approved SysOp. Disabling an account
+revokes its access; deletion is permanent and requires its exact name. Existing
+content retains its recorded author label.
 
-If something happened on the node and you're not sure who did it or
-when: `[O]perations` → `[A]udit log` (§11) is node-wide and always
-present, unlike the account/resource-scoped history views elsewhere —
-the right first stop for "did anything happen here recently" rather than
-"what happened to this specific thing."
+Access can also depend on resource-specific grants, verified age, and verified
+name. Raising a level does not replace identity verification. When access looks
+wrong, inspect both the account and the resource's effective settings, including
+Community defaults.
 
----
+### Verified age and names
 
-## 16. Getting more help
+A SysOp, or an account explicitly granted **Identity verification**, records
+attestations through **Verify** on the main menu. Granting this permission is
+separate from making someone a moderator. Establish your own verification
+procedure outside NetBBS; the software records the attestation, not proof
+that a document or a person's claim is authentic.
 
-- **Ctrl-H**, at any SysOp screen that hints `(Ctrl-H for help on these
-  fields)` — inline explanation of that screen's own fields, right where
-  you are. Not every screen has this authored yet; it's being added
-  incrementally, starting with name requirements (§3).
-- **Ctrl+G**, inside the fullscreen post/bio editor — its keybind list,
-  plus what "Keep draft & exit" does and how a saved draft comes back.
-- **Arrow keys**, on any field-editor screen (create/edit board, file
-  area, channel, Community, and similar draft-based screens) — Up/Down
-  move a `>` cursor over the field list, Space/Enter activates whichever
-  field it's on (identical to pressing that field's own hotkey letter),
-  and Left/Right step a cycling field's value in place without opening a
-  sub-prompt, where that field supports it. Purely additive — every
-  existing hotkey keeps working exactly as before, and the screen looks
-  identical until you actually press an arrow key.
-- `docs/NetBBS-design-doc.md` — the authoritative "why," and the exact
-  rules for anything this handbook only summarizes.
-- `docs/NetBBS-worklog.md` — developer-facing engineering invariants; only
-  useful to you if you're also changing NetBBS's code, not running it.
+Name requirements cycle through:
+
+| Setting | Effect |
+| --- | --- |
+| None | No verified-name requirement |
+| Verified | A name attestation is required; the name is not displayed by this setting |
+| Verified and displayed | Verification is required and the attested name is shown alongside contributions in that resource |
+
+A verified name does not replace the account's chosen display name. Tell callers
+about disclosure before requiring it. Age and name verification are separate;
+review the available attributes and expiry on the attestation screen.
+
+## Content and Communities
+
+Create resources under **Content**, or use **Create** in a resource picker.
+An empty picker remains usable for creating the first resource. Review the
+draft and save it explicitly.
+
+- **Message boards:** set read/write levels, moderation, retention, and gates.
+  Pending posts remain in an approval queue. Edits retain revision identity.
+- **File areas:** set access, upload policy, size/retention rules, and moderation.
+  Uploads may include a description extracted from `FILE_ID.DIZ`. A remote
+  catalogue entry is metadata; fetching its bytes is a separate action.
+- **Chat channels:** set join gates, visibility, invitations, and moderation.
+  Hidden or invite-only channels need more than a sufficient account level.
+- **Communities:** group related resources and provide inherited defaults.
+  Inspect effective gates on child resources before changing a shared default.
+  A Community is not an automatic grant to every resource inside it.
+- **Doors:** attach registered games to a Community or leave them uncategorized.
+
+Moderator grants belong to a resource or Community. Membership alone does not
+make someone a moderator. Grant only the scope required; use approval queues
+and the audit log to review actions. Chat moderation commands are used inside
+the channel by someone with the appropriate authority.
+
+The [user handbook](NetBBS-User-Handbook.md) covers posting, drafts, follows,
+search, mail, and everyday chat. **New scan** and **Find** only show content the
+caller can access on this node, including carried linked content.
+
+## Door games
+
+Open **Content → Doors → Gallery** to register Retro Trivia, Voidrunner, or
+War Dialer. Gallery entries fill a draft with the installed interpreter and
+sensible defaults; review and Save. Callers reach games through Jump to or a
+Community.
+
+Third-party native programs, DOS games through DOSBox-X, and remote RLogin
+services use compatibility profiles. Start with minimum play level 255,
+choose a template, set your actual paths, run **Check setup**, then **Test as
+SysOp**. Testing launches real programs and may change game data, even if you
+later discard the configuration draft. Test normal quit, disconnect, timeout,
+and each offered caller transport before opening it to users.
+
+**MANUAL — outside NetBBS:** obtain games and licenses, install their runtimes,
+prepare writable installation directories, and configure any remote-service
+tunnel and credentials. NetBBS does not install these components. Use the
+[door setup guide](NetBBS-door-guide.md) for exact profiles, game versions,
+DOSBox-X patches, service controls, and troubleshooting.
+
+Native doors run as the NetBBS service account. Resource limits do **not**
+prevent them reading files or using the network as that account. Install only
+trusted programs. A door's temporary launch directory is deleted afterward;
+persistent game data must live elsewhere.
+
+A companion service keeps a game's world process alive between callers.
+NetBBS can supervise it and exposes Start, Halt, Restart, and its recent log
+on the door detail screen. Install/update the service yourself; stop it before
+copying its data. Do not raise a game's session count until its concurrent
+save handling has been tested.
+
+A door may request permission to post to message boards. **Outbound** is off
+by default and configured per door: choose an allowlist and posting limit.
+Posts use a distinct door label, not the caller's identity. Normal board
+moderation applies. Allowing a linked board can distribute posts to peers;
+local deletion cannot retrieve copies already received elsewhere.
+
+## NetBBS Link
+
+NetBBS Link connects independent NetBBS nodes. It carries selected message
+boards, chat channels, file catalogues, and mail. Your node decides what to
+carry and which peers to trust. A signature identifies who sent something;
+it does not make that sender trustworthy.
+
+**Current boundary:** asynchronous services, trust controls, live chat,
+presence, and live relay are implemented. Federation remains private and
+experimental pending [public-readiness validation](NetBBS-phase4-readiness.md)
+and independently operated dogfood. Independent implementation compatibility
+is not yet established. Local Communities are available; Link Communities
+and cross-node `/dm` invitation chats are not. Cross-node `/msg` and `/private`
+do work when a live path exists.
+
+### Join and share
+
+Install the `web` extra even if callers use only SSH. Enable participation
+through first-run onboarding or **Settings → Join NetBBS Link**, unless TOML
+explicitly overrides it. Use a distinct node name. The default outgoing-only
+mode uses reliable nodes for discovery and relay; no Link port forwarding is
+needed. Caller access still needs its own reachable listener.
+
+Reliable nodes are bootstrap/relay infrastructure, not owners of your BBS.
+Manual seeds can supplement them. A full peer additionally advertises a
+reachable Link address and needs the corresponding network setup.
+
+For a full peer, these are the two Link listeners, separate from caller ports:
+
+```toml
+[link]
+enabled = true
+host = "0.0.0.0"
+port = 7862
+realtime_port = 8862
+outgoing_only = false
+advertised_host = "bbs.example.org"
+advertised_port = 7862
+realtime_advertised_port = 8862
+```
+
+**MANUAL — outside NetBBS:** replace the hostname and allow/forward both TCP
+ports to this node. Restart and have another operator check asynchronous
+exchange and live chat separately. If omitted, the real-time port is the HTTP
+Link port plus 1000. Keep outgoing-only mode if you cannot provide this reachability.
+
+The
+[developer handbook's configuration reference](NetBBS-Developer-Handbook.md#node-configuration-reference)
+lists the less common transport and quota settings.
+
+Create a local resource before promoting it to linked scope. To carry a
+remote resource, use its Link browsing/carry actions. Carrying a message board
+creates a local browsable copy; file catalogues do not automatically download
+all file contents. Ask the other SysOp to verify both sides when first testing
+publication. Hello/discovery alone does not prove content arrived.
+
+Asynchronous delivery can continue after a peer reconnects. Live chat and
+private messages require a working live session; a failed live message is not
+silently converted to mail. Link mail is encrypted to the recipient's home
+node for ordinary accounts; the home-node operator can read it.
+
+### Trust and recovery
+
+Use **Link status** for peers and relay state, **Outbox** for pending or failed
+work, and **Diagnostics / Follow log** for explanations. Policy trust settings
+separate identity integrity, resource behavior, and content conduct: a complaint
+about content should not be treated as proof of a forged identity.
+
+Under **Settings → Policy trust**, inspect a subject's effective state and
+history before applying an override. Domains, anchors, and reporters determine
+whose signals count; multiple identities from one trust domain do not become
+independent votes. Quarantine restricts exchange; it does not erase previously
+accepted content. A sole-authority exception deliberately weakens the usual
+multi-source policy and is marked as a safety deviation.
+
+A familiar name attached to a new fingerprint produces an identity warning.
+Confirm the full **Technical identity** with the other operator before trusting
+it; renaming a node does not transfer its reputation. Managed DNS changes and
+node display-name changes are separate. Use the DNS screen's staged rename
+and recovery controls; do not release and re-register a name as a rename shortcut.
+
+## MRC chat bridge
+
+MRC is a separate, public inter-BBS chat network. It is not NetBBS Link and
+does not provide Link's authenticated identities or trust model.
+
+1. Under **Settings → Inter-BBS chat (MRC)**, configure and enable the hub
+   connection and the site name/details it announces. Saving applies live.
+2. Set **MRC room** on each channel you want bridged. One room maps to one
+   channel. Callers see an MRC badge and a notice that their handle is visible.
+3. Optionally enable **Open rooms** so callers can select or name rooms through
+   the Multi Relay Chat picker. Set its access gates, room cap, retention, and
+   blocklist. Adopt a room to retain it, or retire it deliberately.
+
+IP-address reporting and extra caller metadata are separate opt-in settings.
+Terminal size is sent for reply formatting. Private MRC messages require each
+caller's opt-in and are not confidential from the network. Do not type MRC
+passwords as ordinary chat; `/mrc register`, `/mrc identify`, and the related
+password commands ask separately without echo.
+
+Use **Node → Chat bridge (MRC)** for connection state, round-trip time, errors,
+and reconnect. Pause one channel's bridge or disable the whole bridge without
+removing local chat. MRC moderation and room rules also depend on the remote hub.
+
+## Daily operation
+
+Check pending registrations/posts/files, backup recency, free disk space,
+and recent errors. Choose welcome/masthead/banner presets through Settings;
+preview before applying. Timestamp format and display timezone are node-wide.
+
+Under **Operations → Node and sessions**:
+
+- **Maintenance** blocks new non-SysOp logins.
+- **Drain** warns and disconnects non-SysOp sessions after a delay.
+- **Lock & drain** combines both for planned work.
+- **Shutdown** stops the node after warning callers.
+
+These controls require a live node session. For a stopped node, use the host's
+service controls. Use **Audit log** to see administrative and moderation
+activity. Storage garbage collection and draft pruning show the proposed work
+before confirmation; review it instead of deleting files directly.
+
+## State, backup, and recovery
+
+### Know what belongs to the node
+
+The database stores accounts, configuration, metadata, and network state.
+Files, keys, and game saves also live outside it. For `/var/lib/netbbs/netbbs.db`:
+
+| State | Usual location |
+| --- | --- |
+| Database | `/var/lib/netbbs/netbbs.db` and live SQLite side files |
+| Uploaded content | `/var/lib/netbbs/netbbs_files/` |
+| Node identity | Configured `identity_dir` |
+| Managed-DNS state and credentials | Database plus credential files beside it |
+| SSH host key and custom banners | Files beginning `netbbs_` beside the database |
+| War Dialer world | `/var/lib/netbbs/netbbs.db.doors/war-dialer.db`, unless overridden |
+| Voidrunner careers | Service account's `~/.netbbs/voidrunner_saves/`, unless `VOIDRUNNER_SAVE_DIR` overrides it |
+| Third-party games | Each door's installation directory and any author-documented external state |
+| TOML and service configuration | `/etc/netbbs/` and the installed service files |
+| Logs | `netbbs.log` beside the database, plus service-manager output |
+
+Keep your configuration, service settings, and external-game state with your
+recovery records. The built-in backup is not a copy of every file the service
+account can access. Do not copy only a running `.db` file: SQLite's write-ahead
+log can contain changes not yet written into that file.
+
+### Create and verify a backup
+
+Stop active games before capture; halt companion services. The BBS itself may
+stay running for a supported database backup. From a live SysOp console,
+**Backup → Create backup now** writes a timestamped directory under
+`netbbs_backups/` beside the database. Check the reported path and game coverage.
+
+For a scheduled job or chosen destination, use the installed backup CLI. Run it
+as an account able to read all node state. **Pin the real Voidrunner path**:
+
+```sh
+sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m netbbs.backup create \
+  --db /var/lib/netbbs/netbbs.db \
+  --identity-dir /var/lib/netbbs/netbbs_identity \
+  --voidrunner-save-dir /var/lib/netbbs/.netbbs/voidrunner_saves \
+  --to /var/lib/netbbs/backups/pre-upgrade-20260913
+```
+
+The destination must not already exist; choose a fresh name for each backup.
+The Voidrunner path above matches the service layout in this handbook. Use the
+path shown by the live Backup screen if yours differs.
+
+**Known issue in v7.4.0 ([#555](https://github.com/Thiesi/NetBBS/issues/555)):**
+a backup CLI run under a different `HOME` can report success while omitting
+Voidrunner careers. The default is derived from the CLI process's home, not
+from the node database. Read the coverage output and use
+`--voidrunner-save-dir` explicitly. An absent Voidrunner component will not
+magically reappear during restore.
+
+War Dialer has separate world capture and restore rules; see the
+[door guide](NetBBS-door-guide.md). Third-party installation directories are
+excluded unless **Backup → Door installations** is enabled. That option copies
+them without stopping their writers and does not automatically restore them.
+Stop games/services first. A missing or unreadable requested installation fails
+the backup. Symlinks are copied as links, not followed to external data.
+
+**MANUAL — outside NetBBS:** copy completed backups off the machine, protect
+them as secrets, encrypt them if needed, and arrange retention. Backups contain
+private keys and account data. Neither off-site transfer nor rotation is built in.
+Also preserve TOML, service configuration, and any game data outside the captured
+paths. Inspect `manifest.json` and the coverage messages before relying on an archive.
+
+Door outbound result receipts are currently omitted from built-in backups
+([#556](https://github.com/Thiesi/NetBBS/issues/556)). If a game relies on them,
+preserve `door-outbound/` beside the database separately while games are stopped.
+After recovery, a missing receipt does not mean its post was never published.
+
+### Restore
+
+Stop the node and every game/service. Keep the current state until the restored
+node has been verified. Use the backup tool, which validates and stages the
+restore and refuses to overwrite an active node:
+
+```sh
+sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m netbbs.backup restore \
+  --from /path/to/backup \
+  --db /var/lib/netbbs/netbbs.db \
+  --identity-dir /var/lib/netbbs/netbbs_identity \
+  --voidrunner-to /var/lib/netbbs/.netbbs/voidrunner_saves \
+  --war-dialer-to 1=/var/lib/netbbs/netbbs.db.doors/war-dialer.db
+```
+
+Use `--voidrunner-to` when the archive includes that component; omit it for an
+archive without it. The example also assumes one captured War Dialer world,
+key `1`. Every captured world requires an explicit `--war-dialer-to KEY=PATH`
+mapping, even for its default location; omit this option if there is no world
+component. Read the keys in the backup's manifest and follow the door guide for
+multiple or overridden worlds. Restore preserves replaced state in a rollback
+directory and reports its location; it does not delete that directory later.
+
+**MANUAL:** restore external door installations from `door-installs/` if included,
+restore service/TOML settings, and ensure the service uses the restored game paths.
+Set `VOIDRUNNER_SAVE_DIR` to the chosen destination if it differs from the service's
+default. Restore never changes that environment setting for you. Do not run the
+same restored Link identity on two live nodes.
+
+Restart, log in, read a post, retrieve a file, check Link identity/peers, and enter
+a real saved game. Rehearse this first on disposable state using the
+[disaster recovery drill](NetBBS-disaster-recovery-drill.md). Automated backup
+tests do not replace a recovery exercise on your host.
+
+## Upgrading and removing NetBBS
+
+The node checks GitHub Releases on startup and every 24 hours by default;
+a startup within 15 minutes of the last attempt skips another check. Results
+appear on the SysOp dashboard and **Settings → Update**. You can check manually,
+toggle the schedule, and set an optional GitHub token for a higher API limit.
+These checks do not download, install, restart, or interrupt callers.
+
+**MANUAL — on the host:**
+
+1. Read the selected release's notes. Record the current version and paths.
+2. Stop games/services and create a backup; verify its game coverage and keep
+   an off-node copy.
+3. Stop NetBBS through its service manager.
+4. Install the selected GitHub-release wheel into the same virtual environment,
+   using the same extras as before.
+5. Start the service and verify a real login, content, file transfer, and games.
+
+Startup applies required database migrations. An older build refuses a database
+with a newer schema. To roll back after a migration, stop the service, reinstall
+the earlier release, and restore the pre-upgrade state using compatible tooling;
+do not attempt to downgrade the database by hand. Keep the newer state separately
+if callers have contributed since the upgrade.
+
+Uninstalling with the environment's `python -m pip uninstall netbbs` removes the
+package, not node data. Disable the service first. Removing state, keys, games,
+DNS registration, or backups is a separate, deliberate operator action.
+
+## Troubleshooting
+
+| Symptom | Check and next action |
+| --- | --- |
+| Service will not start | Read service output; check config paths, file permissions, selected interpreter, extras, and port conflicts. Do not treat a zero exit status alone as a working listener. |
+| SSH import fails on NetBSD | Check pkgsrc libraries and `LD_LIBRARY_PATH`; see installation above. |
+| Caller cannot log in | Check maintenance mode, pending approval, disabled account, and login throttling before resetting credentials. |
+| Caller can read but cannot contribute | Check write/join gates, age/name attestations, moderator grants, and inherited Community settings. |
+| Browser terminal or upload fails | Check HTTPS proxy/WebSocket forwarding, upload limits, web listener, and `public_url`. |
+| Terminal offers no file-transfer link | Enable/configure the web listener and its public URL, or use a Zmodem-capable client. |
+| Link will not start | Check the `web` extra, effective participation setting, and a non-placeholder node name. |
+| Peers connect but content is missing | Check carry/subscription decisions, trust state, Outbox, and Diagnostics. Use Repair carried posts only for local materialization repair. |
+| Game is busy, fails, or loses state | Check its session limit, Compatibility setup, Last diagnostic, service state, and actual persistent paths. |
+| Backup says no Voidrunner directory found | Compare the live Backup screen with the CLI's path; rerun with explicit `--voidrunner-save-dir`. |
+| Startup refuses the database version | Install a compatible release or restore the matching pre-upgrade backup. Do not edit the schema number. |
+
+On Linux, start with `journalctl -u netbbs`. On NetBSD, the example service's
+capture file is `netbbs.service.log` in the state directory; it catches failures
+before the application's rotating log opens. That service capture is not
+self-rotating, so arrange rotation or an appropriate output policy yourself.
+The application's `netbbs.log` rotates at 10 MiB with five retained backups
+(up to about 60 MiB including the active file).
+
+Link Diagnostics is a bounded warning/error log, not a transcript of all
+content. The administrative Audit log answers who changed a setting or moderated
+an item. Inspect those before attempting filesystem repairs.
+
+For unresolved problems, [file an issue](https://github.com/Thiesi/NetBBS/issues)
+with the release, operating system, transport, steps, and relevant error text.
+Remove passwords, private keys, tokens, personal data, and transfer URLs.

@@ -157,7 +157,7 @@
   <section class="hero">
     <div class="glow"></div>
     <div class="wrap">
-      <div class="tag"><span class="pip"></span>Project overview &middot; v7.2.0</div>
+      <div class="tag"><span class="pip"></span>Project overview &middot; actively developed</div>
       <h1 class="headline">What NetBBS actually is</h1>
       <p class="lede">NetBBS is a modern, TCP/IP-native bulletin board system —
         the dial-up-era style of text-based, multi-user server, rebuilt for
@@ -177,33 +177,33 @@
     <div class="wrap">
       <div class="section-head">
         <span class="eyebrow">Where things stand</span>
-        <h2>Actively developed, one phase at a time.</h2>
-        <p>NetBBS ships in deliberate phases — each one a real, usable slice, not a roadmap placeholder. Here's what's actually done versus still in progress.</p>
+        <h2>What works today.</h2>
+        <p>A complete standalone BBS, with networking and games you can enable as your community grows. The remaining validation limits are part of the picture too.</p>
       </div>
       <div class="timeline">
         <div class="t-item">
-          <div class="t-head"><h3>Phases 1 &amp; 2 — Standalone BBS</h3><span class="badge complete">Complete</span></div>
-          <p>Auth, message boards, file areas with real Zmodem transfer, real-time chat, personal mail, a user directory, moderation, and full SysOp tooling — a genuinely full-featured board on its own, no networking required.</p>
+          <div class="t-head"><h3>Standalone BBS</h3><span class="badge complete">Available</span></div>
+          <p>Message boards, file areas with browser and Zmodem transfers, live chat, personal mail, Communities, search, moderation, and a built-in SysOp console.</p>
         </div>
         <div class="t-item active">
-          <div class="t-head"><h3>Phase 3 — NetBBS Link connectivity</h3><span class="badge active">Complete</span></div>
-          <p>Signed node identity, peer discovery, linked message boards/chat channels/file areas/mail with genesis and materialization, and WAN reachability for nodes behind NAT via automatic relay selection.</p>
+          <div class="t-head"><h3>NetBBS Link connectivity</h3><span class="badge active">Implemented</span></div>
+          <p>Peer discovery, shared message boards, chat channels, file catalogues, mail, and relay support for nodes behind NAT. Each SysOp chooses what their node carries.</p>
         </div>
         <div class="t-item pending">
-          <div class="t-head"><h3>Phase 4 — Trust &amp; reputation</h3><span class="badge pending">Implemented — validation pending</span></div>
-          <p>Local trust policy, signed vouch subscriptions, and enforcement across every NetBBS Link boundary are built and covered by adversarial automated testing. What remains before it's called public-ready is human and operational: a manual recovery exercise and an independently-administered multi-node validation — not further code.</p>
+          <div class="t-head"><h3>Trust &amp; reputation</h3><span class="badge pending">Validation continues</span></div>
+          <p>Local trust policy, signed reports, quarantine, and recovery controls are implemented. NetBBS Link remains private and experimental: manual recovery, independently administered multi-node validation, and sustained dogfood are still required before public readiness is claimed.</p>
         </div>
         <div class="t-item active">
-          <div class="t-head"><h3>Phase 5 — Real-time NetBBS Link chat</h3><span class="badge active">Active</span></div>
-          <p>Noise-authenticated live transport, real-time chat in linked chat channels, and node-wide presence are shipped. NetBBS Link-wide live private chat and broader chat-channel membership models are still ahead.</p>
+          <div class="t-head"><h3>Live NetBBS Link chat</h3><span class="badge active">Available</span></div>
+          <p>Authenticated live chat, presence, recent scrollback on joining, and private messages across nodes, including live relay paths. Cross-node invitation chats and simultaneous background chat-channel memberships remain outside the current scope.</p>
         </div>
         <div class="t-item">
           <div class="t-head"><h3>Inter-BBS chat — the MRC bridge</h3><span class="badge complete">Complete</span></div>
           <p>A bridge onto MRC, the public inter-BBS chat network that Mystic, Synchronet and ENiGMA&frac12; boards already use: chat channels a SysOp maps to rooms, open rooms callers can enter on demand as chat channels of their own, away/topic/message-of-the-day presence carried both ways, and opt-in private messages. Shipped across v5.7.0 through v5.10.0; the scoping decision behind it is closed.</p>
         </div>
         <div class="t-item active">
-          <div class="t-head"><h3>Phase 7 — Doors &amp; legacy compatibility</h3><span class="badge active">Native, DOS and remote shipped</span></div>
-          <p>A native, sandboxed door-game execution model — subprocess isolation, enforced resource ceilings, a wall-time watchdog — plus two bundled games proving the pipeline end to end. v6.0.0 extends it past NetBBS's own doors: native stdio, a POSIX controlling terminal or a private DOOR32 socket; classic DOS doors through an operator-installed DOSBox-X over an emulated serial/FOSSIL link; and remote door services over allowlisted, operator-run tunnels. LORD, TradeWars 2002 and Global War are verified for saved-game re-entry and clean exit on NetBSD 11 and Debian 13 — a tested matrix, not a claim about every historical door. Proprietary multi-node locking stays out of scope, and every template defaults to a single session. v7.2 rebuilt the presentation of both bundled games: the wrapper every screen passed through had stripped their colour by construction, and the tests that now guard it can fail because a screen is grey.</p>
+          <div class="t-head"><h3>Doors &amp; games</h3><span class="badge active">Available</span></div>
+          <p>Retro Trivia, Voidrunner, and War Dialer are bundled. Add trusted native programs, selected DOS games through DOSBox-X, or remote services. Companion services and an optional message-board posting hook support external door developers. Native doors run as the service account; resource limits do not isolate them from its files. Legacy compatibility is documented for specific game versions and host configurations.</p>
         </div>
       </div>
     </div>
@@ -336,7 +336,7 @@
         <div class="cat">
           <h3>How it differs from NetBBS Link</h3>
           <ul>
-            <li><b>NetBBS Link carries everything; MRC carries chat.</b> Message boards, mail, files and governance travel over NetBBS Link's signed, content-addressed protocol. MRC is live conversation only.</li>
+            <li><b>NetBBS Link connects more than chat.</b> It carries selected message boards, mail, file catalogues, trust signals, and live conversations. MRC connects chat rooms.</li>
             <li><b>NetBBS Link has no centre; MRC has a hub.</b> NetBBS Link peers are cryptographic identities that verify each other directly. An MRC author is a name on someone else's server, so NetBBS renders every inbound line as an external, unverifiable author — never as a local account.</li>
           </ul>
         </div>
@@ -565,16 +565,16 @@
     <div class="wrap">
       <div class="section-head">
         <span class="eyebrow">Go deeper</span>
-        <h2>The real documentation, not a summary of it.</h2>
+        <h2>A handbook for what you want to do.</h2>
       </div>
       <div class="doc-links">
-        <a class="doc-link" href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-operator-guide.md" target="_blank" rel="noopener">
+        <a class="doc-link" href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-User-Handbook.md" target="_blank" rel="noopener">
           <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="1.5" width="12" height="13" rx="1.4" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 5H11.5M4.5 7.5H11.5M4.5 10H9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></div>
-          <div><h3>Operator guide</h3><p>The complete install-through-running path for a persistent, real node.</p></div>
+          <div><h3>User handbook</h3><p>A short guide to connecting, getting around, posting, chatting, exchanging files, and playing.</p></div>
         </a>
-        <a class="doc-link" href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-design-doc.md" target="_blank" rel="noopener">
+        <a class="doc-link" href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-Developer-Handbook.md" target="_blank" rel="noopener">
           <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 2.5H10L14 6.5V13.5H2V2.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M10 2.5V6.5H14" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
-          <div><h3>Design document</h3><p>Current product and architecture decisions, and why they were made.</p></div>
+          <div><h3>Developer handbook</h3><p>Build a door, implement NetBBS Link, or contribute to NetBBS itself, with contracts and reference examples.</p></div>
         </a>
         <a class="doc-link" href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-door-guide.md" target="_blank" rel="noopener">
           <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="4" width="13" height="8.4" rx="1.9" stroke="currentColor" stroke-width="1.3"/><path d="M4.6 7.2V9.6M3.4 8.4H5.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="10.6" cy="8" r="0.9" fill="currentColor"/><circle cx="12.3" cy="9.6" r="0.9" fill="currentColor"/></svg></div>
@@ -582,7 +582,7 @@
         </a>
         <a class="doc-link" href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-SysOp-Handbook.md" target="_blank" rel="noopener">
           <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2.5 2.6H7C7.8 2.6 8 3.2 8 3.8V13C8 12.4 7.6 12 7 12H2.5V2.6Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M13.5 2.6H9C8.2 2.6 8 3.2 8 3.8V13C8 12.4 8.4 12 9 12H13.5V2.6Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
-          <div><h3>SysOp handbook</h3><p>Running the board day to day, including the MRC settings and what callers see in a bridged chat channel.</p></div>
+          <div><h3>SysOp handbook</h3><p>Install and run your node, manage accounts and content, connect networks, back up, recover, and upgrade.</p></div>
         </a>
         <a class="doc-link" href="https://github.com/Thiesi/NetBBS/issues" target="_blank" rel="noopener">
           <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3"/><path d="M8 5.3V8.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="10.8" r="0.7" fill="currentColor"/></svg></div>
@@ -590,7 +590,7 @@
         </a>
         <a class="doc-link" href="https://github.com/Thiesi/NetBBS/releases" target="_blank" rel="noopener">
           <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5L14 4.5V11.5L8 14.5L2 11.5V4.5L8 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 8L2 4.7M8 8L14 4.7M8 8V14.3" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
-          <div><h3>Releases</h3><p>Every tagged version with real release notes — no schema surprises, ever silent.</p></div>
+          <div><h3>Releases</h3><p>Download a release and read its changes and upgrade notes.</p></div>
         </a>
       </div>
     </div>
@@ -599,8 +599,8 @@
   <section class="section">
     <div class="wrap">
       <div class="final-cta">
-        <h2>Convinced? It runs in about two minutes.</h2>
-        <p>A from-source quickstart, a real install path, and the full pitch for why you'd want one.</p>
+        <h2>Ready to run your own node?</h2>
+        <p>Start with the installation guide, then shape the BBS around your community.</p>
         <div class="cta-row">
           <a class="btn btn-primary" href="index.html" id="landing-link-final">Get started →</a>
         </div>

@@ -1,155 +1,141 @@
-# NetBBS disaster-recovery drill
+# NetBBS disaster recovery drill
 
-A documented procedure for an operator to prove a node's backup/restore
-mechanism (`netbbs.backup`, design doc §13.4/§13.10) actually works,
-against realistic failure conditions, not just its happy path. Run this
-once against a disposable copy of a real node before relying on backups
-in production, and again after any NetBSD dependency upgrade that changes
-Python, SQLite, or the filesystem NetBBS runs on, or after a NetBBS
-upgrade from an official GitHub release.
+This is a SysOp reference for rehearsing the
+[backup and recovery procedure](NetBBS-SysOp-Handbook.md#state-backup-and-recovery).
+Run it against **disposable copies** and finish with a rehearsal on your actual
+deployment platform. A successful automated test is not evidence that your
+service settings, game paths, permissions, and off-site copies are recoverable.
 
-Everything below can be exercised on any POSIX system; do the final pass
-on the actual NetBSD host you operate, since that's the one environment
-this project targets and the one place `os.kill(pid, 0)`-based liveness
-detection (§13.10) is guaranteed to behave exactly as documented.
+## Prepare
 
-## Prerequisites
+Record the installed version, database and identity paths, service settings,
+public node fingerprint, and the SSH host-key identity. Keep the TOML and service
+configuration separately: the built-in backup does not capture arbitrary host
+configuration.
 
-- A running NetBBS node with real content: at least one board with posts
-  and edits, an uploaded file, a linked (or Link-disabled, either is
-  fine) node identity, SSH enabled with a generated host key, and a
-  custom welcome banner.
-- A saved Voidrunner career and Hall of Fame record in the service's actual
-  save directory. The commands below use `/path/to/voidrunner`; substitute that
-  directory explicitly. Close every game session before capture. If rehearsing
-  an older backup without a `voidrunner` manifest component, omit
-  `--voidrunner-to`; such backups do not restore external careers.
-- Enough free disk to hold a second full copy of the node's database and
-  file area (`netbbs.backup restore` stages a complete copy before
-  switching anything into place -- see §13.10).
+Use representative state: an account, a board post and edit, an uploaded file,
+custom artwork, and saved careers/worlds for the games you offer. Record enough
+visible game details to recognize a restored career. Allow space for the archive,
+staging, and retained rollback generations.
 
-## 1. Take a real backup
+Stop game sessions and companion services before capture. Identify Voidrunner's
+actual save root from the live Backup screen; the CLI's home directory can differ
+from the service's ([#555](https://github.com/Thiesi/NetBBS/issues/555)).
+War Dialer worlds are owned by the corresponding node database; do not transplant
+them into an unrelated node.
 
-```sh
-python -m netbbs.backup create --db netbbs.db --identity-dir netbbs_identity --to /path/to/backup1 --voidrunner-save-dir /path/to/voidrunner
-```
+**MANUAL — outside NetBBS:** copy a completed archive to your recovery machine
+and protect it as a secret. Keep a recovery clone off the public network until
+verified. Never run the original and its restored Link identity simultaneously.
 
-Confirm `backup1/manifest.json` exists and its `checksums` object lists
-the database snapshot, every identity file, the SSH host key, and the
-welcome banner, plus every retained file listed in the `voidrunner` component.
-Confirm its source directory matches the service and that careers, previous
-checkpoints and scores are present. The maintenance gate must refuse capture
-while a pilot is active; retry the same destination after closing that session.
+## 1. Capture and inspect
 
-## 2. Confirm restore refuses against a running node
-
-With the node still running:
+Use the service's interpreter and actual paths; all paths below are placeholders:
 
 ```sh
-python -m netbbs.backup restore --from /path/to/backup1 --db netbbs.db --identity-dir netbbs_identity --voidrunner-to /path/to/voidrunner
+python -m netbbs.backup create --db /path/to/netbbs.db --identity-dir /path/to/identity --voidrunner-save-dir /path/to/voidrunner --to /path/to/fresh-backup
 ```
 
-Expect a refusal naming the node's PID file (`<db-stem>.pid`, written by
-`netbbs.__main__` on startup and removed on clean shutdown). Confirm this
-still refuses even if the node has been sitting idle for a while (not
-mid-transaction) -- this is exactly the case the pre-issue-#75 restore
-could not reliably catch.
+The destination must not exist. Inspect the coverage output and `manifest.json`:
 
-Stop the node (`SIGTERM`/`Ctrl+C`) and every game using the target directory,
-and confirm the PID file is gone.
+- the database snapshot, identity files, SSH host key, and configured banners;
+- the uploaded content tree and representative file bytes;
+- Voidrunner career, previous checkpoint, recovery, and score files when present;
+- each War Dialer world's key, source path, ownership, and checksum;
+- optional door installations if you enabled that capture.
 
-## 3. Confirm a corrupt or truncated backup is refused before anything live is touched
+A backup with no game component does not recover that game's external data.
+Third-party installation copies are not quiesced automatically and are not
+automatically restored. Door outbound receipts are currently omitted
+([#556](https://github.com/Thiesi/NetBBS/issues/556)); preserve any needed receipts
+separately and do not infer an unrecorded post outcome after recovery.
 
-Make a scratch copy of `backup1` first (`cp -r backup1 backup1-corrupt`),
-then corrupt it one way at a time and confirm each is refused, and that
-`netbbs.db`/`netbbs_files`/`netbbs_identity`/the SSH host key/the banner
-are all byte-for-byte unchanged afterward:
+## 2. Rehearse the refusal cases
 
-- Truncate the database snapshot: `truncate -s 100 backup1-corrupt/netbbs.db`.
-- Flip a byte in a blob under `backup1-corrupt/files/`.
-- Edit `manifest.json` to change one recorded checksum without changing
-  the file it describes.
-- Delete one identity file (e.g. `backup1-corrupt/identity/signing.identity`).
-- Change or remove a listed file in `backup1-corrupt/voidrunner/`; confirm the
-  live game directory is unchanged too.
+Use a disposable target with the matching node data, isolated listener ports,
+and no public network participation.
 
-Each should raise before any live path is touched -- verify this
-directly (checksum the live database/files before and after each
-attempt) rather than trusting the error message alone.
+First, attempt a restore while that disposable node is running. Expect a refusal
+naming active state. Repeat with active game sessions where applicable.
+A refusal for a missing destination mapping is not evidence that active-node
+protection was reached: supply all required options.
 
-## 4. Confirm missing components are refused, not silently skipped
+Then stop the disposable node and all games. Make a fresh scratch copy of the
+archive for each corruption case:
 
-Remove `backup1-corrupt/files/` entirely (simulating a backup taken
-against a node with no file area yet, then restored onto one that has
-data) and confirm restoring blobs is simply skipped, not treated as
-corruption -- this is the one case that's expected to differ from
-step 3, since an absent *optional* artifact is not the same as a
-present-but-corrupt one.
+- truncate its database snapshot;
+- alter a blob's bytes without changing its content-addressed filename;
+- alter a recorded checksum or remove a checksummed identity file;
+- alter/remove a manifested career or War Dialer world.
 
-## 5. Confirm an interrupted restore is recoverable
+Attempt restoration and verify that the target state is unchanged. Use hashes
+and read-only inspection rather than trusting the error message alone.
+Do not edit your only valid backup.
 
-Restore switches multiple node artifacts and the game data entries. A real
-crash could land between any two switches; keep the node and all games stopped
-until the journal and every component have been reconciled.
+Optional components and required manifested files are different cases. An archive
+that never contained a component cannot restore it. Removing an entire optional
+tree is not always diagnosed like corrupting a present file; inspect coverage
+and verify actual files during the successful restore.
 
-1. Start a real restore in the background against a genuinely stopped
-   node: `python -m netbbs.backup restore --from backup1 --db netbbs.db --identity-dir netbbs_identity --voidrunner-to /path/to/voidrunner &`
-2. Kill it hard, mid-run: `sleep 0.2; kill -9 %1` (adjust the delay so
-   the kill lands after staging has started but before the whole
-   restore finishes -- a large file area gives more of a window; the
-   automated test suite's own `test_restore_backup_recovers_the_
-   previous_generation_when_a_switch_step_fails` proves the switch-phase
-   rollback logic directly and does not depend on timing).
-3. Check `netbbs.db`'s directory for `.netbbs-restore-state.json`. If
-   present, it names exactly which staging/rollback directories exist
-   and which artifacts were still pending. Its `external_components` also names
-   the game target, staging and rollback directories, which can be on another
-   filesystem. Inspect those paths too -- this is the "clearly
-   identified, not a silent mixture" record the design promises.
-   Resolve it by hand (the state file names the rollback directory to
-   restore from) or, if the kill landed before any live artifact was
-   actually switched, simply delete the state file and staging
-   directory and retry the restore from scratch.
-4. Re-run the same restore command. It should now either complete
-   cleanly or, if the previous attempt's rollback already fully
-   recovered the prior generation on its own (the common case for an
-   in-process exception rather than a hard kill), just proceed normally
-   with no leftover state file at all.
+## 3. Restore a complete archive
 
-## 6. Complete a real restore and verify full recovery
-
-With the node stopped:
+Every captured War Dialer world needs a destination keyed by its manifest entry;
+Voidrunner needs an explicit save-directory destination when present:
 
 ```sh
-python -m netbbs.backup restore --from backup1 --db netbbs.db --identity-dir netbbs_identity --voidrunner-to /path/to/voidrunner
+python -m netbbs.backup restore --from /path/to/backup --db /path/to/restored/netbbs.db --identity-dir /path/to/restored/identity --voidrunner-to /path/to/restored/voidrunner --war-dialer-to 1=/path/to/restored/netbbs.db.doors/war-dialer.db
 ```
 
-Note the printed rollback-generation path (not deleted automatically --
-remove it yourself once satisfied), including `voidrunner-rollback.json` for
-an external game generation. **Manual activation:** configure the service's
-`VOIDRUNNER_SAVE_DIR` to the chosen restore destination before restarting. Restore
-does not change that service setting. Then start the node and verify:
+This example assumes one War Dialer world with key `1`. Repeat the mapping for
+additional worlds; omit the relevant game flag when its component is absent.
+An older archive without War Dialer coverage may refuse a target that already
+has worlds. Follow the [door guide](NetBBS-door-guide.md#backup-ownership-and-restore)
+for namespace-safe recovery instead of bypassing the ownership check.
 
-- **Identity continuity**: the startup log's `fingerprint` line matches
-  the fingerprint from before the drill began.
-- **Transports still authenticate**: connect over every transport this
-  node has enabled (Telnet/SSH/web) and confirm a real login succeeds.
-  For SSH specifically, confirm the client does **not** show a host-key
-  warning -- proof the SSH host key restored correctly, not just that a
-  *a* key exists.
-- **Voidrunner survived**: load the same pilot and verify credits, cargo, day,
-  commitments and the Hall of Fame entry against the captured career. Confirm
-  the restore destination is the directory the running door now uses.
-- **Local content survived**: the board posts/edits/uploaded file from
-  the Prerequisites step are all present and correct.
-- **Link resumes correctly** (if Link is enabled): the node reaches its
-  configured peers again on its own within one sync pass, with no
-  duplicate-identity warnings and no re-bootstrapped (different)
-  fingerprint.
+The tool validates, stages, switches, and retains the previous generation.
+Record the reported rollback directory and any external game rollback locations.
 
-## 7. Clean up
+**MANUAL — outside NetBBS:** restore the service/TOML configuration and any
+external door installations you captured. Configure the restored game paths,
+including `VOIDRUNNER_SAVE_DIR` and any War Dialer override, before launch.
+The restore command does not rewrite service environment settings.
 
-Remove the rollback-generation directory(ies) left behind once you're
-satisfied, and the scratch `backup1-corrupt` copy from step 3. Neither
-is removed automatically -- see `netbbs.backup`'s own module docstring
-for why.
+## 4. Verify the result as a caller and SysOp
+
+Start the isolated recovery node and check:
+
+- the same node fingerprint and expected SSH host key;
+- successful login through every transport you offer;
+- the recorded posts, revisions, uploaded bytes, and custom artwork;
+- the same Voidrunner pilot and score, and War Dialer crew/world history;
+- expected account permissions and moderator settings;
+- the effective game paths reported by setup/backup screens.
+
+For a coordinated Link recovery exercise, keep the original stopped, then allow
+the recovered node to contact its test peers. Verify catch-up, trust state, and
+absence of an unexpected identity change. Record failures as focused issues.
+
+## 5. Rehearse interruption only on disposable state
+
+An interrupted restore can leave staging, rollback directories, and
+`.netbbs-restore-state.json`. Keep the node and games stopped while resolving it.
+Read the named component paths and determine whether each switch happened.
+Preserve the journal and all generations until the state is reconciled; do not
+delete them merely to make a later restore start.
+
+Developers can exercise deterministic switch failures through
+[backup tests](../tests/test_backup.py). An operator rehearsing a hard process
+interruption should do so on an isolated copy with a known-good archive and
+record exactly which stage was interrupted. A kill during staging is not proof
+of recovery from an interruption during the switch.
+
+## 6. Close the drill
+
+Record the release, host, archive source, components checked, observed outcomes,
+and remaining manual steps. Keep the validated backup. Remove disposable
+corruption cases and obsolete rollback generations only after confirming their
+paths and the restored result.
+
+Repeat after changes to backup formats, game storage, service layout, or the
+host's storage/runtime environment. The result should be a recovery procedure
+you can follow without remembering this development session.

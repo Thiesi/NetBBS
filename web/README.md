@@ -1,14 +1,15 @@
 # www.netbbs.org
 
-The two pages of the public site, and the captures they embed. **These files are
-the source of truth.** Edit them here, review the change as a diff like any
-other, then deploy.
+Developer reference for the public project site. The two pages and their
+embedded captures are the source of truth. Edit them here and review the diff;
+deployment is a separate operation using the procedure below.
 
-Until v7.2.0 the source lived in two published Claude Artifacts instead. That
-worked, but updating one required reading the whole 650 KB file back through the
-model before the tool would accept a republish — roughly 400 KB of per-character
-`<span>` markup per page, every time a sentence changed. The artifacts are no
-longer authoritative; treat them as historical copies.
+Both pages are first-contact material. Explain what callers and SysOps can do,
+link to the three [handbooks](../docs/README.md), and keep protocol or implementation
+detail in the developer references. Do not copy phase-by-phase development
+history into the landing page. Claims about compatibility and readiness must
+match the handbooks and current issues. The pre-v7.2 Claude Artifacts are
+historical copies, not an editing or publishing route.
 
 ```
 web/
@@ -36,6 +37,18 @@ web/
   of 17-24 rows needs `shot-tall` or its last rows hide under the 420px cap.
 
 ## Deploying
+
+Before deployment, validate the repository copies:
+
+```sh
+python scripts/website_check_pages.py --local web/netbbs-index.html web/netbbs-overview.html
+python scripts/website_check_wording.py web/netbbs-index.html web/netbbs-overview.html
+```
+
+These local checks do not request outbound URLs. Check documentation links
+against the checkout too; new handbook links become live after the corresponding
+repository changes are published. Inspect rendered pages at desktop and narrow
+widths when changing layout or substantial copy.
 
 Host `Roanoke.NetWorkXXIII.de` (NetBSD, pkgsrc Apache), account `thiesi`, SSH
 via PuTTY's **Pageant** — use `plink`/`pscp`, not OpenSSH. `sudo` is

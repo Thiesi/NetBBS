@@ -1,27 +1,43 @@
-# Door games: setup and compatibility
+# Door games: SysOp setup and compatibility reference
 
-NetBBS supplies the integration, not third-party games or their execution
-environments. The bundled games remain available without a legacy profile.
+This is the game-specific companion to the
+[SysOp handbook](NetBBS-SysOp-Handbook.md#door-games). For getting around as a
+caller, use the [user handbook](NetBBS-User-Handbook.md#play-a-door-game) and each
+game's own help. For building a door, use the
+[developer handbook](NetBBS-Developer-Handbook.md#developing-a-native-door).
 
-## War Dialer installed-package rehearsal
+NetBBS supplies integration and three bundled games: Retro Trivia, Voidrunner,
+and War Dialer. Third-party games and their execution environments are installed
+by the SysOp. **MANUAL — outside NetBBS** identifies work on the host or in another
+program. NetBBS does not download games, obtain licenses, or install emulators.
 
-**MANUAL - outside NetBBS:** in the development Python environment, install the
-wheel frontend with `python -m pip install build` if it is not already available
-(the `dev` extra alone does not include it). Build with `python -m build --wheel`, then
-install that local wheel into a fresh disposable directory with
-`python -m pip install --no-deps --target <installed-root> <wheel-path>`.
-Use a Python environment with the project's existing dependencies available.
-From the checkout, run
-`python scripts/war_dialer_release_check.py --installed-root <installed-root>`.
-The script verifies that imports and the gallery's game path come from that
-installation, registers the catalog entry in a temporary node, and exercises
-supervised quit, timeout and caller disconnect against the installed game.
-Temporary state is removed; no BBS service is started or reconfigured.
+## Find the procedure you need
 
-The repository gallery tests also drive the SysOp's real gallery selection/save
-flow for War Dialer. Process tests cover paid actions, acknowledgement, output
-loss and the season boundaries; none of these establish live-transport usability,
-target-host compatibility, multi-day balance or hands-on restore success.
+- [Supported profiles and verified limits](#what-is-supported-and-what-has-been-verified)
+- [Trust and filesystem layout](#trust-and-filesystem-layout)
+- [Register and test](#register-and-test-inside-netbbs)
+- [Native doors](#native-doors) and [companion services](#doors-with-a-companion-service)
+- [Allow a door to post](#letting-a-door-post-to-a-board)
+- [DOS prerequisites](#dos-prerequisites), [LORD](#lord-407-dos),
+  [Global War](#global-war-27-dos), [TradeWars](#tradewars-2002-309-dos)
+- [Remote services](#remote-services-tunnel-first)
+- [War Dialer maintenance and recovery](#war-dialer-shared-world-sessions)
+- [Voidrunner saves and recovery](#voidrunner-careers-and-concurrent-sessions)
+- [Verification and troubleshooting](#verification-and-troubleshooting)
+
+## Bundled games at a glance
+
+| Game | State and operating concern |
+| --- | --- |
+| Retro Trivia | Fresh question round each launch; no persistent career to migrate |
+| Voidrunner | Per-player career files and scores; one session per pilot; save root depends on the service environment |
+| War Dialer | Shared SQLite world owned by one node; concurrent play; maintenance required for administrative season/reset operations |
+
+Use the Gallery to register them from the installed package. Keep game and runtime
+versions together. Do not replace a career or world merely to bypass a compatibility
+error. The detailed game strategy and screen walkthroughs formerly repeated here
+are available in the games' help and the developer design reference; this guide
+focuses on operating and recovering them.
 
 ## War Dialer shared-world sessions
 
@@ -68,20 +84,15 @@ refuses to silently create a replacement. Choose an explicit override or complet
 the migration. An explicit path for a new independent node deliberately selects
 its own world; it does not adopt the old world's users or records.
 
-War Dialer records schema version 10 in SQLite `user_version`. A complete older
-world upgrades automatically in one transaction: version 1 adopts the original
-layout and latest 500 events per player; version 2 converts copied garrisons to
-shared crew assignments; version 3 adds the capture/control economy described
-below; version 4 adds raid recovery; version 5 adds crew/support; version 6 adds
-recon/operations; version 7 adds exchange roles; version 8 adds neutral operators; version 9 adds crew insignia and public scene
-bulletins; version 10 adds completed-season results. A failed upgrade rolls
+War Dialer validates its stored schema and upgrades supported older worlds
+transactionally. A failed upgrade rolls
 back its schema/data changes and version marker. Newer versions, incomplete or
 unrelated schemas, and corrupt files are refused with a caller-facing error;
 startup does not replace them with an empty world. Existing zero-byte files are
 also refused. First creation atomically publishes a complete database and requires
 a filesystem supporting hard links; an unsupported filesystem fails clearly.
 
-**MANUAL ? outside NetBBS, failed upgrade or unreadable world:** stop game sessions
+**MANUAL — outside NetBBS, failed upgrade or unreadable world:** stop game sessions
 and preserve the original world and any WAL/SHM sidecars. Diagnose a copy. Use a
 game version compatible with the recorded schema or restore a verified,
 SQLite-consistent backup belonging to this node. Do not clear `user_version`,
@@ -89,7 +100,7 @@ delete the world, or copy only a live database file as a recovery shortcut.
 
 ### SysOp status, maintenance and competition controls
 
-**MANUAL ? outside NetBBS:** use the local CLI with the owning node database and
+**MANUAL — outside NetBBS:** use the local CLI with the owning node database and
 its configured world path, in the same service environment:
 `python -m netbbs.doors.war_dialer_admin --db /srv/bbs/netbbs.db --world /srv/bbs/netbbs.db.doors/war-dialer.db status`.
 Status is read-only: it shows the path, schema, node namespace, maintenance state,
@@ -102,7 +113,7 @@ persists across restart. Use `maintenance off` to reopen the world after checkin
 it. A caller arriving during maintenance receives a clear return/retry message.
 No operator command starts, stops or redeploys the BBS service for you.
 
-**MANUAL ? outside NetBBS, season advance or reset:**
+**MANUAL — outside NetBBS, season advance or reset:**
 
 1. Close game sessions, enable maintenance and stop the node service. Use `status`
    to review the selected path and competition before proceeding.
@@ -136,7 +147,7 @@ world has not been bound to a node.
 The first host launch binds a world to an opaque namespace stored in that node's
 database. Display-name changes do not change ownership. Another node, or a
 standalone launch without that node's metadata, cannot load the bound world.
-**MANUAL ? outside NetBBS:** before the first host launch of a legacy world,
+**MANUAL — outside NetBBS:** before the first host launch of a legacy world,
 verify its player IDs belong to that node as described above. Backups refuse
 unbound legacy worlds until this adoption is complete. This guard prevents an
 accidental wrong-node configuration; it is not isolation from the same OS user.
@@ -150,12 +161,12 @@ SQLite's backup API, followed by integrity and ownership validation and SHA-256
 coverage. Committed WAL data is included; transient sidecars are not archived.
 The component supports at most 64 worlds, each at most 512 MiB.
 
-**MANUAL ? inside NetBBS:** close War Dialer sessions before taking a node backup.
+**MANUAL — inside NetBBS:** close War Dialer sessions before taking a node backup.
 An idle session still counts. Backup fails clearly if a world is active. The BBS
-itself may remain running. **MANUAL ? outside NetBBS:** recurring backups and
+itself may remain running. **MANUAL — outside NetBBS:** recurring backups and
 retention remain operator/cron jobs; use the same service environment and account.
 
-**MANUAL ? outside NetBBS, verified restore:**
+**MANUAL — outside NetBBS, verified restore:**
 
 1. Stop the source and destination node services and all game sessions, including
    old game versions. Preserve a current node backup before replacing anything.
@@ -192,332 +203,6 @@ Never delete or replace the session guard while processes might hold it. SQLite
 releases its locks when a process exits or is killed. Old binaries do not know
 about this guard and must be stopped manually. Real NetBSD/filesystem and hands-on
 restore activation checks remain separate from automated Windows tests.
-
-Several callers, including two sessions for one user, may play concurrently.
-Each action uses current stored resources and commits its turn with its result.
-Browsing, quitting and disconnecting cannot overwrite another session's changes.
-An outdated rival/exchange selection is rejected without spending resources.
-The 24-hour turn window starts when its first turn is spent. Login and browsing
-do not start it; Heat and turns refresh when the menu redraws or an action is
-attempted. If you waited at a zero-turn screen until refill, an action key can
-use the refreshed allowance. Clock rollback freezes time-based benefits until the
-last observed time is reached again. At a season change, every crew and exchange
-resets together, including dormant players. An old selection costs nothing and
-the refreshed menu announces the new season; review your resources and continue
-without reconnecting. Original account age is retained, so veterans do not receive
-another newcomer grace period. Skipped seasons do not carry old wealth forward.
-
-Exchange earnings become spendable on login, menu refresh and committed actions.
-Frequent visits retain fractional dollars instead of losing them. Losing an
-exchange pays its earnings through the transfer and keeps the previous owner's
-fractional remainder for later income. Startup upgrades existing player records
-in place; fractions already discarded by older releases cannot be recovered.
-
-`[H]istory` is free and replays your latest 500 events with UTC timestamps and
-NEW/READ labels. Older events expire as new ones arrive, including unread events
-beyond 500; there is no age expiry. The login summary is paginated: continuing
-accepts complete receipts on that page, while Back or disconnect leaves them
-unread. In history, use Next/Prev to browse, Ack page to acknowledge, and Back to
-return. New events arriving while you read remain unread. These screens fit down
-to the 40x12 floor; smaller terminals show a size diagnostic and preserve unread state.
-
-The main switchboard is a stack of cards: who you are with your Rank gauge, then
-cash, Heat, crew, turns, holdings, income, raid protection and unread receipts as
-meters and chips, then the ten exchanges as a ring, the latest receipts as a
-feed, and finally what to do next and the season's absolute deadlines. Next/Prev
-pages are free and refresh these snapshots; action keys stay available on each
-page, and the paging keys sit on the prompt row beside the cursor.
-Outcomes and rejection messages wait for acknowledgement before returning to the
-switchboard. The game requires at least 40 columns by 12 rows; a smaller terminal
-is refused by name, with the size it reported, and nothing in the shared world is
-touched -- resize or reconnect with a larger window and dial again. A door's last
-screen is not the last thing the caller sees: NetBBS follows every door with a
-blank line, `Left <door>.` and `Press any key to continue...`, so a message that
-has to survive -- a size refusal, a farewell -- leaves those three rows free.
-
-Your crew is shared across active play and exchange defense. Capture needs two
-available members and assigns one to the new garrison. `[G]arrison` shows owned
-exchanges and offers reinforcement/withdrawal in amounts of one, five or all
-eligible members, followed by an exact preview. Each transfer costs one turn, no
-cash or Heat, and gives no Rank. Keep one member available for recovery. The last
-withdrawal abandons the exchange after paying earned income. Displaced defenders
-return to their owner's available pool when a rival captures their exchange.
-Each capture attempt costs $25/$50/$75 by role, less $10 when you own a linked
-neighbor, win or lose. A first capture earns 50 Rank per
-exchange per season; recaptures earn none, even after another owner. Holding an
-exchange earns one Rank per six hours, with partial time retained. Rates are
-$1-$3/hour per exchange, $480/day for the whole map. Ordinary recruitment costs $75;
-ordinary trade earns $20-$60. Owned exchanges offer the services below. The same cash budget funds expansion and recruitment.
-Jobs, raids, attacks and busts use available crew; stationed members defend only
-their exchange. The switchboard and results show the two pools separately.
-
-**MANUAL — outside NetBBS, before activating shared-crew rules:** stop all old
-War Dialer processes and create/verify a node backup with its world component.
-The first permitted launch upgrades the world to schema 10 transactionally.
-When upgrading from copied defenses, schema 2 conversion runs first.
-After normal overdue season settlement, it reserves one available member per
-owner, keeps holdings by descending hourly income then ID within the real crew
-budget, and distributes the remaining members evenly across those holdings.
-Unstaffable holdings become unclaimed after paying income; a receipt explains
-the conversion. IDs, handles, account age, cash and Rank are retained. Review
-the receipt and use Garrison to adjust assignments. Never mix old and new game
-processes; older versions refuse schema 10. Restore the verified backup with a
-matching game version if the operator chooses to undo the upgrade.
-
-Schema 3 pays already-earned income at the previous rates before applying the
-new rates. Earned Rank is preserved; control Rank starts at upgrade time. Existing
-players who have earned capture Rank cannot earn further capture awards until
-next season because old aggregate records cannot identify all past exchanges.
-Their history receipt explains this; they can still earn control, recruitment,
-job and raid Rank. Capture awards reopen for every exchange at the next season.
-Tiers now start at 0/100/300/700/1,400/2,800 Rank; the score itself never decreases.
-Review receipts and standings after upgrading. Human balance playtests remain
-necessary; automated simulations do not establish that a season is enjoyable.
-
-Any committed raid attempt grants its target a 24-hour shield against every
-attacker, successful or failed. Login, reconnect, browsing and reading receipts
-never clear it. The dashboard shows remaining time and UTC expiry; Rivals and the
-raid picker show protection reasons and expiry. The 48-hour newcomer shield and
-tier +/-1 rule still apply. Rank/tier and protection are public; cash and available
-crew stay private, so raid odds and payout are explicitly uncertain. Exchange
-garrisons remain public and raid shields never protect territory.
-
-Schema 4 gives targets with an old last-attacker marker one day of recovery from
-upgrade time, since the previous format stored no raid timestamp. An offline
-receipt explains this. The same manual stop-sessions/verified-backup procedure
-above applies; repeated startup does not renew the migration shield.
-
-The two $1/hour Public PBXs cost $25 and +4 base Heat to capture. Owners can
-Lay Low for one turn to remove up to 15 Heat. The six $2/hour Carrier Switches
-cost $50 and +8 Heat; while owned they add two visible security defense points,
-in addition to assigned crew. Their owners recruit one available member for $65
-and one turn (+10 Rank). The two $3/hour Warez Hubs cost $75 and +12 Heat;
-owners use the Warez outlet for one turn, $30-$70 gross payout and +4 Heat.
-
-The ring links neighboring IDs, including the last and first. Owning either
-neighbor saves $10 per capture attempt; owning both still saves only $10. Every
-site is attackable without an owned neighbor. Open `[G]arrison`, choose your
-exchange, then Owner service to inspect its stakes before Act. Back spends
-nothing. Losing ownership or the selected discount before Act rejects the action.
-Security is not crew and never returns to a displaced owner. Lay Low and carrier
-recruitment do not roll for busts or consume support; the outlet follows ordinary
-trade bust rules, including Cash Stash, and preserves Burner Kit.
-
-**MANUAL ? outside NetBBS, before activating exchange roles:** use the stopped-
-sessions and verified-backup procedure above. Schema 7 retains the existing ten
-IDs, owners, garrisons, income and resources while assigning roles in map order.
-Inspect the map after upgrade. Do not mix old and new game processes; old binaries
-refuse schema 7. A world with an unexpected exchange count remains unchanged for
-SysOp diagnosis. Reset clears ownership but retains the map and its roles.
-
-Three fixed crews are explicitly labeled **NPC** on the map and capture preview:
-Patch Panel Society holds home #5 (PBX, 2 defenders), Night Relay Union #6
-(Carrier, 4 defenders plus 2 security), and Spool Archive Collective #7 (Hub,
-6 defenders). They earn no cash or Rank, do not appear in human standings, never
-raid you, and cannot take your holdings. Capture their homes with the ordinary
-previewed stakes. NPC guards never join your available crew.
-
-After capture, a home earns income and grants its owner service normally. If you
-withdraw its last defender, the NPC returns after 24 hours while it remains
-unclaimed; the map shows when. Recapture cancels that return, and recaptures earn
-no extra capture Rank. Season reset restores the three home crews. Settlement is
-lazy and deterministic; reconnecting neither rerolls guards nor accelerates their
-return. Contracts and operations remain repeatable even on a one-caller node.
-
-**MANUAL ? outside NetBBS, before activating neutral operators:** stop old game
-sessions and create/verify the node backup with its world component as above.
-Schema 8 preserves human holdings and resources and populates only unclaimed NPC
-homes. Inspect the map, labels and return deadlines after upgrade/restore. Old
-binaries refuse schema 8; do not mix game versions. No background service is needed.
-
-`[I]Scene` is free even with no turns or cash. Your crew identity combines your
-handle, Rank/tier, specialty and a cosmetic ASCII insignia: Modem `[::]`, Relay
-`<-->`, Signal `=||=`, or Archive `{##}`. Choose a design, inspect the free-change
-preview, then Act; Back keeps the current design. Insignia survive seasons and
-SysOp competition resets. No new player-authored text is accepted.
-
-Scene also offers NPC biographies with actual home ownership/defense and return
-deadlines, plus the latest 500 public territory bulletins. These timestamped,
-season-labeled entries record actual captures, abandonment and NPC stationing;
-private resources, recon, jobs and receipts stay private. Ordinary season rollover
-retains the bounded history, while explicit competition reset clears it. An empty
-board says so. NPC biographies are fixed fiction; their displayed home status is
-read from the current world.
-
-**MANUAL ? outside NetBBS, before activating Scene:** stop old game sessions and
-create/verify the node backup with its world component as above. Schema 9 adds
-insignia and the scene ledger without recreating past activity. Verify insignia,
-NPC home status and public bulletins after upgrade/restore. Old binaries refuse
-schema 9; do not mix game versions. No additional service is required.
-
-On a quiet node, `[J]Job` and `[O]Operations` provide repeatable progression
-without a human raid target. NPC home contests remain available on the map;
-`[I]Scene` identifies neutral crews explicitly. Protected or absent human rivals
-do not block jobs, preparation or execution. After spending the visit's fifteen
-turns, Rank, Map, Scene, history and saved-operation inspection remain free.
-Larger worlds use the same paginated directories; NPCs never inflate human
-standings. Automated complete-visit checks cover 1, 3 and 80 callers at all three
-supported test sizes; human satisfaction and transport usability remain manual.
-
-Season awards are announced before the deadline: Gold/Silver/Bronze go to up to
-three positive-Rank players, ordered by Rank descending and account ID ascending.
-They are cosmetic and grant no gameplay power. Final territory earnings through
-the season cutoff count toward final Rank, including for offline owners.
-
-Open `[I]Scene`, then Season results to see the latest twelve completed seasons,
-their end times, podium and your archived placement. Historical handles and
-insignia are snapshots. Skipped seasons are marked inactive with no invented
-winners. Cash and available crew are not published. Ordinary play never rewrites
-past results; advancing or resetting competition retains these cosmetic records.
-
-Scene also offers Your season reports (your retained medals and best results)
-and Hall of Fame (the actual medal winners by season). Both are free and use the
-same twelve-season archive. A private crackdown receipt in `[H]Log` records your
-final Rank, placement and medal, including when you were offline at rollover.
-The normal latest-500 receipt limit applies; an explicit SysOp competition reset
-clears receipts while retaining the cosmetic archive. No medal grants resources
-or protection in the fresh season.
-
-Joining near the deadline is still a way to learn the board: inspect a Cautious
-job's odds and stakes without needing rivals or territory. The switchboard flags
-the last 48 hours and warns that training, support and all saved operation progress reset
-along with cash and crew. Your final Rank is recorded even without a medal.
-At the next season, start again with $300, three available crew and fifteen turns;
-identity, account age and insignia survive. Newcomer protection expires by account
-age and is not renewed by the season change.
-
-Open `[I]Scene`, then Display for free ASCII-decoration, monochrome and Fast-mode
-toggles. Choices apply immediately and survive seasons and competition reset.
-Back leaves without changing anything. ASCII mode substitutes plain characters
-for every glyph the screens draw and preserves names; monochrome removes colour
-entirely and retains explicit labels and numbers. Fast skips the frame, optional
-art, action flavour and motion, keeping every stake and net result, and shows the
-page counter in its title row instead of a border.
-Motion -- a screen revealed row by row, a carrier bar filling while a committed
-result comes back -- plays only after the write, and any key skips it; Fast,
-monochrome and ASCII modes never play it at all. The scene screen draws the ten
-exchanges as the ring they are, with owner colour on the ring and in the table
-beside it; an exchange's number opens its own card, which carries its links, its
-price for you, its defence and its owner service.
-War Dialer inherits your NetBBS Unicode-decoration choice unless you explicitly
-toggle ASCII decorations in Display. Monochrome and Fast do not override that
-inheritance. Older launchers without the optional `unicode_style` metadata field
-keep rich decorations by default; standalone play uses the same default.
-
-**MANUAL ? outside NetBBS, before activating season results:** stop old game
-sessions and create/verify the node backup with its world component as above.
-Schema 10 starts the archive without fabricating missing historical seasons.
-Check the announced end time, award rules and retained results after upgrade or
-restore. Old binaries refuse schema 10; do not mix game versions. Reset/advance
-still requires its own verified backup and explicit confirmation.
-
-Free screens: `[B]Rank` shows season standings and your position; ties use account
-ID order. `[E]Map` shows the fixed ring, exchange roles, owners, garrisons, security,
-actual capture prices, hourly income and owner services.
-`[V]Rivals` shows other crews' Rank/tier and why they are eligible or protected.
-`[H]Log` replays receipts; `[?]Help` explains the rules. Next/Prev traverses terminal
-pages and batches of ten crews; Back leaves each view without an action. Standings
-refresh when loading another batch. Crew strength and cash are not exposed by the
-rival directory. The initial help is paginated too and can be left with Back.
-
-Action keys open a preview with costs, stakes and Heat/bust risk. Use Next to read
-all pages, then Act on the final page or Back to cancel. Recruitment is guaranteed;
-jobs use your selected contract and approach, and rival cash/strength remain uncertain.
-If another action or incoming raid changes your resources during the preview, the
-game asks you to inspect them again without spending. Outcomes distinguish gross
-payout from actual net changes, including bust losses and the one-member crew floor.
-
-`[J]Job` opens five repeatable contracts, from dial-up access (difficulty 2) to
-payroll (30). Choose a contract, then Cautious (70% payout, +5 Heat, no ordinary
-failure crew loss), Standard (100%, +15 Heat, one member lost on failure), or Bold
-(140%, +25 Heat, one member lost on failure). The one-member floor applies.
-Approaches change payout and risk, not success odds. Each attempt costs one turn
-and no upfront cash; a success earns 15 Rank. The final preview shows exact odds,
-payout range and losses before Act. Cautious does not prevent a Heat bust: its
-possible cash and crew losses are shown separately. Offers stay fixed across
-browsing, cancellation and reconnect. You can inspect them with no turns left.
-
-`[S]Kit` opens crew development; `[C]rew` still recruits directly. Train or switch
-one specialty for $150 and one turn: Phreakers reduce contract Heat by 3, Fixers
-recover $20 on a failed contract before any bust (no Rank), and Lookouts reduce
-raid/root Heat by 3. Ordinary crew losses do not erase training.
-
-The single support slot can hold a $40 Burner Kit or $75 Cash Stash, each costing
-one turn to buy. An occupied slot cannot be replaced or stacked. The Burner Kit
-removes up to 10 added Heat after specialty reductions on your next committed
-job/raid/root attempt, then disappears, win or lose. Existing Heat can still cause
-a bust even when the kit removes all new Heat. Trade and free browsing preserve
-the kit. The Cash Stash waits for your next bust, then reduces its cash loss to
-10% instead of 25%; crew losses remain unchanged. Purchases and support earn no
-Rank. Both training and support reset at the season boundary.
-
-Read effects and prices, choose an item, then inspect the purchase preview before
-Act. A rejected stale preview retains your selection. Schema 5 starts both slots
-empty and preserves existing resources and identity. **Manual SysOp upgrade:**
-stop active War Dialer sessions and make a verified backup before activating this
-version, using the maintenance procedure above; old binaries refuse schema 5.
-
-`[O]Ops` opens saved operations, rival recon and your private dossiers. Recon
-costs one turn and no cash or Heat, revealing a rival's cash and available crew
-as they were at commitment. Only your latest ten distinct rival snapshots remain;
-each expires after 24 hours. Times and last-known labels are shown in dossiers
-and eligible raid previews. A snapshot does not guarantee current odds or remove
-raid protection. Browsing cannot refresh the intelligence without another paid
-recon action.
-
-An operation uses one saved slot: choose a contract and approach, then Case
-(one turn), Prepare (one turn and $50), and Execute (one turn). Execution adds
-15 percentage points to ordinary success odds, capped at 90%, doubles the payout
-range and awards 30 Rank on success. Its approach, specialty/support effects,
-failure losses and bust risk appear in the preview. Case and Prepare add no Heat
-and consume no support. Failure keeps the casing, but you must pay to Prepare
-again before retrying. Success clears the slot; free Abandon forfeits progress
-without refund. Progress survives leaving and reconnecting; no forced wait is
-required. Each paid step and Abandon have a final Act. Ordinary jobs remain
-available. Season reset clears operation progress, its Rank and all dossiers.
-
-Schema 6 preserves existing resources and identity while adding these records.
-**Manual SysOp upgrade:** stop active game sessions and make a verified backup
-before activating this version. Restore carries saved progress and intelligence;
-competition reset or season advance clears them. Old binaries refuse schema 6.
-
-For a short visit, Trade, Recruit and Job remain direct choices. A new operation
-needs at least three turns and $50 to reach its first execution; cased progress
-needs two turns and $50, prepared progress one turn. These are attempt budgets,
-not guaranteed completions. The switchboard and operation hub show your remaining
-budget and cash shortfall. Leave whenever you like: preparation does not expire
-between visits within a season. With no turns, contracts, saved operations and
-dossiers remain free to inspect. No operation setup is required to play ordinary
-jobs or territorial actions.
-
-Target pickers use digits 1-9/0, with Next/Prev and Back. Only fully displayed,
-eligible entries have active selection keys; protected rivals and your own exchanges
-show why they cannot be selected. Raid selection reaches every crew through batches
-of ten rather than a random sample. Results, rejection messages and season notices
-are paginated on compact terminals; continue to read the remaining rows or use Back.
-
-New callers get a short first-visit guide; Help holds the full rules. The switchboard
-suggests next steps when turns, cash or crew are depleted, and shows the wait until
-Trade has no bust roll at high Heat. Recruitment adds no Heat; it still needs cash.
-Out-of-turn raid/root attempts show the refill deadline before target selection.
-Empty rival worlds point callers toward trading, recruiting and territory planning.
-
-Use separate single keys. Arrow/function keys and pasted command bursts do not
-select actions; Escape dismisses a pause but has no menu action. An incomplete
-or excessively long terminal sequence ends the door with a reconnect diagnostic.
-Extended mouse encodings also end the door safely; reconnect and use keyboard keys.
-
-**MANUAL — outside NetBBS:** end all running War Dialer sessions before activating
-this updated game file. An already-running older process retains its old saving
-behavior. Do not mix old and new sessions against the same world.
-
-If startup reports an unexpected exchange count, the world is retained unchanged.
-**MANUAL — outside NetBBS:** stop all sessions, preserve a SQLite-consistent
-backup of the world (including any outstanding WAL data), and inspect the exchange
-IDs, owners and affected player records before explicitly repairing it. The game
-does not choose which duplicate ownership/reward records to discard. Do not delete
-the database to suppress the diagnostic, and do not copy just a live `.db` file.
-There is no automated repair/reset workflow in this slice.
 
 ## Voidrunner careers and concurrent sessions
 
@@ -556,663 +241,6 @@ another session holds it simply skips the import and the next launch retries it
 until every row is in. Scores are optional; a temporary score-write failure does
 not lose the career, and a later checkpoint retries publication from its saved
 high-water mark.
-
-### What Voidrunner looks like
-
-Voidrunner needs a terminal of at least **40 columns by 12 rows**. Below that it
-prints one short, unstyled refusal naming the size it needs and the size the
-terminal reported, and stops before any career is opened or changed. Above it
-there is one layout: every screen, every key and every gauge is the same at 40
-columns as at 80, sized for the room there is. What a narrow terminal gives up
-is named below -- a table's least useful columns, and a silhouette that has
-nowhere to sit -- and never a figure a decision is made on.
-
-Every screen is built from the same small vocabulary. Gauges (`████░░░░`) carry
-hull, fuel, hold, crew, standing and deadlines; chips (`⟦day 12⟧`) carry single
-facts; badges (`ILLEGAL`, `TRACKED`, `MAX`) carry states; tables carry anything
-with more than two columns; and a rule across the frame (`├─ SHIP ─────┤`) names
-each group of rows. Hotkeys are gold, values are bright, labels and prose are
-dim, and severity has its own colour: green good, amber caution, red danger.
-
-Tables narrow gracefully, in two steps. First a table gives up its least useful
-columns: at 40 columns the market keeps the buy and sell price, the hold and the
-`ILLEGAL` flag, and drops the station's stock and demand figures and the price
-spread -- those are still on the commodity's own trade screen, which is where a
-purchase is sized anyway. If what is left still does not fit, the table
-*stacks*: each record's name goes on a line of its own with the rest aligned
-underneath, on as many lines as it takes. Nothing is ever truncated, and nothing
-a table still carries is lost to stacking -- only that first step drops
-anything, and only figures that are a keypress away on another screen. A table's
-column headings reappear at the top of every page of it.
-
-**Display presets** are chosen from the station deck's **[O] Display Options**,
-and each one previews itself on that screen:
-
-| preset | what it does |
-| --- | --- |
-| Full palette | the terminal's own colour depth, with motion |
-| Full palette, no motion | the same palette with every reveal and tick off |
-| 16-color | sixteen ANSI colours and Unicode artwork |
-| Monochrome | Unicode artwork, no ANSI styling |
-| Plain | ASCII artwork, no ANSI styling; letters and typed text stay UTF-8 |
-
-Motion -- rows revealing as a screen opens, and the effects that go with a
-result -- never blocks anything. Any keypress ends an effect immediately, no
-effect delays a save, and a screen redrawn unchanged does not replay one. If
-motion is not wanted at all, choose **Full palette, no motion**; monochrome and
-plain have none either.
-
-### Starting and returning to Voidrunner
-
-Choose **[G] Pilot Guide** on the station deck for flight instructions and a recap
-of contracts, tracked plans and futures orders. Pages fit the negotiated terminal
-size; **[B] Back** leaves without changing the career or advancing the day. **[B]**
-is Back on every screen below the deck and never does anything else; **[Q]** on
-the deck saves and leaves, and is also accepted as Back elsewhere.
-
-On day zero at Freeport, **[O] Offer** shows an optional First Flight delivery to a
-real adjacent station. The terms show the legal cargo to buy, payment, danger,
-fuel reserve and crew costs before **[A] Accept** appears on the final page. It uses
-one normal contract slot and automatically tracks the destination. Buy the cargo
-at the market, refuel at the yard if necessary, and select the station on the
-chart. Docking with the full load delivers it automatically. Jumps advance the
-day; this introductory contract has no deadline.
-
-Accepting the offer returns you to the deck, where a result line names the next
-step. First Flight can be accepted once per career. Abandoning it closes that offer;
-the guide remains available. Completion points toward a first upgrade and regular
-trading or contracts. The normal risks of travel still apply.
-
-### Navigating contracts
-
-Contract details show only the notes that apply to that job; on a multi-page
-offer, the first page says which page holds **[A] Accept**. Screens that fit one
-page show no Prev/Next keys.
-
-Open a contract's details and choose **[R] Route** to inspect every leg to its named
-target, even when the target is uncharted. Names of uncharted intermediate
-stations and their danger remain hidden. The preview shows fuel, wages, manual
-refuelling stops, arrival day and deadline warnings, including queued bounty
-leave/re-enter legs. Browsing a posted job does not accept or track it.
-
-For an active contract, **[J] Jump next** tracks that contract and flies exactly one
-leg using normal encounters, customs and mission resolution. Fuel must cover that
-leg. Review the refreshed route after arriving or being diverted, then choose
-another jump or Back. Completion, failure and expiry stop contract navigation.
-Refuelling is manual at the yard, and delivery cargo must still be procured.
-If a destroyed journey charted a survey target without completing the contract,
-it is shown as blocked: revisiting cannot discover it again. Abandon that contract
-from its details to free the active slot.
-The chart's **[R] Route for tracked contract** reopens this view. After a disconnect,
-any saved encounter resumes first; the rest of a route never runs unattended.
-
-### Planning other journeys
-
-Choose **[G] General route planner** on the chart. It opens the destination picker
-straight away, because a planner with no destination has nothing to show; the
-picker paginates all known destinations, and Back from it leaves the planner
-without planning anything. Inside the planner, **[D] Destination** reopens the
-picker to change the route, and Back from *that* keeps the previous selection.
-Inspect each leg, fuel and wage cash, manual refuelling stops, and active-contract
-deadline estimates before choosing **[J] Jump next**. Unknown intermediate stations
-retain unknown names and danger. Contract destinations can be previewed through
-their details even when uncharted.
-
-Each Jump next performs one ordinary trip and retains its outcome. Continue,
-select a different destination, or Back out to refuel and trade. The whole journey
-does not have to fit in one tank. This screen's selection is temporary: choose it
-again after leaving or restarting. A saved encounter still resumes before station
-access; subsequent route legs always need a new command.
-
-### Direct jump chart
-
-The direct chart keeps current fuel in its heading and paginates full connection
-entries with **[>] Next**, **[<] Prev** and **[B] Back**. Each entry shows its bearing,
-known sector/economy and danger, fuel cost, low-fuel warning and tracked-next marker.
-Uncharted neighbors keep unknown names and danger. The opening pages list route,
-map, scanner and tracked-contract actions when available.
-
-Ordinary connection letters remain stable (B is never one of them). Exceptionally
-dense charts reuse letters on later pages; choose the letter on the page currently
-displayed. A chosen letter asks for a final **Y/N** with the fuel cost and the
-destination's danger; **N** keeps you docked and writes nothing.
-Rejected departures and scanner results remain on the refreshed first page.
-Browsing and rejected jumps leave the career unchanged; a deliberate scan retains
-its normal discovery and checkpoint behavior.
-
-### Reading the spatial map
-
-The chart's **[V] View spatial map / list** opens the current sector. **[N/P]** move
-between the six named sectors, **[O] Overview** shows the galaxy, and **[L] List** opens
-a paginated list with exact positions. **[I] Info** selects a station for its known
-connections and details. **[B] Back** returns without changing the career. Terminals
-below the 40x12 minimum are refused at launch; a terminal that meets it can return to the
-map with **[M] Map**.
-
-Markers distinguish **@** current position, **!** contract objective, **X** route
-end, **\*** plotted stops, **o** charted stations and **+** clustered cells. Dots
-join known stations; colons show plotted legs. Lines can overlap at this scale;
-Info provides exact links and the list preserves every station. Important position
-markers take precedence in overlapping cells. Sector views show links between
-visible points; use Overview to see the full plotted route.
-
-Contract and general route previews offer **[V] Map** with their actual path.
-Uncharted intermediate names, danger and other connections remain unknown;
-contract target names are public bearings. Map and list browsing never charts,
-tracks or travels, and Back returns to the route preview.
-
-### Station command deck
-
-Use **[<] Previous / [>] Next** to page the station cockpit and **[X] Expand**
-for pilot, sector, crew and progress details. Press X again for Compact; this view
-choice lasts for the current deck visit. Every service letter works from every
-page, and **[Q] Exit** saves and disembarks. Credits stay in the heading. After a
-jump, the first deck page lists what happened on the way as **Result:** lines
-(events, discoveries, fights, customs, deliveries); the next deck action clears them.
-
-Hull and fuel show current/maximum; cargo shows used/capacity. Contraband and
-regional-event notices are separate, and low fuel, critical hull or wages beyond
-available credits give a next action. The tracked objective includes its deadline
-and chart entry point. Station settlement results remain in the paginated deck.
-Browsing and toggling do not advance a day or spend credits.
-
-### Pilot record and history
-
-Open station **[S] Pilot Status**, then choose **[O] Pilot**, **[C] Jobs**, or
-**[H] Log** directly. Previous/Next pages and **[B] Back** work in every view.
-Jobs show complete descriptions and deadlines; use the station Mission Board for
-tracking, navigation, acceptance and abandonment. Log includes every retained
-highlight and log entry, newest first. Paging does not alter the career.
-
-Rank stays earned for this career, including after purchases, fines or salvage.
-Each completed action records a crossed balance threshold before you can spend
-the reward. The pilot overview explains the next threshold; History retains
-promotions. Old saved promotions remain valid. Lifetime Hall of Fame wealth does
-not carry a rank into a new career.
-
-**[R] Finale** is available to browse from every pilot record view. **[1-4]**
-selects a conclusion without writing; **[S] Retire** then asks for the final
-confirmation. Back or No keeps the current career. Four conclusions are available:
-
-| Conclusion | Requirement | Next career's equipment |
-| --- | --- | --- |
-| Frontier Legend | Retained top rank | Ordinary Shuttle modules |
-| Trade Guild Founder | 50,000cr known-cost market-sale margin | Cargo tier 1 |
-| Atlas Keeper | All 48 systems charted | Scanner tier 1 |
-| Frontier Warden | 50 recorded combat victories | Weapon tier 1 |
-
-Trading margin excludes deliveries, unknown-cost cargo receipts and non-trading
-income; it is before operating costs, not total profit. The overview shows the
-three independent paths and their intermediate thresholds. They unlock endings
-without requiring the top balance-based rank.
-
-Each ending retains its closing account and starts a fresh galaxy with the ordinary
-1,200cr plus the existing 500cr-per-retirement bonus. Current cargo, contracts,
-factions, crew, stories and rank reset. The selected specialist ending supplies its
-listed module. Display style, lifetime score, retirement count and dossiers remain.
-
-**[D] Dossiers** lists every recorded retirement, newest first, with its original
-seed/dates, ending, rank, ship, days, finances, chart count, victories, missions and
-retained highlights. Earlier unrecorded retirements stay counted without invented
-history. Up to 128 dossiers are retained; at capacity further retirement is visibly
-unavailable and the current career can continue. No dossier is silently removed.
-Retire checks the complete replacement before asking for confirmation. A legacy
-history too close to the 4 MiB save limit can leave insufficient room for dossier
-metadata; retirement then reports unavailability and retains the current career.
-Accepted legacy highlight lists are preserved in full. The dossier and new career
-save together before the restart acknowledgement.
-
-### Hall of Fame pages
-
-Station **[H] Hall of Fame** offers **[1] Wealth**, **[2] Trading**,
-**[3] Exploration**, **[4] Combat**, and **[5] Completed careers**. Wealth
-and completion counts rank pilots; the other views rank individual current or
-archived careers. Each view displays up to 20 entries. **[YOU]** identifies your
-pilot. Use **[N] Next**, **[P] Previous** and **[B] Back**; all category keys
-work from every page, and complete entries remain available on narrow terminals.
-
-Trading uses known-cost market margin before operating costs, excluding delivery
-pay, unknown-cost receipts and other income. It is not total profit. Exploration
-counts charted systems, including surveys and assignments; Combat counts all
-recorded victories, including patrol ships and each defeated squadron member. Entries identify their career
-number, seed and current/completed state. Completed careers includes older
-retirements whose detailed dossiers are unavailable.
-
-Every retained dossier and the current run have a compact score summary. Only
-the display is limited to 20; lower-ranked records remain stored. On your next
-checkpoint, valid earlier retirement totals carry into your career count and next
-career number without creating missing dossiers or adding current credits. Old scores keep
-their wealth and retirement counts; career details appear at the next saved
-action, and missing older history is never invented. A later checkpoint repairs
-an optional score-write failure from the career save and its dossiers. A newer
-unsupported score-summary format remains untouched.
-
-All views share one snapshot per visit; reopen to refresh. Paging, changing views
-and Back leave scores and gameplay unchanged. These are local accomplishments,
-not certified competition: starting advantages and game versions can differ.
-Shared-seed challenges remain deferred until equal starts and versioned rules
-can be defined separately from normal careers.
-
-### Faction contacts and membership
-
-Station **[P] Concord** and **[W] Blackwake** contacts are always available.
-Browse their terms and your standing, then **[B] Back** without changing anything.
-At standing 75, **[J] Join** offers a final confirmation. Each faction grants
-2,000 credits once; you may hold both memberships.
-
-- Every completed delivery, survey or escort earns one point of Concord standing.
-- An engineer aboard cuts yard repairs from 4 to 3 credits per hull point, and to 2
-  at Veteran service; the yard heading shows the current rate.
-- Concord's active commission adds 25% to bounty and escort payouts. The bonus
-  uses your standing when the reward is paid, which can change during the mission.
-- Blackwake's active membership halves the chance of a new customs inspection.
-  It does not reduce the fine or clear notoriety.
-
-At standing **-50 or below**, that faction's perk is suspended. Raise its standing
-above -50 to restore it; your membership remains and no second grant is paid.
-Contacts and the pilot record show the current status. These rules also apply to
-older members. The two memberships work independently, and retirement clears both.
-
-### Faction stories
-
-In either faction contact, **[S] Story** opens an optional case. **[A] Accept**,
-then **[R] Route** to its workshop and **[I] Investigate** there. Read the evidence
-and both outcomes before choosing **[H] Hardline** or **[A] Aid**. This choice is
-final. Travel to the stated destination and use **[C] Complete**. Cases have no
-membership requirement, deadline, entry fee or ordinary contract-slot cost.
-Ending previews are plain information until evidence unlocks the choice. The
-ending route appears after commitment; unavailable Hardline handovers are not
-advertised as actions.
-
-| Case | Hardline ending | Aid ending |
-| --- | --- | --- |
-| Concord: The Missing Dispatch | File at Freeport: 1,800cr; Concord +18, Blackwake -12 | Two Medicine to Far Lantern: 1,500cr; Concord +12, Blackwake +6 |
-| Blackwake: The Broken Toll | One Weapons to a Haven: 2,100cr; Blackwake +18, Concord -12 | Three Electronics to Far Lantern: 1,500cr; Blackwake +12, Concord +6 |
-
-The screen shows effective standing changes, capped within -100..100. Payments
-are gross: allow for cargo, fuel and wages. Weapons are contraband, so intermediate
-non-Haven arrivals can trigger customs. Material handovers consume goods after a
-final confirmation, including cargo promised to other contracts. The delivery ledger
-records material costs. Cases pay once, without commission bonuses, and record
-one completed mission and a personal closing response. If a galaxy has no Haven,
-armed enforcement is unavailable; the beacon route remains open.
-
-Public case bearings do not chart systems or create market quotes. Back, paging
-and refusal write nothing. Every completed story step saves before its result.
-Retirement starts new cases.
-
-### Named crew and service
-
-The yard's **[K] Crew** roster introduces three named specialists with distinct
-personalities. It shows hire cost, ongoing wages, current benefits and the next
-promotion before hiring. **[A-C]** hires or dismisses the selected role after a
-final confirmation. Paging or choosing No writes nothing. Named crew also appear
-in the expanded cockpit and pilot record.
-
-| Recorded paid jumps | Service rank | Gunner damage bonus | Engineer fuel saving | Navigator survey bonus |
-| --- | --- | --- | --- | --- |
-| 0 | Recruit | +3 | 25% | +1 hop |
-| 5 | Seasoned | +4 | 30% | +2 hops |
-| 15 | Veteran | +5 | 35% | +3 hops |
-| 30 | Ace | +6 | 40% | +4 hops |
-
-Engineer savings round up, with at least one fuel burned per jump. Promotions
-are earned when wages are paid; fuel for that departure is already spent, so an
-engine promotion helps the following jump. Route budgets use current efficiency
-and may overestimate later fuel if a crew member advances along the way.
-
-Service stops at mastery. Dismissal and unpaid resignation retain the specialist's
-identity and experience; rehiring costs the ordinary hire fee. Unhired crew give
-no bonus. Older hired crew begin tracked service on their next paid jump; earlier
-unrecorded service is unknown. Wages, promotion and the departure save together,
-so reconnecting cannot repay salaries or award the same service twice. Existing
-salvage recovery keeps crew and their records; retirement starts a fresh roster.
-
-### Personal crew assignments
-
-In the crew roster, **[1-3] Tasks** opens a specialist's personal assignment.
-Five paid jumps unlock it. Read the terms, then **[A] Accept**; **[R] Route**
-shows the destination and ordinary fuel/wage budget. **[B] Back** writes nothing.
-There is no deadline, deposit or ordinary contract-slot cost.
-
-- The gunner wants one new combat recording after acceptance, delivered to
-  Rivet House for 600 credits.
-- The engineer needs three Machinery delivered to Tuning Fork for 900 credits.
-  Completion consumes the goods, including any promised to other contracts,
-  after a final confirmation. Their cost is included in the delivery ledger.
-- The navigator wants three new chart entries delivered to Far Lantern for
-  700 credits. If fewer systems remain, chart those; an already complete atlas
-  can be delivered directly.
-
-At the destination, **[C] Complete** requires that specialist to be hired.
-Dismissal retains the task and its progress; work done while they are away still
-counts. Rehiring costs the usual fee. Each task pays once and adds one completed
-mission and a personal highlight. It does not grant extra standing, service or
-upgrades. The contact remembers the completed task. Retirement starts fresh.
-
-### Specialist workshops
-
-In **[Y] Engineering Yard**, **[S] Specialists** opens the public workshop
-directory. Select **[1-3]** to meet Iona Rusk at Rivet House (cargo), Oren Vale at
-Tuning Fork (engines), or Dr. Sel Parn at Far Lantern (scanners). These workshops
-occupy distinct existing stations. **[R] Route** provides ordinary deliberate
-jumps; the public bearing does not chart the station or reveal market prices.
-Back lets you refuel or trade before continuing.
-
-Bring materials to the workshop to install the next ordinary module tier:
-
-| Workshop | Materials per resulting tier | Credit price |
-| --- | --- | --- |
-| Rivet House | 2 Refined Metals | 65% of ordinary cargo upgrade |
-| Tuning Fork | 2 Machinery | 65% of ordinary engine upgrade |
-| Far Lantern | 1 Electronics | 65% of ordinary scanner upgrade |
-
-For example, cargo tier 1 costs 520 credits plus two Refined Metals, versus
-800 credits at an ordinary yard. The quote shows the exact cost, held materials
-and benefit. Count material acquisition and travel before assuming a saving.
-Materials may include cargo promised to delivery contracts. **[I] Install** ends
-with a confirmation; Back or No spends nothing. Tier caps stay the same, and no
-extra fuel, repairs, mission credit or faction standing accompanies installation.
-
-Credits, FIFO material consumption and the module tier save together before the
-named mechanic acknowledges the work. The Trading Ledger separates workshop
-credit spending and material costs from cargo losses. The career record preserves
-the mechanic and installation. Standard yard services remain available everywhere.
-
-### The Freeport archive
-
-Station **[N] Archive Contacts** introduces Mara Venn's optional assignment.
-Accept at Freeport with **[A]**, then **[R] Route** to the existing landmark.
-Accepting provides a bearing without charting the site. Each deliberate route
-jump uses ordinary fuel, wages and encounter rules; Back lets you visit the yard.
-There is no deadline, deposit or active-contract slot requirement.
-
-Visit the site and use **[I] Recover record** in Archive Contacts, or **[L]** from
-the station and **[I] Investigate**. Reading either screen and choosing Back costs
-nothing. Investigation still pays the landmark's existing 3,000-credit salvage
-once; previously investigated sites provide a transcript without a second payment.
-The four landmark types hold different records and interpretations.
-
-Return to Freeport. **[P] Publish** preserves the record for the public archive,
-paying 500 credits and Concord +5. **[S] Sell privately** gives it to broker Kest
-Rel for 1,500 credits, Blackwake +5 and Concord -2. Standing stays within -100 to
-100; the screen shows the effective changes at your current standing. The choice
-closes the assignment,
-adds one completed mission and records a career highlight. Revisit the contact to
-read the response to your choice. Acceptance, recovery and the ending save before
-their acknowledgement; reconnecting cannot repeat a reward.
-
-### Area surveys
-
-With a scanner installed, use **[S] Scan** from the chart to inspect the survey
-terms. **[S] Survey** spends two fuel and charts every new contact within range:
-two connection hops plus scanner tier and the hired navigator's current bonus:
-one for Recruit, two for Seasoned, three for Veteran, four for Ace. The screen
-shows the contact count and warns if the cost empties your tank. **[B] Back**
-before surveying writes nothing. Empty areas and insufficient fuel incur no charge.
-
-Surveying advances no day or wages. Its report lists each newly charted system's
-station, economy and danger, plus completed survey contracts. Read it with **[<] /
-[>]**, then return to the chart with **[B]**. The report creates no remote market
-price quotes; visit a market to learn its prices. Fuel, discoveries and mission
-rewards save together before the result appears. Repeating a completed area scan
-cannot charge fuel or award the same contract again.
-
-### Coordinated raiders
-
-New two-raider contacts disclose both opponents and their covering fire. **[T]
-Target** switches who you fight first before engagement, without spending fuel or
-a combat turn. The partner adds two damage plus twice its tier to return fire
-while both ships remain. **[G] Guard** reduces the combined incoming damage.
-Destroying the target prevents that return volley and ends the covering bonus.
-
-The best order depends on the opponents' tiers, hull and patterns. There is no
-repair between foes. A successful evasion or accepted bribe breaks contact with
-both raiders. Target selection closes after any valid combat decision, and its
-saved order survives a disconnect. Previously cached squadrons retain their
-original sequential rules.
-
-### Derelicts and distress calls
-
-Use **[<] Previous / [>] Next** to read encounter terms. Derelicts offer **[S]
-Salvage** (boarding) with a 70% salvage chance and a 30% ambush chance. The displayed reward
-and opponent tier ranges follow the sector you are entering. Boarding itself
-costs no fuel; an ambush uses ordinary combat choices and losses.
-
-Distress calls offer **[H] Help** for 2-4 fuel, capped at your remaining fuel,
-with a 60-180 credit reward and up to three Concord standing, capped at 100.
-The screen shows the
-possible fuel balance and warns when helping can empty your tank. **[I] Ignore**
-on either screen continues the journey without a reward or penalty. Paging and
-invalid keys spend nothing; completed choices save before their result appears.
-
-### Bounty identification
-
-Before engaging a new bounty contact, **[V] Verify** spends one fuel to check the
-posted identity. It spends no combat turn. **[W] Withdraw** continues the journey
-and keeps the contract; the identity stays the same on a later attempt. A confirmed
-mismatch offers **[R] Close incorrect warrant**, ending the contract without a
-fight, bounty payout, mission credit or notoriety penalty.
-
-Posted matches have a 12% error rate. If you fire unverified or knowingly attack a
-mismatch, the full bounty still pays, but the identification penalty adds two
-notoriety and subtracts three Concord standing in addition to normal combat
-rewards. Verification, reporting and free withdrawal close after engaging,
-including an attempted evasion or bribe. Without one fuel, verification is
-unavailable; withdrawal remains available before engagement.
-
-Verified identity, fuel spending and report completion save before acknowledgement.
-A target selected under older rules keeps its existing controls and receives no
-new undisclosed post-kill identity penalty. Earlier career history stays intact.
-
-### Customs decisions
-
-An inspection pages its full terms with **[<] Previous / [>] Next**, keeping
-credits and action keys visible. **[S] Surrender** gives up all contraband without
-a fine, improves Concord standing within its limit, and leaves notoriety unchanged.
-An affordable **[P] Pay bribe** has a 60% acceptance chance: you pay only on acceptance
-and keep the cargo. Refusal confiscates contraband, reduces Concord standing and
-raises notoriety. The stated fine takes at most your available credits and leaves
-no debt; the result reports the amount actually collected.
-
-An unaffordable bribe is unavailable. Typing P anyway changes no cargo, money,
-standing, notoriety or randomness. Paging and invalid input are read-only; if you
-disconnect before choosing, the same inspection resumes next visit. Completed
-outcomes save before acknowledgement and replay without repeating their effects.
-
-### Combat telemetry and last exchange
-
-Combat pages show current credits, enemy HP, hull/fuel and cargo usage. Browse
-with **[<] Previous / [>] Next** and toggle **[I] Info** for shields, weapons,
-notoriety and faction consequences. These keys spend no turn; the last saved
-exchange stays available at the front of the pages, including after reconnecting.
-
-New fights show an enemy pattern and its current intent, including the incoming
-damage range. **[G] Guard** fires at reduced strength and cuts incoming damage to
-a quarter; **[F] Fire** recharges it. Guard a dangerous volley when you cannot
-finish the opponent first. Cover/harry reduce your shot, while recovery exposes
-the enemy; harry also lowers your escape chance. The Info view shows the pattern.
-
-Raider, Bulwark and Skirmisher patterns reward different timing. Ship upgrades
-still matter, and high-tier fire can seriously damage even heavy hulls. New raiders
-use destination danger; already stored opponents retain their stats. A saved
-fight keeps the ruleset version it started under until it is resolved. Invalid
-repeat-Guard input spends no turn or randomness.
-
-**[F] Fire** exchanges one round, **[E] Evade** attempts escape, and pirates also
-allow **[D] Dump** (one random cargo unit; shown only with cargo aboard) and
-an affordable **[P] Pay bribe**. The action bar names every verb at every
-supported size.
-While escorting, the Evade, Dump and Pay bribe lines say that leaving fails the
-convoy. Failed, abandoned and expired contracts are counted on the Pilot Status
-page and in retirement dossiers, and the log names the forfeited reward.
-Losing the fight costs a salvage fee of 200 credits plus four per point of maximum
-hull (never more than you have), all cargo, and a tow to Freeport; the tug restores
-full hull only when the fee is paid in full, otherwise a quarter of maximum plus the
-paid share of the rest, never full. It is always dearer than repairing beforehand. Only a Concord patrol's kill clears
-notoriety. The low-hull warning and the Info view show the fee.
-Read the displayed odds and consequences: failed evasion or refused bribery draws
-fire; a pirate takes bribe credits only on acceptance. Patrols instead allow an
-affordable **[S] Surrender**, which pays the stated fine and clears notoriety.
-Action letters work from every page. Unaffordable choices retain explanatory
-terms but expose no action key. Disconnecting preserves the existing pending fight.
-
-### Saved display presets
-
-Station **[O] Display Options** offers **[1] Full palette**, **[2] Full palette,
-no motion**, **[3] 16-color**, **[4] Monochrome**, and **[5] Plain / ASCII
-artwork**. Full palette uses the terminal's existing truecolor or 256-color
-setting; the second is the same palette with every reveal, tick and drain off.
-Monochrome retains Unicode artwork without ANSI styling; Plain also substitutes
-ASCII decorations for the whole glyph vocabulary. Unicode letters and text input
-remain UTF-8 in every mode. Numeric telemetry and warning labels do not depend on
-color. Each preset previews itself on that screen, drawn with what your own
-terminal can do.
-
-Selecting a different preset saves it immediately before acknowledging the
-change. **[B] Back**, paging, and selecting the current preset make no change.
-The preference applies from the first title on the next visit and survives
-retirement. Existing careers default to Full palette. Motion is on in the first
-and third and off in the other three; see "What Voidrunner looks like" for what
-it does and how to skip it.
-
-### Ship and place portraits
-
-Station **[V] Viewport** opens **[1] Ship**, **[2] Station**, and
-**[3] Discovery** views. The yard's **[V] Ship** opens the same viewer.
-Use **[<] / [>]** to page and **[B] Back** to leave. Browsing does not
-advance time, chart systems, or save anything.
-
-Each hull has its own silhouette. Damage adds `x` shading alongside the
-actual hull values and an Intact, Scuffed, Damaged, or Critical label; fuel
-and cargo remain separate capacity figures. Station portraits reflect the
-current economy, with the real station name, sector, coordinates, danger,
-and specialist contact where present. A landmark portrait becomes viewable
-at its location and remains in the discovery view after investigation.
-
-Portraits use complete large or compact compositions according to terminal
-dimensions, with paginated details and the selected display preset. A portrait
-is a still composition: it is never redrawn once it is on the screen.
-Landmark inspection keeps salvage status and action results
-before the artwork. A hull refit opens an illustrated preview: **[C] Commission**
-then final confirmation purchases it, while **[B] Back** leaves the ship alone.
-Commissioning restores hull health and keeps cargo and modules; it does not
-fill the larger fuel tank.
-
-### Commodity market pages
-
-Station **[M] Commodity Market** pages with **[<] Previous / [>] Next**; each
-commodity letter works from every page. Credits stay in the heading, while entries
-show per-unit quotes, stock, station buying demand and cargo aboard. Cargo usage
-is labelled as capacity rather than a health gauge. Illegal and price-event notices
-can appear together; prohibited purchases are identified before a trade.
-
-Buying or selling retains the result in the refreshed catalog after saving it.
-Cancel a quantity with Enter to leave the career unchanged and keep the prior
-result. **[X] Futures** opens wholesale orders; **[B] Back** returns to the station.
-
-### Futures exchange pages
-
-Market **[X] Futures** lists wholesale quotes and outstanding orders. Read the
-fee and limit notices, page with **[N] Next / [P] Previous**, and select a numbered
-entry for details. Complete labels stay together or use a read-through view;
-inspection returns to the same list page. **[B] Back** leaves the exchange.
-
-Order drafts and existing orders use **[<] Previous / [>] Next**. The draft shows
-the station's stock and what remains after the order; an order larger than the
-stock cannot be signed, and signing reserves those units from spot stock until
-pickup or cancellation. Quantity and term edits remain unsaved until **[S] Sign**
-and its final confirmation. Invalid quantity
-input retains the draft; Back discards it. Modern-order cancellation remains an
-explicit **[X] Cancel** with a final refund/fee confirmation.
-Signed/cancelled results are saved before display and retained when
-returning to the futures list and market.
-
-### Engineering yard and crew pages
-
-The yard and crew roster fit the terminal height, stacking terms at narrow widths.
-Use **[>] Next** and **[<] Prev** to browse; **[B] Back** is available on every page.
-Upgrade/refit letters work directly, and the yard keeps **[R] Refuel**, **[P] Repair**
-and **[K] Crew** available across pages. The heading shows current credits. Full
-costs, upgrade benefits, fuel/hull prices and ongoing crew wages remain readable.
-
-After an action, the refreshed first page retains the result and updated credits.
-Paging, Back and cancelled confirmation/quantity prompts do not spend or save.
-The historical **[U]** yard shortcut now returns to the upgrade list; choose the
-visible upgrade letter there.
-
-### Station stock and buying demand
-
-Spot markets carry a limited quantity of each good and have a limited buying
-demand. The market lists stock; commodity details show both available quantities
-and replenishment per day. A producer stocks up to 96 units of its goods and
-replenishes 6 per day; other goods have 48 stock and replenish 3. Stations that
-demand a good buy up to 96 units and regain 6 demand per day; other goods have
-48 demand and regain 3. Only jumps advance days. Revisiting a menu or restarting
-the door does not refill a market. Selling replenishes stock up to its ceiling;
-buying does not restore spent buying demand.
-
-Large holds can carry several commodities or visit additional markets when one
-pool is exhausted. Futures are separate wholesale consignments with their stated
-fee, maturity and station pickup; selling the delivered goods uses ordinary spot
-demand. Contract deliveries use their own contracted quantities. Existing careers
-start with full spot pools when this feature is first used.
-
-The ledger's market memory retains observed quantities with their date. Trader
-price reports do not reveal stock or buying demand. Route estimates warn when a
-load exceeds remembered buying demand; that demand may have replenished since the
-observation. Check a current market before relying on a complete sale.
-
-### Trading Ledger
-
-Choose **[T] Trading Ledger** on the station deck to inspect cargo costs, sale
-and delivery margins, losses, fuel purchases and crew wages. It also shows the
-current station's production and demand and your present per-jump wage budget.
-Pages fit the terminal; **[B] Back** leaves without changing anything.
-
-Costs are recorded for new purchases and futures pickups, including brokerage.
-Every unit in the hold has a recorded acquisition cost, and disposals consume
-purchases in the order they were made. Sale and delivery margins exclude
-travel and other career spending. The ledger reports actual fuel purchases,
-paid wages, cancelled-order fees and lost cargo cost separately; it cannot
-reconstruct activity before recording began. A new career starts a fresh ledger.
-
-Within the ledger, **[M] Markets** shows remembered buy/sell quotes and their
-observation day. Docking updates local quotes; trader data bursts also record
-the quote they reveal. Remote quotes stay stale until updated, and older chart
-discoveries do not invent price history. Open purchase of contraband remains
-labelled prohibited outside Havens.
-
-**[R] Route** estimates a trade using a remembered destination sale price. Open
-**[E] Edit draft**, change **[D] Destination**, **[C] Cargo** and **[Q] Quantity**, then
-**[S] Apply** to update the estimate. Back discards edits; rejected combinations
-retain the draft for correction. **[H] Hold** toggles between buying
-new goods here and using cargo already aboard. The view shows procurement and
-remaining credits, fuel and refuelling stops, wages, quote age, cash shortfall,
-route danger where known and expected margin. Unknown acquisition cost or a
-delivery that would consume this cargo prevents a total-margin claim. A leg
-longer than the ship's tank capacity is marked infeasible. Estimates assume the
-remembered price and an intact load; market changes, encounters, repairs, fines,
-detours and other income/spending can change the result. These views are read-only
-and never purchase cargo or engage travel. Use the market and chart to act.
-
-### Regional opportunities
-
-Within the Trading Ledger, **[O] Opportunities** shows active economy news and up to
-six trade candidates. New events affect at most three nearby stations. A boom
-suggests bringing the named commodity; a crash suggests checking for cheaper
-supplies. The bulletin names affected stations, coordinates, hops and remaining
-event time, while uncharted danger stays unknown. Public news does not chart a
-station or record its prices. Older saved economy-wide events keep their scope
-until they finish. An event changes prices, not the spot market's supply limits.
-
-Candidates use current local stock, cash and hold space plus remembered sale
-prices and buying demand. They reserve cash for fuel and wages, exclude delivery
-conflicts and rank estimated margin per outbound jump. Return travel, encounters,
-repairs and market changes are excluded; unobserved demand and contraband risks
-are labelled. **[1-6] Route** opens the selected estimate, where **[E] Edit draft**
-can adjust it. Back or disconnect changes nothing; the board never buys cargo or
-starts travel. Visit markets and compare alternatives when a pool is exhausted.
 
 ### Voidrunner recovery
 
@@ -1297,12 +325,6 @@ data. Restore a separately retained, matching game backup manually in that case.
 Copy completed backups off-machine and manage retention separately; NetBBS does
 not configure a scheduler, remote storage, or automatic deletion.
 
-Existing registrations keep their JSON metadata and UTF-8 stdio API.
-
-**MANUAL — outside NetBBS** labels below identify work the SysOp must do on
-the host or in another program. NetBBS never installs packages, downloads
-games/drivers, creates tunnel accounts, or edits host configuration.
-
 ## What is supported, and what has been verified?
 
 | Profile | Execution environment | Current verification |
@@ -1375,46 +397,11 @@ host data in the game installation. Run NetBBS unprivileged, never as root.
 
 ### What a door is told: `door_info.json`
 
-Every **native** door -- stdio, PTY or socket -- is given the path to a small
-JSON file in `NETBBS_DOOR_INFO`. It is the NetBBS-native alternative to the
-classic drop files, and such a door may use either or both.
+The complete developer contract has moved to the
+[developer handbook](NetBBS-Developer-Handbook.md#door-launch-metadata).
+Native doors receive launch metadata; DOS games use their classic drop files,
+and remote services receive their configured RLogin handshake fields.
 
-Two kinds of registration deliberately get none of it:
-
-- A **DOS** door. `NETBBS_DOOR_INFO` is set in the emulator's *host*
-  environment and names a host path; nothing inside the guest sets it, and a
-  DOS path could not reach it anyway. Give a DOS game the classic
-  [drop files](#register-and-test-inside-netbbs) instead — which is what the
-  DOS templates configure, and what a DOS-era program can actually read.
-- A **remote** (RLogin) registration. NetBBS launches no process for it, so
-  there is no environment to carry a path and no filesystem in common. The
-  RFC 1282 handshake conveys only the configured local and remote identity
-  strings and a terminal type; everything else about that caller stays on
-  this side of the connection.
-
-| Field | Meaning |
-| --- | --- |
-| `door_api` | Contract version, currently `3`. Refuse a version you do not understand rather than probing for fields. |
-| `handle` | The caller's NetBBS handle. |
-| `user_id` | Their stable numeric id on this node. |
-| `terminal_width`, `terminal_height` | Current geometry; rewritten mid-run if the caller resizes and the door opted in (see above). |
-| `color_depth` | `truecolor` or `256`. |
-| `unicode_style` | The caller's own NetBBS glyph preference, so a door can match what they already chose. |
-| `transport` | `telnet`, `ssh`, `web`, `local`, or `unknown`. Key decoding and latency assumptions differ, particularly for the browser terminal. |
-| `timezone` | The node's display timezone as an IANA name, for in-game clocks. Node-wide: NetBBS has no per-caller timezone. |
-| `node_name` | The node's display name, which a SysOp may change at any time. |
-| `node_id` | A stable, opaque per-node identifier which survives a rename. Key a door's world on this, not on `node_name`. Not a credential. |
-| `session_limit_seconds` | The effective wall-clock cap for *this* launch — the tighter of the profile's limit and any lower bound the launch itself imposes — so a door can warn before it is cut off. Absent when nothing bounds the run. |
-| `outbound` | Present **only** if a SysOp switched this door's outbound hook on: `label` (the name its posts appear under), `directory` (where to drop a request, relative to the file's own directory), `results` (absolute path where outcomes are kept across launches), `boards` (every board it may name) and `posts_per_hour`. See [Letting a door post to a board](#letting-a-door-post-to-a-board). |
-
-Treat every field as optional and absence as "unknown": that is how the file
-stays compatible as it grows. Two notes on what is deliberately **not** there.
-`node_fingerprint` (the Link identity) is not published yet — the node's own
-identity is not held in the database, so supplying it would mean threading it
-into the door runtime; `node_id` is what a door keying its world on the node
-needs today. And nothing here is a credential or a privilege: no password, no
-email, no user level, no IP address. A door learns who the caller says they
-are, not what they may do.
 
 **MANUAL — outside NetBBS:** create the installation directories and give the
 actual service account read/write/search access. For a service user/group both
@@ -1799,88 +786,9 @@ post, which is usually the point of automating it. Two things follow:
 
 ### Writing a door that uses it
 
-A door learns about its hook from `door_info.json` (see
-[What a door is told](#what-a-door-is-told-door_infojson)). The `outbound`
-key is **absent** when the hook is off, which is the only supported way to
-test for it:
+See the [developer handbook's outbound posting contract](NetBBS-Developer-Handbook.md#door-outbound-posting)
+for request/result JSON, timing, failure behavior, and limits.
 
-```json
-"outbound": {
-  "label": "Blacksite.door",
-  "directory": "outbound",
-  "results": "/home/netbbs/.netbbs/door-outbound/3",
-  "boards": ["Chronicle"],
-  "posts_per_hour": 6
-}
-```
-
-If `"rehearsal": true` is present, a SysOp is *testing* this door rather than
-a caller playing it. The drop directory works exactly as it always does, so
-your posting path is exercised, but nothing written is published and no result
-comes back. Say so rather than reporting a post you did not make.
-
-`directory` is relative to the directory holding `door_info.json`, and NetBBS
-has already created it. To post, write one JSON file there:
-
-```json
-{"board": "Chronicle", "subject": "Season 1 closes", "body": "..."}
-```
-
-- Write it under a temporary name and **rename it into place** with a `.json`
-  extension. NetBBS ignores anything not ending in `.json`, so a half-written
-  file is never read. The check is case-insensitive, so `POST.JSON` counts.
-  Use your language's atomic rename — `Path.replace` in Python, `rename(2)`
-  in C.
-- Keep a request under about 216 KB. A larger one is refused unread rather
-  than loaded into the BBS process.
-- `board` may be omitted if exactly one board is allowlisted. With more than
-  one, a request that names none is refused rather than guessed at.
-- `subject` must be non-empty; `body` may be empty.
-
-Requests are processed when the door exits. For each one, NetBBS removes the
-request and writes a result into the directory named by `outbound.results` —
-an absolute path outside the working directory, because the working directory
-is deleted the moment the run ends and a result left there could never be read
-by anyone.
-
-Result files are named `<launch>.<your request name>.result.json`, where
-`<launch>` differs for every run. Do not construct that name: read the
-directory, parse each file, and match on the `request` field it carries. This
-is what lets two sessions of the same door run at once without one
-overwriting the other's outcome — which matters for any door that permits
-more than one player at a time.
-
-```json
-{"status": "posted", "post_id": "...", "board": "Chronicle", "moderated": true,
- "request": "chronicle", "at": "2026-09-12T18:04:11.502133Z"}
-{"status": "rejected", "reason": "board 'Private' is not allowlisted for this door",
- "request": "chronicle", "at": "2026-09-12T18:04:11.502133Z"}
-```
-
-If a SysOp switched the hook off while your door was running, its requests are
-simply dropped and no result is written — there would be nowhere you could
-find one, since the next launch has no `outbound` block at all. That absent
-block is how you learn the hook is off.
-
-A refusal is never queued for later — a post held back and published after a
-SysOp revoked the allowlist is the surprise the switch exists to prevent. Your
-door can read the result on its next launch if it wants to know what happened;
-`"moderated": true` means the post is waiting for the SysOp's approval rather
-than already visible.
-
-Reasons you can expect to see, and what they mean for the door:
-
-| `reason` contains | What happened |
-| --- | --- |
-| `not switched on` | The SysOp has not enabled outbound. Stop trying. |
-| `no board is allowlisted` | Enabled, but nothing is allowed yet. |
-| `not allowlisted for this door` | The board name is wrong, or was revoked. |
-| `matches more than one` | Two allowlisted boards differ only by case; spell one exactly. |
-| `more than one allowlisted board` | Name a board in the request. |
-| `rate limit reached` | Try again later; the ceiling is in `posts_per_hour`. |
-| `larger than` | The request exceeded the size limit and was not read. |
-| `requests in one session` | You wrote more in one session than a drain answers. |
-| `switch it on again` | The account that enabled the hook is gone, so it has lapsed until a SysOp vouches for the door again. |
 
 ## DOS prerequisites
 

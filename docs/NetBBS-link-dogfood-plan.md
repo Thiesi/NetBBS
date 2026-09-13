@@ -13,7 +13,7 @@ calendar time passing. This document is the plan to follow; running it
 is a separate, ongoing activity.
 
 **Explicitly not the goal:** this does not by itself establish public-
-federation readiness. Phase 3 remains private/experimental federation.
+federation readiness. NetBBS Link remains private/experimental federation.
 The automated parts of design doc §12's Phase-4 trust/quarantine model are
 implemented; this deployment now also supplies the real-node and independently
 administered evidence required by issue #131. Public readiness still requires
@@ -25,7 +25,7 @@ they arise.
 
 | Node | Role | Reachability | Suggested host |
 |---|---|---|---|
-| **A — "home"** | Rendezvous seed for the other two | Full peer, real advertised address | A cheap VPS (~$4–6/mo: Hetzner, Vultr, DigitalOcean, etc.) or a home server with port-forwarding |
+| **A — "home"** | Rendezvous seed for the other two | Full peer, real advertised address | A reachable server or a home server with port-forwarding |
 | **B** | Second full peer, distinct network from A | Full peer, real advertised address | A second VPS, or the user's own always-on home machine |
 | **C — outgoing-only** | Proves relay support, not just direct pairwise sync | `outgoing_only = true` (the default), relies on A or B agreeing to relay for it | A laptop/desktop behind ordinary home NAT, no port-forwarding |
 
@@ -45,7 +45,7 @@ month total if you'd rather have genuinely independent, always-on
 hosts for A and B. Either is fine — the requirement is independent
 networks, not paid infrastructure.
 
-Install each node using `docs/NetBBS-operator-guide.md` (issue #82) --
+Install each node using [SysOp handbook](NetBBS-SysOp-Handbook.md) (issue #82) --
 this run doubles as a real-world exercise of that guide, not just of
 Link itself. Use distinct node names (`node.name` in config) so
 `[L]ink status`/logs are easy to tell apart across three terminals.
@@ -68,7 +68,7 @@ fits your own availability.
 
 ### Setup (day 0)
 
-- [x] Install and start all three nodes per `docs/NetBBS-operator-guide.md`.
+- [x] Install and start all three nodes per [SysOp handbook](NetBBS-SysOp-Handbook.md).
       Actual topology deployed: NetBBS-1/2/3, a directed ring (1→seed
       2, 2→seed 3, 3→seed 1), all three full peers on one home LAN —
       not the suggested "A/B mutual, C outgoing-only on separate
@@ -190,7 +190,7 @@ fits your own availability.
       proving restore against *this deployment's* real accumulated
       state, which it did.
 - [x] Perform at least one real upgrade on one node using
-      `docs/NetBBS-operator-guide.md`'s documented procedure (back up
+      [SysOp handbook](NetBBS-SysOp-Handbook.md)'s documented procedure (back up
       first, upgrade the package, restart). If no new NetBBS release
       exists yet when you reach this step, cut one (even a small patch
       version bump) specifically so there's something real to upgrade
