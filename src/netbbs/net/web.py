@@ -600,9 +600,23 @@ class WebSession(Session):
                         # promotes ESC to a named key when it introduces
                         # a CSI or SS3 sequence, so an Escape with
                         # nothing after it falls through to the
-                        # character stream. Only a caller that opted in
-                        # sees this; otherwise it stays the no-op it has
-                        # always been.
+                        # character stream.
+                        #
+                        # Alt-letter arrives the same way and must not be
+                        # mistaken for one (Codex review): xterm.js sends
+                        # it as a single `onData` string like `ESC` + `s`,
+                        # which `_parse_input_events` queues as two
+                        # separate characters. Raising on the ESC alone
+                        # left the `s` in the queue, where the resource
+                        # editor behind this prompt then read it as its
+                        # own [S]ave hotkey -- Alt+B likewise becoming
+                        # Back. The queued follow-up is consumed with the
+                        # Escape so nothing escapes into the screen
+                        # behind, and only a genuinely bare Escape
+                        # cancels.
+                        if not self._char_queue.empty():
+                            self._char_queue.get_nowait()
+                            continue
                         raise InputCancelled
 
                     if char in (_BS, _DEL):

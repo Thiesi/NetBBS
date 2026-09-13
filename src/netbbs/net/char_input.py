@@ -678,7 +678,13 @@ async def _read_line_editable(
     # editor owns what is on screen from the prompt onward, and a caller
     # that wrote the text itself would leave this function's cursor
     # arithmetic disagreeing with the terminal from the first keystroke.
-    line: list[str] = list(initial)
+    # Bounded like anything else that reaches this buffer (Codex
+    # review). A carried Link resource's name or description is
+    # persisted from a remote genesis payload without a per-field limit,
+    # so an unbounded `initial` would let a peer make opening an edit
+    # field emit an enormous terminal write -- and submit a value the
+    # typed path would have refused.
+    line: list[str] = list(initial[:_MAX_LINE_LENGTH])
     cursor = len(line)
     if line:
         await write("".join(line))
@@ -759,14 +765,23 @@ async def _read_line_editable(
                     continue
 
                 if b == _ESC:
+                    if cancellable:
+                        # `_read_escape_sequence`'s `None` is ambiguous:
+                        # it means both "nothing followed ESC" (a real
+                        # standalone Escape) and "something followed but
+                        # was not in the recognized table" -- Ctrl+Left
+                        # (`ESC[1;5D`), Alt-letter, and anything else
+                        # this editor does not map. Cancelling on both
+                        # would abort the edit on an unsupported key
+                        # combination, which has always simply been
+                        # ignored. Peeked apart explicitly, the same way
+                        # `read_editor_key` already does it for the same
+                        # ambiguity, using the same pushback mechanism.
+                        peek = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
+                        if peek is None:
+                            raise InputCancelled
+                        _push_back(source, peek)
                     key = await _read_escape_sequence(source)
-                    if key is None and cancellable:
-                        # A bare Escape, not the start of an arrow or
-                        # Home/End sequence (issue #529). Only reachable
-                        # for a caller that asked for it; for everyone
-                        # else `key is None` still falls through every
-                        # branch below and is ignored, exactly as before.
-                        raise InputCancelled
                     if key == "LEFT":
                         if cursor > 0:
                             cursor -= 1

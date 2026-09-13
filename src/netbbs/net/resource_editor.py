@@ -834,6 +834,36 @@ async def _show_field_help(
 # empty string.
 _EDIT_HINT = "Edit (Enter saves, Esc cancels)"
 
+# ...but only while the value fits on one physical row (Codex review).
+#
+# `read_line` moves its cursor with single-row `CSI D`/`CSI C`
+# sequences. A buffer wider than the terminal soft-wraps onto a second
+# row, and from then on Home, Left, Backspace and tail redraws clamp at
+# the current row while the logical cursor walks into text a row above
+# -- the display and the value that will be saved diverge. That is a
+# pre-existing limit of the line editor, not something prefilling
+# introduced: a *typed* over-wide line has always had it. What prefilling
+# changes is that it becomes reachable by simply opening a long
+# description, which is precisely the case this feature exists for.
+#
+# So a value that will not fit keeps the old empty prompt and its
+# "blank = keep" answer, and the prompt says which one the caller is
+# looking at rather than leaving them to discover it. Long values want a
+# real single-row viewport, or routing to the full-screen prose editor
+# that already exists; both are follow-up work, filed separately rather
+# than half-built here.
+_KEEP_HINT = "blank = keep"
+
+
+def _prefill_fits(session: Session, hint: str, value: str) -> bool:
+    """Whether `value` can be edited inline without soft-wrapping.
+
+    The prompt is written on its own line, so the value gets the whole
+    terminal width rather than whatever the prompt left of it -- which
+    is what keeps most real descriptions on the inline path.
+    """
+    return display_width(value) < max(1, session.terminal_width - 1)
+
 
 def text_field(key: str, *, required: bool = False) -> FieldPrompt:
     """A plain single-line text prompt, opening on the current value.
@@ -846,8 +876,31 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
     """
 
     async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        current = draft.get(key) or ""
-        await write_prompt(session, f"{_EDIT_HINT}: ")
+        # Sanitized before it is seeded, not just where it is displayed
+        # (Codex review, P1). For a *carried Link* board, channel or file
+        # area the draft value came from a remote genesis payload and is
+        # stored verbatim -- the screen sanitizes it at render time, but
+        # handing the raw string to `read_line` would echo a hostile
+        # peer's embedded ESC/OSC sequences straight at the SysOp's
+        # terminal the moment they opened the field. Design doc:
+        # sanitize untrusted segments *before* they are written.
+        current = sanitize_text(draft.get(key) or "")
+        if not _prefill_fits(session, _EDIT_HINT, current):
+            # Too wide to edit inline -- see `_KEEP_HINT`. Falls back to
+            # the prompt this screen has always had, including its
+            # "blank = keep" answer, so a value that cannot be edited
+            # in place can still be replaced or left alone.
+            shown = current if current else "(blank)" if required else "(none)"
+            await write_prompt(session, f"[{shown}] ({_KEEP_HINT}): ")
+            raw = (await session.read_line()).strip()
+            if raw:
+                draft[key] = raw
+            return
+
+        # The prompt gets its own line so the value below it has the
+        # whole terminal width to sit in -- which is what keeps most
+        # real descriptions on the inline path rather than the fallback.
+        await session.write_line(colored(f"{_EDIT_HINT}:", fg_color=MUTED_COLOR))
         try:
             raw = (await session.read_line(initial=current, cancellable=True)).strip()
         except InputCancelled:

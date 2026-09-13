@@ -112,3 +112,39 @@ def test_the_prompt_says_which_keys_do_what():
     draft = {"description": "old"}
     session = _edit(draft, "new")
     assert "Enter" in session.output and "Esc" in session.output
+
+
+# -- Codex review -----------------------------------------------------
+
+
+def test_a_remote_value_is_sanitized_before_it_is_seeded():
+    """P1. A carried Link board/channel/area stores its name and
+    description verbatim from a remote genesis payload, sanitized only
+    where the screen renders them. Seeding the line editor with the raw
+    value would echo a hostile peer's escape sequences straight at the
+    SysOp's terminal the moment they opened the field."""
+    hostile = "Releases\x1b[2J\x1b]0;pwned\x07"
+    draft = {"description": hostile}
+    session = _edit(draft, "whatever")
+    assert "\x1b" not in session.offered_initial
+    assert "Releases" in session.offered_initial
+
+
+def test_a_value_too_wide_for_one_row_keeps_the_old_prompt():
+    """`read_line` moves with single-row CSI D/C, so a buffer that
+    soft-wraps makes the display diverge from the value that will be
+    saved. Too-wide values keep the prompt that has always worked,
+    including its "blank = keep" answer."""
+    draft = {"description": "x" * 200}
+    session = _edit(draft, "")
+    assert session.offered_initial == ""
+    assert "keep" in session.output
+    # And blank still means keep on that path, rather than clearing.
+    assert draft["description"] == "x" * 200
+
+
+def test_a_value_that_fits_still_gets_the_editable_prompt():
+    draft = {"description": "Weekly release builds"}
+    session = _edit(draft, "Weekly release builds, signed")
+    assert session.offered_initial == "Weekly release builds"
+    assert draft["description"] == "Weekly release builds, signed"
