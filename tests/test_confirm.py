@@ -24,7 +24,7 @@ class FakeSession(Session):
     async def write(self, text: str) -> None:
         self.written.append(text)
 
-    async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
+    async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
         raise AssertionError("single-key confirmation must not call read_line")
 
     async def read_key(self, echo: bool = True) -> str:
@@ -187,7 +187,7 @@ def test_line_only_adapter_retries_invalid_input_for_compatibility():
         async def write(self, text: str) -> None:
             self.written.append(text)
 
-        async def read_line(self) -> str:
+        async def read_line(self, **kwargs) -> str:
             return next(self.lines)
 
     session = LineOnlySession()

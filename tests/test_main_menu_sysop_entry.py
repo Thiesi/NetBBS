@@ -51,7 +51,7 @@ class FakeSession:
             raise AssertionError("FakeSession.read_key() called with no more scripted keys")
         return key
 
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, **kwargs) -> str:
         line = next(self._lines, None)
         if line is None:
             raise AssertionError("read_line should not be reached by these tests")

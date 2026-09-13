@@ -39,7 +39,7 @@ class _FakeSession(Session):
     async def write(self, text: str) -> None:
         raise NotImplementedError
 
-    async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
+    async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
         raise NotImplementedError
 
     async def read_key(self, echo: bool = True) -> str:
