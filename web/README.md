@@ -86,6 +86,36 @@ nothing.
 games, drive the door as a subprocess through `scripts/door_gallery.py` and
 convert with `website_ansi_to_html.py`.
 
+**Every embedded capture is reproducible.** `website_capture_screens.py --list`
+names the nine NetBBS screens; `website_capture_chat_mrc.py`,
+`website_capture_door_menu.py` and `website_capture_door_profile.py` cover the
+other three. The raw ANSI for each lives in `shots/raw-<name>.txt` and its
+converted form in `shots/shot-<name>.html`, so a capture can be regenerated,
+diffed, and re-embedded rather than rebuilt by hand.
+
+That was not always true, and the cost of it not being true is worth
+remembering: the original gallery came from two Claude Artifacts with no way to
+redraw it, so it aged silently. By v7.5.0 the files shot was showing a prose
+layout the product had replaced several releases earlier, and every grey on
+both pages was a `MUTED_COLOR` the palette no longer used. **A capture nobody
+can regenerate is a screenshot of a product you no longer ship.**
+
+Regenerate all twelve, convert each at its own geometry, then re-embed:
+
+```sh
+for s in $(PYTHONPATH=src python scripts/website_capture_screens.py --list); do
+  PYTHONPATH=src python scripts/website_capture_screens.py "$s" web/shots/raw-$s.txt
+done
+PYTHONPATH=src python scripts/website_ansi_to_html.py web/shots/raw-files.txt \
+  web/shots/shot-files.html --width 88 --height 24
+```
+
+`website_check_pages.py` reports each capture's rows × columns and whether it
+needs `shot-tall` (17–24 rows do; fewer do not). Recapturing changes those
+numbers — the Colors screen gained rows and needed the class, the directory
+screen lost them and no longer did — so read that report rather than assuming
+the classes still fit.
+
 ## House vocabulary
 
 "Link" is always **NetBBS Link**, "boards" **message boards**, "channels"

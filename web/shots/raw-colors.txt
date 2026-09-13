@@ -1,0 +1,23 @@
+
+[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;51mNode colors[0m
+[38;5;240m───────────────────────────[0m
+[38;5;246mBackup: never[0m
+[38;5;248mBranding only -- status colors (error/success/warning/etc.) always stay standard, so a caller can trust what they mean on any node.[0m
+[1m[38;5;75mAccent color:[0m
+[38;5;248m  Default:   [0m[1m[38;5;220m  MetroBBS Underground[0m
+[1m[38;5;75mHeader color:[0m
+[38;5;248m  Default:   [0m[1m[38;5;51m== Node management ==[0m
+[1m[38;5;75mClock color:[0m
+[38;5;248m  Default:   [0m[1m[38;5;213m14:32:07[0m
+[38;5;75m  Accent[0m: [38;5;248mdefault[0m
+[38;5;75m  Header[0m: [38;5;248mdefault[0m
+[38;5;75m  Clock[0m: [38;5;248mdefault[0m
+
+  [[1m[38;5;46mA[0m]ccent                                 [[1m[38;5;46mS[0m]ave
+[38;5;248m    Board/channel/user-name color[0m        [38;5;248m    Write this draft to the database[0m
+  [[1m[38;5;46mH[0m]eader                                 [[1m[38;5;46mB[0m]ack
+[38;5;248m    Section-header color[0m                 [38;5;248m    Discard the draft, nothing saved[0m
+  [[1m[38;5;46mC[0m]lock
+[38;5;248m    Main-menu clock color[0m
+[38;5;248m(Ctrl-H for help on these fields)[0m
+Choice: 

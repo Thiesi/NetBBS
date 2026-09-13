@@ -1,0 +1,31 @@
+
+[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;51mSysOp operations console[0m
+[38;5;246mLive health, attention queues, and administrative controls.[0m
+[38;5;240m───────────────────────────────────────────────────────────[0m
+[1m[38;5;51m╔════════════════════════════════════════════════════════════════════════════╗[0m
+[1m[38;5;51m║ [0m[1m[38;5;75mNODE  [0m[1m[38;5;82m● ONLINE[0m                                                            [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m  [38;5;246mActive sessions: [0m[1m[38;5;252m0[0m                                                      [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m[1m[38;5;75mLINK  [0m[1m[38;5;246m● DISABLED[0m                                                          [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m[1m[38;5;75mCONTENT[0m                                                                   [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m  [38;5;246mUsers: [0m[1m[38;5;252m4[0m  [38;5;246mMessage boards: [0m[1m[38;5;252m3[0m  [38;5;246mPosts: [0m[1m[38;5;252m1[0m  [38;5;246mFile areas: [0m[1m[38;5;252m1[0m  [38;5;246mFiles: [0m[1m[38;5;252m0[0m          [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m[1m[38;5;75mATTENTION[0m                                                                 [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m  [38;5;246mModeration: [0m[1m[38;5;252m0[0m pending                                                   [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m    [38;5;246mUsers: [0m[1m[38;5;252m0[0m  [38;5;246mPosts: [0m[1m[38;5;252m0[0m  [38;5;246mFiles: [0m[1m[38;5;252m0[0m                                          [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m  Backup: [38;5;214mnever[0m                                                           [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m  Update check: [38;5;214mnever[0m                                                     [1m[38;5;51m ║[0m
+[1m[38;5;51m╚════════════════════════════════════════════════════════════════════════════╝[0m
+
+[1m[38;5;246mCONSOLE[0m                                  [1m[38;5;246mQUICK[0m
+  [[1m[38;5;46mU[0m]sers                                  [[1m[38;5;46mN[0m]ode
+[38;5;248m    Manage user accounts[0m                 [38;5;248m    Sessions, shutdown, and drain[0m
+  [[1m[38;5;46mC[0m]ontent                                Bac[[1m[38;5;46mk[0m]up
+[38;5;248m    Boards, areas, channels & more[0m       [38;5;248m    Create and review complete backups[0m
+  [[1m[38;5;46mO[0m]perations                             [[1m[38;5;46mD[0m]NS
+[38;5;248m    Observe the node, fix trouble[0m        [38;5;248m    Managed netbbs.org subdomain statu[0m
+  [[1m[38;5;46mS[0m]ettings
+[38;5;248m    Durable node configuration[0m
+  [[1m[38;5;46mR[0m]efresh
+[38;5;248m    Redraw with current numbers[0m
+  [[1m[38;5;46mB[0m]ack
+[38;5;248m    Return to the main menu[0m
+Choice: 

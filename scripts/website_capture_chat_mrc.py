@@ -153,6 +153,26 @@ LIVE = [
 ]
 
 
+_CONTROL = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[78]")
+
+
+def on_screen(session) -> str:
+    """What has been drawn, flattened enough to search for a message body.
+
+    A body does not reach the screen as one contiguous run: NetBBS wraps it
+    at the terminal width, so a long enough line arrives with a newline (and
+    the next row's worth of escapes) somewhere in the middle of it. That
+    became the common case in v7.5.0, when chat timestamps turned on by
+    default and every line grew a `[HH:MM] ` prefix -- bodies that used to
+    fit started wrapping, and a raw substring test for "has it arrived yet"
+    started timing out on lines that were plainly on the screen.
+
+    Control sequences out, whitespace collapsed, so the test asks the
+    question it means: is this text on the screen anywhere.
+    """
+    return " ".join(_CONTROL.sub("", "".join(session.written)).split())
+
+
 async def until(predicate, seconds: float, what: str) -> None:
     """Wait for `predicate()`, raising rather than asserting on timeout.
 
@@ -229,14 +249,15 @@ async def capture(exchanges: int) -> str:
                     await asyncio.sleep(TYPING_GAP - waited)
                 session.inputs.put_nowait(typed)
                 typed_at = asyncio.get_running_loop().time()
-            await until(lambda b=body: b in "".join(session.written), 10,
+            await until(lambda b=" ".join(body.split()): b in on_screen(session), 10,
                         f"this line to reach the screen: {body[:48]!r}")
 
         # The screen as the caller sees it while still in the channel: /quit
         # clears it on the way out, so snapshot before leaving.
         snapshot = "".join(session.written)
+        drawn = on_screen(session)
         missing = [extract_body(i) if i is not None else t for i, t in played
-                   if (extract_body(i) if i is not None else t) not in snapshot]
+                   if " ".join((extract_body(i) if i is not None else t).split()) not in drawn]
         if missing:
             raise RuntimeError(f"{len(missing)} line(s) never rendered: {missing[:3]}")
         if RATE_LIMIT_NOTICE in snapshot:

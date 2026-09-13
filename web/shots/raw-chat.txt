@@ -1,0 +1,21 @@
+[2J[H[1;21r
+[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;246mChat[0m[38;5;246m › [0m[38;5;51m#lobby[0m
+[38;5;246mrelease day: 7.5.0[0m
+[38;5;240m─────────────────────────────[0m
+
+[1m[38;5;246m[HISTORY][0m [38;5;248mRecent channel activity[0m
+[38;5;246m[19:58][0m [38;5;248m*** wren has joined the channel.[0m
+[38;5;246m[19:58][0m [38;5;220m<wren>[0m [38;5;255mevening -- did the 7.5.0 wheel land yet?[0m
+[38;5;246m[20:01][0m [38;5;248m*** otto has joined the channel.[0m
+[38;5;246m[20:01][0m [38;5;220m<keeper>[0m [38;5;255mit did. the file listing is a real table now[0m
+[38;5;246m[20:02][0m [38;5;220m<otto>[0m [38;5;255mjust pulled it. the cursor is finally visible over ssh[0m
+[38;5;246m[20:03][0m [38;5;220m<wren>[0m [38;5;255mtimestamps on by default is the one I wanted[0m
+[38;5;246m[20:03][0m [38;5;220m<keeper>[0m [38;5;255mthat one changes for everybody, so it is in the notes[0m
+[38;5;246m[20:04][0m [38;5;248m• otto reads the notes properly this time[0m
+[38;5;246m[20:06][0m [38;5;220m<wren>[0m [38;5;255manyone else on the link tonight? quiet over here[0m
+[38;5;246m[20:06][0m [38;5;220m<keeper>[0m [38;5;255mtwo peers up. sync window moved to 04:00 last week[0m
+[38;5;248m10 recent events retained[0m
+[38;5;238m──────────────────────────────────────────────────────────────────────────────[0m
+
+[1m[38;5;82m● LIVE[0m Joined [1m[38;5;220m#lobby[0m. Type [[1m[38;5;46m/quit[0m] to leave.
+7[1;21r[22;1H[2K[38;5;238m────────────────────────────────────────────────────────────────────────────────[0m[23;1H[2K[1m[38;5;220m[48;5;236m#lobby[0m[1m[38;5;208m[48;5;236m[PUBLIC][0m[38;5;248m[48;5;236m | [0m[1m[38;5;51m[48;5;236m1[0m[38;5;248m[48;5;236m online ([0m[1m[38;5;51m[48;5;236m0[0m[38;5;248m[48;5;236m away)[0m[38;5;248m[48;5;236m | [0m[1m[38;5;141m[48;5;236m"release day: 7.5.0"[0m[38;5;248m[48;5;236m | [0m[1m[38;5;201m[48;5;236mkeeper[0m[1m[38;5;196m[48;5;236m[sysop][0m[48;5;236m       [0m8[1;21r[24;1H[2K[1m[38;5;220m› [0m

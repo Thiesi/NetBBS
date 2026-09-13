@@ -1,0 +1,26 @@
+
+[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;246mMessage boards[0m[38;5;246m › [0m[38;5;51mAnnouncements[0m
+[38;5;246m4 posts on this page[0m
+[38;5;240m──────────────────────────────────────────────[0m
+
+[38;5;220m[1] NetBBS 7.5.0 is up -- [0mkeeper[38;5;246m (02.09.2026 19:41)[0m
+Guest login, a readable palette and a backup that no longer quietly skips Voidrunner
+careers. Notes are in the releases page.
+[38;5;238m──────────────────────────────────────────────────────────────────────────────[0m
+
+[38;5;220m[2] Masthead preset pack -- [0mwren[38;5;246m (04.09.2026 08:16)[0m
+Twelve presets in the file area, 80 and 132 columns both.
+[38;5;238m──────────────────────────────────────────────────────────────────────────────[0m
+
+[38;5;220m[3] Re: NetBBS 7.5.0 is up -- [0motto[38;5;246m (07.09.2026 21:03)[0m
+The file listing finally reads as a table over ssh. Thank you.
+[38;5;238m──────────────────────────────────────────────────────────────────────────────[0m
+
+[38;5;220m[4] Link sync window moved to 04:00 -- [0mkeeper[38;5;246m (09.09.2026 17:28)[0m
+Quieter for everyone, and it stops colliding with the backup.
+
+  [[1m[38;5;46mP[0m]ost
+[38;5;248m    Write a new post[0m
+  [[1m[38;5;46mB[0m]ack
+[38;5;248m    Return to the previous menu[0m
+Choice: 

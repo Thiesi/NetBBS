@@ -1,0 +1,19 @@
+
+[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;51mAvailable doors[0m
+[38;5;246mpage 1/1, 6 total[0m
+[38;5;240m───────────────────────────────[0m
+[38;5;46m  01. [0m[38;5;248m(#6) [0m[38;5;220mBarren Realms Elite [remote: DoorParty][0m[38;5;248m - Operator-run tunnel.[0m
+[38;5;46m  02. [0m[38;5;248m(#3) [0m[38;5;220mGlobal War[0m[38;5;248m - DOS 2.7, turn-based conquest.[0m
+[38;5;46m  03. [0m[38;5;248m(#1) [0m[38;5;220mLegend of the Red Dragon[0m[38;5;248m - DOS 4.07, via DOSBox-X and BNU.[0m
+[38;5;46m  04. [0m[38;5;248m(#5) [0m[38;5;220mRetro Trivia[0m[38;5;248m - Native bundled quiz door.[0m
+[38;5;46m  05. [0m[38;5;248m(#2) [0m[38;5;220mTradeWars 2002[0m[38;5;248m - DOS 3.09, persistent galaxy.[0m
+[38;5;46m  06. [0m[38;5;248m(#4) [0m[38;5;220mVoidrunner[0m[38;5;248m - Native NetBBS door, sandboxed.[0m
+
+  [[1m[38;5;46mS[0m]earch
+[38;5;248m    Search by name[0m
+  [[1m[38;5;46mG[0m]oto #
+[38;5;248m    Jump to an item's #[0m
+  [[1m[38;5;46mB[0m]ack
+[38;5;248m    Return without picking[0m
+or type a 2-digit number to select; Ctrl-L: redraw, Ctrl-H: help
+Choice: 
