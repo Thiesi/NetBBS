@@ -492,6 +492,12 @@ async def capture_console(tmp: Path) -> str:
         create_file_area(db, "Utilities", creator=people["keeper"],
                          description="Node utilities and helper scripts")
         create_channel(db, "lobby", creator=people["keeper"], description="General chat")
+        # Something for the attention queue to be attending to. A console
+        # whose every counter reads zero shows the panel but not the point
+        # of it -- and the caption beside this shot says the queue is
+        # actually waiting on someone, which has to be true.
+        create_user(db, "newcomer", password="hunter2", user_level=10,
+                    pending_approval=True)
 
         session = CaptureSession(width=80, height=40)
         await _draw_admin_menu(session, lane, people["keeper"],
@@ -509,10 +515,16 @@ async def capture_colors(tmp: Path) -> str:
     """The one screen whose subject is colour, which makes it the one
     screen where a stale capture is most obviously stale."""
     from netbbs.net.admin_flow import _theme_colors_menu
+    from netbbs.net.node_theme import set_accent_color_override
 
     db, lane = _node(tmp)
     try:
         people = _people(db)
+        # A node that has actually been branded. Three rows reading
+        # "default" demonstrate the screen exists; they do not show what it
+        # is for, and the live preview above the fields is the whole point
+        # of the draft editor.
+        set_accent_color_override(db, (255, 140, 60))
         session = CaptureSession(width=80)
         await _theme_colors_menu(session, lane, people["keeper"])
         return session.take()
@@ -532,19 +544,32 @@ async def capture_login(tmp: Path) -> str:
     does, because a banner is operator-authored art and how it reaches the
     wire is part of whether it survives.
     """
+    from netbbs.net.nodeconfig import ThrottleConfig
+    from netbbs.net.throttle import LoginThrottle
     from netbbs.net.banner_presets import WELCOME_BANNER_PRESETS, load_welcome_banner_preset
-    from netbbs.net.session import write_preformatted_line, write_prompt
+    from netbbs.net.login_flow import _login
+    from netbbs.net.session import write_preformatted_line
     from netbbs.net.welcome_banner import (
         banner_path,
         load_welcome_banner,
         set_welcome_banner_enabled,
     )
-    from netbbs.rendering import LABEL_COLOR, colored
 
     db, _lane = _node(tmp)
     _lane.close()
     try:
-        preset = next(p for p in WELCOME_BANNER_PRESETS if p.key == "cyberpunk_sunset_gold")
+        _people(db)
+        # A preset whose art is unambiguously art. `cyberpunk_sunset_gold`
+        # -- the one this shot used to carry -- bakes `NODE: Megacity-Prime`,
+        # `PEERS: 18 Active Nodes` and `UPTIME: 100 Days+` into the `.ans`.
+        # Nothing fills those in, so as a *screenshot* they claim NetBBS
+        # renders live telemetry on the login screen, which it does not, and
+        # they name a node no other shot in the gallery mentions. This one
+        # carries no field/value rows at all, and no U+276F either -- three
+        # shipped presets use that Dingbats glyph, which is the character
+        # v7.5.0 removed from the chat prompt for rendering as a hollow box
+        # in the fonts a Windows terminal reaches for.
+        preset = next(p for p in WELCOME_BANNER_PRESETS if p.key == "cathedral_of_signals")
         banner_path(db).write_bytes(load_welcome_banner_preset(preset))
         set_welcome_banner_enabled(db, True)
 
@@ -552,7 +577,25 @@ async def capture_login(tmp: Path) -> str:
         await write_preformatted_line(
             session, load_welcome_banner(db, truecolor=session.supports_truecolor)
         )
-        await write_prompt(session, colored("Username (or [N]ew): ", fg_color=LABEL_COLOR, bold=True))
+        # `_login` itself draws the rest: the `Sign in` title, the
+        # registration subtitle, and the prompt. Nothing here retypes any of
+        # it -- an earlier version of this function hand-wrote
+        # `"Username (or [N]ew): "`, which invented a hotkey NetBBS has no
+        # such thing as (the sentinel is the whole word `new`) and shipped
+        # it to the website as a screenshot. A capture that composes its own
+        # text is not a capture.
+        limits = ThrottleConfig()
+        throttle = LoginThrottle(
+            per_source_capacity=limits.per_source_capacity,
+            per_source_refill_per_minute=limits.per_source_refill_per_minute,
+            per_username_capacity=limits.per_username_capacity,
+            per_username_refill_per_minute=limits.per_username_refill_per_minute,
+            global_capacity=limits.global_capacity,
+            global_refill_per_minute=limits.global_refill_per_minute,
+            max_tracked_keys=limits.max_tracked_keys,
+            max_concurrent_unauthenticated_sessions=limits.max_concurrent_unauthenticated_sessions,
+        )
+        await _login(session, db, throttle, max_attempts=1, idle_timeout=5.0)
         return session.take()
     finally:
         db.close()
