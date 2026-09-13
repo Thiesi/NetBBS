@@ -379,6 +379,15 @@ class LineViewport:
                 break
             total += width
             index -= 1
+        # Never start on a combining mark (Codex review). The walk above
+        # consumes a zero-width accent freely and can then stop on the
+        # base character it belongs to, leaving the window opening at
+        # the accent -- which the terminal then applies to whatever
+        # precedes it, so the scroll marker itself grew an acute accent
+        # and the real base character was hidden. Stepping forward past
+        # the orphans drops them with the character they modify.
+        while index < len(line) and char_width(line[index]) == 0:
+            index += 1
         return index
 
     def _layout(self, line: list[str], cursor: int) -> tuple[str, str, str, int]:
@@ -464,7 +473,13 @@ class LineViewport:
             # owns its row, and the prompt that introduced it is above,
             # untouched.
             self._reanchor = False
-            rows_above = max(0, (self.drawn - 1) // self.width)
+            # From where the *cursor* was, not from how much was drawn
+            # (Codex review). The caret is at `col`, which after a
+            # reflow puts it on row `col // width` of the wrapped block
+            # -- pressing Home before shrinking leaves it on the first
+            # of those rows, and moving up by the whole payload's height
+            # would have stepped into the prompt above and erased it.
+            rows_above = max(0, self.col // self.width)
             up = f"\x1b[{rows_above}A" if rows_above else ""
             prefix = up + "\r\x1b[J"
         else:

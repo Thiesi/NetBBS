@@ -405,3 +405,46 @@ def test_deleting_keeps_the_window_full_while_there_is_text_for_it():
     # Still plenty of text to the left, so the window stays full rather
     # than emptying out from the right.
     assert display_width(visible) >= _WIDTH - 4
+
+
+def test_the_window_never_opens_on_a_combining_mark():
+    """The reverse walk consumes a zero-width accent freely and could
+    then stop on the base character it belongs to, leaving the window
+    opening at the accent -- which the terminal applies to whatever
+    precedes it, so the scroll marker itself grew an acute accent while
+    the real base character was hidden (Codex review)."""
+    from netbbs.rendering.width import char_width
+
+    window = LineViewport(_WIDTH)
+    line = list("e\u0301" * 60)
+    for cursor in range(0, len(line) + 1, 3):
+        left, visible, _, _ = window._layout(line, cursor)
+        if visible:
+            assert char_width(visible[0]) > 0, "the window starts on a real character"
+
+
+@pytest.mark.parametrize("cursor_at_home", [True, False])
+def test_a_resize_moves_up_from_where_the_cursor_is(cursor_at_home):
+    """`rows_above` came from how much had been *drawn*, not from where
+    the caret was. Press Home on an 80-column field and shrink to 40:
+    the caret is on the block's first row, but moving up by the whole
+    payload's height stepped into the prompt above and erased it (Codex
+    review)."""
+    window = LineViewport(80, owns_row=True)
+    recorder = Recorder(80)
+    cursor = 0 if cursor_at_home else len(_LONG)
+    asyncio.run(window.render(recorder.write, list(_LONG), cursor))
+    col = window.col
+    recorder.chunks.clear()
+
+    window.resize(40)
+    asyncio.run(window.render(recorder.write, list(_LONG), cursor))
+
+    expected = col // 40
+    if expected:
+        assert f"\x1b[{expected}A" in recorder.raw
+    else:
+        # At Home the caret is already on the first row: moving up at
+        # all would leave the field and take the prompt with it.
+        assert "A" not in _CSI.findall(recorder.raw)[0] if _CSI.findall(recorder.raw) else True
+        assert "\x1b[1A" not in recorder.raw
