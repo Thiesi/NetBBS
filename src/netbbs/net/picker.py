@@ -558,41 +558,58 @@ async def pick_item(
     def _sized_page_size() -> int:
         width, height = _dimensions()
 
-        def measure(single_page: bool) -> int:
+        def measure(shapes: Sequence[tuple[bool, bool]]) -> int:
             return _page_size(
                 session, on_sort, description_level,
                 header_lines=_header_lines(), width=width, height=height, on_create=on_create,
                 # Issue #538: the trailer is a real line too, and whether
                 # it takes one depends on these.
                 trailer=_trailer_text(_sort_label_text(), refresh is not None),
-                unicode_style=unicode_style, single_page=single_page,
+                unicode_style=unicode_style, shapes=shapes,
             )
 
-        # Two passes, because the answer decides its own question
-        # (Codex review). A list that fits one page never draws Next or
-        # Prev, so it should not be priced against those shapes -- but
-        # whether it fits one page is what the price decides. Price it
-        # as a paginated list first; only if it fits that page is it
-        # worth asking the cheaper question, and only if it fits *that*
-        # page too is the cheaper answer self-consistent.
-        paginated = measure(single_page=False)
-        if len(working_set) <= paginated:
-            single = measure(single_page=True)
-            if len(working_set) <= single:
-                return single
-            # The list fits a paginated page but not a single-page one,
-            # and returning `paginated` here would have been the worst
-            # of both (Codex review): every item on one page makes
-            # `_total_pages()` 1, so the render picks the single-page
-            # nav that was *just* measured as not fitting -- seven items
-            # at 40x20 drew 21 rows on a 20-row terminal.
-            #
-            # Force the pagination the reservation assumed instead. One
-            # item short of the list is enough to make Next real, which
-            # makes the nav the paginated one, which is the nav this
-            # size was measured against.
-            return max(1, min(paginated, len(working_set) - 1))
-        return paginated
+        # The answer decides its own question (Codex review,
+        # repeatedly): how many rows a page gets depends on how tall the
+        # nav is, how tall the nav can be depends on how many pages
+        # there are, and how many pages there are depends on how many
+        # rows a page gets.
+        #
+        # A size is *valid* when the page it produces fits the nav that
+        # page will actually draw -- which is the only property that
+        # matters, since the render picks its nav from the page count.
+        # Of the valid sizes, the largest shows the most rows.
+        #
+        # Asking "does this shape set's own page count match the
+        # assumption" was not enough: seven items at 40x20 make every
+        # assumption contradict its own result (one page needs 6 rows
+        # and 6 rows is two pages; two pages allows 11 and 11 is one
+        # page), and the fallback then drew a one-page nav on a size
+        # measured for the tallest. 21 rows on a 20-row terminal.
+        total = len(working_set)
+
+        def shapes_for(pages: int) -> Sequence[tuple[bool, bool]]:
+            if pages <= 1:
+                return _SHAPES_ONE_PAGE
+            return _SHAPES_TWO_PAGES if pages == 2 else _SHAPES_MANY_PAGES
+
+        def pages_at(size: int) -> int:
+            return max(1, math.ceil(total / size)) if total else 1
+
+        valid = []
+        for shapes in (_SHAPES_ONE_PAGE, _SHAPES_TWO_PAGES, _SHAPES_MANY_PAGES):
+            size = measure(shapes)
+            if size <= measure(shapes_for(pages_at(size))):
+                valid.append(size)
+        if valid:
+            return max(valid)
+        # Nothing is valid at this geometry -- too short for any nav this
+        # list can draw. The smallest candidate keeps the most of the
+        # page on screen; the floor in `_render_nav` has already fallen
+        # back to the compact bar by here.
+        return min(
+            measure(shapes)
+            for shapes in (_SHAPES_ONE_PAGE, _SHAPES_TWO_PAGES, _SHAPES_MANY_PAGES)
+        )
 
     def _masthead_prefix() -> str:
         # Same clear_screen()-ordering hazard `_draw_main_menu`'s own
@@ -647,6 +664,15 @@ async def pick_item(
             if stable_id_of(item) == start_stable_id:
                 start_page_size = _sized_page_size()
                 page_start = (start_index // start_page_size) * start_page_size
+                # The pages [P]rev will walk back through, as though the
+                # caller had paged here (Codex review). Without them the
+                # fallback derived the previous boundary from live
+                # geometry, so a picker opened on item 20 and then grown
+                # a little showed rows 15-28 and, on [P]rev, rows 1-16 --
+                # repeating two.
+                page_history = [
+                    boundary for boundary in range(0, page_start, start_page_size)
+                ]
                 highlighted = start_index % start_page_size
                 break
 
@@ -722,7 +748,14 @@ async def pick_item(
         # size that changes under it moves the window without ever
         # skipping a row or repeating one.
         page_start = max(0, min(page_start, max(0, len(working_set) - 1)))
-        page_index = min(page_start // page_size, max(0, total_pages - 1))
+        # The ordinal is how many pages were actually walked to get
+        # here, not `page_start // page_size` (Codex review): the size
+        # can differ from the one those pages were drawn with, so the
+        # division renamed the page under the caller -- an 80x22 picker
+        # showing "page 1/2" grew to 80x24, and [N]ext then showed the
+        # last item as "page 1/1".
+        page_index = len(page_history)
+        total_pages = max(total_pages, page_index + 1)
         page_items = working_set[page_start : page_start + page_size]
         page_end = page_start + len(page_items)
         # Against what was actually sliced, not against the nominal page
@@ -888,10 +921,13 @@ async def pick_item(
             # the offset is the half that is authoritative.
             include_next=page_start + len(page_items) < len(working_set),
             include_prev=page_start > 0,
-            # The same fact the budget used: a one-page list cannot
-            # draw Next or Prev, so it must not be priced against
-            # nav shapes it will never render.
-            single_page=total_pages <= 1,
+            # The same shapes the budget used: a list only ever draws
+            # the navs its own page count allows.
+            shapes=(
+                _SHAPES_ONE_PAGE if total_pages <= 1
+                else _SHAPES_TWO_PAGES if total_pages == 2
+                else _SHAPES_MANY_PAGES
+            ),
             # The frozen pair, like everything else this render draws
             # (Codex review). The previous commit gave this function the
             # parameters and then failed to pass them here, which left
@@ -1448,13 +1484,24 @@ def _nav_entries(
 # five-entry shape can be ten rows where every possible one is six,
 # which forces the compact bar on a list with room for the
 # descriptions it asked for.
-_NAV_SHAPES = ((True, True), (True, False), (False, True))
-_SINGLE_PAGE_SHAPE = ((False, False),)
+# What a page of a list this long can actually look like.
+#
+# One page: no Next, no Prev. Two pages: the first has Next only, the
+# second Prev only -- *never* both, which is the shape a middle page
+# has. Three or more: all three are reachable. `menu_grid` is
+# non-monotonic, so an impossible shape is not merely a bigger number
+# (Codex review, three times now): at 40x21 the twelve-row middle-page
+# form failed the floor and cost a two-page list the descriptions it
+# asked for, while every shape it can render fits.
+_SHAPES_ONE_PAGE = ((False, False),)
+_SHAPES_TWO_PAGES = ((True, False), (False, True))
+_SHAPES_MANY_PAGES = ((True, True), (True, False), (False, True))
 
 
 def _tallest_nav(
     session: Session, on_sort: Callable | None, description_level: str,
-    *, width: int, height: int, on_create: Callable | None, single_page: bool = False,
+    *, width: int, height: int, on_create: Callable | None,
+    shapes: Sequence[tuple[bool, bool]] = _SHAPES_MANY_PAGES,
 ) -> str:
     """The tallest nav block any page of this list could render.
 
@@ -1480,7 +1527,7 @@ def _tallest_nav(
             # reason (Codex review): four items on a 120x20 terminal fit
             # in nineteen rows with an eight-row nav, and were being
             # priced against a ten-row shape they cannot render.
-            _SINGLE_PAGE_SHAPE if single_page else _NAV_SHAPES
+            shapes
         )
         ),
         key=lambda nav: nav.count("\r\n"),
@@ -1493,7 +1540,7 @@ def _render_nav(
     width: int | None = None, height: int | None = None,
     on_create: Callable | None = None,
     trailer: str = "", unicode_style: bool = False,
-    reserve: bool = False, single_page: bool = False,
+    reserve: bool = False, shapes: Sequence[tuple[bool, bool]] = _SHAPES_MANY_PAGES,
 ) -> str:
     """The nav block for this page, or -- with `reserve` -- the tallest
     block any page of this list could produce in the *same form*.
@@ -1543,7 +1590,7 @@ def _render_nav(
         # they press [N].
         tallest = _tallest_nav(
             session, on_sort, description_level,
-            width=width, height=height, on_create=on_create, single_page=single_page,
+            width=width, height=height, on_create=on_create, shapes=shapes,
         )
         descriptive_lines = tallest.count("\r\n") + 1
         # The same arithmetic `_page_size` will do, including the
@@ -1575,9 +1622,16 @@ def _render_nav(
     # The reservation takes the worst-case entry list, since a compact
     # bar wraps and one more entry can cost it a row.
     if reserve:
-        entries = _nav_entries(
-            on_sort, include_next=not single_page, include_prev=not single_page,
-            on_create=on_create,
+        # The worst case among the shapes this list can render.
+        entries = max(
+            (
+                _nav_entries(
+                    on_sort, include_next=next_here, include_prev=prev_here,
+                    on_create=on_create,
+                )
+                for next_here, prev_here in shapes
+            ),
+            key=len,
         )
     return action_bar([e.label for e in entries], width=width)
 
@@ -1643,7 +1697,8 @@ def _trailer_rows(
 def _page_size(
     session: Session, on_sort: Callable | None, description_level: str, *, header_lines: int = 0,
     width: int | None = None, height: int | None = None, on_create: Callable | None = None,
-    trailer: str = "", unicode_style: bool = False, single_page: bool = False,
+    trailer: str = "", unicode_style: bool = False,
+    shapes: Sequence[tuple[bool, bool]] = _SHAPES_MANY_PAGES,
 ) -> int:
     # `_RESERVED_LINES` was calibrated against the nav row always being
     # exactly 1 line -- still true for `description_level="off"`
@@ -1667,7 +1722,7 @@ def _page_size(
     nav = _render_nav(
         session, on_sort, description_level, width=width, height=height, on_create=on_create,
         trailer=trailer, unicode_style=unicode_style, reserve=True,
-        single_page=single_page,
+        shapes=shapes,
     )
     nav_lines = nav.count("\r\n") + 1
     trailer_lines = _trailer_rows(

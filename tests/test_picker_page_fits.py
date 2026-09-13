@@ -262,8 +262,13 @@ def test_opening_on_a_stored_item_lands_on_a_page_that_holds_it():
     `IndexError` (Codex review)."""
     labels = iter(["Activity", "Activity, newest first, including every archived entry"])
 
-    session = FakeSession(80, 24, ["\r"])
-    asyncio.run(
+    # "ENTER", not "\r": this fake maps the token, and a bare carriage
+    # return arrives as an ordinary character the picker rejects -- so
+    # the first version of this never indexed the highlighted row at
+    # all, and would have passed with the `IndexError` still there
+    # (Codex review).
+    session = FakeSession(80, 24, ["ENTER"])
+    result = asyncio.run(
         pick_item(
             session, list(range(1, 80)),
             name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
@@ -273,7 +278,10 @@ def test_opening_on_a_stored_item_lands_on_a_page_that_holds_it():
             start_stable_id=16,
         )
     )
-    # No IndexError, and the page it opened on is the page it drew.
+    # It opened highlighted on item 16, so Enter selects exactly that --
+    # which is what proves the highlight index was inside the page that
+    # was actually drawn.
+    assert result == 16, f"selected {result!r}"
     assert session.rows_on_screen() <= 24
 
 
@@ -544,4 +552,61 @@ def test_prev_returns_to_the_page_it_came_from():
     assert len(pages) >= 3, f"expected first, next and prev renders, got {len(pages)}"
     assert pages[2][0] == pages[0][0], (
         f"[P]rev returned to {pages[2][0]}, not to {pages[0][0]} where it started"
+    )
+
+
+def test_the_page_number_counts_pages_walked_not_rows_divided():
+    """`page_start // page_size` renames the page under the caller when
+    the size changes: an 80x22 picker showing "page 1/2" grew to 80x24,
+    and [N]ext then showed the last item as "page 1/1" (Codex review)."""
+    class Growing(FakeSession):
+        async def read_editor_key(self, *, distinguish_ctrl_h: bool = False):
+            self.terminal_height = 24
+            return await FakeSession.read_editor_key(self)
+
+    session = Growing(80, 22, ["n", "b"])
+    asyncio.run(
+        pick_item(
+            session, list(range(1, 16)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none",
+        )
+    )
+    plain = _ANSI.sub("", _SGR.sub("", "".join(session.written)))
+    labels = re.findall(r"page (\d+)/(\d+)", plain)
+    assert labels, "no page label drawn"
+    ordinals = [int(current) for current, _ in labels]
+    assert ordinals == sorted(ordinals), f"the page number went backwards: {ordinals}"
+    assert ordinals[-1] >= 2, f"[N]ext left the ordinal at {ordinals[-1]}"
+
+
+def test_opening_on_a_stored_item_leaves_prev_a_trail():
+    """Placement recorded no history, so [P]rev derived the previous
+    boundary from live geometry: a picker opened on item 20 and then
+    grown showed rows 15-28, and [P]rev showed 1-16 -- repeating two
+    (Codex review)."""
+    class Growing(FakeSession):
+        async def read_editor_key(self, *, distinguish_ctrl_h: bool = False):
+            # The terminal grows before [P]rev, which is what made the
+            # subtraction land somewhere the caller had never been.
+            self.terminal_height = 24
+            return await FakeSession.read_editor_key(self)
+
+    session = Growing(80, 22, ["p", "b"])
+    asyncio.run(
+        pick_item(
+            session, list(range(1, 41)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none", start_stable_id=35,
+        )
+    )
+    pages = _pages_drawn(session)
+    assert len(pages) >= 2, "expected the opening page and the one [P]rev went to"
+    # Placement walked boundaries 0 and 14 to reach 28, so [P]rev returns
+    # to 14 -- row 15. Deriving it from the grown geometry gave
+    # 28 - 16 = 12 instead: a boundary the caller had never been on.
+    assert pages[1][0] == pages[0][0] - 14, (
+        f"[P]rev went to row {pages[1][0]}, not to the boundary before {pages[0][0]}"
     )
