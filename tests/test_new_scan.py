@@ -253,3 +253,24 @@ def test_selecting_a_channel_calls_browse_channels_with_that_channel(db, lane, a
 
     assert len(calls) == 1
     assert calls[0].id == channel.id
+
+
+def test_new_scan_numbers_its_rows_rather_than_printing_an_address(db, lane, alice):
+    """`pick_item` prints each row's stable id as its `(#N)` reference,
+    and `id(item)` is about fifteen digits -- at 40 columns that prefix
+    plus an ordinary name consumed the whole row, clipping the
+    description away before anyone could read it (issue #541, Codex
+    review). A row number is equally stable for as long as this list
+    exists, and makes `[G]oto #` mean something here for the first
+    time."""
+    import re
+
+    other = create_user(db, "bob", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=other)
+    create_post(db, board, other, "hello", "world")
+
+    session = _run_main_menu(db, lane, alice, ["n", "b", "b", "l", "y"])
+    text = _written_text(session)
+
+    assert "(#1)" in text
+    assert not re.search(r"\(#\d{6,}\)", text), "a reference number nobody could type or read"

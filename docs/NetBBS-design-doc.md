@@ -514,9 +514,11 @@ a "Turn X on?" question that doubles as the exit. A "blank keeps the current
 value" prompt writes nothing else, including a sibling visibility flag.
 A text field opens on its current value instead (issue #529): Enter saves what
 is shown, an emptied line clears it, and Esc leaves it unchanged -- "keep" is a
-key rather than an overload of the empty string. A value too long or too wide to
-edit in one row falls back to the older prompt, blank-keeps-it and all, and says
-so.
+key rather than an overload of the empty string. Width is no longer a reason to fall back (issue #546): the line editor
+keeps a one-row window over the buffer and scrolls it to follow the cursor, so a
+value wider than the terminal is edited like any other. A value longer than the
+editor's own buffer cap still falls back to the older prompt, blank-keeps-it and
+all, and says so.
 Anything gathering more than two values goes through the draft field editor or
 a picker and persists nothing before `[S]ave`. The deliberate exceptions are
 once-only first-run decisions (Link participation, node name, managed DNS,
@@ -549,13 +551,21 @@ Two rules follow from that, and are normative for any future list:
   fallback too: a long name is bounded there rather than allowed to push the
   gates off the end of the row.
 
-  Deliberately scoped to the SysOp's own resource listers for now. The
-  caller-facing pickers do not yet carry gate metadata, and one of them
-  (the chat channel picker) filters its list on level and age but not on
-  name requirement, so it can still offer a channel that refuses the caller
-  on selection. That is a real gap, tracked separately; this rule will
-  extend to those screens when it is closed, and the wording here should be
-  widened at that point rather than read as already covering them.
+  Caller-facing pickers carry gate metadata too, since issue #541 closed
+  the gap this paragraph used to describe -- but only the part of it a
+  caller can act on. A channel whose name requirement they do not meet is
+  still listed, and says so ("needs verification"), in both the chat
+  channel picker and `[N]ew scan`. It is not hidden: a name requirement is
+  a *participation* gate rather than a content restriction, unlike an age
+  gate, which does hide the resource. The note is placed ahead of any
+  free-form description, because the row is clipped to the terminal width
+  and whatever sits at the end is what a narrow terminal loses.
+
+  The rest of the gate set stays on the SysOp side for now. Level and age
+  already decide visibility rather than needing to be displayed, so the
+  open question is only whether a caller should be told *why* something is
+  absent -- a different feature from telling them why something present
+  will refuse them.
 - **A table that does not fit becomes prose again.** Below the width at which
   the name column stays readable, the row falls back to the flat description
   form. The decision is made per render against the live terminal width, not

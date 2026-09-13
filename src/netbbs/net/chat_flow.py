@@ -179,12 +179,14 @@ from netbbs.rendering import (
     ACCENT_COLOR,
     CHAT_BODY_COLOR,
     CHANNEL_TYPE_COLOR,
+    GATE_COLOR,
     HEADER_COLOR,
     MENU_KEY_COLOR,
     MUTED_COLOR,
     NICK_COLOR,
     PRIVILEGE_COLOR,
     SELF_COLOR,
+    SegmentColor,
     STATUS_BAR_BACKGROUND,
     SUCCESS_COLOR,
     TOPIC_COLOR,
@@ -526,10 +528,36 @@ async def _pick_channel(
 
         category_name = get_category_by_id(db, category_id).name if category_id is not None else None
         community = get_community(db, effective_community_id)
-        return channels_here, categories_here, category_name, community.name if community is not None else None
+        # Which of these will ask for a verified name this caller has
+        # not got (issue #541). Resolved here, in the lane pass that is
+        # already reading them, so the picker's own `description_of`
+        # callback stays free of database access -- the same shape #528
+        # used for the SysOp-side gate columns.
+        #
+        # A name requirement deliberately does *not* hide a channel, the
+        # way an age gate does: it is a participation gate rather than a
+        # content restriction, so the channel stays listed and entry is
+        # refused with a specific message
+        # (tests/test_chat_flow_picker_authorization.py records that
+        # decision). What was missing is any sign of it *before* the
+        # refusal -- so a caller picked a channel, was turned away, and
+        # had nothing to go on. Naming the gate in the list turns that
+        # into something they can act on: go and get attested.
+        needs_name = {
+            channel.id for channel in channels_here
+            if not meets_name_requirement(db, user, get_effective_name_requirement(db, channel))
+        }
+        return (
+            channels_here, categories_here, category_name,
+            community.name if community is not None else None, needs_name,
+        )
 
-    async def _load_sorted(order_by: str) -> tuple[list[Channel], list[Category], str | None, str | None]:
-        channels_here, categories_here, category_name, community_name = await lane.run(_load, order_by)
+    async def _load_sorted(
+        order_by: str,
+    ) -> tuple[list[Channel], list[Category], str | None, str | None, set[int]]:
+        channels_here, categories_here, category_name, community_name, needs_name = await lane.run(
+            _load, order_by
+        )
         if order_by == "activity":
             # Same shape the pre-fix default sort used (dogfood item 8) --
             # now reached only when a user explicitly opted into it.
@@ -541,12 +569,14 @@ async def _pick_channel(
             # volume_label docstring) -- no persisted chat history to
             # count instead.
             channels_here = sorted(channels_here, key=lambda c: (not c.pinned, -hub.participant_count(c.name)))
-        return channels_here, categories_here, category_name, community_name
+        return channels_here, categories_here, category_name, community_name, needs_name
 
     current_mode = await lane.run(
         get_effective_sort_mode, user, "channel", community_id=effective_community_id, category_id=category_id
     )
-    channels_here, categories_here, category_name, community_name = await _load_sorted(current_mode)
+    channels_here, categories_here, category_name, community_name, needs_name = await _load_sorted(
+        current_mode
+    )
     mode_box = {"mode": current_mode}
 
     async def _persist_sort_choice(mode: str, scope_kwargs: dict) -> None:
@@ -592,15 +622,21 @@ async def _pick_channel(
             if new_mode is None:
                 return None
             mode_box["mode"] = new_mode
-            new_channels, _, _, _ = await _load_sorted(new_mode)
+            new_channels, _, _, _, refreshed = await _load_sorted(new_mode)
+            needs_name.clear()
+            needs_name.update(refreshed)
             return new_channels
 
+        flat_accent = await lane.run(effective_accent_color_256)
         return await pick_item(
             session,
             channels_here,
             name_of=lambda c: c.name,
             stable_id_of=lambda c: c.id,
-            description_of=lambda c: _channel_description(hub, c),
+            description_of=lambda c: _channel_description(hub, c, needs_name),
+            name_segments_of=lambda c: channel_name_segments(
+                c, needs_name, name_color=flat_accent,
+            ),
             title=title,
             breadcrumb=picker_breadcrumb,
             empty_message="No chat channels are available to you yet.",
@@ -609,7 +645,7 @@ async def _pick_channel(
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
             collapsed=collapsed,
-            accent_color=await lane.run(effective_accent_color_256),
+            accent_color=flat_accent,
             masthead=channel_masthead,
         )
 
@@ -627,7 +663,17 @@ async def _pick_channel(
             return _mrc_section_description(mrc_bridge.status())
         if isinstance(item, Category):
             return item.description or "(category)"
-        return _channel_description(hub, item)
+        return _channel_description(hub, item, needs_name)
+
+    def _name_segments(
+        item: Category | Channel | _MrcRoomsEntry,
+    ) -> list[tuple[str, SegmentColor]]:
+        # This list holds categories and the MRC section as well as
+        # channels, and only a channel can carry a name gate -- the
+        # others render exactly the name `render_name` gives them.
+        if isinstance(item, Channel):
+            return channel_name_segments(item, needs_name, name_color=accent_color)
+        return [(render_name(item), accent_color)]
 
     def stable_id(item: Category | Channel | _MrcRoomsEntry) -> int:
         if isinstance(item, _MrcRoomsEntry):
@@ -639,7 +685,9 @@ async def _pick_channel(
         if new_mode is None:
             return None
         mode_box["mode"] = new_mode
-        new_channels, _, _, _ = await _load_sorted(new_mode)
+        new_channels, _, _, _, refreshed = await _load_sorted(new_mode)
+        needs_name.clear()
+        needs_name.update(refreshed)
         return [*leading, *categories_here, *new_channels]
 
     accent_color = await lane.run(effective_accent_color_256)
@@ -652,6 +700,7 @@ async def _pick_channel(
             on_sort=on_sort_mixed,
             sort_label=_sort_label,
             description_of=render_description,
+            name_segments_of=_name_segments,
             title=title,
             breadcrumb=picker_breadcrumb,
             empty_message="No chat channels are available to you yet.",
@@ -674,7 +723,9 @@ async def _pick_channel(
         # in and out of the section never deepens the stack -- and with the
         # section itself re-decided from the bridge's current settings.
         leading = [mrc_section] if mrc_bridge.open_rooms_enabled else []
-        new_channels, _, _, _ = await _load_sorted(mode_box["mode"])
+        new_channels, _, _, _, refreshed = await _load_sorted(mode_box["mode"])
+        needs_name.clear()
+        needs_name.update(refreshed)
         mixed = [*leading, *categories_here, *new_channels]
 
     if isinstance(selected, Category):
@@ -1103,7 +1154,102 @@ def _meets_live_participation_requirements(db: Database, channel: Channel, user:
     )
 
 
-def _channel_description(hub: ChatHub, channel: Channel) -> str:
+#: What a caller is told about a channel whose name requirement they do
+#: not meet. One string, because three screens say it: this module's own
+#: picker, its sectioned variant, and `[N]ew scan`
+#: (`netbbs.net.scan_and_find`, which imports it).
+# Short, but not at the cost of the point (Codex review, twice). The
+# 40-column floor this project builds to leaves little room once a
+# selector, a reference and a channel name have had theirs, and a note
+# that gets truncated tells a caller no more than no note at all -- but
+# "needs a name" was wrong as well as short. Every caller *has* a name;
+# what this gate wants is a *verified* one, and the difference is the
+# whole action a caller has to take. The full sentence is one keystroke
+# away, in the refusal itself: "This channel requires a verified real
+# name to participate."
+NAME_GATE_NOTE = "needs verification"
+_NAME_GATE_NOTE = NAME_GATE_NOTE
+
+
+def channel_name_gate_unmet(db: Database, user: User, channel: Channel) -> bool:
+    """Whether entering `channel` will ask `user` for a verified name
+    they have not got (issue #541).
+
+    Public because `[N]ew scan` builds its own picker over the same
+    channels and would otherwise reproduce the pick-then-get-refused
+    behaviour this was filed about -- fixing it in one of two
+    caller-facing channel pickers fixes it for whoever happens to use
+    that one (Codex review).
+
+    Reads the *effective* requirement, which is what entry enforces.
+    """
+    return not meets_name_requirement(db, user, get_effective_name_requirement(db, channel))
+
+
+def channel_name_segments(
+    channel: Channel, needs_name: set[int] | None = None, *, name_color: SegmentColor = None,
+) -> list[tuple[str, SegmentColor]]:
+    """The row's name, with the gate note attached to it (issue #541).
+
+    Putting the note in the description was not enough, twice over
+    (Codex review). `pick_item` composes a row as selector, reference,
+    name, description -- and then truncates the whole thing -- so a note
+    anywhere in the description sits behind an unbounded channel name
+    and is the first thing a 40-column terminal loses. A gated channel
+    then looks exactly like an ungated one, which is the entire bug.
+
+    As a name segment it sits ahead of the description instead, so what
+    a narrow row gives up is the prose, and the thing a caller has to
+    act on survives.
+    """
+    # `name_color` is not decoration: `pick_item` colours a plain
+    # `name_of` row with the node's accent, and a segment list is taken
+    # verbatim -- so leaving it `None` quietly stripped the accent off
+    # every channel name the moment this callback existed (Codex
+    # review). The caller passes the same accent it hands the picker.
+    segments: list[tuple[str, SegmentColor]] = []
+    if needs_name is not None and channel.id in needs_name:
+        # Ahead of the name, not after it. `colored_truncate` cuts from
+        # the end, so anything behind an unbounded channel name can be
+        # cut away entirely -- and a 42-character name on a 40-column
+        # terminal takes the whole row by itself. In front, the note
+        # cannot be lost however long the name is (Codex review).
+        segments.append((f"({NAME_GATE_NOTE}) ", GATE_COLOR))
+    segments.append((channel.name, name_color))
+    return segments
+
+
+def _channel_description(hub: ChatHub, channel: Channel, needs_name: set[int] | None = None) -> str:
+    """The picker's per-channel line: description, who is in it, and
+    whether it is going to ask for something this caller has not got.
+
+    `needs_name` is the set of channel ids whose effective name
+    requirement this caller does not meet, resolved once per list in the
+    lane pass that read the channels (issue #541) -- so this stays a
+    pure, database-free callback, which is what `pick_item` expects of
+    it.
+
+    The gate is *named*, not used to hide the channel. An age gate hides
+    one; a name requirement is a participation gate rather than a
+    content restriction, so the channel stays listed and entry is
+    refused with its own message. What was missing was any sign of it
+    before that refusal -- a caller picked a channel, was turned away,
+    and had nothing to act on. "needs a verified name" is something they
+    can act on.
+    """
+    # The note is *not* here. It rides with the name, in front of it,
+    # where the row cannot cut it -- see `channel_name_segments`.
+    #
+    # And only there (Codex review): `pick_item` renders
+    # `name_segments_of` and `description_of` both, always, with no
+    # either/or fallback between them -- so a copy here was a second one
+    # on screen, reading "(needs verification) verified-only - needs
+    # verification -- ...", spending the width that should have gone to
+    # the description it was crowding out.
+    #
+    # `needs_name` stays in the signature for the callers that have not
+    # got a name-segment callback to hand, and for the tests that ask
+    # this function what a row says.
     online = hub.participant_count(channel.name)
     base = channel.description or ""
     return f"{base} ({online} online)".strip()
