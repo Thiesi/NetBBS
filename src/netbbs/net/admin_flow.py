@@ -10533,6 +10533,15 @@ async def _prompt_optional_int(session: Session, label: str, *, current: int | N
         return None, False
 
 
+#: Bounds for an age gate (issue #540). `0` stays accepted and keeps its
+#: existing meaning -- `netbbs.attestation.meets_age` opens with
+#: `if not min_age: return True`, so zero is "no gate" rather than a
+#: gate nobody passes. The ceiling is loose on purpose: it exists to
+#: catch a typo, not to legislate how old a caller may be.
+MIN_AGE_FLOOR = 0
+MIN_AGE_CEILING = 120
+
+
 async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int | None, bool]:
     """Shared min_age prompt for board/channel/area create+edit screens
     (design doc §18). Returns `(value, ok)` -- `ok=False`
@@ -10540,17 +10549,43 @@ async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int
     itself already be `None`, meaning no gate), `'none'` clears any
     existing gate, otherwise a plain integer sets it."""
     label = current if current is not None else "none"
-    await write_prompt(session, f"Minimum age [{label}] (blank = keep, 'none' = no gate): ")
+    await write_prompt(
+        session,
+        f"Minimum age [{label}] (blank = keep, 'none' = no gate, {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}): ",
+    )
     raw = (await session.read_line()).strip()
     if not raw:
         return current, True
     if raw.lower() == "none":
         return None, True
     try:
-        return int(raw), True
+        value = int(raw)
     except ValueError:
         await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
         return None, False
+    if not (MIN_AGE_FLOOR <= value <= MIN_AGE_CEILING):
+        # Issue #540. This used to accept any integer at all, and
+        # `meets_age` compares `compute_age(birthdate) >= min_age`, so a
+        # fat-fingered 188 or 1000 refused every caller on the node --
+        # including callers who would otherwise have qualified -- with
+        # nothing on screen explaining why. "Nobody can get into this
+        # area" does not obviously point at a mistyped age.
+        #
+        # A negative value was worse than useless: truthy, so treated as
+        # a real gate, and then passed by everyone with a birthdate
+        # while still failing closed for anyone without one.
+        #
+        # Refused rather than clamped, and nothing is written, so the
+        # SysOp sees that their value did not take.
+        await session.write_line(
+            colored(
+                f"A minimum age must be between {MIN_AGE_FLOOR} and {MIN_AGE_CEILING}, "
+                f"or 'none' for no gate -- cancelled.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return None, False
+    return value, True
 
 
 async def _pick_optional_category(
