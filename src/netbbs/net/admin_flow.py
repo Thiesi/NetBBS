@@ -3582,256 +3582,161 @@ _USER_VISIBILITY_LABELS = {
 }
 
 
-def _user_picker_nav(session: Session) -> str:
-    # Deliberately NOT run through `_menu_row`/`menu_grid` -- issue
-    # #160's rollout, but a considered exception: this nav has 9 entries
-    # (4 sort/filter toggles plus the usual 5 paging keys), and
-    # `menu_grid` renders one entry per line even at "brief" (the real
-    # default -- see `menu_description_preference`'s own docstring).
-    # That's 18 lines of nav alone on top of this screen's other
-    # reserved lines, which at a standard 24-row terminal leaves room
-    # for exactly 1 user per page -- defeating the point of a screen
-    # whose whole purpose is browsing a list of many users. Every other
-    # converted site in this rollout has at most ~6 entries, where the
-    # same trade-off is still tolerable; this one isn't. Always compact,
-    # regardless of the caller's description-level preference.
-    options = [
-        menu_key("A", "lphabetical"), menu_key("R", "egistration"), menu_key("L", "evel"),
-        menu_key("V", "isibility"), menu_key("N", "ext"), menu_key("P", "rev"),
-        menu_key("S", "earch"), menu_key("G", "oto #"), menu_key("B", "ack"),
+_USER_COLUMNS = [
+    ListColumn("level", 5, VALUE_COLOR, align_right=True),
+    ListColumn("status", 10, VALUE_COLOR),
+]
+
+
+def _user_columns(user: User) -> list[str | tuple[str, SegmentColor]]:
+    """Level and status as their own columns (issue #537, design doc
+    §3.6).
+
+    `_user_description` stapled them into one grey string -- and the
+    account list is the single place a SysOp most often scans for
+    exactly these two fields, so it is the worst place to have left
+    them as prose.
+    """
+    status = _status_label(user)
+    return [
+        str(user.user_level),
+        (status, ALERT_COLOR if status == "disabled" else VALUE_COLOR),
     ]
-    return action_bar(options, width=session.terminal_width)
-
-
-def _user_picker_page_size(session: Session) -> int:
-    available = session.terminal_height - _USER_PICKER_RESERVED_LINES
-    return max(1, min(_USER_PICKER_MAX_PAGE_SIZE, available))
-
-
-def _user_search_completer(candidates: Sequence[str]) -> Callable[[str], list[str]]:
-    """Tab completion for the user picker's own `"Search: "` prompt --
-    mirrors `netbbs.net.picker._search_completer`'s exact behavior
-    (prefix match, no candidates once the query contains a space),
-    duplicated rather than imported for the same reason
-    `_user_picker_page_size` above is."""
-
-    def completer(text: str) -> list[str]:
-        if " " in text:
-            return []
-        lower = text.lower()
-        return sorted(name for name in candidates if name.lower().startswith(lower))
-
-    return completer
 
 
 async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *, title: str) -> User | None:
     """
-    The single screen every `[U]sers` submenu entry now reaches a target
+    The single screen every `[U]sers` submenu entry reaches a target
     account through (design doc -- Thiesi's own dogfood-testing report).
-    Mirrors `pick_item`'s own pagination/search/goto/select shape
-    closely, adding three live sort-toggle keys (`[A]lphabetical`/
-    `[R]egistration date`/`[L]evel`) that re-sort and redraw the same
-    screen in place, each shown with its own current direction arrow so
-    the active mode is never ambiguous, plus a fourth, independent
-    `[V]isibility` toggle (a real ~50-user node's own SysOp, dogfooding
-    the sort toggles) cycling all -> active-only -> disabled-only -> all,
-    always shown as a `Showing: ...` line the same "current state is
-    never ambiguous" way the sort line already is. The visibility filter
-    applies everywhere `_load` is called -- search and goto both scope to
-    the currently visible subset, not the full roster -- since the whole
-    point of hiding a class of accounts is to stop having to look at or
-    reach them until the SysOp explicitly widens the filter again.
+
+    A `pick_item` call since issue #537. It used to be a hand-rolled
+    copy of one: justified when it was written, because it needed live
+    sort toggles and a visibility filter and the shared picker could do
+    neither -- and then quietly wrong for every month after, because the
+    shared picker kept gaining things this screen could not inherit.
+    Cursor navigation, `Ctrl-L`, `Ctrl-R`, `Ctrl-H`, reopening on the
+    page you left, and columnar rows were all missing here and nowhere
+    else. The dogfood question that started it -- "why does the user
+    list have no arrow keys?" -- had that one-word answer: because it is
+    not the picker.
+
+    The capabilities that forced the fork now exist in `pick_item`:
+    `on_sort` for the three modes and their direction, and `on_filter`
+    (added for this screen) for the visibility cycle. Both are prompts
+    rather than four top-level hotkeys, which is what every other picker
+    in the console does with the same kind of choice, and both keep the
+    property they were built for: the trailer always says what is sorted
+    how and what is being shown.
+
+    The filter scopes search and goto too, as it did before -- the whole
+    point of hiding a class of accounts is to stop having to reach them
+    until the SysOp widens the filter again.
     """
     mode = "a"
     descending = False
     visibility = "all"
-    query: str | None = None
-    page_index = 0
 
-    async def _load(*, apply_search: bool = True) -> list[User]:
+    def _load(db: Database) -> list[User]:
         _, ascending_order, descending_order = _USER_SORT_MODES[mode]
-        users = await lane.run(list_users, order_by=descending_order if descending else ascending_order)
+        users = list_users(db, order_by=descending_order if descending else ascending_order)
         if visibility == "active_only":
-            users = [u for u in users if u.disabled_at is None]
-        elif visibility == "disabled_only":
-            users = [u for u in users if u.disabled_at is not None]
-        if apply_search and query:
-            return [u for u in users if query.lower() in u.username.lower()]
+            return [u for u in users if u.disabled_at is None]
+        if visibility == "disabled_only":
+            return [u for u in users if u.disabled_at is not None]
         return users
 
-    working_set = await _load()
-    if not working_set:
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    users = await lane.run(_load)
+    if not users:
         await session.write_line("\r\nNo registered users yet.")
         return None
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    accent = await lane.run(effective_accent_color_256)
-    header_color = await lane.run(effective_header_color_256)
 
-    def _total_pages() -> int:
-        return max(1, math.ceil(len(working_set) / _user_picker_page_size(session)))
-
-    async def _render() -> list[User]:
-        nonlocal page_index
-        page_size = _user_picker_page_size(session)
-        total_pages = _total_pages()
-        page_index = max(0, min(page_index, total_pages - 1))
-        start = page_index * page_size
-        page_users = working_set[start : start + page_size]
-
+    def _standing_label() -> str:
+        """The two lines the old screen kept above its list, on one line
+        in the picker's trailer -- where `sort_label` already puts
+        exactly this kind of standing state, and where truncation takes
+        the boilerplate before it."""
         label, _, _ = _USER_SORT_MODES[mode]
+        # The arrow, not the word: the direction is the thing a SysOp
+        # is checking at a glance, and an arrow reads at a glance.
+        # ASCII gets the word, as everywhere else this screen chooses
+        # between the two.
         if unicode_style:
             arrow = "↓" if descending else "↑"
         else:
             arrow = "desc" if descending else "asc"
-        await session.write_line(
-            "\r\n" + screen_title(
-                title,
-            breadcrumb=(session.node_display_name,),
-                subtitle=f"page {page_index + 1}/{total_pages}, {len(working_set)} total",
-                width=session.terminal_width,
-                clear=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient)
+        return (
+            f"Sorted by: {label} {arrow}"
+            f", Showing: {_USER_VISIBILITY_LABELS[visibility]}"
         )
-        await session.write_line(colored(f"Sorted by: {label} {arrow}", fg_color=MUTED_COLOR))
-        await session.write_line(
-            colored(f"Showing: {_USER_VISIBILITY_LABELS[visibility]}", fg_color=MUTED_COLOR)
-        )
-        await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
-        for position, user in enumerate(page_users, start=1):
-            segments: list[tuple[str, int | None]] = [
-                (f"  {position:02d}. ", MENU_KEY_COLOR),
-                (f"(#{user.id}) ", MUTED_COLOR),
-                (sanitize_text(user.username), accent),
-                (f" - {_user_description(user)}", MUTED_COLOR),
-            ]
-            await session.write_line(colored_truncate(segments, session.terminal_width))
 
-        nav = _user_picker_nav(session)
-        await session.write_line(f"\r\n{nav} — or type a 2-digit number to select")
-        await session.write("Choice: ")
-        return page_users
-
-    page_users = await _render()
-    while True:
-        key = await session.read_key()
-        key_lower = key.lower()
-
-        if key_lower == "b":
-            await session.write_line("")
-            return None
-
-        if key_lower in _USER_SORT_MODES:
-            if mode == key_lower:
+    def _sort_key(chosen: str):
+        async def toggle() -> list[User]:
+            nonlocal mode, descending
+            # Exactly what the top-level keys did before: the active
+            # dimension pressed again reverses it, a different one
+            # switches to it and starts ascending.
+            if chosen == mode:
                 descending = not descending
             else:
-                mode = key_lower
-                descending = False
-            await session.write_line("")
-            working_set = await _load()
-            page_index = 0
-            page_users = await _render()
-            continue
+                mode, descending = chosen, False
+            return await lane.run(_load)
 
-        if key_lower == "v":
-            next_index = (_USER_VISIBILITY_MODES.index(visibility) + 1) % len(_USER_VISIBILITY_MODES)
-            visibility = _USER_VISIBILITY_MODES[next_index]
-            await session.write_line("")
-            working_set = await _load()
-            page_index = 0
-            page_users = await _render()
-            continue
+        return toggle
 
-        if key_lower == "n":
-            if page_index < _total_pages() - 1:
-                await session.write_line("")
-                page_index += 1
-                page_users = await _render()
-            else:
-                await session.write(reject_unhandled_key(key))
-            continue
+    async def _cycle_visibility() -> list[User]:
+        nonlocal visibility
+        # One key, forward through a fixed cycle -- not a menu of every
+        # value, matching how the sort keys only ever offer "toggle this
+        # one" (the original screen's own reasoning, kept).
+        position = _USER_VISIBILITY_MODES.index(visibility)
+        visibility = _USER_VISIBILITY_MODES[(position + 1) % len(_USER_VISIBILITY_MODES)]
+        return await lane.run(_load)
 
-        if key_lower == "p":
-            if page_index > 0:
-                await session.write_line("")
-                page_index -= 1
-                page_users = await _render()
-            else:
-                await session.write(reject_unhandled_key(key))
-            continue
+    async def _reload() -> list[User]:
+        """Ctrl-R. The screen claims to inherit it, so it has to have it
+        (Codex review) -- `pick_item` rings the bell and keeps the stale
+        list when `refresh` is None, and an account list is exactly the
+        thing another session changes underneath you."""
+        return await lane.run(_load)
 
-        if key_lower == "s":
-            await session.write_line("")
-            await session.write("Search: ")
-            all_users = await _load(apply_search=False)
-            completer = _user_search_completer([u.username for u in all_users])
-            typed = (await session.read_line(completer=completer)).strip()
-            if not typed:
-                # Empty search clears back to the full, unfiltered list --
-                # a no-op if nothing was filtered yet, "clear filter"
-                # otherwise, same dual role pick_item's own search
-                # command already establishes.
-                query = None
-                working_set = await _load()
-                page_index = 0
-                page_users = await _render()
-                continue
-            matches = [u for u in all_users if typed.lower() in u.username.lower()]
-            if not matches:
-                await session.write_line("No matches.")
-                await session.write("Choice: ")
-                continue
-            if len(matches) == 1:
-                return matches[0]
-            query = typed
-            working_set = matches
-            page_index = 0
-            page_users = await _render()
-            continue
+    live_keys = {key: _sort_key(key) for key in _USER_SORT_MODES}
+    live_keys["v"] = _cycle_visibility
+    live_nav = [
+        MenuEntry(label=menu_key("A", "lphabetical"), brief="Sort by name"),
+        MenuEntry(label=menu_key("R", "egistration"), brief="Sort by join date"),
+        MenuEntry(label=menu_key("L", "evel"), brief="Sort by level"),
+        MenuEntry(label=menu_key("V", "isibility"), brief="All/active/disabled"),
+    ]
 
-        if key_lower == "g":
-            await session.write_line("")
-            await session.write("Go to #: ")
-            raw = (await session.read_line()).strip()
-            try:
-                target_id = int(raw)
-            except ValueError:
-                await session.write_line("Not a number.")
-                await session.write("Choice: ")
-                continue
-            # Always searches the full, unfiltered list at the current
-            # sort -- a goto number means the same account regardless of
-            # any active search filter, matching the "(#N)" shown next
-            # to every displayed row (pick_item's own goto establishes
-            # this same "ignore the search filter" rule).
-            for user in await _load(apply_search=False):
-                if user.id == target_id:
-                    return user
-            await session.write_line("Out of range.")
-            await session.write("Choice: ")
-            continue
-
-        if key.isdigit():
-            second = await session.read_key()
-            if not second.isdigit():
-                # Only `key` (the first digit) was actually echoed --
-                # `second` here is either an ordinary unrecognized
-                # character (also echoed, erase both) or REDRAW_KEY/
-                # REFRESH_KEY (never echoed, erase just the one real
-                # character on screen, same reasoning as
-                # reject_unhandled_key itself).
-                erase_count = 1 if second in (REDRAW_KEY, REFRESH_KEY) else 2
-                await session.write(reject_keystroke(erase_count))
-                continue
-            number = int(key + second)
-            if 1 <= number <= len(page_users):
-                await session.write_line("")
-                return page_users[number - 1]
-            await session.write(reject_keystroke(2))
-            continue
-
-        await session.write(reject_unhandled_key(key))
+    return await pick_item(
+        session, users,
+        name_of=lambda user: user.username,
+        stable_id_of=lambda user: user.id,
+        description_of=_user_description,
+        columns=_USER_COLUMNS,
+        column_values_of=_user_columns,
+        title=title,
+        empty_message="No users match that view.",
+        refresh=_reload,
+        live_keys=live_keys,
+        live_nav=live_nav,
+        live_label=_standing_label,
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=unicode_style,
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        # The console's condensed status line, kept from the screen this
+        # replaced: it was drawn on every render there, and a masthead is
+        # how pick_item draws a block above its own title on every
+        # render. Its row is budgeted now -- see the picker's
+        # _header_lines, which never counted a masthead until this.
+        masthead=await _load_condensed_status_line(
+            lane, unicode_style=unicode_style, terminal_width=session.terminal_width
+        ),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
 
 
 async def _pick_and_edit_user(

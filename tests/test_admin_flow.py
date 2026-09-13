@@ -119,6 +119,22 @@ def _written_text(session: FakeSession) -> str:
     return "".join(session.written)
 
 
+def _last_render(text: str, marker: str) -> str:
+    """Everything drawn by the render that most recently showed
+    `marker`.
+
+    The screen redraws in place, so cumulative output still holds every
+    earlier page. Slicing from the marker itself worked while the
+    filter/sort lines were drawn *above* the list; `pick_item` puts that
+    standing state in its trailer, below the rows (issue #537), so the
+    page is what comes *before* the last marker and after the render
+    before it. Anchored on the blank line each render opens with.
+    """
+    end = text.rindex(marker)
+    start = text.rfind("Choice: ", 0, end)
+    return text[start if start != -1 else 0 : end]
+
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -1189,12 +1205,10 @@ def test_user_picker_visibility_toggle_hides_disabled_users_on_first_press(db, l
     text = _written_text(session)
     marker = "Showing: Active users only (disabled hidden)"
     assert marker in text
-    # rindex, not index/`in`: the screen redraws in place, and the
-    # cumulative output still contains the very first, pre-toggle render
-    # (where both users are visible) earlier in the text -- only what
-    # comes after the *last* render reflects the current filter (same
-    # pitfall this codebase already hit with the A/R/L sort toggle).
-    after = text[text.rindex(marker):]
+    # The *last* render, not the whole transcript: the screen redraws in
+    # place, so the cumulative output still contains the first,
+    # pre-toggle page where both users were visible.
+    after = _last_render(text, marker)
     assert "alice" in after
     assert "bob" not in after
 
@@ -1211,7 +1225,7 @@ def test_user_picker_visibility_toggle_shows_only_disabled_on_second_press(db, l
     text = _written_text(session)
     marker = "Showing: Disabled users only"
     assert marker in text
-    after = text[text.rindex(marker):]
+    after = _last_render(text, marker)
     assert "bob" in after
     assert "alice" not in after
 
@@ -1230,7 +1244,7 @@ def test_user_picker_visibility_toggle_returns_to_all_on_third_press(db, lane, s
     # rindex: "All users" is also the *initial* pre-toggle state, so a
     # naive `.index()` would match the very first render instead of the
     # one after the third press.
-    after = text[text.rindex(marker):]
+    after = _last_render(text, marker)
     assert "alice" in after
     assert "bob" in after
 
@@ -6703,15 +6717,23 @@ def test_condensed_status_line_fits_a_narrow_terminal(db, lane, sysop):
 
 def test_user_picker_page_size_reserves_a_line_for_the_condensed_status_line(lane):
     # Code review follow-up (PR #216): the condensed status line (issue
-    # #206) added one more line to this screen's own render -- without a
-    # matching bump to _USER_PICKER_RESERVED_LINES, a full page on a
+    # #206) is one more line this screen draws, and a full page on a
     # standard 24-row terminal pushed the nav/choice prompt past the
-    # viewport.
-    from netbbs.net.admin_flow import _USER_PICKER_RESERVED_LINES, _user_picker_page_size
+    # viewport without it being reserved for.
+    #
+    # It used to be reserved by a constant in a bespoke page-size
+    # calculation. Issue #537 retired that screen in favour of
+    # `pick_item`, where the status line is the picker's `masthead` --
+    # so the claim is now that a masthead costs the page its rows, which
+    # `_header_lines` is what answers.
+    from netbbs.net.picker import _page_size
 
     session = FakeSession([])
     session.terminal_height = 24
-    assert _user_picker_page_size(session) == 24 - _USER_PICKER_RESERVED_LINES
+    session.terminal_width = 80
+    without = _page_size(session, None, "off", header_lines=0, width=80, height=24)
+    with_status = _page_size(session, None, "off", header_lines=1, width=80, height=24)
+    assert with_status == without - 1
 
 
 # -- node-wide timestamp display format/timezone ----------------------------
