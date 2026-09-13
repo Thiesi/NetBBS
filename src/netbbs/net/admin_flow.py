@@ -10713,7 +10713,10 @@ async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int
 async def _pick_optional_category(
     session: Session,
     lane: DatabaseLane,
+    actor: User,
     *,
+    create,
+    error_type,
     list_top_level,
     list_subcategories,
     title: str,
@@ -10774,12 +10777,35 @@ async def _pick_optional_category(
     accent_color = await lane.run(effective_accent_color_256)
     header_color = await lane.run(effective_header_color_256)
 
+    async def _create():
+        # Same dead end as the Community field's, and the same fix
+        # (issue #530): with no categories defined this picker used to
+        # return instantly and the field silently resolved to "none".
+        # A newly created category is returned as the selection without
+        # going back through `_load_top_level`'s filtering -- the SysOp
+        # just made it for this resource, which is answer enough.
+        return await _create_category_screen(
+            session, lane, actor, create=create,
+            # The *filtered* loader, not the raw one (Codex review).
+            # `_load_top_level` hides categories used only by another
+            # Community; passing `list_top_level` straight through meant
+            # [C]reate -> [P]arent listed them again and let the new
+            # category be nested under one, walking around the same
+            # admin-side leak-prevention invariant
+            # `test_admin_category_picker_leak_prevention` exists to
+            # hold. The nested editor inherits the scope it was opened
+            # from.
+            list_top_level=_load_top_level,
+            error_type=error_type,
+        )
+
     selected = await pick_item(
         session, top_level,
         name_of=lambda c: c.name,
         stable_id_of=lambda c: c.id,
         title=title,
         empty_message="No categories exist yet.",
+        on_create=_create,
         redraw_in_place=redraw_in_place,
         unicode_style=unicode_style,
         collapsed=collapsed,
@@ -10813,6 +10839,7 @@ async def _pick_optional_category(
 async def _pick_optional_community(
     session: Session,
     lane: DatabaseLane,
+    actor: User,
     *,
     redraw_in_place: bool = False,
     unicode_style: bool = False,
@@ -10824,16 +10851,30 @@ async def _pick_optional_community(
     two-level sub-structure the way categories do). Prompted *before*
     the existing category prompt at every call site -- Community is the
     outer layer, chosen first. Returns the chosen Community's id, or
-    `None` if cancelled (the picker's own `[B]ack`) or none exist yet
+    `None` if cancelled (the picker's own `[B]ack`)
     -- see `_pick_optional_category`'s own docstring for why this no
     longer gates the picker behind a separate "Assign a Community?"
-    yes/no first."""
+    yes/no first.
+
+    `[C]reate` (issue #530) makes one from here and returns it
+    selected. The dead end it removes: with no Communities defined, this
+    picker returned instantly, the field silently resolved to "none",
+    and the SysOp had to leave the editor, create a Community from the
+    console, and come back. It is offered on a populated list too,
+    because the original reasoning -- that this only bites before the
+    first Community exists -- was wrong: wanting to file a board under a
+    *new* Community is an ordinary thing to want at any point."""
+
+    async def _create() -> Community | None:
+        return await _community_screen(session, lane, actor)
+
     selected = await pick_item(
         session, await lane.run(list_communities),
         name_of=lambda c: c.name,
         stable_id_of=lambda c: c.id,
         title="Community",
         empty_message="No Communities exist yet.",
+        on_create=_create,
         redraw_in_place=redraw_in_place,
         unicode_style=unicode_style,
         collapsed=collapsed,
@@ -10966,6 +11007,7 @@ _NAME_REQUIREMENT_HELP = (
 def _community_field(
     key: str = "community_id",
     *,
+    actor: User,
     redraw_in_place: bool = False,
     unicode_style: bool = False,
     collapsed: bool = False,
@@ -10988,7 +11030,8 @@ def _community_field(
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         community_id = await _pick_optional_community(
-            session, lane, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed
+            session, lane, actor,
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
         )
         draft[key] = community_id
         community = await lane.run(get_community, community_id) if community_id is not None else None
@@ -10999,6 +11042,9 @@ def _community_field(
 
 def _category_field(
     *,
+    actor: User,
+    create,
+    error_type,
     list_top_level,
     list_subcategories,
     title: str,
@@ -11020,7 +11066,9 @@ def _category_field(
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         category_id = await _pick_optional_category(
-            session, lane, list_top_level=list_top_level, list_subcategories=list_subcategories,
+            session, lane, actor,
+            create=create, error_type=error_type,
+            list_top_level=list_top_level, list_subcategories=list_subcategories,
             title=title, community_id=draft.get("community_id"), resources=await lane.run(list_resources),
             redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
         )
@@ -11449,7 +11497,7 @@ async def _draw_board_menu(
 
 
 def _board_field_specs(
-    *, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
+    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
 ) -> list[FieldSpec]:
     """One shared field list drives both create and edit (design doc,
     dogfood feature request) -- see `_board_screen`. `redraw_in_place`/
@@ -11523,7 +11571,8 @@ def _board_field_specs(
             key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
             render=lambda d: d.get("community_id_label") or "(none)",
             prompt=_community_field(
-                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed
+                actor=actor,
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             ),
             brief="Parent community, if any",
             help=(
@@ -11537,6 +11586,7 @@ def _board_field_specs(
             key="category_id", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
             render=lambda d: d.get("category_id_label") or "(none)",
             prompt=_category_field(
+                actor=actor, create=create_board_category, error_type=CategoryError,
                 list_top_level=list_top_level_board_categories, list_subcategories=list_board_subcategories,
                 title="Message board category", list_resources=list_boards, get_by_id=get_board_category_by_id,
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
@@ -11640,7 +11690,10 @@ async def _board_screen(
     board = await edit_resource_draft(
         session, lane,
         title="Edit message board" if existing is not None else "Create message board",
-        fields=_board_field_specs(redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed),
+        fields=_board_field_specs(
+            actor=actor, redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style, collapsed=collapsed,
+        ),
         draft=draft, save=save, error_type=BoardError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
@@ -12768,7 +12821,7 @@ async def _write_gc_report(session: Session, report: GCReport) -> None:
 
 
 def _area_field_specs(
-    *, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
+    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
 ) -> list[FieldSpec]:
     """One shared field list drives both create and edit (design doc,
     dogfood feature request) -- see `_area_screen`. Identical shape to
@@ -12840,7 +12893,8 @@ def _area_field_specs(
             key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
             render=lambda d: d.get("community_id_label") or "(none)",
             prompt=_community_field(
-                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed
+                actor=actor,
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             ),
             brief="Parent community, if any",
             help=(
@@ -12854,6 +12908,7 @@ def _area_field_specs(
             key="category_id", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
             render=lambda d: d.get("category_id_label") or "(none)",
             prompt=_category_field(
+                actor=actor, create=create_file_category, error_type=FileCategoryError,
                 list_top_level=list_top_level_file_categories, list_subcategories=list_file_subcategories,
                 title="File-area category", list_resources=list_file_areas, get_by_id=get_file_area_category_by_id,
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
@@ -12950,7 +13005,10 @@ async def _area_screen(
     area = await edit_resource_draft(
         session, lane,
         title="Edit file area" if existing is not None else "Create file area",
-        fields=_area_field_specs(redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed),
+        fields=_area_field_specs(
+            actor=actor, redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style, collapsed=collapsed,
+        ),
         draft=draft, save=save, error_type=FileAreaError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
@@ -13421,7 +13479,7 @@ async def _draw_door_menu(
     await session.write("Choice: ")
 
 
-def _door_field_specs() -> list[FieldSpec]:
+def _door_field_specs(*, actor: User) -> list[FieldSpec]:
     """One shared field list drives both create and edit, same "single
     source of truth" precedent as `_area_field_specs`/`_board_field_
     specs`. `args` is edited as one space-separated line and split with
@@ -13473,7 +13531,7 @@ def _door_field_specs() -> list[FieldSpec]:
         FieldSpec(
             key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
             render=lambda d: d.get("community_id_label") or "(none)",
-            prompt=_community_field(),
+            prompt=_community_field(actor=actor),
             brief="Where it's offered from",
             help="The Community this door is offered from, if any. 'none' keeps it outside every Community.",
         ),
@@ -13550,7 +13608,7 @@ async def _door_screen(
     door = await edit_resource_draft(
         session, lane,
         title="Edit door" if existing is not None else "Register door",
-        fields=_door_field_specs(),
+        fields=_door_field_specs(actor=actor),
         draft=draft, save=save, error_type=DoorError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
@@ -14245,7 +14303,7 @@ async def _draw_channel_menu(
 
 
 def _channel_field_specs(
-    *, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
+    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
 ) -> list[FieldSpec]:
     """One shared field list drives both create and edit (design doc,
     dogfood feature request) -- see `_channel_screen`."""
@@ -14304,7 +14362,8 @@ def _channel_field_specs(
             key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
             render=lambda d: d.get("community_id_label") or "(none)",
             prompt=_community_field(
-                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed
+                actor=actor,
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             ),
             brief="Parent community, if any",
             help=(
@@ -14318,6 +14377,7 @@ def _channel_field_specs(
             key="category_id", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
             render=lambda d: d.get("category_id_label") or "(none)",
             prompt=_category_field(
+                actor=actor, create=create_channel_category, error_type=ChannelCategoryError,
                 list_top_level=list_top_level_channel_categories, list_subcategories=list_channel_subcategories,
                 title="Chat channel category", list_resources=list_channels, get_by_id=get_channel_category_by_id,
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
@@ -14450,7 +14510,8 @@ async def _channel_screen(
         session, lane,
         title="Edit chat channel" if existing is not None else "Create chat channel",
         fields=_channel_field_specs(
-            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed
+            actor=actor, redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style, collapsed=collapsed,
         ),
         draft=draft, save=save, error_type=ChannelError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
@@ -15192,7 +15253,12 @@ async def _draw_generic_category_menu(
 
 async def _create_category_screen(
     session: Session, lane: DatabaseLane, actor: User, *, create, list_top_level, error_type
-) -> None:
+):
+    # Returns the category it created, or `None` if the SysOp backed
+    # out -- `edit_resource_draft` already returns whatever `save`
+    # returned, this just stopped discarding it (issue #530, so
+    # `_pick_optional_category`'s `[C]reate` can hand it straight back
+    # as the selection).
     """
     Issue #282: the last create-wizard left in this module (boards,
     areas, channels, doors, and Communities were all already
@@ -15271,7 +15337,7 @@ async def _create_category_screen(
         await session.write_line(f"Created category {category.name!r}.")
         return category
 
-    await edit_resource_draft(
+    return await edit_resource_draft(
         session, lane,
         title="Create category",
         fields=fields, draft=draft, save=save, error_type=error_type,
