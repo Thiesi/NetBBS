@@ -816,9 +816,17 @@ Three consequences follow, and are intended rather than gaps:
 
 - Writing is not blocked structurally. A guest meeting a board's write level
   may post; the level is the mechanism.
-- The account keeps its password and can still be signed into normally.
-  Turning guest access off is one configuration change and leaves the account
-  untouched.
+- The account keeps its password. The designation does not touch the
+  credential, and turning guest access off -- one configuration change, leaving
+  the account untouched -- restores ordinary sign-in for it.
+
+  While guest access is *on*, though, typing that name on Telnet or web signs
+  in as the guest: that is the feature, and there is deliberately no second
+  path that offers the password prompt for it instead. The designated account
+  is a node identity rather than a person's, so a SysOp who needs to act on it
+  either turns guest access off for the moment or works on it from the SysOp
+  console, which reaches everything about it including its keys. SSH is
+  unaffected -- a key has already proven identity before the login flow runs.
 - Everything after authentication still runs, and is re-checked at the moment
   of use rather than when the designation was saved. A blocked guest is
   refused. A disabled or not-yet-approved account is refused. An account

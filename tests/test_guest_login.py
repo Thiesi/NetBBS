@@ -205,3 +205,66 @@ def test_the_notice_can_be_cleared(tmp_path):
     set_pre_login_notice(db, "")
     assert pre_login_notice(db) == ""
     db.close()
+
+
+# -- Neither number is unique on its own -------------------------------
+
+
+def test_the_designation_goes_when_the_account_does(tmp_path):
+    """Round five. The `(id, created_at)` pair is not quite unique:
+    `users.id` is a reusable rowid, and `created_at` is not a tiebreaker
+    either -- this project's suite has seen two accounts created close
+    enough together to share a stored timestamp, which is why
+    `list_users` sorts "registered" by id rather than by `created_at`
+    alone. Deleting the account drops the designation in the same
+    transaction, so there is nothing left to collide with.
+    """
+    db, _, sysop = _db(tmp_path)
+    guest = create_user(db, "guest2", password="hunter2", user_level=1)
+    set_guest_user(db, guest)
+    delete_user(db, guest, deleted_by=sysop)
+    assert guest_designation(db) is None
+    db.close()
+
+
+def test_a_stamp_sharing_replacement_is_still_refused(tmp_path):
+    """The collision itself, forced rather than waited for: the
+    replacement is given the deleted account's id *and* its timestamp.
+    Without the deletion hook this is passwordless access to whatever
+    the new account turned out to be.
+    """
+    db, _, sysop = _db(tmp_path)
+    guest = create_user(db, "guest2", password="hunter2", user_level=1)
+    set_guest_user(db, guest)
+    delete_user(db, guest, deleted_by=sysop)
+
+    impostor = create_user(db, "guest2", password="different", user_level=200)
+    db.connection.execute(
+        "UPDATE users SET id = ?, created_at = ? WHERE id = ?",
+        (guest.id, guest.created_at, impostor.id),
+    )
+    db.connection.commit()
+
+    assert guest_login_for(db, "guest2") is None
+    db.close()
+
+
+def test_touching_last_login_refuses_a_row_that_is_not_that_account(tmp_path):
+    """`touch_last_login` re-reads by id after the login path's last
+    await. An id freed in that window and handed to another account
+    meant this wrote a login timestamp onto a stranger's row before the
+    caller was refused (Codex review)."""
+    from netbbs.auth.users import touch_last_login
+
+    db, guest, sysop = _db(tmp_path)
+    delete_user(db, guest, deleted_by=sysop)
+    replacement = create_user(db, "someone-else", password="hunter2", user_level=1)
+    db.connection.execute("UPDATE users SET id = ? WHERE id = ?", (guest.id, replacement.id))
+    db.connection.commit()
+
+    assert touch_last_login(db, guest) is None
+    landed = db.connection.execute(
+        "SELECT last_login_at FROM users WHERE id = ?", (guest.id,)
+    ).fetchone()
+    assert landed["last_login_at"] is None, "a refused guest attempt wrote to another account"
+    db.close()

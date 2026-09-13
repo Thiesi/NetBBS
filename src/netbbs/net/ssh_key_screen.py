@@ -74,10 +74,15 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
         # Signing in with the account's own password reaches this screen
         # exactly as before.
         await session.write_line("")
+        # Says what can actually be done, not what sounds reasonable
+        # (Codex review). An earlier version of this line told the
+        # caller to sign in with the account's own password -- which,
+        # for the guest account, is exactly what guest login makes
+        # unreachable on Telnet and web while guest access is on.
         await session.write_line(
             colored(
                 "This session signed in without a password, so it cannot manage keys. "
-                "Sign in with the account's own password to add or remove them.",
+                "A SysOp can manage this account's keys from the SysOp console.",
                 fg_color=ERROR_COLOR,
             )
         )

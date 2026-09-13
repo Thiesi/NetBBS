@@ -24,9 +24,16 @@ oversights:
   write level can post. If that is not wanted, the level is the
   mechanism, the same as for any other account.
 - **The account keeps its password.** Guest login skips the password
-  prompt; it does not remove the credential. The same account can still
-  be signed into normally, and revoking guest access is one config
-  change that leaves the account intact.
+  prompt; it does not remove the credential, and revoking guest access
+  is one config change that leaves the account intact -- after which the
+  account signs in normally again.
+
+  While guest access is on, that name reaches the guest branch and not
+  the password prompt on Telnet and web, with no alternative route
+  offered (Codex review raised this as a gap; it is a boundary). The
+  designated account is a node identity rather than a person's, and a
+  SysOp who needs to act on it has the console, which reaches
+  everything about it.
 
 **The designation is an account id, not a name** (Codex review). Storing
 the name read better in `node_config` and was how this was first
@@ -76,7 +83,7 @@ pre-login moment on that transport to show it in.
 from __future__ import annotations
 
 from netbbs.auth.users import SYSOP_LEVEL, User, get_user_by_id
-from netbbs.config import get_config, set_config
+from netbbs.config import get_config, set_config, set_config_without_commit
 from netbbs.permissions.levels import meets_level
 from netbbs.storage.database import Database
 
@@ -120,6 +127,34 @@ def guest_designation(db: Database) -> tuple[int, str] | None:
         return int(user_id), created_at
     except ValueError:
         return None
+
+
+def clear_designation_for_deleted_user(db: Database, user_id: int) -> None:
+    """Drop the designation if it names `user_id` (Codex review, round
+    five).
+
+    The `(id, created_at)` pair is not quite unique. `users.id` is a
+    reusable rowid, and `created_at` is *not* a tiebreaker: this
+    project's own suite has observed two accounts created close enough
+    together to share a stored timestamp, which is why `list_users`
+    sorts "registered" by `id` rather than by `created_at` alone. Delete
+    the newest account and recreate one fast enough, and the pair can
+    match.
+
+    So the designation is dropped at the moment the account goes,
+    inside the same transaction as the delete -- reuse then has nothing
+    to inherit. The pair stays, and still earns its keep for every way
+    an account can stop being that account without passing through
+    `delete_user`: a restore from a backup taken before the designation,
+    or a database edited by hand.
+
+    Takes an id rather than a `User` because the caller is mid-delete
+    and holds the row it is about to remove; no commit of its own, for
+    the same reason.
+    """
+    designation = guest_designation(db)
+    if designation is not None and designation[0] == user_id:
+        set_config_without_commit(db, _GUEST_USER_ID_KEY, "")
 
 
 def set_guest_user(db: Database, user: User | None) -> None:

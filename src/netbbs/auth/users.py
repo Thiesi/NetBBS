@@ -574,7 +574,7 @@ def authorize_public_key(db: Database, username: str, verify_key: nacl.signing.V
 
 def touch_last_login(db: Database, user: User) -> User | None:
     """Record that `user` has just signed in and return the refreshed
-    row, or `None` if the account is no longer there.
+    row, or `None` if the account is no longer the account `user` names.
 
     The `User`-shaped counterpart to `_touch_last_login`, which every
     password and key path already reaches through its own `sqlite3.Row`.
@@ -591,7 +591,7 @@ def touch_last_login(db: Database, user: User) -> User | None:
     read in the same breath will simply never see it.
     """
     row = db.connection.execute(
-        "SELECT * FROM users WHERE id = ?", (user.id,)
+        "SELECT * FROM users WHERE id = ? AND created_at = ?", (user.id, user.created_at)
     ).fetchone()
     if row is None:
         return None
@@ -1056,12 +1056,22 @@ def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
     `BEGIN IMMEDIATE` transaction rather than as a plain check-then-act
     sequence.
     """
+    from netbbs.guest import clear_designation_for_deleted_user
     from netbbs.moderation.log import record_action_without_commit
 
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         current = _get_user_by_id(db, target.id)
         _refuse_if_last_sysop(db, current, removes_active_sysop=True)
+        # Issue #531, Codex review. Guest login keys its designation on
+        # `(id, created_at)`, and neither is unique on its own -- rowids
+        # are reused, and two fast creations can share a timestamp (see
+        # `list_users`' own note on sorting by id rather than
+        # `created_at`). Dropped here, in the same transaction as the
+        # delete, so a recreated account cannot inherit passwordless
+        # access however the numbers fall. Imported inside the function:
+        # `netbbs.guest` imports from this module.
+        clear_designation_for_deleted_user(db, current.id)
         # Logged *before* deleting, not after: on a self-delete
         # (deleted_by == target), record_action's own actor_user_id FK
         # would otherwise reference a row that's already gone. Logging
