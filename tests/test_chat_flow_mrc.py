@@ -131,13 +131,16 @@ async def _run(lane, hub, presence, channel, user, lines, *, mrc_bridge=None, wh
     task = asyncio.create_task(
         chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user, mrc_bridge=mrc_bridge)
     )
-    # The task's whole lifetime is owned from here (AGENTS.md, "own
+    # Both tasks' whole lifetimes are owned from here (AGENTS.md, "own
     # async tasks" -- Codex review, the same finding `_browse_until`
-    # took one round earlier). `while_joined` now waits on conditions
-    # that can time out or raise, and an early exit used to leave this
-    # loop running into the fixtures' teardown with its own exception
-    # unretrieved -- so a chat loop that died before rendering what was
-    # awaited was reported as the wait's five-second timeout instead.
+    # took one round earlier, and then the callback task this very fix
+    # introduced took one round after that).
+    # `while_joined` now waits on conditions that can time out or raise,
+    # and an early exit used to leave this loop running into the
+    # fixtures' teardown with its own exception unretrieved -- so a chat
+    # loop that died before rendering what was awaited was reported as
+    # the wait's five-second timeout instead.
+    callback = None
     try:
         # `_wait_for` watches the task too: a loop that has already
         # finished means the condition will never hold, and whatever it
@@ -172,15 +175,23 @@ async def _run(lane, hub, presence, channel, user, lines, *, mrc_bridge=None, wh
             session.inputs.put_nowait(line)
         return session, await asyncio.wait_for(task, timeout=4)
     finally:
-        if not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        else:
-            # Retrieved, not suppressed: anything that mattered has
-            # already been raised by the waits above.
-            with contextlib.suppress(BaseException):
-                task.exception()
+        # `callback` included, and for the reason `task` is: an outer
+        # cancellation -- a test-level timeout, say -- can land while
+        # `asyncio.wait` is pending, and a callback left running then
+        # goes on driving the session and the bridge through the
+        # fixtures' teardown, with its own exception unretrieved.
+        for owned in (callback, task):
+            if owned is None:
+                continue
+            if not owned.done():
+                owned.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await owned
+            else:
+                # Retrieved, not suppressed: anything that mattered has
+                # already been raised by the waits above.
+                with contextlib.suppress(BaseException):
+                    owned.exception()
 
 
 async def _wait_for(predicate, *, what: str, timeout: float = 5.0, task=None) -> None:
