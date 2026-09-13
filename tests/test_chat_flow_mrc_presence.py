@@ -10,14 +10,20 @@ bridge on the loopback fake hub.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ParticipantId
 from netbbs.mrc.settings import set_mrc_room
+from netbbs.chat.mailbox import MessageMailbox
+from netbbs.net import chat_flow
+from netbbs.net.char_input import InputHistory
 from tests.test_chat_flow_mrc import (  # noqa: F401 -- fixtures and helpers
+    _QueueSession,
     _rig,
     _run,
     _text,
+    _wait_for,
     alice,
     channel,
     db,
@@ -27,6 +33,70 @@ from tests.test_chat_flow_mrc import (  # noqa: F401 -- fixtures and helpers
     sysop,
 )
 from tests.test_chat_flow_mrc_open_rooms import _bridge_on, _browse, _visible_text
+
+
+class _PickerQueueSession(_QueueSession):
+    """A queue session whose *keystrokes* come from the queue too.
+
+    `_QueueSession` overrides only `read_line`; its inherited `read_key`
+    still reads `FakeSession`'s separate scripted list, which is empty
+    here. `browse_channels` opens on the picker and reads keys, so a
+    plain `_QueueSession` blocks before it can consume anything queued
+    -- which is exactly how this helper hung the first time it ran, and
+    the hang I wrongly put down to a busy machine.
+    """
+
+    async def read_key(self, echo: bool = True) -> str:
+        return await self.inputs.get()
+
+
+async def _browse_until(lane, hub, presence, user, before, after, *, mrc_bridge, until, what):
+    """`_browse`, but `after` is held back until `until` holds (issue
+    #536).
+
+    `_browse` feeds a fixed list and the session ends when it runs dry,
+    so an assertion about something the hub *replies* with is a race: on
+    a slower host the reply lands after the session has already finished
+    and rendered nothing. Waiting for the reply before feeding the rest
+    removes the window rather than widening it.
+
+    Two lists rather than "hold back the last line" (Codex review). The
+    caller that needed this queues `0`, `1`, `/join second`, `/quit` and
+    waits for the first room's MOTD -- and holding back only `/quit` let
+    `/join second` run first, so the session could leave the room the
+    MOTD was addressed to. `local_leave` drops the caller from
+    `_announced`, and an addressed packet arriving after that has no
+    recipient and is discarded for good, leaving the wait to time out on
+    exactly the slow host it exists to protect. What must not happen
+    before the condition is the caller's business, so the caller says so.
+    """
+    session = _PickerQueueSession()
+    task = asyncio.create_task(
+        chat_flow.browse_channels(
+            session, lane, hub, presence, MessageMailbox(), InputHistory(), user, mrc_bridge=mrc_bridge,
+        )
+    )
+    try:
+        for line in before:
+            session.inputs.put_nowait(line)
+        await _wait_for(lambda: until(session), what=what, timeout=5.0, task=task)
+        for line in after:
+            session.inputs.put_nowait(line)
+        await asyncio.wait_for(task, timeout=4)
+    finally:
+        # AGENTS.md, "own async tasks": if the condition never holds --
+        # or the predicate raises -- this task is still running, and
+        # would otherwise overlap the test's bridge and database
+        # teardown, or surface later as an exception nobody retrieved.
+        #
+        # Cancelled, then gathered with `return_exceptions`, so that a
+        # browse loop raising from its own cleanup cannot speak over the
+        # failure this block is unwinding -- the same shape `_run` uses,
+        # for the same reason.
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    return session
+
 
 
 def test_away_is_mirrored_to_the_hub(db, lane, hub, presence, channel, alice):
@@ -60,8 +130,10 @@ def test_the_hubs_welcome_is_shown_once_per_session(db, lane, hub, presence, ali
         try:
             # 0,1 enters #first (the only entries are first and second);
             # /join second moves to a second MRC room in the same session.
-            session = await _browse(
-                lane, hub, presence, alice, ["0", "1", "/join second", "/quit"], mrc_bridge=bridge,
+            session = await _browse_until(
+                lane, hub, presence, alice, ["0", "1"], ["/join second", "/quit"], mrc_bridge=bridge,
+                until=lambda s: "[MRC] MOTD reply line 1" in _visible_text(s),
+                what="the hub's MOTD reply to be rendered",
             )
             text = _visible_text(session)
             assert text.count("Joined") == 2
@@ -242,10 +314,16 @@ def test_the_roster_shows_handles_with_spaces(db, lane, hub, presence, channel, 
     async def scenario():
         rig = await _rig(db, lane, hub, channel)
         try:
-            async def push_roster():
+            async def push_roster(session):
                 await rig.fake.wait_for(lambda p: p.body == "NEWROOM::lobby" and p.from_user == "alice")
                 await rig.fake.send_line("SERVER~~~CLIENT~~lobby~USERLIST:Some_User@Other,bob~")
-                await asyncio.sleep(0.2)
+                # Issue #536: the roster has to have been taken in
+                # before `/who` is typed, so wait for the bridge to hold
+                # it rather than sleeping and hoping.
+                await _wait_for(
+                    lambda: "Some_User@Other" in rig.bridge.remote_roster(channel),
+                    what="the MRC roster to reach the bridge",
+                )
 
             session, _ = await _run(lane, hub, presence, channel, alice, ["/who", "/quit"], mrc_bridge=rig.bridge, while_joined=push_roster)
             text = _text(session)

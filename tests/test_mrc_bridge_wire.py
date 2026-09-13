@@ -8,6 +8,7 @@ one caller, CTCP, and the hub moving, renaming or terminating a session.
 from __future__ import annotations
 
 import asyncio
+import time
 
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub, ParticipantId
@@ -156,6 +157,37 @@ def test_ctcp_requests_are_answered_from_the_targets_nick_and_bounded(db, lane, 
     asyncio.run(scenario())
 
 
+class _FreezableClock:
+    """`time.monotonic`, until a test freezes it (issue #536).
+
+    `MrcBridge` already takes a `clock`, but handing it a fully fake one
+    from construction would stall the connection-stability timing it
+    also uses that clock for. This runs real until `freeze()`, which is
+    all the reply-allowance assertion needs: a token bucket that cannot
+    refill while the burst is being measured.
+
+    Without it the test depended on the steps between spending two
+    tokens and sending the burst taking under 0.2 s -- `REPLY_RATE_PER_
+    SECOND` is 10.0, so those two were back by then on any host slower
+    than the one it was written on, the burst got its full allowance,
+    and the assertion about which line carried the notice failed. It
+    got *worse* when other sleeps in the suite were lengthened, which is
+    how it was identified.
+    """
+
+    def __init__(self) -> None:
+        self._frozen: float | None = None
+
+    def __call__(self) -> float:
+        return time.monotonic() if self._frozen is None else self._frozen
+
+    def freeze(self) -> None:
+        self._frozen = time.monotonic()
+
+    def thaw(self) -> None:
+        self._frozen = None
+
+
 def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, lobby, alice):
     async def scenario():
         fake = FakeMrcHub()
@@ -165,9 +197,22 @@ def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, l
         hub = ChatHub()
         alice_queue = hub.join(lobby.name, ParticipantId("alice", 1))
         carol_queue = hub.join(lobby.name, ParticipantId("carol", 7))
-        bridge = await _connected_bridge(db, lane, hub, fake, reply_burst=5)
+        clock = _FreezableClock()
+        bridge = await _connected_bridge(db, lane, hub, fake, reply_burst=5, clock=clock)
         try:
             await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM:")) == 2)
+            # Frozen before alice's reply bucket exists (issue #536,
+            # Codex review). `_TokenBucket` refills lazily -- `now -
+            # _last_refill` on the next check -- so freezing *after* the
+            # LIST replies would still hand back whatever real time had
+            # passed since the bucket was created, which is the very
+            # refill this is trying to exclude. Frozen from before the
+            # bucket is created, no time elapses for it at all.
+            #
+            # Safe across this stretch: the outbound bucket starts full,
+            # and the only commands sent here are this LIST and two that
+            # are refused before they reach the wire.
+            clock.freeze()
             assert bridge.send_hub_command(lobby, "alice", "LIST") is None
             sent = await fake.wait_for(lambda p: p.body == "LIST")
             assert (sent.from_user, sent.to_user, sent.to_room) == ("alice", "SERVER", "lobby")
@@ -191,8 +236,21 @@ def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, l
             texts = [n.text for n in got]
             assert texts[:3] == ["line 0", "line 1", "line 2"]
             assert "cut short" in texts[3]
+            # Still frozen for the assertion the freeze exists to make
+            # (Codex review). Receiving the notice proves the bridge
+            # handled the *first* refused line, not the four after it --
+            # `send_line` drains the sender without waiting for the
+            # receiver. Thawing here jumped the bucket's clock to real
+            # monotonic time, so those four could refill it and be
+            # delivered during the sleep below, failing this assertion
+            # on exactly the slow host the test is for.
+            #
+            # Frozen, no refill is possible at all, so "nothing more was
+            # delivered" is a claim about the allowance rather than
+            # about who won a race.
             await asyncio.sleep(0.1)
             assert alice_queue.empty()
+            clock.thaw()
         finally:
             await bridge.close()
             await fake.close()

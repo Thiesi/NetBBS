@@ -145,7 +145,13 @@ def test_a_caller_who_did_not_opt_in_sees_only_the_old_notice(db, lane, hub, pre
     async def scenario():
         rig = await _rig(db, lane, hub, channel)
         try:
-            async def push_private():
+            # Takes the session because this one goes through the
+            # shared `_run`, not this module's own `_run_session`
+            # (Codex review): the sweep that added the parameter to
+            # every other callback stopped at the file the helper lives
+            # in, and this call raised `TypeError` before testing
+            # anything.
+            async def push_private(session):
                 await rig.fake.wait_for(lambda p: p.body == "NEWROOM::lobby" and p.from_user == "alice")
                 await rig.fake.send_line("bob~Other~garden~alice~My_Board~~|03<|11bob|03>|16|07 psst~")
                 await asyncio.sleep(0.2)

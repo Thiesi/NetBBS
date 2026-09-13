@@ -23,6 +23,7 @@ from tests.test_chat_flow_mrc import (  # noqa: F401 -- fixtures
     _rig,
     _run,
     _text,
+    _wait_for,
     alice,
     channel,
     db,
@@ -37,11 +38,17 @@ def test_mrc_colours_are_rendered_or_stripped_per_viewer(db, lane, hub, presence
     async def scenario(expect_colour: bool):
         rig = await _rig(db, lane, hub, channel)
         try:
-            async def push():
+            async def push(session):
                 await rig.fake.send_line("bob~Other~lobby~~~lobby~|03<|11bob|03>|16|07 |12blue words|07 here~")
                 await rig.fake.send_line("bob~Other~lobby~~~lobby~|15* |13bob |09waves~")
                 await rig.fake.send_line("SERVER~~~CLIENT~~~ROOMTOPIC:lobby:|14be |15excellent~")
-                await asyncio.sleep(0.15)
+                # Issue #536: wait for the last of the three to land
+                # rather than sleeping and hoping. The topic arrives
+                # after the two messages, so it is the one to watch.
+                await _wait_for(
+                    lambda: "excellent" in _text(session),
+                    what="all three inbound MRC lines to be rendered",
+                )
 
             session, _ = await _run(
                 lane, hub, presence, channel, alice, ["/quit"], mrc_bridge=rig.bridge, while_joined=push,

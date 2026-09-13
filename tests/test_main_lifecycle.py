@@ -803,7 +803,13 @@ def test_link_alone_does_not_count_as_an_interactive_listener(tmp_path):
             telnet=TransportConfig(False, "127.0.0.1", 0),
             ssh=TransportConfig(False, "127.0.0.1", 0),
             web=TransportConfig(False, "127.0.0.1", 0),
-            link=LinkConfig(enabled=True, host="127.0.0.1", port=0),
+            # Issue #536: an explicit realtime port. `effective_realtime_port`
+            # derives one as `port + 1000`, so `port=0` lands on exactly 1000 --
+            # which an unprivileged process cannot bind on a POSIX host. The
+            # listener then failed to start before this test reached what it is
+            # actually about; it only passed on Windows, which has no
+            # privileged-port rule.
+            link=LinkConfig(enabled=True, host="127.0.0.1", port=0, realtime_port=0),
         )
         with pytest.raises(StartupError, match="no interactive listener actually started"):
             await run(config)
@@ -1418,7 +1424,13 @@ def test_link_enabled_canonicalizes_a_legacy_display_name_in_place(tmp_path):
     config = _config(
         tmp_path,
         telnet=TransportConfig(True, "127.0.0.1", 0),
-        link=LinkConfig(enabled=True, host="127.0.0.1", port=0),
+        # Issue #536: an explicit realtime port. `effective_realtime_port`
+        # derives one as `port + 1000`, so `port=0` lands on exactly 1000 --
+        # which an unprivileged process cannot bind on a POSIX host. The
+        # listener then failed to start before this test reached what it is
+        # actually about; it only passed on Windows, which has no
+        # privileged-port rule.
+        link=LinkConfig(enabled=True, host="127.0.0.1", port=0, realtime_port=0),
     )
     db = Database(config.db_path)
     set_config(db, "node_display_name", "Cafe\u0301 Node")
