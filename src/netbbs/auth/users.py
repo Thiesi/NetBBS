@@ -590,12 +590,35 @@ def touch_last_login(db: Database, user: User) -> User | None:
     login path already knows how to say. Callers holding a row they
     read in the same breath will simply never see it.
     """
-    row = db.connection.execute(
-        "SELECT * FROM users WHERE id = ? AND created_at = ?", (user.id, user.created_at)
-    ).fetchone()
-    if row is None:
-        return None
-    return _touch_last_login(db, row)
+    # One transaction across the identity check, the update and the
+    # re-read (Codex review). As three separate statements, a delete
+    # landing between them left `_touch_last_login` updating no rows and
+    # then subscripting a re-fetch that returned nothing -- a
+    # `TypeError` that dropped the caller's session instead of the
+    # refusal this path knows how to give -- and a replacement inserted
+    # in that window could take the login timestamp before eligibility
+    # turned it away. `BEGIN IMMEDIATE` is what actually excludes the
+    # other writer, which is `delete_user`, which uses the same.
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = db.connection.execute(
+            "SELECT * FROM users WHERE id = ? AND created_at = ?", (user.id, user.created_at)
+        ).fetchone()
+        if row is None:
+            return None
+        now = utc_now_iso()
+        db.connection.execute(
+            "UPDATE users SET last_login_at = ? WHERE id = ?", (now, row["id"])
+        )
+        updated = db.connection.execute(
+            "SELECT * FROM users WHERE id = ?", (row["id"],)
+        ).fetchone()
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
+    return _row_to_user(updated)
 
 
 def _touch_last_login(db: Database, row: sqlite3.Row) -> User:

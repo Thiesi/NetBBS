@@ -270,7 +270,12 @@ from netbbs.link.work_items import (
     replay_work_item,
 )
 from netbbs.moderation.blocklist import BlocklistError, block_user, is_blocked, unblock_user
-from netbbs.moderation.log import list_actions_for_target_user, list_recent_actions, record_action
+from netbbs.moderation.log import (
+    list_actions_for_target_user,
+    list_recent_actions,
+    record_action,
+    record_action_without_commit,
+)
 from netbbs.mrc.protocol import display_roster_entry, room_name_error
 from netbbs.mrc.bridge import MrcBridge, MrcState, MrcStatus
 from netbbs.mrc.settings import (
@@ -491,7 +496,9 @@ from netbbs.guest import (
     guest_user,
     pre_login_notice,
     set_guest_user,
+    set_guest_user_without_commit,
     set_pre_login_notice,
+    set_pre_login_notice_without_commit,
 )
 from netbbs.session_history import previous_callers_enabled, set_previous_callers_enabled
 from netbbs.storage.database import Database
@@ -2040,27 +2047,40 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
                 )
 
         def _apply(db: Database) -> None:
-            # Re-read in the same lane call that writes (Codex review).
-            # Resolving the account in one call and designating it in
-            # another is a check-then-act: a second SysOp deleting it in
-            # that gap runs the deletion's own designation-clearing hook
-            # *before* the stale designation exists, so nothing clears
-            # it afterwards -- and if the freed id and timestamp are
-            # then handed to a new account, that account has
-            # passwordless login. Rare, and cheap to close: the write
-            # simply refuses a name that is no longer there.
-            if account is not None:
-                still_there = get_user_by_id(db, account.id)
-                if still_there is None or still_there.created_at != account.created_at:
-                    raise AuthError(
-                        f"{name!r} was removed while you were editing. Nothing was changed."
-                    )
-            set_guest_user(db, account)
-            set_pre_login_notice(db, draft["notice"] or "")
-            record_action(
-                db, actor=actor, action="set_guest_access",
-                detail=f"guest={name or '(off)'} notice={'set' if draft['notice'] else '(none)'}",
-            )
+            # Validated and written inside one `BEGIN IMMEDIATE`, the
+            # same shape `netbbs.auth.users.delete_user` uses -- and for
+            # the same reason, since that is the writer this is racing
+            # (Codex review, three rounds on this one paragraph).
+            #
+            # Resolving the account and designating it as two separate
+            # statements is a check-then-act: a delete landing in
+            # between runs its own designation-clearing hook *before*
+            # the stale designation is written, so nothing clears it
+            # afterwards -- and if the freed id and creation timestamp
+            # are later handed to a new account, that account has
+            # passwordless login. Doing it in one lane callback
+            # serializes this process but not the standalone admin CLI
+            # or any other connection; a write transaction is what
+            # actually excludes them.
+            db.connection.execute("BEGIN IMMEDIATE")
+            try:
+                if account is not None:
+                    still_there = get_user_by_id(db, account.id)
+                    if still_there is None or still_there.created_at != account.created_at:
+                        raise AuthError(
+                            f"{name!r} was removed while you were editing. Nothing was changed."
+                        )
+                set_guest_user_without_commit(db, account)
+                set_pre_login_notice_without_commit(db, draft["notice"] or "")
+                record_action_without_commit(
+                    db, actor=actor, action="set_guest_access",
+                    detail=f"guest={name or '(off)'} notice={'set' if draft['notice'] else '(none)'}",
+                )
+            except BaseException:
+                db.connection.rollback()
+                raise
+            else:
+                db.connection.commit()
 
         await lane.run(_apply)
         return True

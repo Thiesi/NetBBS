@@ -167,7 +167,18 @@ def clear_designation_for_deleted_user(db: Database, user_id: int) -> None:
 def set_guest_user(db: Database, user: User | None) -> None:
     """Designate `user` as the guest identity, or `None` to turn guest
     login off. The account itself is untouched either way."""
-    set_config(db, _GUEST_USER_ID_KEY, "" if user is None else f"{user.id}:{user.created_at}")
+    set_config(db, _GUEST_USER_ID_KEY, _designation_value(user))
+
+
+def set_guest_user_without_commit(db: Database, user: User | None) -> None:
+    """`set_guest_user` for a caller inside its own transaction --
+    `netbbs.net.admin_flow`'s Guest access screen, which validates the
+    account and writes the designation as one atomic change."""
+    set_config_without_commit(db, _GUEST_USER_ID_KEY, _designation_value(user))
+
+
+def _designation_value(user: User | None) -> str:
+    return "" if user is None else f"{user.id}:{user.created_at}"
 
 
 def guest_user(db: Database) -> User | None:
@@ -247,6 +258,15 @@ def pre_login_notice(db: Database) -> str:
     return get_config(db, _PRE_LOGIN_NOTICE_KEY) or ""
 
 
+def set_pre_login_notice_without_commit(db: Database, notice: str) -> None:
+    """`set_pre_login_notice` for a caller inside its own transaction."""
+    set_config_without_commit(db, _PRE_LOGIN_NOTICE_KEY, _bounded_notice(notice))
+
+
+def _bounded_notice(notice: str) -> str:
+    return (notice or "").strip()[:MAX_PRE_LOGIN_NOTICE_LENGTH]
+
+
 def set_pre_login_notice(db: Database, notice: str) -> None:
     """Set or clear the pre-login notice.
 
@@ -255,4 +275,4 @@ def set_pre_login_notice(db: Database, notice: str) -> None:
     first `MAX_PRE_LOGIN_NOTICE_LENGTH` characters is friendlier than
     refusing a save over a length the SysOp cannot see while typing.
     """
-    set_config(db, _PRE_LOGIN_NOTICE_KEY, (notice or "").strip()[:MAX_PRE_LOGIN_NOTICE_LENGTH])
+    set_config(db, _PRE_LOGIN_NOTICE_KEY, _bounded_notice(notice))
