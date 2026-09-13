@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import shutil
 import sys
 import tempfile
@@ -39,7 +40,7 @@ import door_gallery as gallery  # noqa: E402
 
 def capture_walk(door_name: str, label: str, width: int, height: int,
                  page: int, preset: str, fresh: bool, fixture_override=None,
-                 setup_keys: str = "") -> str:
+                 setup_keys: str = "", expect: str | None = None) -> str:
     door = ROOT / "src/netbbs/doors/bundled" / f"{door_name}.py"
     if not door.exists():
         raise SystemExit(f"no such bundled door: {door}")
@@ -86,7 +87,31 @@ def capture_walk(door_name: str, label: str, width: int, height: int,
 
     if not 1 <= page <= len(pages):
         raise SystemExit(f"{label} ends on {len(pages)} page(s); asked for {page}")
-    return pages[page - 1]
+    screen = pages[page - 1]
+
+    # The gallery's own check, for the same reason it has one: a panel that is
+    # not the screen its caption names reads as a review of a screen nobody
+    # looked at, and a *published* one reads as a product that does not exist.
+    # `--fixture` and `--setup` both change where the walk starts from, so the
+    # walk can end somewhere else entirely -- `Command Deck --fixture combat`
+    # stops on the combat screen and would otherwise be published under the
+    # deck's caption.
+    mark = gallery.SHOWS.get(door_name, {}).get(label)
+    wanted = expect or (gallery.shown(mark, preset) if mark is not None else None)
+    if wanted is None and (fixture_override or setup_keys):
+        # `SHOWS` covers War Dialer and not Voidrunner, so for half the walks
+        # there is nothing to check against. Rather than let that half go
+        # unchecked, say so: a changed start with no marker is refused.
+        raise SystemExit(f"{label} has no marker in door_gallery.SHOWS, so a "
+                         f"changed --fixture/--setup cannot be checked; pass "
+                         f"--expect with something the screen says")
+    painted = gallery.painted(screen, width, height)
+    if wanted is not None and wanted not in painted:
+        raise SystemExit(f"{label} did not end on its own screen: "
+                         f"no {wanted!r} on the page captured")
+    if not painted.strip():
+        raise SystemExit(f"{label} ended on a blank screen")
+    return screen
 
 
 def main() -> None:
@@ -104,6 +129,9 @@ def main() -> None:
     parser.add_argument("--fixture", help="play the walk against another fixture")
     parser.add_argument("--setup", default="",
                         help="keys played first, in a launch whose screens are discarded")
+    parser.add_argument("--expect",
+                        help="text the captured screen must say; required with "
+                             "--fixture or --setup when the walk has no SHOWS marker")
     parser.add_argument("--fresh", action="store_true",
                         help="rebuild the cached fixture first")
     args = parser.parse_args()
@@ -117,12 +145,17 @@ def main() -> None:
 
     screen = capture_walk(args.door, args.walk, args.width, args.height,
                           args.page, args.preset, args.fresh, args.fixture,
-                          args.setup)
+                          args.setup, args.expect)
     # Bytes, not text: `write_text` turns the door's CR LF into CR CR LF on
     # Windows, which renders as a blank line between every terminal row.
-    args.output.write_bytes(screen.encode("utf-8"))
-    rows = screen.count("\n") + 1
-    print(f"wrote {args.output} ({rows} rows)")
+    #
+    # The door's own stdout is already in text mode when it runs on Windows,
+    # so a row it ends with CR LF reaches this pipe as CR CR LF -- a Windows
+    # build artifact, not what a caller's terminal is sent. One CR per row,
+    # so the committed capture is the same bytes wherever it was taken.
+    body = re.sub("\r+\n", "\r\n", screen)
+    args.output.write_bytes(body.encode("utf-8"))
+    print(f"wrote {args.output} ({body.count(chr(10)) + 1} rows)")
 
 
 if __name__ == "__main__":

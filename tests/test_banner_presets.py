@@ -116,9 +116,10 @@ def test_masthead_categories_ship_distinct_artwork() -> None:
         assert left.isdisjoint(right)
 
 
-#: What a row starts and ends with when it spans a box. A row needs both:
-#: a tree drawn with `├─ label ....` starts with a border and ends in text,
-#: and its rows are meant to differ in length.
+#: What a row starts and ends with when it spans a box. Both are needed to
+#: decide that a *column* holds a box at all: a tree drawn with
+#: `├─ label ....` starts with a border and ends in text, and its rows are
+#: meant to differ in length.
 FRAME_STARTS = frozenset("│║┃╔╠╚┏┣┗┌├└╭╰╟╞")
 FRAME_ENDS = frozenset("│║┃╗╝┓┛┐┘╮╯┤╣┫╢╡")
 
@@ -129,20 +130,32 @@ UNSTABLE_GLYPHS = frozenset("\u276e\u276f")
 
 
 def framed_rows_by_indent(text: str) -> dict[int, list[int]]:
-    """Width of every box-spanning row, grouped by the column it starts in.
+    """Width of every row of a box, grouped by the column the box starts in.
 
     Grouping by indent is what lets a preset hold more than one box: an
     outer frame in column zero and an inner panel a few columns in are
     measured separately, but each has to close.
+
+    A column counts as a box when at least two of its rows both start and
+    end on a border. Every row that *starts* on one there is then measured,
+    including one that has lost its closing border -- which is the shape a
+    broken rectangle usually takes, and which testing each row for both
+    ends would quietly drop. A tree has no such pair, so none of its rows
+    are measured at all.
     """
-    groups: dict[int, list[int]] = {}
+    starts: dict[int, list[int]] = {}
+    closed: dict[int, int] = {}
     for line in text.splitlines():
         row = strip_ansi(line).rstrip("\r").rstrip(" ")
         bare = row.lstrip(" ")
-        if len(bare) > 1 and bare[0] in FRAME_STARTS and bare[-1] in FRAME_ENDS:
-            indent = display_width(row) - display_width(bare)
-            groups.setdefault(indent, []).append(display_width(row))
-    return groups
+        if len(bare) < 2 or bare[0] not in FRAME_STARTS:
+            continue
+        indent = display_width(row) - display_width(bare)
+        starts.setdefault(indent, []).append(display_width(row))
+        if bare[-1] in FRAME_ENDS:
+            closed[indent] = closed.get(indent, 0) + 1
+    return {indent: widths for indent, widths in starts.items()
+            if closed.get(indent, 0) >= 2}
 
 
 @pytest.mark.parametrize(("family", "presets", "loader"), PRESET_FAMILIES)

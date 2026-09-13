@@ -122,10 +122,18 @@ rather than by writing its tables.
 
 ```sh
 PYTHONPATH=src python scripts/website_capture_door_screen.py voidrunner \
-  "Command Deck" web/shots/raw-voidrunner.txt --fixture played
+  "Command Deck" web/shots/raw-voidrunner.txt --fixture played \
+  --expect "Command Deck"
 PYTHONPATH=src python scripts/website_capture_door_screen.py war_dialer \
   Switchboard web/shots/raw-war_dialer.txt --setup 'X{Bay}N*A'
 ```
+
+A walk that is given `--fixture` or `--setup` starts somewhere its own keys
+did not, so it can end somewhere else: `Command Deck --fixture combat`
+stops on the combat screen and would publish under the deck's caption.
+The capture is checked against `door_gallery.SHOWS`, and where that has no
+marker -- it covers War Dialer and not Voidrunner -- `--expect` is required
+and the capture is refused without it.
 
 **Convert at the capture's own terminal width**, not at the width of its
 widest row. `website_ansi_to_html.py` emulates a terminal, and a capture
