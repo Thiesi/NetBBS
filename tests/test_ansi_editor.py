@@ -51,7 +51,7 @@ class FakeSession(Session):
     async def write(self, text: str) -> None:
         self.written.append(text)
 
-    async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
+    async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
         if not self._inputs:
             raise AssertionError("FakeSession ran out of scripted input (read_line)")
         return self._inputs.pop(0)
@@ -508,7 +508,7 @@ def test_quit_confirmation_acts_on_a_single_keystroke_without_enter(tmp_path):
     doesn't otherwise distinguish the two read methods."""
 
     class NoReadLineSession(FakeSession):
-        async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
+        async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
             raise AssertionError("_confirm_quit must use read_key, not read_line")
 
     async def scenario():

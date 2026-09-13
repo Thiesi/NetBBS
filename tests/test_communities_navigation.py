@@ -52,7 +52,7 @@ class FakeSession:
             raise AssertionError("FakeSession.read_key() called with no more scripted keys")
         return key
 
-    async def read_line(self, echo: bool = True, history=None, completer=None, *, live_buffer=None, lock=None) -> str:
+    async def read_line(self, echo: bool = True, history=None, completer=None, *, live_buffer=None, lock=None, **kwargs) -> str:
         # Every scenario in this file ends by pressing "l" to leave the
         # main menu cleanly; default the now-required logoff
         # confirmation to "y" once the scripted lines run out, rather

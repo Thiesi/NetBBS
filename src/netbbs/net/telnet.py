@@ -234,6 +234,8 @@ class TelnetSession(Session):
         live_buffer: char_input.LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
         list_candidates: char_input.CandidateListPrinter | None = None,
+        initial: str = "",
+        cancellable: bool = False,
     ) -> str:
         """
         Read one line of input, character by character, echoing (or
@@ -250,6 +252,7 @@ class TelnetSession(Session):
         return await char_input.read_line(
             self, self.write, echo, history, completer,
             live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
+            initial=initial, cancellable=cancellable,
         )
 
     async def read_key(self, echo: bool = True) -> str:

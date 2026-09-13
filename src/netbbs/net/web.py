@@ -56,6 +56,7 @@ from netbbs.net.char_input import (
     Completer,
     EditorKey,
     EditorKeyKind,
+    InputCancelled,
     InputHistory,
     LastCandidateList,
     LiveInputBuffer,
@@ -124,6 +125,20 @@ _SPECIAL_TO_EDITOR_KIND: dict[str, EditorKeyKind] = {
 
 
 @dataclass(frozen=True)
+class _AltKey:
+    """An Alt-combination that arrived as one `onData` event.
+
+    Kept distinct from a bare Escape and from the plain character that
+    follows it, because only the tokenizer -- which sees the whole
+    event string -- can tell the difference. By the time the two are
+    separate queue entries, "ESC then s" and "Escape, then the user
+    pressed s" are indistinguishable.
+    """
+
+    char: str
+
+
+@dataclass(frozen=True)
 class _SpecialKey:
     """Distinguishes a recognized escape sequence (e.g. the two literal
     characters "U" and "P" typed by a user) from the *symbolic* key
@@ -172,6 +187,19 @@ def _parse_input_events(data: str) -> list[str | _SpecialKey]:
                     out.append(_SpecialKey(key))
                 i += 3
                 continue
+        if data[i] == _ESC and i + 1 < len(data):
+            # A bare ESC directly followed, in the *same* event, by a
+            # character that starts no recognized sequence: Alt+letter
+            # (Codex review). Kept together as one item so a consumer
+            # can discard it atomically. Queuing the two separately
+            # made the trailing letter indistinguishable from an
+            # unrelated keystroke that merely arrived quickly -- the
+            # editor either leaked the letter into the screen behind it
+            # or, once it started draining the queue, ate a real
+            # keypress instead. The event boundary only exists here.
+            out.append(_AltKey(data[i + 1]))
+            i += 2
+            continue
         out.append(data[i])
         i += 1
     return out
@@ -427,6 +455,8 @@ class WebSession(Session):
         live_buffer: LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
         list_candidates: CandidateListPrinter | None = None,
+        initial: str = "",
+        cancellable: bool = False,
     ) -> str:
         """
         Read one line, with the same cursor-addressable editing,
@@ -453,7 +483,8 @@ class WebSession(Session):
         if not echo:
             return await self._read_line_masked()
         return await self._read_line_editable(
-            history, completer, live_buffer=live_buffer, lock=lock, list_candidates=list_candidates
+            history, completer, live_buffer=live_buffer, lock=lock,
+            list_candidates=list_candidates, initial=initial, cancellable=cancellable,
         )
 
     async def _read_line_masked(self) -> str:
@@ -483,9 +514,19 @@ class WebSession(Session):
         live_buffer: LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
         list_candidates: CandidateListPrinter | None = None,
+        initial: str = "",
+        cancellable: bool = False,
     ) -> str:
-        line: list[str] = []
-        cursor = 0
+        # Issue #529, mirroring `netbbs.net.char_input._read_line_
+        # editable` exactly -- this transport is a separate
+        # reimplementation of the same editor (see `read_line`'s own
+        # docstring), so a feature added to one has to be added to both
+        # or the same screen behaves differently over web than over
+        # Telnet/SSH.
+        line: list[str] = list(initial)
+        cursor = len(line)
+        if line:
+            await self.write("".join(line))
         overwrite = False
         history_index = 0
         saved_in_progress: list[str] | None = None
@@ -507,6 +548,17 @@ class WebSession(Session):
                     # identical reset -- see LastCandidateList's docstring.
                     if item != _TAB:
                         last_candidates.shown = False
+
+                    if isinstance(item, _AltKey):
+                        # One event, discarded whole (Codex review):
+                        # neither half can leak into the screen behind
+                        # this prompt, and no unrelated keystroke is
+                        # eaten to achieve it. Alt-combinations have
+                        # never done anything in this editor; what
+                        # changed is that they no longer arrive as two
+                        # items a cancellable read could mistake for a
+                        # bare Escape followed by a keypress.
+                        continue
 
                     if isinstance(item, _SpecialKey):
                         key = item.name
@@ -578,6 +630,29 @@ class WebSession(Session):
                         cursor = 0
                         await self.write("\r\n")
                         break
+
+                    if char == _ESC and cancellable:
+                        # Issue #529. A *bare* Escape reaches this
+                        # transport as the raw character, not as a
+                        # `_SpecialKey`: the tokenizer above only
+                        # promotes ESC to a named key when it introduces
+                        # a CSI or SS3 sequence, so an Escape with
+                        # nothing after it falls through to the
+                        # character stream.
+                        #
+                        # Alt-letter arrives the same way and must not be
+                        # mistaken for one (Codex review): xterm.js sends
+                        # it as a single `onData` string like `ESC` + `s`,
+                        # which `_parse_input_events` queues as two
+                        # separate characters. Raising on the ESC alone
+                        # left the `s` in the queue, where the resource
+                        # editor behind this prompt then read it as its
+                        # own [S]ave hotkey -- Alt+B likewise becoming
+                        # Back. The queued follow-up is consumed with the
+                        # Escape so nothing escapes into the screen
+                        # behind, and only a genuinely bare Escape
+                        # cancels.
+                        raise InputCancelled
 
                     if char in (_BS, _DEL):
                         if cursor > 0:
@@ -707,6 +782,9 @@ class WebSession(Session):
         when set, `_DEL` (0x7F) is unaffected either way.
         """
         item = await self._read_item()
+        if isinstance(item, _AltKey):
+            # Not a key this editor surfaces, same as INSERT below.
+            return await self.read_editor_key(distinguish_ctrl_h=distinguish_ctrl_h)
         if isinstance(item, _SpecialKey):
             kind = _SPECIAL_TO_EDITOR_KIND.get(item.name)
             if kind is not None:

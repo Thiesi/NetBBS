@@ -54,7 +54,7 @@ class FakeSession:
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
 
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, **kwargs) -> str:
         return next(self._lines)
 
     async def read_key(self, echo: bool = True) -> str:

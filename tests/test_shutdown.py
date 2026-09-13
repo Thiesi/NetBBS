@@ -62,7 +62,7 @@ class _FakeSession:
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
-    async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
+    async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
@@ -685,7 +685,7 @@ def test_maintenance_mode_rejects_a_new_connection_before_login():
         async def write_line(self, text: str = "") -> None:
             self.written.append(text)
 
-        async def read_line(self, echo: bool = True) -> str:
+        async def read_line(self, echo: bool = True, **kwargs) -> str:
             raise AssertionError("read_line should never be reached once maintenance mode is active")
 
     async def scenario():
@@ -1110,7 +1110,7 @@ class _ScriptedLoginSession:
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
 
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, **kwargs) -> str:
         return next(self._lines)
 
     async def read_key(self, echo: bool = True) -> str:

@@ -82,7 +82,7 @@ class _ServerSession(Session):
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
 
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, **kwargs) -> str:
         return self._lines.pop(0) if self._lines else ""
 
     async def read_key(self, echo: bool = True) -> str:
@@ -115,7 +115,7 @@ class _ClientSession(Session):
     async def write_line(self, text: str = "") -> None:
         raise NotImplementedError
 
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, **kwargs) -> str:
         raise NotImplementedError
 
     async def read_key(self, echo: bool = True) -> str:

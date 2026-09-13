@@ -29,7 +29,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, EditorKey, EditorKeyKind, reject_unhandled_key
+from netbbs.net.char_input import (
+    CANCEL_KEY,
+    HELP_KEY,
+    EditorKey,
+    EditorKeyKind,
+    InputCancelled,
+    MAX_LINE_LENGTH as _MAX_LINE_LENGTH,
+    reject_unhandled_key,
+)
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.help_overlay import show_help
 from netbbs.net.session import Session, write_prompt
@@ -812,24 +820,129 @@ async def _show_field_help(
     await show_help(session, "Field help", lines[:-1], header_color=header_color, unicode_style=unicode_style)
 
 
+# The prompt opens with the field's current value already in the buffer
+# and editable (issue #529), so a long description can be amended
+# instead of retyped. That replaces the old "blank = keep" convention
+# *for this field type*, and it had to: once the line starts populated,
+# an empty submit is no longer something a caller reaches by pressing
+# Enter on an untouched prompt -- it is a deliberate act of clearing the
+# text. Reading it as "keep" would mean a caller who selected all and
+# deleted watched the old value come back.
+#
+# So: Enter saves what is shown, an emptied line clears the value, and
+# Escape leaves without writing anything -- which is what "keep"
+# actually meant, now on its own key rather than overloaded onto the
+# empty string.
+def _normalize_tabs(text: str) -> str:
+    """What the write path does to a tab, applied before measuring --
+    see `netbbs.net.picker._pad_cell` for the same rule and reason."""
+    return text.replace(chr(9), " ").replace(chr(13), " ").replace(chr(10), " ")
+
+
+_EDIT_HINT = "Edit (Enter saves, Esc cancels)"
+
+# ...but only while the value fits on one physical row (Codex review).
+#
+# `read_line` moves its cursor with single-row `CSI D`/`CSI C`
+# sequences. A buffer wider than the terminal soft-wraps onto a second
+# row, and from then on Home, Left, Backspace and tail redraws clamp at
+# the current row while the logical cursor walks into text a row above
+# -- the display and the value that will be saved diverge. That is a
+# pre-existing limit of the line editor, not something prefilling
+# introduced: a *typed* over-wide line has always had it. What prefilling
+# changes is that it becomes reachable by simply opening a long
+# description, which is precisely the case this feature exists for.
+#
+# So a value that will not fit keeps the old empty prompt and its
+# "blank = keep" answer, and the prompt says which one the caller is
+# looking at rather than leaving them to discover it. Long values want a
+# real single-row viewport, or routing to the full-screen prose editor
+# that already exists; both are follow-up work, filed separately rather
+# than half-built here.
+_KEEP_HINT = "blank = keep"
+
+
+# `read_line`'s own cap. A value longer than this cannot be edited
+# inline at all: Telnet/SSH would submit only the first
+# `_MAX_LINE_LENGTH` code points while the web transport seeded the lot,
+# so the field would be silently corrupted, differently on each
+# transport. Such a value takes the fallback prompt, where it is left
+# alone unless the SysOp types a replacement -- visible, and the same
+# everywhere.
+_MAX_PREFILL_LENGTH = _MAX_LINE_LENGTH
+
+
+def _prefill_fits(session: Session, value: str) -> bool:
+    """Whether `value` can be edited inline, unchanged and in one row.
+
+    Two separate limits, both of which silently altered the value when
+    they were missing (Codex review):
+
+    *Length* -- `read_line` caps its buffer, and a carried Link
+    resource's name or description is persisted from a remote genesis
+    payload with no per-field limit of its own, so an over-long value is
+    reachable rather than hypothetical.
+
+    *Width* -- measured after normalizing tabs. `sanitize_text`
+    deliberately preserves a tab and `display_width` scores it zero,
+    while the terminal advances to a tab stop: measuring the raw string
+    would approve a value that occupies more columns than counted, and
+    every cursor calculation after it would then edit the wrong ones.
+
+    The prompt is written on its own line, so the value gets the whole
+    terminal width rather than whatever the prompt left of it -- which
+    is what keeps most real descriptions on the inline path.
+    """
+    if len(value) > _MAX_PREFILL_LENGTH:
+        return False
+    return display_width(_normalize_tabs(value)) < max(1, session.terminal_width - 1)
+
+
 def text_field(key: str, *, required: bool = False) -> FieldPrompt:
-    """A plain single-line text prompt -- blank always keeps whatever
-    is currently in the draft (matching every existing edit screen's
-    own "blank = keep" convention); `required` only changes what the
-    *current-value line* shows when the draft's value is still blank
-    (a fresh "create" draft that hasn't had this field touched yet),
-    never blocks typing here -- `save`'s own validation is where a
-    still-blank required field actually gets rejected, the same
-    "errors surface at Save, not mid-edit" shape `edit_resource_draft`
-    itself already uses for domain (`error_type`) rejections."""
+    """A plain single-line text prompt, opening on the current value.
+
+    `required` no longer changes anything here and is kept for its
+    callers' signatures: a still-blank required field is rejected by
+    `save`, the same "errors surface at Save, not mid-edit" shape
+    `edit_resource_draft` already uses for domain (`error_type`)
+    rejections. See `_EDIT_HINT` above for why "blank = keep" is gone.
+    """
 
     async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        current = draft.get(key) or ""
-        shown = current if current else "(blank)" if required else "(none)"
-        await write_prompt(session, f"[{shown}] (blank = keep): ")
-        raw = (await session.read_line()).strip()
-        if raw:
-            draft[key] = raw
+        # Sanitized before it is seeded, not just where it is displayed
+        # (Codex review, P1). For a *carried Link* board, channel or file
+        # area the draft value came from a remote genesis payload and is
+        # stored verbatim -- the screen sanitizes it at render time, but
+        # handing the raw string to `read_line` would echo a hostile
+        # peer's embedded ESC/OSC sequences straight at the SysOp's
+        # terminal the moment they opened the field. Design doc:
+        # sanitize untrusted segments *before* they are written.
+        current = _normalize_tabs(sanitize_text(draft.get(key) or ""))
+        if not _prefill_fits(session, current):
+            # Too wide to edit inline -- see `_KEEP_HINT`. Falls back to
+            # the prompt this screen has always had, including its
+            # "blank = keep" answer, so a value that cannot be edited
+            # in place can still be replaced or left alone.
+            shown = current if current else "(blank)" if required else "(none)"
+            await write_prompt(session, f"[{shown}] ({_KEEP_HINT}): ")
+            raw = (await session.read_line()).strip()
+            if raw:
+                draft[key] = raw
+            return
+
+        # The prompt gets its own line so the value below it has the
+        # whole terminal width to sit in -- which is what keeps most
+        # real descriptions on the inline path rather than the fallback.
+        await session.write_line(colored(f"{_EDIT_HINT}:", fg_color=MUTED_COLOR))
+        try:
+            raw = (await session.read_line(initial=current, cancellable=True)).strip()
+        except InputCancelled:
+            # Esc: they changed their mind. Nothing is written, and the
+            # draft keeps whatever it had -- the same "leave without
+            # answering" escape every other screen offers.
+            await session.write_line("")
+            return
+        draft[key] = raw
 
     return prompt
 
