@@ -379,13 +379,23 @@ class LineViewport:
                 break
             total += width
             index -= 1
-        # Never start on a combining mark (Codex review). The walk above
-        # consumes a zero-width accent freely and can then stop on the
-        # base character it belongs to, leaving the window opening at
-        # the accent -- which the terminal then applies to whatever
-        # precedes it, so the scroll marker itself grew an acute accent
-        # and the real base character was hidden. Stepping forward past
-        # the orphans drops them with the character they modify.
+        return index
+
+    @staticmethod
+    def _on_a_base_character(line: list[str], index: int) -> int:
+        """`index`, moved forward past any combining marks it lands on.
+
+        A window must never open on one (Codex review, twice). The
+        terminal applies a leading mark to whatever precedes it, so the
+        scroll marker itself grew an acute accent while the character
+        the mark belonged to stayed hidden -- and typing at the caret
+        could then reattach it to something else entirely.
+
+        Applied to the *result*, not inside one of the ways of computing
+        it: the first fix normalized `_fits_from`'s walk, and left the
+        `cursor < start` branch -- moving Left past the window's edge --
+        setting `start` straight to a cursor that can sit on a mark.
+        """
         while index < len(line) and char_width(line[index]) == 0:
             index += 1
         return index
@@ -442,6 +452,8 @@ class LineViewport:
             fill = self._fits_from(line, len(line), text_columns)
             if self.start > fill:
                 self.start = fill
+            # Whichever of the three put it there.
+            self.start = self._on_a_base_character(line, self.start)
 
         # Sliced by columns, never by code-point count (Codex review).
         # "At least one column per character" is false for a combining

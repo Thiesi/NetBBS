@@ -507,9 +507,11 @@ a "Turn X on?" question that doubles as the exit. A "blank keeps the current
 value" prompt writes nothing else, including a sibling visibility flag.
 A text field opens on its current value instead (issue #529): Enter saves what
 is shown, an emptied line clears it, and Esc leaves it unchanged -- "keep" is a
-key rather than an overload of the empty string. A value too long or too wide to
-edit in one row falls back to the older prompt, blank-keeps-it and all, and says
-so.
+key rather than an overload of the empty string. Width is no longer a reason to fall back (issue #546): the line editor
+keeps a one-row window over the buffer and scrolls it to follow the cursor, so a
+value wider than the terminal is edited like any other. A value longer than the
+editor's own buffer cap still falls back to the older prompt, blank-keeps-it and
+all, and says so.
 Anything gathering more than two values goes through the draft field editor or
 a picker and persists nothing before `[S]ave`. The deliberate exceptions are
 once-only first-run decisions (Link participation, node name, managed DNS,

@@ -448,3 +448,23 @@ def test_a_resize_moves_up_from_where_the_cursor_is(cursor_at_home):
         # all would leave the field and take the prompt with it.
         assert "A" not in _CSI.findall(recorder.raw)[0] if _CSI.findall(recorder.raw) else True
         assert "\x1b[1A" not in recorder.raw
+
+
+def test_moving_left_past_the_edge_does_not_open_on_a_mark():
+    """The first normalization went inside `_fits_from`'s walk and left
+    the `cursor < start` branch -- moving Left past the window's edge --
+    setting `start` straight to a cursor that can sit on a combining
+    mark (Codex review). Applied to the result instead, so every way of
+    arriving at a start goes through it."""
+    from netbbs.rendering.width import char_width
+
+    window = LineViewport(_WIDTH)
+    line = list("e\u0301" * 60)
+    window._layout(line, len(line))  # scrolled to the end first
+
+    # Walk back through the buffer one code point at a time, which is
+    # what Left does, and land on marks as often as on bases.
+    for cursor in range(len(line), -1, -1):
+        left, visible, _, _ = window._layout(line, cursor)
+        if visible:
+            assert char_width(visible[0]) > 0, f"window opened on a mark at cursor {cursor}"
