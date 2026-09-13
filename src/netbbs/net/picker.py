@@ -1000,7 +1000,10 @@ async def pick_item(
                     segments.append((cell_text, item_name_color if is_highlighted else color))
                 if is_highlighted:
                     segments = [(text, _reverse_row) for text, _ in segments]
-                await session.write_line(colored_truncate(segments, render_width))
+                await session.write_line(colored_truncate(
+                    segments, render_width,
+                    ellipsis_color=_reverse_row if is_highlighted else None,
+                ))
                 continue
 
             segments = [
@@ -1039,7 +1042,13 @@ async def pick_item(
                 segments.append((f" - {sanitize_text(description)}", desc_color))
             if is_highlighted:
                 segments = [(text, _reverse_row) for text, _ in segments]
-            await session.write_line(colored_truncate(segments, render_width))
+            # The ellipsis too, or a row long enough to truncate -- which on
+            # a 40-column terminal is most of them -- ends its bar three
+            # columns short (Codex review).
+            await session.write_line(colored_truncate(
+                segments, render_width,
+                ellipsis_color=_reverse_row if is_highlighted else None,
+            ))
 
         # Read before the nav block rather than after it: the
         # descriptive-nav floor now weighs the trailer's rows too, so it

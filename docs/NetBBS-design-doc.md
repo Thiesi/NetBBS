@@ -1103,6 +1103,22 @@ Local chat includes bounded persistent channel scrollback, presence, away
 state, invitations/membership, `/who`, `/whois`, `/names`, `/list`, `/join`,
 `/leave`, `/topic`, completion, and online private conversation.
 
+Chat lines carry a per-user display timestamp, **on by default** and toggled
+with `/timestamps`. The default is the answer for an account that has never
+expressed a preference, so it applies to existing accounts as well as new
+ones; an account holding an explicit `off` keeps it. Knowing when a line was
+said is most of what makes scrollback readable, and a caller entering a quiet
+channel cannot otherwise tell whether the last line is a minute or a week old.
+The stamp is time-only, in the caller's own display timezone and the metadata
+shade rather than the muted one -- it is chrome attached to the line beside it,
+not a system message.
+
+Because the stamp renders on every line of replayed scrollback, a carried
+message's `created_at` is a field every channel entry now formats. It is
+validated at the Link protocol boundary before the event is accepted, and an
+already-stored value that cannot be parsed costs its own line's stamp and
+nothing more: rendering must never be able to shut a caller out of a channel.
+
 `/msg` and `/private` remain ephemeral and online-only. They never silently
 fall back to asynchronous mail.
 

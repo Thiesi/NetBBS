@@ -11,8 +11,10 @@ gossip path did not, so a signed peer could store
 `created_at="invalid"` -- and one such row would have made the channel
 permanently unenterable, with nothing on screen saying why.
 
-Both halves are held here: new rows are refused at ingest, and a row
-stored before that boundary existed still renders.
+The ingest half lives in `tests/test_link_convergence.py`, where the
+protocol boundary that refuses such an event has a harness. This file
+holds the other half: a row stored before that boundary existed still
+has to render.
 """
 
 from __future__ import annotations
@@ -79,32 +81,23 @@ def test_a_well_formed_carried_message_is_still_accepted(db, origin, carried):
     assert stored.body == "hello from elsewhere"
 
 
+# -- the render path ----------------------------------------------------
+
+
 @pytest.mark.parametrize(
-    "created_at",
+    "stored",
     [
         "invalid",
         "",
         "2026-13-45T99:99:99Z",
-        "2026-01-01 12:00:00",          # no timezone
-        "0001-01-01T00:00:00+23:59",    # parses, then overflows converting to UTC
+        # Parses cleanly and then overflows on the way to UTC, so the
+        # failure arrives from normalization rather than from parsing
+        # (Codex review). Reachable on a legacy row precisely because
+        # durable ingestion used to accept any string at all.
+        "0001-01-01T00:00:00+23:59",
     ],
 )
-def test_a_malformed_timestamp_is_refused_rather_than_stored(db, origin, carried, created_at):
-    with pytest.raises(LinkChannelsError):
-        materialize_carried_channel_message(
-            db, _message(origin, carried, created_at=created_at),
-            sender_fingerprint=origin.fingerprint,
-        )
-    # Nothing landed: the row a later render would have tripped over does
-    # not exist, and neither does a half-written `link_events` entry.
-    assert db.connection.execute("SELECT COUNT(*) FROM channel_messages").fetchone()[0] == 0
-    assert db.connection.execute("SELECT COUNT(*) FROM link_events").fetchone()[0] == 0
-
-
-# -- the render path ----------------------------------------------------
-
-
-def test_an_unparseable_stored_timestamp_costs_the_stamp_not_the_line(db):
+def test_an_unparseable_stored_timestamp_costs_the_stamp_not_the_line(db, stored):
     """Belt to the boundary's braces: a row written before the boundary
     existed still has to render. This runs once per message in
     scrollback, so raising here shuts a caller out of the channel
@@ -114,7 +107,7 @@ def test_an_unparseable_stored_timestamp_costs_the_stamp_not_the_line(db):
     create_channel(db, "lobby", creator=user)
     set_timestamps_enabled(db, user, True)
 
-    rendered = format_with_preference(db, user, "<bob> hello", "invalid")
+    rendered = format_with_preference(db, user, "<bob> hello", stored)
 
     assert rendered == "<bob> hello"
 

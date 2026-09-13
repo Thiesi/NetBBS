@@ -196,7 +196,14 @@ def _parse_stored_timestamp(iso_timestamp: str) -> datetime.datetime:
 
     A naive timestamp is read as UTC, matching the stored convention;
     anything genuinely unparseable still raises, since that is a bug
-    worth seeing rather than a string worth guessing at.
+    worth seeing rather than a string worth guessing at. It raises
+    `ValueError` and only `ValueError`: `fromisoformat` accepts
+    `0001-01-01T00:00:00+23:59` quite happily and then `astimezone` runs
+    off the end of the representable range, so the failure arrives as
+    `OverflowError` from normalization rather than from parsing (Codex
+    review, and the same trap `netbbs.link.protocol.
+    _parse_aware_timestamp` documents for its own callers). A caller
+    guarding one call site should not have to know that.
     """
     try:
         return datetime.datetime.strptime(iso_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
@@ -207,7 +214,10 @@ def _parse_stored_timestamp(iso_timestamp: str) -> datetime.datetime:
     parsed = datetime.datetime.fromisoformat(iso_timestamp)
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=datetime.timezone.utc)
-    return parsed.astimezone(datetime.timezone.utc)
+    try:
+        return parsed.astimezone(datetime.timezone.utc)
+    except (OverflowError, OSError) as exc:
+        raise ValueError(f"{iso_timestamp!r} cannot be normalized to UTC") from exc
 
 
 def format_for_display(
