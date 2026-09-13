@@ -30,6 +30,54 @@ class FieldError(Exception):
     pass
 
 
+class FieldTerminal:
+    """Small VT screen for the cursor/erase operations these editors emit."""
+
+    def __init__(self, width, height):
+        self.width, self.height = width, height
+        self.row = self.col = 0
+        self.cells = [[" "] * width for _ in range(height)]
+
+    def feed(self, text):
+        from netbbs.rendering import display_width
+        for token in re.findall(r"\x1b\[[0-9;?]*[A-Za-z]|[^\x1b]", text):
+            if token.startswith("\x1b["):
+                params = [int(v) if v else 0 for v in token[2:-1].split(";")]
+                command = token[-1]
+                if command == "H":
+                    self.row = (params[0] or 1) - 1
+                    self.col = ((params[1] if len(params) > 1 else 1) or 1) - 1
+                elif command == "J" and params[0] == 2:
+                    self.cells = [[" "] * self.width for _ in range(self.height)]
+                elif command == "K":
+                    start = 0 if params[0] == 2 else self.col
+                    self.cells[self.row][start:] = [" "] * (self.width - start)
+                elif command in ("C", "D"):
+                    self.col = max(0, min(self.width - 1, self.col + (params[0] or 1) * (1 if command == "C" else -1)))
+                continue
+            if token == "\r":
+                self.col = 0
+            elif token == "\n":
+                self.row += 1
+            elif token != "\a":
+                if self.col >= self.width:
+                    self.row += 1
+                    self.col = 0
+                if self.row >= self.height:
+                    self.cells.pop(0)
+                    self.cells.append([" "] * self.width)
+                    self.row = self.height - 1
+                self.cells[self.row][self.col] = token
+                self.col += display_width(token)
+            if self.row >= self.height:
+                self.cells.pop(0)
+                self.cells.append([" "] * self.width)
+                self.row = self.height - 1
+
+    def rows(self):
+        return ["".join(row).rstrip() for row in self.cells]
+
+
 class FakeSession(Session):
     def __init__(self, inputs: list[str] | None = None):
         self._inputs = list(inputs or [])
@@ -1360,7 +1408,7 @@ def test_sectioned_fields_show_bold_uppercase_headers_in_order():
     # section header rather than the old flat list.
     identity_index = text.index("IDENTITY")
     display_index = text.index("DISPLAY")
-    assert identity_index < text.index("Name: lobby") < display_index < text.index("Pinned: yes")
+    assert identity_index < text.index("Name:   lobby") < display_index < text.index("Pinned: yes")
 
 
 def test_sectioned_fields_group_the_compact_fallback_menu_row_too():
@@ -1739,3 +1787,205 @@ def test_page_up_down_bell_rejects_when_not_paginated():
     text = _written_text(session)
     assert text.count("\a") == 2
     assert "PgUp/PgDn" not in _visible(text)
+
+
+class InlineSession(NavigableFakeSession):
+    """Real seeded byte editor, with VT snapshots before its first input."""
+
+    def __init__(self, keys, script=b"!\r", *, width=80, height=24):
+        super().__init__(keys)
+        self.terminal_width, self.terminal_height = width, height
+        self.terminal = FieldTerminal(width, height)
+        self.script = script
+        self.before = []
+        self.during = []
+        self.read_options = []
+        self.resize_on_read = False
+
+    async def write(self, text):
+        await super().write(text)
+        self.terminal.feed(text)
+
+    async def write_line(self, text=""):
+        await Session.write_line(self, text)
+
+    async def read_line(self, **kwargs):
+        from netbbs.net.char_input import read_line
+        self.before.append((self.terminal.row, self.terminal.col, self.terminal.rows()))
+        self.read_options.append(kwargs)
+        owner = self
+
+        class Source:
+            def __init__(self):
+                self.data = list(owner.script)
+                self.first = True
+
+            async def read_byte(self):
+                if self.first:
+                    owner.during.append(owner.terminal.rows())
+                    self.first = False
+                    if owner.resize_on_read:
+                        owner.terminal_width -= 1
+                assert self.data, "field editor consumed all scripted input"
+                return self.data.pop(0)
+
+            async def read_byte_with_timeout(self, timeout):
+                return self.data.pop(0) if self.data else None
+
+        return await read_line(Source(), self.write, **kwargs)
+
+
+def _inline_fields():
+    return [
+        FieldSpec("description", "d", menu_key("D", "escription"), "Description",
+                  lambda d: d["description"], text_field("description"), section="Identity"),
+        FieldSpec("name", "n", menu_key("N", "ame"), "Name",
+                  lambda d: d["name"], text_field("name"), section="Identity"),
+    ]
+
+
+@pytest.mark.parametrize("width", [40, 80, 120])
+@pytest.mark.parametrize("redraw", [False, True])
+def test_real_line_editor_edits_after_a_wrapped_value_at_the_correct_row(width, redraw):
+    session = InlineSession(["n", "s"], width=width, height=40)
+    draft = {"description": "A wrapped description with several words. " * 3, "name": "lobby"}
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit thing", subtitle="Subtitle", preamble="Context " * 12,
+        fields=_inline_fields(), draft=draft, save=_save_dict, save_menu_text="Save",
+        back_menu_text=menu_key("B", "ack"), redraw_in_place=redraw,
+    ))
+    assert result["name"] == "lobby!"
+    row, col, before = session.before[0]
+    assert session.read_options[0]["initial"] == "lobby"
+    if redraw:
+        assert before[row].strip().startswith("> Name")
+        assert col == len("  Description: ")
+        assert "lobby" in session.during[0][row]
+        assert not any("Edit (Enter" in line for line in session.during[0])
+        assert before[row - 1] == session.during[0][row - 1]
+    else:
+        assert col == 0
+        assert "Edit (Enter saves, Esc cancels):" in "\n".join(before)
+        assert "lobby" in session.during[0][row]
+
+
+@pytest.mark.parametrize("script, expected", [(b"\x1b[H!\r", "!"), (b"\x1b", "")])
+def test_editing_a_wrapped_value_clears_old_continuations_and_preserves_neighbors(script, expected):
+    session = InlineSession(["d", "s"], script=script, width=40)
+    value = "A long description that wraps across several rows and remains fully editable."
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit thing", fields=_inline_fields(),
+        draft={"description": value, "name": "neighbor"}, save=_save_dict, save_menu_text="Save",
+        back_menu_text=menu_key("B", "ack"), redraw_in_place=True,
+    ))
+    row, _, _ = session.before[0]
+    screen = session.during[0]
+    neighbor_row = next(i for i, line in enumerate(screen) if "neighbor" in line)
+    assert all(not line.strip() for line in screen[row + 1:neighbor_row])
+    assert result["description"] == expected + value
+    assert "neighbor" in "\n".join(session.terminal.rows())
+
+
+@pytest.mark.parametrize("activate", [["n"], ["DOWN", "DOWN", "ENTER"], ["DOWN", "DOWN", " "]])
+def test_hotkey_enter_and_space_use_the_same_field_position(activate):
+    session = InlineSession(activate + ["s"])
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit", fields=_inline_fields(),
+        draft={"description": "description", "name": "lobby"}, save=_save_dict, save_menu_text="Save",
+        back_menu_text="Back", redraw_in_place=True,
+    ))
+    assert result["name"] == "lobby!"
+    row, col, screen = session.before[0]
+    assert "> Name" in screen[row]
+    assert col == 15
+
+
+@pytest.mark.parametrize("kind", ["age", "level", "integer", "float", "optional_text"])
+def test_numeric_and_optional_fields_use_their_displayed_row(kind):
+    from netbbs.net.admin_flow import _min_age_field, _optional_int_field, _int_field, _float_field, _optional_text_field
+    prompts = {"age": _min_age_field("value"), "level": _optional_int_field("value", "Level"),
+               "integer": _int_field("value", "Number"), "float": _float_field("value", label="Weight"),
+               "optional_text": _optional_text_field("value")}
+    session = InlineSession(["v", "s"], script=b"\x7f\x7f\r")
+    value = "21" if kind == "optional_text" else 21
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit", fields=[FieldSpec("value", "v", "Value", "Value", lambda d: str(d["value"]), prompts[kind])],
+        draft={"value": value}, save=_save_dict, save_menu_text="Save", back_menu_text="Back", redraw_in_place=True,
+    ))
+    row, col, screen = session.before[0]
+    assert "> Value" in screen[row]
+    assert col == 9
+    assert result["value"] == (None if kind in ("age", "level") else "" if kind == "optional_text" else 21)
+
+
+def test_resize_during_in_place_edit_keeps_the_draft_and_redraws():
+    session = InlineSession(["n", "s"])
+    session.resize_on_read = True
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit", fields=_inline_fields(),
+        draft={"description": "description", "name": "lobby"}, save=_save_dict, save_menu_text="Save",
+        back_menu_text="Back", redraw_in_place=True,
+    ))
+    assert result["name"] == "lobby"
+
+
+@pytest.mark.parametrize("width", [40, 80, 120])
+def test_labels_and_wrapped_values_share_a_column_across_sections(width):
+    from netbbs.net.resource_editor import _field_value_lines
+    from netbbs.rendering import strip_ansi, display_width
+    fields = _inline_fields() + [FieldSpec("long", "l", "Long", "A longer label for narrow screens",
+                                         lambda d: "second value", text_field("long"), section="Other")]
+    rows = [strip_ansi(row) for row in _field_value_lines(
+        fields, {"description": "first " + "words " * 20, "name": "third value"},
+        selected=None, accent_color=1, terminal_width=width,
+    )]
+    offsets = [display_width(row[:row.index(word)]) for row in rows for word in ("first", "second", "third") if word in row]
+    assert len(set(offsets)) == 1
+    assert all(display_width(row) <= width for row in rows)
+
+
+@pytest.mark.parametrize("long_value", [False, True])
+def test_off_page_hotkey_draws_its_field_before_reading_even_when_the_form_overflows(long_value):
+    session = InlineSession(["z", "s"], width=40, height=12)
+    fields = [FieldSpec(str(i), chr(97 + i), "Field", "Long label", lambda d: "x", text_field(str(i)),
+                        section="First") for i in range(10)]
+    fields.append(FieldSpec("target", "z", "Target", "Target", lambda d: d["target"], text_field("target"), section="Second"))
+    value = "many words " * 80 if long_value else "value"
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit", fields=fields, draft={"target": value},
+        save=_save_dict, save_menu_text="Save", back_menu_text="Back", redraw_in_place=True,
+    ))
+    row, col, before = session.before[0]
+    assert "> Target:" in before[row]
+    assert 0 <= row < session.terminal_height - 1
+    assert result["target"] == value + "!"
+
+
+def test_invalid_inline_age_remains_visible_after_redraw_and_does_not_change_the_draft():
+    from netbbs.net.admin_flow import _min_age_field
+    session = InlineSession(["v", "s"], script=b"\x7f\x7f999\r")
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit", fields=[FieldSpec("value", "v", "Value", "Value", lambda d: str(d["value"]), _min_age_field("value"))],
+        draft={"value": 21}, save=_save_dict, save_menu_text="Save", back_menu_text="Back", redraw_in_place=True,
+    ))
+    assert result["value"] == 21
+    assert "120" in "\n".join(session.terminal.rows())
+
+
+def test_position_is_cleared_after_a_field_raises():
+    from netbbs.net.resource_editor import inline_field, _field_position
+
+    @inline_field
+    async def broken(session, lane, draft):
+        raise RuntimeError("disconnected")
+
+    session = InlineSession(["n"])
+    async def run():
+        with pytest.raises(RuntimeError, match="disconnected"):
+            await edit_resource_draft(
+                session, None, title="Edit", fields=[FieldSpec("name", "n", "Name", "Name", lambda d: "value", broken)],
+                draft={}, back_menu_text="Back", redraw_in_place=True,
+            )
+        assert _field_position.get() is None
+
+    asyncio.run(run())

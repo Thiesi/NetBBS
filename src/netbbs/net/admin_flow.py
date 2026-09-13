@@ -322,6 +322,10 @@ from netbbs.net.draft_storage import DraftPruneReport, prune_stale_drafts
 from netbbs.net.help_overlay import show_help
 from netbbs.net.picker import ListColumn, pick_item
 from netbbs.net.resource_editor import (
+    inline_field,
+    read_field_line,
+    write_field_prompt,
+    write_field_message,
     FieldSpec,
     bool_field,
     choice_field,
@@ -2470,8 +2474,9 @@ def _float_field(
     issue #557) with a friendly rejection instead of a leaked float()
     exception (a dogfood report against the old trust-domain wizard)."""
 
+    @inline_field
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await session.write_line(colored(f"{label} ({_EDIT_HINT}):", fg_color=MUTED_COLOR))
+        await write_field_prompt(session, colored(f"{label} ({_EDIT_HINT}):", fg_color=MUTED_COLOR))
         try:
             raw = (await _read_seeded_line(session, initial=str(draft.get(key)))).strip()
         except InputCancelled:
@@ -2482,10 +2487,10 @@ def _float_field(
         try:
             value = float(raw)
         except ValueError:
-            await session.write_line(colored("Not a number.", fg_color=MUTED_COLOR))
+            await write_field_message(session, colored("Not a number.", fg_color=MUTED_COLOR))
             return
         if (minimum is not None and value < minimum) or (maximum is not None and value > maximum):
-            await session.write_line(colored(f"Must be between {minimum} and {maximum}.", fg_color=MUTED_COLOR))
+            await write_field_message(session, colored(f"Must be between {minimum} and {maximum}.", fg_color=MUTED_COLOR))
             return
         draft[key] = value
 
@@ -5379,9 +5384,10 @@ def _optional_text_field(key: str) -> Callable[[Session, DatabaseLane, dict], Aw
     clear a field whose current value is too long to seed inline.
     """
 
+    @inline_field
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         current = draft.get(key) or ""
-        await session.write_line(colored(f"({_CLEAR_HINT}):", fg_color=MUTED_COLOR))
+        await write_field_prompt(session, colored(f"({_CLEAR_HINT}):", fg_color=MUTED_COLOR), hint=_CLEAR_HINT)
         try:
             raw = (await _read_seeded_line(session, initial=current)).strip()
         except InputCancelled:
@@ -10641,7 +10647,7 @@ async def _read_int(session: Session, *, default: int) -> int | None:
     try:
         return int(raw)
     except ValueError:
-        await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+        await write_field_message(session, colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
         return None
 
 
@@ -10661,7 +10667,7 @@ async def _prompt_optional_int(session: Session, label: str, *, current: int | N
     `default_min_read_level`/`default_min_write_level`. "Clear" is the
     accurate word in both cases, not "no gate" (a level isn't a gate
     the way age/name-requirement are)."""
-    await session.write_line(colored(f"{label} ({_CLEAR_HINT}):", fg_color=MUTED_COLOR))
+    await write_field_prompt(session, colored(f"{label} ({_CLEAR_HINT}):", fg_color=MUTED_COLOR), hint=_CLEAR_HINT)
     try:
         raw = (await _read_seeded_line(
             session, initial="" if current is None else str(current)
@@ -10674,7 +10680,7 @@ async def _prompt_optional_int(session: Session, label: str, *, current: int | N
     try:
         return int(raw), True
     except ValueError:
-        await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+        await write_field_message(session, colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
         return None, False
 
 
@@ -10732,10 +10738,7 @@ async def _read_seeded_line(session: Session, *, initial: str) -> str:
     Raises `InputCancelled` on Escape, which every caller reads as
     "leave the value alone".
     """
-    return await session.read_line(
-        initial=initial, cancellable=True,
-        viewport=lambda: session.terminal_width, viewport_owns_row=True,
-    )
+    return await read_field_line(session, initial=initial)
 
 
 #: Bounds for an age gate (issue #540). `0` stays accepted and keeps its
@@ -10756,8 +10759,9 @@ async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int
     emptied line (or the explicit word `none`) clears the gate, and
     Escape leaves it alone -- see `_CLEAR_HINT` for why this is no longer
     "blank = keep"."""
-    await session.write_line(
-        colored(f"Minimum age ({_CLEAR_HINT}, {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}):", fg_color=MUTED_COLOR)
+    await write_field_prompt(
+        session, colored(f"Minimum age ({_CLEAR_HINT}, {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}):", fg_color=MUTED_COLOR),
+        hint=f"Age {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}; Enter saves; Esc keeps",
     )
     try:
         raw = (await _read_seeded_line(
@@ -10771,7 +10775,7 @@ async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int
     try:
         value = int(raw)
     except ValueError:
-        await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+        await write_field_message(session, colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
         return None, False
     if not (MIN_AGE_FLOOR <= value <= MIN_AGE_CEILING):
         # Issue #540. This used to accept any integer at all, and
@@ -10787,7 +10791,7 @@ async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int
         #
         # Refused rather than clamped, and nothing is written, so the
         # SysOp sees that their value did not take.
-        await session.write_line(
+        await write_field_message(session,
             colored(
                 f"A minimum age must be between {MIN_AGE_FLOOR} and {MIN_AGE_CEILING}, "
                 f"or 'none' for no gate -- cancelled.",
@@ -11006,6 +11010,7 @@ def _link_recommendation_label(value: bool | None) -> str:
 
 
 def _optional_int_field(key: str, label: str) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
+    @inline_field
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         value, ok = await _prompt_optional_int(session, label, current=draft.get(key))
         if ok:
@@ -11020,11 +11025,12 @@ def _int_field(key: str, label: str) -> Callable[[Session, DatabaseLane, dict], 
     level`/`min_write_level` do, so `_read_int`, not `_prompt_optional_
     int`, is the right underlying primitive here)."""
 
+    @inline_field
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         # No `[current]` in the prompt any more: the value is in the
         # line the caller is editing, so showing it twice would read as
         # two different numbers.
-        await session.write_line(colored(f"{label} ({_EDIT_HINT}):", fg_color=MUTED_COLOR))
+        await write_field_prompt(session, colored(f"{label} ({_EDIT_HINT}):", fg_color=MUTED_COLOR))
         value = await _read_int(session, default=draft.get(key))
         if value is not None:
             draft[key] = value
@@ -11033,6 +11039,7 @@ def _int_field(key: str, label: str) -> Callable[[Session, DatabaseLane, dict], 
 
 
 def _min_age_field(key: str = "min_age") -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
+    @inline_field
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         value, ok = await _prompt_min_age(session, current=draft.get(key))
         if ok:

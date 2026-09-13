@@ -868,7 +868,7 @@ def test_trust_anchor_picker_selection_still_warns_about_a_reused_familiar_name(
     text = _written_text(session)
     assert "different cryptographic identity" in text
     assert "No trust policy change made." in text
-    assert "Node: (not chosen)" in _visible(text)
+    assert re.search(r"Node: +\(not chosen\)", _visible(text))
     assert list_trust_anchors(db) == []
 
 

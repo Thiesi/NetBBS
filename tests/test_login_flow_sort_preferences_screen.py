@@ -161,5 +161,5 @@ def test_profile_screen_shows_the_saved_preference_count_and_offers_the_menu_opt
     session = FakeSession(["s", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible_text(session)
-    assert "Sort preferences: 2 saved" in text
+    assert re.search(r"Sort preferences: +2 saved", text)
     assert "ort preferences" in text  # the [S]ort preferences menu option itself

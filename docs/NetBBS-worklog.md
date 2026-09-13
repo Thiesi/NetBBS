@@ -5725,6 +5725,19 @@ This is a real latent trap for a SysOp manually typing a Windows path
 into this field too, not just this call site, but that's out of scope
 of what prefilling could fix and is unchanged here.
 
+Draft field positions come from the same wrapped rows sent to the terminal,
+not a count of FieldSpec entries. The renderer builds the complete screen
+before its single write, so pagination, section headers, preambles and value
+continuations use one geometry. The label width is computed over all fields,
+not just the current section. In-place typing callbacks opt in through
+`inline_field` and use `write_field_prompt`/`read_field_line`; arbitrary pickers
+and confirmations do not inherit cursor placement. The position is scoped to
+one awaited callback and reset on every exit. `write_field_message` retains
+validation feedback across the redraw rather than immediately erasing it.
+Resize invalidates the position and cancels the unsubmitted edit with visible
+feedback; the draft remains unchanged. Tests replay the renderer and real byte
+line editor onto a VT screen to check cursor placement and neighboring rows.
+
 A one-shot status message (a validation error, a "not applied"/"loaded
 and enabled" confirmation) that a screen prints and then falls straight
 through to its caller's own redraw is invisible whenever the current
