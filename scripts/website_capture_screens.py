@@ -492,6 +492,12 @@ async def capture_console(tmp: Path) -> str:
         create_file_area(db, "Utilities", creator=people["keeper"],
                          description="Node utilities and helper scripts")
         create_channel(db, "lobby", creator=people["keeper"], description="General chat")
+        # Something for the attention queue to be attending to. A console
+        # whose every counter reads zero shows the panel but not the point
+        # of it -- and the caption beside this shot says the queue is
+        # actually waiting on someone, which has to be true.
+        create_user(db, "newcomer", password="hunter2", user_level=10,
+                    pending_approval=True)
 
         session = CaptureSession(width=80, height=40)
         await _draw_admin_menu(session, lane, people["keeper"],
@@ -509,10 +515,16 @@ async def capture_colors(tmp: Path) -> str:
     """The one screen whose subject is colour, which makes it the one
     screen where a stale capture is most obviously stale."""
     from netbbs.net.admin_flow import _theme_colors_menu
+    from netbbs.net.node_theme import set_accent_color_override
 
     db, lane = _node(tmp)
     try:
         people = _people(db)
+        # A node that has actually been branded. Three rows reading
+        # "default" demonstrate the screen exists; they do not show what it
+        # is for, and the live preview above the fields is the whole point
+        # of the draft editor.
+        set_accent_color_override(db, (255, 140, 60))
         session = CaptureSession(width=80)
         await _theme_colors_menu(session, lane, people["keeper"])
         return session.take()

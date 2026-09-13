@@ -4,12 +4,13 @@
 [38;5;246mBackup: never[0m
 [38;5;248mBranding only -- status colors (error/success/warning/etc.) always stay standard, so a caller can trust what they mean on any node.[0m
 [1m[38;5;75mAccent color:[0m
-[38;5;248m  Default:   [0m[1m[38;5;220m  MetroBBS Underground[0m
+[38;5;248m  Truecolor: [0m[1m[38;2;255;140;60m  MetroBBS Underground[0m
+[38;5;248m  256-color: [0m[1m[38;5;209m  MetroBBS Underground[0m
 [1m[38;5;75mHeader color:[0m
 [38;5;248m  Default:   [0m[1m[38;5;51m== Node management ==[0m
 [1m[38;5;75mClock color:[0m
 [38;5;248m  Default:   [0m[1m[38;5;213m14:32:07[0m
-[38;5;75m  Accent[0m: [38;5;248mdefault[0m
+[38;5;75m  Accent[0m: [38;5;248m255,140,60[0m
 [38;5;75m  Header[0m: [38;5;248mdefault[0m
 [38;5;75m  Clock[0m: [38;5;248mdefault[0m
 
