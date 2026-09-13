@@ -4186,6 +4186,11 @@ def test_admin_category_picker_leak_prevention(db, lane, sysop):
         "n", "Amiga",
         "u", "0", "2",
         "c",
+        # The picker no longer returns the instant it finds nothing to
+        # offer (issue #530): an empty list is interactive, because
+        # [C]reate is something to do there. Backing out of it is now
+        # an explicit keystroke rather than automatic.
+        "b",
         "s",
         "b", "b", "b",
     ]
@@ -4195,6 +4200,45 @@ def test_admin_category_picker_leak_prevention(db, lane, sysop):
     text = _written_text(session)
     assert "No categories exist yet." in text
     assert "Hardware" not in text
+
+
+def test_creating_a_category_from_the_picker_keeps_the_community_scope(db, lane, sysop):
+    """Codex review on #530. `[C]reate` inside the category picker opens
+    a nested editor with its own `[P]arent` picker. Handing that editor
+    the *raw* category loader re-listed the categories `_load_top_level`
+    had just hidden, and let the new category be nested under one --
+    walking around the leak-prevention invariant the test above holds.
+    """
+    from netbbs.boards.boards import create_board
+    from netbbs.boards.categories import create_category
+    from netbbs.communities import create_community
+
+    politics = create_community(db, "Politics", creator=sysop)
+    create_community(db, "Vintage Computing", creator=sysop)  # #02, alphabetically later
+    hardware = create_category(db, "Hardware", created_by=sysop)
+    create_board(db, "elections", community_id=politics.id, category_id=hardware.id, creator=sysop)
+
+    # Create a board in Vintage Computing, open its category field, and
+    # press [C]reate -- then open the new category's own [P]arent
+    # picker. "Hardware" belongs to a Politics board and must not appear
+    # there either.
+    inputs = [
+        "m", "m", "c",
+        "n", "Amiga",
+        "u", "0", "2",
+        "c",            # category field
+        "c",            # [C]reate a category from the picker
+        "p",            # its [P]arent picker
+        "b",            # back out of the parent picker
+        "b",            # back out of the create editor
+        "b",            # back out of the category picker
+        "s",
+        "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, lane, sysop)
+
+    assert "Hardware" not in _written_text(session)
 
 
 def test_grant_blanket_scoped_to_a_community(db, lane, sysop):
