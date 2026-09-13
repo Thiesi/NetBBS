@@ -477,3 +477,90 @@ def test_a_resize_mid_render_cannot_split_the_page_geometry():
     flat_rows = ["(#" in row for row in rows]
     assert len(set(flat_rows)) == 1, "rows disagree with each other"
     assert flat_rows[0] != drew_header, "header and rows disagree about the form"
+
+
+def test_a_long_name_cannot_push_the_gates_off_a_narrow_row():
+    """Codex review. The flat fallback truncates the whole row at the
+    terminal width, so an unbounded name pushed the description --
+    which is where the gates live for a columnar caller -- off the end,
+    and a long-named gated resource went back to looking open."""
+    long_name = "General Discussion And Announcements Archive"
+    items = [Item(1, long_name, ["0", "0", "open", ("18+ name", GATE_COLOR)])]
+    session = FakeSession(["b"], width=50, height=24)
+    asyncio.run(
+        pick_item(
+            session, items,
+            name_of=lambda i: i.name, stable_id_of=lambda i: i.id,
+            description_of=lambda i: "18+ name, read 0/write 0, open",
+            columns=COLUMNS, column_values_of=lambda i: i.cells,
+            title="File areas", empty_message="none",
+        )
+    )
+    plain = _plain(session.output)
+    assert "NAME" not in plain, "should have fallen back to prose at this width"
+    row = [line for line in plain.split("\n") if re.match(r"^\s{2}\d\d\. ", line)][0]
+    assert "18+ name" in row, row
+
+
+def test_a_prose_picker_keeps_its_unbounded_name():
+    """The bound is only for callers whose description carries gates.
+    The ~30 pickers whose secondary text really is prose keep today's
+    behaviour -- losing the tail of a sentence is the right trade when
+    the tail is a sentence."""
+    long_name = "General Discussion And Announcements Archive"
+    items = [Item(1, long_name, [])]
+    session = FakeSession(["b"], width=50, height=24)
+    asyncio.run(
+        pick_item(
+            session, items,
+            name_of=lambda i: i.name, stable_id_of=lambda i: i.id,
+            description_of=lambda i: "some prose that will be cut",
+            title="Boards", empty_message="none",
+        )
+    )
+    row = [line for line in _plain(session.output).split("\n") if re.match(r"^\s{2}\d\d\. ", line)][0]
+    assert long_name[:30] in row
+
+
+def test_the_nav_block_is_measured_against_the_frozen_dimensions():
+    """Codex review, round three. The previous commit gave `_render_nav`
+    width/height parameters and then did not pass them from the render
+    path, leaving the exact split it was meant to close: items sized
+    against the snapshot, nav re-measured against a width that had
+    changed underneath it."""
+    from netbbs.rendering import display_width
+
+    items = [Item(n, f"area {n}", ["0", "0", "open", ("-", MUTED_COLOR)]) for n in range(1, 40)]
+
+    class WidensBeforeTheNav(FakeSession):
+        """Widens once the item rows are down, which is exactly the
+        window between the page-size decision and the nav render."""
+
+        def __init__(self):
+            super().__init__(["b"], width=50, height=24)
+            self._rows = 0
+
+        async def write_line(self, text: str = "") -> None:
+            await super().write_line(text)
+            if re.match(r"^\s{2}\d\d\. ", _plain(text)):
+                self._rows += 1
+                if self._rows == 3:
+                    self.terminal_width = 120
+
+    session = WidensBeforeTheNav()
+    asyncio.run(
+        pick_item(
+            session, items,
+            name_of=lambda i: i.name, stable_id_of=lambda i: i.id,
+            description_of=lambda i: "read 0/write 0, open",
+            columns=COLUMNS, column_values_of=lambda i: i.cells,
+            title="File areas", empty_message="none",
+        )
+    )
+    assert session.terminal_width == 120, "the resize must actually have landed"
+    # Every line this render produced, the nav and trailer included, was
+    # laid out for the width the render began with. A nav measured
+    # against the live 120 would overrun the 50 columns the items were
+    # sized for.
+    for line in _plain(session.output).replace("\r\n", "\n").split("\n"):
+        assert display_width(line) <= 50, repr(line)

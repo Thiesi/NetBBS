@@ -11115,6 +11115,14 @@ def _community_description(community: Community) -> str:
     same reason a leaf's do."""
     gates, _ = _gate_cell(community.default_min_age, community.default_name_requirement)
     bits = [] if gates == "-" else [f"default {gates}"]  # leads; see `_describe_resource`
+    # The level defaults belong here too (Codex review): they are shown
+    # in the wide table and they set the floor for every inheriting
+    # child, so dropping them made two Communities with entirely
+    # different defaults read identically on a narrow terminal.
+    bits.append(
+        f"read {_level_cell(community.default_min_read_level)}"
+        f"/write {_level_cell(community.default_min_write_level)}"
+    )
     bits.append("hidden" if community.hidden else "listed")
     return ", ".join(bits)
 
@@ -11653,10 +11661,16 @@ _LEVEL_COLUMNS = [
     ListColumn("write", 7, VALUE_COLOR, align_right=True),
 ]
 _STATUS_COLUMN = ListColumn("status", 9, VALUE_COLOR)
-# Ten, not nine: `_prompt_min_age` parses a bare `int()` with no
-# upper bound, so "100+ name+" is reachable from the UI, and a
-# gates column that truncates the gate is worse than no column.
-_GATES_COLUMN = ListColumn("gates", 10, GATE_COLOR)
+# Eleven, not nine or ten: `_prompt_min_age` parses a bare `int()`
+# with no upper bound at all, so "1000+ name+" is reachable from the
+# UI today, and a gates column that truncates the gate is worse than
+# no column. Eleven covers every age a human could plausibly be typed
+# as, including a fat-fingered one. The real defect behind this --
+# that an unbounded age is accepted at all, and a typo'd 1000 makes
+# `meets_age` refuse every caller and silently lock the resource --
+# is an input-validation problem, filed separately rather than
+# papered over with a wider column.
+_GATES_COLUMN = ListColumn("gates", 11, GATE_COLOR)
 
 _BOARD_COLUMNS = [*_LEVEL_COLUMNS, _STATUS_COLUMN, _GATES_COLUMN]
 _AREA_COLUMNS = _BOARD_COLUMNS

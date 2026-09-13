@@ -547,7 +547,7 @@ async def pick_item(
 
     async def _render_frozen() -> Sequence[T]:
         nonlocal page_index
-        render_width, _render_height = _dimensions()
+        render_width, render_height = _dimensions()
         if not working_set:
             page_index = 0
             prefix = _masthead_prefix()
@@ -681,6 +681,29 @@ async def pick_item(
             if name_segments_of is not None:
                 for text, color in name_segments_of(item):
                     segments.append((sanitize_text(text), item_name_color if is_highlighted else color))
+            elif columns is not None and description:
+                # A columnar picker that fell back to prose because the
+                # terminal is too narrow (Codex review). The whole row
+                # is truncated at the terminal width, so an unbounded
+                # name pushes the description off the end -- and for
+                # these callers the description is where the gates
+                # live, so a long-named gated resource went back to
+                # looking exactly like an open one. Design doc §3.6
+                # promises gates wherever a resource is listed, and a
+                # long name is not an exemption.
+                #
+                # Bounded only for these callers: the ~30 pickers whose
+                # secondary text really is prose keep their unbounded
+                # name and lose the tail of a sentence instead, which
+                # is the right trade when the tail is a sentence.
+                fixed = display_width(f"{marker}{position:02d}. ") + display_width(f"(#{id_str}) {id_padding}")
+                room = render_width - fixed - display_width(f" - {description}")
+                name_text = sanitize_text(name_of(item))
+                if room < display_width(name_text):
+                    name_text = _pad_cell(
+                        name_text, max(_MIN_TABLE_NAME_WIDTH, room), align_right=False
+                    ).rstrip()
+                segments.append((name_text, item_name_color))
             else:
                 segments.append((sanitize_text(name_of(item)), item_name_color))
             if description:
@@ -690,6 +713,16 @@ async def pick_item(
         nav = _render_nav(
             session, on_sort, description_level,
             include_next=page_index < total_pages - 1, include_prev=page_index > 0,
+            # The frozen pair, like everything else this render draws
+            # (Codex review). The previous commit gave this function the
+            # parameters and then failed to pass them here, which left
+            # the exact split it was meant to close: items sized against
+            # the snapshot while the nav block re-measured itself
+            # against a width that had changed underneath it. A render
+            # beginning at 15 rows picks a compact nav; growing to 16
+            # before this call switches it to the six-line descriptive
+            # form, and the page runs off the bottom.
+            width=render_width, height=render_height,
         )
         # Folded into this same trailing line, not a line of its own
         # (issue #102's own "document it somewhere discoverable"

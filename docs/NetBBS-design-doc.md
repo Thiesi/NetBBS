@@ -529,11 +529,21 @@ prevents it.
 
 Two rules follow from that, and are normative for any future list:
 
-- **A resource's access gates appear wherever the resource is listed.** A
-  minimum age or a name requirement changes who may enter, and a list that
+- **A resource's access gates appear wherever a SysOp lists that resource.**
+  A minimum age or a name requirement changes who may enter, and a list that
   omits them shows a gated resource as identical to an open one. A gate is
   coloured (`GATE_COLOR`) only when present, so an ungated row stays quiet
-  and a gated one is visible while scanning.
+  and a gated one is visible while scanning. This holds in the narrow
+  fallback too: a long name is bounded there rather than allowed to push the
+  gates off the end of the row.
+
+  Deliberately scoped to the SysOp's own resource listers for now. The
+  caller-facing pickers do not yet carry gate metadata, and one of them
+  (the chat channel picker) filters its list on level and age but not on
+  name requirement, so it can still offer a channel that refuses the caller
+  on selection. That is a real gap, tracked separately; this rule will
+  extend to those screens when it is closed, and the wording here should be
+  widened at that point rather than read as already covering them.
 - **A table that does not fit becomes prose again.** Below the width at which
   the name column stays readable, the row falls back to the flat description
   form. The decision is made per render against the live terminal width, not
