@@ -3574,6 +3574,18 @@ def _input_prompt(accent_color: int = ACCENT_COLOR, unicode_style: bool = False)
     return colored(glyph, fg_color=accent_color, bold=True)
 
 
+def _has_remote_origin():
+    """`netbbs.link.realtime_channels.has_remote_origin`, imported at call
+    time. Same reasoning as `_subscribe_live`'s own lazy import: that
+    module pulls in `aiohttp` through `netbbs.link.transport`, which this
+    one must not require merely to be imported. Only ever called on a
+    node whose `realtime_bridge` exists, which means the import already
+    succeeded once at startup."""
+    from netbbs.link.realtime_channels import has_remote_origin
+
+    return has_remote_origin
+
+
 def _shelf_divider(width: int, *, unicode_style: bool = False, truecolor: bool = False) -> str:
     rule_char = "─" if unicode_style else "-"
     color = 238 if truecolor else RULE_COLOR
@@ -4796,6 +4808,22 @@ async def _chat_loop(
             link_context is not None
             and link_context.realtime_registry is not None
             and link_context.realtime_bridge is not None
+            # Dogfood feedback: entering a *local* channel announced
+            # "(Connecting to this channel's real-time origin...)" and
+            # then "(No real-time link to this channel's origin right
+            # now -- new messages will still arrive after the next
+            # sync.)" -- a warning about a link that was never supposed
+            # to exist, on a channel with no origin but this node. The
+            # notices were right for the case they were written for and
+            # meaningless for every other one: `ensure_live_subscription`
+            # returns `None` both for "the origin would not answer" and
+            # for "there is no origin", and this flow could not tell the
+            # two apart. Asked before anything is announced, so a local
+            # channel says nothing rather than saying something
+            # reassuring.
+            and await lane.run(
+                _has_remote_origin(), channel, link_context.node_identity.fingerprint
+            )
         ):
 
             async def _subscribe_live() -> None:
