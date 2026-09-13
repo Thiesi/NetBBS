@@ -24,7 +24,14 @@ import asyncio
 
 import pytest
 
-from netbbs.net.admin_flow import _int_field, _prompt_min_age, _prompt_optional_int, _read_int
+from netbbs.net.admin_flow import (
+    _float_field,
+    _int_field,
+    _optional_text_field,
+    _prompt_min_age,
+    _prompt_optional_int,
+    _read_int,
+)
 from netbbs.net.char_input import InputCancelled
 
 
@@ -37,6 +44,7 @@ class FakeSession:
         self._cancel = cancel
         self.written: list[str] = []
         self.seeded: list[str] = []
+        self.viewports: list[tuple[int | None, bool]] = []
         self.terminal_width = 80
         self.terminal_height = 24
 
@@ -46,8 +54,12 @@ class FakeSession:
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
 
-    async def read_line(self, echo: bool = True, *, initial: str = "", cancellable: bool = False, **kwargs) -> str:
+    async def read_line(self, echo: bool = True, *, initial: str = "", cancellable: bool = False,
+                        viewport=None, viewport_owns_row: bool = False, **kwargs) -> str:
         self.seeded.append(initial)
+        self.viewports.append(
+            (viewport() if callable(viewport) else viewport, viewport_owns_row)
+        )
         if self._cancel:
             assert cancellable, "Escape can only be pressed at a prompt that accepts it"
             raise InputCancelled()
@@ -112,6 +124,48 @@ def test_escape_leaves_every_kind_of_field_alone():
         _prompt_optional_int(FakeSession(cancel=True), "Minimum read level", current=100)
     ) == (100, True)
     assert asyncio.run(_read_int(FakeSession(cancel=True), default=3)) == 3
+
+
+# -- the value is edited in a row of its own ----------------------------
+
+
+def test_every_seeded_prompt_gets_a_full_row_viewport():
+    """Codex review. Issue #546 gave `read_line` a one-row viewport so a
+    buffer wider than the space left on the line stops soft-wrapping onto
+    a second row -- where Home/Left/Backspace and every tail redraw clamp
+    to the row they are on while the logical cursor walks into text
+    above, and the display diverges from the value that gets saved.
+
+    Seeding a prompt without also giving it that row reintroduces the bug
+    wherever it is done, and these labels are longer than the supported
+    40-column floor on their own, so it is reachable before a caller
+    types anything at all.
+    """
+    checks = [
+        lambda s: _prompt_min_age(s, current=21),
+        lambda s: _prompt_optional_int(s, "Minimum read level", current=100),
+        lambda s: _read_int(s, default=3),
+        lambda s: _int_field("min_level", "Minimum level")(s, None, {"min_level": 3}),
+        lambda s: _float_field("weight", label="Weight")(s, None, {"weight": 0.5}),
+        lambda s: _optional_text_field("info")(s, None, {"info": "x" * 100}),
+    ]
+    for make in checks:
+        session = FakeSession("7")
+        asyncio.run(make(session))
+        assert session.viewports, make
+        for width, owns_row in session.viewports:
+            assert width == session.terminal_width, (make, width)
+            assert owns_row is True, make
+
+
+def test_the_label_is_written_as_its_own_line():
+    """What makes the viewport above the whole width rather than
+    whatever the label left behind."""
+    session = FakeSession("18")
+    asyncio.run(_prompt_min_age(session, current=21))
+    # `write_line`, not `write`: the last thing before the read ends the
+    # row, so the input starts at column 0 of the next one.
+    assert session.written[-1].endswith(chr(10)), session.written
 
 
 # -- no prompt advertises the old convention ----------------------------

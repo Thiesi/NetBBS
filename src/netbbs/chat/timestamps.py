@@ -72,7 +72,15 @@ def format_with_preference(db: Database, user: User, text: str, created_at: str)
     """
     if not timestamps_enabled(db, user):
         return text
-    stamp = colored(
-        f"[{format_for_display(created_at, db, override_format='%H:%M')}]", fg_color=METADATA_COLOR
-    )
-    return f"{stamp} {text}"
+    try:
+        shown = format_for_display(created_at, db, override_format="%H:%M")
+    except ValueError:
+        # Belt to the ingest boundary's braces (Codex review). A row
+        # stored before that boundary existed still has to render: this
+        # runs for every message in scrollback on entering a channel, so
+        # raising here would make one unparseable carried timestamp shut
+        # a caller out of the channel entirely, every time, with nothing
+        # on screen saying why. The line is worth more than its stamp,
+        # so the line survives without one.
+        return text
+    return f"{colored(f'[{shown}]', fg_color=METADATA_COLOR)} {text}"

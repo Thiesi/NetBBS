@@ -2275,11 +2275,9 @@ def _float_field(
     exception (a dogfood report against the old trust-domain wizard)."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await write_prompt(session, f"{label} ({_EDIT_HINT}): ")
+        await session.write_line(colored(f"{label} ({_EDIT_HINT}):", fg_color=MUTED_COLOR))
         try:
-            raw = (await session.read_line(
-                initial=str(draft.get(key)), cancellable=True,
-            )).strip()
+            raw = (await _read_seeded_line(session, initial=str(draft.get(key)))).strip()
         except InputCancelled:
             await session.write_line("")
             return
@@ -5182,9 +5180,9 @@ def _optional_text_field(key: str) -> Callable[[Session, DatabaseLane, dict], Aw
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         current = draft.get(key) or ""
-        await session.write(f"({_CLEAR_HINT}): ")
+        await session.write_line(colored(f"({_CLEAR_HINT}):", fg_color=MUTED_COLOR))
         try:
-            raw = (await session.read_line(initial=current, cancellable=True)).strip()
+            raw = (await _read_seeded_line(session, initial=current)).strip()
         except InputCancelled:
             await session.write_line("")
             return
@@ -10433,7 +10431,7 @@ async def _read_int(session: Session, *, default: int) -> int | None:
     `None` as "abort the current screen". See `_EDIT_HINT` (issue #557)
     for why this no longer asks for a value against an empty line."""
     try:
-        raw = (await session.read_line(initial=str(default), cancellable=True)).strip()
+        raw = (await _read_seeded_line(session, initial=str(default))).strip()
     except InputCancelled:
         await session.write_line("")
         return default
@@ -10462,10 +10460,10 @@ async def _prompt_optional_int(session: Session, label: str, *, current: int | N
     `default_min_read_level`/`default_min_write_level`. "Clear" is the
     accurate word in both cases, not "no gate" (a level isn't a gate
     the way age/name-requirement are)."""
-    await write_prompt(session, f"{label} ({_CLEAR_HINT}): ")
+    await session.write_line(colored(f"{label} ({_CLEAR_HINT}):", fg_color=MUTED_COLOR))
     try:
-        raw = (await session.read_line(
-            initial="" if current is None else str(current), cancellable=True,
+        raw = (await _read_seeded_line(
+            session, initial="" if current is None else str(current)
         )).strip()
     except InputCancelled:
         await session.write_line("")
@@ -10511,6 +10509,34 @@ _CLEAR_HINT = "Enter saves, blank clears, Esc keeps"
 _EDIT_HINT = "Enter saves, Esc cancels"
 
 
+async def _read_seeded_line(session: Session, *, initial: str) -> str:
+    """Read one line opening on `initial`, with a row to do it in.
+
+    Every prompt below writes its label as a line of its own and then
+    calls this, which is `netbbs.net.resource_editor.text_field`'s shape
+    and for its reason (issue #546, Codex review): `read_line` moves its
+    cursor with single-row `CSI D`/`CSI C`, so a value that soft-wraps
+    onto a second row makes every Home, Left, Backspace and tail redraw
+    clamp to the row it is on while the logical cursor walks into text
+    above -- the display and the value that would be saved diverge,
+    silently.
+
+    The prompt occupying its own line is what makes `viewport` the whole
+    terminal width rather than "whatever was left after the label", which
+    on the supported 40-column floor is frequently nothing: these labels
+    are longer than 40 columns on their own. A callable, not a number, so
+    a caller who resizes mid-edit gets rows sized for the terminal they
+    now have.
+
+    Raises `InputCancelled` on Escape, which every caller reads as
+    "leave the value alone".
+    """
+    return await session.read_line(
+        initial=initial, cancellable=True,
+        viewport=lambda: session.terminal_width, viewport_owns_row=True,
+    )
+
+
 #: Bounds for an age gate (issue #540). `0` stays accepted and keeps its
 #: existing meaning -- `netbbs.attestation.meets_age` opens with
 #: `if not min_age: return True`, so zero is "no gate" rather than a
@@ -10529,13 +10555,12 @@ async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int
     emptied line (or the explicit word `none`) clears the gate, and
     Escape leaves it alone -- see `_CLEAR_HINT` for why this is no longer
     "blank = keep"."""
-    await write_prompt(
-        session,
-        f"Minimum age ({_CLEAR_HINT}, {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}): ",
+    await session.write_line(
+        colored(f"Minimum age ({_CLEAR_HINT}, {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}):", fg_color=MUTED_COLOR)
     )
     try:
-        raw = (await session.read_line(
-            initial="" if current is None else str(current), cancellable=True,
+        raw = (await _read_seeded_line(
+            session, initial="" if current is None else str(current)
         )).strip()
     except InputCancelled:
         await session.write_line("")
@@ -10798,7 +10823,7 @@ def _int_field(key: str, label: str) -> Callable[[Session, DatabaseLane, dict], 
         # No `[current]` in the prompt any more: the value is in the
         # line the caller is editing, so showing it twice would read as
         # two different numbers.
-        await write_prompt(session, f"{label} ({_EDIT_HINT}): ")
+        await session.write_line(colored(f"{label} ({_EDIT_HINT}):", fg_color=MUTED_COLOR))
         value = await _read_int(session, default=draft.get(key))
         if value is not None:
             draft[key] = value

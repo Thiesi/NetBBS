@@ -144,6 +144,7 @@ from netbbs.rendering import (
     menu_grid,
     menu_key,
     sanitize_text,
+    strip_ansi,
     screen_title,
     visible_width,
 )
@@ -1340,6 +1341,24 @@ def _uploader_display_name(db: Database, entry, *, name_requirement: str | None)
     return sanitize_text(present_link_author_label(db, entry.uploader_label))
 
 
+def _uploader_cell(padded: str) -> str:
+    """AUTHOR_COLOR over an uploader label that may already carry a
+    colour of its own.
+
+    A verified real name arrives pre-styled from
+    `netbbs.attestation.format_name_for_resource`, and an SGR reset
+    restores no outer colour -- so wrapping the whole cell would colour
+    the name, then leave everything after the verified unit uncoloured.
+    Composed beside it instead of around it, the same way
+    `netbbs.net.chat_flow._colored_around` already handles an author
+    label that may or may not bring its own styling (issue #298).
+    """
+    marker = padded.find(chr(27))
+    if marker == -1:
+        return colored(padded, fg_color=AUTHOR_COLOR)
+    return colored(padded[:marker], fg_color=AUTHOR_COLOR) + padded[marker:]
+
+
 async def _render_file_page(
     session: Session,
     lane: DatabaseLane,
@@ -1436,7 +1455,15 @@ async def _render_file_page(
             # cancel the attribute at the first cell boundary. The cells
             # therefore go out plain inside a single inverted run, which
             # is also what makes the bar solid rather than striped.
-            await session.write_line(colored(" ".join(cells), reverse=True))
+            # `strip_ansi`, not the raw cells (Codex review): a verified
+            # uploader name brings its own colour and its own reset, and
+            # that reset would end the reverse run partway along the
+            # column -- striping the bar this commit exists to make
+            # solid. The `(=...=)` markers survive stripping, and
+            # `set_display_name` refuses `=` at write time, so the
+            # unforgeability the colour also signals is still on screen
+            # while the row is under the cursor.
+            await session.write_line(colored(strip_ansi(" ".join(cells)), reverse=True))
         else:
             idx_cell = colored(idx_label, fg_color=MENU_KEY_COLOR)
             name_cell = colored(name_padded, fg_color=accent)
@@ -1448,7 +1475,7 @@ async def _render_file_page(
             # the uploader are separate facts and now say so.
             size_cell = colored(size_padded, fg_color=EMPHASIS_COLOR)
             date_cell = colored(date_padded, fg_color=DATE_COLOR)
-            uploader_cell = colored(uploader_padded, fg_color=AUTHOR_COLOR)
+            uploader_cell = _uploader_cell(uploader_padded)
             await session.write_line(" ".join([idx_cell, name_cell, size_cell, date_cell, uploader_cell]))
         # Every line, not just the first (issue #463): a description
         # read out of an archive's FILE_ID.DIZ is up to ten lines of

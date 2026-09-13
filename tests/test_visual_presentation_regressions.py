@@ -399,10 +399,20 @@ def test_picker_highlight_cursor_styling():
     assert selected is None
     output = _raw_text(session)
 
-    # After DOWN arrow, item 1 is highlighted:
-    # 1. Cursor marker is "> 01. "
-    # 2. Key/selector has bold accent_color
-    # 3. Description is colored 252 (soft white)
+    # After DOWN arrow, item 1 is highlighted. The marker stays; the
+    # styling behind it does not.
+    #
+    # This used to assert bold accent plus a 252 description -- which is
+    # exactly the highlight the dogfood report called "barely
+    # noticeable, not least because it uses the same color as some
+    # elements of the line do". The row is a reverse-video bar now, so
+    # the assertion is that the highlighted row carries no foreground
+    # colour of its own at all: any colour inside it would end the
+    # inverted run at its reset and stripe the bar.
     assert "> 01. " in output
-    assert str(ACCENT_COLOR) in output
-    assert "252" in output
+    assert str(ACCENT_COLOR) in output  # still the accent for the rows around it
+    highlighted = [line for line in output.split(chr(10)) if "> 01. " in line]
+    assert highlighted, output
+    bar = highlighted[-1]
+    assert "\x1b[7m" in bar, bar
+    assert "\x1b[38;5;" not in bar, bar

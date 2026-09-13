@@ -261,6 +261,42 @@ def test_the_highlighted_row_is_a_reverse_video_bar(tmp_path, monkeypatch):
     db.close()
 
 
+def test_a_verified_uploader_does_not_stripe_the_highlighted_bar(tmp_path, monkeypatch):
+    """Codex review. `format_name_for_resource` returns the `(=...=)`
+    unit already wrapped in VERIFIED_COLOR and terminated by its own
+    reset -- and an SGR reset ends whatever run it lands inside. Nesting
+    that in one outer reverse span stopped the bar halfway along the
+    uploader column, which is the striped highlight this change exists to
+    remove.
+    """
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "verified_docs", creator=alice, name_requirement="verified_and_displayed")
+    upload_file(db, area, alice, "release.zip", b"zip data")
+    attest_name(db, alice, "Alice Wonderland", verifier=sysop)
+
+    session = FakeInteractiveSession(editor_keys=[EditorKey(EditorKeyKind.DOWN)], width=100)
+    lane = DatabaseLane(db_path)
+    asyncio.run(_show_area(session, lane, area, alice))
+    lane.close()
+    db.close()
+
+    rows = [line for line in session.output.split(chr(10)) if ">[ 1]" in line]
+    assert rows, "the highlighted row was never drawn"
+    bar = rows[-1]
+    # One inverted run, opened once and closed once: no colour of any
+    # kind survives inside it, so nothing can end it early.
+    assert bar.count("\x1b[7m") == 1, bar
+    assert "\x1b[38;5;" not in bar, bar
+    assert bar.count("\x1b[0m") == 1, bar
+    # The verified name is still legible under the cursor, markers and
+    # all -- `set_display_name` refuses `=` at write time, so the unit is
+    # still unforgeable without its colour.
+    assert "(=Alice Wonderland=)" in bar, bar
+
+
 # -- Numbered Download Shortcuts (Line mode) --
 
 

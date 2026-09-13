@@ -28,6 +28,7 @@ import json
 
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX, Channel
 from netbbs.chat.scrollback import ChannelMessage as LocalChannelMessage, get_scrollback_limit
+from netbbs.link.protocol import LinkProtocolError, _parse_aware_timestamp
 from netbbs.link.events import (
     CHANNEL_MESSAGE_OBJECT_TYPE,
     ChannelGenesis,
@@ -339,6 +340,23 @@ def materialize_carried_channel_message(
     ).fetchone()
     if existing is not None:
         return _channel_message_from_row(existing)
+
+    # `created_at` is remote input and lands verbatim in a row every
+    # later render reads (Codex review). The *real-time* frame path has
+    # always validated it (`netbbs.link.protocol.
+    # _validate_channel_message_payload`); this durable gossip path never
+    # did, so a signed peer could store `created_at="invalid"` -- harmless
+    # only for as long as nothing formatted it. Chat timestamps are on by
+    # default now, so every caller entering the channel formats every
+    # message in scrollback, and one bad row would have made the channel
+    # permanently unenterable. Rejected here rather than repaired: a
+    # timestamp that cannot be parsed carries no information to keep, and
+    # this is the same "handle_events-adjacent rejection" shape the rest
+    # of this module already uses.
+    try:
+        _parse_aware_timestamp(message.payload["created_at"], field_name="channel_message.created_at")
+    except LinkProtocolError as exc:
+        raise LinkChannelsError(f"refusing a carried channel message: {exc}") from exc
 
     channel_row = db.connection.execute(
         "SELECT * FROM channels WHERE channel_id = ?", (message.payload["channel_id"],)
