@@ -534,6 +534,13 @@ async def pick_item(
         # further up. Measured rather than assumed to be one line,
         # because a SysOp-authored masthead can be several.
         lines = 0
+        if masthead and not redraw_in_place:
+            # The blank row `_masthead_prefix` adds to get off the
+            # "Choice: " line (Codex review). It is a physical row, and
+            # every physical row this screen draws has to be in the
+            # budget or it is the next one to push the prompt off the
+            # bottom.
+            lines += 1
         if masthead:
             # Measured through the same wrapping `write_preformatted_line`
             # performs, not by counting `\r\n` pairs (Codex review): that
@@ -594,6 +601,19 @@ async def pick_item(
     working_set: Sequence[T] = items
     page_index = 0
     highlighted: int | None = None
+    # The search that narrowed `working_set`, if one did (issue #537,
+    # Codex review). A re-sort or a filter replaces the backing set, and
+    # without remembering this it also silently threw the search away --
+    # so a SysOp who found three accounts and then pressed [L] to order
+    # them by level got the whole roster back. The screen this replaced
+    # reapplied its query after every such change.
+    active_query: str | None = None
+
+    def _matching(candidates: Sequence[T], query: str) -> list[T]:
+        return [item for item in candidates if query.lower() in name_of(item).lower()]
+
+    def _narrowed(candidates: Sequence[T]) -> Sequence[T]:
+        return _matching(candidates, active_query) if active_query else candidates
     if start_stable_id is not None:
         for start_index, item in enumerate(working_set):
             if stable_id_of(item) == start_stable_id:
@@ -1050,7 +1070,13 @@ async def pick_item(
                 continue
             await session.write_line("")
             await session.write("Search: ")
-            search_completer = _search_completer([name_of(item) for item in working_set])
+            # From `items`, not `working_set` (Codex review): the query
+            # below searches the full set, so completing only from the
+            # narrowed one meant Tab could not offer a name that Enter
+            # would have found. After narrowing to `ali*`, typing `b`
+            # and pressing Tab completed nothing while Enter selected
+            # `bob`.
+            search_completer = _search_completer([name_of(item) for item in items])
             query = (await session.read_line(completer=search_completer)).strip()
             if not query:
                 # Empty search clears back to the full, unfiltered list
@@ -1058,12 +1084,14 @@ async def pick_item(
                 # (a no-op in that case) and "clear filter" when a
                 # previous search narrowed working_set, without needing
                 # two separate commands for what's really one action.
+                active_query = None
                 working_set = items
                 page_index = 0
                 highlighted = None
                 page_items = await _render()
                 continue
-            matches = [item for item in items if query.lower() in name_of(item).lower()]
+            active_query = query
+            matches = _matching(items, query)
             if not matches:
                 await session.write_line(colored("No matches.", fg_color=ERROR_COLOR))
                 await session.write("Choice: ")
@@ -1083,7 +1111,7 @@ async def pick_item(
             new_items = await on_sort()
             if new_items is not None:
                 items = new_items
-                working_set = new_items
+                working_set = _narrowed(new_items)
                 page_index = 0
                 highlighted = None
             page_items = await _render()
@@ -1109,7 +1137,7 @@ async def pick_item(
             new_items = await live_keys[char_lower]()
             if new_items is not None:
                 items = new_items
-                working_set = new_items
+                working_set = _narrowed(new_items)
                 page_index = 0
                 highlighted = None
             page_items = await _render()

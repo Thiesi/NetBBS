@@ -8681,3 +8681,24 @@ def test_a_remote_door_is_told_outbound_cannot_work_for_it(db, lane, sysop):
 
     assert "has no way to hand anything back" in _written_text(session)
     assert outbound_config(db, door.id) is None, "the switch must not be reachable at all"
+
+
+def test_user_picker_keeps_an_active_search_across_a_sort(db, lane, sysop):
+    """A re-sort or a filter replaces the backing set, and used to throw
+    the search away with it -- so a SysOp who found three accounts and
+    pressed [L] to order them by level got the whole roster back. The
+    screen this replaced reapplied its query after every such change
+    (issue #537, Codex review)."""
+    for name in ("alice", "alina", "bob"):
+        create_user(db, name, password="hunter2", user_level=10)
+
+    # Search "ali" (matches alice and alina, not bob), then re-sort.
+    session = FakeSession(["u", "l", "s", "ali", "l", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    marker = "Sorted by: Level"
+    assert marker in text
+    after = _last_render(text, marker)
+    assert "alice" in after and "alina" in after
+    assert "bob" not in after, "the search survived the re-sort"
