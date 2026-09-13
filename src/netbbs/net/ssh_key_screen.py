@@ -51,6 +51,43 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
     self_service = changed_by.id == target.id
     possessive = "your" if self_service else f"{sanitize_text(target.username)}'s"
 
+    if getattr(session, "authenticated_without_credential", False):
+        # Issue #531, Codex review -- twice. A guest session proved no
+        # credential (that is what guest login *is*), so it may not
+        # manage this account's credentials.
+        #
+        # The first version of this guarded `_add_key` alone, because
+        # minting a permanent SSH key that outlives guest access being
+        # switched off was the obvious harm. The next review round
+        # pointed out that `[R]emove a key` was still right there: an
+        # anonymous caller could strip every key off a password-backed
+        # account and, by removing the primary one, change the identity
+        # fingerprint Link events are authored under.
+        #
+        # So the guard belongs to the screen, not to one of its actions
+        # -- which is also the only version that stays correct when
+        # somebody adds a third action here.
+        #
+        # Not a check on the account: the guest is an ordinary account
+        # and everything else about it stays ordinary, which is the
+        # whole design. This is a check on *how this session got in*.
+        # Signing in with the account's own password reaches this screen
+        # exactly as before.
+        await session.write_line("")
+        # Says what can actually be done, not what sounds reasonable
+        # (Codex review). An earlier version of this line told the
+        # caller to sign in with the account's own password -- which,
+        # for the guest account, is exactly what guest login makes
+        # unreachable on Telnet and web while guest access is on.
+        await session.write_line(
+            colored(
+                "This session signed in without a password, so it cannot manage keys. "
+                "A SysOp can manage this account's keys from the SysOp console.",
+                fg_color=ERROR_COLOR,
+            )
+        )
+        return target
+
     while True:
         def _load(db: Database) -> tuple[list, str, str]:
             keys = list_ssh_keys(db, target)

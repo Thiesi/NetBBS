@@ -25,7 +25,7 @@ from netbbs.net.board_flow import _render_post_page, _render_quoted_body
 from netbbs.net.mail_flow import _render_message
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
-from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, colored
+from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, RULE_COLOR, colored
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -200,7 +200,7 @@ def test_render_post_page_multiple_posts_divider_unicode(tmp_path):
         )
         output = _raw_text(session)
 
-        expected_rule = colored("─" * 78, fg_color=MUTED_COLOR)
+        expected_rule = colored("─" * 78, fg_color=RULE_COLOR)
         assert expected_rule in output
     finally:
         db.close()
@@ -223,7 +223,7 @@ def test_render_post_page_multiple_posts_divider_ascii_fallback(tmp_path):
         )
         output = _raw_text(session)
 
-        expected_rule = colored("-" * 78, fg_color=MUTED_COLOR)
+        expected_rule = colored("-" * 78, fg_color=RULE_COLOR)
         assert expected_rule in output
         assert "─" not in output
     finally:
@@ -311,7 +311,7 @@ def test_review_composition_body_framed_with_dividers():
     assert action is ReviewAction.CANCEL
     output = _raw_text(session)
 
-    expected_rule = colored("─" * 78, fg_color=MUTED_COLOR)
+    expected_rule = colored("─" * 78, fg_color=RULE_COLOR)
     # Rule should appear above and below body
     assert output.count(expected_rule) == 2
 
@@ -333,7 +333,7 @@ def test_review_composition_dividers_ascii_fallback():
     assert action is ReviewAction.CANCEL
     output = _raw_text(session)
 
-    expected_rule = colored("-" * 78, fg_color=MUTED_COLOR)
+    expected_rule = colored("-" * 78, fg_color=RULE_COLOR)
     assert output.count(expected_rule) == 2
     assert "─" not in output
 
@@ -361,7 +361,7 @@ def test_render_mail_message_dividers(tmp_path):
         output = _raw_text(session)
 
         # Body should be framed by horizontal divider rules
-        expected_rule = colored("─" * 78, fg_color=MUTED_COLOR)
+        expected_rule = colored("─" * 78, fg_color=RULE_COLOR)
         assert output.count(expected_rule) == 2
     finally:
         lane.close()
@@ -399,10 +399,20 @@ def test_picker_highlight_cursor_styling():
     assert selected is None
     output = _raw_text(session)
 
-    # After DOWN arrow, item 1 is highlighted:
-    # 1. Cursor marker is "> 01. "
-    # 2. Key/selector has bold accent_color
-    # 3. Description is colored 252 (soft white)
+    # After DOWN arrow, item 1 is highlighted. The marker stays; the
+    # styling behind it does not.
+    #
+    # This used to assert bold accent plus a 252 description -- which is
+    # exactly the highlight the dogfood report called "barely
+    # noticeable, not least because it uses the same color as some
+    # elements of the line do". The row is a reverse-video bar now, so
+    # the assertion is that the highlighted row carries no foreground
+    # colour of its own at all: any colour inside it would end the
+    # inverted run at its reset and stripe the bar.
     assert "> 01. " in output
-    assert str(ACCENT_COLOR) in output
-    assert "252" in output
+    assert str(ACCENT_COLOR) in output  # still the accent for the rows around it
+    highlighted = [line for line in output.split(chr(10)) if "> 01. " in line]
+    assert highlighted, output
+    bar = highlighted[-1]
+    assert "\x1b[7m" in bar, bar
+    assert "\x1b[38;5;" not in bar, bar

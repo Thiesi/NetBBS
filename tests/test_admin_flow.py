@@ -42,7 +42,7 @@ from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.session import Session
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls
-from netbbs.rendering import ACCENT_COLOR, MENU_KEY_COLOR, METADATA_COLOR, colored
+from netbbs.rendering import ACCENT_COLOR, MENU_KEY_COLOR, MUTED_COLOR, colored
 from netbbs.rendering.width import display_width
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -1701,7 +1701,7 @@ def test_who_lists_and_disconnects_another_session(db, lane, sysop):
         # Same pick_item semantic field palette asserted by caller Who.
         assert colored("  01. ", fg_color=MENU_KEY_COLOR) in text
         assert f"\x1b[38;5;{ACCENT_COLOR}m(unauthenticated)" in text
-        assert f"\x1b[38;5;{METADATA_COLOR}m - connected since " in text
+        assert f"\x1b[38;5;{MUTED_COLOR}m - connected since " in text
 
     asyncio.run(scenario())
 

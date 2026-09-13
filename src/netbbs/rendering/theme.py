@@ -21,22 +21,51 @@ HEADER_COLOR = 51  # bright cyan — section headers, banners; also the chat sta
                    # since that already means "channel name" there and reusing it
                    # for the numbers would make two unrelated fields look like one
 ACCENT_COLOR = 220  # gold — navigable items: board/channel names, other users' names
-MUTED_COLOR = 244  # gray — system/meta messages (join/leave notices, etc.)
+MUTED_COLOR = 248  # gray — system/meta messages (join/leave notices, etc.).
+                   # Raised from 244 (#808080) to 248 (#a8a8a8) after dogfood
+                   # feedback that muted text was not merely quiet but hard to
+                   # read: 244 sits at the midpoint of the xterm greyscale ramp,
+                   # which on a black background is closer to the background
+                   # than to the foreground. "Muted" has to mean "recessive but
+                   # legible" — a caller should be able to read a join notice
+                   # without leaning in, and still tell at a glance that it is
+                   # not somebody talking
 LABEL_COLOR = 75  # light blue — field names such as "From:"/"Date:";
                   # distinct from the value beside them and from HEADER_COLOR
 VALUE_COLOR = 252  # soft white — ordinary field values and prose content
-METADATA_COLOR = 244  # gray — timestamps, counts, and secondary context;
-                      # deliberately the same shade as MUTED_COLOR but a
-                      # separate semantic role for future palette changes
+METADATA_COLOR = 246  # gray — timestamps, counts, and secondary context
+                      # *beside* something else (a timestamp in front of a chat
+                      # line, a count after a name). Held one step below
+                      # MUTED_COLOR rather than equal to it, which is the future
+                      # palette change the old "deliberately the same shade"
+                      # note was reserving room for: chrome that sits next to
+                      # content should read as quieter than a system message
+                      # that is content in its own right. A date that occupies
+                      # its own column in a listing is not this — see
+                      # DATE_COLOR
+EMPHASIS_COLOR = 255  # near-white — the one value in a row of values that has
+                      # to read first, where VALUE_COLOR's soft white would make
+                      # every field on the row equally loud. A file's size among
+                      # its date and uploader is the case this was added for
+RULE_COLOR = 240  # dark gray — a horizontal rule or column divider, which is
+                  # structure rather than content and should stay at the quiet
+                  # end of the ramp. Previously these five rules borrowed
+                  # MUTED_COLOR as "the dimmest value this palette has", which
+                  # stopped being true when MUTED_COLOR was raised for legibility
 SUCCESS_COLOR = 82  # vivid green — completed user actions and healthy states
 ERROR_COLOR = 196  # red — failed actions and unavailable/error states
 MENU_KEY_COLOR = 46  # bright green — the actual valid keystroke in a menu option
 SELF_COLOR = 201  # bright magenta — the user's own name/messages in chat, distinct
                   # from ACCENT_COLOR (used for everyone else's), so a user's own
                   # messages visually stand out from the rest of the conversation
-CHAT_BODY_COLOR = 252  # soft white — ordinary direct-chat message text, kept
+CHAT_BODY_COLOR = 255  # near-white — ordinary direct-chat message text, kept
                        # distinct from SELF_COLOR/ACCENT_COLOR identity labels so
-                       # a conversational line reads as speaker plus content
+                       # a conversational line reads as speaker plus content.
+                       # The brightest step of the ramp because in a chat window
+                       # what people said is the content and everything else on
+                       # the screen is apparatus around it — raised from 252
+                       # alongside MUTED_COLOR so the gap between a system
+                       # notice and a person talking survives the lift
 NICK_COLOR = 39   # sky blue — a `/nick` alias shown alone in the live chat stream
                   # (design doc), distinct from ACCENT_COLOR/SELF_COLOR so
                   # "this is a stand-in name, not necessarily the account's own" reads
@@ -60,6 +89,19 @@ GATE_COLOR = 208  # orange — an access gate a resource carries (a minimum age,
                   # A separate named constant rather than reusing
                   # CHANNEL_TYPE_COLOR directly, matching this module's own
                   # "one constant per meaning" convention.
+AUTHOR_COLOR = 79  # aquamarine — a person credited in their own column of a
+                   # listing (a file's uploader), where the name is a field the
+                   # caller scans down rather than a navigable item (ACCENT_COLOR)
+                   # or a speaker in a conversation (SELF_COLOR/NICK_COLOR).
+                   # Deliberately not green: VERIFIED_COLOR already means
+                   # "this name was checked", and an uncoloured column of
+                   # uploaders is how attribution came to be the one field on a
+                   # file row with no colour at all
+DATE_COLOR = 110  # soft steel blue — a date or time occupying its own column in a
+                  # listing, where it is a field being compared down the column
+                  # rather than chrome attached to something else (that is
+                  # METADATA_COLOR). Paler and greyer than LABEL_COLOR's
+                  # saturated azure, which never appears in the same table
 TOPIC_COLOR = 141  # light purple — the chat status line's quoted channel topic
 PRIVILEGE_COLOR = 196  # red — a user's own moderator/SysOp badge ("[mod]",
                        # "[sysop]") in the chat status line, distinct from the

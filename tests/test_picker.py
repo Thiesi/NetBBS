@@ -1293,6 +1293,57 @@ def test_arrow_down_moves_the_highlight_and_bells_past_the_last_row():
     assert result["value"] is None
 
 
+def test_the_highlighted_row_is_a_reverse_video_bar():
+    """Dogfood feedback: a cursor drawn as "the accent color, but bold"
+    is invisible on a row whose name is already that accent color. The
+    highlight is now reverse video, which owes nothing to the caller's
+    palette.
+
+    Asserted on the raw bytes, not on `_visible()` output -- the whole
+    point of this fix is the escape sequences the other arrow tests strip.
+    """
+    items = ["alpha", "beta", "gamma"]
+    reverse = b"\x1b[7m"
+
+    async def handler(session: Session):
+        await pick_item(
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1,
+            title="Items", empty_message="none",
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await skip_initial_negotiation(reader)
+            data = await _read_until_quiet(reader)
+            # Nothing is highlighted yet, so nothing is inverted.
+            assert reverse not in data
+
+            writer.write(_DOWN)
+            await writer.drain()
+            data = await _read_until_quiet(reader)
+            assert reverse in data, "the highlighted row is not inverted"
+
+            # The bar is continuous: every segment of the row carries the
+            # attribute, so the selector, the reference and the name are
+            # each inside their own inverted run rather than one field
+            # being inverted and the rest left plain.
+            row = [line for line in data.split(b"\r\n") if b"alpha" in line]
+            assert row, "the highlighted row was not redrawn"
+            assert row[0].count(reverse) >= 3, row[0]
+
+            writer.write(b"b")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
 def test_arrow_up_from_unhighlighted_lands_on_the_last_row_and_bells_past_the_first():
     result = {}
     items = ["alpha", "beta", "gamma"]

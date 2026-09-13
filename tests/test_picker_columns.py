@@ -19,6 +19,7 @@ import re
 import pytest
 
 from netbbs.net.picker import (
+    _reverse_row,
     _COLUMN_GUTTER,
     _MAX_TABLE_NAME_WIDTH,
     _MIN_TABLE_NAME_WIDTH,
@@ -595,3 +596,27 @@ def test_the_fallback_name_yields_before_the_gates_do():
     )
     row = [line for line in _plain(session.output).split(chr(10)) if re.match(r"^\s{2}\d\d\. ", line)][0]
     assert "18+ name+" in row, row
+
+
+def test_a_truncated_highlighted_row_reverses_its_ellipsis_too():
+    """Codex review. `colored_truncate` appended its "..." after the
+    styled segments, unstyled -- so a highlighted row long enough to be
+    cut ended its inverted bar three columns early and handed the last
+    three cells back to the terminal's normal attributes.
+
+    A row long enough to truncate is not an edge case: on the supported
+    40-column floor it is most of them.
+    """
+    from netbbs.rendering import colored_truncate
+
+    segments = [("a name far too long for this width", None)]
+    plain = colored_truncate(segments, 20)
+    assert plain.endswith("...")
+
+    reversed_row = colored_truncate(
+        [(text, _reverse_row) for text, _ in segments], 20, ellipsis_color=_reverse_row
+    )
+    assert reversed_row.endswith("\x1b[7m...\x1b[0m"), reversed_row
+    # Nothing between the last inverted run and the end of the line is
+    # left unstyled, which is the whole promise of a selection bar.
+    assert not reversed_row.endswith("\x1b[0m..."), reversed_row

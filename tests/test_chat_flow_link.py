@@ -26,7 +26,7 @@ from netbbs.chat.scrollback import get_scrollback
 from netbbs.link.boards import LinkContext
 from netbbs.link.channels import link_channel, materialize_carried_channel
 from netbbs.link.enforcement import ensure_node_subject
-from netbbs.link.events import ChannelMessage
+from netbbs.link.events import ChannelMessage, build_channel_genesis
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import LinkNode, RealtimeFrame
 from netbbs.link.realtime_channels import LiveChannelBridge
@@ -82,6 +82,36 @@ def channel(db, sysop):
 @pytest.fixture
 def node_identity():
     return bootstrap_node_identity("thisnode")
+
+
+@pytest.fixture
+def origin_node_identity():
+    """The node a carried channel came from. Distinct from
+    `node_identity`, which is this node."""
+    return bootstrap_node_identity("elsewhere")
+
+
+@pytest.fixture
+def carried_channel(db, origin_node_identity):
+    """A channel this node carries: Linked, and originated somewhere
+    else.
+
+    The real-time tests below used `link_channel(db, channel,
+    node_identity=node_identity)` instead, which makes *this* node the
+    origin -- and a node never dials itself. They passed anyway because
+    the check for that lived inside `ensure_live_subscription`, which
+    every one of them monkeypatched away, so the scenario under test was
+    one the product cannot reach. `chat_flow` now asks before it
+    announces anything, and asks the real question.
+    """
+    genesis = build_channel_genesis(
+        signing_identity=origin_node_identity.signing_key,
+        origin_fingerprint=origin_node_identity.fingerprint,
+        channel_id="carried-lobby",
+        name="lobby",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    return materialize_carried_channel(db, genesis)
 
 
 def _link_context_for(node_identity, *, registry=None, bridge=None) -> LinkContext:
@@ -270,8 +300,59 @@ def test_message_join_and_leave_in_a_linked_channel_are_pushed_live_to_a_real_su
     }
 
 
+def test_a_local_channel_says_nothing_about_real_time_origins(
+    db, lane, hub, presence, channel, alice, node_identity
+):
+    """Dogfood report: entering a local channel showed
+
+        (No real-time link to this channel's origin right now -- new
+        messages will still arrive after the next sync.)
+
+    on a channel with no origin but this node, preceded by a
+    "(Connecting to this channel's real-time origin...)" for a dial that
+    was never going to happen. `ensure_live_subscription` returns `None`
+    both for "the origin would not answer" and for "there is no origin",
+    and the flow could not tell them apart -- so it reported the first
+    whenever it saw the second.
+
+    The channel here is deliberately *not* Linked, and the node is
+    deliberately fully equipped with a registry and a bridge: the point
+    is that a node able to dial still has nothing to dial here.
+    """
+    registry = LinkRealtimeSessionRegistry(own_fingerprint=node_identity.fingerprint)
+    bridge = LiveChannelBridge(hub=hub, lane=lane, presence=presence, registry=registry)
+    link_context = _link_context_for(node_identity, registry=registry, bridge=bridge)
+
+    session, _action = asyncio.run(
+        _run(lane, hub, presence, channel, alice, ["hello", "/quit"], link_context=link_context)
+    )
+
+    written = "\n".join(session.written)
+    assert "real-time" not in written.lower(), written
+
+
+def test_a_channel_this_node_originated_says_nothing_either(
+    db, lane, hub, presence, channel, alice, node_identity
+):
+    """The other half of "nothing to dial": Linked, but this node is the
+    origin. A node does not dial itself, and telling its callers the link
+    to itself is down would be the same untruth in a rarer place."""
+    link_channel(db, channel, node_identity=node_identity)
+
+    registry = LinkRealtimeSessionRegistry(own_fingerprint=node_identity.fingerprint)
+    bridge = LiveChannelBridge(hub=hub, lane=lane, presence=presence, registry=registry)
+    link_context = _link_context_for(node_identity, registry=registry, bridge=bridge)
+
+    session, _action = asyncio.run(
+        _run(lane, hub, presence, channel, alice, ["hello", "/quit"], link_context=link_context)
+    )
+
+    written = "\n".join(session.written)
+    assert "real-time" not in written.lower(), written
+
+
 def test_chat_loop_subscribes_to_a_linked_channels_origin_and_unsubscribes_on_quit(
-    db, lane, hub, presence, channel, alice, node_identity, monkeypatch
+    db, lane, hub, presence, carried_channel, alice, node_identity, monkeypatch
 ):
     """The *inbound*-subscribe half of the wiring: `_chat_loop` calls
     `ensure_live_subscription` on join and sends `unsubscribe` on the way
@@ -282,7 +363,8 @@ def test_chat_loop_subscribes_to_a_linked_channels_origin_and_unsubscribes_on_qu
     cleans it up on exit, without a real-network race against a
     background task racing a scripted FakeSession's own near-instant
     `/quit`."""
-    link_channel(db, channel, node_identity=node_identity)  # this node is the origin
+    # A channel this node *carries* -- see the `carried_channel` fixture for what this used to be and why it could not happen.
+    channel = carried_channel
 
     calls: list[dict] = []
     sent_frames: list = []
@@ -326,7 +408,7 @@ def test_chat_loop_subscribes_to_a_linked_channels_origin_and_unsubscribes_on_qu
 
 
 def test_a_second_local_caller_still_watching_keeps_the_origin_subscription_alive_when_the_first_leaves(
-    db, lane, hub, presence, channel, alice, node_identity, monkeypatch
+    db, lane, hub, presence, carried_channel, alice, node_identity, monkeypatch
 ):
     """Issue #159: the live subscription to a linked channel's origin is
     a node-level resource (`LiveChannelBridge.register_local_interest`/
@@ -337,7 +419,8 @@ def test_a_second_local_caller_still_watching_keeps_the_origin_subscription_aliv
     be wrong the moment a *second* local caller is also relying on the
     same feed: the first to `/quit` would send `unsubscribe`
     unconditionally and silently cut off live delivery for the other."""
-    link_channel(db, channel, node_identity=node_identity)
+    # A channel this node *carries* -- see the `carried_channel` fixture for what this used to be and why it could not happen.
+    channel = carried_channel
     bob = create_user(db, "bob", password="hunter2", user_level=10)
 
     calls: list[dict] = []
@@ -396,14 +479,15 @@ def test_a_second_local_caller_still_watching_keeps_the_origin_subscription_aliv
 
 
 def test_chat_loop_announces_the_real_time_link_coming_up_and_going_down(
-    db, lane, hub, presence, channel, alice, node_identity, monkeypatch
+    db, lane, hub, presence, carried_channel, alice, node_identity, monkeypatch
 ):
     """Design doc §8.10.2: the caller sees connecting/live/offline
     state, honestly -- monkeypatched (see the sibling test above for
     why) with a fake session whose `closed` event the test controls
     directly, so both the "is up" and "was lost" announcements are
     deterministic rather than racing a real network dial."""
-    link_channel(db, channel, node_identity=node_identity)
+    # A channel this node *carries* -- see the `carried_channel` fixture for what this used to be and why it could not happen.
+    channel = carried_channel
 
     class _FakeSession:
         def __init__(self):
@@ -435,11 +519,12 @@ def test_chat_loop_announces_the_real_time_link_coming_up_and_going_down(
 
 
 def test_chat_loop_reports_an_incompatible_real_time_protocol(
-    db, lane, hub, presence, channel, alice, node_identity, monkeypatch
+    db, lane, hub, presence, carried_channel, alice, node_identity, monkeypatch
 ):
     from netbbs.link.protocol import RealtimeProtocolVersionError
 
-    link_channel(db, channel, node_identity=node_identity)
+    # A channel this node *carries* -- see the `carried_channel` fixture for what this used to be and why it could not happen.
+    channel = carried_channel
 
     async def incompatible_subscription(**kwargs):
         raise RealtimeProtocolVersionError(
@@ -464,9 +549,10 @@ def test_chat_loop_reports_an_incompatible_real_time_protocol(
 
 
 def test_chat_loop_announces_a_lost_real_time_link_while_still_in_the_channel(
-    db, lane, hub, presence, channel, alice, node_identity, monkeypatch
+    db, lane, hub, presence, carried_channel, alice, node_identity, monkeypatch
 ):
-    link_channel(db, channel, node_identity=node_identity)
+    # A channel this node *carries* -- see the `carried_channel` fixture for what this used to be and why it could not happen.
+    channel = carried_channel
 
     class _FakeSession:
         def __init__(self):
@@ -527,7 +613,7 @@ def test_chat_loop_announces_a_lost_real_time_link_while_still_in_the_channel(
 
 
 def test_chat_loop_renders_a_pending_remote_scrollback_snapshot_once_live_comes_up(
-    db, lane, hub, presence, channel, alice, node_identity, monkeypatch
+    db, lane, hub, presence, carried_channel, alice, node_identity, monkeypatch
 ):
     """Issue #194: `_subscribe_live` picks up whatever `LiveChannelBridge.
     pop_channel_scrollback` already has waiting for this channel right
@@ -539,7 +625,8 @@ def test_chat_loop_renders_a_pending_remote_scrollback_snapshot_once_live_comes_
     interest_reference_counts_holders_per_channel` already uses -- the
     poll's first attempt finds it immediately, so this doesn't race
     the scripted `/quit`'s own near-instant cleanup."""
-    link_channel(db, channel, node_identity=node_identity)
+    # A channel this node *carries* -- see the `carried_channel` fixture for what this used to be and why it could not happen.
+    channel = carried_channel
 
     class _FakeSession:
         def __init__(self):
@@ -581,14 +668,15 @@ def test_chat_loop_renders_a_pending_remote_scrollback_snapshot_once_live_comes_
 
 
 def test_chat_loop_shows_no_scrollback_catch_up_when_nothing_is_pending(
-    db, lane, hub, presence, channel, alice, node_identity, monkeypatch
+    db, lane, hub, presence, carried_channel, alice, node_identity, monkeypatch
 ):
     """The ordinary case -- an empty local scrollback at the origin means
     `_handle_subscribe` never sends a `scrollback_snapshot` frame at all
     (tests/test_link_realtime_channels.py::test_no_scrollback_snapshot_
     is_sent_for_a_channel_with_empty_local_scrollback), so nothing is
     ever pending here to pop -- the catch-up section must not appear."""
-    link_channel(db, channel, node_identity=node_identity)
+    # A channel this node *carries* -- see the `carried_channel` fixture for what this used to be and why it could not happen.
+    channel = carried_channel
 
     class _FakeSession:
         def __init__(self):

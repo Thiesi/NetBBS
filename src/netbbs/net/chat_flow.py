@@ -183,6 +183,7 @@ from netbbs.rendering import (
     HEADER_COLOR,
     MENU_KEY_COLOR,
     MUTED_COLOR,
+    RULE_COLOR,
     NICK_COLOR,
     PRIVILEGE_COLOR,
     SELF_COLOR,
@@ -1434,7 +1435,16 @@ def _render_channel_message(
         if message.external_source == "mrc":
             line = f"{label} {_mrc_body(db, viewer, message.body)}"
         else:
-            line = f"{label} {sanitize_text(message.body)}"
+            # Dogfood feedback: "system messages are barely readable, and
+            # actual messages are just slightly better". The bodies were
+            # better because they had no color at all -- the terminal's
+            # own default foreground, which is the one shade this palette
+            # never got to choose. CHAT_BODY_COLOR is what direct chat
+            # has always used for exactly this span; a channel message is
+            # the same thing with a different envelope. Its own reset
+            # terminates the span, so it composes beside the label
+            # without nesting, the same way the MRC branch above does.
+            line = f"{label} " + colored(sanitize_text(message.body), fg_color=CHAT_BODY_COLOR)
     durable_author = _durable_link_author(db, message)
     author_fingerprint = (
         message.author_fingerprint
@@ -1577,7 +1587,7 @@ async def _deliver_remote_scrollback_snapshot(
         )
     )
     rule_char = "─" if unicode_style else "-"
-    divider_color = 238 if truecolor else MUTED_COLOR
+    divider_color = 238 if truecolor else RULE_COLOR
     await deliver(colored(rule_char * min(terminal_width, 78), fg_color=divider_color))
 
 
@@ -3569,13 +3579,34 @@ _REMOTE_SCROLLBACK_POLL_ATTEMPTS = 20
 
 
 def _input_prompt(accent_color: int = ACCENT_COLOR, unicode_style: bool = False) -> str:
-    glyph = "❯ " if unicode_style else "> "
+    # U+203A, not U+276F (dogfood report: the prompt was a hollow
+    # rectangle in PuTTY, and fine in Termux). Not PuTTY's own
+    # limitation -- U+276F lives in Dingbats, which the bitmap and
+    # legacy fonts a Windows terminal reaches for by default simply do
+    # not cover, so the terminal draws the missing-glyph box. U+203A is
+    # the same shape one weight lighter, sits in cp1252, and is in
+    # every font that has ever shipped with Windows -- it is already
+    # what every masthead breadcrumb in the product uses, on the same
+    # terminals, without complaint.
+    glyph = "› " if unicode_style else "> "
     return colored(glyph, fg_color=accent_color, bold=True)
+
+
+def _has_remote_origin():
+    """`netbbs.link.realtime_channels.has_remote_origin`, imported at call
+    time. Same reasoning as `_subscribe_live`'s own lazy import: that
+    module pulls in `aiohttp` through `netbbs.link.transport`, which this
+    one must not require merely to be imported. Only ever called on a
+    node whose `realtime_bridge` exists, which means the import already
+    succeeded once at startup."""
+    from netbbs.link.realtime_channels import has_remote_origin
+
+    return has_remote_origin
 
 
 def _shelf_divider(width: int, *, unicode_style: bool = False, truecolor: bool = False) -> str:
     rule_char = "─" if unicode_style else "-"
-    color = 238 if truecolor else MUTED_COLOR
+    color = 238 if truecolor else RULE_COLOR
     return colored(rule_char * width, fg_color=color)
 
 
@@ -4344,7 +4375,7 @@ async def _chat_loop(
                 )
             )
             rule_char = "─" if unicode_style else "-"
-            divider_color = 238 if truecolor else MUTED_COLOR
+            divider_color = 238 if truecolor else RULE_COLOR
             await session.write_line(
                 colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
             )
@@ -4795,6 +4826,22 @@ async def _chat_loop(
             link_context is not None
             and link_context.realtime_registry is not None
             and link_context.realtime_bridge is not None
+            # Dogfood feedback: entering a *local* channel announced
+            # "(Connecting to this channel's real-time origin...)" and
+            # then "(No real-time link to this channel's origin right
+            # now -- new messages will still arrive after the next
+            # sync.)" -- a warning about a link that was never supposed
+            # to exist, on a channel with no origin but this node. The
+            # notices were right for the case they were written for and
+            # meaningless for every other one: `ensure_live_subscription`
+            # returns `None` both for "the origin would not answer" and
+            # for "there is no origin", and this flow could not tell the
+            # two apart. Asked before anything is announced, so a local
+            # channel says nothing rather than saying something
+            # reassuring.
+            and await lane.run(
+                _has_remote_origin(), channel, link_context.node_identity.fingerprint
+            )
         ):
 
             async def _subscribe_live() -> None:

@@ -47,6 +47,7 @@ from netbbs.rendering import (
     LABEL_COLOR,
     METADATA_COLOR,
     MUTED_COLOR,
+    VALUE_COLOR,
     MenuEntry,
     action_bar,
     colored,
@@ -213,7 +214,7 @@ def _field_value_lines(
         label_width = display_width(f"{marker}{f.label}: ")
         available = max(1, terminal_width - label_width)
         value_lines = wrap_to_width(value, available) or [""]
-        val_color = 252 if is_selected else MUTED_COLOR
+        val_color = VALUE_COLOR if is_selected else MUTED_COLOR
         lines.append(f"{prefix}: {colored(value_lines[0], fg_color=val_color)}")
         indent = " " * label_width
         for continuation in value_lines[1:]:

@@ -181,6 +181,45 @@ def resolve_display_preferences(db: Database) -> tuple[str, str]:
     return fmt, tz_name
 
 
+def _parse_stored_timestamp(iso_timestamp: str) -> datetime.datetime:
+    """Parse a stored or received timestamp into an aware UTC datetime.
+
+    `utc_now_iso()`'s own shape first, since that is what every locally
+    written row holds and the strict parse is the cheap common case. Any
+    other RFC-3339/ISO-8601 spelling second -- `2026-01-01T00:00:00Z`,
+    `...+00:00`, `...+02:00` -- because not every timestamp this renders
+    was written by this node. A carried channel message's `created_at`
+    comes off the wire from another implementation of Link (issue #71),
+    and a foreign field must never be able to take a caller's chat
+    session down, which is exactly what a bare `strptime` here would do
+    the moment somebody's clock serialized an offset instead of a `Z`.
+
+    A naive timestamp is read as UTC, matching the stored convention;
+    anything genuinely unparseable still raises, since that is a bug
+    worth seeing rather than a string worth guessing at. It raises
+    `ValueError` and only `ValueError`: `fromisoformat` accepts
+    `0001-01-01T00:00:00+23:59` quite happily and then `astimezone` runs
+    off the end of the representable range, so the failure arrives as
+    `OverflowError` from normalization rather than from parsing (Codex
+    review, and the same trap `netbbs.link.protocol.
+    _parse_aware_timestamp` documents for its own callers). A caller
+    guarding one call site should not have to know that.
+    """
+    try:
+        return datetime.datetime.strptime(iso_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=datetime.timezone.utc
+        )
+    except ValueError:
+        pass
+    parsed = datetime.datetime.fromisoformat(iso_timestamp)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    try:
+        return parsed.astimezone(datetime.timezone.utc)
+    except (OverflowError, OSError) as exc:
+        raise ValueError(f"{iso_timestamp!r} cannot be normalized to UTC") from exc
+
+
 def format_for_display(
     iso_timestamp: str,
     db: Database | None = None,
@@ -206,6 +245,13 @@ def format_for_display(
     Getting the format right without also converting to the right
     timezone still leaves users looking at UTC clock time, just reshaped.
 
+    Raises `ValueError` for a timestamp that cannot be shown at all --
+    either because it cannot be parsed, or because the resolved display
+    timezone puts it outside the representable range. Both are the same
+    answer to a caller ("there is no string to show here"), so they
+    arrive as the same exception; `netbbs.chat.timestamps` depends on
+    that to drop a stamp without dropping the line it belongs to.
+
     Whatever format/timezone are resolved are re-validated here
     regardless of source (see `is_valid_display_format` /
     `is_valid_timezone`) and fall back to the hardcoded defaults if
@@ -213,9 +259,7 @@ def format_for_display(
     setters (writing directly via `netbbs.config.set_config`, or a future
     per-user preference path that doesn't route through validation).
     """
-    parsed = datetime.datetime.strptime(iso_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
-        tzinfo=datetime.timezone.utc
-    )
+    parsed = _parse_stored_timestamp(iso_timestamp)
 
     if override_format is not None:
         fmt = override_format
@@ -237,5 +281,19 @@ def format_for_display(
     if not is_valid_timezone(tz_name):
         tz_name = _DEFAULT_DISPLAY_TIMEZONE
 
-    localized = parsed.astimezone(ZoneInfo(tz_name))
+    try:
+        localized = parsed.astimezone(ZoneInfo(tz_name))
+    except (OverflowError, OSError) as exc:
+        # The *second* place an instant can run off the end of the
+        # representable range (Codex review). `_parse_stored_timestamp`
+        # already normalizes to UTC, and that succeeding says nothing
+        # about the display zone: `9999-12-31T23:59:59Z` is a perfectly
+        # ordinary timestamp a peer may legitimately send, and converting
+        # it to a +14 zone like Pacific/Kiritimati overflows. Raised as
+        # `ValueError` for the same reason the parse half is -- this
+        # function has one failure type, so a caller guarding one call
+        # site does not have to know which half threw.
+        raise ValueError(
+            f"{iso_timestamp!r} cannot be represented in display timezone {tz_name!r}"
+        ) from exc
     return localized.strftime(fmt)

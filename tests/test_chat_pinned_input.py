@@ -21,6 +21,7 @@ import asyncio
 
 import pytest
 
+from netbbs.net.chat_flow import _input_prompt
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub, ParticipantId
@@ -29,7 +30,7 @@ from netbbs.chat.presence import PresenceRegistry
 from netbbs.net import char_input, chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.net.session import Session
-from netbbs.rendering import move_cursor, set_scroll_region
+from netbbs.rendering import CHAT_BODY_COLOR, colored, move_cursor, set_scroll_region
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
@@ -176,7 +177,8 @@ def test_pinned_ui_min_height_requires_four_rows(lane, hub, presence, mailbox, c
     )
     text = _written_text(session)
     assert "\x1b[r" not in text  # scroll region never set, so never reset
-    assert "❯ " not in text and "> " not in text  # no pinned input row painted either
+    assert _input_prompt(unicode_style=True) not in text
+    assert _input_prompt(unicode_style=False) not in text
 
 
 # -- the real, byte-fed session: live_buffer/lock genuinely exercised -----
@@ -334,10 +336,12 @@ def test_in_progress_typing_survives_an_incoming_message(lane, hub, presence, ma
     # through correctly on the far side of the interruption, proving the
     # underlying buffer (not just its on-screen echo) survived intact.
     # Anchored to alice's own self-colored echo of her own message
-    # (`<alice>` immediately followed by an SGR reset, then " hello")
-    # specifically, not a bare "hello" substring, which bob's own
-    # distinct "hello there" would also satisfy.
-    assert "<alice>\x1b[0m hello" in text
+    # (`<alice>` immediately followed by an SGR reset, then the body in
+    # its own CHAT_BODY_COLOR span) specifically, not a bare "hello"
+    # substring, which bob's own distinct "hello there" would also
+    # satisfy. The body used to be uncolored text right after that
+    # reset; it is its own span now.
+    assert "<alice>\x1b[0m " + colored("hello", fg_color=CHAT_BODY_COLOR) in text
 
 
 def test_tab_completion_candidate_list_does_not_land_on_the_status_row(

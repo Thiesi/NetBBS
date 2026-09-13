@@ -31,7 +31,16 @@ def get_config(db: Database, key: str, default: str | None = None) -> str | None
     return row["value"] if row is not None else default
 
 
-def set_config(db: Database, key: str, value: str) -> None:
+def set_config_without_commit(db: Database, key: str, value: str) -> None:
+    """`set_config` for a caller already inside its own transaction --
+    same shape as `netbbs.moderation.log.record_action_without_commit`
+    and there for the same reason: committing here would end the
+    caller's `BEGIN IMMEDIATE` early and split what it meant to be one
+    atomic change into two.
+
+    `netbbs.auth.users.delete_user` uses it to drop a guest designation
+    in the same breath as removing the account it names (issue #531).
+    """
     db.connection.execute(
         """
         INSERT INTO node_config (key, value) VALUES (?, ?)
@@ -39,6 +48,10 @@ def set_config(db: Database, key: str, value: str) -> None:
         """,
         (key, value),
     )
+
+
+def set_config(db: Database, key: str, value: str) -> None:
+    set_config_without_commit(db, key, value)
     db.connection.commit()
 
 

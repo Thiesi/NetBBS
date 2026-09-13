@@ -21,6 +21,7 @@ from netbbs.rendering import (
     HEADER_COLOR,
     LABEL_COLOR,
     MUTED_COLOR,
+    RULE_COLOR,
     MenuEntry,
     action_bar,
     colored,
@@ -418,7 +419,7 @@ async def review_composition(
         )
         await session.write_line(body_prefix)
         rule_char = "─" if unicode_style else "-"
-        divider_color = 238 if truecolor else MUTED_COLOR
+        divider_color = 238 if truecolor else RULE_COLOR
         preview_rule = colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
         await session.write_line(preview_rule)
         await session.write_line(_preview_body(body, session.terminal_width))
