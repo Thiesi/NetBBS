@@ -204,3 +204,53 @@ def test_the_descriptive_nav_floor_counts_what_the_page_budget_counts():
                 assert size >= _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV, (
                     f"{width}x{height}: descriptive nav left only {size} items"
                 )
+
+
+# -- What the second review round found --------------------------------
+
+
+@pytest.mark.parametrize("width,height", [(120, 16), (100, 16), (120, 20), (80, 16)])
+def test_the_tallest_nav_is_the_one_reserved_for(width, height):
+    """"Worst case" is the tallest *layout*, not the longest entry list
+    (Codex review). `menu_grid` packs into more columns as the list
+    grows, so at 120x16 the six-entry form is three columns and four
+    rows while the five-entry one is a single column of ten -- the
+    fuller list is the shorter layout. Reserving from entry count alone
+    accepted the descriptive nav on a four-row estimate and then drew
+    ten."""
+    session = _render(width, height, description_level="brief", keys=["n", "b"])
+    assert session.rows_on_screen() <= height
+
+
+def test_create_counts_toward_the_reservation_too():
+    """The floor measured a nav without `[C]reate` while the render drew
+    one with it."""
+    from netbbs.net.picker import _nav_entries
+
+    with_create = _nav_entries(None, on_create=lambda: None)
+    without = _nav_entries(None)
+    assert len(with_create) == len(without) + 1
+
+
+def test_opening_on_a_stored_item_lands_on_a_page_that_holds_it():
+    """`start_stable_id` measured a page size in one generation and then
+    rendered in the next, re-reading a `sort_label` whose text can
+    differ between reads -- and a label that wraps differently gives a
+    different page size, so a target placed at index 15 could be
+    highlighted on a page that turned out to hold 14. Enter then raised
+    `IndexError` (Codex review)."""
+    labels = iter(["Activity", "Activity, newest first, including every archived entry"])
+
+    session = FakeSession(80, 24, ["\r"])
+    asyncio.run(
+        pick_item(
+            session, list(range(1, 80)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none",
+            sort_label=lambda: next(labels, "Activity"), on_sort=None,
+            start_stable_id=16,
+        )
+    )
+    # No IndexError, and the page it opened on is the page it drew.
+    assert session.rows_on_screen() <= 24

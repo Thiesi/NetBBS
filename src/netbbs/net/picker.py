@@ -604,12 +604,21 @@ async def pick_item(
     def _total_pages() -> int:
         return max(1, math.ceil(len(working_set) / _sized_page_size()))
 
-    async def _render() -> Sequence[T]:
+    async def _render(*, keep_generation: bool = False) -> Sequence[T]:
         nonlocal page_index, frozen, render_generation
         # Freeze for the duration of this render; see `_dimensions`.
         frozen = (session.terminal_width, session.terminal_height)
         # A new render is a new read of `sort_label`; see its cache.
-        render_generation += 1
+        #
+        # `keep_generation` is for the one caller that has *already*
+        # measured a page in this generation: `start_stable_id`'s
+        # placement (Codex review). Bumping here would re-read a label
+        # whose text can differ between reads, and a label that wraps
+        # differently gives a different page size -- so a target placed
+        # at index 15 of a 16-item page could be highlighted on a page
+        # that turned out to hold 14, and Enter raised `IndexError`.
+        if not keep_generation:
+            render_generation += 1
         try:
             return await _render_frozen()
         finally:
@@ -879,7 +888,10 @@ async def pick_item(
         await session.write("Choice: ")
         return page_items
 
-    page_items = await _render()
+    # The first render reuses the generation the placement above
+    # measured in, so both see the same `sort_label` and the same page
+    # size -- see `_render`.
+    page_items = await _render(keep_generation=start_stable_id is not None)
     while True:
         key = await _read_navigable_key(session, distinguish_ctrl_h=True)
 
@@ -1353,9 +1365,9 @@ def _render_nav(
             [("", entries)], width=width, height=height,
             description_level=description_level,
         )
-        # Measured against the *worst case* nav -- both Next and Prev --
-        # rather than this page's own entries (Codex review, and the
-        # deeper cause of the overflow it reported).
+        # Measured against the *tallest* nav any page of this list can
+        # produce, rather than this page's own entries (Codex review,
+        # twice).
         #
         # `_page_size` prices the tallest nav a page could need, because
         # a page has to fit whichever page it turns out to be. But the
@@ -1366,14 +1378,33 @@ def _render_nav(
         # had seen the floor fail and priced a one-row `action_bar`. The
         # render drew three rows the page had not paid for.
         #
-        # Deciding from the worst case settles it, and settles something
-        # else worth having: the nav no longer changes shape underneath
-        # the caller when they press [N].
-        worst_case = menu_grid(
-            [("", _nav_entries(on_sort, include_next=True, include_prev=True))],
-            width=width, height=height, description_level=description_level,
+        # And "tallest" is not "most entries". `menu_grid` packs into
+        # more columns as the list grows, so at 120x16 the six-entry
+        # form is three columns and four rows while the five-entry one
+        # is a single column of ten -- the fuller list is the *shorter*
+        # layout. Taking the maximum over the page shapes that can
+        # actually occur is the only measure that holds both ways.
+        #
+        # Deciding from that settles something else worth having too:
+        # the nav no longer changes shape underneath the caller when
+        # they press [N].
+        tallest = max(
+            (
+                menu_grid(
+                    [("", _nav_entries(
+                        on_sort, include_next=next_here, include_prev=prev_here,
+                        on_create=on_create,
+                    ))],
+                    width=width, height=height, description_level=description_level,
+                )
+                # Every combination a real page can be in: the only one
+                # that cannot happen is "neither", on a single-page
+                # list -- and that one is shorter than the rest anyway.
+                for next_here, prev_here in ((True, True), (True, False), (False, True))
+            ),
+            key=lambda nav: nav.count("\r\n"),
         )
-        descriptive_lines = worst_case.count("\r\n") + 1
+        descriptive_lines = tallest.count("\r\n") + 1
         # The same arithmetic `_page_size` will do, including the
         # trailer (Codex review). This floor decides whether the taller
         # nav is worth its rows by asking how many items would be left;
@@ -1386,7 +1417,7 @@ def _render_nav(
         available = height - (
             _RESERVED_LINES + descriptive_lines
             + _trailer_rows(
-                worst_case, trailer,
+                tallest, trailer,
                 width=width, unicode_style=unicode_style,
                 description_level=description_level,
             )
