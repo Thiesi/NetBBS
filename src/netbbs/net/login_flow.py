@@ -1102,11 +1102,28 @@ async def _login(
             # returned closes that, and closes any future window opened
             # by something else awaiting between here and the return.
             refreshed = touch_last_login(db, guest)
-            if not guest_is_eligible(db, refreshed):
+            if refreshed is None or not guest_is_eligible(db, refreshed):
+                # `None` is the account having been deleted in that same
+                # window -- a refusal, not a crash (Codex review: this
+                # used to subscript the missing row and drop the
+                # session).
                 await session.write_line(
                     colored("Guest access is not available.", fg_color=ERROR_COLOR)
                 )
                 continue
+            if is_blocked(db, refreshed):
+                # Checked again, against the refreshed row, for the same
+                # reason the eligibility check is (Codex review). A block
+                # landing while the `write_line` above awaited transport
+                # I/O would otherwise have been applied to a caller who
+                # had already passed the pre-await check -- and the
+                # session-revocation watcher would not have caught it
+                # afterwards either, since `account_still_active` reads
+                # account status and not the blocklist.
+                await session.write_line(
+                    colored("Your access to this system has been revoked.", fg_color=ERROR_COLOR)
+                )
+                return LoginOutcome.BLOCKED
 
             # This session proved no credential (Codex review). It is
             # still an ordinary account in every other respect -- that

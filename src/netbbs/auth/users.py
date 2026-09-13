@@ -572,19 +572,30 @@ def authorize_public_key(db: Database, username: str, verify_key: nacl.signing.V
     return _touch_last_login(db, row)
 
 
-def touch_last_login(db: Database, user: User) -> User:
-    """Record that `user` has just signed in, and return the refreshed
-    row.
+def touch_last_login(db: Database, user: User) -> User | None:
+    """Record that `user` has just signed in and return the refreshed
+    row, or `None` if the account is no longer there.
 
     The `User`-shaped counterpart to `_touch_last_login`, which every
     password and key path already reaches through its own `sqlite3.Row`.
     Guest login (issue #531) resolves an account without going through
     either, and skipping this left `last_login_at` stale on an account
     that was signing in daily.
+
+    The `None` is not defensive padding (Codex review): the guest path
+    calls this *after* awaiting transport I/O, so a SysOp deleting the
+    designated account in that window left `fetchone()` returning
+    nothing and `_touch_last_login` subscripting it -- a `TypeError`
+    that dropped the caller's whole session instead of the refusal the
+    login path already knows how to say. Callers holding a row they
+    read in the same breath will simply never see it.
     """
-    return _touch_last_login(db, db.connection.execute(
+    row = db.connection.execute(
         "SELECT * FROM users WHERE id = ?", (user.id,)
-    ).fetchone())
+    ).fetchone()
+    if row is None:
+        return None
+    return _touch_last_login(db, row)
 
 
 def _touch_last_login(db: Database, row: sqlite3.Row) -> User:

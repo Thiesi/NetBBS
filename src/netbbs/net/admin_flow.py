@@ -64,6 +64,7 @@ from zoneinfo import available_timezones
 import nacl.signing
 
 from netbbs.auth.users import (
+    SYSOP_LEVEL,
     AuthError,
     User,
     UserManagementError,
@@ -442,6 +443,7 @@ from netbbs.net.chat_channel_picker_banner import (
     load_chat_channel_picker_banner,
     set_chat_channel_picker_banner_enabled,
 )
+from netbbs.permissions.levels import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
     ALERT_COLOR,
@@ -1745,7 +1747,13 @@ async def _draw_system_menu(
         MenuEntry(
             label=menu_key("G", "uest access"),
             brief=(
-                f"Guest login as {stats['guest_username']}"
+                # Sanitized here because `menu_grid` does not do it for
+                # its callers (Codex review). Account creation rejects a
+                # username carrying C1 controls or a bidi override, but
+                # deliberately left rows that predate that check valid --
+                # so designating one of those could have injected
+                # terminal control into the SysOp's own Settings menu.
+                f"Guest login as {sanitize_text(stats['guest_username'])}"
                 if stats["guest_username"]
                 else "Guest login off; pre-login notice"
             ),
@@ -1965,30 +1973,6 @@ async def _node_name_screen(session: Session, lane: DatabaseLane, actor: User) -
             await session.write(reject_unhandled_key(choice))
 
 
-def _clearable_text_field(key: str, label: str):
-    """A text field a SysOp can actually empty again (issue #531).
-
-    The shared `text_field` treats a blank entry as "keep the current
-    value", which is right for a name that must always be *something*
-    but makes an optional setting impossible to unset -- and both fields
-    on the Guest Access screen are optional by design, since clearing
-    them is how guest login and the notice are turned off. `'none'`
-    clears, the same word and the same convention the numeric gate
-    fields already use for exactly this reason.
-    """
-
-    async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        current = draft.get(key) or ""
-        shown = current if current else "none"
-        await write_prompt(session, f"{label} [{shown}] (blank = keep, 'none' = clear): ")
-        raw = (await session.read_line()).strip()
-        if not raw:
-            return
-        draft[key] = "" if raw.lower() == "none" else raw
-
-    return prompt
-
-
 async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """Guest login and the pre-login notice (issue #531).
 
@@ -2059,12 +2043,20 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
             key="guest_username", hotkey="g", menu_text=menu_key("G", "uest account"),
             label="Guest account",
             render=lambda d: d.get("guest_username") or "(guest login off)",
-            # Not `text_field`: on this branch a blank entry means
-            # "keep", so a configured guest account could never be
-            # cleared and the help text below advertised a workflow that
-            # did not exist (Codex review). `'none'` clears it, matching
-            # the convention the numeric gate fields already use.
-            prompt=_clearable_text_field("guest_username", "Guest account"),
+            # Two Codex rounds landed on this one field. It could not
+            # be cleared at all at first -- the shared `text_field` read
+            # a blank entry as "keep", which is right for a name that
+            # must always be *something* and wrong for a setting whose
+            # off switch is emptiness. A `'none'` sentinel fixed that and
+            # introduced a smaller bug of its own: `RESERVED_USERNAMES`
+            # holds only `new`, so an account genuinely named "none"
+            # could never be designated.
+            #
+            # Neither is needed now. Issue #529 gave `text_field` the
+            # current value as an editable prefill, so erasing it and
+            # pressing Enter *is* the clear -- no sentinel, no word a
+            # SysOp cannot type.
+            prompt=text_field("guest_username"),
             brief="Account that signs in without a password",
             help=(
                 "An existing account callers may sign in as without a password. It stays an "
@@ -2077,7 +2069,7 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
             key="notice", hotkey="n", menu_text=menu_key("N", "otice"),
             label="Pre-login notice",
             render=lambda d: d.get("notice") or "(none)",
-            prompt=_clearable_text_field("notice", "Pre-login notice"),
+            prompt=text_field("notice"),
             brief="Shown before the login prompt",
             help=(
                 "A short line shown after the welcome banner and before the username prompt -- "

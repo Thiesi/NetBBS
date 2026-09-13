@@ -172,13 +172,20 @@ def test_no_notice_means_nothing_extra_is_written(db):
     assert "Username:" in "".join(session.written)
 
 
-def test_a_guest_session_cannot_add_an_ssh_key(db):
-    """Codex review. The guest is an ordinary account, and that is the
-    design -- but "may manage this account's credentials" is a question
-    about how the *session* got in, not about the account. An anonymous
-    caller who can add a key has converted temporary public access into
-    a credential that keeps working over SSH after a SysOp switches
-    guest access off."""
+def test_a_guest_session_cannot_manage_ssh_keys(db):
+    """Codex review, twice. The guest is an ordinary account, and that
+    is the design -- but "may manage this account's credentials" is a
+    question about how the *session* got in, not about the account.
+
+    The first fix guarded adding alone, which is the obvious harm: an
+    anonymous caller minting a key that keeps working over SSH after a
+    SysOp switches guest access off. `[R]emove a key` was still right
+    there, though, and removing the primary key changes the fingerprint
+    the account's Link events are authored under. So the guard belongs
+    to the screen, and this test drives the screen rather than either
+    action -- the version of it that called `_add_key` directly would
+    have passed against the code that still allowed removal.
+    """
     import netbbs.net.ssh_key_screen as keys
 
     guest = create_user(db, "guest", password="hunter2", user_level=1)
@@ -188,11 +195,11 @@ def test_a_guest_session_cannot_add_an_ssh_key(db):
     assert getattr(session, "authenticated_without_credential", False) is True
 
     session.written.clear()
-    session._lines = iter(["phone", "ssh-ed25519 AAAA"])
-    result = asyncio.run(keys._add_key(session, None, guest, changed_by=guest))
+    result = asyncio.run(keys.manage_ssh_keys_screen(session, None, guest, changed_by=guest))
 
-    text = "".join(session.written)
-    assert "without a password" in text
+    # `FakeSession.read_key` raises, so reaching the screen's own menu
+    # at all would fail this rather than quietly picking `[B]ack`.
+    assert "without a password" in "".join(session.written)
     assert result is guest
 
 
@@ -204,3 +211,87 @@ def test_an_ordinary_session_is_not_marked(db):
     _, session = _login(db, ["alice", "correct"])
 
     assert getattr(session, "authenticated_without_credential", False) is False
+
+
+# -- The window between the last check and the returned row ------------
+#
+# `touch_last_login` re-reads the account after the login path's final
+# await, so the row it hands back is not the row that was checked.
+# Patching it is how these reach that window: the wrapper stands in for
+# a SysOp acting while the caller's terminal write was in flight.
+
+
+def test_a_block_landing_during_the_final_await_is_caught(db):
+    """The pre-await `is_blocked` check has already passed by then, and
+    the session-revocation watcher would not have caught it afterwards
+    either -- `account_still_active` reads account status, not the
+    blocklist."""
+    guest = create_user(db, "guest", password="hunter2", user_level=1)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    set_guest_user(db, guest)
+
+    real = login_flow.touch_last_login
+
+    def blocking(database, user):
+        block_user(database, user, blocked_by=sysop, reason="during login")
+        return real(database, user)
+
+    login_flow.touch_last_login = blocking
+    try:
+        result, session = _login(db, ["guest"])
+    finally:
+        login_flow.touch_last_login = real
+
+    assert result is login_flow.LoginOutcome.BLOCKED
+    assert "revoked" in "".join(session.written)
+
+
+def test_a_promotion_landing_during_the_final_await_is_caught(db):
+    """The one this window was found through: the refreshed row came
+    back at level 255 and ran the session as a SysOp."""
+    from netbbs.auth.users import set_user_level
+
+    guest = create_user(db, "guest", password="hunter2", user_level=1)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    set_guest_user(db, guest)
+
+    real = login_flow.touch_last_login
+
+    def promoting(database, user):
+        set_user_level(database, user, SYSOP_LEVEL, changed_by=sysop)
+        return real(database, user)
+
+    login_flow.touch_last_login = promoting
+    try:
+        result, session = _login(db, ["guest", "hunter2", "guest", "hunter2", "guest", "hunter2"])
+    finally:
+        login_flow.touch_last_login = real
+
+    assert getattr(result, "user_level", 0) != SYSOP_LEVEL
+    assert "Password:" in "".join(session.written)
+
+
+def test_the_account_vanishing_during_the_final_await_is_a_refusal(db):
+    """Not a crash: the re-read returned no row and the login task
+    subscripted it, dropping the caller's session with a `TypeError`
+    instead of the refusal this path already knows how to say."""
+    from netbbs.auth.users import delete_user
+
+    guest = create_user(db, "guest", password="hunter2", user_level=1)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    set_guest_user(db, guest)
+
+    real = login_flow.touch_last_login
+
+    def deleting(database, user):
+        delete_user(database, user, deleted_by=sysop)
+        return real(database, user)
+
+    login_flow.touch_last_login = deleting
+    try:
+        result, session = _login(db, ["guest", "hunter2", "guest", "hunter2", "guest", "hunter2"])
+    finally:
+        login_flow.touch_last_login = real
+
+    assert result is login_flow.LoginOutcome.ATTEMPTS_EXHAUSTED
+    assert "Guest access is not available." in "".join(session.written)

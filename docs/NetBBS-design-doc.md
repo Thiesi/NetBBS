@@ -832,11 +832,19 @@ Three consequences follow, and are intended rather than gaps:
   `AUTOINCREMENT`, so SQLite hands a freed rowid to the next account created.
   Either alone would hand passwordless access to a replacement account.
 - A guest session **may not manage the account's credentials.** The guest is an
-  ordinary account in every other respect, but whether a session may add an SSH
-  key is a question about how that session authenticated, not about the
-  account: a caller who proved nothing must not be able to mint a credential
-  that outlives guest access being switched off. Signing in with the account's
-  own password reaches key management normally.
+  ordinary account in every other respect, but whether a session may touch an
+  SSH key is a question about how that session authenticated, not about the
+  account. The rule covers the whole key screen, not adding alone: a caller who
+  proved nothing must not be able to mint a credential that outlives guest
+  access being switched off, nor to strip the keys off a password-backed
+  account -- removing the primary key changes the fingerprint its Link events
+  are authored under. Signing in with the account's own password reaches key
+  management normally.
+- The re-checks are applied to the row that is **ultimately returned**, not
+  only to the one first resolved. The login path awaits transport I/O and then
+  re-reads the account to stamp `last_login_at`; a promotion, a block or a
+  deletion landing in that window would otherwise have been read too early to
+  matter. A deletion is a refusal like any other, not an error.
 
 A SysOp account may not be designated. Everything else about guest access is
 policy the SysOp chooses, but a passwordless SysOp login is not a choice worth
