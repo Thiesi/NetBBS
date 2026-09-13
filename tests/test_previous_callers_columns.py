@@ -196,3 +196,76 @@ def test_the_frame_stays_rectangular(tmp_path, width):
     framed = [line for line in plain.split("\n") if line.startswith(("║", "|"))]
     assert framed
     assert len({display_width(line) for line in framed}) == 1
+
+
+# -- Codex review -----------------------------------------------------
+
+
+def test_the_gradient_covers_the_name_not_its_padding(tmp_path):
+    """`name_color` is a callable on a truecolor session that hands its
+    whole segment to `gradient_text`. Padding the name before styling
+    spread a five-stop gradient across invisible trailing spaces, so a
+    short name like "bob" kept three characters of it and lost the
+    effect."""
+    db, viewer = _setup(tmp_path, ["bob"])
+    session = FakeSession()
+    session.supports_truecolor = True
+    asyncio.run(_show_previous_callers_screen(session, db, viewer, current_history_id=None))
+    db.close()
+
+    # The name is gradient-coloured one character at a time, so "bob"
+    # never appears as a literal run in the raw output: the row has to
+    # be found on the stripped text and then read back raw.
+    row = next(
+        line for line in session.output.split("\n") if "bob" in _SGR.sub("", line)
+    )
+    coloured = re.findall(r"\x1b\[38;2;\d+;\d+;\d+m(.)", row)
+    assert "".join(coloured).count("b") == 2 and "o" in coloured, coloured
+
+    # The real assertion is how *many* characters carry a gradient stop.
+    # The name column is dozens wide at 80 columns; with the padding
+    # inside the gradient every one of those columns took a stop. Now
+    # only the three letters do, plus the frame's own rail characters,
+    # which are coloured separately by `_framed`/`_rule` and legitimately
+    # include a space.
+    assert len(coloured) < 10, coloured
+
+
+def test_a_tab_in_the_timestamp_format_does_not_break_the_columns(tmp_path, monkeypatch):
+    """`sanitize_text` preserves a tab, `display_width` scores it zero,
+    and the terminal expands it -- so a node whose display format
+    contained one would measure its timestamp short and drag the column
+    after it along."""
+    import netbbs.net.profile_flow as pf
+
+    db, viewer = _setup(tmp_path, ["al", "Bartholomew"])
+    monkeypatch.setattr(pf, "format_for_display", lambda *a, **k: "13.09\t04:16")
+    session = FakeSession()
+    asyncio.run(_show_previous_callers_screen(session, db, viewer, current_history_id=None))
+    db.close()
+
+    plain = _SGR.sub("", session.output)
+    assert "\t" not in plain
+    framed = [line for line in plain.split("\n") if line.startswith(("║", "|"))]
+    assert len({display_width(line) for line in framed}) == 1
+
+
+def test_the_privacy_placeholder_is_never_cut_into_nonsense(tmp_path):
+    """At the 40-column minimum the name column is narrower than
+    "(name hidden)". Truncating it produced "(name hidde" -- malformed,
+    and ambiguous about whether the name is hidden or merely long."""
+    from netbbs.session_history import set_session_history_name_visible
+
+    db, viewer = _setup(tmp_path, ["visible_one"])
+    hidden = create_user(db, "hidden_one", password="hunter2", user_level=10)
+    set_session_history_name_visible(db, hidden, False)
+    history_id = record_session_start(db, hidden)
+    record_session_end(db, history_id)
+
+    session = FakeSession(width=40)
+    asyncio.run(_show_previous_callers_screen(session, db, viewer, current_history_id=None))
+    db.close()
+
+    plain = _SGR.sub("", session.output)
+    assert "(name hidde\n" not in plain and "(name hidde " not in plain
+    assert "(hidden)" in plain or "(name hidden)" in plain

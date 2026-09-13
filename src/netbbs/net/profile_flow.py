@@ -280,12 +280,26 @@ async def _show_previous_callers_screen(
     # The sibling screen in this file already did this right
     # (`_show_logoff_summary_screen` pads with `f" {label:<12}"`); this
     # one was simply overlooked.
-    def _pad(text: str, width: int) -> str:
-        """Fit to exactly `width` *display* columns. A CJK handle is two
-        columns per character, so padding by `len` is how a panel's
-        columns wander from row to row."""
-        text = cut_to_width(text, width)
-        return text + " " * max(0, width - display_width(text))
+    def _fit(text: str, width: int) -> tuple[str, str]:
+        """`(visible, padding)` for one cell, fitted to `width` display
+        columns.
+
+        Returned as two pieces rather than one padded string (Codex
+        review) because `name_color` is a *callable* on a truecolor
+        session -- it hands its whole segment to `gradient_text`. Pad
+        before styling and the gradient spreads itself across the
+        invisible trailing spaces, so a short name like "bob" gets three
+        characters' worth of a five-stop gradient and loses the effect
+        entirely. The padding is emitted as its own unstyled segment.
+
+        Tabs are normalized first: `sanitize_text` preserves them,
+        `display_width` scores them zero, and the terminal expands them
+        -- so a timestamp format containing one (`%B\t%Y`) would be
+        measured short and take its column with it. AGENTS.md: "Width
+        measurement must normalize tabs."
+        """
+        text = cut_to_width(text.replace("\t", " "), width)
+        return text, " " * max(0, width - display_width(text))
 
     def _name_of(entry) -> str:
         return sanitize_text(
@@ -293,7 +307,17 @@ async def _show_previous_callers_screen(
         )
 
     def _connected_of(entry) -> str:
-        return sanitize_text(format_for_display(entry.connected_at, db))
+        return sanitize_text(format_for_display(entry.connected_at, db)).replace("\t", " ")
+
+    # The privacy placeholder is not a username and must never be cut
+    # into something that merely looks like one (Codex review): at the
+    # 40-column minimum the name column is narrower than
+    # "(name hidden)", and truncating it produced "(name hidde" --
+    # malformed, and ambiguous about whether the name is hidden or just
+    # long. A deliberately shorter label is substituted instead, so the
+    # row still says plainly what it is.
+    _HIDDEN = "(name hidden)"
+    _HIDDEN_SHORT = "(hidden)"
 
     # The timestamp is not a fixed width: a 12-hour display format
     # yields both "1:05 PM" and "11:05 AM", so it is measured rather
@@ -316,11 +340,15 @@ async def _show_previous_callers_screen(
     )
     # A name still has to be a name; below this the panel would be all
     # chrome and no caller, so the name keeps a floor and the row is
-    # allowed to run into `colored_truncate` as it always did.
-    name_width = max(8, body_width - fixed)
+    # allowed to run into `colored_truncate` as it always did. The floor
+    # is the short privacy label's own width, so that label is never
+    # itself truncated.
+    name_width = max(len(_HIDDEN_SHORT), body_width - fixed)
 
     for index, entry in enumerate(entries, start=1):
         name = _name_of(entry)
+        if name == _HIDDEN and name_width < display_width(_HIDDEN):
+            name = _HIDDEN_SHORT
         connected = _connected_of(entry)
         if entry.disconnected_at is not None:
             status, status_color = "SIGNED OFF", METADATA_COLOR
@@ -340,18 +368,24 @@ async def _show_previous_callers_screen(
             if use_truecolor and name != "(name hidden)"
             else MUTED_COLOR if name == "(name hidden)" else accent_color
         )
+        name_text, name_padding = _fit(name, name_width)
+        connected_text, connected_padding = _fit(connected, connected_width)
         segments = [
             (f" {index:02d} ", METADATA_COLOR),
             (marker, rail_color),
             (" ", None),
-            (_pad(name, name_width), name_color),
+            # Name and padding are separate segments so the truecolor
+            # gradient spans the name only -- see `_fit`.
+            (name_text, name_color),
+            (name_padding, None),
             (dot, METADATA_COLOR),
             # Padded even in the narrow branch, where it is the last
             # column: a trailing run of spaces costs nothing inside a
             # frame that pads to `body_width` anyway, and leaving it
             # unpadded would mean the two branches disagreed about
             # whether a column is a column.
-            (_pad(connected, connected_width), METADATA_COLOR),
+            (connected_text, METADATA_COLOR),
+            (connected_padding, None),
         ]
         if show_status:
             segments.extend([
