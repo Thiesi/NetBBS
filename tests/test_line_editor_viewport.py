@@ -343,11 +343,21 @@ def test_a_resize_redraws_the_row_from_its_left_edge():
     window = LineViewport(80, owns_row=True)
     recorder = Recorder(80)
     asyncio.run(window.render(recorder.write, list(_LONG), len(_LONG)))
+    drawn = window.drawn
     recorder.chunks.clear()
 
     window.resize(40)
     asyncio.run(window.render(recorder.write, list(_LONG), len(_LONG)))
-    assert "\r" in recorder.raw and "\x1b[2K" in recorder.raw
+
+    # Column 0 is not enough on its own: a row of `drawn` columns
+    # reflowed into a 40-column terminal occupies one row per 40, and the
+    # cursor is on the last of them -- so `\r` alone lands on a
+    # continuation row and leaves the stale prefix above it.
+    rows_above = (drawn - 1) // 40
+    assert rows_above >= 1, "the fixture has to actually reflow onto a second row"
+    assert f"\x1b[{rows_above}A" in recorder.raw, "moves up to the row it started on"
+    assert "\r" in recorder.raw
+    assert "\x1b[J" in recorder.raw, "clears from there to the end of the screen"
 
 
 def test_a_window_that_does_not_own_its_row_does_not_try():
@@ -362,3 +372,36 @@ def test_a_window_that_does_not_own_its_row_does_not_try():
     window.resize(40)
     asyncio.run(window.render(recorder.write, list(_LONG), len(_LONG)))
     assert "\x1b[2K" not in recorder.raw
+
+
+def test_the_window_slides_back_left_as_text_is_deleted():
+    """Only ever advancing `start` meant that holding Backspace at the
+    end of a long value shrank the visible text from a full window to
+    nothing while the buffer still held plenty to the left: the field
+    showed a left-scroll marker and a blank caret, and every further
+    press deleted a character nobody could see (Codex review)."""
+    window = LineViewport(_WIDTH)
+    line = list(_LONG)
+    window._layout(line, len(line))
+    assert window.start > 0, "the fixture has to have scrolled right first"
+
+    while len(line) > 5:
+        line.pop()
+        left, visible, right, column = window._layout(line, len(line))
+        assert display_width(visible) > 0, "the caller can always see what they are shortening"
+        assert column <= len(left) + display_width(visible) + len(right)
+
+    assert window.start == 0, "and it ends up back at the beginning"
+
+
+def test_deleting_keeps_the_window_full_while_there_is_text_for_it():
+    window = LineViewport(_WIDTH)
+    line = list(_LONG)
+    window._layout(line, len(line))
+
+    for _ in range(10):
+        line.pop()
+    _, visible, _, _ = window._layout(line, len(line))
+    # Still plenty of text to the left, so the window stays full rather
+    # than emptying out from the right.
+    assert display_width(visible) >= _WIDTH - 4

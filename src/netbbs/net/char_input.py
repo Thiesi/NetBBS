@@ -327,6 +327,9 @@ class LineViewport:
         self.width = max(1, width)
         self.start = 0
         self.col = 0
+        # Columns drawn by the last render, so a resize knows how many
+        # rows the old content reflowed onto -- see `resize`.
+        self.drawn = 0
         # Whether the window begins at column 0 of its own row, which is
         # what makes re-anchoring possible after a resize -- see
         # `resize`. Both `netbbs.net.resource_editor.text_field`
@@ -416,6 +419,20 @@ class LineViewport:
             earliest = self._fits_from(line, cursor, text_columns - 1)
             if self.start < earliest:
                 self.start = earliest
+            # ...and back left when there is slack on the right (Codex
+            # review). Only ever advancing `start` meant that holding
+            # Backspace at the end of a long value shrank the visible
+            # text from a full window to nothing, while the buffer still
+            # held plenty to the left: the field ended up showing a
+            # left-scroll marker and a blank caret, and every further
+            # press deleted a character nobody could see.
+            #
+            # `_fits_from` from the *end* of the line is the furthest
+            # left the window can sit while still reaching the last
+            # character -- which is the most text it can show.
+            fill = self._fits_from(line, len(line), text_columns)
+            if self.start > fill:
+                self.start = fill
 
         # Sliced by columns, never by code-point count (Codex review).
         # "At least one column per character" is false for a combining
@@ -435,10 +452,21 @@ class LineViewport:
         payload = left + visible + right
         if self._reanchor:
             # The row was rewrapped underneath us, so `col` means
-            # nothing: return to the start of the row the cursor is
-            # actually on and clear the whole of it.
+            # nothing. Returning to column 0 is not enough on its own
+            # (Codex review): a row of `drawn` columns reflowed into a
+            # terminal `width` wide occupies one row per `width`
+            # columns, and the cursor is on the *last* of them, so `\r`
+            # alone lands on a continuation row and leaves the stale
+            # prefix on the rows above it.
+            #
+            # Up by however many rows that is, back to column 0, then
+            # clear from there to the end of the screen -- the field
+            # owns its row, and the prompt that introduced it is above,
+            # untouched.
             self._reanchor = False
-            prefix = "\r\x1b[2K"
+            rows_above = max(0, (self.drawn - 1) // self.width)
+            up = f"\x1b[{rows_above}A" if rows_above else ""
+            prefix = up + "\r\x1b[J"
         else:
             # Back to the window's left edge, clearing what was there.
             prefix = move_cursor(self.col, forward=False) + "\x1b[K"
@@ -447,12 +475,14 @@ class LineViewport:
         drawn = len(left) + display_width(visible) + len(right)
         await write(move_cursor(drawn - column, forward=False))
         self.col = column
+        self.drawn = drawn
 
     def reset(self) -> None:
         """Forget where the cursor was -- for a caller that has just
         written a newline, after which the window starts over."""
         self.start = 0
         self.col = 0
+        self.drawn = 0
 
 
 async def redraw_tail(
