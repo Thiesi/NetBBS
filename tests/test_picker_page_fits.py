@@ -429,3 +429,47 @@ def test_seven_items_fit_the_terminal_they_were_sized_for():
         )
     )
     assert session.rows_on_screen() <= 20
+
+
+def test_paging_never_repeats_or_skips_a_row_when_the_page_size_changes():
+    """`page_index * page_size` means one thing only while `page_size`
+    holds still, and it does not: a `sort_label` that wraps changes the
+    trailer's height and so the page size. At 80x24 with a label
+    alternating short and two-line, page 1 held items 1-16, page 2
+    started at 16, and page 3 at 33 -- [N]ext twice showed item 16 twice
+    and never showed 31 or 32 (Codex review).
+
+    The claim is about the *pages*, so this reads each rendered page's
+    rows and asserts each page starts exactly where the last one ended.
+    """
+    labels = iter([
+        "Activity",
+        "Activity, newest first, with every archived entry and every note as well",
+        "Activity",
+        "Activity, newest first, with every archived entry and every note as well",
+    ])
+    session = FakeSession(80, 24, ["n", "n", "b"])
+    asyncio.run(
+        pick_item(
+            session, list(range(1, 41)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none",
+            sort_label=lambda: next(labels, "Activity"), on_sort=None,
+        )
+    )
+
+    plain = _ANSI.sub("", _SGR.sub("", "".join(session.written)))
+    # One group of rows per render: the title line starts each page.
+    pages = [
+        [int(n) for n in re.findall(r"area (\d+)", block)]
+        for block in plain.split("ReLink /")[1:]
+    ]
+    pages = [rows for rows in pages if rows]
+    assert len(pages) >= 3, f"expected three renders, got {len(pages)}"
+
+    for earlier, later in zip(pages, pages[1:]):
+        assert later[0] == earlier[-1] + 1, (
+            f"page starting {later[0]} follows a page ending {earlier[-1]}: "
+            f"{'repeats' if later[0] <= earlier[-1] else 'skips'} rows"
+        )

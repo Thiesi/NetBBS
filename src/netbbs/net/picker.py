@@ -619,13 +619,25 @@ async def pick_item(
         return None
 
     working_set: Sequence[T] = items
-    page_index = 0
+    # Where this page *starts*, as an index into `working_set` -- not
+    # which page it is (Codex review).
+    #
+    # `page_index * page_size` only means one thing while `page_size`
+    # holds still, and it does not: `sort_label` is read fresh per
+    # render by contract, and a label that wraps changes the trailer's
+    # height and therefore the page size. At 80x24 with a label
+    # alternating short and two-line, page 1 held items 1-16, page 2
+    # started at 16, and page 3 at 33 -- so [N]ext twice showed item 16
+    # twice and never showed 31 or 32 at all. An exception would have
+    # been the better failure, and the highlight guards had just made
+    # sure there was not one.
+    page_start = 0
     highlighted: int | None = None
     if start_stable_id is not None:
         for start_index, item in enumerate(working_set):
             if stable_id_of(item) == start_stable_id:
                 start_page_size = _sized_page_size()
-                page_index = start_index // start_page_size
+                page_start = (start_index // start_page_size) * start_page_size
                 highlighted = start_index % start_page_size
                 break
 
@@ -633,7 +645,7 @@ async def pick_item(
         return max(1, math.ceil(len(working_set) / _sized_page_size()))
 
     async def _render(*, keep_generation: bool = False) -> Sequence[T]:
-        nonlocal page_index, frozen, render_generation
+        nonlocal page_start, frozen, render_generation
         # Freeze for the duration of this render; see `_dimensions`.
         frozen = (session.terminal_width, session.terminal_height)
         # A new render is a new read of `sort_label`; see its cache.
@@ -653,10 +665,10 @@ async def pick_item(
             frozen = None
 
     async def _render_frozen() -> Sequence[T]:
-        nonlocal page_index, highlighted
+        nonlocal page_start, highlighted
         render_width, render_height = _dimensions()
         if not working_set:
-            page_index = 0
+            page_start = 0
             prefix = _masthead_prefix()
             if prefix:
                 await write_preformatted_line(session, prefix)
@@ -695,9 +707,13 @@ async def pick_item(
         # on this page at all, and moving somebody's selection silently
         # is worse than asking them to make it again.
         total_pages = _total_pages()
-        page_index = max(0, min(page_index, total_pages - 1))
-        start = page_index * page_size
-        page_items = working_set[start : start + page_size]
+        # Clamped to a real row, then turned into a page number *for
+        # display only* -- the offset itself stays absolute, so a page
+        # size that changes under it moves the window without ever
+        # skipping a row or repeating one.
+        page_start = max(0, min(page_start, max(0, len(working_set) - 1)))
+        page_index = min(page_start // page_size, max(0, total_pages - 1))
+        page_items = working_set[page_start : page_start + page_size]
         # Against what was actually sliced, not against the nominal page
         # size (Codex review): the last page is shorter than a full one,
         # so an index inside `page_size` can still be outside
@@ -856,7 +872,11 @@ async def pick_item(
         trailer = _trailer_text(_sort_label_text(), refresh is not None)
         nav = _render_nav(
             session, on_sort, description_level,
-            include_next=page_index < total_pages - 1, include_prev=page_index > 0,
+            # From the offset, not the derived page number: they are
+            # the same thing only while the page size holds still, and
+            # the offset is the half that is authoritative.
+            include_next=page_start + page_size < len(working_set),
+            include_prev=page_start > 0,
             # The same fact the budget used: a one-page list cannot
             # draw Next or Prev, so it must not be priced against
             # nav shapes it will never render.
@@ -960,7 +980,7 @@ async def pick_item(
                 continue
             items = await refresh()
             working_set = items
-            page_index = 0
+            page_start = 0
             highlighted = None
             page_items = await _render()
             continue
@@ -1050,9 +1070,9 @@ async def pick_item(
             return None
 
         if char_lower == "n":
-            if page_index < _total_pages() - 1:
+            if page_start + _sized_page_size() < len(working_set):
                 await session.write_line("")
-                page_index += 1
+                page_start += _sized_page_size()
                 highlighted = None
                 page_items = await _render()
             else:
@@ -1060,9 +1080,9 @@ async def pick_item(
             continue
 
         if char_lower == "p":
-            if page_index > 0:
+            if page_start > 0:
                 await session.write_line("")
-                page_index -= 1
+                page_start = max(0, page_start - _sized_page_size())
                 highlighted = None
                 page_items = await _render()
             else:
@@ -1095,7 +1115,7 @@ async def pick_item(
                 # previous search narrowed working_set, without needing
                 # two separate commands for what's really one action.
                 working_set = items
-                page_index = 0
+                page_start = 0
                 highlighted = None
                 page_items = await _render()
                 continue
@@ -1107,7 +1127,7 @@ async def pick_item(
             if len(matches) == 1:
                 return matches[0]
             working_set = matches
-            page_index = 0
+            page_start = 0
             highlighted = None
             page_items = await _render()
             continue
@@ -1120,7 +1140,7 @@ async def pick_item(
             if new_items is not None:
                 items = new_items
                 working_set = new_items
-                page_index = 0
+                page_start = 0
                 highlighted = None
             page_items = await _render()
             continue
@@ -1399,7 +1419,15 @@ def _nav_entries(
 # threshold, so a five-entry single-page nav can be ten rows where the
 # six-entry one is four. An assumption about which is taller is exactly
 # what this enumeration exists to stop making.
-_NAV_SHAPES = ((True, True), (True, False), (False, True), (False, False))
+# Every shape a page of a *paginated* list can take. "Neither" is not
+# one of them -- if there is more than one page, every page has a Next,
+# a Prev, or both -- and including it is not merely over-reserving
+# (Codex review): `menu_grid` is non-monotonic, so the impossible
+# five-entry shape can be ten rows where every possible one is six,
+# which forces the compact bar on a list with room for the
+# descriptions it asked for.
+_NAV_SHAPES = ((True, True), (True, False), (False, True))
+_SINGLE_PAGE_SHAPE = ((False, False),)
 
 
 def _tallest_nav(
@@ -1430,7 +1458,7 @@ def _tallest_nav(
             # reason (Codex review): four items on a 120x20 terminal fit
             # in nineteen rows with an eight-row nav, and were being
             # priced against a ten-row shape they cannot render.
-            ((False, False),) if single_page else _NAV_SHAPES
+            _SINGLE_PAGE_SHAPE if single_page else _NAV_SHAPES
         )
         ),
         key=lambda nav: nav.count("\r\n"),
