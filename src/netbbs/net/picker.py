@@ -73,10 +73,24 @@ from netbbs.rendering import (
 
 T = TypeVar("T")
 
-# Lines reserved on screen for the title, blank spacing, and the
-# footer/prompt — subtracted from the negotiated terminal height (see
-# netbbs.net.telnet's NAWS handling) to compute how many items actually
-# fit on one page without scrolling off screen.
+# Rows a page spends on everything that is not an item or the nav
+# block: the leading blank, the title, the "page 1/5, 79 total" counter,
+# the rule under it, the blank line above the nav, and the prompt. Six,
+# each one counted (issue #538, Codex review) -- subtracted from the
+# negotiated terminal height (see netbbs.net.telnet's NAWS handling).
+#
+# It was six before too, but the budget then subtracted `_RESERVED_LINES
+# - 1`, on the belief that the spare line paid for the trailer. Measured
+# against what a render actually writes, it did not: with descriptions
+# off the picker drew 26 rows on a 24-row terminal at *every* width,
+# including 80, where this was thought to be fine. Two rows over -- the
+# unpaid trailer, and this off-by-one.
+#
+# With descriptions on it looked fine on page 1 only because the nav
+# block is reserved at its worst case (`_render_nav` is asked for the
+# tallest form, with both Next and Prev) while page 1 renders without
+# Prev. Two rows of slack that happened to cover the shortfall -- and
+# stopped covering it on page 2, where the nav really is that tall.
 _RESERVED_LINES = 6
 
 # Selection numbers are always exactly two digits (01-99), zero-padded,
@@ -759,6 +773,11 @@ async def pick_item(
                 segments.append((f" - {sanitize_text(description)}", desc_color))
             await session.write_line(colored_truncate(segments, render_width))
 
+        # Read before the nav block rather than after it: the
+        # descriptive-nav floor now weighs the trailer's rows too, so it
+        # has to exist by the time that decision is made. The full
+        # reasoning for what goes in it is below, where it is drawn.
+        trailer = _trailer_text(_sort_label_text(), refresh is not None)
         nav = _render_nav(
             session, on_sort, description_level,
             include_next=page_index < total_pages - 1, include_prev=page_index > 0,
@@ -772,6 +791,7 @@ async def pick_item(
             # before this call switches it to the six-line descriptive
             # form, and the page runs off the bottom.
             width=render_width, height=render_height,
+            trailer=trailer, unicode_style=unicode_style,
         )
         # Folded into this same trailing line, not a line of its own
         # (issue #102's own "document it somewhere discoverable"
@@ -785,7 +805,6 @@ async def pick_item(
         # active sort mode being a mystery), not a one-time hint the
         # way the rest of this trailer is -- it must survive truncation
         # ahead of the boilerplate instructions below it.
-        trailer = _trailer_text(_sort_label_text(), refresh is not None)
         # Dogfood-reported regression, and a real dogfood-reported
         # *re*-regression on top of the original fix: with sort mode
         # (and/or refresh) active, nav + separator + trailer could run
@@ -1251,6 +1270,7 @@ def _render_nav(
     session: Session, on_sort: Callable | None, description_level: str,
     *, include_next: bool = True, include_prev: bool = True,
     width: int | None = None, height: int | None = None,
+    trailer: str = "", unicode_style: bool = False,
 ) -> str:
     # Dimensions may be supplied by a caller that has frozen them for
     # one render (see `pick_item`'s `_dimensions`); otherwise read live.
@@ -1262,8 +1282,44 @@ def _render_nav(
             [("", entries)], width=width, height=height,
             description_level=description_level,
         )
-        descriptive_lines = descriptive.count("\r\n") + 1
-        available = height - (_RESERVED_LINES - 1 + descriptive_lines)
+        # Measured against the *worst case* nav -- both Next and Prev --
+        # rather than this page's own entries (Codex review, and the
+        # deeper cause of the overflow it reported).
+        #
+        # `_page_size` prices the tallest nav a page could need, because
+        # a page has to fit whichever page it turns out to be. But the
+        # choice between the two nav forms was made from the entries of
+        # the page in hand, and page 1 has no `[P]rev`: at 80x16 the
+        # shorter list cleared the floor and drew the four-row
+        # descriptive form while the budget, pricing the taller list,
+        # had seen the floor fail and priced a one-row `action_bar`. The
+        # render drew three rows the page had not paid for.
+        #
+        # Deciding from the worst case settles it, and settles something
+        # else worth having: the nav no longer changes shape underneath
+        # the caller when they press [N].
+        worst_case = menu_grid(
+            [("", _nav_entries(on_sort, include_next=True, include_prev=True))],
+            width=width, height=height, description_level=description_level,
+        )
+        descriptive_lines = worst_case.count("\r\n") + 1
+        # The same arithmetic `_page_size` will do, including the
+        # trailer (Codex review). This floor decides whether the taller
+        # nav is worth its rows by asking how many items would be left;
+        # answering with a different sum than the one that actually
+        # sizes the page meant accepting the descriptive form on the
+        # promise of five items and then delivering three. Two pieces of
+        # code that must agree about a height should be one piece of
+        # code -- so this asks `_trailer_rows` rather than approximating
+        # it, which is why the trailer reaches this function at all.
+        available = height - (
+            _RESERVED_LINES + descriptive_lines
+            + _trailer_rows(
+                worst_case, trailer,
+                width=width, unicode_style=unicode_style,
+                description_level=description_level,
+            )
+        )
         if max(1, min(_MAX_PAGE_SIZE, available)) >= _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV:
             return descriptive
     # `menu_grid` always renders one entry per line, even with
@@ -1308,25 +1364,29 @@ def _trailer_rows(
     shared with its own fit-check: two pieces of code that must agree
     about a height should be one piece of code.
 
-    Counted as rows *beyond the first*, because `_RESERVED_LINES`
-    already budgets one line for this. That is why 80 columns never
-    overflowed even though the trailer has its own line there: one line
-    was paid for. What was never paid for is the trailer **wrapping**,
-    which is what happens at 50-60 columns, where the boilerplate alone
-    is 63 columns wide. Returning the full row count here instead would
-    fix the narrow band by taking an item off every page at 80, which
-    trades a real bug for a real regression.
+    Counted in full. The first version of this returned rows *beyond
+    the first*, on the reasoning that `_RESERVED_LINES` already paid for
+    one -- and that 80 columns never overflowed, so charging the whole
+    thing would take an item off every page there to fix a bug that only
+    existed at 50.
+
+    Both halves of that were wrong, and measuring said so (Codex
+    review). `_RESERVED_LINES` pays for no trailer line, and 80 columns
+    overflowed too -- by two rows, at every width, which is what a
+    rendered page turned out to draw versus what the budget had allowed.
+    The band at 50-60 columns was simply where somebody noticed. So the
+    page does lose items, and the reason it loses them is that they were
+    never on the screen.
     """
     if description_level == "off":
         separator = " — " if unicode_style else " - "
         last_nav_line = nav.rsplit("\r\n", 1)[-1]
         room = width - visible_width(last_nav_line) - visible_width(separator)
         if trailer and visible_width(trailer) <= max(0, room):
-            # Folded onto the nav line: it costs nothing of its own, and
-            # the line `_RESERVED_LINES` set aside goes unused.
+            # Folded onto the nav line, which is already counted: this
+            # genuinely costs nothing.
             return 0
-    rows = len(wrap_to_width(trailer, width)) if trailer else 0
-    return max(0, rows - 1)
+    return len(wrap_to_width(trailer, width)) if trailer else 0
 
 
 def _page_size(
@@ -1351,11 +1411,14 @@ def _page_size(
     # out for is exactly the split freezing them exists to prevent.
     width = session.terminal_width if width is None else width
     height = session.terminal_height if height is None else height
-    nav = _render_nav(session, on_sort, description_level, width=width, height=height)
+    nav = _render_nav(
+        session, on_sort, description_level, width=width, height=height,
+        trailer=trailer, unicode_style=unicode_style,
+    )
     nav_lines = nav.count("\r\n") + 1
     trailer_lines = _trailer_rows(
         nav, trailer,
         width=width, unicode_style=unicode_style, description_level=description_level,
     )
-    available = height - (_RESERVED_LINES - 1 + nav_lines + header_lines + trailer_lines)
+    available = height - (_RESERVED_LINES + nav_lines + header_lines + trailer_lines)
     return max(1, min(_MAX_PAGE_SIZE, available))
