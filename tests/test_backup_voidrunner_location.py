@@ -147,3 +147,63 @@ def test_no_database_at_all_still_resolves(operator_home, tmp_path, monkeypatch)
 
     missing, guessed = backup_module.voidrunner_save_directory(tmp_path / "not-a-database.db")
     assert (missing, guessed) == (resolved, False)
+
+
+# -- a guess is never reported as a finding (Codex review) -------------
+
+
+def test_a_guessed_directory_that_exists_is_still_marked_as_a_guess(
+    operator_home, node_home, tmp_path, monkeypatch
+):
+    """The nastiest case, because it reads as success.
+
+    The node has recorded nothing, and the fallback path *happens to
+    exist* -- a SysOp who once ran a node from their own shell before
+    setting up the service has exactly this directory, holding exactly
+    the wrong careers. The manifest has to say the location was guessed,
+    so a restore months later can still answer "was that the right
+    directory?".
+    """
+    from netbbs.backup import create_backup
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    # Saves under the operator's own home, none under the node's.
+    guessed = operator_home / ".netbbs" / "voidrunner_saves"
+    guessed.mkdir(parents=True)
+    (guessed / "leaderboard.json").write_text("[]", encoding="utf-8")
+
+    database = Database(tmp_path / "unrecorded.db")
+    identity_dir = tmp_path / "identity"
+    bootstrap_node_identity("thisnode").save(identity_dir)
+    database.close()
+
+    _as_home(monkeypatch, operator_home)
+    destination = tmp_path / "backup"
+    create_backup(db_path=tmp_path / "unrecorded.db", identity_dir=identity_dir, destination=destination)
+
+    import json
+
+    manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["voidrunner"] is not None, "the guess was captured"
+    assert manifest["voidrunner"]["location_recorded_by_node"] is False
+
+
+def test_a_recorded_directory_is_marked_as_recorded(db, node_home, tmp_path, monkeypatch):
+    from netbbs.backup import create_backup
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    _as_home(monkeypatch, node_home)
+    record_voidrunner_save_dir(db)
+    (node_home / ".netbbs" / "voidrunner_saves" / "leaderboard.json").write_text("[]", encoding="utf-8")
+    db.connection.commit()
+
+    identity_dir = tmp_path / "identity"
+    bootstrap_node_identity("thisnode").save(identity_dir)
+
+    destination = tmp_path / "backup-recorded"
+    create_backup(db_path=db.path, identity_dir=identity_dir, destination=destination)
+
+    import json
+
+    manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["voidrunner"]["location_recorded_by_node"] is True

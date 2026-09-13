@@ -888,10 +888,6 @@ async def run(
         # reasoning as set_node_fingerprint just above) so the SysOp
         # console can say truthfully whether the participation answer is
         # what decides Link on this node.
-        # Issue #555. Written here rather than at the first door launch
-        # so it is already true for a node nobody has played yet, and so
-        # it follows a node whose HOME changes between restarts.
-        record_voidrunner_save_dir(db)
         set_configured_link_enabled(db, config.link.enabled)
         if config.link.enabled is None:
             effective_link_enabled = resolve_link_enabled(None, db)
@@ -1166,6 +1162,18 @@ async def run(
             # table above answers 404 (Codex review).
             transfer_gateway,
         )
+
+        # Issue #555, after the listeners are bound for the same reason
+        # issue #466 moved door services here (Codex review). This value
+        # is what a later backup trusts, and a *second* NetBBS launched
+        # from a different HOME -- by hand, against a running service,
+        # which is exactly the operator habit that produced #555 in the
+        # first place -- would otherwise overwrite the good answer and
+        # only then fail on the bound port. The live node would keep
+        # saving where it always did while every backup looked somewhere
+        # else. Past this line the ports are ours, so the process
+        # claiming to be this node is this node.
+        record_voidrunner_save_dir(db)
 
         # Issue #466: after the listeners are bound, not before. A second
         # NetBBS started against the same state directory fails here, on the

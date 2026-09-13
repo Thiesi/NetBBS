@@ -773,10 +773,10 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
 
     database_filename = _validate_database_filename(db_path.name)
 
-    game_source = (
-        voidrunner_save_dir.resolve() if voidrunner_save_dir is not None
-        else voidrunner_save_directory(db_path)[0]
-    )
+    if voidrunner_save_dir is not None:
+        game_source, game_source_recorded = voidrunner_save_dir.resolve(), True
+    else:
+        game_source, game_source_recorded = voidrunner_save_directory(db_path)
     if destination.resolve().is_relative_to(game_source):
         raise BackupError("A backup destination cannot be inside the Voidrunner save directory.")
     destination.mkdir(parents=True)
@@ -784,6 +784,16 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
     checksums = {}
     try:
         game_metadata = _capture_voidrunner(game_source, destination, checksums)
+        if game_metadata is not None:
+            # Whether this component's source was the node's own answer or
+            # this process's guess, recorded in the archive rather than
+            # only in the terminal scrollback of whoever ran the command
+            # (Codex review). A restore months later is exactly when
+            # "was that the right directory?" becomes unanswerable.
+            # Informational, and the manifest version stays 1: nothing
+            # about the required shape changed, and both older readers
+            # and this module's own validator ignore unknown keys.
+            game_metadata["location_recorded_by_node"] = game_source_recorded
         war_metadata = _capture_war_dialer(db_path, destination, checksums)
         door_metadata = _capture_door_installs(db_path, destination)
     except BaseException as exc:
@@ -1524,8 +1534,28 @@ def main(argv: list[str] | None = None) -> None:
             source_directory, recorded_by_node = args.voidrunner_save_dir.resolve(), True
         else:
             source_directory, recorded_by_node = voidrunner_save_directory(args.db)
-        if coverage is not None:
+        if coverage is not None and recorded_by_node:
             print_wrapped(f"Voidrunner: included {len(coverage['files'])} retained files from {source_directory}.")
+        elif coverage is not None:
+            # Codex review: the nastiest case of all, because it reads as
+            # success. The node has recorded nothing, and the fallback
+            # path *happens to exist* -- a SysOp who once ran a node from
+            # their own shell before setting up the service has exactly
+            # this directory, holding exactly the wrong careers. Captured
+            # anyway rather than refused: on a single-user node with no
+            # service account the guess is simply correct, and taking that
+            # away would turn an upgrade into data loss. But it is never
+            # allowed to read as a finding.
+            print_wrapped(
+                f"Voidrunner: included {len(coverage['files'])} retained files from {source_directory} "
+                f"-- WARNING, GUESSED LOCATION."
+            )
+            print_wrapped(
+                "  This node has recorded no save directory (it has not started since the version that "
+                "records one), so that path came from this shell's own home directory. If the node runs "
+                "with a different HOME -- examples/netbbs.rc sets it to the state directory -- these are "
+                "not its careers. Start the node once, or re-run with --voidrunner-save-dir."
+            )
         elif recorded_by_node:
             # The node itself named this directory, so "nothing there" is
             # a fact about the node rather than about this shell.

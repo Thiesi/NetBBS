@@ -3458,9 +3458,17 @@ in `create_backup`; do not infer a transaction spanning every independent file.
 Voidrunner and War Dialer require their maintenance/session guards; external door
 installation copies require the operator to stop writers first.
 
-The CLI's default Voidrunner directory follows its own process environment,
-which may differ from the service's `HOME` (#555). Explicit source paths are
-necessary for reliable operating instructions. Outbound door receipts under
+The node records its own Voidrunner save directory in `node_config` once its
+listeners are bound, and the CLI reads it (#555). Before that fix the CLI's
+default followed its own process environment, which differs from the service's
+`HOME` whenever `examples/netbbs.rc` started the node -- so a backup taken from
+an operator's shell captured no careers and said so in a sentence that read like
+a fact about the node. Two states remain and are reported differently: a
+recorded-but-empty directory is a fact about the node, while an unrecorded
+lookup (a database that has not started since the fix) falls back to the calling
+process's home and is labelled a guess, whether or not that path happens to
+exist. Explicit `--voidrunner-save-dir` remains authoritative and is still the
+right instruction for any layout that differs from the handbook's. Outbound door receipts under
 `door-outbound/` currently have no backup component (#556); their location beside
 the database does not imply capture.
 
