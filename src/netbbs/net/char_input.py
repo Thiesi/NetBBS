@@ -280,7 +280,13 @@ def _grapheme_start(line: list[str], index: int) -> int:
     So the cursor does not go there. Left and Right step over a whole
     grapheme, and this is what they use.
     """
-    while index > 0 and char_width(line[index - 1]) == 0:
+    # The character *at* `index`, not the one before it (Codex review).
+    # `index` names the position the cursor sits in front of, so a
+    # combining mark there is precisely the between-a-character-and-its-
+    # accent case this exists to leave -- checking the previous
+    # character asked a different question and answered it correctly,
+    # which is the worst kind of wrong.
+    while 0 < index < len(line) and char_width(line[index]) == 0:
         index -= 1
     return index
 
@@ -429,6 +435,13 @@ class LineViewport:
 
     def _layout(self, line: list[str], cursor: int) -> tuple[str, str, str, int]:
         """`(left marker, visible text, right marker, cursor column)`."""
+        # A cursor resting between a character and its accent is a
+        # position nothing can draw honestly, so the window works from
+        # the grapheme it belongs to. `read_line`'s own Left/Right never
+        # produce one; this keeps `_layout` correct for any caller that
+        # does, and makes both invariants hold at once -- the window
+        # opens on a real character, and never after the cursor.
+        cursor = _grapheme_start(line, cursor)
         # Never the final cell (Codex review). A VT terminal that has
         # just printed into the last column leaves the cursor there with
         # a wrap pending rather than one cell beyond it, so the
