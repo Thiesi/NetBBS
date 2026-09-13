@@ -79,6 +79,8 @@ class ChannelMessage:
     # node's attested content -- trusted-scrollback snapshots skip it and
     # Link queueing refuses to sign it.
     external_source: str | None = None
+    # Optional CGA foreground for MRC authors; never part of their identity.
+    mrc_nick_color: int | None = None
 
 
 def get_scrollback_limit(db: Database) -> int:
@@ -119,6 +121,7 @@ def record_message(
     body: str | None = None,
     external_source: str | None = None,
     index_body: str | None = None,
+    mrc_nick_color: int | None = None,
 ) -> ChannelMessage:
     """
     Append an event to `channel`'s scrollback and trim it back down to the
@@ -142,6 +145,8 @@ def record_message(
     if kind in ("message", "daybreak") and body is None:
         raise ValueError(f"body is required for kind={kind!r}")
 
+    if mrc_nick_color is not None and (external_source != "mrc" or not 0 <= mrc_nick_color <= 15):
+        raise ValueError("MRC nickname color must be 0-15 on an MRC message")
     created_at = utc_now_iso()
     if external_source is None:
         # Migration tests exercise historical schemas from before the
@@ -165,6 +170,10 @@ def record_message(
             (channel.id, kind, author_label, author_fingerprint, body, created_at, external_source),
         )
     message_id = cursor.lastrowid
+    if mrc_nick_color is not None:
+        db.connection.execute(
+            "UPDATE channel_messages SET mrc_nick_color = ? WHERE id = ?", (mrc_nick_color, message_id),
+        )
     # Capture *this* row now, inside the transaction and before the trim:
     # never "the channel's newest row" (a background writer -- issue
     # #275's MRC bridge on the background lane -- can land another row
@@ -249,4 +258,5 @@ def _row_to_message(row: sqlite3.Row) -> ChannelMessage:
         link_content_id=row["link_content_id"] if "link_content_id" in columns else None,
         link_event_json=row["link_event_json"] if "link_event_json" in columns else None,
         external_source=row["external_source"] if "external_source" in columns else None,
+        mrc_nick_color=row["mrc_nick_color"] if "mrc_nick_color" in columns else None,
     )

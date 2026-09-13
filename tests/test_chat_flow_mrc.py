@@ -383,3 +383,20 @@ def test_mrc_command_is_only_suggested_in_a_mapped_channel(db, channel, alice):
     set_mrc_room(db, channel, "lobby")
     assert chat_flow._channel_is_mrc_bridged(db, channel, alice)
     assert "mrc" in chat_flow._COMMAND_INFO and "mrc" in chat_flow._COMMANDS
+
+
+def test_status_counts_remote_roster_without_inventing_remote_away(db, lane, hub, presence, channel, alice):
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            async def push(session):
+                await rig.fake.send_line("SERVER~~~CLIENT~~lobby~USERLIST:alice@My_Board,bob@Other,carol@Third~")
+                await _wait_for(lambda: len(rig.bridge.remote_roster(channel)) == 2, what="remote roster")
+                await rig.fake.send_line("bob~Other~lobby~~~lobby~status repaint~")
+                await _wait_for(lambda: "2 MRC" in _text(session), what="MRC occupancy in status bar")
+            session, _ = await _run(lane, hub, presence, channel, alice, ["/quit"], mrc_bridge=rig.bridge, while_joined=push)
+            assert "1 here (0 away)" in _text(session)
+            assert "3 online" not in _text(session)
+        finally:
+            await rig.close()
+    asyncio.run(scenario())

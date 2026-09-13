@@ -495,6 +495,14 @@ Use **Node → Chat bridge (MRC)** for connection state, round-trip time, errors
 and reconnect. Pause one channel's bridge or disable the whole bridge without
 removing local chat. MRC moderation and room rules also depend on the remote hub.
 
+The room picker learns the network directory when a caller enters an MRC
+room; `/rooms` refreshes it. Reported user counts are snapshots, with stale
+readings marked. The chat status bar labels local occupancy separately from
+MRC occupancy; the hub roster does not supply a remote away count. A hub
+nickname or room correction that cannot identify one of several local callers
+produces a notice and diagnostic instead of being applied to an arbitrary
+account.
+
 ## Daily operation
 
 Check pending registrations/posts/files, backup recency, free disk space,

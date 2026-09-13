@@ -380,6 +380,9 @@ class MrcBridge:
         # room (lower) -> roster from the hub's last USERLIST reply
         self._rosters: dict[str, tuple[str, ...]] = {}
         self._last_userlist_request: dict[str, float] = {}
+        self._roster_received_at: dict[str, float] = {}
+        self._roster_local_nicks: dict[str, set[str]] = {}
+        self._ambiguous_controls: set[str] = set()
         # (sender lower, channel id, username) -> already notified about
         # an undeliverable private message
         self._private_notified: set[tuple[str, int, str]] = set()
@@ -434,6 +437,9 @@ class MrcBridge:
         self._network_stats_at: float | None = None
         self._network_stats_raw: str | None = None
         self._stats_requested: set[str] = set()
+        self._directory: dict[str, tuple[int, str, float]] = {}
+        self._directory_requests: dict[str, tuple[float, bool]] = {}
+        self._last_directory_request = -1e9
 
         # Unbounded as a Queue; the bound is `_outbound_cap()`, enforced by
         # `_enqueue`: the configured size, or more when this node has more
@@ -538,10 +544,14 @@ class MrcBridge:
             self._fatal_error = None
             self._attempts = 0
             # A reading from the previous hub must not describe the new one.
+            self._directory.clear()
+            self._directory_requests.clear()
+            self._last_directory_request = -1e9
             self._network_stats = None
             self._network_stats_at = None
             self._network_stats_raw = None
             self._banner.clear()
+            self._ambiguous_controls.clear()
             self._known_sites.clear()
             self._network_activity = None
             self._hub_latency = None
@@ -616,6 +626,8 @@ class MrcBridge:
         self._announced.clear()
         self._announced_rooms.clear()
         self._rosters.clear()
+        self._roster_received_at.clear()
+        self._roster_local_nicks.clear()
         self._last_userlist_request.clear()
         self._rehomed.clear()
         self._reply_truncated.clear()
@@ -683,6 +695,8 @@ class MrcBridge:
                 self._announced.clear()
                 self._announced_rooms.clear()
                 self._rosters.clear()
+                self._roster_received_at.clear()
+                self._roster_local_nicks.clear()
                 self._last_userlist_request.clear()
                 self._rehomed.clear()
                 self._reply_truncated.clear()
@@ -731,6 +745,9 @@ class MrcBridge:
         self._state = MrcState.CONNECTED
         self._connected_since = utc_now_iso()
         self._banner.clear()
+        self._ambiguous_controls.clear()
+        self._directory_requests.clear()
+        self._last_directory_request = -1e9
         self._nick_colors.clear()
         self._private_optin.clear()
         self._lastseen_recorded.clear()
@@ -751,6 +768,8 @@ class MrcBridge:
             mapping = self._by_channel.get(channel_id)
             if mapping is not None and nicks:
                 self._request_stats(next(iter(nicks.values())), mapping.room)
+                if self.open_rooms_enabled:
+                    self.refresh_directory(mapping.channel, next(iter(nicks)))
                 break
 
         connection.tasks = [
@@ -968,6 +987,8 @@ class MrcBridge:
                     mapping = self._by_channel.get(channel_id)
                     if mapping is not None and nicks:
                         self._request_stats(next(iter(nicks.values())), mapping.room)
+                        if self.open_rooms_enabled:
+                            self.refresh_directory(mapping.channel, next(iter(nicks)))
                         break
 
     # --- outbound ----------------------------------------------------------
@@ -1072,6 +1093,7 @@ class MrcBridge:
         if mapping is None:
             return []
         own = {nick.lower() for nick in self._announced.get(channel.id, {}).values()}
+        own |= self._roster_local_nicks.get(mapping.room.lower(), set())
         own_site = self._settings.site_wire_name.lower() if self._settings is not None else ""
         roster = self._rosters.get(mapping.room.lower(), ())
 
@@ -1086,6 +1108,21 @@ class MrcBridge:
             return nick.lower() in own
 
         return sorted((name for name in roster if not _is_own(name)), key=str.lower)
+
+    def room_presence(self, channel: Channel) -> tuple[int | None, bool]:
+        """Remote count and freshness, copied on the event loop before rendering.
+
+        USERLIST contains names, not away flags. None means no roster received.
+        """
+        mapping = self.mapping_for(channel)
+        key = mapping.room.lower() if mapping is not None else ""
+        received = self._roster_received_at.get(key)
+        count = len(self.remote_roster(channel)) if received is not None else None
+        fresh = (
+            received is not None and self._state is MrcState.CONNECTED
+            and self._clock() - received <= self._userlist_refresh
+        )
+        return count, fresh
 
     async def local_join(self, channel: Channel, username: str) -> None:
         """A caller entered `channel`. Announces them to the hub if the
@@ -1375,6 +1412,10 @@ class MrcBridge:
         for cache in (self._nick_colors, self._private_optin, self._lastseen_recorded, self._last_private_sender):
             for username in [name for name in cache if name not in announced]:
                 del cache[username]
+        announced_nicks = {nick.lower() for nicks in self._announced.values() for nick in nicks.values()}
+        for nick in list(self._directory_requests):
+            if nick not in announced_nicks:
+                del self._directory_requests[nick]
 
     # --- presence, welcome, size, topics (issue #304) ------------------------
 
@@ -1604,6 +1645,7 @@ class MrcBridge:
             recorded = await self._lane.run(
                 record_message, mapping.channel, kind=kind, author_label=author_label,
                 author_fingerprint=None, body=text, external_source="mrc", index_body=plain_text,
+                mrc_nick_color=protocol.sender_color(packet.body, packet.from_user),
             )
         except sqlite3.DatabaseError as exc:
             # The channel was deleted (or its row otherwise vanished)
@@ -1631,6 +1673,8 @@ class MrcBridge:
         self._announced.pop(mapping.channel.id, None)
         self._announced_rooms.pop(mapping.channel.id, None)
         self._rosters.pop(mapping.room.lower(), None)
+        self._roster_received_at.pop(mapping.room.lower(), None)
+        self._roster_local_nicks.pop(mapping.room.lower(), None)
         self._last_userlist_request.pop(mapping.room.lower(), None)
         self._last_touch.pop(mapping.channel.id, None)
         self._prune_caller_caches()
@@ -1670,7 +1714,12 @@ class MrcBridge:
             # an unbounded remotely-named dictionary is exactly what the
             # inbound rate limit cannot bound on its own.
             if room_key is not None and room_key in self._by_room:
-                self._rosters[room_key] = tuple(protocol.parse_userlist(params))
+                names = tuple({name.lower(): name for name in protocol.parse_userlist(params)}.values())
+                own = {nick.lower() for nicks in self._announced.values() for nick in nicks.values()}
+                own |= self._roster_local_nicks.get(room_key, set())
+                self._roster_local_nicks[room_key] = own & {name.partition("@")[0].lower() for name in names}
+                self._rosters[room_key] = names
+                self._roster_received_at[room_key] = self._clock()
             return
         if command == "ROOMTOPIC":
             room, _, topic = params.partition(":")
@@ -1706,7 +1755,31 @@ class MrcBridge:
             return
         if command == "PROTOCOLVERSION":
             return
+        if await self._handle_directory_reply(packet):
+            return
         addressed = self._caller_for_nick(packet.to_user)
+        generic = packet.to_user.upper() in ("", protocol.CLIENT, protocol.ALL)
+        if command == "STATS" and (generic or addressed is not None):
+            self._record_stats(params)
+            # Site replies update everyone's summary. Only explicit requesters
+            # see the text, including when the hub uses its generic target.
+            requesters = set(self._stats_requested) if generic else {addressed[1]} & self._stats_requested
+            for username in requesters:
+                self._stats_requested.discard(username)
+                await self._deliver_reply(username, packet.body.strip())
+            return
+        if generic and command in ("USERROOM", "USERNICK"):
+            callers = [(cid, name) for cid, nicks in self._announced.items() for name in nicks]
+            if len(callers) == 1:
+                addressed = callers[0]
+            elif callers and command not in self._ambiguous_controls:
+                self._ambiguous_controls.add(command)
+                _logger.warning("MRC hub sent %s without identifying one of %d callers", command, len(callers))
+                for _cid, username in callers:
+                    await self._deliver_to_caller(username, MrcNotice(
+                        "The MRC hub sent a room or nickname correction without identifying its caller; "
+                        "it could not be applied. Check /mrc before continuing.", utc_now_iso()), priority=True)
+                return
         if addressed is not None:
             channel_id, username = addressed
             if command == "USERROOM":
@@ -1715,12 +1788,6 @@ class MrcBridge:
             if command == "USERNICK":
                 await self._handle_usernick(channel_id, username, strip_pipe_codes(params).strip())
                 return
-            if command == "STATS":
-                # Parsed for everyone; shown only to a caller who asked.
-                self._record_stats(params)
-                if username not in self._stats_requested:
-                    return
-                self._stats_requested.discard(username)
             # Issue #298: everything else the hub says *to one caller* is
             # the reply to something they asked (LIST, CHATTERS, INFO,
             # MOTD, STATS, HELP ...) -- plain text lines, shown to them
@@ -1784,6 +1851,9 @@ class MrcBridge:
         nicks = self._announced.get(channel_id)
         if not new_nick or nicks is None or username not in nicks or nicks[username].lower() == new_nick.lower():
             return
+        previous = nicks[username].lower()
+        if previous in self._directory_requests:
+            self._directory_requests[new_nick.lower()] = self._directory_requests.pop(previous)
         self._rename_outbound(nicks[username], new_nick)
         nicks[username] = new_nick
         await self._deliver_to_caller(
@@ -2003,6 +2073,61 @@ class MrcBridge:
         admitting them until the sweeper retires it."""
         return self._open_settings is not None and self._open_settings.blocks(room)
 
+    def directory_details(self, room: str) -> tuple[int, str, bool] | None:
+        entry = self._directory.get(room.lower())
+        if entry is None:
+            return None
+        users, topic, received = entry
+        return users, topic, self._state is MrcState.CONNECTED and self._clock() - received <= self._userlist_refresh
+
+    def refresh_directory(self, channel: Channel, username: str) -> None:
+        """A first join discovers company without flooding chat with a listing."""
+        if self._clock() - self._last_directory_request < self._userlist_refresh:
+            return
+        if self.send_hub_command(channel, username, "LIST") is None:
+            nick = self._announced.get(channel.id, {}).get(username)
+            if nick is not None:
+                self._directory_requests[nick.lower()] = (self._clock(), False)
+
+    async def _handle_directory_reply(self, packet: MrcPacket) -> bool:
+        # Only a reply to a recent LIST may populate this advisory directory.
+        now = self._clock()
+        self._directory_requests = {
+            nick: request for nick, request in self._directory_requests.items()
+            if now - request[0] <= 30 and self._caller_for_nick(nick) is not None
+        }
+        generic = packet.to_user.upper() in ("", protocol.CLIENT, protocol.ALL)
+        requests = self._directory_requests if generic else {
+            nick: request for nick, request in self._directory_requests.items() if nick == packet.to_user.lower()}
+        if not requests:
+            return False
+        plain = strip_pipe_codes(packet.body).strip()
+        row = protocol.parse_room_list_row(plain)
+        header = bool(re.match(r"^\*\.\s+_+Rooms_+Usr_+Topic_+", plain))
+        footer = plain.startswith("*.:__")
+        if row is None and not header and not footer:
+            return False
+        if row is not None:
+            room, users, topic = row
+            self._observe_room(room)
+            if room.lower() not in self._directory and len(self._directory) >= MAX_OBSERVED_ROOMS:
+                oldest = min(self._directory, key=lambda key: self._directory[key][2])
+                del self._directory[oldest]
+            self._directory[room.lower()] = (users, topic, now)
+            text = f"#{room:<20} {users:>4} users  {topic}"
+        else:
+            text = (
+                "Rooms on MRC  |  users  |  topic" if header else
+                "Pick a discovered room in Chat > Multi Relay Chat, or /join <room>."
+            )
+        for nick, (_sent, explicit) in list(requests.items()):
+            addressed = self._caller_for_nick(nick)
+            if explicit and addressed is not None:
+                await self._deliver_reply(addressed[1], text)
+            if footer:
+                self._directory_requests.pop(nick, None)
+        return True
+
     def observed_rooms(self) -> list[str]:
         """Rooms this node has heard of, most recently seen first: rooms
         callers opened, `USERROOM` targets, join/leave chatter naming a
@@ -2104,6 +2229,9 @@ class MrcBridge:
             self._dropped_outbound += 1
             return "you're sending faster than MRC allows"
         bucket.consume()
+        if body.upper() == "LIST":
+            self._directory_requests[nick.lower()] = (self._clock(), True)
+            self._last_directory_request = self._clock()
         if body.split(" ", 1)[0].upper() == "STATS":
             self._stats_requested.add(username)
         self._enqueue(protocol.user_command(nick, settings.site_wire_name, mapping.room, body))
@@ -2209,7 +2337,7 @@ class MrcBridge:
                     return
                 notice = colored(
                     f"[MRC] {sanitize_text(protocol.display_handle(packet.from_user))}@{sanitize_text(packet.from_site)} tried to message "
-                    "you privately. Private MRC chat isn't bridged; only room traffic is.",
+                    "you privately. Enable private MRC messages in Profile > Communication to receive and reply.",
                     fg_color=MUTED_COLOR,
                 )
                 for participant in self._hub.participants_for_username(mapping.channel.name, username):

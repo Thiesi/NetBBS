@@ -321,3 +321,18 @@ def test_spec_follow_up_helpers():
     assert protocol.parse_stats_activity("2 2 2") is None
     assert protocol.parse_stats_activity("2 2 2 9") is None and protocol.parse_stats_activity("2 2 2 x") is None
     assert protocol.ACTIVITY_LABELS[2] == "medium activity"
+
+
+def test_room_directory_rows_use_the_observed_hub_layout():
+    assert protocol.parse_room_list_row("*.:  #lobby                   12  A welcoming topic") == ("lobby", 12, "A welcoming topic")
+    assert protocol.parse_room_list_row("|07*.:  |14#chess  1  Chess - open games") == ("chess", 1, "Chess - open games")
+    for text in ("*. __Rooms___________________Usr__Topic____", "*.:__ # = Normal", "wrapped topic continuation", "*.: #bad~room 1 Topic", "*.: #lobby -1 Topic"):
+        assert protocol.parse_room_list_row(text) is None
+
+
+def test_sender_color_comes_from_the_matching_handle_not_the_body():
+    assert protocol.sender_color("|03<|11bob|03>|16|07 |12hello", "bob") == 11
+    assert protocol.sender_color("|15* |13bob |09waves", "bob") == 13
+    assert protocol.sender_color("|08<|14John Doe|08> hello", "John_Doe") == 14
+    assert protocol.sender_color("|11<mallory> hello", "bob") is None
+    assert protocol.sender_color("plain old scrollback", "bob") is None

@@ -234,3 +234,31 @@ def test_check_integrity_raises_for_a_corrupted_database(tmp_path):
             db.check_integrity()
     finally:
         db.close()
+
+
+def test_mrc_color_migration_preserves_existing_scrollback(tmp_path, monkeypatch):
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+    from netbbs.auth.users import create_user
+    from netbbs.chat.channels import create_channel
+    from netbbs.chat.scrollback import get_scrollback, record_message
+
+    path = tmp_path / "upgrade.db"
+    with monkeypatch.context() as old_schema:
+        old_schema.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+        with Database(path) as db:
+            user = create_user(db, "alice", password="test-only", user_level=255)
+            channel = create_channel(db, "lobby", creator=user)
+            record_message(db, channel, kind="message", author_label="alice", body="local text")
+            previous = record_message(db, channel, kind="message", author_label="bob@Other (MRC)",
+                                      external_source="mrc", body="bob is a name in this old message")
+    with Database(path) as db:
+        messages = get_scrollback(db, channel)
+        assert [message.body for message in messages] == ["local text", "bob is a name in this old message"]
+        assert messages[-1].id == previous.id and messages[-1].mrc_nick_color is None
+        colored = record_message(db, channel, kind="message", author_label="bob@Other (MRC)",
+                                 external_source="mrc", body="new text", mrc_nick_color=11)
+        assert colored.mrc_nick_color == 11
+        assert db.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        with pytest.raises(sqlite3.IntegrityError):
+            db.connection.execute("UPDATE channel_messages SET mrc_nick_color = 16 WHERE id = ?", (colored.id,))

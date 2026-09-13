@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import random
 
+import pytest
+
 from netbbs.chat.channels import create_channel, get_channel_by_name
 from netbbs.chat.hub import ParticipantId
 from netbbs.chat.mailbox import MessageMailbox
@@ -59,6 +61,47 @@ async def _browse(lane, hub, presence, user, inputs, *, mrc_bridge):
         timeout=4,
     )
     return session
+
+
+@pytest.mark.parametrize("limits,reason", [
+    ({"min_level": 50}, "You are not authorized to open MRC rooms on this node."),
+    ({"blocklist": ("denied",)}, "The SysOp has blocked MRC room #denied on this node."),
+    ({"cap": 1}, "already has 1 MRC rooms open"),
+])
+def test_room_refusal_survives_picker_redraw(db, lane, hub, alice, limits, reason):
+    from netbbs.mrc.settings import count_open_rooms
+    from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+
+    set_redraw_in_place_enabled(db, alice, True)
+
+    class ScreenSession(FakeSession):
+        async def read_key(self, echo=True):
+            if self._inputs and self._inputs[0] in ("\x0c", "b"):
+                # Check only what was painted AFTER the most recent clear,
+                # both on refusal and after Ctrl-L. A transcript assertion
+                # also passes for the old, immediately erased message.
+                screen = "".join(self.written).rsplit("\x1b[2J", 1)[-1]
+                assert reason in screen
+                assert "Multi Relay Chat" in screen and "Choice:" in screen
+            return await super().read_key(echo)
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub, **limits)
+        try:
+            if "cap" in limits:
+                await bridge.open_room("existing", alice.username)
+            before = count_open_rooms(db)
+            session = ScreenSession(["0", "1", "denied", "\x0c", "b"])
+            result = await asyncio.wait_for(
+                chat_flow._pick_mrc_room(session, lane, hub, alice, bridge), timeout=4,
+            )
+            assert result is None and not session._inputs
+            assert count_open_rooms(db) == before
+            assert not [p for p in fake.received if p.body == "NEWROOM::denied"]
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
 
 
 def test_picker_offers_the_mrc_section_only_when_open_rooms_are_on(db, lane, hub, presence, alice):
@@ -413,6 +456,83 @@ def test_a_room_blocked_after_opening_admits_nobody(db, lane, hub, presence, ali
             assert "Joined" in text and other.name in text
             assert text.count("The SysOp has blocked MRC room #temp on this node.") == 2
             assert hub.participant_count(temp.name) == 0
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_directory_discovery_and_completion_use_hub_rows(db, lane, hub, presence, alice):
+    from tests.test_chat_flow_mrc import _wait_for
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        original = fake.reply_lines
+        fake.reply_lines = lambda command, params: [
+            "*. __Rooms___________________Usr__Topic_______________________",
+            "*.:  #chess                    1  Chess - open games",
+            "*.:  #lobby                   12  Welcome to the lobby",
+            "*.:__                             # = Normal  # = Locked",
+        ] if command == "LIST" else original(command, params)
+        try:
+            mapping = await bridge.open_room("lobby", "alice")
+            participant = ParticipantId("alice", 991)
+            queue = hub.join(mapping.channel.name, participant)
+            await bridge.local_join(mapping.channel, "alice")
+            await fake.wait_for(lambda p: p.body.startswith("NEWROOM:"))
+            bridge.refresh_directory(mapping.channel, "alice")
+            await _wait_for(lambda: bridge.directory_details("chess") is not None, what="directory response")
+            assert bridge.directory_details("chess")[:2] == (1, "Chess - open games")
+            assert queue.empty()  # background discovery doesn't fill chat with a table
+            fake.users[("other", "bob")] = "lobby"
+            await fake.send_line("SERVER~~~CLIENT~~lobby~USERLIST:alice,bob~")
+            await _wait_for(lambda: "bob" in bridge.remote_roster(mapping.channel), what="roster")
+            completer = await chat_flow._build_completer(lane, hub, presence, mapping.channel, alice, mrc_bridge=bridge)
+            assert completer("/mrc ro") == ["roompass", "rooms"]
+            assert completer("/mrc msg b") == ["bob"]
+            assert completer("/join ch") == ["chess"]
+            assert completer("/join mrc:ch") == ["mrc:chess"]
+            assert completer("/mrc ctcp bob v") == ["VERSION"]
+            assert completer("/mrc update p") == ["password"]
+            hub.leave(mapping.channel.name, participant)
+            await bridge.local_leave(mapping.channel, "alice")
+            assert bridge.remote_roster(mapping.channel) == ["bob"]
+            session = FakeSession(["b"])
+            await chat_flow._pick_mrc_room(session, lane, hub, alice, bridge)
+            visible = _visible_text(session)
+            assert "chess" in visible and "Chess - open games" in visible
+            assert "1 on MRC" in visible
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_directory_rejects_unsolicited_and_expired_rows(db, lane, hub, presence, alice):
+    from tests.test_chat_flow_mrc import _wait_for
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        fake.reply_lines = lambda command, params: []
+        try:
+            mapping = await bridge.open_room("lobby", "alice")
+            queue = hub.join(mapping.channel.name, ParticipantId("alice", 992))
+            await bridge.local_join(mapping.channel, "alice")
+            await fake.wait_for(lambda p: p.body.startswith("NEWROOM:"))
+            await fake.send_line("SERVER~~~alice~~~*.: #unsolicited 1 A room~")
+            await asyncio.wait_for(queue.get(), timeout=2)
+            assert bridge.directory_details("unsolicited") is None
+            assert bridge.send_hub_command(mapping.channel, "alice", "LIST") is None
+            await fake.wait_for(lambda p: p.body == "LIST")
+            await fake.send_line("SERVER~~~alice~~~*.: #chess 1 Open games~")
+            notice = await asyncio.wait_for(queue.get(), timeout=2)
+            assert "#chess" in notice.text and "Open games" in notice.text
+            assert bridge.directory_details("chess")[:2] == (1, "Open games")
+            before = bridge._clock()
+            bridge._clock = lambda: before + 31
+            await fake.send_line("SERVER~~~alice~~~*.: #expired 1 A room~")
+            await asyncio.wait_for(queue.get(), timeout=2)
+            assert bridge.directory_details("expired") is None
         finally:
             await bridge.close()
             await fake.close()

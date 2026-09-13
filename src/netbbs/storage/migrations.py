@@ -2691,4 +2691,11 @@ MIGRATIONS = [
             ON door_outbound_history(door_id, created_at);
         """,
     ),
+    Migration(
+        description="Retain an MRC author's foreground color without changing stored message text or identity.",
+        sql="""
+        ALTER TABLE channel_messages ADD COLUMN mrc_nick_color INTEGER
+            CHECK (mrc_nick_color IS NULL OR (external_source IS 'mrc' AND mrc_nick_color BETWEEN 0 AND 15));
+        """,
+    ),
 ]
