@@ -565,10 +565,7 @@ async def capture_login(tmp: Path) -> str:
         # Nothing fills those in, so as a *screenshot* they claim NetBBS
         # renders live telemetry on the login screen, which it does not, and
         # they name a node no other shot in the gallery mentions. This one
-        # carries no field/value rows at all, and no U+276F either -- three
-        # shipped presets use that Dingbats glyph, which is the character
-        # v7.5.0 removed from the chat prompt for rendering as a hollow box
-        # in the fonts a Windows terminal reaches for.
+        # carries no field/value rows at all.
         preset = next(p for p in WELCOME_BANNER_PRESETS if p.key == "cathedral_of_signals")
         banner_path(db).write_bytes(load_welcome_banner_preset(preset))
         set_welcome_banner_enabled(db, True)
@@ -601,12 +598,44 @@ async def capture_login(tmp: Path) -> str:
         db.close()
 
 
+async def capture_users(tmp: Path) -> str:
+    """The Users sub-console: where v5.4.0's console work actually shows.
+
+    The console *landing* page deliberately shows bare counts -- active
+    sessions and the moderation queue have no configured capacity, so a
+    `max(10, count)` denominator read as "100% full" past ten and both
+    gauges were dropped (v5.4.0 release notes). The ratios that do have a
+    real denominator live one level in, framed, which is the half of that
+    release the gallery was never showing.
+    """
+    from netbbs.auth.users import get_user_by_username, set_user_disabled
+    from netbbs.net.admin_flow import _users_menu
+
+    db, lane = _node(tmp)
+    try:
+        people = _people(db)
+        # A node with a real spread of accounts: the active ratio is the
+        # gauge, so it has to be a ratio worth drawing.
+        for name in ("mox", "pell", "ondra", "juno", "sable", "rask"):
+            create_user(db, name, password="hunter2", user_level=10)
+        create_user(db, "newcomer", password="hunter2", user_level=10, pending_approval=True)
+        set_user_disabled(db, get_user_by_username(db, "rask"), True, changed_by=people["keeper"])
+
+        session = CaptureSession(width=80, height=30)
+        await _users_menu(session, lane, people["keeper"], node_controls=_controls())
+        return session.take()
+    finally:
+        lane.close()
+        db.close()
+
+
 SCREENS = {
     "boards": capture_boards,
     "chat": capture_chat,
     "colors": capture_colors,
     "console": capture_console,
     "directory": capture_directory,
+    "users": capture_users,
     "files": capture_files,
     "login": capture_login,
     "mainmenu": capture_mainmenu,

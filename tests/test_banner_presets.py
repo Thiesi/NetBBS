@@ -114,3 +114,51 @@ def test_masthead_categories_ship_distinct_artwork() -> None:
 
     for left, right in combinations(contents, 2):
         assert left.isdisjoint(right)
+
+
+#: The characters a row is drawn with when it belongs to a frame. A preset
+#: that uses them has promised a rectangle, and the terminal will show every
+#: column it is short by.
+FRAME_STARTS = frozenset("│║┃╔╠╚┏┣┗┌├└╭╰╟╞")
+
+#: Heavy angle quotation marks. They are East Asian Ambiguous, so a terminal
+#: may give them one column or two, and the frame around them moves with the
+#: terminal's choice rather than with the art.
+UNSTABLE_GLYPHS = frozenset("\u276e\u276f")
+
+
+@pytest.mark.parametrize(("family", "presets", "loader"), PRESET_FAMILIES)
+def test_framed_rows_are_all_the_same_width(
+    family: str, presets: tuple[BannerPreset, ...], loader: PresetLoader
+) -> None:
+    """A preset that draws a frame draws a rectangular one.
+
+    Every row that starts with a border character is part of the same box,
+    so they all have to end in the same column. Seven presets once did not:
+    their rows differed by up to nine columns, the frame could not close,
+    and the vertical borders wandered down the screen.
+    """
+    for preset in presets:
+        rows = [
+            strip_ansi(line).rstrip("\r")
+            for line in decode_ansi_bytes(loader(preset)).splitlines()
+        ]
+        framed = [row for row in rows if row[:1] in FRAME_STARTS]
+        if len(framed) < 2:
+            continue
+        widths = {display_width(row) for row in framed}
+        assert len(widths) == 1, (
+            f"{family}/{preset.resource} has framed rows of {sorted(widths)} columns"
+        )
+
+
+@pytest.mark.parametrize(("family", "presets", "loader"), PRESET_FAMILIES)
+def test_presets_avoid_ambiguous_width_glyphs(
+    family: str, presets: tuple[BannerPreset, ...], loader: PresetLoader
+) -> None:
+    for preset in presets:
+        visible = strip_ansi(decode_ansi_bytes(loader(preset)))
+        found = sorted(UNSTABLE_GLYPHS & set(visible))
+        assert not found, (
+            f"{family}/{preset.resource} uses {found}, whose width the terminal picks"
+        )

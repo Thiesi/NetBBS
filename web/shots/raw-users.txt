@@ -1,0 +1,19 @@
+
+[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;246mSysOp[0m[38;5;246m › [0m[38;5;51mUsers[0m
+[38;5;246mAccount administration, registration policy, and access levels.[0m
+[38;5;240m───────────────────────────────────────────────────────────────[0m
+[1m[38;5;51m╔════════════════════════════════════════════════════════════════════════════╗[0m
+[1m[38;5;51m║ [0m[1m[38;5;75mACCOUNTS[0m                                                                  [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m  [38;5;246mTotal users: [0m[1m[38;5;252m11[0m  [38;5;246mActive: [0m[1m[38;5;252m9[0m  [38;5;246mPending: [0m[1m[38;5;252m1[0m  [38;5;246mDisabled: [0m[1m[38;5;252m1[0m                     [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m  [38;5;246mSysOps: [0m[1m[38;5;252m1[0m    [38;5;246mActive ratio: [0m[38;5;246m[[0m[38;5;82m████████[0m[38;5;248m░░[0m[38;5;246m][0m [1m[38;5;252m9/11[0m                            [1m[38;5;51m ║[0m
+[1m[38;5;51m║ [0m  [1m[38;5;214m⚠ 1 registration awaiting review[0m                                        [1m[38;5;51m ║[0m
+[1m[38;5;51m╚════════════════════════════════════════════════════════════════════════════╝[0m
+  [[1m[38;5;46mC[0m]reate user                            [[1m[38;5;46mE[0m]nable/disable
+[38;5;248m    Add a new user account[0m               [38;5;248m    Toggle account access[0m
+  [[1m[38;5;46mL[0m]ist users                             [[1m[38;5;46mD[0m]elete user
+[38;5;248m    Browse and edit accounts[0m             [38;5;248m    Permanently remove a user[0m
+  [[1m[38;5;46mR[0m]egistration                           [[1m[38;5;46mB[0m]ack
+[38;5;248m    Signup policy settings[0m               [38;5;248m    Return to the SysOp console[0m
+  [[1m[38;5;46mP[0m]romote/demote
+[38;5;248m    Change a user's level[0m
+Choice: 
