@@ -303,3 +303,30 @@ def test_a_shrinking_page_does_not_keep_a_highlight_it_lost():
         )
     )
     assert session.rows_on_screen() <= 24
+
+
+def test_falling_back_to_the_compact_nav_does_not_cost_the_page():
+    """A compact `action_bar` wraps to two rows by itself at 40 columns,
+    so "does the nav contain a line break" is not a test for "is it the
+    descriptive form". Inferring it that way priced a picker that had
+    correctly fallen back to compact as if it were ten rows of
+    descriptive nav, cutting a page that fits ten choices to two (Codex
+    review)."""
+    from netbbs.net.picker import (
+        _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV, _page_size, _render_nav, _trailer_text,
+    )
+
+    session = FakeSession(40, 20)
+    trailer = _trailer_text("", False)
+    nav = _render_nav(
+        session, None, "brief", width=40, height=20,
+        trailer=trailer, unicode_style=False,
+    )
+    assert "Return without picking" not in nav, "this width falls back to the compact bar"
+    assert "\r\n" in nav, "and that bar wraps, which is what made the guess wrong"
+
+    size = _page_size(
+        session, None, "brief", width=40, height=20,
+        trailer=trailer, unicode_style=False,
+    )
+    assert size >= _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV, f"only {size} choices fit"

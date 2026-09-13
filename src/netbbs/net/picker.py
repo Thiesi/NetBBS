@@ -1399,7 +1399,19 @@ def _render_nav(
     width: int | None = None, height: int | None = None,
     on_create: Callable | None = None,
     trailer: str = "", unicode_style: bool = False,
+    reserve: bool = False,
 ) -> str:
+    """The nav block for this page, or -- with `reserve` -- the tallest
+    block any page of this list could produce in the *same form*.
+
+    `_page_size` asks for the reservation and counts its rows, rather
+    than taking this page's block and guessing whether it is descriptive
+    (Codex review). Guessing meant looking for a line break, and a
+    compact `action_bar` wraps to two rows all by itself at 40 columns --
+    so a picker that had correctly fallen back to the compact form was
+    then priced as if it had ten rows of descriptive nav, cutting a page
+    that fits ten choices down to two.
+    """
     # Dimensions may be supplied by a caller that has frozen them for
     # one render (see `pick_item`'s `_dimensions`); otherwise read live.
     width = session.terminal_width if width is None else width
@@ -1458,13 +1470,18 @@ def _render_nav(
             )
         )
         if max(1, min(_MAX_PAGE_SIZE, available)) >= _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV:
-            return descriptive
+            return tallest if reserve else descriptive
     # `menu_grid` always renders one entry per line, even with
     # descriptions off -- unlike `action_bar`'s packed single-line row,
     # that's not a byte-for-byte-compatible substitute at this level.
     # Reached either because the caller's preference is "off", or
     # because the descriptive form above didn't clear the page-size
     # floor.
+    #
+    # The reservation takes the worst-case entry list, since a compact
+    # bar wraps and one more entry can cost it a row.
+    if reserve:
+        entries = _nav_entries(on_sort, include_next=True, include_prev=True, on_create=on_create)
     return action_bar([e.label for e in entries], width=width)
 
 
@@ -1548,19 +1565,12 @@ def _page_size(
     # out for is exactly the split freezing them exists to prevent.
     width = session.terminal_width if width is None else width
     height = session.terminal_height if height is None else height
+    # `reserve=True`: the tallest block of whichever form this list will
+    # use, because a page has to fit whichever page it turns out to be.
     nav = _render_nav(
         session, on_sort, description_level, width=width, height=height, on_create=on_create,
-        trailer=trailer, unicode_style=unicode_style,
+        trailer=trailer, unicode_style=unicode_style, reserve=True,
     )
-    # The tallest shape, not this call's default one (Codex review).
-    # `_render_nav` above answers "which form", which is all the budget
-    # needs from it; how many rows that form costs is a question about
-    # every page, and `_tallest_nav` is the one place that answers it.
-    if "\r\n" in nav:
-        nav = _tallest_nav(
-            session, on_sort, description_level,
-            width=width, height=height, on_create=on_create,
-        )
     nav_lines = nav.count("\r\n") + 1
     trailer_lines = _trailer_rows(
         nav, trailer,
