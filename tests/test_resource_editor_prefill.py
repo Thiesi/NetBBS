@@ -27,6 +27,8 @@ class FakeSession:
         self.terminal_height = 24
         self.offered_initial: str | None = None
         self.offered_cancellable: bool | None = None
+        self.offered_viewport: int | None = None
+        self.offered_owns_row: bool | None = None
         self._answer = answer
         self._cancel = cancel
 
@@ -36,9 +38,14 @@ class FakeSession:
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
 
-    async def read_line(self, echo: bool = True, *, initial: str = "", cancellable: bool = False, **kw) -> str:
+    async def read_line(
+        self, echo: bool = True, *, initial: str = "", cancellable: bool = False,
+        viewport=None, viewport_owns_row: bool = False, **kw,
+    ) -> str:
         self.offered_initial = initial
         self.offered_cancellable = cancellable
+        self.offered_viewport = viewport
+        self.offered_owns_row = viewport_owns_row
         if self._cancel:
             raise InputCancelled
         return self._answer
@@ -130,17 +137,38 @@ def test_a_remote_value_is_sanitized_before_it_is_seeded():
     assert "Releases" in session.offered_initial
 
 
-def test_a_value_too_wide_for_one_row_keeps_the_old_prompt():
-    """`read_line` moves with single-row CSI D/C, so a buffer that
-    soft-wraps makes the display diverge from the value that will be
-    saved. Too-wide values keep the prompt that has always worked,
-    including its "blank = keep" answer."""
+def test_a_value_too_wide_for_one_row_is_edited_like_any_other():
+    """Width used to disqualify a value from inline editing (issue
+    #529): `read_line` moved with single-row CSI D/C, so a buffer that
+    soft-wrapped made the display diverge from what would be saved, and
+    the longest descriptions -- the case this feature was asked for --
+    kept the old "blank = keep" prompt and had to be retyped.
+
+    Issue #546 fixed that where it was actually broken, in the line
+    editor, which now keeps a scrolling one-row window over the buffer.
+    So no width gate is left: the value is seeded, and erasing it clears
+    the field exactly as it does anywhere else."""
     draft = {"description": "x" * 200}
     session = _edit(draft, "")
-    assert session.offered_initial == ""
-    assert "keep" in session.output
-    # And blank still means keep on that path, rather than clearing.
-    assert draft["description"] == "x" * 200
+    assert session.offered_initial == "x" * 200
+    assert draft["description"] == ""
+
+
+def test_the_window_is_sized_to_the_room_the_prompt_left():
+    """The prompt is written on its own line precisely so the whole
+    terminal width is available -- `viewport` is columns from the cursor
+    to the right edge, not the terminal width in general.
+
+    Handed over as a callable, not a number: a caller who shrinks their
+    terminal mid-edit would otherwise keep getting rows sized for the
+    terminal they had."""
+    draft = {"description": "x" * 200}
+    session = _edit(draft, "")
+    assert callable(session.offered_viewport)
+    assert session.offered_viewport() == session.terminal_width
+
+    session.terminal_width = 40
+    assert session.offered_viewport() == 40, "the width is read again, not remembered"
 
 
 def test_a_value_that_fits_still_gets_the_editable_prompt():
@@ -172,3 +200,23 @@ def test_a_tab_is_normalized_before_the_width_is_judged():
     session = _edit(draft, "a b")
     assert "\t" not in session.offered_initial
     assert session.offered_initial == "a b"
+
+
+def test_the_fallback_prompt_scrolls_too():
+    """It is reached for a value too *long* to seed, not too wide -- and
+    whoever is replacing such a value is about to type something long
+    themselves, straight into the soft-wrap this change exists to
+    remove. Only the inline branch opted in at first (Codex review)."""
+    from netbbs.net.char_input import MAX_LINE_LENGTH
+
+    draft = {"description": "x" * (MAX_LINE_LENGTH + 1)}
+    session = _edit(draft, "a replacement")
+    assert session.offered_initial == ""
+    assert callable(session.offered_viewport)
+    # The input gets a row of its own, as the inline branch does, so the
+    # window is the whole width. Deriving it from the prompt's width was
+    # the first attempt and was wrong: `write_prompt` wraps, so on a
+    # narrow terminal the prompt's total width says nothing about where
+    # the cursor lands on its last row.
+    assert session.offered_viewport() == session.terminal_width
+    assert session.offered_owns_row is True
