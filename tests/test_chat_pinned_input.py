@@ -21,6 +21,7 @@ import asyncio
 
 import pytest
 
+from netbbs.net.chat_flow import _input_prompt
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub, ParticipantId
@@ -176,7 +177,8 @@ def test_pinned_ui_min_height_requires_four_rows(lane, hub, presence, mailbox, c
     )
     text = _written_text(session)
     assert "\x1b[r" not in text  # scroll region never set, so never reset
-    assert "❯ " not in text and "> " not in text  # no pinned input row painted either
+    assert _input_prompt(unicode_style=True) not in text
+    assert _input_prompt(unicode_style=False) not in text
 
 
 # -- the real, byte-fed session: live_buffer/lock genuinely exercised -----

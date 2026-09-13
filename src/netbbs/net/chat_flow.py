@@ -3579,7 +3579,16 @@ _REMOTE_SCROLLBACK_POLL_ATTEMPTS = 20
 
 
 def _input_prompt(accent_color: int = ACCENT_COLOR, unicode_style: bool = False) -> str:
-    glyph = "❯ " if unicode_style else "> "
+    # U+203A, not U+276F (dogfood report: the prompt was a hollow
+    # rectangle in PuTTY, and fine in Termux). Not PuTTY's own
+    # limitation -- U+276F lives in Dingbats, which the bitmap and
+    # legacy fonts a Windows terminal reaches for by default simply do
+    # not cover, so the terminal draws the missing-glyph box. U+203A is
+    # the same shape one weight lighter, sits in cp1252, and is in
+    # every font that has ever shipped with Windows -- it is already
+    # what every masthead breadcrumb in the product uses, on the same
+    # terminals, without complaint.
+    glyph = "› " if unicode_style else "> "
     return colored(glyph, fg_color=accent_color, bold=True)
 
 
