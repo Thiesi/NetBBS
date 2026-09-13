@@ -270,11 +270,58 @@ async def _show_previous_callers_screen(
         _rule(middle_left, middle_right),
     ]
 
-    for index, entry in enumerate(entries, start=1):
-        name = sanitize_text(
+    # Issue #535: every column after the name used to start wherever
+    # that row's name happened to end, so nothing lined up down the
+    # panel. The widths are computed once, from the entries actually on
+    # screen -- the same per-page (not per-list) measurement
+    # `netbbs.net.picker` uses for its own reference column, since
+    # alignment only has to hold within one panel.
+    #
+    # The sibling screen in this file already did this right
+    # (`_show_logoff_summary_screen` pads with `f" {label:<12}"`); this
+    # one was simply overlooked.
+    def _pad(text: str, width: int) -> str:
+        """Fit to exactly `width` *display* columns. A CJK handle is two
+        columns per character, so padding by `len` is how a panel's
+        columns wander from row to row."""
+        text = cut_to_width(text, width)
+        return text + " " * max(0, width - display_width(text))
+
+    def _name_of(entry) -> str:
+        return sanitize_text(
             _session_history_display_name(db, entry, viewer_is_sysop=viewer_is_sysop)
         )
-        connected = sanitize_text(format_for_display(entry.connected_at, db))
+
+    def _connected_of(entry) -> str:
+        return sanitize_text(format_for_display(entry.connected_at, db))
+
+    # The timestamp is not a fixed width: a 12-hour display format
+    # yields both "1:05 PM" and "11:05 AM", so it is measured rather
+    # than assumed.
+    connected_width = max(
+        (display_width(_connected_of(entry)) for entry in entries), default=0
+    )
+    # "SIGNED OFF" / "SIGNAL LOST" / "ONLINE NOW" are all ten columns
+    # already, but deriving it keeps the arithmetic honest if a fourth
+    # state is ever added.
+    status_width = max(len(s) for s in ("SIGNED OFF", "SIGNAL LOST", "ONLINE NOW"))
+    show_status = frame_width >= 62
+    fixed = (
+        display_width(f" {1:02d} ")
+        + display_width(marker)
+        + 1
+        + display_width(dot)
+        + connected_width
+        + ((display_width(dot) + status_width) if show_status else 0)
+    )
+    # A name still has to be a name; below this the panel would be all
+    # chrome and no caller, so the name keeps a floor and the row is
+    # allowed to run into `colored_truncate` as it always did.
+    name_width = max(8, body_width - fixed)
+
+    for index, entry in enumerate(entries, start=1):
+        name = _name_of(entry)
+        connected = _connected_of(entry)
         if entry.disconnected_at is not None:
             status, status_color = "SIGNED OFF", METADATA_COLOR
         elif entry.interrupted_at is not None:
@@ -293,26 +340,24 @@ async def _show_previous_callers_screen(
             if use_truecolor and name != "(name hidden)"
             else MUTED_COLOR if name == "(name hidden)" else accent_color
         )
-        if frame_width >= 62:
-            segments = [
-                (f" {index:02d} ", METADATA_COLOR),
-                (marker, rail_color),
-                (" ", None),
-                (name, name_color),
-                (dot, METADATA_COLOR),
-                (connected, METADATA_COLOR),
+        segments = [
+            (f" {index:02d} ", METADATA_COLOR),
+            (marker, rail_color),
+            (" ", None),
+            (_pad(name, name_width), name_color),
+            (dot, METADATA_COLOR),
+            # Padded even in the narrow branch, where it is the last
+            # column: a trailing run of spaces costs nothing inside a
+            # frame that pads to `body_width` anyway, and leaving it
+            # unpadded would mean the two branches disagreed about
+            # whether a column is a column.
+            (_pad(connected, connected_width), METADATA_COLOR),
+        ]
+        if show_status:
+            segments.extend([
                 (dot, METADATA_COLOR),
                 (status, status_color),
-            ]
-        else:
-            segments = [
-                (f" {index:02d} ", METADATA_COLOR),
-                (marker, rail_color),
-                (" ", None),
-                (name, name_color),
-                (dot, METADATA_COLOR),
-                (connected, METADATA_COLOR),
-            ]
+            ])
         rendered.append(
             _framed(colored_truncate(segments, body_width), rail_color)
         )
