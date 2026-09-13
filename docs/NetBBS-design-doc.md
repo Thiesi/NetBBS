@@ -510,6 +510,61 @@ a picker and persists nothing before `[S]ave`. The deliberate exceptions are
 once-only first-run decisions (Link participation, node name, managed DNS,
 the Unicode-style probe) and type-the-name confirmations before deletes.
 
+### 3.6 Resource lists (issue #528)
+
+A list row's secondary text is either prose or a record, and the two render
+differently.
+
+Prose stays prose: a moderation reason, a log message, a peer fingerprint, an
+author attribution. These render as `pick_item`'s single trailing description
+string, muted, exactly as they always have.
+
+A *record* — a row whose secondary text is several independent fields — is a
+table. `pick_item` takes `columns` and `column_values_of`, and renders a
+`LABEL_COLOR` heading row above fixed columns, each column separately
+coloured. This covers the SysOp's board, file-area, chat-channel and
+Community listers. The distinction is whether the fields can be compared down
+a page: levels, status and gates can, and a sentence stapling them together
+prevents it.
+
+Two rules follow from that, and are normative for any future list:
+
+- **A resource's access gates appear wherever a SysOp lists that resource.**
+  A minimum age or a name requirement changes who may enter, and a list that
+  omits them shows a gated resource as identical to an open one. A gate is
+  coloured (`GATE_COLOR`) only when present, so an ungated row stays quiet
+  and a gated one is visible while scanning. This holds in the narrow
+  fallback too: a long name is bounded there rather than allowed to push the
+  gates off the end of the row.
+
+  Deliberately scoped to the SysOp's own resource listers for now. The
+  caller-facing pickers do not yet carry gate metadata, and one of them
+  (the chat channel picker) filters its list on level and age but not on
+  name requirement, so it can still offer a channel that refuses the caller
+  on selection. That is a real gap, tracked separately; this rule will
+  extend to those screens when it is closed, and the wording here should be
+  widened at that point rather than read as already covering them.
+- **A table that does not fit becomes prose again.** Below the width at which
+  the name column stays readable, the row falls back to the flat description
+  form. The decision is made per render against the live terminal width, not
+  once on entry. A truncated table is worse than the sentence it replaced.
+
+A row shows what **applies** to a caller, resolved through the Community
+cascade (`get_effective_min_age` and friends), never the resource's own raw
+unset value. A board that sets no age gate but sits in a Community that does
+is gated, and enforcement says so; a list that printed the resource's own
+`None` would report it as open. The editor behind `[E]` is where a SysOp sees
+which values the resource itself sets. An explicit `0` minimum age is not a
+gate -- `meets_age` admits everyone -- and is not tagged as one.
+
+In the prose fallback the gates lead the string, because a narrow terminal is
+precisely where that string gets truncated: who may enter is the least
+guessable fact in the row, so the levels take the truncation instead.
+
+Cells are measured and padded in display columns, never character counts, so
+a CJK name does not shift the columns after it, and whitespace is normalized
+before measuring since a preserved tab measures zero but renders as a space.
+
 ---
 
 ## 4. Accounts, authentication, identity, and addressing
