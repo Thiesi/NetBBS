@@ -37,10 +37,16 @@ from netbbs.mrc.bridge import MrcBridge
 from netbbs.net.board_flow import _show_board
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import InputHistory
-from netbbs.net.chat_flow import browse_channels, list_visible_channels_for
+from netbbs.net.chat_flow import (
+    NAME_GATE_NOTE,
+    browse_channels,
+    channel_name_gate_unmet,
+    list_visible_channels_for,
+)
 from netbbs.net.file_flow import enter_file_area
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.picker import pick_item
+from netbbs.rendering import GATE_COLOR, SegmentColor
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -65,8 +71,8 @@ class _ScanItem:
     """One row in issue #56's `[N]ew scan` picker -- a board, channel,
     or file area `user` can currently access, with its computed unread
     state and follow status. Built fresh on every screen entry, never
-    persisted -- see `_new_scan_screen`'s own docstring for why
-    `stable_id_of=lambda item: id(item)` is the correct idiom here."""
+    persisted -- see `_new_scan_screen`'s own docstring for why the row's
+    own position is the right stable id here."""
 
     kind: str  # "board" | "channel" | "file_area"
     name: str
@@ -75,6 +81,13 @@ class _ScanItem:
     board: Board | None = None
     channel: Channel | None = None
     file_area: FileArea | None = None
+    # Issue #541: a channel this caller can see but not enter, because
+    # its effective name requirement asks for an attestation they have
+    # not got. Resolved while the rows are built, in the pass that is
+    # already reading them, and shown in the row -- otherwise this
+    # picker reproduces exactly the pick-it-and-be-refused behaviour the
+    # channel picker was just fixed for.
+    name_gate_unmet: bool = False
 
 
 async def _new_scan_screen(
@@ -106,9 +119,19 @@ async def _new_scan_screen(
     yet seeing an empty screen.
 
     Built fresh every time this screen is entered -- a plain Python
-    list, never persisted -- so `stable_id_of=lambda item: id(item)`
-    is the correct idiom (same as `_who_screen`'s sessions, or the
-    Link status screen's in-memory peers), not a database id.
+    list, never persisted -- so there is no database id to use, the way
+    `_who_screen`'s sessions and the Link status screen's in-memory peers
+    have none either.
+
+    This one numbers its rows instead of using `id(item)` (issue #541,
+    Codex review). A `CPython` object address is around fifteen digits,
+    and `pick_item` prints the stable id beside every row as its `(#N)`
+    reference: at 40 columns that prefix plus an ordinary channel name
+    consumed the whole row, so the description -- including the
+    "needs a verified name" note this screen had just been given --
+    was clipped away before a caller could read it. A row number is
+    short, equally stable for as long as this list exists, and makes
+    `[G]oto #` mean something for the first time on this screen.
 
     Selecting a board/file area jumps straight to its first unread post/
     file via `initial_cursor`; selecting a channel enters it directly
@@ -140,6 +163,7 @@ async def _new_scan_screen(
                 _ScanItem(
                     kind="channel", name=channel.name, unread=unread_channel_count(db, user, channel),
                     followed=is_following(db, user, "channel", channel.id), channel=channel,
+                    name_gate_unmet=channel_name_gate_unmet(db, user, channel),
                 )
             )
 
@@ -184,12 +208,34 @@ async def _new_scan_screen(
             status = "caught up"
         else:
             status = f"{item.unread} unread"
-        return f"{prefix}{item.kind.replace('_', ' ')}, {status}"
+        line = f"{prefix}{item.kind.replace('_', ' ')}, {status}"
+        if item.name_gate_unmet:
+            # Still here as well as beside the name: this is what the
+            # fallback prose row carries when the row is too narrow for
+            # the segments to help either.
+            line = f"{NAME_GATE_NOTE} -- {line}"
+        return line
+
+    positions = {id(item): index for index, item in enumerate(items, start=1)}
+
+    def _name_segments(item: _ScanItem) -> list[tuple[str, SegmentColor]]:
+        """The gate note rides with the name here too (issue #541).
+
+        In the description it sat behind an unbounded name and was the
+        first thing a 40-column row lost, so a gated channel looked
+        exactly like an ungated one -- which is the whole bug (Codex
+        review).
+        """
+        segments: list[tuple[str, SegmentColor]] = [(item.name, None)]
+        if item.name_gate_unmet:
+            segments.append((f" ({NAME_GATE_NOTE})", GATE_COLOR))
+        return segments
 
     selected = await pick_item(
         session, items,
         name_of=lambda item: item.name,
-        stable_id_of=lambda item: id(item),
+        stable_id_of=lambda item: positions[id(item)],
+        name_segments_of=_name_segments,
         description_of=_description,
         title="New scan",
         empty_message="Nothing accessible yet.",
