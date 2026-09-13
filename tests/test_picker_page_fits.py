@@ -32,8 +32,20 @@ import re
 
 import pytest
 
+from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.picker import pick_item
 from netbbs.rendering.width import display_width
+
+#: Scripted keys this fake turns into real editor events rather than
+#: characters. Without `read_editor_key`, `pick_item`'s base
+#: `Session.read_editor_key` never sees them and "\x1b[A" arrives as an
+#: ordinary keystroke -- which is how a highlight regression test can
+#: pass while never pressing Up at all (Codex review).
+_EDITOR_KEYS = {
+    "UP": EditorKeyKind.UP,
+    "DOWN": EditorKeyKind.DOWN,
+    "ENTER": EditorKeyKind.ENTER,
+}
 
 _SGR = re.compile("\x1b" + r"\[[0-9;]*m")
 _ANSI = re.compile("\x1b" + r"\[[0-9;]*[A-Za-z]")
@@ -61,6 +73,12 @@ class FakeSession:
 
     async def read_line(self, echo: bool = True, **kwargs) -> str:
         return next(self._keys, "b")
+
+    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
+        raw = next(self._keys, "b")
+        if raw in _EDITOR_KEYS:
+            return EditorKey(_EDITOR_KEYS[raw])
+        return EditorKey(EditorKeyKind.CHAR, char=raw)
 
     def rows_on_screen(self) -> int:
         """Every row the last drawn page occupies.
@@ -292,7 +310,7 @@ def test_a_shrinking_page_does_not_keep_a_highlight_it_lost():
     the previous one -- and `page_items[highlighted]` then raised
     `IndexError` on Enter (Codex review)."""
     labels = iter(["Activity", "Activity, newest first, with every archived entry included too"])
-    session = FakeSession(80, 24, [_UP := "\x1b[A", "\r"])
+    session = FakeSession(80, 24, ["UP", "ENTER"])
     asyncio.run(
         pick_item(
             session, list(range(1, 80)),
@@ -367,3 +385,47 @@ def test_a_paginated_list_still_fits(width, height):
         )
     )
     assert session.rows_on_screen() <= height
+
+
+def test_a_shorter_last_page_does_not_keep_a_highlight_beyond_it():
+    """The guard compared against the nominal page size, not the slice
+    that was actually taken -- and the last page is shorter than a full
+    one, so an index inside `page_size` can still be outside
+    `page_items`. That is `IndexError` on Enter, which is exactly what
+    the guard exists to stop (Codex review)."""
+    labels = iter([
+        "Activity",
+        "Activity, newest first, with every archived entry and every note included as well",
+        "Activity",
+    ])
+    session = FakeSession(80, 24, ["n", "UP", "ENTER"])
+    result = asyncio.run(
+        pick_item(
+            session, list(range(1, 21)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none",
+            sort_label=lambda: next(labels, "Activity"), on_sort=None,
+        )
+    )
+    # No IndexError. Whatever it returned, it returned something on the
+    # page that was actually drawn.
+    assert result is None or result in range(1, 21)
+
+
+def test_seven_items_fit_the_terminal_they_were_sized_for():
+    """The two-pass could answer inconsistently: a list that fits a
+    paginated page but not a single-page one returned the paginated
+    size, which put every item on one page -- so the render chose the
+    single-page nav that had *just* been measured as not fitting. Seven
+    items at 40x20 drew 21 rows (Codex review)."""
+    session = FakeSession(40, 20)
+    asyncio.run(
+        pick_item(
+            session, list(range(1, 8)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none", description_level="brief",
+        )
+    )
+    assert session.rows_on_screen() <= 20

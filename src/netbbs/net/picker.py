@@ -580,6 +580,18 @@ async def pick_item(
             single = measure(single_page=True)
             if len(working_set) <= single:
                 return single
+            # The list fits a paginated page but not a single-page one,
+            # and returning `paginated` here would have been the worst
+            # of both (Codex review): every item on one page makes
+            # `_total_pages()` 1, so the render picks the single-page
+            # nav that was *just* measured as not fitting -- seven items
+            # at 40x20 drew 21 rows on a 20-row terminal.
+            #
+            # Force the pagination the reservation assumed instead. One
+            # item short of the list is enough to make Next real, which
+            # makes the nav the paginated one, which is the nav this
+            # size was measured against.
+            return max(1, min(paginated, len(working_set) - 1))
         return paginated
 
     def _masthead_prefix() -> str:
@@ -682,12 +694,17 @@ async def pick_item(
         # cleared rather than clamped: the row it pointed at may not be
         # on this page at all, and moving somebody's selection silently
         # is worse than asking them to make it again.
-        if highlighted is not None and highlighted >= page_size:
-            highlighted = None
         total_pages = _total_pages()
         page_index = max(0, min(page_index, total_pages - 1))
         start = page_index * page_size
         page_items = working_set[start : start + page_size]
+        # Against what was actually sliced, not against the nominal page
+        # size (Codex review): the last page is shorter than a full one,
+        # so an index inside `page_size` can still be outside
+        # `page_items` -- which is `IndexError` on Enter, the thing this
+        # guard exists to stop.
+        if highlighted is not None and highlighted >= len(page_items):
+            highlighted = None
 
         if masthead:
             await write_preformatted_line(session, _masthead_prefix())
