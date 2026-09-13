@@ -144,7 +144,7 @@ async def _run(lane, hub, presence, channel, user, lines, *, mrc_bridge=None, wh
     return session, await asyncio.wait_for(task, timeout=4)
 
 
-async def _wait_for(predicate, *, what: str, timeout: float = 5.0) -> None:
+async def _wait_for(predicate, *, what: str, timeout: float = 5.0, task=None) -> None:
     """Wait until `predicate()` holds, or fail saying what never came.
 
     Issue #536: several tests here pushed a line into the fake hub, slept
@@ -155,9 +155,20 @@ async def _wait_for(predicate, *, what: str, timeout: float = 5.0) -> None:
     condition is met promptly, which is the normal case, and the failure
     message names what was being waited for instead of leaving a missing
     line of text to be reverse-engineered.
+
+    `task`, if given, is the session driving the condition. Without it a
+    session that fails before rendering what is awaited is reported as a
+    timeout five seconds later, and the real exception is then lost to
+    the caller's cleanup -- the secondary failure replacing the actual
+    one (Codex review).
     """
     deadline = asyncio.get_running_loop().time() + timeout
     while not predicate():
+        if task is not None and task.done():
+            # Re-raises whatever the session died of; a session that
+            # simply ended says so, rather than timing out in silence.
+            task.result()
+            raise AssertionError(f"the session ended before {what}")
         assert asyncio.get_running_loop().time() < deadline, f"timed out waiting for {what}"
         await asyncio.sleep(0.01)
 

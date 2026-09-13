@@ -50,15 +50,25 @@ class _PickerQueueSession(_QueueSession):
         return await self.inputs.get()
 
 
-async def _browse_until(lane, hub, presence, user, inputs, *, mrc_bridge, until, what):
-    """`_browse`, but the last scripted input is held back until `until`
-    holds (issue #536).
+async def _browse_until(lane, hub, presence, user, before, after, *, mrc_bridge, until, what):
+    """`_browse`, but `after` is held back until `until` holds (issue
+    #536).
 
     `_browse` feeds a fixed list and the session ends when it runs dry,
-    so an assertion about something the hub *replies* with is a race:
-    on a slower host the reply lands after the session has already
-    finished and rendered nothing. Waiting for the reply before quitting
+    so an assertion about something the hub *replies* with is a race: on
+    a slower host the reply lands after the session has already finished
+    and rendered nothing. Waiting for the reply before feeding the rest
     removes the window rather than widening it.
+
+    Two lists rather than "hold back the last line" (Codex review). The
+    caller that needed this queues `0`, `1`, `/join second`, `/quit` and
+    waits for the first room's MOTD -- and holding back only `/quit` let
+    `/join second` run first, so the session could leave the room the
+    MOTD was addressed to. `local_leave` drops the caller from
+    `_announced`, and an addressed packet arriving after that has no
+    recipient and is discarded for good, leaving the wait to time out on
+    exactly the slow host it exists to protect. What must not happen
+    before the condition is the caller's business, so the caller says so.
     """
     session = _PickerQueueSession()
     task = asyncio.create_task(
@@ -67,21 +77,28 @@ async def _browse_until(lane, hub, presence, user, inputs, *, mrc_bridge, until,
         )
     )
     try:
-        for line in inputs[:-1]:
+        for line in before:
             session.inputs.put_nowait(line)
-        await _wait_for(lambda: until(session), what=what, timeout=5.0)
-        session.inputs.put_nowait(inputs[-1])
+        await _wait_for(lambda: until(session), what=what, timeout=5.0, task=task)
+        for line in after:
+            session.inputs.put_nowait(line)
         await asyncio.wait_for(task, timeout=4)
     finally:
         # AGENTS.md, "own async tasks": if the condition never holds --
         # or the predicate raises -- this task is still running, and
         # would otherwise overlap the test's bridge and database
-        # teardown, or surface later as an exception nobody retrieved,
-        # replacing the real failure with a timeout.
+        # teardown, or surface later as an exception nobody retrieved.
         if not task.done():
             task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        else:
+            # Retrieved, not suppressed: `_wait_for` and the `await`
+            # above have already raised anything that mattered, and
+            # swallowing it here is what turned a real failure into a
+            # bare timeout.
+            with contextlib.suppress(BaseException):
+                task.exception()
     return session
 
 
@@ -118,7 +135,7 @@ def test_the_hubs_welcome_is_shown_once_per_session(db, lane, hub, presence, ali
             # 0,1 enters #first (the only entries are first and second);
             # /join second moves to a second MRC room in the same session.
             session = await _browse_until(
-                lane, hub, presence, alice, ["0", "1", "/join second", "/quit"], mrc_bridge=bridge,
+                lane, hub, presence, alice, ["0", "1"], ["/join second", "/quit"], mrc_bridge=bridge,
                 until=lambda s: "[MRC] MOTD reply line 1" in _visible_text(s),
                 what="the hub's MOTD reply to be rendered",
             )
