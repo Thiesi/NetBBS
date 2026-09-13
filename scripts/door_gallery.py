@@ -1079,12 +1079,20 @@ def base_fixture(door_name: str, door: pathlib.Path, root_dir: pathlib.Path,
     fixture = root_dir / "fixtures" / (door_name if name == "base" else f"{door_name}-{name}")
     if fresh:
         remove(fixture)
-    # A directory is not a fixture; a world or a saves directory inside one is.
+    # A directory is not a fixture; a world file or a saved career inside one is.
     # `--fresh` deletes through a tree the door's SQLite handle may still be
     # holding, and on Windows that can take the files and leave the directory
     # behind -- after which a bare existence check accepted a world with no
     # schema in it and failed every panel with `no such table: meta`.
-    if any(fixture.glob("*.db")) or any(fixture.glob("saves")):
+    #
+    # `saves` was still being tested for existence rather than for contents,
+    # which is the same hazard one level down: `remove` gives up after three
+    # seconds, leaving `saves/` and `saves/scores/` behind with no career in
+    # them, and every later run then accepted that empty directory as a
+    # fixture. Every Voidrunner panel silently rendered the *registration*
+    # screen instead of the screen it was named after -- a gallery that looks
+    # like it built, and reviews nothing.
+    if any(fixture.glob("*.db")) or any(fixture.glob("saves/*.json")):
         return fixture
     remove(fixture)
     build = FIXTURE_BUILDERS.get((door_name, name), _onboard)

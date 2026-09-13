@@ -5829,6 +5829,49 @@ the colon the label read as a sentence -- subject "Board 4", verb "offers" --
 and a caller asked what the numbers meant (issue #518). Counts agree in number
 with their noun.
 
+**A value is a value whether or not it is a number** (issue #532). The rule
+above is the shape of a recurring mistake, and the count in a menu label was
+only its first instance. `style_body_line` assigns colour by token *shape* --
+digits, credit figures, gauges, severity words, `[K]` -- and anything it does
+not recognise falls to the prose role. So a value that happens to be a word had
+nothing to match and came out the colour of its own label: `HULL ... 60/60
+Intact`, `Concord Navy ... +0 Neutral Not joined`, `Crew none`. Two style lists
+made it worse by declaring those columns `label` outright. A column that holds
+what the caller reads off the row is a value column, whatever its cells look
+like; absent severity means *value*, not *label*, and only the bar carrying that
+same absence stays chrome.
+
+**A table's headings are structure, not labels.** They take the `heading` tone,
+which is `hull` -- the role that already means section headers -- so a table
+announces itself as one instead of being the colour of the sentence above it and
+the footnote below it.
+
+**The action bar wears the roles of the menu it mirrors.** A footer is a row of
+`[K] Label` pairs, not a sentence with keys in it, so `out_prompt` styles it the
+way `key_label` styles the service menu: gold key, value label. It is done in
+`out_prompt` rather than at the thirty call sites that print a prompt, and a
+prompt that styles itself is left alone -- the same rule a composed body row
+follows. Before this, the action bar was the only row on a Voidrunner screen
+carrying no palette role at all, and it is the row a caller has to read to know
+what to press.
+
+**A screen of figures is not a screen of sentences.** The Trading Ledger was
+fifteen prose rows with `HOLD -`, `TRAVEL -` and `LOCAL MARKET -` as headings
+wearing a hyphen; 73% of its characters were the prose role and 0.4% were
+values. `section` and `table` exist for exactly this, and every fact it carried
+survived the change of shape. Where a table's rows each hold a single figure,
+no column may be `optional`: dropping one leaves a row with nothing on it, which
+is what a first cut of that table did to `Cargo lost or surrendered` at forty
+columns. With nothing droppable the table stacks instead, and a stacked row
+still carries its figure.
+
+**A menu is built, not pattern-matched.** The Hall of Fame wrote its view
+switcher as the sentence `Views: [1] Wealth, ... [5] Completed careers.`, and
+`Completed` matched the good-tone severity pattern, so one view name rendered
+green for no reason. A component's decision beats a pattern's guess -- the rule
+that settled the preview counts -- so the switcher is a `menu_grid` under a
+`section` rule.
+
 **A screen replaces the one before it** (issue #516). A door owns the terminal
 for its whole session, so every paged screen clears and repaints rather than
 printing underneath its predecessor: a session was one long scroll, and a
