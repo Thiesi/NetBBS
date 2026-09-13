@@ -841,24 +841,22 @@ def _normalize_tabs(text: str) -> str:
 
 _EDIT_HINT = "Edit (Enter saves, Esc cancels)"
 
-# ...but only while the value fits on one physical row (Codex review).
+# Width is no longer a reason to refuse an inline edit (issue #546).
 #
-# `read_line` moves its cursor with single-row `CSI D`/`CSI C`
-# sequences. A buffer wider than the terminal soft-wraps onto a second
-# row, and from then on Home, Left, Backspace and tail redraws clamp at
-# the current row while the logical cursor walks into text a row above
-# -- the display and the value that will be saved diverge. That is a
-# pre-existing limit of the line editor, not something prefilling
-# introduced: a *typed* over-wide line has always had it. What prefilling
-# changes is that it becomes reachable by simply opening a long
-# description, which is precisely the case this feature exists for.
+# It used to be. `read_line` moves its cursor with single-row `CSI D`/
+# `CSI C` sequences, so a buffer wider than the terminal soft-wrapped
+# onto a second row and every subsequent Home, Left, Backspace and tail
+# redraw clamped at the row it was on while the logical cursor walked
+# into text a row above -- the display and the value that would be saved
+# diverged, silently. #529 gated on it rather than shipping that, which
+# left the longest descriptions -- the exact case the dogfood report was
+# about -- unamendable without retyping.
 #
-# So a value that will not fit keeps the old empty prompt and its
-# "blank = keep" answer, and the prompt says which one the caller is
-# looking at rather than leaving them to discover it. Long values want a
-# real single-row viewport, or routing to the full-screen prose editor
-# that already exists; both are follow-up work, filed separately rather
-# than half-built here.
+# `netbbs.net.char_input.LineViewport` fixes it at the source: the
+# editor keeps a one-row window over the buffer and scrolls it to follow
+# the cursor, so it never emits a second row for anything. Every value
+# now takes the same path, and the fix reaches a *typed* over-wide line
+# too, which had this from the beginning.
 _KEEP_HINT = "blank = keep"
 
 
@@ -873,29 +871,23 @@ _MAX_PREFILL_LENGTH = _MAX_LINE_LENGTH
 
 
 def _prefill_fits(session: Session, value: str) -> bool:
-    """Whether `value` can be edited inline, unchanged and in one row.
+    """Whether `value` can be edited inline unchanged.
 
-    Two separate limits, both of which silently altered the value when
-    they were missing (Codex review):
-
-    *Length* -- `read_line` caps its buffer, and a carried Link
+    Length only, now that width is handled by the editor's own viewport
+    (issue #546). `read_line` caps its buffer, and a carried Link
     resource's name or description is persisted from a remote genesis
     payload with no per-field limit of its own, so an over-long value is
-    reachable rather than hypothetical.
+    reachable rather than hypothetical: Telnet/SSH would submit only the
+    first `_MAX_LINE_LENGTH` code points while the web transport seeded
+    the lot, silently corrupting the field differently on each
+    transport. Such a value takes the fallback prompt instead, where it
+    is left alone unless the SysOp types a replacement.
 
-    *Width* -- measured after normalizing tabs. `sanitize_text`
-    deliberately preserves a tab and `display_width` scores it zero,
-    while the terminal advances to a tab stop: measuring the raw string
-    would approve a value that occupies more columns than counted, and
-    every cursor calculation after it would then edit the wrong ones.
-
-    The prompt is written on its own line, so the value gets the whole
-    terminal width rather than whatever the prompt left of it -- which
-    is what keeps most real descriptions on the inline path.
+    `session` is kept in the signature: what counts as editable is a
+    property of the terminal, and width stopped mattering here rather
+    than stopping being a question.
     """
-    if len(value) > _MAX_PREFILL_LENGTH:
-        return False
-    return display_width(_normalize_tabs(value)) < max(1, session.terminal_width - 1)
+    return len(value) <= _MAX_PREFILL_LENGTH
 
 
 def text_field(key: str, *, required: bool = False) -> FieldPrompt:
@@ -924,8 +916,22 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
             # "blank = keep" answer, so a value that cannot be edited
             # in place can still be replaced or left alone.
             shown = current if current else "(blank)" if required else "(none)"
-            await write_prompt(session, f"[{shown}] ({_KEEP_HINT}): ")
-            raw = (await session.read_line()).strip()
+            # This branch scrolls too (Codex review), and gets its own
+            # line to scroll in. It is reached for a value too *long* to
+            # seed, not too wide, and whoever is replacing such a value
+            # is about to type something long themselves -- straight into
+            # the soft-wrap this whole change exists to remove.
+            #
+            # Deriving the window from the prompt's width was the first
+            # attempt and was wrong: `write_prompt` wraps, so on a narrow
+            # terminal the prompt's *total* width says nothing about
+            # where the cursor ends up on its last row. Giving the input
+            # a row of its own makes the answer the whole width, exactly
+            # as it is for the inline branch below.
+            await session.write_line(colored(f"[{shown}] ({_KEEP_HINT}):", fg_color=MUTED_COLOR))
+            raw = (await session.read_line(
+                viewport=lambda: session.terminal_width, viewport_owns_row=True,
+            )).strip()
             if raw:
                 draft[key] = raw
             return
@@ -935,7 +941,18 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
         # real descriptions on the inline path rather than the fallback.
         await session.write_line(colored(f"{_EDIT_HINT}:", fg_color=MUTED_COLOR))
         try:
-            raw = (await session.read_line(initial=current, cancellable=True)).strip()
+            # The prompt is on its own line, so the window gets the whole
+            # terminal width -- `viewport` is columns from where the
+            # cursor is now to the right edge, not the terminal width in
+            # general, and this is the one place those are the same.
+            #
+            # A callable, not a number: a caller who shrinks their
+            # terminal mid-edit would otherwise keep getting rows sized
+            # for the terminal they had (Codex review).
+            raw = (await session.read_line(
+                initial=current, cancellable=True,
+                viewport=lambda: session.terminal_width, viewport_owns_row=True,
+            )).strip()
         except InputCancelled:
             # Esc: they changed their mind. Nothing is written, and the
             # draft keeps whatever it had -- the same "leave without

@@ -45,11 +45,40 @@ class LocalCLISession(Session):
     ) -> None:
         self._read_byte_fn = read_byte_fn
         self._read_byte_with_timeout_fn = read_byte_with_timeout_fn
-        size = shutil.get_terminal_size(fallback=(80, 24))
-        self.terminal_width = size.columns
-        self.terminal_height = size.lines
+        # Read on every access rather than captured here (Codex
+        # review). Nothing in this transport processes resize events --
+        # there is no NAWS and no browser to tell it -- so a SysOp
+        # resizing the window while `python -m netbbs.admin` is running
+        # kept getting rows sized for the window they started with.
+        # `shutil.get_terminal_size` is an `ioctl` and cheap enough to
+        # ask each time something needs the answer.
+        self._width_override: int | None = None
+        self._height_override: int | None = None
         self.peer_address = None
         self.truecolor_diagnostic = "local CLI does not negotiate COLORTERM; using 256-color"
+
+    @property
+    def terminal_width(self) -> int:
+        if self._width_override is not None:
+            return self._width_override
+        return shutil.get_terminal_size(fallback=(80, 24)).columns
+
+    @terminal_width.setter
+    def terminal_width(self, value: int) -> None:
+        # Assignable, because pinning a size is how this session is
+        # driven under test and how a caller forces a known geometry.
+        # Left unset, the live terminal answers.
+        self._width_override = value
+
+    @property
+    def terminal_height(self) -> int:
+        if self._height_override is not None:
+            return self._height_override
+        return shutil.get_terminal_size(fallback=(80, 24)).lines
+
+    @terminal_height.setter
+    def terminal_height(self, value: int) -> None:
+        self._height_override = value
 
     async def write(self, text: str) -> None:
         # Same CRLF normalization TelnetSession.write performs, and for
@@ -75,6 +104,8 @@ class LocalCLISession(Session):
         list_candidates: char_input.CandidateListPrinter | None = None,
         initial: str = "",
         cancellable: bool = False,
+        viewport: int | Callable[[], int] | None = None,
+        viewport_owns_row: bool = False,
     ) -> str:
         # live_buffer/lock/list_candidates are never actually passed by
         # this session's one caller (the standalone `python -m
@@ -84,7 +115,7 @@ class LocalCLISession(Session):
         return await char_input.read_line(
             self, self.write, echo, history, completer,
             live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
-            initial=initial, cancellable=cancellable,
+            initial=initial, cancellable=cancellable, viewport=viewport, viewport_owns_row=viewport_owns_row,
         )
 
     async def read_key(self, echo: bool = True) -> str:
