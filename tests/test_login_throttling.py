@@ -71,7 +71,7 @@ class FakeSession:
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
 
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, **kwargs) -> str:
         return next(self._lines)
 
     async def read_key(self, echo: bool = True) -> str:
@@ -96,7 +96,7 @@ class HangingSession(FakeSession):
         super().__init__(**kwargs)
         self._unblock_after = list(unblock_after or [])
 
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, **kwargs) -> str:
         if self._unblock_after:
             return self._unblock_after.pop(0)
         await asyncio.sleep(3600)
@@ -191,7 +191,7 @@ def test_login_deadline_exceeded_even_with_continuous_activity(db, monkeypatch):
             super().__init__()
             self._count = 0
 
-        async def read_line(self, echo: bool = True) -> str:
+        async def read_line(self, echo: bool = True, **kwargs) -> str:
             await asyncio.sleep(0.05)
             self._count += 1
             return f"value-{self._count}"

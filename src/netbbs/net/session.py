@@ -240,6 +240,8 @@ class Session(ABC):
         live_buffer: LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
         list_candidates: CandidateListPrinter | None = None,
+        initial: str = "",
+        cancellable: bool = False,
     ) -> str:
         """
         Read one line of input from the client.

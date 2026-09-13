@@ -34,7 +34,7 @@ class FakeSession(Session):
     async def write(self, text: str) -> None:
         self.written.append(text)
 
-    async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
+    async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
         if not self._inputs:
             raise AssertionError("FakeSession ran out of scripted input (read_line)")
         return self._inputs.pop(0)

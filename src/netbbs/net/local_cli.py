@@ -73,6 +73,8 @@ class LocalCLISession(Session):
         live_buffer: LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
         list_candidates: char_input.CandidateListPrinter | None = None,
+        initial: str = "",
+        cancellable: bool = False,
     ) -> str:
         # live_buffer/lock/list_candidates are never actually passed by
         # this session's one caller (the standalone `python -m
@@ -82,6 +84,7 @@ class LocalCLISession(Session):
         return await char_input.read_line(
             self, self.write, echo, history, completer,
             live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
+            initial=initial, cancellable=cancellable,
         )
 
     async def read_key(self, echo: bool = True) -> str:
