@@ -76,6 +76,7 @@ class LocalCLISession(Session):
         initial: str = "",
         cancellable: bool = False,
         viewport: int | Callable[[], int] | None = None,
+        viewport_owns_row: bool = False,
     ) -> str:
         # live_buffer/lock/list_candidates are never actually passed by
         # this session's one caller (the standalone `python -m
@@ -85,7 +86,7 @@ class LocalCLISession(Session):
         return await char_input.read_line(
             self, self.write, echo, history, completer,
             live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
-            initial=initial, cancellable=cancellable, viewport=viewport,
+            initial=initial, cancellable=cancellable, viewport=viewport, viewport_owns_row=viewport_owns_row,
         )
 
     async def read_key(self, echo: bool = True) -> str:

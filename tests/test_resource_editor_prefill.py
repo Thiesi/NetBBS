@@ -28,6 +28,7 @@ class FakeSession:
         self.offered_initial: str | None = None
         self.offered_cancellable: bool | None = None
         self.offered_viewport: int | None = None
+        self.offered_owns_row: bool | None = None
         self._answer = answer
         self._cancel = cancel
 
@@ -39,11 +40,12 @@ class FakeSession:
 
     async def read_line(
         self, echo: bool = True, *, initial: str = "", cancellable: bool = False,
-        viewport: int | None = None, **kw,
+        viewport=None, viewport_owns_row: bool = False, **kw,
     ) -> str:
         self.offered_initial = initial
         self.offered_cancellable = cancellable
         self.offered_viewport = viewport
+        self.offered_owns_row = viewport_owns_row
         if self._cancel:
             raise InputCancelled
         return self._answer
@@ -211,5 +213,10 @@ def test_the_fallback_prompt_scrolls_too():
     session = _edit(draft, "a replacement")
     assert session.offered_initial == ""
     assert callable(session.offered_viewport)
-    # The prompt shares this row, so the window gets what it leaves.
-    assert 8 <= session.offered_viewport() < session.terminal_width
+    # The input gets a row of its own, as the inline branch does, so the
+    # window is the whole width. Deriving it from the prompt's width was
+    # the first attempt and was wrong: `write_prompt` wraps, so on a
+    # narrow terminal the prompt's total width says nothing about where
+    # the cursor lands on its last row.
+    assert session.offered_viewport() == session.terminal_width
+    assert session.offered_owns_row is True

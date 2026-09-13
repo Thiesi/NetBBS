@@ -45,7 +45,7 @@ from typing import Awaitable, Callable, Protocol, Sequence
 
 from netbbs.net.session import SessionClosedError
 from netbbs.rendering.ansi import reject_keystroke
-from netbbs.rendering.width import char_width, cut_to_width, display_width
+from netbbs.rendering.width import char_width, display_width
 
 # Control byte values relevant to character-mode line building.
 _CR = 0x0D
@@ -266,6 +266,31 @@ def move_cursor(count: int, *, forward: bool) -> str:
 _MIN_MARKER_WIDTH = 12
 
 
+def _visible_from(line: list[str], start: int, columns: int) -> str:
+    """As much of `line[start:]` as fits `columns` display columns.
+
+    Walks the characters rather than slicing by count, and stops as soon
+    as the columns are spent -- so it is bounded by the window, not by
+    the buffer, and it is correct for the two cases a count-based slice
+    gets wrong (Codex review): a two-column character straddling the
+    edge, and a combining mark, which is a code point occupying no
+    columns at all. Thirty decomposed accented characters are thirty
+    columns and sixty code points.
+
+    A trailing run of zero-width marks comes along with the character it
+    belongs to, since each costs nothing to include.
+    """
+    total = 0
+    taken: list[str] = []
+    for char in line[start:]:
+        width = char_width(char)
+        if total + width > columns:
+            break
+        total += width
+        taken.append(char)
+    return "".join(taken)
+
+
 class LineViewport:
     """A one-row window over a line buffer wider than the row (issue
     #546).
@@ -298,10 +323,16 @@ class LineViewport:
     so this is correct wherever on the row the window happens to start.
     """
 
-    def __init__(self, width: int):
+    def __init__(self, width: int, *, owns_row: bool = False):
         self.width = max(1, width)
         self.start = 0
         self.col = 0
+        # Whether the window begins at column 0 of its own row, which is
+        # what makes re-anchoring possible after a resize -- see
+        # `resize`. Both `netbbs.net.resource_editor.text_field`
+        # branches write their prompt on its own line, so both do.
+        self.owns_row = owns_row
+        self._reanchor = False
 
     def resize(self, width: int) -> None:
         """Adopt a new terminal width (Codex review).
@@ -311,8 +342,20 @@ class LineViewport:
         the old one -- which the smaller terminal then soft-wrapped,
         recreating exactly the divergence this class exists to prevent.
         Callers that can see a live width hand one in per render.
+
+        A *change* also costs the window its anchor (Codex review). A
+        reflowing terminal -- xterm.js, and every modern emulator --
+        rewraps the row that was already drawn, so the physical cursor
+        ends up on a continuation row while `col` still describes a
+        position on a row that no longer exists; backing up within the
+        current row then clears the continuation and leaves a stale
+        prefix above it. A window that owns its row can fix that simply
+        by starting the row again, which is what the next render does.
         """
-        self.width = max(1, width)
+        width = max(1, width)
+        if width != self.width and self.owns_row:
+            self._reanchor = True
+        self.width = width
 
     def _fits_from(self, line: list[str], cursor: int, budget: int) -> int:
         """The earliest index from which `line[index:cursor]` still fits
@@ -346,9 +389,17 @@ class LineViewport:
         # of margin costs nothing and removes the whole class.
         usable = max(1, self.width - 1)
 
-        # Bounded: enough to know whether it overflows, not the width of
-        # a 4,096-character value nobody is going to see.
-        overflowing = display_width(cut_to_width("".join(line), usable + 1)) > usable
+        # Overflow is "something did not fit", not "the part that fit was
+        # narrow" (Codex review). Measuring the cut prefix's width called
+        # 39 ASCII characters followed by a two-column one non-overflowing
+        # at 40 columns -- the cut stopped before the wide character and
+        # reported 39 -- after which the visible text was 39 columns while
+        # the cursor column counted the hidden one, and the reposition
+        # went negative.
+        #
+        # Still bounded: `_visible_from` stops as soon as the columns are
+        # spent, so a 4,096-character value is never measured whole.
+        overflowing = len(_visible_from(line, 0, usable)) < len(line)
         markers = overflowing and usable >= _MIN_MARKER_WIDTH
         # Reserved whenever markers are in play, even where nothing is
         # hidden on that side, so the text does not jump sideways by a
@@ -366,11 +417,13 @@ class LineViewport:
             if self.start < earliest:
                 self.start = earliest
 
-        # At least one column per character, so no more than
-        # `text_columns` of them can be drawn -- slicing to that keeps
-        # the join bounded by the window too.
-        tail = line[self.start:self.start + text_columns + 1]
-        visible = cut_to_width("".join(tail), text_columns)
+        # Sliced by columns, never by code-point count (Codex review).
+        # "At least one column per character" is false for a combining
+        # mark: thirty decomposed accented characters are thirty columns
+        # and sixty code points, so a count-based slice dropped half a
+        # value that fitted perfectly well, and the caret came to rest
+        # ten columns from the insertion point.
+        visible = _visible_from(line, self.start, text_columns)
         hidden_right = len(visible) < len(line) - self.start
         left = ("<" if self.start > 0 else " ") if markers else ""
         right = (">" if hidden_right else " ") if markers else ""
@@ -380,9 +433,17 @@ class LineViewport:
     async def render(self, write: WriteFunc, line: list[str], cursor: int) -> None:
         left, visible, right, column = self._layout(line, cursor)
         payload = left + visible + right
-        # Back to the window's left edge, clear what was there, redraw,
-        # then step forward-by-moving-back to where the cursor belongs.
-        await write(move_cursor(self.col, forward=False) + "\x1b[K" + payload)
+        if self._reanchor:
+            # The row was rewrapped underneath us, so `col` means
+            # nothing: return to the start of the row the cursor is
+            # actually on and clear the whole of it.
+            self._reanchor = False
+            prefix = "\r\x1b[2K"
+        else:
+            # Back to the window's left edge, clearing what was there.
+            prefix = move_cursor(self.col, forward=False) + "\x1b[K"
+        # Redraw, then step back to where the cursor belongs.
+        await write(prefix + payload)
         drawn = len(left) + display_width(visible) + len(right)
         await write(move_cursor(drawn - column, forward=False))
         self.col = column
@@ -713,6 +774,7 @@ async def read_line(
     initial: str = "",
     cancellable: bool = False,
     viewport: int | Callable[[], int] | None = None,
+    viewport_owns_row: bool = False,
 ) -> str:
     """
     Read one line of input, echoing (or masking, if `echo=False`) as it
@@ -753,7 +815,7 @@ async def read_line(
     return await _read_line_editable(
         source, write, history, completer, live_buffer=live_buffer, lock=lock,
         list_candidates=list_candidates, initial=initial, cancellable=cancellable,
-        viewport=viewport,
+        viewport=viewport, viewport_owns_row=viewport_owns_row,
     )
 
 
@@ -811,6 +873,7 @@ async def _read_line_editable(
     initial: str = "",
     cancellable: bool = False,
     viewport: int | Callable[[], int] | None = None,
+    viewport_owns_row: bool = False,
 ) -> str:
     # `initial` (issue #529) starts the buffer populated and the cursor
     # at its end, so the caller can edit an existing value instead of
@@ -840,7 +903,10 @@ async def _read_line_editable(
     # the two, and a completion prompt (chat commands, a picker search)
     # is short by nature.
     window = (
-        LineViewport(viewport() if callable(viewport) else viewport)
+        LineViewport(
+            viewport() if callable(viewport) else viewport,
+            owns_row=viewport_owns_row,
+        )
         if viewport is not None and completer is None
         else None
     )

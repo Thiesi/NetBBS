@@ -459,6 +459,7 @@ class WebSession(Session):
         initial: str = "",
         cancellable: bool = False,
         viewport: int | Callable[[], int] | None = None,
+        viewport_owns_row: bool = False,
     ) -> str:
         """
         Read one line, with the same cursor-addressable editing,
@@ -487,7 +488,7 @@ class WebSession(Session):
         return await self._read_line_editable(
             history, completer, live_buffer=live_buffer, lock=lock,
             list_candidates=list_candidates, initial=initial, cancellable=cancellable,
-            viewport=viewport,
+            viewport=viewport, viewport_owns_row=viewport_owns_row,
         )
 
     async def _read_line_masked(self) -> str:
@@ -520,6 +521,7 @@ class WebSession(Session):
         initial: str = "",
         cancellable: bool = False,
         viewport: int | Callable[[], int] | None = None,
+        viewport_owns_row: bool = False,
     ) -> str:
         # Issue #529, mirroring `netbbs.net.char_input._read_line_
         # editable` exactly -- this transport is a separate
@@ -537,7 +539,10 @@ class WebSession(Session):
         # soft-wraps and clamps `CSI D`/`CSI C` to one row exactly as a
         # real terminal does, so the bug and the fix are identical here.
         window = (
-            LineViewport(viewport() if callable(viewport) else viewport)
+            LineViewport(
+                viewport() if callable(viewport) else viewport,
+                owns_row=viewport_owns_row,
+            )
             if viewport is not None and completer is None
             else None
         )

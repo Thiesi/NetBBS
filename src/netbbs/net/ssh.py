@@ -190,6 +190,7 @@ class SSHSession(Session):
         initial: str = "",
         cancellable: bool = False,
         viewport: int | Callable[[], int] | None = None,
+        viewport_owns_row: bool = False,
     ) -> str:
         # live_buffer/lock/list_candidates pass straight through to
         # char_input.read_line unchanged -- see that function's
@@ -197,7 +198,7 @@ class SSHSession(Session):
         return await char_input.read_line(
             self, self.write, echo, history, completer,
             live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
-            initial=initial, cancellable=cancellable, viewport=viewport,
+            initial=initial, cancellable=cancellable, viewport=viewport, viewport_owns_row=viewport_owns_row,
         )
 
     async def read_key(self, echo: bool = True) -> str:

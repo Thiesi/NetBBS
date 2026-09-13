@@ -280,3 +280,85 @@ def test_a_resized_terminal_is_drawn_for_as_it_is_now():
         )
     )
     assert shrinking.calls > 3, "the width is read once per render, not once per read"
+
+
+# -- What the second review round found --------------------------------
+
+
+def test_a_wide_character_just_past_the_edge_counts_as_overflow():
+    """39 narrow columns and then a two-column character, in a 40-column
+    field. Measuring the *cut prefix's width* called that non-overflowing
+    -- the cut had stopped before the wide character and reported 39 --
+    after which the visible text was 39 columns while the cursor column
+    counted the hidden one, and the reposition went negative (Codex
+    review)."""
+    window = LineViewport(41)  # 40 usable, one column of margin
+    line = list("x" * 39 + "界")
+    left, visible, right, column = window._layout(line, len(line))
+    assert (left, right) != ("", ""), "this has to be recognised as overflowing"
+    drawn = len(left) + display_width(visible) + len(right)
+    assert column <= drawn, f"cursor at {column} of {drawn} drawn columns"
+
+
+def test_combining_marks_are_not_counted_as_columns():
+    """Thirty decomposed accented characters are thirty columns and
+    sixty code points. A slice by code-point count dropped half of a
+    value that fitted perfectly well, and the caret came to rest ten
+    columns from the insertion point (Codex review)."""
+    window = LineViewport(_WIDTH)
+    line = list("e\u0301" * 30)
+    left, visible, right, column = window._layout(line, len(line))
+    assert display_width(visible) == 30
+    drawn = len(left) + display_width(visible) + len(right)
+    assert column <= drawn
+
+
+@pytest.mark.parametrize("line_text", [
+    "x" * 39 + "界",
+    "e\u0301" * 30,
+    "東京" * 40,
+    "x" * 200,
+    "short",
+])
+def test_the_cursor_never_sits_beyond_what_was_drawn(line_text):
+    """The shared consequence of both bugs: `render` moves back by
+    `drawn - column`, so a column past the drawn width is a negative
+    movement -- either malformed output or, once `move_cursor`
+    suppresses it, a caret parked somewhere the buffer is not."""
+    window = LineViewport(_WIDTH)
+    line = list(line_text)
+    for cursor in range(0, len(line) + 1, 3):
+        left, visible, right, column = window._layout(line, cursor)
+        drawn = len(left) + display_width(visible) + len(right)
+        assert 0 <= column <= drawn, f"{line_text[:12]!r} at {cursor}: {column} of {drawn}"
+
+
+def test_a_resize_redraws_the_row_from_its_left_edge():
+    """A reflowing terminal rewraps the row that was already drawn, so
+    the physical cursor ends up on a continuation row while `col`
+    describes a position on a row that no longer exists. Backing up
+    within the current row then clears the continuation and leaves a
+    stale prefix above it -- so a window that owns its row starts the
+    row again instead (Codex review)."""
+    window = LineViewport(80, owns_row=True)
+    recorder = Recorder(80)
+    asyncio.run(window.render(recorder.write, list(_LONG), len(_LONG)))
+    recorder.chunks.clear()
+
+    window.resize(40)
+    asyncio.run(window.render(recorder.write, list(_LONG), len(_LONG)))
+    assert "\r" in recorder.raw and "\x1b[2K" in recorder.raw
+
+
+def test_a_window_that_does_not_own_its_row_does_not_try():
+    """Returning to column 0 would land on whatever shares the row --
+    a prompt, most likely -- so a window that cannot promise the row to
+    itself keeps doing what it did."""
+    window = LineViewport(80)
+    recorder = Recorder(80)
+    asyncio.run(window.render(recorder.write, list(_LONG), len(_LONG)))
+    recorder.chunks.clear()
+
+    window.resize(40)
+    asyncio.run(window.render(recorder.write, list(_LONG), len(_LONG)))
+    assert "\x1b[2K" not in recorder.raw

@@ -243,6 +243,7 @@ class Session(ABC):
         initial: str = "",
         cancellable: bool = False,
         viewport: int | Callable[[], int] | None = None,
+        viewport_owns_row: bool = False,
     ) -> str:
         """
         Read one line of input from the client.

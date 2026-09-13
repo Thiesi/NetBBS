@@ -916,17 +916,21 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
             # "blank = keep" answer, so a value that cannot be edited
             # in place can still be replaced or left alone.
             shown = current if current else "(blank)" if required else "(none)"
-            prompt_text = f"[{shown}] ({_KEEP_HINT}): "
-            await write_prompt(session, prompt_text)
-            # This branch scrolls too (Codex review). It is reached for a
-            # value too *long* to seed, not too wide -- and whoever is
-            # replacing such a value is about to type something long
-            # themselves, straight into the soft-wrap this whole change
-            # exists to remove. The prompt shares this row, so the
-            # window gets what it leaves.
-            prompt_width = display_width(_normalize_tabs(sanitize_text(prompt_text)))
+            # This branch scrolls too (Codex review), and gets its own
+            # line to scroll in. It is reached for a value too *long* to
+            # seed, not too wide, and whoever is replacing such a value
+            # is about to type something long themselves -- straight into
+            # the soft-wrap this whole change exists to remove.
+            #
+            # Deriving the window from the prompt's width was the first
+            # attempt and was wrong: `write_prompt` wraps, so on a narrow
+            # terminal the prompt's *total* width says nothing about
+            # where the cursor ends up on its last row. Giving the input
+            # a row of its own makes the answer the whole width, exactly
+            # as it is for the inline branch below.
+            await session.write_line(colored(f"[{shown}] ({_KEEP_HINT}):", fg_color=MUTED_COLOR))
             raw = (await session.read_line(
-                viewport=lambda: max(8, session.terminal_width - prompt_width),
+                viewport=lambda: session.terminal_width, viewport_owns_row=True,
             )).strip()
             if raw:
                 draft[key] = raw
@@ -947,7 +951,7 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
             # for the terminal they had (Codex review).
             raw = (await session.read_line(
                 initial=current, cancellable=True,
-                viewport=lambda: session.terminal_width,
+                viewport=lambda: session.terminal_width, viewport_owns_row=True,
             )).strip()
         except InputCancelled:
             # Esc: they changed their mind. Nothing is written, and the
