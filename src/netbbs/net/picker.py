@@ -1271,6 +1271,16 @@ def _page_size(
     # (both `True`) rather than the current page's real availability --
     # see `_nav_entries`' own docstring-comment for why this must stay the
     # worst-case (tallest possible) reservation.
-    nav_lines = _render_nav(session, on_sort, description_level).count("\r\n") + 1
-    available = session.terminal_height - (_RESERVED_LINES - 1 + nav_lines + header_lines)
+    # `width`/`height` are the caller's frozen pair when it has one
+    # (`pick_item._dimensions`), and the session's live values
+    # otherwise. Both are read here rather than reaching past them to
+    # `session`: this function is the other half of the render's
+    # geometry, and a page sized against a width the rows were not laid
+    # out for is exactly the split freezing them exists to prevent.
+    width = session.terminal_width if width is None else width
+    height = session.terminal_height if height is None else height
+    nav_lines = _render_nav(
+        session, on_sort, description_level, width=width, height=height,
+    ).count("\r\n") + 1
+    available = height - (_RESERVED_LINES - 1 + nav_lines + header_lines)
     return max(1, min(_MAX_PAGE_SIZE, available))
