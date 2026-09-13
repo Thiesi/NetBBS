@@ -632,6 +632,15 @@ async def pick_item(
     # been the better failure, and the highlight guards had just made
     # sure there was not one.
     page_start = 0
+    # Where the rendered page ended, and where the pages before it
+    # began (Codex review). Deriving either from a freshly measured page
+    # size is what kept going wrong: that size can differ from the one
+    # the visible page was drawn with -- a resize between renders, or a
+    # `sort_label` that wraps differently -- so [N]ext advanced past a
+    # boundary that was never there, and [P]rev landed between two.
+    # Recorded rather than recomputed.
+    page_end = 0
+    page_history: list[int] = []
     highlighted: int | None = None
     if start_stable_id is not None:
         for start_index, item in enumerate(working_set):
@@ -665,10 +674,11 @@ async def pick_item(
             frozen = None
 
     async def _render_frozen() -> Sequence[T]:
-        nonlocal page_start, highlighted
+        nonlocal page_start, page_end, highlighted
         render_width, render_height = _dimensions()
         if not working_set:
             page_start = 0
+            page_history.clear()
             prefix = _masthead_prefix()
             if prefix:
                 await write_preformatted_line(session, prefix)
@@ -714,6 +724,7 @@ async def pick_item(
         page_start = max(0, min(page_start, max(0, len(working_set) - 1)))
         page_index = min(page_start // page_size, max(0, total_pages - 1))
         page_items = working_set[page_start : page_start + page_size]
+        page_end = page_start + len(page_items)
         # Against what was actually sliced, not against the nominal page
         # size (Codex review): the last page is shorter than a full one,
         # so an index inside `page_size` can still be outside
@@ -875,7 +886,7 @@ async def pick_item(
             # From the offset, not the derived page number: they are
             # the same thing only while the page size holds still, and
             # the offset is the half that is authoritative.
-            include_next=page_start + page_size < len(working_set),
+            include_next=page_start + len(page_items) < len(working_set),
             include_prev=page_start > 0,
             # The same fact the budget used: a one-page list cannot
             # draw Next or Prev, so it must not be priced against
@@ -981,6 +992,7 @@ async def pick_item(
             items = await refresh()
             working_set = items
             page_start = 0
+            page_history.clear()
             highlighted = None
             page_items = await _render()
             continue
@@ -1070,9 +1082,10 @@ async def pick_item(
             return None
 
         if char_lower == "n":
-            if page_start + _sized_page_size() < len(working_set):
+            if page_end < len(working_set):
                 await session.write_line("")
-                page_start += _sized_page_size()
+                page_history.append(page_start)
+                page_start = page_end
                 highlighted = None
                 page_items = await _render()
             else:
@@ -1082,7 +1095,13 @@ async def pick_item(
         if char_lower == "p":
             if page_start > 0:
                 await session.write_line("")
-                page_start = max(0, page_start - _sized_page_size())
+                # The start this page was reached from, not a
+                # subtraction: the size may have changed since, and the
+                # arithmetic then lands between two pages rather than on
+                # the one the caller was just looking at.
+                page_start = page_history.pop() if page_history else max(
+                    0, page_start - _sized_page_size()
+                )
                 highlighted = None
                 page_items = await _render()
             else:
@@ -1116,6 +1135,7 @@ async def pick_item(
                 # two separate commands for what's really one action.
                 working_set = items
                 page_start = 0
+                page_history.clear()
                 highlighted = None
                 page_items = await _render()
                 continue
@@ -1128,6 +1148,7 @@ async def pick_item(
                 return matches[0]
             working_set = matches
             page_start = 0
+            page_history.clear()
             highlighted = None
             page_items = await _render()
             continue
@@ -1141,6 +1162,7 @@ async def pick_item(
                 items = new_items
                 working_set = new_items
                 page_start = 0
+                page_history.clear()
                 highlighted = None
             page_items = await _render()
             continue

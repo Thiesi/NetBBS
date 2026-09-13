@@ -473,3 +473,75 @@ def test_paging_never_repeats_or_skips_a_row_when_the_page_size_changes():
             f"page starting {later[0]} follows a page ending {earlier[-1]}: "
             f"{'repeats' if later[0] <= earlier[-1] else 'skips'} rows"
         )
+
+
+def _pages_drawn(session) -> list[list[int]]:
+    """The rows of each rendered page, in the order they were drawn."""
+    plain = _ANSI.sub("", _SGR.sub("", "".join(session.written)))
+    pages = [
+        [int(n) for n in re.findall(r"area (\d+)", block)]
+        for block in plain.split("ReLink /")[1:]
+    ]
+    return [rows for rows in pages if rows]
+
+
+def test_next_advances_past_the_page_that_was_actually_drawn():
+    """[N]ext recomputed the page size from live geometry instead of
+    advancing past the rendered slice, so a terminal that shrank between
+    the render and the keypress made the next page start inside the last
+    one (Codex review)."""
+    class Shrinking(FakeSession):
+        async def read_editor_key(self, *, distinguish_ctrl_h: bool = False):
+            # The caller resizes while looking at the page, before
+            # pressing anything.
+            #
+            # Overriding `read_editor_key`, not `read_key`, because that
+            # is what the picker's dispatch actually reads -- the first
+            # version of this test overrode the other one and therefore
+            # never resized at all, which is how it passed against the
+            # code it was written to catch.
+            self.terminal_height = 22
+            return await FakeSession.read_editor_key(self)
+
+    session = Shrinking(80, 24, ["n", "b"])
+    asyncio.run(
+        pick_item(
+            session, list(range(1, 41)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none",
+        )
+    )
+    pages = _pages_drawn(session)
+    assert len(pages) >= 2
+    assert pages[1][0] == pages[0][-1] + 1, (
+        f"page 2 starts at {pages[1][0]} after a page ending {pages[0][-1]}"
+    )
+
+
+def test_prev_returns_to_the_page_it_came_from():
+    """Subtracting the current page size does not recover the previous
+    page's start once the size has changed -- [P]rev landed between two
+    pages and redrew rows the caller had already passed (Codex
+    review)."""
+    labels = iter([
+        "Activity",
+        "Activity, newest first, with every archived entry and every note as well",
+        "Activity",
+        "Activity, newest first, with every archived entry and every note as well",
+    ])
+    session = FakeSession(80, 24, ["n", "p", "b"])
+    asyncio.run(
+        pick_item(
+            session, list(range(1, 41)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none",
+            sort_label=lambda: next(labels, "Activity"), on_sort=None,
+        )
+    )
+    pages = _pages_drawn(session)
+    assert len(pages) >= 3, f"expected first, next and prev renders, got {len(pages)}"
+    assert pages[2][0] == pages[0][0], (
+        f"[P]rev returned to {pages[2][0]}, not to {pages[0][0]} where it started"
+    )
