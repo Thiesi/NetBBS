@@ -26,6 +26,7 @@ resource kind's own fields, domain functions, or error types.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -50,13 +51,16 @@ from netbbs.rendering import (
     VALUE_COLOR,
     MenuEntry,
     action_bar,
+    clear_screen,
     colored,
     display_width,
     menu_grid,
+    move_cursor,
     sanitize_text,
     screen_title,
     wrap_to_width,
 )
+from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.storage.execution import DatabaseLane
 
 # A draft is a plain, freely-mutable dict of field values -- for
@@ -80,6 +84,100 @@ _NO_SECTION_YET = object()
 # field's `edit_resource_draft` call site, a mistake on one field never
 # discards any other field already entered into the same draft.
 FieldPrompt = Callable[[Session, DatabaseLane, Draft], Awaitable[None]]
+
+
+def inline_field(prompt: FieldPrompt) -> FieldPrompt:
+    """Opt a single typed field into the measured edit position.
+
+    The prompt must use write_field_prompt/read_field_line. Pickers,
+    confirmations and arbitrary multi-step callbacks keep their own output.
+    """
+    setattr(prompt, "_inline_field", True)
+    return prompt
+
+
+@dataclass
+class _FieldPosition:
+    session: Session
+    row: int
+    column: int
+    rows: int
+    width: int
+    height: int
+    prompt_row: int
+    message: str | None = None
+
+
+# Scoped to one awaited field interaction, never left on a shared Session
+# and never inherited by another caller's independent task.
+_field_position: ContextVar[_FieldPosition | None] = ContextVar("field_position", default=None)
+
+
+def _position_for(session: Session) -> _FieldPosition | None:
+    position = _field_position.get()
+    return position if position is not None and position.session is session else None
+
+
+async def write_field_prompt(session: Session, text: str, *, hint: str = "Enter submits; Esc keeps") -> None:
+    """Put typing instructions on the existing action row in owned screens."""
+    position = _position_for(session)
+    if position is None:
+        await session.write_line(text)
+    else:
+        # The normal prompt can wrap (age bounds, for example). The compact
+        # hint fits the 40-column minimum; field help retains its detail.
+        await session.write(
+            move_cursor(position.prompt_row, 1) + "\x1b[2K"
+            + colored(hint, fg_color=MUTED_COLOR)
+        )
+
+
+async def write_field_message(session: Session, text: str) -> None:
+    """Keep an inline validation result visible through the next redraw."""
+    position = _position_for(session)
+    if position is None:
+        await session.write_line(text)
+    else:
+        position.message = text
+
+
+async def read_field_line(session: Session, *, initial: str) -> str:
+    """Read a seeded value using the field's measured row when available."""
+    position = _position_for(session)
+    if position is None:
+        return await session.read_line(
+            initial=initial, cancellable=True,
+            viewport=lambda: session.terminal_width, viewport_owns_row=True,
+        )
+
+    def viewport() -> int:
+        # A resize can reflow every row above this one. Do not edit against
+        # coordinates from a different geometry; Esc semantics preserve the
+        # draft and the outer loop immediately lays out the new dimensions.
+        if (session.terminal_width, session.terminal_height) != (position.width, position.height):
+            position.message = "Terminal resized; edit cancelled. Value unchanged."
+            raise InputCancelled()
+        return position.width - position.column
+
+    viewport()
+    clearing = "".join(
+        move_cursor(position.row + offset, position.column + 1) + "\x1b[K"
+        for offset in range(position.rows)
+    )
+    await session.write(clearing + move_cursor(position.row, position.column + 1))
+    async def restore_prompt() -> None:
+        await session.write(move_cursor(min(position.prompt_row, session.terminal_height), 1) + "\x1b[2K")
+
+    try:
+        value = await session.read_line(initial=initial, cancellable=True, viewport=viewport)
+        viewport()
+    except InputCancelled:
+        await restore_prompt()
+        raise
+    # A disconnected or cancelled session needs no cursor restoration write:
+    # a failed cleanup write must not replace its original exception.
+    await restore_prompt()
+    return value
 
 
 @dataclass(frozen=True)
@@ -162,6 +260,8 @@ _BACK_BRIEF_IMMEDIATE = "Nothing pending -- already saved"
 
 def _field_value_lines(
     fields: list[FieldSpec], draft: Draft, *, selected: FieldSpec | None, accent_color: int, terminal_width: int,
+    label_fields: list[FieldSpec] | None = None,
+    positions: dict[str, tuple[int, int, int]] | None = None,
 ) -> list[str]:
     """Pure rendering of one field-value block -- no I/O, so the exact
     same logic can compute both a dry-run line count (deciding whether
@@ -178,6 +278,11 @@ def _field_value_lines(
     lines: list[str] = []
     sectioned = any(f.section is not None for f in fields)
     previous_section = _NO_SECTION_YET
+    label_size = max((display_width(sanitize_text(f.label)) for f in (label_fields or fields)), default=0)
+    # Keep a useful value column on narrow terminals. If labels cannot
+    # share a row with it, every value uses the same indented next row.
+    stacked = label_size + 4 > terminal_width - 12
+    value_column = 2 if stacked else label_size + 4
     for f in fields:
         if sectioned and f.section != previous_section:
             # Same "uppercased, bold, METADATA_COLOR" heading `menu_grid`
@@ -191,7 +296,9 @@ def _field_value_lines(
             # considered. The bold uppercase heading is still a strong
             # enough visual break on its own without it.
             if f.section is not None:
-                lines.append(colored(f.section.upper(), fg_color=METADATA_COLOR, bold=True))
+                lines.extend(wrap_terminal_text(
+                    colored(sanitize_text(f.section).upper(), fg_color=METADATA_COLOR, bold=True), terminal_width,
+                ).split("\r\n"))
             previous_section = f.section
         value = sanitize_text(f.render(draft))
         is_selected = f is selected
@@ -199,8 +306,10 @@ def _field_value_lines(
         # would insert an SGR reset between "> " and the label text,
         # splitting what should read as one contiguous highlighted run.
         marker = "> " if is_selected else "  "
+        label = sanitize_text(f.label)
+        padding = "" if stacked else " " * (label_size - display_width(label))
         prefix = colored(
-            f"{marker}{f.label}", fg_color=accent_color if is_selected else LABEL_COLOR, bold=is_selected,
+            f"{marker}{label}:", fg_color=accent_color if is_selected else LABEL_COLOR, bold=is_selected,
         )
         # Dogfood report: a long field value (a free-text description,
         # most often) used to print as one raw unwrapped line regardless
@@ -211,14 +320,20 @@ def _field_value_lines(
         # dozens of short one-line fields for every one that's ever
         # actually long, and forcing every field onto two lines would
         # double this screen's height for no reason.
-        label_width = display_width(f"{marker}{f.label}: ")
+        label_width = value_column
         available = max(1, terminal_width - label_width)
         value_lines = wrap_to_width(value, available) or [""]
         val_color = VALUE_COLOR if is_selected else MUTED_COLOR
-        lines.append(f"{prefix}: {colored(value_lines[0], fg_color=val_color)}")
+        if stacked:
+            lines.extend(wrap_terminal_text(prefix, terminal_width).split("\r\n"))
+        start = len(lines)
+        value_prefix = " " * value_column if stacked else prefix + padding + " "
+        lines.append(f"{value_prefix}{colored(value_lines[0], fg_color=val_color)}")
         indent = " " * label_width
         for continuation in value_lines[1:]:
             lines.append(f"{indent}{colored(continuation, fg_color=val_color)}")
+        if positions is not None:
+            positions[f.key] = (start, value_column, len(value_lines))
     return lines
 
 
@@ -473,6 +588,8 @@ async def edit_resource_draft(
     initial_draft = dict(draft)
     selected: int | None = None
     redraw_count = 0
+    pending_edit: int | None = None
+    field_message: str | None = None
     # Computed once -- doesn't depend on `draft`. Order-preserving dedup
     # (`dict.fromkeys`) rather than `set()`: page order must match the
     # order sections first appear in `fields`, the same order the value
@@ -480,15 +597,18 @@ async def edit_resource_draft(
     section_names: list[str] = list(dict.fromkeys(f.section for f in fields if f.section is not None))
     current_page: str | None = section_names[0] if section_names else None
     while True:
-        await session.write_line(
-            "\r\n" + screen_title(
-                title,
-            breadcrumb=(session.node_display_name,), subtitle=subtitle, width=session.terminal_width, clear=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient)
+        width, height = session.terminal_width, session.terminal_height
+        title_text = screen_title(
+            title,
+            breadcrumb=(session.node_display_name,), subtitle=subtitle, width=width,
+            unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
+            node_name_gradient=session.node_name_gradient,
         )
+        header_blocks = [title_text if redraw_in_place else "\r\n" + title_text]
         preamble_text = preamble(draft) if callable(preamble) else preamble
         if preamble_text:
-            await session.write_line(preamble_text)
+            header_blocks.append(preamble_text)
+        header_lines = sum(wrap_terminal_text(block, width).count("\r\n") + 1 for block in header_blocks)
 
         # Codex review (PR #236): pagination specifically (not the
         # value-list/menu-row *headings*, which still use `any()` inside
@@ -519,11 +639,12 @@ async def edit_resource_draft(
         # predict, and Ctrl-H itself would still work fine even on a
         # page whose hint is hidden.
         base_fixed_lines = (
-            (3 if subtitle else 2)  # screen_title: title [+ subtitle] + underline
-            + (preamble_text.count("\r\n") + 1 if preamble_text else 0)
+            header_lines
             + 1  # blank line before the menu row
             + (1 if any(f.help for f in fields) else 0)  # "(Ctrl-H for help...)" hint
             + 1  # "Choice: " prompt line
+            + (1 if redraw_hint and redraw_count >= 1 else 0)
+            + (wrap_terminal_text(field_message, width).count("\r\n") + 1 if field_message else 0)
         )
 
         # The "full" candidate is computed unconditionally every redraw
@@ -536,8 +657,10 @@ async def edit_resource_draft(
         # (still fits), these are exactly the values rendered below --
         # no separate/duplicate computation, no risk of the fit check
         # and the real render ever disagreeing.
+        positions: dict[str, tuple[int, int, int]] = {}
         full_lines = _field_value_lines(
             fields, draft, selected=selected_field, accent_color=accent_color, terminal_width=session.terminal_width,
+            positions=positions,
         )
         full_menu_line = _build_menu_line(
             fields, save=save, save_menu_text=save_menu_text, back_menu_text=back_menu_text, back_brief=back_brief,
@@ -559,10 +682,12 @@ async def edit_resource_draft(
             menu_line = full_menu_line
             page_hint: str | None = None
         else:
+            positions = {}
             page_fields = [f for f in fields if f.section == current_page]
             value_lines = _field_value_lines(
                 page_fields, draft, selected=selected_field, accent_color=accent_color,
                 terminal_width=session.terminal_width,
+                label_fields=fields, positions=positions,
             )
             page_number = section_names.index(current_page) + 1
             page_hint = f"(Section {page_number} of {len(section_names)} -- PgUp/PgDn to switch)"
@@ -572,26 +697,62 @@ async def edit_resource_draft(
                 fixed_lines=base_fixed_lines + len(value_lines) + 1,  # +1: page_hint's own line
             )
 
-        for line in value_lines:
-            await session.write_line(line)
-        await session.write_line(f"\r\n{menu_line}")
+        tail_blocks = [f"\r\n{menu_line}"]
+        if field_message:
+            tail_blocks.append(field_message)
         if any(f.help for f in fields):
             # Only hinted when at least one field actually has help
             # authored -- otherwise Ctrl-H would be an undiscoverable
             # dead end advertised on every screen (issue #150's own
             # "does not need to cover every existing feature on day
             # one" scope extends to which screens mention it at all).
-            await session.write_line(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
+            tail_blocks.append(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
         if page_hint is not None:
-            await session.write_line(colored(page_hint, fg_color=MUTED_COLOR))
+            tail_blocks.append(colored(page_hint, fg_color=MUTED_COLOR))
         if redraw_hint and redraw_count >= 1:
-            await session.write_line(
+            tail_blocks.append(
                 colored(
                     "(Tip: enable in-place redraw in Your profile to stop this scrolling)", fg_color=MUTED_COLOR
                 )
             )
-        await session.write("Choice: ")
+        # Measure exactly what write_line would send, after terminal wrapping.
+        # A single write keeps one render on one geometry across async resize.
+        def physical(blocks: list[str]) -> list[str]:
+            return [line for block in blocks for line in wrap_terminal_text(block, width).split("\r\n")]
+
+        header_rows = physical(header_blocks)
+        field_rows = physical(value_lines)
+        tail_rows = physical(tail_blocks)
+        field_position = None
+        if pending_edit is not None and redraw_in_place:
+            field = fields[pending_edit]
+            start, column, rows = positions[field.key]
+            # Oversized forms already scroll in browsing mode. While editing,
+            # keep the active value visible without making its buffer smaller.
+            if len(header_rows) + len(field_rows) + len(tail_rows) + 1 > height:
+                header_rows = physical([title_text])
+                tail_rows = []
+                capacity = max(1, height - len(header_rows) - 1)
+                first = max(0, min(max(0, start - 1), len(field_rows) - capacity))
+                field_rows = field_rows[first:first + capacity]
+                start -= first
+                rows = min(rows, len(field_rows) - start)
+            prompt_row = len(header_rows) + len(field_rows) + len(tail_rows) + 1
+            field_position = _FieldPosition(
+                session, len(header_rows) + start + 1, column, rows, width, height, prompt_row,
+            )
+        rendered = "\r\n".join(header_rows + field_rows + tail_rows) + "\r\nChoice: "
+        await session.write((clear_screen() if redraw_in_place else "") + rendered)
         redraw_count += 1
+        if pending_edit is not None:
+            index, pending_edit = pending_edit, None
+            token = _field_position.set(field_position)
+            try:
+                await fields[index].prompt(session, lane, draft)
+            finally:
+                _field_position.reset(token)
+            field_message = field_position.message if field_position else None
+            continue
         key = await _read_navigable_key(session)
 
         if key.kind == EditorKeyKind.UP:
@@ -678,8 +839,12 @@ async def edit_resource_draft(
             # next redraw, same bug as the hotkey path already fixed.
             if fields[selected].section is not None and fields[selected].section != current_page:
                 current_page = fields[selected].section
-            await session.write_line("")
-            await fields[selected].prompt(session, lane, draft)
+            if redraw_in_place and getattr(fields[selected].prompt, "_inline_field", False):
+                field_message = None
+                pending_edit = selected
+            else:
+                await session.write_line("")
+                await fields[selected].prompt(session, lane, draft)
             continue
         if key.kind != EditorKeyKind.CHAR or key.char is None:
             # Backspace/Delete/Tab/Escape/Home/End -- nothing was echoed
@@ -742,8 +907,12 @@ async def edit_resource_draft(
             # (`section_names[0]`) -- harmless when it stays unpaginated,
             # since `current_page` is never consulted in that branch.
             current_page = fields[field_index].section
-        await session.write_line("")
-        await fields[field_index].prompt(session, lane, draft)
+        if redraw_in_place and getattr(fields[field_index].prompt, "_inline_field", False):
+            field_message = None
+            pending_edit = field_index
+        else:
+            await session.write_line("")
+            await fields[field_index].prompt(session, lane, draft)
 
 
 async def _read_navigable_key(session: Session) -> EditorKey:
@@ -901,6 +1070,7 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
     rejections. See `_EDIT_HINT` above for why "blank = keep" is gone.
     """
 
+    @inline_field
     async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         # Sanitized before it is seeded, not just where it is displayed
         # (Codex review, P1). For a *carried Link* board, channel or file
@@ -912,6 +1082,8 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
         # sanitize untrusted segments *before* they are written.
         current = _normalize_tabs(sanitize_text(draft.get(key) or ""))
         if not _prefill_fits(session, current):
+            if _position_for(session) is not None:
+                await session.write_line("")
             # Too wide to edit inline -- see `_KEEP_HINT`. Falls back to
             # the prompt this screen has always had, including its
             # "blank = keep" answer, so a value that cannot be edited
@@ -937,23 +1109,14 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
                 draft[key] = raw
             return
 
-        # The prompt gets its own line so the value below it has the
-        # whole terminal width to sit in -- which is what keeps most
-        # real descriptions on the inline path rather than the fallback.
-        await session.write_line(colored(f"{_EDIT_HINT}:", fg_color=MUTED_COLOR))
+        # Owned screens reuse the field row; scrolling screens give the
+        # seeded prompt a whole row beneath its instruction line.
+        await write_field_prompt(
+            session, colored(f"{_EDIT_HINT}:", fg_color=MUTED_COLOR),
+            hint="Enter saves; blank clears; Esc keeps",
+        )
         try:
-            # The prompt is on its own line, so the window gets the whole
-            # terminal width -- `viewport` is columns from where the
-            # cursor is now to the right edge, not the terminal width in
-            # general, and this is the one place those are the same.
-            #
-            # A callable, not a number: a caller who shrinks their
-            # terminal mid-edit would otherwise keep getting rows sized
-            # for the terminal they had (Codex review).
-            raw = (await session.read_line(
-                initial=current, cancellable=True,
-                viewport=lambda: session.terminal_width, viewport_owns_row=True,
-            )).strip()
+            raw = (await read_field_line(session, initial=current)).strip()
         except InputCancelled:
             # Esc: they changed their mind. Nothing is written, and the
             # draft keeps whatever it had -- the same "leave without

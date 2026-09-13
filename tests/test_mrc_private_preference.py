@@ -5,6 +5,7 @@ flips it."""
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -59,11 +60,11 @@ def test_profile_screen_toggles_it(db, alice):
         session = FakeSession(["p", "b"])
         asyncio.run(profile_flow._edit_profile(session, lane, alice))
         text = _visible(_written_text(session))
-        assert "Private messages from MRC users: accepted" in text
+        assert re.search(r"Private messages from MRC users: +accepted", text)
         assert mrc_private_messages_enabled(db, alice) is True
         session = FakeSession(["p", "b"])
         asyncio.run(profile_flow._edit_profile(session, lane, alice))
-        assert "Private messages from MRC users: not accepted" in _visible(_written_text(session))
+        assert re.search(r"Private messages from MRC users: +not accepted", _visible(_written_text(session)))
         assert mrc_private_messages_enabled(db, alice) is False
     finally:
         lane.close()

@@ -519,6 +519,17 @@ keeps a one-row window over the buffer and scrolls it to follow the cursor, so a
 value wider than the terminal is edited like any other. A value longer than the
 editor's own buffer cap still falls back to the older prompt, blank-keeps-it and
 all, and says so.
+With redraw-in-place enabled, the selected text, optional-integer, age,
+integer, float or optional-text field is edited at its displayed value row.
+The existing Choice row carries the editing key hint; no typing prompt opens
+below the action bar. Wrapped continuation rows are cleared while the full
+buffer is edited through a horizontal viewport, then restored on redraw.
+With redraw-in-place disabled, the editable prefilled prompt remains below
+the form. A field hotkey on another section displays that section before
+editing. If the form is taller than the terminal, editing temporarily shows
+the portion containing the selected field. A terminal resize cancels the
+unsubmitted edit, preserves the draft and displays an explanation after
+laying out the new dimensions.
 Anything gathering more than two values goes through the draft field editor or
 a picker and persists nothing before `[S]ave`. The deliberate exceptions are
 once-only first-run decisions (Link participation, node name, managed DNS,
@@ -586,6 +597,13 @@ guessable fact in the row, so the levels take the truncation instead.
 Cells are measured and padded in display columns, never character counts, so
 a CJK name does not shift the columns after it, and whitespace is normalized
 before measuring since a preserved tab measures zero but renders as a space.
+
+Draft editors share one label-column width across the entire field list,
+including sections on other pages. Wrapped values retain that same hanging
+indent. When the widest label would leave fewer than twelve value columns,
+all values move to a separate row with a shared two-column indent; labels and
+values wrap without truncation. This layout also supplies the physical row
+and column used for in-place editing.
 
 ---
 
