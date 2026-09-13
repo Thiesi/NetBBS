@@ -7221,7 +7221,8 @@ without teaching native chat anything about MRC. Decisions:
   user counts and topics. A fresh directory offers `lobby` as a starting
   point, plus opening a room by name. Entering a room requests `LIST` in
   the background, also on reconnect and roster refresh, at most once per
-  five minutes per connection; `/rooms` refreshes it
+  five minutes per connection without spending callers' message allowance;
+  `/rooms` refreshes it
   explicitly and shows a readable listing. Discovery never opens the
   listed rooms. Local access rules and the blocklist still gate entry.
   Refusals stay in the picker's header through redraws. Open rooms appear
@@ -7233,7 +7234,10 @@ without teaching native chat anything about MRC. Decisions:
   use supplies the parser's anchored rows. Only replies to recent `LIST`
   requests populate the bounded cache; unfamiliar output remains text,
   never guessed room names. Counts and topics are advisory snapshots, with
-  stale readings labeled. Reconfiguring the hub clears its directory.
+  stale readings labeled. Reconfiguring the hub clears its directory and
+  observed room names, then reloads locally retained mappings. Unknown
+  generic-client LIST lines stay scoped to explicit requesters and are
+  suppressed for automatic requests, never broadcast to other callers.
 - **Occupancy.** The status line separates local participants and their
   local away count from the hub's remote roster count. An absent roster
   reads `?`, not zero; stale snapshots are marked. MRC roster replies do

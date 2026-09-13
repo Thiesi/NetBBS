@@ -472,6 +472,7 @@ def test_directory_discovery_and_completion_use_hub_rows(db, lane, hub, presence
             "*. __Rooms___________________Usr__Topic_______________________",
             "*.:  #chess                    1  Chess - open games",
             "*.:  #lobby                   12  Welcome to the lobby",
+            "*.:  #quiet                    0  ",
             "*.:__                             # = Normal  # = Locked",
         ] if command == "LIST" else original(command, params)
         try:
@@ -502,6 +503,7 @@ def test_directory_discovery_and_completion_use_hub_rows(db, lane, hub, presence
             visible = _visible_text(session)
             assert "chess" in visible and "Chess - open games" in visible
             assert "1 on MRC" in visible
+            assert "quiet" in visible and bridge.directory_details("quiet")[:2] == (0, "")
         finally:
             await bridge.close()
             await fake.close()
@@ -533,6 +535,113 @@ def test_directory_rejects_unsolicited_and_expired_rows(db, lane, hub, presence,
             await fake.send_line("SERVER~~~alice~~~*.: #expired 1 A room~")
             await asyncio.wait_for(queue.get(), timeout=2)
             assert bridge.directory_details("expired") is None
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("target", ["CLIENT", "ALL", ""])
+@pytest.mark.parametrize("room", ["", "lobby"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_unknown_directory_lines_stay_with_the_requester(db, lane, hub, alice, target, room, explicit):
+    from tests.test_chat_flow_mrc import _wait_for
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        fake.reply_lines = lambda command, params: []
+        try:
+            mapping = await bridge.open_room("lobby", "alice")
+            mine = hub.join(mapping.channel.name, ParticipantId("alice", 993))
+            other = hub.join(mapping.channel.name, ParticipantId("bob", 994))
+            await bridge.local_join(mapping.channel, "alice")
+            if explicit:
+                assert bridge.send_hub_command(mapping.channel, "alice", "LIST") is None
+            else:
+                bridge.refresh_directory(mapping.channel, "alice")
+            await fake.wait_for(lambda p: p.body == "LIST")
+            await fake.send_line(f"SERVER~~~{target}~~{room}~wrapped topic continuation~")
+            # A LIST in progress must not claim unrelated structured replies.
+            await fake.send_line("SERVER~~~CLIENT~~~STATS:2 2 2 3~")
+            await fake.send_line(f"SERVER~~~{target}~~{room}~*.:__ # = Normal~")
+            await fake.send_line("SERVER~~~CLIENT~~lobby~USERLIST:done~")
+            await _wait_for(lambda: bridge.remote_roster(mapping.channel) == ["done"], what="reply fence")
+            lines = []
+            while not mine.empty():
+                lines.append(mine.get_nowait().text)
+            assert ("wrapped topic continuation" in lines) is explicit
+            assert other.empty()
+            assert bridge._network_stats is not None
+            assert "wrapped" not in bridge.observed_rooms()
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_changing_hubs_clears_discovered_rooms_but_keeps_local_mappings(db, lane, hub, alice):
+    from tests.test_chat_flow_mrc import _wait_for
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        replacement = FakeMrcHub()
+        await replacement.start()
+        fake.reply_lines = lambda command, params: ["*.: #oldhubroom 1 Old topic"] if command == "LIST" else []
+        try:
+            mapping = await bridge.open_room("lobby", "alice")
+            participant = ParticipantId("alice", 995)
+            hub.join(mapping.channel.name, participant)
+            await bridge.local_join(mapping.channel, "alice")
+            bridge.refresh_directory(mapping.channel, "alice")
+            await _wait_for(lambda: "oldhubroom" in bridge.observed_rooms(), what="old directory")
+            hub.leave(mapping.channel.name, participant)
+            await bridge.local_leave(mapping.channel, "alice")
+            save_mrc_settings(db, MrcSettings(
+                enabled=True, host="127.0.0.1", port=replacement.port, tls=False, site_name="My Board",
+            ))
+            await bridge.reload_settings()
+            await replacement.wait_for_connections(1)
+            assert bridge.directory_details("oldhubroom") is None
+            assert bridge.observed_rooms() == ["lobby"]
+            session = FakeSession(["b"])
+            await chat_flow._pick_mrc_room(session, lane, hub, alice, bridge)
+            assert "oldhubroom" not in _visible_text(session)
+            assert "lobby" in _visible_text(session)
+        finally:
+            await bridge.close()
+            await fake.close()
+            await replacement.close()
+    asyncio.run(scenario())
+
+
+def test_background_directory_refresh_preserves_the_callers_message_allowance(db, lane, hub, alice):
+    from netbbs.chat.scrollback import record_message
+    from tests.test_chat_flow_mrc import _wait_for
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        fake.reply_lines = lambda command, params: []
+        try:
+            mapping = await bridge.open_room("lobby", "alice")
+            hub.join(mapping.channel.name, ParticipantId("alice", 996))
+            await bridge.local_join(mapping.channel, "alice")
+            now = bridge._clock()
+            bridge._clock = lambda: now  # no token refill can hide the loss
+            bridge.refresh_directory(mapping.channel, "alice")
+            await fake.wait_for(lambda p: p.body == "LIST")
+            for _ in range(3):
+                message = await lane.run(record_message, mapping.channel, kind="message", author_label="alice", body="hello")
+                assert await bridge.local_message(mapping.channel, message) == (True, False)
+            assert await bridge.local_message(mapping.channel, message) == (False, False)
+            # Background discovery still has its own shared refresh limit.
+            bridge.refresh_directory(mapping.channel, "alice")
+            now += bridge._userlist_refresh
+            bridge.refresh_directory(mapping.channel, "alice")
+            await _wait_for(lambda: len(fake.packets(body_prefix="LIST")) == 2, what="periodic directory refresh")
+            # Explicit commands continue to share the interactive allowance.
+            for _ in range(3):
+                assert bridge.send_hub_command(mapping.channel, "alice", "LIST") is None
+            assert bridge.send_hub_command(mapping.channel, "alice", "LIST") == "you're sending faster than MRC allows"
         finally:
             await bridge.close()
             await fake.close()

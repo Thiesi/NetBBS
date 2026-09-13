@@ -545,6 +545,7 @@ class MrcBridge:
             self._attempts = 0
             # A reading from the previous hub must not describe the new one.
             self._directory.clear()
+            self._observed_rooms.clear()
             self._directory_requests.clear()
             self._last_directory_request = -1e9
             self._network_stats = None
@@ -1755,8 +1756,6 @@ class MrcBridge:
             return
         if command == "PROTOCOLVERSION":
             return
-        if await self._handle_directory_reply(packet):
-            return
         addressed = self._caller_for_nick(packet.to_user)
         generic = packet.to_user.upper() in ("", protocol.CLIENT, protocol.ALL)
         if command == "STATS" and (generic or addressed is not None):
@@ -1788,6 +1787,9 @@ class MrcBridge:
             if command == "USERNICK":
                 await self._handle_usernick(channel_id, username, strip_pipe_codes(params).strip())
                 return
+        if await self._handle_directory_reply(packet):
+            return
+        if addressed is not None:
             # Issue #298: everything else the hub says *to one caller* is
             # the reply to something they asked (LIST, CHATTERS, INFO,
             # MOTD, STATS, HELP ...) -- plain text lines, shown to them
@@ -2082,12 +2084,21 @@ class MrcBridge:
 
     def refresh_directory(self, channel: Channel, username: str) -> None:
         """A first join discovers company without flooding chat with a listing."""
-        if self._clock() - self._last_directory_request < self._userlist_refresh:
+        now = self._clock()
+        if now - self._last_directory_request < self._userlist_refresh:
             return
-        if self.send_hub_command(channel, username, "LIST") is None:
-            nick = self._announced.get(channel.id, {}).get(username)
-            if nick is not None:
-                self._directory_requests[nick.lower()] = (self._clock(), False)
+        mapping = self._by_channel.get(channel.id)
+        settings = self._settings
+        nick = self._announced.get(channel.id, {}).get(username)
+        if (mapping is None or not mapping.active or settings is None or not settings.enabled
+                or self._state is not MrcState.CONNECTED or nick is None):
+            return
+        # The shared refresh interval bounds automatic requests. They still
+        # use the bounded writer and its per-nick wire spacing, but never
+        # spend this caller's interactive message/command burst allowance.
+        self._directory_requests[nick.lower()] = (now, False)
+        self._last_directory_request = now
+        self._enqueue(protocol.user_command(nick, settings.site_wire_name, mapping.room, "LIST"))
 
     async def _handle_directory_reply(self, packet: MrcPacket) -> bool:
         # Only a reply to a recent LIST may populate this advisory directory.
@@ -2102,12 +2113,22 @@ class MrcBridge:
         if not requests:
             return False
         plain = strip_pipe_codes(packet.body).strip()
+        command, _params = protocol.parse_server_command(packet.body)
+        if command in ("USERROOM", "USERNICK", "STATS", "LATENCY", "BANNER", "MOTD") or protocol.looks_like_presence_chatter(plain):
+            return False
         row = protocol.parse_room_list_row(plain)
         header = bool(re.match(r"^\*\.\s+_+Rooms_+Usr_+Topic_+", plain))
         footer = plain.startswith("*.:__")
         if row is None and not header and not footer:
-            return False
-        if row is not None:
+            if not generic:
+                # A caller-addressed free-text reply already has a safe
+                # destination and may belong to another concurrent command.
+                return False
+            # Generic LIST continuations have no caller in their envelope.
+            # Keep them with the active request instead of broadcasting (or
+            # dropping) them. They are text only, never discovered rooms.
+            text = packet.body.strip()
+        elif row is not None:
             room, users, topic = row
             self._observe_room(room)
             if room.lower() not in self._directory and len(self._directory) >= MAX_OBSERVED_ROOMS:

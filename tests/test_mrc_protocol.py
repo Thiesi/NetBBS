@@ -330,6 +330,11 @@ def test_room_directory_rows_use_the_observed_hub_layout():
         assert protocol.parse_room_list_row(text) is None
 
 
+def test_room_directory_rows_allow_empty_topics():
+    for text in ("*.: #quiet 0", "*.: #quiet 0     ", "|07*.: #quiet 0 |16"):
+        assert protocol.parse_room_list_row(text) == ("quiet", 0, "")
+
+
 def test_sender_color_comes_from_the_matching_handle_not_the_body():
     assert protocol.sender_color("|03<|11bob|03>|16|07 |12hello", "bob") == 11
     assert protocol.sender_color("|15* |13bob |09waves", "bob") == 13

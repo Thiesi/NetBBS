@@ -1438,8 +1438,15 @@ session needs the same treatment.
   only replies to a recent request may populate the directory. Header,
   footer, malformed rows and unfamiliar prose never become room names.
   Automatic first-join refreshes suppress recognized listing rows; explicit
-  `/rooms` shows reformatted rows. Unknown formats still reach the caller
-  as text. Requests expire after 30 seconds and follow nickname corrections.
+  `/rooms` shows reformatted rows. Unknown generic-client LIST lines follow
+  the outstanding request: explicit requesters see them as text, automatic
+  requests suppress them. Structured control replies and presence chatter
+  retain their own handlers; caller-addressed unfamiliar replies retain
+  their addressed destination. Requests expire after 30 seconds and follow
+  nickname corrections. Settings reload clears both discovery caches, then
+  reloads locally retained mappings. Empty topics do not exclude valid rows.
+  Automatic LIST requests use the shared refresh interval and bounded writer
+  with normal wire spacing, never the caller's interactive token allowance.
 - Generic-client STATS replies update the shared reading; explicit requests
   alone cause displayed replies. Generic-client USERROOM/USERNICK can name
   no individual caller: apply them only with exactly one announced account.

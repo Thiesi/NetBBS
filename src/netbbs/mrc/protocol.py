@@ -382,13 +382,13 @@ def parse_room_list_row(text: str) -> tuple[str, int, str] | None:
     The anchored prefix and strict room validation prevent headers, footers
     and wrapped prose from becoming rooms. This is not a general table parser.
     """
-    match = re.fullmatch(r"\*\.:\s+#([^\s]{1,20})\s+([0-9]{1,6})\s+(.*)", strip_pipe_codes(text).strip())
+    match = re.fullmatch(r"\*\.:\s+#([^\s]{1,20})\s+([0-9]{1,6})(?:\s+(.*))?", strip_pipe_codes(text).strip())
     if match is None:
         return None
     room, users, topic = match.groups()
     if sanitize_room(room) != room:
         return None
-    return room, int(users), sanitize_body(topic)[:MAX_TOPIC]
+    return room, int(users), sanitize_body(topic or "")[:MAX_TOPIC]
 
 
 def looks_like_presence_chatter(body: str) -> bool:
