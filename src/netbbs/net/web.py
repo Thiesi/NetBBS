@@ -125,6 +125,20 @@ _SPECIAL_TO_EDITOR_KIND: dict[str, EditorKeyKind] = {
 
 
 @dataclass(frozen=True)
+class _AltKey:
+    """An Alt-combination that arrived as one `onData` event.
+
+    Kept distinct from a bare Escape and from the plain character that
+    follows it, because only the tokenizer -- which sees the whole
+    event string -- can tell the difference. By the time the two are
+    separate queue entries, "ESC then s" and "Escape, then the user
+    pressed s" are indistinguishable.
+    """
+
+    char: str
+
+
+@dataclass(frozen=True)
 class _SpecialKey:
     """Distinguishes a recognized escape sequence (e.g. the two literal
     characters "U" and "P" typed by a user) from the *symbolic* key
@@ -173,6 +187,19 @@ def _parse_input_events(data: str) -> list[str | _SpecialKey]:
                     out.append(_SpecialKey(key))
                 i += 3
                 continue
+        if data[i] == _ESC and i + 1 < len(data):
+            # A bare ESC directly followed, in the *same* event, by a
+            # character that starts no recognized sequence: Alt+letter
+            # (Codex review). Kept together as one item so a consumer
+            # can discard it atomically. Queuing the two separately
+            # made the trailing letter indistinguishable from an
+            # unrelated keystroke that merely arrived quickly -- the
+            # editor either leaked the letter into the screen behind it
+            # or, once it started draining the queue, ate a real
+            # keypress instead. The event boundary only exists here.
+            out.append(_AltKey(data[i + 1]))
+            i += 2
+            continue
         out.append(data[i])
         i += 1
     return out
@@ -522,6 +549,17 @@ class WebSession(Session):
                     if item != _TAB:
                         last_candidates.shown = False
 
+                    if isinstance(item, _AltKey):
+                        # One event, discarded whole (Codex review):
+                        # neither half can leak into the screen behind
+                        # this prompt, and no unrelated keystroke is
+                        # eaten to achieve it. Alt-combinations have
+                        # never done anything in this editor; what
+                        # changed is that they no longer arrive as two
+                        # items a cancellable read could mistake for a
+                        # bare Escape followed by a keypress.
+                        continue
+
                     if isinstance(item, _SpecialKey):
                         key = item.name
                         if key == "LEFT":
@@ -614,9 +652,6 @@ class WebSession(Session):
                         # Escape so nothing escapes into the screen
                         # behind, and only a genuinely bare Escape
                         # cancels.
-                        if not self._char_queue.empty():
-                            self._char_queue.get_nowait()
-                            continue
                         raise InputCancelled
 
                     if char in (_BS, _DEL):
@@ -747,6 +782,9 @@ class WebSession(Session):
         when set, `_DEL` (0x7F) is unaffected either way.
         """
         item = await self._read_item()
+        if isinstance(item, _AltKey):
+            # Not a key this editor surfaces, same as INSERT below.
+            return await self.read_editor_key(distinguish_ctrl_h=distinguish_ctrl_h)
         if isinstance(item, _SpecialKey):
             kind = _SPECIAL_TO_EDITOR_KIND.get(item.name)
             if kind is not None:

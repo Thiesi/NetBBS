@@ -233,10 +233,25 @@ overrides inheritance entirely, even if that makes the resource *looser*
 than its Community's own default. A Community default is a default, not a
 mandatory floor or ceiling.
 
-In the shared draft-based editor screens, this shows up as "blank = keep
-[current]" for text fields and "`none` = clear" conventions for the
-numeric gates — clearing a field puts it back to inheriting, it doesn't
-set it to a hardcoded 0/none value.
+In the shared draft-based editor screens, the numeric gates use a
+"`none` = clear" convention — clearing a field puts it back to
+inheriting, it doesn't set it to a hardcoded 0/none value.
+
+Text fields open on their current value, already in the buffer and ready
+to edit (issue #529), so a long description can be amended rather than
+retyped:
+
+- **Enter** saves whatever is shown.
+- **Deleting everything, then Enter** clears the value. It does *not*
+  keep the old one — with the value already in the line, an empty submit
+  can only be deliberate.
+- **Esc** leaves the field exactly as it was. This is what "blank = keep"
+  used to mean, now on its own key.
+
+A value too long or too wide to edit in one row falls back to the older
+prompt, which still shows the current value in brackets and still treats
+a blank entry as "keep". The prompt itself says which of the two you are
+looking at.
 
 ---
 

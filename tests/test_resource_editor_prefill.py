@@ -148,3 +148,27 @@ def test_a_value_that_fits_still_gets_the_editable_prompt():
     session = _edit(draft, "Weekly release builds, signed")
     assert session.offered_initial == "Weekly release builds"
     assert draft["description"] == "Weekly release builds, signed"
+
+
+def test_a_value_longer_than_the_line_editor_can_hold_is_not_prefilled():
+    """`read_line` caps its buffer, and the transports disagreed about
+    what that meant: Telnet/SSH submitted a silently shortened value
+    while the web session seeded the whole thing. A carried Link
+    resource's description is persisted from a remote payload with no
+    per-field limit, so this is reachable rather than theoretical."""
+    from netbbs.net.char_input import MAX_LINE_LENGTH
+
+    draft = {"description": "x" * (MAX_LINE_LENGTH + 1)}
+    session = _edit(draft, "")
+    assert session.offered_initial == ""
+    assert draft["description"] == "x" * (MAX_LINE_LENGTH + 1)
+
+
+def test_a_tab_is_normalized_before_the_width_is_judged():
+    """`sanitize_text` preserves a tab and `display_width` scores it
+    zero, while the terminal advances to a tab stop -- so the raw string
+    could be approved as fitting and then edit the wrong columns."""
+    draft = {"description": "a\tb"}
+    session = _edit(draft, "a b")
+    assert "\t" not in session.offered_initial
+    assert session.offered_initial == "a b"

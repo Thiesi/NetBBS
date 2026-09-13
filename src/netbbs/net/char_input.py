@@ -147,6 +147,10 @@ _FOLLOWUP_BYTE_TIMEOUT = 0.05
 # appended (but Backspace and Enter still work normally).
 _MAX_LINE_LENGTH = 4096
 
+#: The same cap, for callers that must decide *before* handing this
+#: module a buffer whether it would be silently shortened (issue #529).
+MAX_LINE_LENGTH = _MAX_LINE_LENGTH
+
 # One-byte lookahead pushback is stored on the source itself so both Telnet
 # and SSH get identical behavior without duplicating buffering machinery in
 # each transport. The source implementations are ordinary mutable session

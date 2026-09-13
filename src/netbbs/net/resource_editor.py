@@ -35,6 +35,7 @@ from netbbs.net.char_input import (
     EditorKey,
     EditorKeyKind,
     InputCancelled,
+    MAX_LINE_LENGTH as _MAX_LINE_LENGTH,
     reject_unhandled_key,
 )
 from netbbs.net.confirm import prompt_yes_no
@@ -832,6 +833,12 @@ async def _show_field_help(
 # Escape leaves without writing anything -- which is what "keep"
 # actually meant, now on its own key rather than overloaded onto the
 # empty string.
+def _normalize_tabs(text: str) -> str:
+    """What the write path does to a tab, applied before measuring --
+    see `netbbs.net.picker._pad_cell` for the same rule and reason."""
+    return text.replace(chr(9), " ").replace(chr(13), " ").replace(chr(10), " ")
+
+
 _EDIT_HINT = "Edit (Enter saves, Esc cancels)"
 
 # ...but only while the value fits on one physical row (Codex review).
@@ -855,14 +862,40 @@ _EDIT_HINT = "Edit (Enter saves, Esc cancels)"
 _KEEP_HINT = "blank = keep"
 
 
-def _prefill_fits(session: Session, hint: str, value: str) -> bool:
-    """Whether `value` can be edited inline without soft-wrapping.
+# `read_line`'s own cap. A value longer than this cannot be edited
+# inline at all: Telnet/SSH would submit only the first
+# `_MAX_LINE_LENGTH` code points while the web transport seeded the lot,
+# so the field would be silently corrupted, differently on each
+# transport. Such a value takes the fallback prompt, where it is left
+# alone unless the SysOp types a replacement -- visible, and the same
+# everywhere.
+_MAX_PREFILL_LENGTH = _MAX_LINE_LENGTH
+
+
+def _prefill_fits(session: Session, value: str) -> bool:
+    """Whether `value` can be edited inline, unchanged and in one row.
+
+    Two separate limits, both of which silently altered the value when
+    they were missing (Codex review):
+
+    *Length* -- `read_line` caps its buffer, and a carried Link
+    resource's name or description is persisted from a remote genesis
+    payload with no per-field limit of its own, so an over-long value is
+    reachable rather than hypothetical.
+
+    *Width* -- measured after normalizing tabs. `sanitize_text`
+    deliberately preserves a tab and `display_width` scores it zero,
+    while the terminal advances to a tab stop: measuring the raw string
+    would approve a value that occupies more columns than counted, and
+    every cursor calculation after it would then edit the wrong ones.
 
     The prompt is written on its own line, so the value gets the whole
     terminal width rather than whatever the prompt left of it -- which
     is what keeps most real descriptions on the inline path.
     """
-    return display_width(value) < max(1, session.terminal_width - 1)
+    if len(value) > _MAX_PREFILL_LENGTH:
+        return False
+    return display_width(_normalize_tabs(value)) < max(1, session.terminal_width - 1)
 
 
 def text_field(key: str, *, required: bool = False) -> FieldPrompt:
@@ -884,8 +917,8 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
         # peer's embedded ESC/OSC sequences straight at the SysOp's
         # terminal the moment they opened the field. Design doc:
         # sanitize untrusted segments *before* they are written.
-        current = sanitize_text(draft.get(key) or "")
-        if not _prefill_fits(session, _EDIT_HINT, current):
+        current = _normalize_tabs(sanitize_text(draft.get(key) or ""))
+        if not _prefill_fits(session, current):
             # Too wide to edit inline -- see `_KEEP_HINT`. Falls back to
             # the prompt this screen has always had, including its
             # "blank = keep" answer, so a value that cannot be edited
