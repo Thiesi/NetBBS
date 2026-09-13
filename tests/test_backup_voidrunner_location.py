@@ -207,3 +207,35 @@ def test_a_recorded_directory_is_marked_as_recorded(db, node_home, tmp_path, mon
 
     manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["voidrunner"]["location_recorded_by_node"] is True
+
+
+def test_the_manifest_records_where_the_run_looked_even_when_it_found_nothing(
+    operator_home, tmp_path, monkeypatch
+):
+    """Codex review. A backup is live-safe, so the node may start while
+    one is running -- and a caller that re-resolves the save directory
+    afterwards can be handed the service path by a database that recorded
+    it half a second ago, then report "no saves at" a directory this run
+    never opened. The capture-time answer is the only one that describes
+    the archive, so it has to travel with it whether or not anything was
+    found.
+    """
+    from netbbs.backup import create_backup
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    database = Database(tmp_path / "unrecorded.db")
+    identity_dir = tmp_path / "identity"
+    bootstrap_node_identity("thisnode").save(identity_dir)
+    database.close()
+
+    _as_home(monkeypatch, operator_home)  # nothing under it: nothing to capture
+    destination = tmp_path / "backup-empty"
+    create_backup(db_path=tmp_path / "unrecorded.db", identity_dir=identity_dir, destination=destination)
+
+    import json
+
+    manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["voidrunner"] is None, "nothing was captured"
+    looked_in = manifest["voidrunner_source"]
+    assert looked_in["recorded_by_node"] is False
+    assert looked_in["directory"] == str((operator_home / ".netbbs" / "voidrunner_saves").resolve())

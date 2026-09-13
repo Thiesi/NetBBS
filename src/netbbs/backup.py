@@ -848,6 +848,18 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         "source_identity_dir": str(identity_dir),
         "checksums": checksums,
         "voidrunner": game_metadata,
+        # Where this run *looked*, and whether the node told it where to
+        # look -- recorded whether or not anything was found (Codex
+        # review). A backup is live-safe, so the node may start while one
+        # is running: a caller that re-resolves the location afterwards
+        # can be told the service path by a database that recorded it
+        # half a second ago, and report "no saves at" a directory nothing
+        # ever opened. The capture-time answer is the only one that
+        # describes this archive, so it travels with it.
+        "voidrunner_source": {
+            "directory": str(game_source),
+            "recorded_by_node": game_source_recorded,
+        },
         "war_dialer": war_metadata,
         "door_installs": door_metadata,
     }
@@ -1529,11 +1541,15 @@ def main(argv: list[str] | None = None) -> None:
         war = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("war_dialer")
         for world in war["worlds"] if war else []:
             print_wrapped(f"War Dialer world {world['key']}: included {world['source_path']}.")
-        coverage = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("voidrunner")
-        if args.voidrunner_save_dir is not None:
-            source_directory, recorded_by_node = args.voidrunner_save_dir.resolve(), True
-        else:
-            source_directory, recorded_by_node = voidrunner_save_directory(args.db)
+        created = json.loads((destination / _MANIFEST_FILENAME).read_text())
+        coverage = created.get("voidrunner")
+        # From the manifest this run just wrote, never a fresh lookup
+        # (Codex review): the database is mutable and the node may have
+        # started since, so asking again can describe a directory this
+        # backup never inspected.
+        looked_in = created.get("voidrunner_source") or {}
+        source_directory = looked_in.get("directory", "(unrecorded)")
+        recorded_by_node = bool(looked_in.get("recorded_by_node"))
         if coverage is not None and recorded_by_node:
             print_wrapped(f"Voidrunner: included {len(coverage['files'])} retained files from {source_directory}.")
         elif coverage is not None:
