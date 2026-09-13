@@ -252,6 +252,7 @@ async def pick_item(
     empty_message: str,
     refresh: Callable[[], Awaitable[Sequence[T]]] | None = None,
     on_sort: Callable[[], Awaitable[Sequence[T] | None]] | None = None,
+    on_create: Callable[[], Awaitable[T | None]] | None = None,
     sort_label: Callable[[], str] | None = None,
     description_level: str = "off",
     redraw_in_place: bool = False,
@@ -526,7 +527,7 @@ async def pick_item(
         width, height = _dimensions()
         return _page_size(
             session, on_sort, description_level,
-            header_lines=_header_lines(), width=width, height=height,
+            header_lines=_header_lines(), width=width, height=height, on_create=on_create,
         )
 
     def _masthead_prefix() -> str:
@@ -540,7 +541,13 @@ async def pick_item(
             return ""
         return (clear_screen() if redraw_in_place else "") + masthead
 
-    if not items and refresh is None:
+    # `on_create` keeps an empty list interactive for the same reason
+    # `refresh` already does (issue #112): there is something to do
+    # here besides leave. Without it an empty Community picker
+    # returned instantly, the field silently resolved to "none",
+    # and the SysOp was bounced out to create one elsewhere and
+    # come back -- the dead end issue #530 was filed about.
+    if not items and refresh is None and on_create is None:
         prefix = _masthead_prefix()
         if prefix:
             await write_preformatted_line(session, prefix)
@@ -579,7 +586,13 @@ async def pick_item(
             if prefix:
                 await write_preformatted_line(session, prefix)
             await session.write_line(colored(f"\r\n{empty_message}", fg_color=MUTED_COLOR))
-            trailer = f"{menu_key('B', 'ack')} {'—' if unicode_style else '-'} Ctrl-L: redraw"
+            dash = "—" if unicode_style else "-"
+            if on_create is not None:
+                # The whole point of staying here (issue #530): an empty
+                # list with a way out of being empty.
+                trailer = f"{menu_key('C', 'reate')}  {menu_key('B', 'ack')} {dash} Ctrl-L: redraw"
+            else:
+                trailer = f"{menu_key('B', 'ack')} {dash} Ctrl-L: redraw"
             if refresh is not None:
                 trailer += ", Ctrl-R: refresh"
             await session.write_line(f"\r\n{trailer}")
@@ -747,7 +760,7 @@ async def pick_item(
             # beginning at 15 rows picks a compact nav; growing to 16
             # before this call switches it to the six-line descriptive
             # form, and the page runs off the bottom.
-            width=render_width, height=render_height,
+            width=render_width, height=render_height, on_create=on_create,
         )
         # Folded into this same trailing line, not a line of its own
         # (issue #102's own "document it somewhere discoverable"
@@ -1004,6 +1017,24 @@ async def pick_item(
             page_items = await _render()
             continue
 
+        if char_lower == "c":
+            if on_create is None:
+                await session.write(reject_keystroke())
+                continue
+            # `on_create` owns the whole create interaction and returns
+            # the new item, or `None` if the caller backed out of it.
+            # A successful create *selects* what it just made rather
+            # than dropping the caller back onto the list: they opened
+            # this picker to choose something, said "none of these",
+            # and made the one they wanted -- picking it again by hand
+            # would be a step that answers a question already answered.
+            created = await on_create()
+            if created is None:
+                page_items = await _render()
+                continue
+            await session.write_line("")
+            return created
+
         if char_lower == "g":
             if not items:
                 # Same reasoning as [S]earch's own guard above -- issue
@@ -1204,7 +1235,10 @@ def _search_completer(candidates: Sequence[str]) -> Completer:
 _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV = 5
 
 
-def _nav_entries(on_sort: Callable | None, *, include_next: bool = True, include_prev: bool = True) -> list[MenuEntry]:
+def _nav_entries(
+    on_sort: Callable | None, *, include_next: bool = True, include_prev: bool = True,
+    on_create: Callable | None = None,
+) -> list[MenuEntry]:
     # Dogfood-reported UI issue: [N]ext/[P]rev used to be shown even when
     # there was no next/previous page to go to -- pressing them just bell-
     # rejected (still true, see the main loop below), but the menu row lied
@@ -1226,6 +1260,14 @@ def _nav_entries(on_sort: Callable | None, *, include_next: bool = True, include
     entries.append(MenuEntry(label=menu_key("G", "oto #"), brief="Jump to an item's #"))
     if on_sort is not None:
         entries.append(MenuEntry(label=menu_key("O", "rder"), brief="Change sort order"))
+    if on_create is not None:
+        # Issue #530. Offered on a populated list as well as an
+        # empty one: the original reasoning -- that this only bites
+        # before the first Community exists -- was wrong. Filing a
+        # new board under a *new* Community is an ordinary thing to
+        # want at any point, and the picker offered no route to it
+        # however many already existed.
+        entries.append(MenuEntry(label=menu_key("C", "reate"), brief="Make a new one"))
     entries.append(MenuEntry(label=menu_key("B", "ack"), brief="Return without picking"))
     return entries
 
@@ -1234,12 +1276,15 @@ def _render_nav(
     session: Session, on_sort: Callable | None, description_level: str,
     *, include_next: bool = True, include_prev: bool = True,
     width: int | None = None, height: int | None = None,
+    on_create: Callable | None = None,
 ) -> str:
     # Dimensions may be supplied by a caller that has frozen them for
     # one render (see `pick_item`'s `_dimensions`); otherwise read live.
     width = session.terminal_width if width is None else width
     height = session.terminal_height if height is None else height
-    entries = _nav_entries(on_sort, include_next=include_next, include_prev=include_prev)
+    entries = _nav_entries(
+        on_sort, include_next=include_next, include_prev=include_prev, on_create=on_create,
+    )
     if description_level != "off":
         descriptive = menu_grid(
             [("", entries)], width=width, height=height,
@@ -1260,7 +1305,7 @@ def _render_nav(
 
 def _page_size(
     session: Session, on_sort: Callable | None, description_level: str, *, header_lines: int = 0,
-    width: int | None = None, height: int | None = None,
+    width: int | None = None, height: int | None = None, on_create: Callable | None = None,
 ) -> int:
     # `_RESERVED_LINES` was calibrated against the nav row always being
     # exactly 1 line -- still true for `description_level="off"`
@@ -1280,7 +1325,7 @@ def _page_size(
     width = session.terminal_width if width is None else width
     height = session.terminal_height if height is None else height
     nav_lines = _render_nav(
-        session, on_sort, description_level, width=width, height=height,
+        session, on_sort, description_level, width=width, height=height, on_create=on_create,
     ).count("\r\n") + 1
     available = height - (_RESERVED_LINES - 1 + nav_lines + header_lines)
     return max(1, min(_MAX_PAGE_SIZE, available))

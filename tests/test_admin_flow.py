@@ -4186,6 +4186,11 @@ def test_admin_category_picker_leak_prevention(db, lane, sysop):
         "n", "Amiga",
         "u", "0", "2",
         "c",
+        # The picker no longer returns the instant it finds nothing to
+        # offer (issue #530): an empty list is interactive, because
+        # [C]reate is something to do there. Backing out of it is now
+        # an explicit keystroke rather than automatic.
+        "b",
         "s",
         "b", "b", "b",
     ]
