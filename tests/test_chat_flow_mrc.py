@@ -11,6 +11,7 @@ it was.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 
 import pytest
@@ -130,18 +131,39 @@ async def _run(lane, hub, presence, channel, user, lines, *, mrc_bridge=None, wh
     task = asyncio.create_task(
         chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user, mrc_bridge=mrc_bridge)
     )
-    deadline = asyncio.get_running_loop().time() + 2
-    while hub.participant_count(channel.name) == 0:
-        assert asyncio.get_running_loop().time() < deadline, "caller never joined"
-        await asyncio.sleep(0.01)
-    # `while_joined` is handed the session so it can wait for what it
-    # pushed to actually arrive, rather than sleeping a fixed interval
-    # and hoping (issue #536). The join above already waits on a
-    # condition; inbound delivery deserves the same treatment.
-    await while_joined(session)
-    for line in lines:
-        session.inputs.put_nowait(line)
-    return session, await asyncio.wait_for(task, timeout=4)
+    # The task's whole lifetime is owned from here (AGENTS.md, "own
+    # async tasks" -- Codex review, the same finding `_browse_until`
+    # took one round earlier). `while_joined` now waits on conditions
+    # that can time out or raise, and an early exit used to leave this
+    # loop running into the fixtures' teardown with its own exception
+    # unretrieved -- so a chat loop that died before rendering what was
+    # awaited was reported as the wait's five-second timeout instead.
+    try:
+        # `_wait_for` watches the task too: a loop that has already
+        # finished means the condition will never hold, and whatever it
+        # died of is the failure worth reporting.
+        await _wait_for(
+            lambda: hub.participant_count(channel.name) > 0,
+            what="the caller to join the channel", timeout=2.0, task=task,
+        )
+        # `while_joined` is handed the session so it can wait for what
+        # it pushed to actually arrive, rather than sleeping a fixed
+        # interval and hoping (issue #536). The join above already waits
+        # on a condition; inbound delivery deserves the same treatment.
+        await while_joined(session)
+        for line in lines:
+            session.inputs.put_nowait(line)
+        return session, await asyncio.wait_for(task, timeout=4)
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        else:
+            # Retrieved, not suppressed: anything that mattered has
+            # already been raised by the waits above.
+            with contextlib.suppress(BaseException):
+                task.exception()
 
 
 async def _wait_for(predicate, *, what: str, timeout: float = 5.0, task=None) -> None:
