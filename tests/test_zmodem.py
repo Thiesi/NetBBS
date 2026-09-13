@@ -86,7 +86,7 @@ class FakeSession(Session):
     async def write_raw(self, data: bytes) -> None:
         self._write_pipe.feed(data)
 
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, **kwargs) -> str:
         raise NotImplementedError
 
     async def read_key(self, echo: bool = True) -> str:

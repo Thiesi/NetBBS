@@ -99,6 +99,19 @@ HELP_KEY = "\x08"  # Ctrl-H
 CANCEL_KEY = "\x03"  # Ctrl-C
 
 
+class InputCancelled(Exception):
+    """Raised by `read_line(cancellable=True)` when the caller presses a
+    bare Escape (issue #529).
+
+    An exception rather than a sentinel return value because every
+    existing caller is typed `-> str` and treats whatever comes back as
+    the user's answer; a `None` would have to be checked at every one of
+    them, and the ones that forgot would write the string "None" into a
+    draft. Only a caller that opts in can ever see this, and opting in
+    means having somewhere meaningful to put "they changed their mind".
+    """
+
+
 def reject_unhandled_key(key: str, *, count: int = 1) -> str:
     """
     Like `netbbs.rendering.ansi.reject_keystroke`, but aware that
@@ -560,6 +573,8 @@ async def read_line(
     live_buffer: LiveInputBuffer | None = None,
     lock: asyncio.Lock | None = None,
     list_candidates: CandidateListPrinter | None = None,
+    initial: str = "",
+    cancellable: bool = False,
 ) -> str:
     """
     Read one line of input, echoing (or masking, if `echo=False`) as it
@@ -598,7 +613,8 @@ async def read_line(
     if not echo:
         return await _read_line_masked(source, write)
     return await _read_line_editable(
-        source, write, history, completer, live_buffer=live_buffer, lock=lock, list_candidates=list_candidates
+        source, write, history, completer, live_buffer=live_buffer, lock=lock,
+        list_candidates=list_candidates, initial=initial, cancellable=cancellable,
     )
 
 
@@ -653,9 +669,19 @@ async def _read_line_editable(
     live_buffer: LiveInputBuffer | None = None,
     lock: asyncio.Lock | None = None,
     list_candidates: CandidateListPrinter | None = None,
+    initial: str = "",
+    cancellable: bool = False,
 ) -> str:
-    line: list[str] = []
-    cursor = 0
+    # `initial` (issue #529) starts the buffer populated and the cursor
+    # at its end, so the caller can edit an existing value instead of
+    # retyping it. Echoed here rather than by the caller: the line
+    # editor owns what is on screen from the prompt onward, and a caller
+    # that wrote the text itself would leave this function's cursor
+    # arithmetic disagreeing with the terminal from the first keystroke.
+    line: list[str] = list(initial)
+    cursor = len(line)
+    if line:
+        await write("".join(line))
     overwrite = False
     history_index = 0  # 0 == "not recalling", editing the in-progress line
     saved_in_progress: list[str] | None = None
@@ -734,6 +760,13 @@ async def _read_line_editable(
 
                 if b == _ESC:
                     key = await _read_escape_sequence(source)
+                    if key is None and cancellable:
+                        # A bare Escape, not the start of an arrow or
+                        # Home/End sequence (issue #529). Only reachable
+                        # for a caller that asked for it; for everyone
+                        # else `key is None` still falls through every
+                        # branch below and is ignored, exactly as before.
+                        raise InputCancelled
                     if key == "LEFT":
                         if cursor > 0:
                             cursor -= 1

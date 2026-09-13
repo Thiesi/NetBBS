@@ -56,6 +56,7 @@ from netbbs.net.char_input import (
     Completer,
     EditorKey,
     EditorKeyKind,
+    InputCancelled,
     InputHistory,
     LastCandidateList,
     LiveInputBuffer,
@@ -427,6 +428,8 @@ class WebSession(Session):
         live_buffer: LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
         list_candidates: CandidateListPrinter | None = None,
+        initial: str = "",
+        cancellable: bool = False,
     ) -> str:
         """
         Read one line, with the same cursor-addressable editing,
@@ -453,7 +456,8 @@ class WebSession(Session):
         if not echo:
             return await self._read_line_masked()
         return await self._read_line_editable(
-            history, completer, live_buffer=live_buffer, lock=lock, list_candidates=list_candidates
+            history, completer, live_buffer=live_buffer, lock=lock,
+            list_candidates=list_candidates, initial=initial, cancellable=cancellable,
         )
 
     async def _read_line_masked(self) -> str:
@@ -483,9 +487,19 @@ class WebSession(Session):
         live_buffer: LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
         list_candidates: CandidateListPrinter | None = None,
+        initial: str = "",
+        cancellable: bool = False,
     ) -> str:
-        line: list[str] = []
-        cursor = 0
+        # Issue #529, mirroring `netbbs.net.char_input._read_line_
+        # editable` exactly -- this transport is a separate
+        # reimplementation of the same editor (see `read_line`'s own
+        # docstring), so a feature added to one has to be added to both
+        # or the same screen behaves differently over web than over
+        # Telnet/SSH.
+        line: list[str] = list(initial)
+        cursor = len(line)
+        if line:
+            await self.write("".join(line))
         overwrite = False
         history_index = 0
         saved_in_progress: list[str] | None = None
@@ -578,6 +592,18 @@ class WebSession(Session):
                         cursor = 0
                         await self.write("\r\n")
                         break
+
+                    if char == _ESC and cancellable:
+                        # Issue #529. A *bare* Escape reaches this
+                        # transport as the raw character, not as a
+                        # `_SpecialKey`: the tokenizer above only
+                        # promotes ESC to a named key when it introduces
+                        # a CSI or SS3 sequence, so an Escape with
+                        # nothing after it falls through to the
+                        # character stream. Only a caller that opted in
+                        # sees this; otherwise it stays the no-op it has
+                        # always been.
+                        raise InputCancelled
 
                     if char in (_BS, _DEL):
                         if cursor > 0:

@@ -29,7 +29,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, EditorKey, EditorKeyKind, reject_unhandled_key
+from netbbs.net.char_input import (
+    CANCEL_KEY,
+    HELP_KEY,
+    EditorKey,
+    EditorKeyKind,
+    InputCancelled,
+    reject_unhandled_key,
+)
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.help_overlay import show_help
 from netbbs.net.session import Session, write_prompt
@@ -812,24 +819,44 @@ async def _show_field_help(
     await show_help(session, "Field help", lines[:-1], header_color=header_color, unicode_style=unicode_style)
 
 
+# The prompt opens with the field's current value already in the buffer
+# and editable (issue #529), so a long description can be amended
+# instead of retyped. That replaces the old "blank = keep" convention
+# *for this field type*, and it had to: once the line starts populated,
+# an empty submit is no longer something a caller reaches by pressing
+# Enter on an untouched prompt -- it is a deliberate act of clearing the
+# text. Reading it as "keep" would mean a caller who selected all and
+# deleted watched the old value come back.
+#
+# So: Enter saves what is shown, an emptied line clears the value, and
+# Escape leaves without writing anything -- which is what "keep"
+# actually meant, now on its own key rather than overloaded onto the
+# empty string.
+_EDIT_HINT = "Edit (Enter saves, Esc cancels)"
+
+
 def text_field(key: str, *, required: bool = False) -> FieldPrompt:
-    """A plain single-line text prompt -- blank always keeps whatever
-    is currently in the draft (matching every existing edit screen's
-    own "blank = keep" convention); `required` only changes what the
-    *current-value line* shows when the draft's value is still blank
-    (a fresh "create" draft that hasn't had this field touched yet),
-    never blocks typing here -- `save`'s own validation is where a
-    still-blank required field actually gets rejected, the same
-    "errors surface at Save, not mid-edit" shape `edit_resource_draft`
-    itself already uses for domain (`error_type`) rejections."""
+    """A plain single-line text prompt, opening on the current value.
+
+    `required` no longer changes anything here and is kept for its
+    callers' signatures: a still-blank required field is rejected by
+    `save`, the same "errors surface at Save, not mid-edit" shape
+    `edit_resource_draft` already uses for domain (`error_type`)
+    rejections. See `_EDIT_HINT` above for why "blank = keep" is gone.
+    """
 
     async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         current = draft.get(key) or ""
-        shown = current if current else "(blank)" if required else "(none)"
-        await write_prompt(session, f"[{shown}] (blank = keep): ")
-        raw = (await session.read_line()).strip()
-        if raw:
-            draft[key] = raw
+        await write_prompt(session, f"{_EDIT_HINT}: ")
+        try:
+            raw = (await session.read_line(initial=current, cancellable=True)).strip()
+        except InputCancelled:
+            # Esc: they changed their mind. Nothing is written, and the
+            # draft keeps whatever it had -- the same "leave without
+            # answering" escape every other screen offers.
+            await session.write_line("")
+            return
+        draft[key] = raw
 
     return prompt
 

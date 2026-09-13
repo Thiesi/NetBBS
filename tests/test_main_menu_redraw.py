@@ -34,7 +34,7 @@ class FakeSession:
     async def read_key(self, echo: bool = True) -> str:
         return next(self._keys)
 
-    async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
+    async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
         return next(self._lines)
 
 
