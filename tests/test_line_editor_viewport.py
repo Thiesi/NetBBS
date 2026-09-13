@@ -520,3 +520,41 @@ def test_moving_left_through_accents_lands_only_on_characters():
         _, visible, _, _ = window._layout(line, cursor)
         if visible:
             assert char_width(visible[0]) > 0
+
+
+_INSERT = b"\x1b[2~"
+
+
+def test_overwriting_a_base_character_keeps_its_accent_with_it():
+    """Overwrite advanced one code point, leaving the cursor between the
+    new base and the old accent -- so the caret drew before the composed
+    glyph while the next keystroke replaced the accent: overwriting the
+    `e` of `e<acute>x` with `a` and typing `b` saved `abx` (Codex
+    review)."""
+    # Home first: the prefill leaves the cursor at the end, where
+    # overwrite has nothing to overwrite.
+    result, _ = _edit(_HOME + _INSERT + b"ab" + _ENTER, initial="e\u0301x")
+    assert result == "a\u0301b", f"got {result!r}"
+
+
+@pytest.mark.parametrize("drawn,width,expected", [
+    (78, 39, 1),   # the exact-multiple case: last cell of row 1
+    (39, 39, 0),   # and of row 0
+    (40, 39, 1),
+    (0, 39, 0),
+    (5, 39, 0),
+])
+def test_the_reflowed_caret_row_counts_a_pending_wrap(drawn, width, expected):
+    """A caret at an exact multiple of the width is in the last cell of
+    the previous row with a wrap pending, not at the start of the next
+    one -- and moving up one row too many stepped into the prompt, which
+    the clear that follows then erased (Codex review)."""
+    window = LineViewport(80, owns_row=True)
+    window.col = drawn
+    window.resize(width)
+    recorder = Recorder(width)
+    asyncio.run(window.render(recorder.write, list("x" * 10), 10))
+    if expected:
+        assert f"\x1b[{expected}A" in recorder.raw
+    else:
+        assert "A" not in re.sub(r"\x1b\[[0-9]*[BCDJKm]", "", recorder.raw)

@@ -741,7 +741,10 @@ class WebSession(Session):
                         same_width = char_width(line[cursor]) == char_width(char)
                         edit_pos = cursor
                         line[cursor] = char
-                        cursor += 1
+                        # Past the replaced character's own marks, as in
+                        # `char_input` -- this editor is a separate copy
+                        # and a fix in one is not a fix in the other.
+                        cursor = _grapheme_end(line, cursor + 1)
                         if window is not None:
                             await show()
                         elif same_width:

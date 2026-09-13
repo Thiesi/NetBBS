@@ -536,7 +536,13 @@ class LineViewport:
             # -- pressing Home before shrinking leaves it on the first
             # of those rows, and moving up by the whole payload's height
             # would have stepped into the prompt above and erased it.
-            rows_above = max(0, self.col // self.width)
+            # `col - 1`, because a caret at an exact multiple of the
+            # width is in the *last cell of the previous row* with a
+            # wrap pending, not at the start of the next one (Codex
+            # review). 78 columns reflowed to width 39 leaves it on row
+            # 1; `78 // 39` said row 2, and moving up two rows stepped
+            # into the prompt, which the clear that follows then erased.
+            rows_above = max(0, (self.col - 1) // self.width) if self.col else 0
             up = f"\x1b[{rows_above}A" if rows_above else ""
             prefix = up + "\r\x1b[J"
         else:
@@ -1216,7 +1222,14 @@ async def _read_line_editable(
                     same_width = char_width(line[cursor]) == char_width(char)
                     edit_pos = cursor
                     line[cursor] = char
-                    cursor += 1
+                    # Past the marks that belonged to the character just
+                    # replaced (Codex review). Advancing one code point
+                    # left the cursor between the new base and the old
+                    # accent: the caret drew before the composed glyph
+                    # while the next keystroke replaced the accent, so
+                    # overwriting the `e` of `e<acute>x` with `a` and
+                    # then typing `b` saved `abx`.
+                    cursor = _grapheme_end(line, cursor + 1)
                     if window is not None:
                         await show()
                     elif same_width:
