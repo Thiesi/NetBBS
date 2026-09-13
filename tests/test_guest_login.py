@@ -268,3 +268,45 @@ def test_touching_last_login_refuses_a_row_that_is_not_that_account(tmp_path):
     ).fetchone()
     assert landed["last_login_at"] is None, "a refused guest attempt wrote to another account"
     db.close()
+
+
+# -- The database decides what a name matches --------------------------
+
+
+def test_a_name_the_database_calls_a_different_account_is_not_the_guest(tmp_path):
+    """`strip().casefold()` is not SQLite's `COLLATE NOCASE`, and where
+    the two disagree the difference was a way in (Codex review): a
+    legacy long-s account and an ordinary `s` account can both exist,
+    casefold calls their names equal, and typing one would have signed
+    the caller in as the other.
+
+    The long s is created directly, since account creation would reject
+    it now -- which is exactly the "legacy row" this is about.
+    """
+    db, _, _ = _db(tmp_path)
+    guest = create_user(db, "sam", password="hunter2", user_level=1)
+    other = create_user(db, "zzz", password="hunter2", user_level=200)
+    db.connection.execute(
+        "UPDATE users SET username = ? WHERE id = ?", ("\u017fam", other.id)
+    )
+    db.connection.commit()
+    set_guest_user(db, other)
+
+    # Typed as "sam": casefold says that is the designated account, the
+    # database says it is a different row. The database wins.
+    assert guest_login_for(db, "sam") is None
+    assert guest_login_for(db, "\u017fam") is not None
+    assert guest_login_for(db, "sam") is None or guest_login_for(db, "sam").id != other.id
+    assert guest.id != other.id
+    db.close()
+
+
+def test_the_name_is_still_matched_case_insensitively(tmp_path):
+    """The database's own rule, which is case-insensitive -- so the
+    forgiving behaviour a caller told to "sign in as guest" depends on
+    survives this."""
+    db, guest, _ = _db(tmp_path)
+    set_guest_user(db, guest)
+    assert guest_login_for(db, "GUEST") is not None
+    assert guest_login_for(db, "  Guest  ") is not None
+    db.close()

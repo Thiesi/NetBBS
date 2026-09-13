@@ -82,7 +82,14 @@ pre-login moment on that transport to show it in.
 
 from __future__ import annotations
 
-from netbbs.auth.users import SYSOP_LEVEL, User, get_user_by_id
+from netbbs.auth.users import (
+    NEW_ACCOUNT_SENTINEL,
+    SYSOP_LEVEL,
+    AuthError,
+    User,
+    get_user_by_id,
+    get_user_by_username,
+)
 from netbbs.config import get_config, set_config, set_config_without_commit
 from netbbs.permissions.levels import meets_level
 from netbbs.storage.database import Database
@@ -214,12 +221,25 @@ def guest_login_for(db: Database, username: str) -> User | None:
     docstring for each check and why it lives here rather than at
     designation time.
     """
-    user = guest_user(db)
-    if user is None:
+    designated = guest_user(db)
+    if designated is None:
         return None
-    if username.strip().casefold() != user.username.strip().casefold():
+
+    # Resolved through the same lookup the password path uses, rather
+    # than compared in Python (Codex review). `strip().casefold()` is
+    # not SQLite's `COLLATE NOCASE`, and where the two disagree the
+    # difference is a way in: a legacy long-s account and a current
+    # `s` can both exist, and casefold makes them the same name, so
+    # typing `s` would have signed the caller in as the other account.
+    # A name that the database says is a different row is a different
+    # account, which is the rule every other lookup already follows.
+    try:
+        typed = get_user_by_username(db, username.strip())
+    except AuthError:
         return None
-    return user if guest_is_eligible(db, user) else None
+    if typed.id != designated.id or typed.created_at != designated.created_at:
+        return None
+    return designated if guest_is_eligible(db, designated) else None
 
 
 def pre_login_notice(db: Database) -> str:

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 from netbbs.auth.users import create_user
 from netbbs.guest import guest_user, pre_login_notice, set_guest_user
-from tests.test_admin_flow import FakeSession, _run, _visible, _written_text, db, lane, sysop  # noqa: F401
+from tests.test_admin_flow import (  # noqa: F401
+    FakeSession, _normalized_visible, _run, _visible, _written_text, db, lane, sysop,
+)
 
 
 # -- Designating, and undesignating -----------------------------------
@@ -103,3 +105,23 @@ def test_a_legacy_username_cannot_inject_control_sequences(db, lane, sysop):
     text = _written_text(session)
     assert "\x9b" not in text
     assert "\u202e" not in text
+
+
+def test_an_account_named_new_cannot_be_designated(db, lane, sysop):
+    """`new` is how a caller asks to register, and `_login` acts on it
+    before the guest branch is reached -- so designating an account with
+    that name saved happily and then signed nobody in (Codex review).
+    `RESERVED_USERNAMES` has refused the name since, so only a row
+    predating that check can be in this position; it is created here the
+    way such a row exists, directly.
+    """
+    stray = create_user(db, "newcomer", password="hunter2", user_level=1)
+    db.connection.execute("UPDATE users SET username = ? WHERE id = ?", ("new", stray.id))
+    db.connection.commit()
+
+    session = FakeSession(["s", "g", "g", "new", "s", "b", "y", "b", "b"])
+    _run(session, lane, sysop)
+
+    assert guest_user(db) is None
+    # Wrapped on screen, so the sentence is reassembled first.
+    assert "cannot be the guest account" in _normalized_visible(_written_text(session))

@@ -64,6 +64,7 @@ from zoneinfo import available_timezones
 import nacl.signing
 
 from netbbs.auth.users import (
+    NEW_ACCOUNT_SENTINEL,
     SYSOP_LEVEL,
     AuthError,
     User,
@@ -2015,6 +2016,17 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
                 raise AuthError(
                     f"No account named {name!r}. Guest login names an existing account; "
                     "create it first, then designate it here."
+                )
+            if account.username.strip().lower() == NEW_ACCOUNT_SENTINEL:
+                # `new` is how a caller asks to register, and `_login`
+                # acts on it before the guest branch is reached -- so an
+                # account with this name can be designated, saved, and
+                # then never actually sign anybody in (Codex review).
+                # `RESERVED_USERNAMES` has refused the name since, so
+                # only an account predating that check can be here.
+                raise AuthError(
+                    f"{name!r} is how a caller asks to create an account, so it cannot be the "
+                    "guest account. Rename it first."
                 )
             if meets_level(account, SYSOP_LEVEL):
                 # The one refusal worth hard-coding. Everything else
