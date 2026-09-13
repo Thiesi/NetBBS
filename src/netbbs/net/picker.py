@@ -111,6 +111,17 @@ _MAX_PAGE_SIZE = 99
 # instead -- a truncated table is worse than the prose it replaced.
 _MIN_TABLE_NAME_WIDTH = 12
 
+# The floor for a *fallback* row's name is far lower than a table's,
+# deliberately (Codex review). The fallback's description leads with the
+# gates, and on a 40-column Community list a 12-column name floor left
+# too little room for "default 18+ name+" -- cutting the gate to
+# "default 18+..." and hiding the name requirement entirely, which is
+# the failure this whole issue exists to remove. Design doc §3.6 ranks
+# who-may-enter above everything else in the row, so the name yields
+# first. Four columns still distinguish one row from the next when
+# scanning; nothing does if the gate is gone.
+_MIN_FALLBACK_NAME_WIDTH = 4
+
 # ...and past this the table stops spanning the terminal instead of
 # stretching. A name column that grows without limit puts twenty blank
 # columns between a resource's name and its levels on a wide terminal,
@@ -125,6 +136,15 @@ _COLUMN_GUTTER = 2
 
 # Width of the selector segment ("  01. "), which carries no header.
 _SELECTOR_WIDTH = 6
+
+
+# What the write path does to a tab, done here so a cell is measured at
+# the width it will actually occupy. Carriage returns and newlines go
+# with it: neither can survive inside a row, and leaving them to be
+# measured as zero-width would corrupt the whole table rather than one
+# cell. Ordinary spaces are left exactly as they are -- see `_pad_cell`.
+def _normalize_tabs(text: str) -> str:
+    return text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
 
 
 @dataclass(frozen=True)
@@ -149,17 +169,22 @@ def _pad_cell(text: str, width: int, *, align_right: bool) -> str:
     per character, and padding it by character count is how a table's
     columns wander from row to row.
 
-    Whitespace is normalized to single spaces first (Codex review).
-    `sanitize_text` deliberately preserves a tab, and `display_width`
-    scores a tab zero (it is category Cc), but the write path renders
-    it as one visible space -- so a name carrying a tab would be padded
-    a column too wide and shift every column after it on that row. Any
-    whitespace run is collapsed here, which is what the wrapping inside
-    `Session.write_line` does to it downstream anyway, so the width
-    measured here is the width that reaches the terminal. AGENTS.md:
-    "Width measurement must normalize tabs."
+    Tabs are normalized first (AGENTS.md: "Width measurement must
+    normalize tabs"). `sanitize_text` deliberately preserves a tab, and
+    `display_width` scores it zero (it is category Cc), but the write
+    path renders it as one visible space -- so a name carrying a tab
+    would be padded a column too wide and shift every column after it.
+
+    Only tabs, and each becomes exactly one space (Codex review). An
+    earlier version collapsed every whitespace *run* via
+    `" ".join(text.split())`, which went too far: `Session.write_line`
+    preserves runs of ordinary spaces, and resource names are stored
+    with their internal spacing intact and must be unique by exact
+    name -- so "Ops East" and "Ops  East" are two different boards, and
+    collapsing them rendered both identically, leaving a SysOp unable
+    to tell which row a selection would act on.
     """
-    text = " ".join(text.split())
+    text = _normalize_tabs(text)
     if display_width(text) > width:
         text = truncate_to_width(text, width, ellipsis="…" if width > 1 else "")
     padding = " " * max(0, width - display_width(text))
@@ -701,7 +726,7 @@ async def pick_item(
                 name_text = sanitize_text(name_of(item))
                 if room < display_width(name_text):
                     name_text = _pad_cell(
-                        name_text, max(_MIN_TABLE_NAME_WIDTH, room), align_right=False
+                        name_text, max(_MIN_FALLBACK_NAME_WIDTH, room), align_right=False
                     ).rstrip()
                 segments.append((name_text, item_name_color))
             else:

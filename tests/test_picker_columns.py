@@ -564,3 +564,34 @@ def test_the_nav_block_is_measured_against_the_frozen_dimensions():
     # sized for.
     for line in _plain(session.output).replace("\r\n", "\n").split("\n"):
         assert display_width(line) <= 50, repr(line)
+
+
+def test_internal_spaces_are_preserved_so_two_names_stay_distinct():
+    """Codex review. An earlier tab fix collapsed every whitespace run,
+    which went too far: `Session.write_line` preserves runs of ordinary
+    spaces, and resource names are unique by exact name -- so "Ops East"
+    and "Ops  East" are two different boards, and collapsing them left a
+    SysOp unable to tell which row a selection would act on."""
+    assert _pad_cell("Ops  East", 20, align_right=False).rstrip() == "Ops  East"
+    assert _pad_cell("Ops	East", 20, align_right=False).rstrip() == "Ops East"
+
+
+def test_the_fallback_name_yields_before_the_gates_do():
+    """Codex review. On a very narrow Community list the old 12-column
+    name floor squeezed the description below the width of
+    "default 18+ name+", cutting the gate off entirely -- the failure
+    this issue exists to remove. Design doc 3.6 ranks who-may-enter
+    above the rest of the row, so the name yields first."""
+    items = [Item(1, "Retro Computing Enthusiasts", ["0", "0", "open", ("-", MUTED_COLOR)])]
+    session = FakeSession(["b"], width=44, height=24)
+    asyncio.run(
+        pick_item(
+            session, items,
+            name_of=lambda i: i.name, stable_id_of=lambda i: i.id,
+            description_of=lambda i: "default 18+ name+, listed",
+            columns=COLUMNS, column_values_of=lambda i: i.cells,
+            title="Communities", empty_message="none",
+        )
+    )
+    row = [line for line in _plain(session.output).split(chr(10)) if re.match(r"^\s{2}\d\d\. ", line)][0]
+    assert "18+ name+" in row, row
