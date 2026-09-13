@@ -313,7 +313,13 @@ async def pick_item(
     required and unaffected either way -- it remains the sole source of
     truth for search matching, the completer's candidate list, and any
     caller that never wires up `name_segments_of` at all (every existing
-    caller, byte-for-byte unchanged). A highlighted row overrides every
+    caller, byte-for-byte unchanged).
+
+    **A segment's color is used verbatim, and `None` means no styling,
+    not "the usual"** -- so a caller that wants the node accent its
+    plain `name_of` rows would have had must pass it explicitly. Issue
+    #541 lost the accent off every channel name by leaving it `None`,
+    which is an easy thing to do and an invisible thing to have done. A highlighted row overrides every
     segment to the single accent+bold highlight style, the same
     "selection state wins over field identity" rule the plain `name_of`
     path already follows -- distinguishable field colors are a
