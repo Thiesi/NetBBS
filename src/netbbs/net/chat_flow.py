@@ -627,13 +627,16 @@ async def _pick_channel(
             needs_name.update(refreshed)
             return new_channels
 
+        flat_accent = await lane.run(effective_accent_color_256)
         return await pick_item(
             session,
             channels_here,
             name_of=lambda c: c.name,
             stable_id_of=lambda c: c.id,
             description_of=lambda c: _channel_description(hub, c, needs_name),
-            name_segments_of=lambda c: channel_name_segments(c, needs_name),
+            name_segments_of=lambda c: channel_name_segments(
+                c, needs_name, name_color=flat_accent,
+            ),
             title=title,
             breadcrumb=picker_breadcrumb,
             empty_message="No chat channels are available to you yet.",
@@ -642,7 +645,7 @@ async def _pick_channel(
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
             collapsed=collapsed,
-            accent_color=await lane.run(effective_accent_color_256),
+            accent_color=flat_accent,
             masthead=channel_masthead,
         )
 
@@ -669,8 +672,8 @@ async def _pick_channel(
         # channels, and only a channel can carry a name gate -- the
         # others render exactly the name `render_name` gives them.
         if isinstance(item, Channel):
-            return channel_name_segments(item, needs_name)
-        return [(render_name(item), None)]
+            return channel_name_segments(item, needs_name, name_color=accent_color)
+        return [(render_name(item), accent_color)]
 
     def stable_id(item: Category | Channel | _MrcRoomsEntry) -> int:
         if isinstance(item, _MrcRoomsEntry):
@@ -1199,6 +1202,11 @@ def channel_name_segments(
     a narrow row gives up is the prose, and the thing a caller has to
     act on survives.
     """
+    # `name_color` is not decoration: `pick_item` colours a plain
+    # `name_of` row with the node's accent, and a segment list is taken
+    # verbatim -- so leaving it `None` quietly stripped the accent off
+    # every channel name the moment this callback existed (Codex
+    # review). The caller passes the same accent it hands the picker.
     segments: list[tuple[str, SegmentColor]] = []
     if needs_name is not None and channel.id in needs_name:
         # Ahead of the name, not after it. `colored_truncate` cuts from

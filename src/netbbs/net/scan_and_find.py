@@ -214,6 +214,7 @@ async def _new_scan_screen(
         return f"{prefix}{item.kind.replace('_', ' ')}, {status}"
 
     positions = {id(item): index for index, item in enumerate(items, start=1)}
+    accent = effective_accent_color(session, db)
 
     def _name_segments(item: _ScanItem) -> list[tuple[str, SegmentColor]]:
         """The gate note rides with the name here too (issue #541).
@@ -223,6 +224,9 @@ async def _new_scan_screen(
         exactly like an ungated one -- which is the whole bug (Codex
         review).
         """
+        # The accent the picker would have used for a plain name --
+        # a segment list is taken verbatim, so `None` strips it (Codex
+        # review).
         segments: list[tuple[str, SegmentColor]] = []
         if item.name_gate_unmet:
             # In *front* of the name, exactly as `channel_name_segments`
@@ -231,7 +235,7 @@ async def _new_scan_screen(
             # end, so a name long enough to fill the row takes anything
             # behind it with it.
             segments.append((f"({NAME_GATE_NOTE}) ", GATE_COLOR))
-        segments.append((item.name, None))
+        segments.append((item.name, accent))
         return segments
 
     selected = await pick_item(
@@ -245,7 +249,7 @@ async def _new_scan_screen(
         redraw_in_place=redraw_in_place_enabled(db, user),
         unicode_style=unicode_style_enabled(db, user),
         collapsed=breadcrumb_collapsed_enabled(db, user),
-        accent_color=effective_accent_color(session, db),
+        accent_color=accent,
         header_color=effective_header_color(session, db),
     )
     if selected is None:

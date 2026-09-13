@@ -234,3 +234,19 @@ def test_even_a_name_wider_than_the_row_cannot_hide_the_note(db, sysop):
 
     row = strip_ansi(colored_truncate(segments, 40))
     assert _NOTE in row
+
+
+def test_the_name_keeps_the_accent_a_plain_name_would_have(db, sysop):
+    """`pick_item` colours a plain `name_of` row with the node's accent
+    and takes a segment list verbatim -- so leaving the colour `None`
+    quietly stripped the accent off every channel name the moment this
+    callback existed (Codex review)."""
+    from netbbs.net.chat_flow import channel_name_segments
+
+    channel = create_channel(db, "lobby", creator=sysop)
+    assert channel_name_segments(channel, set(), name_color=51) == [("lobby", 51)]
+
+    gated = create_channel(db, "verified-only", creator=sysop, name_requirement="verified")
+    segments = channel_name_segments(gated, {gated.id}, name_color=51)
+    assert segments[-1] == ("verified-only", 51), "the name keeps the accent"
+    assert segments[0][1] != 51, "and the gate keeps its own colour"
