@@ -497,10 +497,15 @@ class LineViewport:
         else:
             # Back to the window's left edge, clearing what was there.
             prefix = move_cursor(self.col, forward=False) + "\x1b[K"
-        # Redraw, then step back to where the cursor belongs.
-        await write(prefix + payload)
+        # One write, not three (Codex review). A web caller can resize
+        # between two writes -- `WebSession._read_loop` updates the
+        # width from another task while xterm.js reflows what has
+        # already arrived -- and a redraw split across that boundary
+        # positions its caret with a count measured against the row it
+        # no longer occupies. Delivered whole, a resize can land before
+        # it or after it, but not inside it.
         drawn = len(left) + display_width(visible) + len(right)
-        await write(move_cursor(drawn - column, forward=False))
+        await write(prefix + payload + move_cursor(drawn - column, forward=False))
         self.col = column
         self.drawn = drawn
 

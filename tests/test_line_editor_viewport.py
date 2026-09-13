@@ -468,3 +468,15 @@ def test_moving_left_past_the_edge_does_not_open_on_a_mark():
         left, visible, _, _ = window._layout(line, cursor)
         if visible:
             assert char_width(visible[0]) > 0, f"window opened on a mark at cursor {cursor}"
+
+
+def test_a_redraw_is_delivered_as_one_write():
+    """A web caller can resize between two writes -- the session's read
+    loop updates the width from another task while xterm.js reflows what
+    has already arrived -- and a redraw split across that boundary
+    positions its caret with a count measured against the row it no
+    longer occupies (Codex review)."""
+    window = LineViewport(_WIDTH)
+    recorder = Recorder()
+    asyncio.run(window.render(recorder.write, list(_LONG), len(_LONG)))
+    assert len(recorder.chunks) == 1, f"{len(recorder.chunks)} writes: a resize can land between them"
