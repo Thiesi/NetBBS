@@ -245,6 +245,13 @@ def format_for_display(
     Getting the format right without also converting to the right
     timezone still leaves users looking at UTC clock time, just reshaped.
 
+    Raises `ValueError` for a timestamp that cannot be shown at all --
+    either because it cannot be parsed, or because the resolved display
+    timezone puts it outside the representable range. Both are the same
+    answer to a caller ("there is no string to show here"), so they
+    arrive as the same exception; `netbbs.chat.timestamps` depends on
+    that to drop a stamp without dropping the line it belongs to.
+
     Whatever format/timezone are resolved are re-validated here
     regardless of source (see `is_valid_display_format` /
     `is_valid_timezone`) and fall back to the hardcoded defaults if
@@ -274,5 +281,19 @@ def format_for_display(
     if not is_valid_timezone(tz_name):
         tz_name = _DEFAULT_DISPLAY_TIMEZONE
 
-    localized = parsed.astimezone(ZoneInfo(tz_name))
+    try:
+        localized = parsed.astimezone(ZoneInfo(tz_name))
+    except (OverflowError, OSError) as exc:
+        # The *second* place an instant can run off the end of the
+        # representable range (Codex review). `_parse_stored_timestamp`
+        # already normalizes to UTC, and that succeeding says nothing
+        # about the display zone: `9999-12-31T23:59:59Z` is a perfectly
+        # ordinary timestamp a peer may legitimately send, and converting
+        # it to a +14 zone like Pacific/Kiritimati overflows. Raised as
+        # `ValueError` for the same reason the parse half is -- this
+        # function has one failure type, so a caller guarding one call
+        # site does not have to know which half threw.
+        raise ValueError(
+            f"{iso_timestamp!r} cannot be represented in display timezone {tz_name!r}"
+        ) from exc
     return localized.strftime(fmt)

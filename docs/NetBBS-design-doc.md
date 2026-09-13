@@ -1109,9 +1109,10 @@ expressed a preference, so it applies to existing accounts as well as new
 ones; an account holding an explicit `off` keeps it. Knowing when a line was
 said is most of what makes scrollback readable, and a caller entering a quiet
 channel cannot otherwise tell whether the last line is a minute or a week old.
-The stamp is time-only, in the caller's own display timezone and the metadata
-shade rather than the muted one -- it is chrome attached to the line beside it,
-not a system message.
+The stamp is time-only, in the node's configured display timezone -- NetBBS has
+one clock, and a per-user timezone is reserved for a future preferences system
+rather than implemented here -- and in the metadata shade rather than the muted
+one, since it is chrome attached to the line beside it and not a system message.
 
 Because the stamp renders on every line of replayed scrollback, a carried
 message's `created_at` is a field every channel entry now formats. It is

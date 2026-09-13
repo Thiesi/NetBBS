@@ -112,6 +112,26 @@ def test_an_unparseable_stored_timestamp_costs_the_stamp_not_the_line(db, stored
     assert rendered == "<bob> hello"
 
 
+def test_a_far_future_timestamp_in_a_far_east_timezone_costs_only_its_stamp(db):
+    """The second place an instant can run off the representable range
+    (Codex review).
+
+    `9999-12-31T23:59:59Z` is a perfectly ordinary timestamp -- it parses,
+    and normalizing it to UTC succeeds, so the Link protocol check accepts
+    it and a peer may legitimately send one. Converting it to a +14 display
+    zone is what overflows, and that happens inside the renderer, after
+    every check upstream has passed.
+    """
+    from netbbs.config import set_config
+    from netbbs.timeutil import DISPLAY_TIMEZONE_CONFIG_KEY
+
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    set_timestamps_enabled(db, user, True)
+    set_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, "Pacific/Kiritimati")
+
+    assert format_with_preference(db, user, "<bob> hello", "9999-12-31T23:59:59.000000Z") == "<bob> hello"
+
+
 def test_a_good_timestamp_still_gets_its_stamp(db):
     user = create_user(db, "alice", password="hunter2", user_level=10)
     set_timestamps_enabled(db, user, True)
