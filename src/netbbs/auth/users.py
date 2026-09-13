@@ -572,6 +572,21 @@ def authorize_public_key(db: Database, username: str, verify_key: nacl.signing.V
     return _touch_last_login(db, row)
 
 
+def touch_last_login(db: Database, user: User) -> User:
+    """Record that `user` has just signed in, and return the refreshed
+    row.
+
+    The `User`-shaped counterpart to `_touch_last_login`, which every
+    password and key path already reaches through its own `sqlite3.Row`.
+    Guest login (issue #531) resolves an account without going through
+    either, and skipping this left `last_login_at` stale on an account
+    that was signing in daily.
+    """
+    return _touch_last_login(db, db.connection.execute(
+        "SELECT * FROM users WHERE id = ?", (user.id,)
+    ).fetchone())
+
+
 def _touch_last_login(db: Database, row: sqlite3.Row) -> User:
     now = utc_now_iso()
     db.connection.execute(

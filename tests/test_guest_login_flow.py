@@ -13,7 +13,7 @@ import asyncio
 import pytest
 
 from netbbs.auth.users import SYSOP_LEVEL, create_user, set_user_disabled
-from netbbs.guest import set_guest_username, set_pre_login_notice
+from netbbs.guest import set_guest_user, set_pre_login_notice
 from netbbs.moderation.blocklist import block_user
 from netbbs.net import login_flow
 from netbbs.storage.database import Database
@@ -38,7 +38,7 @@ def _login(db, lines):
 def test_the_guest_name_signs_in_without_a_password(db):
     """The whole feature: one line of input, no password prompt."""
     guest = create_user(db, "guest", password="hunter2", user_level=1)
-    set_guest_username(db, "guest")
+    set_guest_user(db, guest)
 
     result, session = _login(db, ["guest"])
 
@@ -47,9 +47,9 @@ def test_the_guest_name_signs_in_without_a_password(db):
 
 
 def test_any_other_account_still_needs_its_password(db):
-    create_user(db, "guest", password="hunter2", user_level=1)
+    guest = create_user(db, "guest", password="hunter2", user_level=1)
     alice = create_user(db, "alice", password="correct", user_level=10)
-    set_guest_username(db, "guest")
+    set_guest_user(db, guest)
 
     result, session = _login(db, ["alice", "correct"])
 
@@ -60,9 +60,9 @@ def test_any_other_account_still_needs_its_password(db):
 def test_the_guest_account_can_still_sign_in_normally(db):
     """Guest login skips the password; it does not remove it."""
     guest = create_user(db, "guest", password="hunter2", user_level=1)
-    set_guest_username(db, "guest")
+    set_guest_user(db, guest)
     # Designation off: the same account, the ordinary path.
-    set_guest_username(db, None)
+    set_guest_user(db, None)
 
     result, session = _login(db, ["guest", "hunter2"])
 
@@ -79,7 +79,7 @@ def test_a_blocked_guest_is_still_refused(db):
     guest = create_user(db, "guest", password="hunter2", user_level=1)
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     block_user(db, guest, blocked_by=sysop, reason="spam")
-    set_guest_username(db, "guest")
+    set_guest_user(db, guest)
 
     result, session = _login(db, ["guest"])
 
@@ -87,18 +87,51 @@ def test_a_blocked_guest_is_still_refused(db):
     assert "revoked" in "".join(session.written)
 
 
-def test_a_disabled_guest_account_does_not_let_anyone_in(db):
-    """`handle_session` refuses a disabled account after `_login`
-    returns it, exactly as for any other account -- the guest path must
-    not hand back something that skips that."""
+def test_a_disabled_guest_account_gets_no_passwordless_login(db):
+    """`get_user_by_username` filters no account status, so the guest
+    path has to apply this gate itself -- the password path applies its
+    own. A disabled designation stops being special and falls through
+    to the ordinary prompt rather than handing back a session."""
     guest = create_user(db, "guest", password="hunter2", user_level=1)
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     set_user_disabled(db, guest, disabled=True, changed_by=sysop)
-    set_guest_username(db, "guest")
+    set_guest_user(db, guest)
+
+    _, session = _login(db, ["guest", "hunter2", "guest", "hunter2", "guest", "hunter2"])
+
+    assert "Password:" in "".join(session.written)
+
+
+def test_a_guest_promoted_to_sysop_gets_no_passwordless_login(db):
+    """Checking the level only when the designation is saved left a
+    passwordless privilege-escalation path: designate an ordinary
+    account, then promote it through the user-detail level action."""
+    from netbbs.auth.users import set_user_level
+
+    guest = create_user(db, "guest", password="hunter2", user_level=1)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    set_guest_user(db, guest)
+    set_user_level(db, guest, SYSOP_LEVEL, changed_by=sysop)
+
+    _, session = _login(db, ["guest", "hunter2", "guest", "hunter2", "guest", "hunter2"])
+
+    assert "Password:" in "".join(session.written)
+
+
+def test_a_guest_session_updates_last_login(db):
+    """Every other authentication path records this on its way out; a
+    guest account signing in daily should not look like one that never
+    has."""
+    from netbbs.auth.users import get_user_by_id
+
+    guest = create_user(db, "guest", password="hunter2", user_level=1)
+    assert guest.last_login_at is None
+    set_guest_user(db, guest)
 
     result, _ = _login(db, ["guest"])
 
-    assert getattr(result, "disabled_at", None) is not None
+    assert result.last_login_at is not None
+    assert get_user_by_id(db, guest.id).last_login_at is not None
 
 
 def test_a_deleted_guest_account_falls_back_to_the_password_prompt(db):
@@ -108,7 +141,7 @@ def test_a_deleted_guest_account_falls_back_to_the_password_prompt(db):
 
     guest = create_user(db, "guest", password="hunter2", user_level=1)
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
-    set_guest_username(db, "guest")
+    set_guest_user(db, guest)
     delete_user(db, guest, deleted_by=sysop)
 
     result, session = _login(db, ["guest", "hunter2", "guest", "hunter2", "guest", "hunter2"])

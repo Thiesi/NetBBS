@@ -28,10 +28,38 @@ oversights:
   be signed into normally, and revoking guest access is one config
   change that leaves the account intact.
 
+**The designation is an account id, not a name** (Codex review). Storing
+the name read better in `node_config` and was how this was first
+written, with a comment claiming that deleting and recreating an account
+under the same name would not silently point guest login somewhere else.
+That claim was exactly backwards: a name lookup resolves whatever row
+currently holds the name, so deleting the guest and later creating a new
+account with the same name would have handed passwordless access to the
+replacement -- with whatever permissions it happened to have. An id
+cannot be recycled, so a deleted guest stays deleted.
+
+`guest_login_for` is the *only* entry point, and returns an account just
+once it has re-checked everything the password path would have:
+
+- the account still exists;
+- it is not disabled and not awaiting approval -- `get_user_by_username`
+  filters neither, so a guest designated before being disabled would
+  otherwise have walked straight past a gate the password path enforces;
+- it is not a SysOp. Checking that only when the designation is *saved*
+  left a passwordless privilege-escalation path: designate an ordinary
+  account, then promote it through the existing user-detail level
+  action, and the login path would hand back a SysOp. The prohibition
+  has to hold at the moment it is used, not only at the moment it is
+  set.
+
+It also matches the typed name against the *resolved* account rather
+than against a separately-read configuration value, so a concurrent
+Guest Access save cannot swap identities between the check and the
+lookup.
+
 The pre-login notice is unrelated machinery living here for one reason:
 it is how a caller learns the guest credentials exist at all. It is a
-short SysOp-authored string shown between the welcome banner and the
-username prompt.
+short SysOp-authored string shown above the sign-in screen.
 
 Unlike `netbbs.net.welcome_banner`, which is authored as an `.ans` file
 and deliberately neither sanitized nor wrapped (to preserve fixed-width
@@ -47,11 +75,12 @@ pre-login moment on that transport to show it in.
 
 from __future__ import annotations
 
-from netbbs.auth.users import AuthError, User, get_user_by_username
+from netbbs.auth.users import SYSOP_LEVEL, User, get_user_by_id
 from netbbs.config import get_config, set_config
+from netbbs.permissions.levels import meets_level
 from netbbs.storage.database import Database
 
-_GUEST_USERNAME_KEY = "guest_login_username"
+_GUEST_USER_ID_KEY = "guest_login_user_id"
 _PRE_LOGIN_NOTICE_KEY = "pre_login_notice"
 
 # Long enough for the two or three lines a notice like "Here for NetBBS?
@@ -61,58 +90,57 @@ _PRE_LOGIN_NOTICE_KEY = "pre_login_notice"
 MAX_PRE_LOGIN_NOTICE_LENGTH = 240
 
 
-def guest_username(db: Database) -> str | None:
-    """The account name guest login is enabled for, or `None`.
+def guest_user_id(db: Database) -> int | None:
+    """The account id guest login is enabled for, or `None`."""
+    raw = get_config(db, _GUEST_USER_ID_KEY)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
-    Stored as a name rather than a user id so the stored value stays
-    meaningful when read by a human in `node_config`, and so deleting
-    and recreating the account under the same name does not silently
-    point guest login at a different row.
-    """
-    return get_config(db, _GUEST_USERNAME_KEY) or None
 
-
-def set_guest_username(db: Database, username: str | None) -> None:
-    """Designate `username` as the guest identity, or `None` to turn
-    guest login off. The account itself is untouched either way."""
-    set_config(db, _GUEST_USERNAME_KEY, username or "")
+def set_guest_user(db: Database, user: User | None) -> None:
+    """Designate `user` as the guest identity, or `None` to turn guest
+    login off. The account itself is untouched either way."""
+    set_config(db, _GUEST_USER_ID_KEY, "" if user is None else str(user.id))
 
 
 def guest_user(db: Database) -> User | None:
-    """The guest account, or `None` if guest login is off *or* the
-    designated account no longer exists.
+    """The designated account, or `None` if guest login is off or the
+    account is gone.
 
-    Resolved on every login rather than cached: an account can be
-    deleted, renamed or disabled long after it was designated, and a
-    stale guest identity must fail closed -- guest login simply stops
-    working and the ordinary password prompt takes over, rather than
-    the name matching something unintended.
+    Says nothing about whether that account may *currently* log in --
+    that is `guest_login_for`'s job. This exists for the SysOp screen,
+    which needs to show what is configured even when the configuration
+    has become unusable.
     """
-    username = guest_username(db)
-    if not username:
+    user_id = guest_user_id(db)
+    if user_id is None:
         return None
-    try:
-        return get_user_by_username(db, username)
-    except AuthError:
-        # `get_user_by_username` raises rather than returning `None`, to
-        # keep username enumeration out of the authentication path. Here
-        # the name came from the node's own configuration, not from a
-        # caller, so there is nothing to enumerate -- a missing account
-        # just means guest login is off.
-        return None
+    return get_user_by_id(db, user_id)
 
 
-def is_guest_login(db: Database, username: str) -> bool:
-    """Whether `username` should skip the password prompt.
+def guest_login_for(db: Database, username: str) -> User | None:
+    """The account to sign `username` in as without a password, or
+    `None` if that is not something this node will do.
 
-    Compared case-insensitively, matching how the login prompt treats
-    the `new` sentinel: a caller told to "sign in as guest" should not
-    be refused for typing "Guest".
+    One configuration read and one account resolution, with the typed
+    name compared against the resolved account -- see this module's
+    docstring for each check and why it lives here rather than at
+    designation time.
     """
-    configured = guest_username(db)
-    if not configured:
-        return False
-    return username.strip().lower() == configured.strip().lower()
+    user = guest_user(db)
+    if user is None:
+        return None
+    if username.strip().casefold() != user.username.strip().casefold():
+        return None
+    if user.disabled_at is not None or user.pending_approval:
+        return None
+    if meets_level(user, SYSOP_LEVEL):
+        return None
+    return user
 
 
 def pre_login_notice(db: Database) -> str:

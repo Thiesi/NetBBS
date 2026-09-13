@@ -814,10 +814,16 @@ Three consequences follow, and are intended rather than gaps:
 - The account keeps its password and can still be signed into normally.
   Turning guest access off is one configuration change and leaves the account
   untouched.
-- Everything after authentication still runs. A blocked guest is refused, a
-  disabled guest is refused, and a guest account that has been deleted stops
-  being special -- the name falls through to the ordinary password prompt
-  rather than matching something unintended.
+- Everything after authentication still runs, and is re-checked at the moment
+  of use rather than when the designation was saved. A blocked guest is
+  refused. A disabled or not-yet-approved account is refused. An account
+  promoted to SysOp after being designated is refused -- otherwise designating
+  an ordinary account and then promoting it would be a passwordless route to
+  SysOp. And a deleted guest stops being special, falling through to the
+  ordinary password prompt.
+- The designation is an **account id**, never a name. A name would resolve to
+  whatever row holds it now, so deleting the guest and recreating an account
+  under the same name would hand passwordless access to the replacement.
 
 A SysOp account may not be designated. Everything else about guest access is
 policy the SysOp chooses, but a passwordless SysOp login is not a choice worth

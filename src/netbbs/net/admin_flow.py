@@ -485,9 +485,9 @@ from netbbs.rendering import (
     wrap_to_width,
 )
 from netbbs.guest import (
-    guest_username,
+    guest_user,
     pre_login_notice,
-    set_guest_username,
+    set_guest_user,
     set_pre_login_notice,
 )
 from netbbs.session_history import previous_callers_enabled, set_previous_callers_enabled
@@ -1534,7 +1534,7 @@ async def _system_menu(
                 utc_now_iso(), override_format=display_format, override_timezone=display_timezone
             ),
             "previous_callers_enabled": previous_callers_enabled(db),
-            "guest_username": guest_username(db),
+            "guest_username": (lambda u: u.username if u is not None else None)(guest_user(db)),
             "trust_exceptions": len(list_sole_authorities(db)),
             "description_level": menu_description_level(db, actor),
             "unicode_style": unicode_style_enabled(db, actor),
@@ -1965,6 +1965,30 @@ async def _node_name_screen(session: Session, lane: DatabaseLane, actor: User) -
             await session.write(reject_unhandled_key(choice))
 
 
+def _clearable_text_field(key: str, label: str):
+    """A text field a SysOp can actually empty again (issue #531).
+
+    The shared `text_field` treats a blank entry as "keep the current
+    value", which is right for a name that must always be *something*
+    but makes an optional setting impossible to unset -- and both fields
+    on the Guest Access screen are optional by design, since clearing
+    them is how guest login and the notice are turned off. `'none'`
+    clears, the same word and the same convention the numeric gate
+    fields already use for exactly this reason.
+    """
+
+    async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        current = draft.get(key) or ""
+        shown = current if current else "none"
+        await write_prompt(session, f"{label} [{shown}] (blank = keep, 'none' = clear): ")
+        raw = (await session.read_line()).strip()
+        if not raw:
+            return
+        draft[key] = "" if raw.lower() == "none" else raw
+
+    return prompt
+
+
 async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """Guest login and the pre-login notice (issue #531).
 
@@ -1981,8 +2005,9 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
 
     def _load(db: Database) -> dict:
+        current = guest_user(db)
         return {
-            "guest_username": guest_username(db) or "",
+            "guest_username": current.username if current is not None else "",
             "notice": pre_login_notice(db),
         }
 
@@ -1990,6 +2015,7 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
 
     async def save(draft: dict):
         name = (draft["guest_username"] or "").strip()
+        account = None
         if name:
             def _check(db: Database) -> User | None:
                 try:
@@ -2018,7 +2044,7 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
                 )
 
         def _apply(db: Database) -> None:
-            set_guest_username(db, name or None)
+            set_guest_user(db, account)
             set_pre_login_notice(db, draft["notice"] or "")
             record_action(
                 db, actor=actor, action="set_guest_access",
@@ -2033,7 +2059,12 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
             key="guest_username", hotkey="g", menu_text=menu_key("G", "uest account"),
             label="Guest account",
             render=lambda d: d.get("guest_username") or "(guest login off)",
-            prompt=text_field("guest_username"),
+            # Not `text_field`: on this branch a blank entry means
+            # "keep", so a configured guest account could never be
+            # cleared and the help text below advertised a workflow that
+            # did not exist (Codex review). `'none'` clears it, matching
+            # the convention the numeric gate fields already use.
+            prompt=_clearable_text_field("guest_username", "Guest account"),
             brief="Account that signs in without a password",
             help=(
                 "An existing account callers may sign in as without a password. It stays an "
@@ -2046,7 +2077,7 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
             key="notice", hotkey="n", menu_text=menu_key("N", "otice"),
             label="Pre-login notice",
             render=lambda d: d.get("notice") or "(none)",
-            prompt=text_field("notice"),
+            prompt=_clearable_text_field("notice", "Pre-login notice"),
             brief="Shown before the login prompt",
             help=(
                 "A short line shown after the welcome banner and before the username prompt -- "

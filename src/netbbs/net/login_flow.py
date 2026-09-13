@@ -37,6 +37,7 @@ from netbbs.auth.users import (
     authenticate_password_async,
     create_user_async,
     get_user_by_username,
+    touch_last_login,
 )
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry, list_pending_invitations_for_user
 from netbbs.config import RegistrationMode, get_node_display_name, get_registration_mode
@@ -64,7 +65,7 @@ from netbbs.net.unicode_style_preference import (
     unicode_style_enabled,
     unicode_style_ever_set,
 )
-from netbbs.guest import guest_user, is_guest_login, pre_login_notice
+from netbbs.guest import guest_login_for, pre_login_notice
 from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
@@ -372,17 +373,6 @@ async def _run_authenticated_session(
         # never blocks anyone by itself, unlike the post-authentication
         # `[M]aintenance mode` rejection a non-SysOp still gets further
         # down for actually trying to log in while this is on.
-        # The SysOp's own pre-login notice (issue #531), between the
-        # banner and the prompt: it is how a caller learns the guest
-        # credentials exist at all. Sanitized and wrapped, unlike the
-        # banner above -- that is authored ANSI art placed on the
-        # node's filesystem, this is typed in the BBS.
-        notice = pre_login_notice(db)
-        if notice:
-            await session.write_line("")
-            for line in wrap_to_width(sanitize_text(notice), session.terminal_width):
-                await session.write_line(colored(line, fg_color=ACCENT_COLOR))
-
         if node_controls is not None and node_controls.maintenance.is_lockdown_active():
             await session.write_line(colored(f"\r\n{LOCKDOWN_NOTICE}", fg_color=ALERT_COLOR, bold=True))
         try:
@@ -1083,24 +1073,27 @@ async def _login(
                 return new_user
             continue
 
-        if is_guest_login(db, username):
-            # Issue #531: an authentication shortcut, and nothing
-            # more. The password prompt is skipped; everything after
-            # it is not. `is_blocked` still runs, the account's level
-            # and per-object permissions still decide what it can
-            # reach, and a guest account that has since been deleted
-            # resolves to `None` here and falls through to the
-            # ordinary password path rather than letting the name
-            # match something unintended.
-            guest = guest_user(db)
-            if guest is not None:
-                if is_blocked(db, guest):
-                    await session.write_line(
-                        colored("Your access to this system has been revoked.", fg_color=ERROR_COLOR)
-                    )
-                    return LoginOutcome.BLOCKED
-                await session.write_line("")
-                return guest
+        # Issue #531: an authentication shortcut, and nothing more.
+        # The password prompt is skipped; everything after it is not.
+        # `guest_login_for` re-checks, at the moment of use, that the
+        # designated account still exists, is neither disabled nor
+        # awaiting approval, is not a SysOp, and is the account whose
+        # name was actually typed -- see `netbbs.guest` for why each of
+        # those has to happen here rather than when the designation was
+        # saved. Anything short of all of them falls through to the
+        # ordinary password path.
+        guest = guest_login_for(db, username)
+        if guest is not None:
+            if is_blocked(db, guest):
+                await session.write_line(
+                    colored("Your access to this system has been revoked.", fg_color=ERROR_COLOR)
+                )
+                return LoginOutcome.BLOCKED
+            await session.write_line("")
+            # The same bookkeeping every other authentication path does
+            # on its way out (Codex review): a guest account that logs
+            # in daily should not look like one that never has.
+            return touch_last_login(db, guest)
 
         try:
             await session.write(colored("Password: ", fg_color=LABEL_COLOR, bold=True))
