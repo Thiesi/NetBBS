@@ -65,7 +65,7 @@ from netbbs.net.unicode_style_preference import (
     unicode_style_enabled,
     unicode_style_ever_set,
 )
-from netbbs.guest import guest_login_for, pre_login_notice
+from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
 from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
@@ -1091,9 +1091,35 @@ async def _login(
                 return LoginOutcome.BLOCKED
             await session.write_line("")
             # The same bookkeeping every other authentication path does
-            # on its way out (Codex review): a guest account that logs
-            # in daily should not look like one that never has.
-            return touch_last_login(db, guest)
+            # on its way out: a guest account that logs in daily should
+            # not look like one that never has.
+            #
+            # And then re-checked, because `touch_last_login` re-fetches
+            # (Codex review). The `write_line` above awaits transport
+            # I/O; a SysOp promoting the guest in that window meant the
+            # *refreshed* row -- level 255 by then -- was what came back
+            # and what the session ran as. Validating the row actually
+            # returned closes that, and closes any future window opened
+            # by something else awaiting between here and the return.
+            refreshed = touch_last_login(db, guest)
+            if not guest_is_eligible(db, refreshed):
+                await session.write_line(
+                    colored("Guest access is not available.", fg_color=ERROR_COLOR)
+                )
+                continue
+
+            # This session proved no credential (Codex review). It is
+            # still an ordinary account in every other respect -- that
+            # is the whole design -- but "may manage this account's
+            # credentials" is a question about *how the caller got in*,
+            # not about the account, and an anonymous caller who can add
+            # an SSH key has turned temporary public access into a
+            # permanent one that outlives guest access being switched
+            # off. Recorded on the session because that is what the
+            # property describes; `netbbs.net.ssh_key_screen` refuses on
+            # it.
+            session.authenticated_without_credential = True
+            return refreshed
 
         try:
             await session.write(colored("Password: ", fg_color=LABEL_COLOR, bold=True))

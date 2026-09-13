@@ -17,9 +17,10 @@ from __future__ import annotations
 from netbbs.auth.users import SYSOP_LEVEL, create_user, delete_user, set_user_disabled, set_user_level
 from netbbs.guest import (
     MAX_PRE_LOGIN_NOTICE_LENGTH,
+    guest_designation,
+    guest_is_eligible,
     guest_login_for,
     guest_user,
-    guest_user_id,
     pre_login_notice,
     set_guest_user,
     set_pre_login_notice,
@@ -39,7 +40,7 @@ def _db(tmp_path):
 
 def test_guest_login_is_off_until_an_account_is_designated(tmp_path):
     db, _, _ = _db(tmp_path)
-    assert guest_user_id(db) is None
+    assert guest_designation(db) is None
     assert guest_user(db) is None
     assert guest_login_for(db, "guest") is None
     db.close()
@@ -74,7 +75,7 @@ def test_clearing_it_turns_guest_login_off(tmp_path):
     db, guest, _ = _db(tmp_path)
     set_guest_user(db, guest)
     set_guest_user(db, None)
-    assert guest_user_id(db) is None
+    assert guest_designation(db) is None
     assert guest_login_for(db, "guest") is None
     db.close()
 
@@ -97,20 +98,41 @@ def test_the_account_survives_guest_login_being_turned_off(tmp_path):
 
 
 def test_a_recreated_account_does_not_inherit_the_designation(tmp_path):
-    """The designation is an account id, not a name.
+    """Neither a name nor an id alone is an identity here.
 
-    It was a name first, with a comment claiming that deleting and
-    recreating under the same name would not point guest login
-    elsewhere. Exactly backwards: a name lookup resolves whatever row
-    holds the name now, so the replacement -- with whatever permissions
-    it happened to have -- would have been handed passwordless access.
+    A name lookup resolves whatever row holds the name now. And an id is
+    *reusable*: `users.id` is `INTEGER PRIMARY KEY` without
+    `AUTOINCREMENT`, so SQLite hands back the highest free rowid --
+    delete the newest account and the next one created takes its number.
+
+    The guest is created **last** here on purpose, so it holds the
+    highest id and deleting it frees exactly that number. An earlier
+    version of this test created it first, which meant the recreated
+    account got a fresh id and the reuse never happened -- the test
+    passed while the hole was wide open.
     """
-    db, guest, sysop = _db(tmp_path)
+    db, _, sysop = _db(tmp_path)
+    guest = create_user(db, "guest2", password="hunter2", user_level=1)
     set_guest_user(db, guest)
     delete_user(db, guest, deleted_by=sysop)
-    impostor = create_user(db, "guest", password="different", user_level=200)
-    assert impostor.username == "guest"
-    assert guest_login_for(db, "guest") is None
+    impostor = create_user(db, "guest2", password="different", user_level=200)
+    assert impostor.id == guest.id, "this test is pointless unless the id is actually reused"
+    assert guest_login_for(db, "guest2") is None
+    db.close()
+
+
+def test_eligibility_is_re_checkable_against_a_refreshed_row(tmp_path):
+    """The login path re-fetches the account after its last await, so
+    the row it finally returns has to be validated too -- a promotion
+    landing in that window otherwise came back as a SysOp session."""
+    db, guest, sysop = _db(tmp_path)
+    set_guest_user(db, guest)
+    assert guest_is_eligible(db, guest) is True
+
+    from netbbs.auth.users import get_user_by_id, set_user_level
+
+    set_user_level(db, guest, SYSOP_LEVEL, changed_by=sysop)
+    assert guest_is_eligible(db, get_user_by_id(db, guest.id)) is False
     db.close()
 
 

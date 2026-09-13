@@ -97,6 +97,26 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
 
 
 async def _add_key(session: Session, lane: DatabaseLane, target: User, *, changed_by: User) -> User:
+    if getattr(session, "authenticated_without_credential", False):
+        # Issue #531, Codex review. A guest session proved no credential
+        # -- that is what guest login *is* -- and adding a key here would
+        # turn temporary public access into a permanent one that keeps
+        # working over SSH after a SysOp switches guest access off.
+        #
+        # Not a check on the account: the guest is an ordinary account
+        # and everything else about it stays ordinary, which is the
+        # whole design. This is a check on *how this session got in*.
+        # Signing in with the account's own password reaches this screen
+        # exactly as before.
+        await session.write_line("")
+        await session.write_line(
+            colored(
+                "This session signed in without a password, so it cannot add a key. "
+                "Sign in with the account's own password to manage its keys.",
+                fg_color=ERROR_COLOR,
+            )
+        )
+        return target
     await session.write_line("")
     await write_prompt(session, 'Label for this key (e.g. "phone", "laptop", blank to cancel): ')
     label = (await session.read_line()).strip()

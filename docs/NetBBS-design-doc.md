@@ -821,9 +821,17 @@ Three consequences follow, and are intended rather than gaps:
   an ordinary account and then promoting it would be a passwordless route to
   SysOp. And a deleted guest stops being special, falling through to the
   ordinary password prompt.
-- The designation is an **account id**, never a name. A name would resolve to
-  whatever row holds it now, so deleting the guest and recreating an account
-  under the same name would hand passwordless access to the replacement.
+- The designation records the account's **id and creation timestamp**, and both
+  must match. Neither a name nor an id alone is an identity: a name resolves to
+  whatever row holds it now, and `users.id` is `INTEGER PRIMARY KEY` without
+  `AUTOINCREMENT`, so SQLite hands a freed rowid to the next account created.
+  Either alone would hand passwordless access to a replacement account.
+- A guest session **may not manage the account's credentials.** The guest is an
+  ordinary account in every other respect, but whether a session may add an SSH
+  key is a question about how that session authenticated, not about the
+  account: a caller who proved nothing must not be able to mint a credential
+  that outlives guest access being switched off. Signing in with the account's
+  own password reaches key management normally.
 
 A SysOp account may not be designated. Everything else about guest access is
 policy the SysOp chooses, but a passwordless SysOp login is not a choice worth

@@ -90,13 +90,34 @@ _PRE_LOGIN_NOTICE_KEY = "pre_login_notice"
 MAX_PRE_LOGIN_NOTICE_LENGTH = 240
 
 
-def guest_user_id(db: Database) -> int | None:
-    """The account id guest login is enabled for, or `None`."""
+def guest_designation(db: Database) -> tuple[int, str] | None:
+    """The designated `(account id, created_at)`, or `None`.
+
+    **An id alone is not an identity here** (Codex review). `users.id`
+    is `INTEGER PRIMARY KEY` without `AUTOINCREMENT`, so SQLite hands
+    out the highest free rowid -- delete the newest account and the next
+    one created takes its number back. Designating a guest, deleting it,
+    and creating a new account then silently pointed guest login at the
+    replacement, with whatever level it happened to have.
+
+    The account's `created_at` is recorded alongside and must match,
+    which a recreated row cannot do: it is stamped at insert, to
+    microseconds. Kept here rather than as a hook in `delete_user`
+    because this stays correct however an account disappears, including
+    a restore from a backup taken before the designation.
+
+    The first version of this stored a *name*, which was worse for the
+    same reason and with a comment claiming the opposite. The second
+    stored an id and claimed it could not be recycled. The test that
+    was supposed to prove it created the guest before the SysOp, so the
+    guest was never the highest row and the reuse never happened.
+    """
     raw = get_config(db, _GUEST_USER_ID_KEY)
-    if not raw:
+    if not raw or ":" not in raw:
         return None
+    user_id, _, created_at = raw.partition(":")
     try:
-        return int(raw)
+        return int(user_id), created_at
     except ValueError:
         return None
 
@@ -104,22 +125,49 @@ def guest_user_id(db: Database) -> int | None:
 def set_guest_user(db: Database, user: User | None) -> None:
     """Designate `user` as the guest identity, or `None` to turn guest
     login off. The account itself is untouched either way."""
-    set_config(db, _GUEST_USER_ID_KEY, "" if user is None else str(user.id))
+    set_config(db, _GUEST_USER_ID_KEY, "" if user is None else f"{user.id}:{user.created_at}")
 
 
 def guest_user(db: Database) -> User | None:
-    """The designated account, or `None` if guest login is off or the
-    account is gone.
+    """The designated account, or `None` if guest login is off, the
+    account is gone, or the row now at that id is a different account.
 
     Says nothing about whether that account may *currently* log in --
     that is `guest_login_for`'s job. This exists for the SysOp screen,
     which needs to show what is configured even when the configuration
     has become unusable.
     """
-    user_id = guest_user_id(db)
-    if user_id is None:
+    designation = guest_designation(db)
+    if designation is None:
         return None
-    return get_user_by_id(db, user_id)
+    user_id, created_at = designation
+    user = get_user_by_id(db, user_id)
+    if user is None or user.created_at != created_at:
+        return None
+    return user
+
+
+def guest_is_eligible(db: Database, user: User) -> bool:
+    """Whether `user` is, right now, the account this node signs in
+    without a password.
+
+    Split out so it can be applied to the row that is *ultimately
+    returned* as well as the one first resolved (Codex review). The
+    login path awaits transport I/O and then re-fetches the account to
+    stamp `last_login_at`; a promotion landing in that window meant the
+    refreshed row -- level 255 by then -- was handed back as an
+    authenticated session. Checking only the row read first leaves that
+    window open.
+    """
+    designation = guest_designation(db)
+    if designation is None:
+        return False
+    user_id, created_at = designation
+    if user.id != user_id or user.created_at != created_at:
+        return False
+    if user.disabled_at is not None or user.pending_approval:
+        return False
+    return not meets_level(user, SYSOP_LEVEL)
 
 
 def guest_login_for(db: Database, username: str) -> User | None:
@@ -136,11 +184,7 @@ def guest_login_for(db: Database, username: str) -> User | None:
         return None
     if username.strip().casefold() != user.username.strip().casefold():
         return None
-    if user.disabled_at is not None or user.pending_approval:
-        return None
-    if meets_level(user, SYSOP_LEVEL):
-        return None
-    return user
+    return user if guest_is_eligible(db, user) else None
 
 
 def pre_login_notice(db: Database) -> str:

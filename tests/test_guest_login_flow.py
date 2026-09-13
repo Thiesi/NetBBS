@@ -170,3 +170,37 @@ def test_no_notice_means_nothing_extra_is_written(db):
     _, session = _login(db, ["alice", "correct"])
 
     assert "Username:" in "".join(session.written)
+
+
+def test_a_guest_session_cannot_add_an_ssh_key(db):
+    """Codex review. The guest is an ordinary account, and that is the
+    design -- but "may manage this account's credentials" is a question
+    about how the *session* got in, not about the account. An anonymous
+    caller who can add a key has converted temporary public access into
+    a credential that keeps working over SSH after a SysOp switches
+    guest access off."""
+    import netbbs.net.ssh_key_screen as keys
+
+    guest = create_user(db, "guest", password="hunter2", user_level=1)
+    set_guest_user(db, guest)
+
+    _, session = _login(db, ["guest"])
+    assert getattr(session, "authenticated_without_credential", False) is True
+
+    session.written.clear()
+    session._lines = iter(["phone", "ssh-ed25519 AAAA"])
+    result = asyncio.run(keys._add_key(session, None, guest, changed_by=guest))
+
+    text = "".join(session.written)
+    assert "without a password" in text
+    assert result is guest
+
+
+def test_an_ordinary_session_is_not_marked(db):
+    """The flag describes this session, not the account -- signing in
+    with the password reaches key management exactly as before."""
+    create_user(db, "alice", password="correct", user_level=10)
+
+    _, session = _login(db, ["alice", "correct"])
+
+    assert getattr(session, "authenticated_without_credential", False) is False
