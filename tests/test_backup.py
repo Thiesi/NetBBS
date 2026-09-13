@@ -46,7 +46,7 @@ def isolated_voidrunner_backup_directory(tmp_path, monkeypatch):
 
 def _populate_voidrunner():
     from netbbs.doors.bundled import voidrunner as vr
-    directory = backup_module.voidrunner_save_directory()
+    directory = backup_module.voidrunner_save_directory()[0]
     world = vr.World(vr._new_career("Backup Pilot"))
     vr.persist(world, directory, 77)
     world.save.pilot.credits += 100

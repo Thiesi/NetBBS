@@ -307,6 +307,16 @@ netbbs_start()
 	# HOME does not affect Path resolution; only cd does. The systemd
 	# unit gets this from WorkingDirectory=.
 	#
+	# HOME is set to the state directory so a door keeps its saves
+	# with the rest of the node's state rather than in the service
+	# account's own home. That is deliberate, and it is also why a
+	# backup run from a SysOp's interactive shell used to look in the
+	# wrong place for Voidrunner careers (issue #555): the two
+	# processes have different HOMEs. The node now records its own
+	# save directory at startup and the backup CLI reads it, so this
+	# no longer needs a flag -- but the divergence itself starts
+	# here, on this line.
+	#
 	# If the pid cannot be published, SIGKILL rather than SIGTERM: the
 	# node is seconds old with no callers to warn, and SIGTERM would
 	# start a graceful shutdown that may wait out

@@ -37,6 +37,7 @@ from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.onboarding import participation_accepted
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
+from netbbs.doors.runtime import record_voidrunner_save_dir
 from netbbs.link.onboarding import resolve_link_enabled, set_configured_link_enabled
 from netbbs.link.reliable_nodes import run_scheduled_reliable_nodes_refresh
 from netbbs.link.store import load_link_node
@@ -887,6 +888,10 @@ async def run(
         # reasoning as set_node_fingerprint just above) so the SysOp
         # console can say truthfully whether the participation answer is
         # what decides Link on this node.
+        # Issue #555. Written here rather than at the first door launch
+        # so it is already true for a node nobody has played yet, and so
+        # it follows a node whose HOME changes between restarts.
+        record_voidrunner_save_dir(db)
         set_configured_link_enabled(db, config.link.enabled)
         if config.link.enabled is None:
             effective_link_enabled = resolve_link_enabled(None, db)

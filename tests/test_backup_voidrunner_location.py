@@ -1,0 +1,149 @@
+"""A backup taken from a different shell than the node runs in (#555).
+
+`examples/netbbs.rc` starts the node with `HOME=<state dir>`, so the door
+writes its careers under the state directory. The documented backup
+command is run by a SysOp from their own shell, with their own HOME, and
+`_default_save_dir()` resolved `Path.home()` in *that* process -- so the
+backup looked somewhere the node never writes, found nothing, exited 0,
+and printed
+
+    Voidrunner: no save directory found at /home/thiesi/.netbbs/voidrunner_saves.
+
+which reads as a statement about the node and is in fact a statement
+about the environment the CLI inherited. The archive it produced was the
+rollback point for an upgrade.
+
+These tests run the two processes' environments as the two different
+things they are.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from netbbs import backup as backup_module
+from netbbs.doors.runtime import VOIDRUNNER_SAVE_DIR_CONFIG_KEY, record_voidrunner_save_dir
+from netbbs.storage.database import Database
+
+
+@pytest.fixture
+def node_home(tmp_path):
+    """Where the *node* runs, the way the rc.d script arranges it."""
+    home = tmp_path / "node-state"
+    (home / ".netbbs" / "voidrunner_saves").mkdir(parents=True)
+    return home
+
+
+@pytest.fixture
+def operator_home(tmp_path):
+    """Where the SysOp's own shell runs. Deliberately has no saves under
+    it -- that is the whole point."""
+    home = tmp_path / "operator"
+    home.mkdir()
+    return home
+
+
+@pytest.fixture
+def db(tmp_path):
+    database = Database(tmp_path / "node.db")
+    yield database
+    database.close()
+
+
+def _as_home(monkeypatch, home: Path) -> None:
+    monkeypatch.delenv("VOIDRUNNER_SAVE_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+
+# -- what the node records ---------------------------------------------
+
+
+def test_the_node_records_the_directory_its_doors_will_use(db, node_home, monkeypatch):
+    _as_home(monkeypatch, node_home)
+
+    recorded = record_voidrunner_save_dir(db)
+
+    assert recorded == node_home / ".netbbs" / "voidrunner_saves"
+    row = db.connection.execute(
+        "SELECT value FROM node_config WHERE key = ?", (VOIDRUNNER_SAVE_DIR_CONFIG_KEY,)
+    ).fetchone()
+    assert row[0] == str(recorded)
+
+
+def test_recording_follows_a_node_whose_home_changes(db, node_home, operator_home, monkeypatch):
+    """A node moved between restarts must not leave the old location
+    behind for the backup to trust."""
+    _as_home(monkeypatch, node_home)
+    record_voidrunner_save_dir(db)
+
+    moved = operator_home / "elsewhere"
+    _as_home(monkeypatch, moved)
+    assert record_voidrunner_save_dir(db) == moved / ".netbbs" / "voidrunner_saves"
+
+    row = db.connection.execute(
+        "SELECT value FROM node_config WHERE key = ?", (VOIDRUNNER_SAVE_DIR_CONFIG_KEY,)
+    ).fetchone()
+    assert row[0] == str(moved / ".netbbs" / "voidrunner_saves")
+
+
+def test_an_explicit_save_dir_override_is_what_gets_recorded(db, node_home, monkeypatch):
+    """`VOIDRUNNER_SAVE_DIR` is forwarded to the door by
+    `_door_environment`, so it is also what the node must write down."""
+    explicit = node_home / "careers"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: node_home))
+    monkeypatch.setenv("VOIDRUNNER_SAVE_DIR", str(explicit))
+
+    assert record_voidrunner_save_dir(db) == explicit.resolve()
+
+
+# -- what the backup reads ---------------------------------------------
+
+
+def test_the_backup_reads_the_nodes_answer_not_its_own_home(db, node_home, operator_home, monkeypatch):
+    """The reported defect, end to end: the node records its location,
+    then the CLI resolves it from a completely different home."""
+    _as_home(monkeypatch, node_home)
+    record_voidrunner_save_dir(db)
+    db.connection.commit()
+
+    # Now we are the operator's shell.
+    _as_home(monkeypatch, operator_home)
+
+    resolved, recorded_by_node = backup_module.voidrunner_save_directory(db.path)
+
+    assert recorded_by_node is True
+    assert resolved == (node_home / ".netbbs" / "voidrunner_saves").resolve()
+
+
+def test_without_a_recorded_location_the_answer_is_marked_as_a_guess(operator_home, tmp_path, monkeypatch):
+    """A database written before this version says nothing, so the CLI
+    falls back to its own home -- and has to report that it guessed.
+
+    This is the exact state every existing node is in until it next
+    starts, so the fallback matters as much as the fix.
+    """
+    database = Database(tmp_path / "unrecorded.db")
+    try:
+        _as_home(monkeypatch, operator_home)
+        resolved, recorded_by_node = backup_module.voidrunner_save_directory(database.path)
+    finally:
+        database.close()
+
+    assert recorded_by_node is False
+    assert resolved == (operator_home / ".netbbs" / "voidrunner_saves").resolve()
+
+
+def test_no_database_at_all_still_resolves(operator_home, tmp_path, monkeypatch):
+    """`voidrunner_save_directory()` is called with no argument by the
+    SysOp console, and by anything older that has not been updated."""
+    _as_home(monkeypatch, operator_home)
+
+    resolved, recorded_by_node = backup_module.voidrunner_save_directory()
+
+    assert recorded_by_node is False
+    assert resolved == (operator_home / ".netbbs" / "voidrunner_saves").resolve()
+
+    missing, guessed = backup_module.voidrunner_save_directory(tmp_path / "not-a-database.db")
+    assert (missing, guessed) == (resolved, False)
