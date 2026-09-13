@@ -565,10 +565,7 @@ async def capture_login(tmp: Path) -> str:
         # Nothing fills those in, so as a *screenshot* they claim NetBBS
         # renders live telemetry on the login screen, which it does not, and
         # they name a node no other shot in the gallery mentions. This one
-        # carries no field/value rows at all, and no U+276F either -- three
-        # shipped presets use that Dingbats glyph, which is the character
-        # v7.5.0 removed from the chat prompt for rendering as a hollow box
-        # in the fonts a Windows terminal reaches for.
+        # carries no field/value rows at all.
         preset = next(p for p in WELCOME_BANNER_PRESETS if p.key == "cathedral_of_signals")
         banner_path(db).write_bytes(load_welcome_banner_preset(preset))
         set_welcome_banner_enabled(db, True)
