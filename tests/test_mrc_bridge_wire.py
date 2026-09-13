@@ -236,9 +236,21 @@ def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, l
             texts = [n.text for n in got]
             assert texts[:3] == ["line 0", "line 1", "line 2"]
             assert "cut short" in texts[3]
-            clock.thaw()
+            # Still frozen for the assertion the freeze exists to make
+            # (Codex review). Receiving the notice proves the bridge
+            # handled the *first* refused line, not the four after it --
+            # `send_line` drains the sender without waiting for the
+            # receiver. Thawing here jumped the bucket's clock to real
+            # monotonic time, so those four could refill it and be
+            # delivered during the sleep below, failing this assertion
+            # on exactly the slow host the test is for.
+            #
+            # Frozen, no refill is possible at all, so "nothing more was
+            # delivered" is a claim about the allowance rather than
+            # about who won a race.
             await asyncio.sleep(0.1)
             assert alice_queue.empty()
+            clock.thaw()
         finally:
             await bridge.close()
             await fake.close()

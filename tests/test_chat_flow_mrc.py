@@ -150,7 +150,24 @@ async def _run(lane, hub, presence, channel, user, lines, *, mrc_bridge=None, wh
         # it pushed to actually arrive, rather than sleeping a fixed
         # interval and hoping (issue #536). The join above already waits
         # on a condition; inbound delivery deserves the same treatment.
-        await while_joined(session)
+        #
+        # Raced against the chat loop rather than simply awaited (Codex
+        # review). The callback does its own waiting, and a loop that
+        # dies while it waits would otherwise let it spend its whole
+        # timeout -- after which the timeout is the exception reported
+        # and the real one is retrieved and dropped by the cleanup
+        # below. Whichever finishes first decides.
+        callback = asyncio.ensure_future(while_joined(session))
+        await asyncio.wait({callback, task}, return_when=asyncio.FIRST_COMPLETED)
+        if task.done() and not callback.done():
+            callback.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await callback
+            # Re-raises whatever the loop died of. A loop that merely
+            # ended says so instead.
+            task.result()
+            raise AssertionError("the chat loop ended before while_joined finished")
+        await callback
         for line in lines:
             session.inputs.put_nowait(line)
         return session, await asyncio.wait_for(task, timeout=4)
