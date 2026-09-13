@@ -480,3 +480,43 @@ def test_a_redraw_is_delivered_as_one_write():
     recorder = Recorder()
     asyncio.run(window.render(recorder.write, list(_LONG), len(_LONG)))
     assert len(recorder.chunks) == 1, f"{len(recorder.chunks)} writes: a resize can land between them"
+
+
+def test_the_window_never_starts_after_the_cursor():
+    """Normalizing the start forward could overshoot the cursor, which
+    draws the caret at the next character while insertion still happens
+    before the hidden mark -- the same divergence, one character along
+    (Codex review)."""
+    window = LineViewport(_WIDTH)
+    line = list("e\u0301" * 60)
+    for cursor in range(len(line), -1, -1):
+        window._layout(line, cursor)
+        assert window.start <= cursor, f"start {window.start} past cursor {cursor}"
+
+
+def test_left_and_right_step_over_a_whole_grapheme():
+    """A cursor resting between a character and its accent is a position
+    the display cannot show honestly, so the cursor does not go there."""
+    from netbbs.net.char_input import _grapheme_end, _grapheme_start
+
+    line = list("e\u0301x")
+    # Between the base and its mark is index 1; both directions leave it.
+    assert _grapheme_start(line, 1) == 0
+    assert _grapheme_end(line, 1) == 2
+
+
+def test_moving_left_through_accents_lands_only_on_characters():
+    """End to end: hold Left through a decomposed string and every
+    resting place is a real character."""
+    from netbbs.rendering.width import char_width
+
+    decomposed = "e\u0301" * 20
+    result, _ = _edit(_END + _LEFT * 25 + _ENTER, initial=decomposed)
+    assert result == decomposed, "moving about changes nothing"
+
+    window = LineViewport(_WIDTH)
+    line = list(decomposed)
+    for cursor in range(0, len(line) + 1):
+        _, visible, _, _ = window._layout(line, cursor)
+        if visible:
+            assert char_width(visible[0]) > 0

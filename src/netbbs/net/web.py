@@ -60,6 +60,8 @@ from netbbs.net.char_input import (
     InputHistory,
     LastCandidateList,
     LineViewport,
+    _grapheme_end,
+    _grapheme_start,
     LiveInputBuffer,
     apply_tab_completion,
     move_cursor,
@@ -597,7 +599,8 @@ class WebSession(Session):
                         key = item.name
                         if key == "LEFT":
                             if cursor > 0:
-                                cursor -= 1
+                                # A whole grapheme, as in `char_input`.
+                                cursor = _grapheme_start(line, cursor - 1)
                                 if window is not None:
                                     await show()
                                 else:
@@ -605,7 +608,7 @@ class WebSession(Session):
                         elif key == "RIGHT":
                             if cursor < len(line):
                                 width = char_width(line[cursor])
-                                cursor += 1
+                                cursor = _grapheme_end(line, cursor + 1)
                                 if window is not None:
                                     await show()
                                 else:

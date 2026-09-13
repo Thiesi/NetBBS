@@ -266,6 +266,33 @@ def move_cursor(count: int, *, forward: bool) -> str:
 _MIN_MARKER_WIDTH = 12
 
 
+def _grapheme_start(line: list[str], index: int) -> int:
+    """`index`, moved back onto the character its combining marks belong
+    to (issue #546).
+
+    A cursor resting *between* a base character and its accent is a
+    position the display cannot show and the caller never asked for: the
+    window would have to open on the mark -- which the terminal applies
+    to whatever precedes it -- or start after the cursor, which puts the
+    caret somewhere other than where typing will land (Codex review,
+    three rounds of it).
+
+    So the cursor does not go there. Left and Right step over a whole
+    grapheme, and this is what they use.
+    """
+    while index > 0 and char_width(line[index - 1]) == 0:
+        index -= 1
+    return index
+
+
+def _grapheme_end(line: list[str], index: int) -> int:
+    """`index`, moved forward past any combining marks that follow it --
+    the other direction of `_grapheme_start`, for Right."""
+    while index < len(line) and char_width(line[index]) == 0:
+        index += 1
+    return index
+
+
 def _visible_from(line: list[str], start: int, columns: int) -> str:
     """As much of `line[start:]` as fits `columns` display columns.
 
@@ -452,8 +479,13 @@ class LineViewport:
             fill = self._fits_from(line, len(line), text_columns)
             if self.start > fill:
                 self.start = fill
-            # Whichever of the three put it there.
-            self.start = self._on_a_base_character(line, self.start)
+            # Whichever of the three put it there -- and never past
+            # the cursor (Codex review). Normalizing forward could
+            # overshoot it, which draws the caret at the next character
+            # while insertion still happens before the hidden mark.
+            # Left/Right keep the cursor off a mark in the first place;
+            # this holds the invariant for any caller that does not.
+            self.start = min(self._on_a_base_character(line, self.start), cursor)
 
         # Sliced by columns, never by code-point count (Codex review).
         # "At least one column per character" is false for a combining
@@ -1087,7 +1119,10 @@ async def _read_line_editable(
                     key = await _read_escape_sequence(source)
                     if key == "LEFT":
                         if cursor > 0:
-                            cursor -= 1
+                            # A whole grapheme back: landing between a
+                            # character and its accent is a position
+                            # nothing can draw honestly.
+                            cursor = _grapheme_start(line, cursor - 1)
                             if window is not None:
                                 await show()
                             else:
@@ -1095,7 +1130,7 @@ async def _read_line_editable(
                     elif key == "RIGHT":
                         if cursor < len(line):
                             width = char_width(line[cursor])
-                            cursor += 1
+                            cursor = _grapheme_end(line, cursor + 1)
                             if window is not None:
                                 await show()
                             else:
