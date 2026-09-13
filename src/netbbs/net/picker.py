@@ -46,6 +46,7 @@ from typing import Awaitable, Callable, Mapping, Sequence, TypeVar
 
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
 from netbbs.net.help_overlay import show_help
+from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.session import Session, write_preformatted_line
 from netbbs.rendering import (
@@ -567,7 +568,15 @@ async def pick_item(
         # clear_screen() inside whatever it returns.
         if not masthead:
             return ""
-        return (clear_screen() if redraw_in_place else "") + masthead
+        if redraw_in_place:
+            return clear_screen() + masthead
+        # Without an in-place redraw the cursor is still sitting after
+        # "Choice: " (and after the letter a live key echoed), and
+        # `write_preformatted_line` only adds a *trailing* newline -- so
+        # the masthead ran on as "Choice: aBackup: ..." (Codex review).
+        # The screen this replaced wrote a newline before every
+        # state-change render for exactly this reason.
+        return "\r\n" + masthead
 
     # `on_create` keeps an empty list interactive for the same reason
     # `refresh` already does (issue #112): there is something to do
@@ -904,6 +913,7 @@ async def pick_item(
             await _show_picker_help(
                 session, on_sort=on_sort, has_refresh=refresh is not None, header_color=header_color,
                 unicode_style=unicode_style, has_create=on_create is not None,
+                live_nav=live_nav,
             )
             page_items = await _render()
             continue
@@ -1232,6 +1242,7 @@ async def _show_picker_help(
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     unicode_style: bool = False,
     has_create: bool = False,
+    live_nav: Sequence[MenuEntry] = (),
 ) -> None:
     """Ctrl-H's own content for this screen (dogfood feature request --
     the shared picker had no on-demand help at all, only the terse
@@ -1279,6 +1290,18 @@ async def _show_picker_help(
         ]
     if on_sort is not None:
         lines += ["", colored("Order", fg_color=header_color, bold=True), "  Changes how this list is sorted."]
+    for entry in live_nav:
+        # A caller's own keys, explained here too (issue #537, Codex
+        # review). This overlay's contract is that it explains every
+        # command in the nav row, and it matters most exactly where the
+        # nav row is least explanatory: a short terminal collapses to
+        # the compact bar, which shows `[A]lphabetical` and nothing
+        # about what it does.
+        lines += [
+            "",
+            colored(strip_ansi(entry.label), fg_color=header_color, bold=True),
+            f"  {entry.brief}." if entry.brief else "",
+        ]
     lines += [
         "", colored("Back", fg_color=header_color, bold=True), "  Returns without picking anything.",
         "", colored("Ctrl-L", fg_color=header_color, bold=True), "  Redraws the current page in place.",

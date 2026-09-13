@@ -3584,7 +3584,12 @@ _USER_VISIBILITY_LABELS = {
 
 _USER_COLUMNS = [
     ListColumn("level", 5, VALUE_COLOR, align_right=True),
-    ListColumn("status", 10, VALUE_COLOR),
+    # Wide enough for "pending approval", the longest `_status_label`
+    # returns (Codex review). At 10 it truncated to "pending a..." on
+    # the one list whose job is scanning exactly this field -- and the
+    # prose row it replaced showed the whole thing. A width too narrow
+    # for its own longest value is not a column, it is a riddle.
+    ListColumn("status", 16, VALUE_COLOR),
 ]
 
 
