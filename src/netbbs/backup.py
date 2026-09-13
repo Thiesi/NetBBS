@@ -367,9 +367,49 @@ def _snapshot_database_and_managed_dns_credentials(
     )
 
 
-def voidrunner_save_directory() -> Path:
+def voidrunner_save_directory(db_path: Path | None = None) -> tuple[Path, str]:
+    """Where this node's Voidrunner saves live, and how that was decided.
+
+    The second element is the provenance -- `"node"` when the node
+    recorded it, `"guess"` when nothing was recorded and this process's
+    own home was used. (`"operator"` is the third value the manifest
+    carries; it belongs to `--voidrunner-save-dir` and never originates
+    here.)
+
+    Issue #555. The door resolves its save directory from `Path.home()`
+    of whatever process launched it, which is right for a door and wrong
+    for this CLI: a node started by `examples/netbbs.rc` runs with
+    `HOME=<state dir>`, while a SysOp running the documented backup
+    command from their own shell has their own HOME. The two resolve
+    `Path.home()` differently, so the backup looked somewhere the node
+    never writes, found nothing, and printed "Voidrunner: no save
+    directory found at ..." -- which reads as a fact about the node,
+    exits 0, and leaves every career out of the archive that exists to
+    be the rollback point before an upgrade.
+
+    The node records the answer at startup
+    (`netbbs.doors.runtime.record_voidrunner_save_dir`), so the first
+    thing tried is the node's own word for it. Falling back to this
+    process's `Path.home()` keeps a database written by an older version
+    working; the returned provenance says the location was guessed rather
+    than read, so a caller can report a guess as a guess instead of
+    presenting it as a finding.
+
+    War Dialer needs none of this: v7.0.0 moved its world to
+    `<db path>.doors/`, derived from an argument this module already has.
+    """
+    if db_path is not None and db_path.exists():
+        try:
+            with contextlib.closing(sqlite3.connect(db_path)) as conn:
+                row = conn.execute(
+                    "SELECT value FROM node_config WHERE key = 'voidrunner_save_dir'"
+                ).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row is not None and row[0]:
+            return Path(row[0]).resolve(), "node"
     from netbbs.doors.bundled.voidrunner import _default_save_dir
-    return _default_save_dir().resolve()
+    return _default_save_dir().resolve(), "guess"
 
 
 @contextlib.contextmanager
@@ -738,7 +778,13 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
 
     database_filename = _validate_database_filename(db_path.name)
 
-    game_source = (voidrunner_save_dir or voidrunner_save_directory()).resolve()
+    if voidrunner_save_dir is not None:
+        # Not "node" (Codex review): the operator named this path, and an
+        # archive that claims the node confirmed a directory it never
+        # recorded defeats the point of writing the provenance down.
+        game_source, game_source_provenance = voidrunner_save_dir.resolve(), "operator"
+    else:
+        game_source, game_source_provenance = voidrunner_save_directory(db_path)
     if destination.resolve().is_relative_to(game_source):
         raise BackupError("A backup destination cannot be inside the Voidrunner save directory.")
     destination.mkdir(parents=True)
@@ -746,6 +792,16 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
     checksums = {}
     try:
         game_metadata = _capture_voidrunner(game_source, destination, checksums)
+        if game_metadata is not None:
+            # Whether this component's source was the node's own answer or
+            # this process's guess, recorded in the archive rather than
+            # only in the terminal scrollback of whoever ran the command
+            # (Codex review). A restore months later is exactly when
+            # "was that the right directory?" becomes unanswerable.
+            # Informational, and the manifest version stays 1: nothing
+            # about the required shape changed, and both older readers
+            # and this module's own validator ignore unknown keys.
+            game_metadata["source_provenance"] = game_source_provenance
         war_metadata = _capture_war_dialer(db_path, destination, checksums)
         door_metadata = _capture_door_installs(db_path, destination)
     except BaseException as exc:
@@ -800,6 +856,18 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         "source_identity_dir": str(identity_dir),
         "checksums": checksums,
         "voidrunner": game_metadata,
+        # Where this run *looked*, and whether the node told it where to
+        # look -- recorded whether or not anything was found (Codex
+        # review). A backup is live-safe, so the node may start while one
+        # is running: a caller that re-resolves the location afterwards
+        # can be told the service path by a database that recorded it
+        # half a second ago, and report "no saves at" a directory nothing
+        # ever opened. The capture-time answer is the only one that
+        # describes this archive, so it travels with it.
+        "voidrunner_source": {
+            "directory": str(game_source),
+            "provenance": game_source_provenance,
+        },
         "war_dialer": war_metadata,
         "door_installs": door_metadata,
     }
@@ -1481,12 +1549,61 @@ def main(argv: list[str] | None = None) -> None:
         war = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("war_dialer")
         for world in war["worlds"] if war else []:
             print_wrapped(f"War Dialer world {world['key']}: included {world['source_path']}.")
-        coverage = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("voidrunner")
-        source_directory = args.voidrunner_save_dir or voidrunner_save_directory()
-        if coverage is None:
-            print_wrapped(f"Voidrunner: no save directory found at {source_directory}.")
-        else:
+        created = json.loads((destination / _MANIFEST_FILENAME).read_text())
+        coverage = created.get("voidrunner")
+        # From the manifest this run just wrote, never a fresh lookup
+        # (Codex review): the database is mutable and the node may have
+        # started since, so asking again can describe a directory this
+        # backup never inspected.
+        looked_in = created.get("voidrunner_source") or {}
+        source_directory = looked_in.get("directory", "(unrecorded)")
+        provenance = looked_in.get("provenance", "guess")
+        if coverage is not None and provenance != "guess":
             print_wrapped(f"Voidrunner: included {len(coverage['files'])} retained files from {source_directory}.")
+        elif coverage is not None:
+            # Codex review: the nastiest case of all, because it reads as
+            # success. The node has recorded nothing, and the fallback
+            # path *happens to exist* -- a SysOp who once ran a node from
+            # their own shell before setting up the service has exactly
+            # this directory, holding exactly the wrong careers. Captured
+            # anyway rather than refused: on a single-user node with no
+            # service account the guess is simply correct, and taking that
+            # away would turn an upgrade into data loss. But it is never
+            # allowed to read as a finding.
+            print_wrapped(
+                f"Voidrunner: included {len(coverage['files'])} retained files from {source_directory} "
+                f"-- WARNING, GUESSED LOCATION."
+            )
+            print_wrapped(
+                "  This node has recorded no save directory (it has not started since the version that "
+                "records one), so that path came from this shell's own home directory. If the node runs "
+                "with a different HOME -- examples/netbbs.rc sets it to the state directory -- these are "
+                "not its careers. Start the node once, or re-run with --voidrunner-save-dir."
+            )
+        elif provenance != "guess":
+            # The node named this directory, or the operator did. Either
+            # way "nothing there" is a fact about the node rather than
+            # about this shell.
+            print_wrapped(f"Voidrunner: no saves at {source_directory}.")
+        else:
+            # Issue #555: the case that used to read exactly like the one
+            # above and meant something entirely different. Nothing in the
+            # database says where this node keeps its careers -- it has not
+            # started since this version -- so the directory below was
+            # derived from *this* process's home, which is not necessarily
+            # the node's. Saying so is the whole point: the old wording
+            # sent an operator away believing a rollback point was complete.
+            print_wrapped(
+                f"Voidrunner: NOT CAPTURED. This node has recorded no save directory (it has not "
+                f"started since the version that records one), so {source_directory} was derived "
+                f"from this shell's own home directory, and nothing is there."
+            )
+            print_wrapped(
+                "  If the node runs with a different HOME -- examples/netbbs.rc sets it to the "
+                "state directory -- this backup is missing every Voidrunner career. Start the node "
+                "once, or re-run with --voidrunner-save-dir pointing at the node's own "
+                ".netbbs/voidrunner_saves."
+            )
     else:
         try:
             rollback_dir = restore_backup(source=args.source, db_path=args.db, identity_dir=args.identity_dir,

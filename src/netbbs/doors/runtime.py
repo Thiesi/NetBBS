@@ -190,6 +190,53 @@ def war_dialer_path_problem(door, world_path: Path | None) -> str | None:
     return None
 
 
+#: Where a Voidrunner save lands, as resolved *by the node process*.
+#: Recorded so `netbbs.backup` does not have to guess (issue #555).
+VOIDRUNNER_SAVE_DIR_CONFIG_KEY = "voidrunner_save_dir"
+
+
+def record_voidrunner_save_dir(db) -> Path:
+    """Store where this node's doors keep their Voidrunner saves, and
+    return it.
+
+    The location is a pure function of the *node process's* environment
+    -- `VOIDRUNNER_SAVE_DIR` if set, else `Path.home()/.netbbs/
+    voidrunner_saves` -- which is exactly what `_door_environment` below
+    hands a launched door. That is the whole problem this exists to fix:
+    a node started by `examples/netbbs.rc` runs with `HOME=<state dir>`,
+    while `python -m netbbs.backup` run from a SysOp's shell has their
+    own HOME, so the two processes resolved `Path.home()` differently
+    and the documented backup command quietly captured no careers at
+    all -- exit 0, with a line that read like a fact about the node
+    ("no save directory found") when it was a fact about the
+    environment the CLI happened to inherit.
+
+    War Dialer was never exposed because v7.0.0 moved its world to
+    `<db path>.doors/`, derived from an argument the backup already has.
+    Voidrunner's saves cannot be moved the same way without stranding
+    every existing career, so the node writes down the answer instead.
+
+    Read before write, and written only when it has actually changed --
+    an unconditional write would take SQLite's write lock on a path that
+    runs at every startup, for a value that changes approximately never.
+    See `_minted_once` for the same reasoning at greater length.
+    """
+    from netbbs.doors.bundled.voidrunner import _default_save_dir
+
+    resolved = _default_save_dir()
+    row = db.connection.execute(
+        "SELECT value FROM node_config WHERE key = ?", (VOIDRUNNER_SAVE_DIR_CONFIG_KEY,)
+    ).fetchone()
+    if row is None or row[0] != str(resolved):
+        db.connection.execute(
+            "INSERT INTO node_config (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (VOIDRUNNER_SAVE_DIR_CONFIG_KEY, str(resolved)),
+        )
+        db.connection.commit()
+    return resolved
+
+
 def _door_environment(info_path, war_dialer_path=None):
     env = {"NETBBS_DOOR_INFO": str(info_path)}
     try:

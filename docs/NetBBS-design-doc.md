@@ -3761,7 +3761,24 @@ in the War Dialer storage decision in ?16; manual activation is in the door guid
 
 Voidrunner coverage (issue #310): ordinary CLI and SysOp node backups include the
 effective `VOIDRUNNER_SAVE_DIR` (or legacy home-directory default), when present,
-under a checksummed `voidrunner/` component. Capture preserves career, previous,
+under a checksummed `voidrunner/` component.
+
+How that directory is chosen is itself part of the contract (issue #555), because
+the door and the backup CLI are different processes and need not share a `HOME`:
+`examples/netbbs.rc` starts a node with `HOME` set to the state directory, while
+an operator runs the backup from their own shell. The node therefore records the
+directory it would hand a door, once its listeners are bound, and the CLI reads
+that. Three provenances exist and are reported differently, because they carry
+different amounts of confidence: an **operator-supplied** `--voidrunner-save-dir`
+wins over everything; a **node-recorded** path is authoritative, so finding it
+empty is a fact about the node; and an **unrecorded** lookup falls back to the
+calling process's own home and is a guess, reported as one whether or not that
+directory happens to exist. A guess that finds files is the dangerous case -- an
+operator who once ran a node from their shell has exactly that directory, holding
+exactly the wrong careers -- so it is captured but never presented as a finding.
+The chosen directory and its provenance are written into the manifest as captured,
+not re-derived afterwards: a backup is live-safe, so the node may start midway and
+a later lookup can describe a directory the archive never inspected. Capture preserves career, previous,
 recovery and score JSON bytes, including damaged careers needed for repair;
 temporary files and OS lock files are excluded. A bounded maintenance lease
 prevents new game launches and refuses capture while an existing pilot is active.

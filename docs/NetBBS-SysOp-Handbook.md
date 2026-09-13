@@ -560,11 +560,25 @@ The destination must not already exist; choose a fresh name for each backup.
 The Voidrunner path above matches the service layout in this handbook. Use the
 path shown by the live Backup screen if yours differs.
 
-**Known issue in v7.4.0 ([#555](https://github.com/Thiesi/NetBBS/issues/555)):**
-a backup CLI run under a different `HOME` can report success while omitting
-Voidrunner careers. The default is derived from the CLI process's home, not
-from the node database. Read the coverage output and use
-`--voidrunner-save-dir` explicitly. An absent Voidrunner component will not
+**Why the path is worth pinning** ([#555](https://github.com/Thiesi/NetBBS/issues/555)):
+Voidrunner keeps its careers under the home directory of whichever account
+started the node, and `examples/netbbs.rc` starts it with `HOME` set to the
+state directory. A backup CLI run from your own shell has your own `HOME`. Up
+to v7.4.0 the two resolved differently and the CLI silently captured no
+careers at all -- exit 0, with a line reading "no save directory found", which
+sounds like a statement about the node and was a statement about the shell.
+
+From v7.4.1 the node records its own save directory at startup and the CLI
+reads it, so the default is correct without a flag. Two cases still need you:
+
+- A node that has not yet started since upgrading has recorded nothing. The
+  CLI says so in as many words -- `Voidrunner: NOT CAPTURED` -- rather than
+  reporting an empty directory as an empty node. Start the node once, or pass
+  the flag.
+- A layout that differs from this handbook's still needs `--voidrunner-save-dir`.
+  Use the path shown on the live Backup screen.
+
+Read the coverage output either way. An absent Voidrunner component will not
 magically reappear during restore.
 
 War Dialer has separate world capture and restore rules; see the
@@ -660,7 +674,8 @@ DNS registration, or backups is a separate, deliberate operator action.
 | Link will not start | Check the `web` extra, effective participation setting, and a non-placeholder node name. |
 | Peers connect but content is missing | Check carry/subscription decisions, trust state, Outbox, and Diagnostics. Use Repair carried posts only for local materialization repair. |
 | Game is busy, fails, or loses state | Check its session limit, Compatibility setup, Last diagnostic, service state, and actual persistent paths. |
-| Backup says no Voidrunner directory found | Compare the live Backup screen with the CLI's path; rerun with explicit `--voidrunner-save-dir`. |
+| Backup says `Voidrunner: NOT CAPTURED` | The node has not started since v7.4.1, so it has recorded no save directory and the CLI fell back to your shell's home. Start the node once, or rerun with explicit `--voidrunner-save-dir`. |
+| Backup says `Voidrunner: no saves at ...` | The node named that directory itself and there is nothing in it -- nobody has played. Nothing to do. |
 | Startup refuses the database version | Install a compatible release or restore the matching pre-upgrade backup. Do not edit the schema number. |
 
 On Linux, start with `journalctl -u netbbs`. On NetBSD, the example service's

@@ -37,6 +37,7 @@ from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.onboarding import participation_accepted
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
+from netbbs.doors.runtime import record_voidrunner_save_dir
 from netbbs.link.onboarding import resolve_link_enabled, set_configured_link_enabled
 from netbbs.link.reliable_nodes import run_scheduled_reliable_nodes_refresh
 from netbbs.link.store import load_link_node
@@ -1161,6 +1162,18 @@ async def run(
             # table above answers 404 (Codex review).
             transfer_gateway,
         )
+
+        # Issue #555, after the listeners are bound for the same reason
+        # issue #466 moved door services here (Codex review). This value
+        # is what a later backup trusts, and a *second* NetBBS launched
+        # from a different HOME -- by hand, against a running service,
+        # which is exactly the operator habit that produced #555 in the
+        # first place -- would otherwise overwrite the good answer and
+        # only then fail on the bound port. The live node would keep
+        # saving where it always did while every backup looked somewhere
+        # else. Past this line the ports are ours, so the process
+        # claiming to be this node is this node.
+        record_voidrunner_save_dir(db)
 
         # Issue #466: after the listeners are bound, not before. A second
         # NetBBS started against the same state directory fails here, on the
