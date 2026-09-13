@@ -1435,7 +1435,16 @@ def _render_channel_message(
         if message.external_source == "mrc":
             line = f"{label} {_mrc_body(db, viewer, message.body)}"
         else:
-            line = f"{label} {sanitize_text(message.body)}"
+            # Dogfood feedback: "system messages are barely readable, and
+            # actual messages are just slightly better". The bodies were
+            # better because they had no color at all -- the terminal's
+            # own default foreground, which is the one shade this palette
+            # never got to choose. CHAT_BODY_COLOR is what direct chat
+            # has always used for exactly this span; a channel message is
+            # the same thing with a different envelope. Its own reset
+            # terminates the span, so it composes beside the label
+            # without nesting, the same way the MRC branch above does.
+            line = f"{label} " + colored(sanitize_text(message.body), fg_color=CHAT_BODY_COLOR)
     durable_author = _durable_link_author(db, message)
     author_fingerprint = (
         message.author_fingerprint

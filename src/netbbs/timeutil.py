@@ -181,6 +181,35 @@ def resolve_display_preferences(db: Database) -> tuple[str, str]:
     return fmt, tz_name
 
 
+def _parse_stored_timestamp(iso_timestamp: str) -> datetime.datetime:
+    """Parse a stored or received timestamp into an aware UTC datetime.
+
+    `utc_now_iso()`'s own shape first, since that is what every locally
+    written row holds and the strict parse is the cheap common case. Any
+    other RFC-3339/ISO-8601 spelling second -- `2026-01-01T00:00:00Z`,
+    `...+00:00`, `...+02:00` -- because not every timestamp this renders
+    was written by this node. A carried channel message's `created_at`
+    comes off the wire from another implementation of Link (issue #71),
+    and a foreign field must never be able to take a caller's chat
+    session down, which is exactly what a bare `strptime` here would do
+    the moment somebody's clock serialized an offset instead of a `Z`.
+
+    A naive timestamp is read as UTC, matching the stored convention;
+    anything genuinely unparseable still raises, since that is a bug
+    worth seeing rather than a string worth guessing at.
+    """
+    try:
+        return datetime.datetime.strptime(iso_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=datetime.timezone.utc
+        )
+    except ValueError:
+        pass
+    parsed = datetime.datetime.fromisoformat(iso_timestamp)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
 def format_for_display(
     iso_timestamp: str,
     db: Database | None = None,
@@ -213,9 +242,7 @@ def format_for_display(
     setters (writing directly via `netbbs.config.set_config`, or a future
     per-user preference path that doesn't route through validation).
     """
-    parsed = datetime.datetime.strptime(iso_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
-        tzinfo=datetime.timezone.utc
-    )
+    parsed = _parse_stored_timestamp(iso_timestamp)
 
     if override_format is not None:
         fmt = override_format

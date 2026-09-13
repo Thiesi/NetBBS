@@ -24,8 +24,10 @@ def alice(db):
     return create_user(db, "alice", password="hunter2", user_level=10)
 
 
-def test_defaults_to_disabled(db, alice):
-    assert timestamps_enabled(db, alice) is False
+def test_defaults_to_enabled(db, alice):
+    """Dogfood feedback: on by default. Knowing when a line was said is
+    most of what makes scrollback readable."""
+    assert timestamps_enabled(db, alice) is True
 
 
 def test_set_enabled_then_read_back(db, alice):
@@ -41,12 +43,15 @@ def test_set_disabled_after_enabled(db, alice):
 
 def test_preference_is_per_user(db, alice):
     bob = create_user(db, "bob", password="hunter2", user_level=10)
-    set_timestamps_enabled(db, alice, True)
-    assert timestamps_enabled(db, alice) is True
-    assert timestamps_enabled(db, bob) is False
+    # Set explicitly *against* the default, so this proves the store is
+    # per-user rather than proving that neither account has a row yet.
+    set_timestamps_enabled(db, alice, False)
+    assert timestamps_enabled(db, alice) is False
+    assert timestamps_enabled(db, bob) is True
 
 
 def test_format_with_preference_returns_text_unchanged_when_disabled(db, alice):
+    set_timestamps_enabled(db, alice, False)
     assert format_with_preference(db, alice, "hello", "2026-01-01T00:00:00.000000Z") == "hello"
 
 

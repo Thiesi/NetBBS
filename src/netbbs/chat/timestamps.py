@@ -1,7 +1,11 @@
 """
 Per-user chat timestamp preference (design doc, point 3):
 whether chat lines are prefixed with a
-display timestamp, defaulting to off. A thin typed wrapper over
+display timestamp, defaulting to **on** (dogfood feedback). Knowing when
+something was said is most of what makes scrollback readable, and a
+caller who joins a quiet channel cannot otherwise tell whether the last
+line is a minute or a week old. Off remains one keystroke away on the
+chat screen; the default is simply the other way round now. A thin typed wrapper over
 `netbbs.user_preferences`' generic per-user key-value store — the same
 pattern `netbbs.timeutil` already uses for the node-wide display
 format/timezone settings.
@@ -10,7 +14,7 @@ format/timezone settings.
 preference check, `netbbs.timeutil.format_for_display` (so this reuses
 the existing per-user/node display-timezone and display-format system
 rather than inventing chat-specific formatting rules), and the
-muted-color styling — reused identically by both
+timestamp styling — reused identically by both
 `netbbs.net.chat_flow` (live chat, scrollback replay) and
 `netbbs.net.login_flow` (mailbox-flushed private messages), so the
 combination logic lives in exactly one place rather than being
@@ -24,7 +28,7 @@ sanitizing/coloring.
 from __future__ import annotations
 
 from netbbs.auth.users import User
-from netbbs.rendering import MUTED_COLOR, colored
+from netbbs.rendering import METADATA_COLOR, colored
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 from netbbs.user_preferences import get_user_preference, set_user_preference
@@ -33,7 +37,11 @@ _PREFERENCE_KEY = "chat_timestamps"
 
 
 def timestamps_enabled(db: Database, user: User) -> bool:
-    return get_user_preference(db, user, _PREFERENCE_KEY, default="off") == "on"
+    # The default is the *unset* answer, so flipping it turns timestamps
+    # on for every account that never expressed a preference -- which is
+    # the intent. An account that switched them off explicitly has "off"
+    # stored and keeps it.
+    return get_user_preference(db, user, _PREFERENCE_KEY, default="on") == "on"
 
 
 def set_timestamps_enabled(db: Database, user: User, enabled: bool) -> None:
@@ -41,8 +49,14 @@ def set_timestamps_enabled(db: Database, user: User, enabled: bool) -> None:
 
 
 def format_with_preference(db: Database, user: User, text: str, created_at: str) -> str:
-    """Prefix `text` with a muted-color display timestamp if `user` has
-    chat timestamps enabled, otherwise return `text` unchanged.
+    """Prefix `text` with a display timestamp if `user` has chat
+    timestamps enabled, otherwise return `text` unchanged.
+
+    METADATA_COLOR, not MUTED_COLOR: a timestamp is chrome attached to
+    the line beside it, not a system message that is content in its own
+    right, and the two constants stopped sharing a value when the grey
+    ramp was lifted. On by default now, so this shade is in front of
+    every chat line rather than only the ones a caller opted into.
 
     Deliberately time-only (`override_format="%H:%M"`),
     not the node's full configured display format (which includes
@@ -59,6 +73,6 @@ def format_with_preference(db: Database, user: User, text: str, created_at: str)
     if not timestamps_enabled(db, user):
         return text
     stamp = colored(
-        f"[{format_for_display(created_at, db, override_format='%H:%M')}]", fg_color=MUTED_COLOR
+        f"[{format_for_display(created_at, db, override_format='%H:%M')}]", fg_color=METADATA_COLOR
     )
     return f"{stamp} {text}"
