@@ -116,15 +116,33 @@ def test_masthead_categories_ship_distinct_artwork() -> None:
         assert left.isdisjoint(right)
 
 
-#: The characters a row is drawn with when it belongs to a frame. A preset
-#: that uses them has promised a rectangle, and the terminal will show every
-#: column it is short by.
+#: What a row starts and ends with when it spans a box. A row needs both:
+#: a tree drawn with `├─ label ....` starts with a border and ends in text,
+#: and its rows are meant to differ in length.
 FRAME_STARTS = frozenset("│║┃╔╠╚┏┣┗┌├└╭╰╟╞")
+FRAME_ENDS = frozenset("│║┃╗╝┓┛┐┘╮╯┤╣┫╢╡")
 
 #: Heavy angle quotation marks. They are East Asian Ambiguous, so a terminal
 #: may give them one column or two, and the frame around them moves with the
 #: terminal's choice rather than with the art.
 UNSTABLE_GLYPHS = frozenset("\u276e\u276f")
+
+
+def framed_rows_by_indent(text: str) -> dict[int, list[int]]:
+    """Width of every box-spanning row, grouped by the column it starts in.
+
+    Grouping by indent is what lets a preset hold more than one box: an
+    outer frame in column zero and an inner panel a few columns in are
+    measured separately, but each has to close.
+    """
+    groups: dict[int, list[int]] = {}
+    for line in text.splitlines():
+        row = strip_ansi(line).rstrip("\r").rstrip(" ")
+        bare = row.lstrip(" ")
+        if len(bare) > 1 and bare[0] in FRAME_STARTS and bare[-1] in FRAME_ENDS:
+            indent = display_width(row) - display_width(bare)
+            groups.setdefault(indent, []).append(display_width(row))
+    return groups
 
 
 @pytest.mark.parametrize(("family", "presets", "loader"), PRESET_FAMILIES)
@@ -133,23 +151,20 @@ def test_framed_rows_are_all_the_same_width(
 ) -> None:
     """A preset that draws a frame draws a rectangular one.
 
-    Every row that starts with a border character is part of the same box,
-    so they all have to end in the same column. Seven presets once did not:
-    their rows differed by up to nine columns, the frame could not close,
-    and the vertical borders wandered down the screen.
+    Every row that spans the same box has to end in the same column. Ten
+    presets once did not: their rows differed by up to nine columns, the
+    frame could not close, and the vertical borders wandered down the
+    screen. An earlier version of this test only looked at column zero,
+    which let four indented boxes keep the same defect.
     """
     for preset in presets:
-        rows = [
-            strip_ansi(line).rstrip("\r")
-            for line in decode_ansi_bytes(loader(preset)).splitlines()
-        ]
-        framed = [row for row in rows if row[:1] in FRAME_STARTS]
-        if len(framed) < 2:
-            continue
-        widths = {display_width(row) for row in framed}
-        assert len(widths) == 1, (
-            f"{family}/{preset.resource} has framed rows of {sorted(widths)} columns"
-        )
+        for indent, widths in framed_rows_by_indent(decode_ansi_bytes(loader(preset))).items():
+            if len(widths) < 2:
+                continue
+            assert len(set(widths)) == 1, (
+                f"{family}/{preset.resource}: rows starting in column {indent} "
+                f"end in columns {sorted({w - 1 for w in set(widths)})}"
+            )
 
 
 @pytest.mark.parametrize(("family", "presets", "loader"), PRESET_FAMILIES)
