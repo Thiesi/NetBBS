@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Sequence, TypeVar
+from typing import Awaitable, Callable, Mapping, Sequence, TypeVar
 
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
 from netbbs.net.help_overlay import show_help
@@ -254,6 +254,9 @@ async def pick_item(
     on_sort: Callable[[], Awaitable[Sequence[T] | None]] | None = None,
     on_create: Callable[[], Awaitable[T | None]] | None = None,
     sort_label: Callable[[], str] | None = None,
+    live_keys: Mapping[str, Callable[[], Awaitable[Sequence[T] | None]]] | None = None,
+    live_nav: Sequence[MenuEntry] = (),
+    live_label: Callable[[], str] | None = None,
     description_level: str = "off",
     redraw_in_place: bool = False,
     unicode_style: bool = False,
@@ -518,16 +521,31 @@ async def pick_item(
         return session.terminal_width, session.terminal_height
 
     def _header_lines() -> int:
-        if not columns:
-            return 0
-        width, _ = _dimensions()
-        return 1 if _table_widths(width, columns, 1) is not None else 0
+        # Everything this screen draws above the item list and does not
+        # already reserve elsewhere: the column heading, and the
+        # masthead.
+        #
+        # The masthead was never counted (issue #537). It is written
+        # immediately above the title on every render, so a one-line
+        # masthead cost a page one row it had not paid for -- the same
+        # accounting gap issue #538 found in the trailer, one block
+        # further up. Measured rather than assumed to be one line,
+        # because a SysOp-authored masthead can be several.
+        lines = 0
+        if masthead:
+            lines += masthead.count("\r\n") + 1
+        if columns:
+            width, _ = _dimensions()
+            if _table_widths(width, columns, 1) is not None:
+                lines += 1
+        return lines
 
     def _sized_page_size() -> int:
         width, height = _dimensions()
         return _page_size(
             session, on_sort, description_level,
             header_lines=_header_lines(), width=width, height=height, on_create=on_create,
+            live_nav=live_nav,
         )
 
     def _masthead_prefix() -> str:
@@ -762,6 +780,7 @@ async def pick_item(
         nav = _render_nav(
             session, on_sort, description_level,
             include_next=page_index < total_pages - 1, include_prev=page_index > 0,
+            live_nav=live_nav,
             # The frozen pair, like everything else this render draws
             # (Codex review). The previous commit gave this function the
             # parameters and then failed to pass them here, which left
@@ -788,6 +807,15 @@ async def pick_item(
         trailer = ""
         if sort_label is not None:
             trailer = f"Sort: {sanitize_text(sort_label())}"
+        if live_label is not None:
+            # Beside the sort label and ahead of the boilerplate, for the
+            # same reason: it is standing state, not a hint. A list whose
+            # rows are filtered without saying so is a list with rows
+            # missing for no visible reason -- precisely what the SysOp
+            # who asked for the account filter did not want.
+            standing = sanitize_text(live_label())
+            if standing:
+                trailer = f"{trailer}, {standing}" if trailer else standing
         boilerplate = "or type a 2-digit number to select; Ctrl-L: redraw"
         if refresh is not None:
             boilerplate += ", Ctrl-R: refresh"
@@ -1020,6 +1048,32 @@ async def pick_item(
                 await session.write(reject_keystroke())
                 continue
             new_items = await on_sort()
+            if new_items is not None:
+                items = new_items
+                working_set = new_items
+                page_index = 0
+                highlighted = None
+            page_items = await _render()
+            continue
+
+        if live_keys and char_lower in live_keys:
+            # A caller's own key, dispatched exactly as `[O]rder` is: it
+            # replaces the working set, and the screen forgets its page
+            # and its highlight either way. What differs is only what the
+            # callback does.
+            #
+            # This exists because the account lister has four of them
+            # (issue #537) -- three sort dimensions that flip direction
+            # when pressed again, and a three-state visibility cycle --
+            # and they were why that screen was a hand-rolled copy of
+            # this one rather than a call to it. A SysOp asked for single
+            # keystrokes on a fifty-account roster by name; routing them
+            # through a prompt to reuse this screen would have paid for
+            # its features with the thing they asked for.
+            #
+            # Checked *after* this screen's own keys, so a caller cannot
+            # shadow `[N]ext` or `[B]ack` by accident.
+            new_items = await live_keys[char_lower]()
             if new_items is not None:
                 items = new_items
                 working_set = new_items
@@ -1261,7 +1315,7 @@ _MIN_PAGE_SIZE_FOR_DESCRIPTIVE_NAV = 5
 
 def _nav_entries(
     on_sort: Callable | None, *, include_next: bool = True, include_prev: bool = True,
-    on_create: Callable | None = None,
+    on_create: Callable | None = None, live_nav: Sequence[MenuEntry] = (),
 ) -> list[MenuEntry]:
     # Dogfood-reported UI issue: [N]ext/[P]rev used to be shown even when
     # there was no next/previous page to go to -- pressing them just bell-
@@ -1284,6 +1338,10 @@ def _nav_entries(
     entries.append(MenuEntry(label=menu_key("G", "oto #"), brief="Jump to an item's #"))
     if on_sort is not None:
         entries.append(MenuEntry(label=menu_key("O", "rder"), brief="Change sort order"))
+    # A caller's own keys, appended after this screen's (issue #537) --
+    # last, so the standard paging entries stay where a SysOp expects
+    # them however many the caller adds.
+    entries.extend(live_nav)
     if on_create is not None:
         # Issue #530. Offered on a populated list as well as an
         # empty one: the original reasoning -- that this only bites
@@ -1300,7 +1358,7 @@ def _render_nav(
     session: Session, on_sort: Callable | None, description_level: str,
     *, include_next: bool = True, include_prev: bool = True,
     width: int | None = None, height: int | None = None,
-    on_create: Callable | None = None,
+    on_create: Callable | None = None, live_nav: Sequence[MenuEntry] = (),
 ) -> str:
     # Dimensions may be supplied by a caller that has frozen them for
     # one render (see `pick_item`'s `_dimensions`); otherwise read live.
@@ -1308,6 +1366,7 @@ def _render_nav(
     height = session.terminal_height if height is None else height
     entries = _nav_entries(
         on_sort, include_next=include_next, include_prev=include_prev, on_create=on_create,
+        live_nav=live_nav,
     )
     if description_level != "off":
         descriptive = menu_grid(
@@ -1330,6 +1389,7 @@ def _render_nav(
 def _page_size(
     session: Session, on_sort: Callable | None, description_level: str, *, header_lines: int = 0,
     width: int | None = None, height: int | None = None, on_create: Callable | None = None,
+    live_nav: Sequence[MenuEntry] = (),
 ) -> int:
     # `_RESERVED_LINES` was calibrated against the nav row always being
     # exactly 1 line -- still true for `description_level="off"`
@@ -1350,6 +1410,7 @@ def _page_size(
     height = session.terminal_height if height is None else height
     nav_lines = _render_nav(
         session, on_sort, description_level, width=width, height=height, on_create=on_create,
+        live_nav=live_nav,
     ).count("\r\n") + 1
     available = height - (_RESERVED_LINES - 1 + nav_lines + header_lines)
     return max(1, min(_MAX_PAGE_SIZE, available))
