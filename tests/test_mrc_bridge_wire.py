@@ -201,6 +201,18 @@ def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, l
         bridge = await _connected_bridge(db, lane, hub, fake, reply_burst=5, clock=clock)
         try:
             await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM:")) == 2)
+            # Frozen before alice's reply bucket exists (issue #536,
+            # Codex review). `_TokenBucket` refills lazily -- `now -
+            # _last_refill` on the next check -- so freezing *after* the
+            # LIST replies would still hand back whatever real time had
+            # passed since the bucket was created, which is the very
+            # refill this is trying to exclude. Frozen from before the
+            # bucket is created, no time elapses for it at all.
+            #
+            # Safe across this stretch: the outbound bucket starts full,
+            # and the only commands sent here are this LIST and two that
+            # are refused before they reach the wire.
+            clock.freeze()
             assert bridge.send_hub_command(lobby, "alice", "LIST") is None
             sent = await fake.wait_for(lambda p: p.body == "LIST")
             assert (sent.from_user, sent.to_user, sent.to_room) == ("alice", "SERVER", "lobby")
@@ -215,12 +227,6 @@ def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, l
             other = create_channel(db, "other", creator=alice)
             assert bridge.send_hub_command(other, "alice", "LIST") == "this channel isn't bridged to MRC"
             # A burst past the per-caller allowance is cut short, and said so once.
-            # Frozen first (issue #536): alice has spent two of her five
-            # on the LIST replies above, and at 10 tokens/second those
-            # two come back in 0.2s -- less time than the steps between
-            # took on a POSIX host, which handed the burst its full
-            # allowance and moved the notice.
-            clock.freeze()
             for i in range(8):
                 await fake.send_line(f"SERVER~~~alice~~~line {i}~")
             got = []

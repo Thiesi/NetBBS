@@ -10,6 +10,7 @@ bridge on the loopback fake hub.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ParticipantId
@@ -34,6 +35,21 @@ from tests.test_chat_flow_mrc import (  # noqa: F401 -- fixtures and helpers
 from tests.test_chat_flow_mrc_open_rooms import _bridge_on, _browse, _visible_text
 
 
+class _PickerQueueSession(_QueueSession):
+    """A queue session whose *keystrokes* come from the queue too.
+
+    `_QueueSession` overrides only `read_line`; its inherited `read_key`
+    still reads `FakeSession`'s separate scripted list, which is empty
+    here. `browse_channels` opens on the picker and reads keys, so a
+    plain `_QueueSession` blocks before it can consume anything queued
+    -- which is exactly how this helper hung the first time it ran, and
+    the hang I wrongly put down to a busy machine.
+    """
+
+    async def read_key(self, echo: bool = True) -> str:
+        return await self.inputs.get()
+
+
 async def _browse_until(lane, hub, presence, user, inputs, *, mrc_bridge, until, what):
     """`_browse`, but the last scripted input is held back until `until`
     holds (issue #536).
@@ -44,17 +60,28 @@ async def _browse_until(lane, hub, presence, user, inputs, *, mrc_bridge, until,
     finished and rendered nothing. Waiting for the reply before quitting
     removes the window rather than widening it.
     """
-    session = _QueueSession()
+    session = _PickerQueueSession()
     task = asyncio.create_task(
         chat_flow.browse_channels(
             session, lane, hub, presence, MessageMailbox(), InputHistory(), user, mrc_bridge=mrc_bridge,
         )
     )
-    for line in inputs[:-1]:
-        session.inputs.put_nowait(line)
-    await _wait_for(lambda: until(session), what=what, timeout=5.0)
-    session.inputs.put_nowait(inputs[-1])
-    await asyncio.wait_for(task, timeout=4)
+    try:
+        for line in inputs[:-1]:
+            session.inputs.put_nowait(line)
+        await _wait_for(lambda: until(session), what=what, timeout=5.0)
+        session.inputs.put_nowait(inputs[-1])
+        await asyncio.wait_for(task, timeout=4)
+    finally:
+        # AGENTS.md, "own async tasks": if the condition never holds --
+        # or the predicate raises -- this task is still running, and
+        # would otherwise overlap the test's bridge and database
+        # teardown, or surface later as an exception nobody retrieved,
+        # replacing the real failure with a timeout.
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
     return session
 
 
@@ -274,10 +301,16 @@ def test_the_roster_shows_handles_with_spaces(db, lane, hub, presence, channel, 
     async def scenario():
         rig = await _rig(db, lane, hub, channel)
         try:
-            async def push_roster():
+            async def push_roster(session):
                 await rig.fake.wait_for(lambda p: p.body == "NEWROOM::lobby" and p.from_user == "alice")
                 await rig.fake.send_line("SERVER~~~CLIENT~~lobby~USERLIST:Some_User@Other,bob~")
-                await asyncio.sleep(0.2)
+                # Issue #536: the roster has to have been taken in
+                # before `/who` is typed, so wait for the bridge to hold
+                # it rather than sleeping and hoping.
+                await _wait_for(
+                    lambda: "Some_User@Other" in rig.bridge.remote_roster(channel),
+                    what="the MRC roster to reach the bridge",
+                )
 
             session, _ = await _run(lane, hub, presence, channel, alice, ["/who", "/quit"], mrc_bridge=rig.bridge, while_joined=push_roster)
             text = _text(session)
