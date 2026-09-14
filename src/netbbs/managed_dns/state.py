@@ -14,6 +14,7 @@ that does *not* belong here is the credential itself -- see
 
 from __future__ import annotations
 
+import ipaddress
 from enum import Enum
 from urllib.parse import urlsplit
 
@@ -255,8 +256,9 @@ def canonical_service_url(url: str) -> str:
     Scheme and host are lowercased, a default port for the scheme is
     dropped, and a trailing slash goes; userinfo is dropped because it
     is refused at config load and is not part of which service this is.
-    An IPv6 literal is re-bracketed, since the split hands back
-    `hostname` without its brackets.
+    An IP literal is normalised through `ipaddress` so two spellings of
+    one address match, and an IPv6 one is re-bracketed afterwards, since
+    the split hands back `hostname` without its brackets.
 
     `urlsplit`, not `urlparse`: `urlparse` peels a final-segment path
     parameter off into `params`, so a canonical form built from `path`
@@ -278,6 +280,14 @@ def canonical_service_url(url: str) -> str:
         port = parsed.port
     except ValueError:
         return url.strip().rstrip("/")
+    try:
+        # `::1` and `0:0:0:0:0:0:0:1` are the same address written two
+        # ways, and this comparison is the difference between a node
+        # heartbeating and a node paused (Codex review of PR #587).
+        # Raises for an ordinary hostname, which is left alone.
+        host = ipaddress.ip_address(host).compressed
+    except ValueError:
+        pass
     if ":" in host:
         host = f"[{host}]"
     if port is not None and port != {"http": 80, "https": 443}.get(scheme):

@@ -1104,9 +1104,18 @@ def test_a_managed_dns_service_url_may_not_embed_credentials():
     for bad in (
         "https://user:hunter2@dns.example.org",
         "https://user@dns.example.org",
+        # Also malformed some other way: the userinfo guard has to run
+        # *before* the shared validator, which names what it rejected
+        # (Codex review of PR #587).
+        "https://user:hunter2@dns.example.org:abc",
+        "https://user:hunter2@dns.example.org?a=1",
+        "http://user:hunter2@dns.example.org",
     ):
         with pytest.raises(ConfigError) as caught:
             config(bad).validate()
         assert "username or password" in str(caught.value)
         assert "hunter2" not in str(caught.value)
         assert bad not in str(caught.value)
+
+    # An `@` in the path is not userinfo and is nobody's password.
+    config("https://dns.example.org/tenant@a").validate()

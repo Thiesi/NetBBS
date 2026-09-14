@@ -462,6 +462,26 @@ class NodeConfig:
                 _validate_base_url(transport.public_url, f"{name}.public_url")
 
         if self.managed_dns.service_url is not None:
+            # Asked first, and without parsing: every other message in
+            # this validator names the value it rejected, and this is the
+            # one setting whose value may carry a password -- a URL that
+            # is *also* malformed some other way would otherwise be
+            # refused by the shared validator, password and all, before
+            # reaching a guard that promises not to echo it (Codex review
+            # of PR #587). A textual look at the authority catches it
+            # whether or not the rest of the URL parses at all.
+            _, _, after_scheme = self.managed_dns.service_url.partition("//")
+            if "@" in after_scheme.split("/", 1)[0]:
+                # The node copies this address into its database and
+                # prints it in log lines and SysOp-facing diagnostics, so
+                # an embedded password would leak wherever those go.
+                # Deliberately the one message here that does not echo
+                # the value it rejected.
+                raise ConfigError(
+                    "managed_dns.service_url must not embed a username or password -- this node "
+                    "records the address in its database and prints it in logs; put credentials "
+                    "in the service's own reverse proxy instead"
+                )
             _validate_base_url(self.managed_dns.service_url, "managed_dns.service_url")
             # Unlike `public_url`, which names a listener callers reach
             # however that listener is configured, this one carries a
@@ -473,20 +493,10 @@ class NodeConfig:
             # proxy (`services/managed_dns/README.md`), which is exactly
             # why the *node's* side of it must be the proxy's https://
             # address. A loopback address is the one honest exception:
-            # nothing leaves the machine, and it is how the service is
-            # developed against.
+            # nothing leaves the machine (`netbbs.managed_dns.client.
+            # outbound_session` dials it directly, past any proxy), and
+            # it is how the service is developed against.
             parsed = urlparse(self.managed_dns.service_url)
-            if parsed.username or parsed.password:
-                # The node copies this address into its database and
-                # prints it in log lines and SysOp-facing diagnostics, so
-                # an embedded password would leak wherever those go
-                # (Codex review of PR #587). Deliberately the one message
-                # here that does not echo the value it rejected.
-                raise ConfigError(
-                    "managed_dns.service_url must not embed a username or password -- this node "
-                    "records the address in its database and prints it in logs; put credentials "
-                    "in the service's own reverse proxy instead"
-                )
             if parsed.scheme != "https" and not is_loopback_host(parsed.hostname or ""):
                 raise ConfigError(
                     "managed_dns.service_url must be an https:// URL unless it names a loopback "

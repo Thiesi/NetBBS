@@ -417,3 +417,18 @@ def test_a_path_parameter_is_part_of_which_service_this_is(tmp_path):
         == "https://dns.example/api;tenant=a"
     )
     db.close()
+
+
+def test_two_spellings_of_one_ip_literal_are_the_same_service(tmp_path):
+    """Codex review of PR #587. `::1` and `0:0:0:0:0:0:0:1` are one
+    address; re-bracketing alone left them comparing differently, which
+    would pause a node over a spelling change."""
+    db = Database(tmp_path / "node.db")
+    set_registration_result_state(
+        db, name="myboard", status=RegistrationStatus.PENDING, dynamic=True,
+        service_url="http://[::1]:8099",
+    )
+
+    assert state.foreign_credential_service_url(db, "http://[0:0:0:0:0:0:0:1]:8099") is None
+    assert state.foreign_credential_service_url(db, "http://[::1]:8100") == "http://[::1]:8099"
+    db.close()

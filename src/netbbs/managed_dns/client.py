@@ -10,6 +10,15 @@ rule -- this is the same kind of outbound call, just to a different
 service), `ClientTimeout`, a non-2xx response read as text and raised
 with status+body rather than a bare `raise_for_status()`, and
 `strict_json_loads` for the response body.
+
+One departure from that pattern, because these requests carry a bearer
+credential and the Link ones do not: `allow_redirects=False`. aiohttp
+follows redirects by default, and a 307/308 resends the whole POST body
+-- credential included -- to whatever `Location` names, which is neither
+the address the issuer comparison approved nor the one the https rule
+checked (Codex review of PR #587). A redirect therefore surfaces as an
+ordinary non-2xx `ManagedDnsError` naming its status, which a SysOp or
+the log can act on, rather than as a silent hop.
 """
 
 from __future__ import annotations
@@ -106,6 +115,7 @@ async def register(
     try:
         async with session.post(
             url, json=payload, timeout=ClientTimeout(total=timeout),
+            allow_redirects=False,
         ) as response:
             if response.status != 201:
                 text = await response.text()
@@ -156,6 +166,7 @@ async def heartbeat(
     try:
         async with session.post(
             url, json={"credential": credential}, timeout=ClientTimeout(total=timeout),
+            allow_redirects=False,
         ) as response:
             if response.status != 200:
                 text = await response.text()
@@ -200,6 +211,7 @@ async def rename(
     try:
         async with session.post(
             url, json={"name": name, "credential": credential}, timeout=ClientTimeout(total=timeout),
+            allow_redirects=False,
         ) as response:
             if response.status != 201:
                 text = await response.text()
@@ -239,6 +251,7 @@ async def cancel_rename(
     try:
         async with session.post(
             url, json={"credential": credential}, timeout=ClientTimeout(total=timeout),
+            allow_redirects=False,
         ) as response:
             if response.status != 200:
                 text = await response.text()
@@ -284,6 +297,7 @@ async def release(
     try:
         async with session.post(
             url, json={"credential": credential}, timeout=ClientTimeout(total=timeout),
+            allow_redirects=False,
         ) as response:
             if response.status != 200:
                 text = await response.text()

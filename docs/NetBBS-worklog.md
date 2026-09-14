@@ -3618,7 +3618,11 @@ HTTP, never imports it.
   `trust_env=False` so that exception holds on a proxied host as well.
   Canonicalisation uses `urlsplit`, since `urlparse` peels a final-
   segment path parameter into `params` and those are part of which
-  service an address names. The consequence: **moving the service's own
+  service an address names, and normalises an IP literal through
+  `ipaddress` so two spellings of one address match. Every
+  credential-bearing request sets `allow_redirects=False`: a followed
+  307/308 resends the body to an address neither the issuer comparison
+  nor the https rule ever checked. The consequence: **moving the service's own
   address is not transparent** -- nodes already registered with it pause
   rather than follow it.
 - **The bearer credential is not the node's Ed25519 key, and the server
