@@ -103,7 +103,16 @@ def test_offer_opt_in_declining_records_declined_and_asks_nothing_more(tmp_path)
     db.close()
 
 
-def test_offer_opt_in_accepting_with_no_service_url_configured_shows_a_message(tmp_path):
+def test_offer_opt_in_accepting_with_no_service_address_records_the_decision_and_says_so(tmp_path):
+    """Issue #583. The message this replaced told the SysOp to "ask your
+    operator to set the service address" -- an operator who is
+    themselves, for a setting no surface of the product could write. The
+    replacement says what is actually true, and the acceptance is still
+    recorded so the question is never asked twice.
+
+    `FakeSession` raises on exhausted input, so the single "y" is itself
+    the assertion that no registration editor was drawn over a service
+    that cannot answer it."""
     db = Database(tmp_path / "node.db")
     lane = DatabaseLane(db.path)
     session = FakeSession(["y"])
@@ -112,7 +121,57 @@ def test_offer_opt_in_accepting_with_no_service_url_configured_shows_a_message(t
     asyncio.run(offer_managed_dns_opt_in(session, lane))
 
     assert get_opt_in(db) is OptIn.ACCEPTED
-    assert any("hasn't been configured" in line for line in session.written)
+    written = " ".join(session.written)
+    assert "isn't running yet" in written
+    assert "operator" not in written
+    assert get_registered_name(db) is None
+    lane.close()
+    db.close()
+
+
+def test_offer_opt_in_accepting_reaches_registration_through_the_shipped_default(
+    tmp_path, monkeypatch
+):
+    """The other half of #583: a node told nothing by its operator still
+    has somewhere to register, so accepting the pre-set first-run answer
+    leads to the name editor rather than a dead end. `[B]ack` out of it
+    rather than dialing the (unreachable) address."""
+    from netbbs.managed_dns import state
+
+    monkeypatch.setattr(state, "DEFAULT_SERVICE_URL", "http://127.0.0.1:1")
+    db = Database(tmp_path / "node.db")
+    set_node_fingerprint(db, "fp-1")
+    lane = DatabaseLane(db.path)
+    session = FakeSession(["y", "b"])
+
+    asyncio.run(offer_managed_dns_opt_in(session, lane))
+
+    assert get_opt_in(db) is OptIn.ACCEPTED
+    written = " ".join(session.written)
+    assert "isn't running yet" not in written
+    assert "Subdomain name" in written
+    lane.close()
+    db.close()
+
+
+def test_registering_from_the_sysop_console_with_no_service_address_explains_why(tmp_path):
+    """The same gap reached from the other direction -- the `[R]egister`
+    action on the SysOp console's DNS screen. A different message from
+    the first-run one: this SysOp pressed a key on purpose and is owed a
+    reason nothing happened, plus the one way out that does exist today
+    (running an instance and pointing the node at it)."""
+    db = Database(tmp_path / "node.db")
+    set_node_fingerprint(db, "fp-1")
+    lane = DatabaseLane(db.path)
+    session = FakeSession([])
+    assert get_service_url(db) is None  # precondition
+
+    held = asyncio.run(register_via_prompt(session, lane))
+
+    assert held is True
+    written = " ".join(session.written)
+    assert "isn't running yet" in written
+    assert "netbbs.toml" in written
     assert get_registered_name(db) is None
     lane.close()
     db.close()
@@ -136,6 +195,11 @@ def test_offer_opt_in_accepting_and_leaving_the_name_blank_registers_nothing(tmp
 def test_offer_opt_in_releases_the_decision_lock_before_registration(tmp_path, monkeypatch):
     async def scenario():
         db = Database(tmp_path / "node.db")
+        # This test is about the decision lock, not about the service:
+        # an accept only continues into registration at all when the
+        # node has a service address (issue #583), and the stand-in
+        # below is never dialed.
+        set_service_url(db, "http://127.0.0.1:1")
         lane = DatabaseLane(db.path)
         registration_started = asyncio.Event()
         finish_registration = asyncio.Event()

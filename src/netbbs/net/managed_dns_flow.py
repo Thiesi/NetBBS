@@ -66,12 +66,48 @@ _OPT_IN_BLURB = (
     "menu."
 )
 
+# Issue #583. Until `netbbs.managed_dns.state.DEFAULT_SERVICE_URL` names
+# a deployed instance, a node has no service to register against -- and
+# the message this replaced ("ask your operator to set the service
+# address") sent the SysOp looking for an operator who is themselves,
+# for a setting no surface of the product could set. Two notes, not one,
+# because the two callers are in different places: the first-run screen
+# is telling someone who just answered a question that their answer is
+# recorded and costs them nothing more, while the SysOp console is
+# telling someone who deliberately pressed [R]egister why nothing
+# happened.
+_SERVICE_UNAVAILABLE_FIRST_RUN_NOTE = (
+    "(Noted. The managed netbbs.org service isn't running yet, so "
+    "there's nothing to register against -- nothing further is needed "
+    "from you. Pick a name from the SysOp console's DNS screen once a "
+    "NetBBS release says the service is live.)"
+)
+
+_SERVICE_UNAVAILABLE_SYSOP_NOTE = (
+    "(The managed netbbs.org service isn't running yet, so there's "
+    "nothing to register against. This node will be able to register as "
+    "soon as a NetBBS release ships with the service's address -- or "
+    "right away if you run an instance of it yourself and point this "
+    "node at it with service_url under [managed_dns] in netbbs.toml.)"
+)
+
 # Statuses design doc §16 Decision 3/5 treat as "this node currently has
 # a live-or-maturing registration" -- the gate for whether [R]egister
 # (a fresh attempt would just be rejected) or [L] Release (nothing
 # active to release) makes sense to offer on the admin screen.
 _ACTIVE_STATUSES = (RegistrationStatus.PENDING, RegistrationStatus.MATURED)
 _opt_in_locks: dict[Path, asyncio.Lock] = {}
+
+
+async def _write_note(session: Session, text: str) -> None:
+    """Word-wrapped to the real terminal width before colouring, one
+    physical line at a time -- colouring the whole paragraph as one
+    string and relying on the terminal's own soft-wrap runs past the
+    right edge unpredictably on anything narrower than the text itself
+    (the same bug `netbbs.net.admin_flow._write_wrapped_subtitle`'s own
+    docstring documents fixing for screen subtitles)."""
+    for wrapped in wrap_to_width(text, session.terminal_width):
+        await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
 
 
 async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None:
@@ -87,15 +123,8 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
         if await lane.run(get_opt_in) is not OptIn.UNDECIDED:
             return
 
-        # Word-wrapped to the real terminal width before coloring, one
-        # physical line at a time -- coloring the whole blurb as one string
-        # and relying on the terminal's own soft-wrap runs past the right
-        # edge unpredictably on anything narrower than the text itself (the
-        # same bug netbbs.net.admin_flow._write_wrapped_subtitle's own
-        # docstring documents fixing for screen subtitles).
         await session.write_line("")
-        for wrapped in wrap_to_width(_OPT_IN_BLURB, session.terminal_width):
-            await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
+        await _write_note(session, _OPT_IN_BLURB)
         await session.write_line("")
         # Defaults to accept (design doc §16, issue #219 Decision 7: both
         # first-run choices are pre-set to accept so accepting everything
@@ -110,6 +139,13 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
     # can remain interactive indefinitely without blocking another SysOp's
     # login behind the node-wide decision lock.
     if accepted:
+        if not await lane.run(get_service_url):
+            # Recording the decision is the whole of what this prompt
+            # promises; there is simply nowhere to register yet. Said
+            # here rather than by letting `register_via_prompt` draw a
+            # name editor over a service that cannot answer it.
+            await _write_note(session, _SERVICE_UNAVAILABLE_FIRST_RUN_NOTE)
+            return
         await register_via_prompt(session, lane)
 
 
@@ -148,14 +184,7 @@ async def register_via_prompt(
     """
     base_url = await lane.run(get_service_url)
     if not base_url:
-        await session.write_line(
-            colored(
-                "(Managed DNS hasn't been configured on this node yet -- "
-                "ask your operator to set the service address, then "
-                "register from the SysOp menu.)",
-                fg_color=MUTED_COLOR,
-            )
-        )
+        await _write_note(session, _SERVICE_UNAVAILABLE_SYSOP_NOTE)
         return True
 
     node_fingerprint = await lane.run(get_node_fingerprint)

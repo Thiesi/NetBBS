@@ -7217,7 +7217,10 @@ def test_managed_dns_status_allows_recovery_registration_when_cached_status_is_a
 
     session = FakeSession(["d", "r", " ", "b", "b"])
     _run(session, lane, sysop)
-    assert "hasn't been configured" in _visible(_written_text(session))
+    # [R]egister was offered and reached the flow; with no service
+    # address on this node it reports why rather than opening an editor
+    # (issue #583).
+    assert "isn't running yet" in _visible(_written_text(session))
 
 
 def test_managed_dns_status_pauses_after_register_message_before_redraw(db, lane, sysop):
@@ -7226,7 +7229,7 @@ def test_managed_dns_status_pauses_after_register_message_before_redraw(db, lane
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
-    assert "hasn't been configured" in text
+    assert "isn't running yet" in text
     assert "Press any key to continue..." in text
 
 

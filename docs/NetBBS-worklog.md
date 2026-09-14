@@ -3582,7 +3582,7 @@ than compounding the mess.
 
 ### Managed netbbs.org subdomain + dynamic DNS is two independently-deployed components, not one (issue #201)
 
-Design doc §16 locks seven decisions; `services/managed_dns/` (the
+Design doc §16 locks eight decisions; `services/managed_dns/` (the
 project-operated backend, one instance for all of netbbs.org) and
 `src/netbbs/managed_dns/` (the node-side client every opted-in SysOp's
 own BBS runs) are genuinely separate deployables that happen to share
@@ -3593,6 +3593,26 @@ scoping (see the `examples/` entry just below) never packages it into a
 node's own install — a SysOp who opts in talks to the backend over
 HTTP, never imports it.
 
+- **Two separate deployables still need one line connecting them, and
+  for three releases there wasn't one.** `netbbs.managed_dns.state.
+  set_service_url` existed, was tested, and had no caller anywhere in
+  the installed package: no CLI flag, no `netbbs.toml` key, no admin
+  screen. Every node that accepted the first-run opt-in — the pre-set
+  answer — therefore dead-ended at registration, and the message it
+  dead-ended with named an operator the SysOp would have had to be
+  (issue #583). The address now arrives two ways, both in
+  `netbbs.managed_dns.state`: the shipped `DEFAULT_SERVICE_URL`
+  constant for the project's own instance (`None` until that instance
+  is deployed, guarded by a test that must be flipped in the same
+  commit), and `[managed_dns] service_url` for a node pointed at a
+  different one. `netbbs.__main__.run` mirrors the configured value
+  into the database on every startup *including when it is absent*,
+  which is what makes removing the setting fall back rather than strand
+  the node; that write is the only production writer of the key, so it
+  cannot clobber a decision made elsewhere. The general shape worth
+  keeping: a setter whose only callers are tests is not "configurable",
+  and a domain layer that reads a value nothing writes fails at the far
+  end of a user-visible flow, not at startup where it would be noticed.
 - **The bearer credential is not the node's Ed25519 key, and the server
   never stores it in recoverable form.** `POST /register` mints a
   separate per-registration secret server-side, returns it once, and

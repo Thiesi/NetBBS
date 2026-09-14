@@ -6,6 +6,7 @@ import sqlite3
 
 import pytest
 
+from netbbs.managed_dns import state
 from netbbs.managed_dns.state import (
     OptIn,
     RegistrationStatus,
@@ -267,3 +268,51 @@ def test_heartbeat_reconciliation_rolls_back_as_one_transaction(tmp_path):
     assert get_published(db)
     assert get_previous_name(db) is None
     db.close()
+
+
+# -- the shipped default service address (issue #583) ------------------------
+
+
+def test_the_service_url_falls_back_to_the_shipped_default(tmp_path, monkeypatch):
+    """The whole of issue #583: a node that has been told nothing still
+    knows where the project's own instance is, so the opt-in a SysOp
+    accepted at first run can actually lead somewhere."""
+    monkeypatch.setattr(state, "DEFAULT_SERVICE_URL", "https://dns.netbbs.org")
+    db = Database(tmp_path / "node.db")
+
+    assert get_service_url(db) == "https://dns.netbbs.org"
+    db.close()
+
+
+def test_a_configured_service_url_wins_over_the_shipped_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(state, "DEFAULT_SERVICE_URL", "https://dns.netbbs.org")
+    db = Database(tmp_path / "node.db")
+
+    set_service_url(db, "http://127.0.0.1:8099")
+
+    assert get_service_url(db) == "http://127.0.0.1:8099"
+    db.close()
+
+
+def test_clearing_a_configured_service_url_returns_to_the_shipped_default(tmp_path, monkeypatch):
+    """`netbbs.__main__.run` writes `None` here on every startup whose
+    configuration carries no `[managed_dns] service_url`, so an operator
+    who removes the setting must land back on the shipped address rather
+    than stay pinned to the one they configured once."""
+    monkeypatch.setattr(state, "DEFAULT_SERVICE_URL", "https://dns.netbbs.org")
+    db = Database(tmp_path / "node.db")
+    set_service_url(db, "http://127.0.0.1:8099")
+
+    set_service_url(db, None)
+
+    assert get_service_url(db) == "https://dns.netbbs.org"
+    db.close()
+
+
+def test_the_shipped_default_is_unset_until_the_service_is_deployed():
+    """A guard, not a preference: `services.managed_dns` is not standing
+    anywhere yet, and shipping an address that resolves to nothing would
+    turn every node's registration into a connection error instead of
+    the plain "not running yet" the flow says today. Flip this test in
+    the same commit that flips the constant."""
+    assert state.DEFAULT_SERVICE_URL is None

@@ -42,7 +42,7 @@ from netbbs.link.onboarding import resolve_link_enabled, set_configured_link_ena
 from netbbs.link.reliable_nodes import run_scheduled_reliable_nodes_refresh
 from netbbs.link.store import load_link_node
 from netbbs.link.trust import maintain_trust_state
-from netbbs.managed_dns.state import set_node_fingerprint
+from netbbs.managed_dns.state import set_node_fingerprint, set_service_url
 from netbbs.net.daybreak import run_daybreak_announcer
 from netbbs.net.login_flow import handle_session, handle_ssh_session
 from netbbs.net.maintenance import MaintenanceMode
@@ -876,6 +876,17 @@ async def run(
         # direct-db reasoning load_link_node's own read just below
         # already documents for this exact point in startup.
         set_node_fingerprint(db, node_identity.fingerprint)
+
+        # Issue #583: the one path by which an operator's own
+        # `[managed_dns] service_url` reaches the database
+        # `netbbs.managed_dns.state`, `netbbs.managed_dns.updater` and
+        # the SysOp screens all read. Written unconditionally, `None`
+        # included: a node whose operator *removes* the setting must
+        # fall back to the shipped `DEFAULT_SERVICE_URL` on this
+        # startup, not stay pinned to an address it was told about
+        # once. Nothing else in the package writes that key, so this
+        # cannot clobber a choice made anywhere else.
+        set_service_url(db, config.managed_dns.service_url)
 
         # Design doc §16, issue #219: `config.link.enabled` is tri-state
         # until here. An explicit TOML/CLI value wins; a silent config

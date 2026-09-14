@@ -125,7 +125,39 @@ systemd/rc.d supervision the same way the netbbs.org website's own
 deployment is supervised -- this service has no built-in restart-on-
 crash behavior of its own.
 
-## 6. Verify end to end
+## 6. Point nodes at it
+
+A running instance is not reachable by anybody until nodes know its
+address. There are exactly two ways one gets there, and neither is a
+thing a SysOp is ever asked to type (design doc §16 Decision 8, issue
+#583):
+
+**The shipped address, for every ordinary node.** Set
+`DEFAULT_SERVICE_URL` in `src/netbbs/managed_dns/state.py` to this
+instance's public base URL -- the reverse proxy's `https://` address,
+not the `MANAGED_DNS_HOST`/`MANAGED_DNS_PORT` bind -- and release. It is
+`None` until then, which is why a node today records the SysOp's opt-in
+and says the service is not running yet. `tests/test_managed_dns_state.
+py` has a test asserting it is still `None`; flip that test in the same
+commit.
+
+**`[managed_dns] service_url` in a node's `netbbs.toml`**, or
+`--managed-dns-service-url` on its command line, for a node that should
+talk to a *different* instance -- a developer running this service
+locally, or a staging deployment:
+
+```toml
+[managed_dns]
+service_url = "https://dns.example.org"
+```
+
+The value is a base URL with no trailing slash, no query and no
+fragment; `/register`, `/heartbeat` and the rest are appended to it. It
+is read into the node's database at startup, so a node has to be
+restarted after the setting changes, and *removing* the setting returns
+that node to the shipped address on its next start.
+
+## 7. Verify end to end
 
 Before pointing real SysOps at this instance:
 

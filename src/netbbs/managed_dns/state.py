@@ -63,6 +63,21 @@ PREVIOUS_STATUS_CONFIG_KEY = "managed_dns_previous_status"
 PUBLISHED_CONFIG_KEY = "managed_dns_published"
 PREVIOUS_PUBLISHED_CONFIG_KEY = "managed_dns_previous_published"
 
+# The address of the project's own `services.managed_dns` instance, as
+# shipped -- what a node reaches when its operator configures nothing,
+# which is every ordinary node (design doc §16 Decision 8). `None` while
+# that backend is not standing anywhere: a node then simply has no
+# service to talk to, which `netbbs.net.managed_dns_flow` now says
+# plainly instead of telling the SysOp to go ask an operator who is
+# themselves (issue #583).
+#
+# Deploying the backend is an operational step
+# (`services/managed_dns/README.md`); the code change that follows it is
+# this one line. Same shape, and the same reason, as `netbbs.link.
+# reliable_nodes.RELIABLE_NODES_URL`: a project-run service a node must
+# not need to be told about to use.
+DEFAULT_SERVICE_URL: str | None = None
+
 
 def _set_config_values(db: Database, values: tuple[tuple[str, str], ...]) -> None:
     """Commit a related set of node-config values as one transaction."""
@@ -181,18 +196,32 @@ def set_node_fingerprint(db: Database, fingerprint: str) -> None:
 
 def get_service_url(db: Database) -> str | None:
     """The managed-DNS service's own base URL (e.g.
-    `"https://managed.netbbs.org"`) -- `None` until an operator
-    configures it. Deliberately not a hardcoded default: this project
-    runs one instance of `services.managed_dns`, but its real production
-    address is an operational decision independent of this client code,
-    the same "which DNS provider... is implementation-time detail, not
-    blocking" reasoning design doc §16 already applies to the DNS
-    provider choice itself. `set_service_url` stores `None` as `""`
-    (same "empty string means None" convention as `set_registered_
-    name`), so this translates it back rather than ever returning an
-    empty string a caller never actually set."""
+    `"https://managed.netbbs.org"`) -- this node's `[managed_dns]
+    service_url` if its operator set one, otherwise the shipped
+    `DEFAULT_SERVICE_URL`, and `None` only when neither exists.
+
+    This used to be database-only and documented as deliberately having
+    no default, on the reasoning that the production address is an
+    operational decision independent of this client code. That reasoning
+    held; what was missing is that nothing ever carried the operational
+    decision *in*. `set_service_url` had no caller outside the tests, so
+    every node that accepted the opt-in (the pre-set answer, design doc
+    §16 Decision 7) dead-ended at registration with no way forward from
+    any surface a SysOp or operator has -- issue #583. Both halves are
+    answered now: a shipped default for the project's own instance, and
+    `netbbs.net.nodeconfig`'s `[managed_dns] service_url` (mirrored here
+    at startup by `netbbs.__main__.run`) for anyone pointing a node at a
+    different one.
+
+    `set_service_url` stores `None` as `""` (same "empty string means
+    None" convention as `set_registered_name`), so this translates it
+    back rather than ever returning an empty string a caller never
+    actually set -- and, because a cleared config key is indistinguishable
+    from an absent one here, removing `service_url` from a node's
+    configuration correctly falls back to the shipped default on the
+    next startup rather than stranding the node on a stale override."""
     value = get_config(db, SERVICE_URL_CONFIG_KEY)
-    return value or None
+    return value or DEFAULT_SERVICE_URL
 
 
 def set_service_url(db: Database, url: str | None) -> None:
