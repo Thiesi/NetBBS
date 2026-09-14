@@ -181,6 +181,7 @@ from netbbs.rendering import (
     CHANNEL_TYPE_COLOR,
     GATE_COLOR,
     HEADER_COLOR,
+    LABEL_COLOR,
     MENU_KEY_COLOR,
     MUTED_COLOR,
     RULE_COLOR,
@@ -191,6 +192,7 @@ from netbbs.rendering import (
     STATUS_BAR_BACKGROUND,
     SUCCESS_COLOR,
     TOPIC_COLOR,
+    VALUE_COLOR,
     badge,
     clear_line,
     clear_screen,
@@ -1700,6 +1702,16 @@ class _EnterDirectChat:
     target: User
 
 
+@dataclass(frozen=True)
+class _ShowHelp:
+    """Render a prepared help result from ``send_loop`` outside its lock."""
+
+    entries: tuple[tuple[str, str], ...]
+    accent_color: int
+    header_color: int
+    message: str | None = None
+
+
 # What a command handler returns after running: `None` means "continue
 # the chat loop as normal." A `ChatAction` means "something about the
 # loop itself needs to change" — propagated all the way up through
@@ -1712,7 +1724,7 @@ class _EnterDirectChat:
 # "keep going": the same "explicit return contract, not exceptions"
 # reasoning already established, just with more to say than a
 # single bit could carry.
-ChatAction = _Quit | _ToPicker | _SwitchTo | _EnterPrivate | _ExitPrivate | _EnterDirectChat
+ChatAction = _Quit | _ToPicker | _SwitchTo | _EnterPrivate | _ExitPrivate | _EnterDirectChat | _ShowHelp
 CommandHandler = Callable[[ChatCommandContext, str], Awaitable[ChatAction | None]]
 
 
@@ -2061,7 +2073,242 @@ async def _handle_dm(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     return _EnterDirectChat(target)
 
 
-async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
+def _help_syntax_parts(syntax: str) -> tuple[str, str]:
+    """Split a help-table syntax into the command and its arguments."""
+    command, separator, parameters = syntax.partition(" ")
+    return command, f"{separator}{parameters}" if separator else ""
+
+
+def _help_column_width(entries: Sequence[tuple[str, str]], width: int) -> int:
+    """Choose a useful command column without starving the description."""
+    widest = max((visible_width(syntax) for syntax, _description in entries), default=7)
+    description_floor = 12
+    available = max(1, width - 2 - description_floor)
+    preferred = max(14, width // 2 - 2)
+    return max(1, min(widest, 32, preferred, available))
+
+
+def _styled_help_syntax(
+    fragment: str, command: str, *, first: bool, accent_color: int = ACCENT_COLOR,
+) -> str:
+    if first and fragment.startswith(command):
+        parameters = fragment[len(command):]
+        return colored(command, fg_color=accent_color, bold=True) + (
+            colored(parameters, fg_color=LABEL_COLOR) if parameters else ""
+        )
+    return colored(fragment, fg_color=LABEL_COLOR)
+
+
+def _wrap_help_syntax(syntax: str, width: int) -> list[str]:
+    """Wrap command syntax at spaces and alternative separators before words."""
+    tokens: list[tuple[str, bool]] = []
+    for word_index, word in enumerate(syntax.split()):
+        start = 0
+        first_segment = True
+        for index, char in enumerate(word):
+            if char != "|":
+                continue
+            tokens.append((word[start:index + 1], word_index > 0 and first_segment))
+            start = index + 1
+            first_segment = False
+        if start < len(word):
+            tokens.append((word[start:], word_index > 0 and first_segment))
+
+    lines: list[str] = []
+    current = ""
+    for token, separated in tokens:
+        separator = " " if separated and current else ""
+        candidate = f"{current}{separator}{token}"
+        if visible_width(candidate) <= width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        if visible_width(token) <= width:
+            current = token
+            continue
+        pieces = wrap_to_width(token, width)
+        lines.extend(pieces[:-1])
+        current = pieces[-1]
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _render_help_entry(
+    syntax: str, description: str, *, width: int, syntax_width: int,
+    accent_color: int = ACCENT_COLOR, highlight_command: bool = True,
+) -> list[str]:
+    """Render one command as aligned, independently colored table rows."""
+    command, _parameters = _help_syntax_parts(syntax)
+    syntax_lines = _wrap_help_syntax(syntax, syntax_width)
+    description_width = max(1, width - syntax_width - 2)
+    description_lines = wrap_to_width(description, description_width)
+    row_count = max(len(syntax_lines), len(description_lines), 1)
+    rows: list[str] = []
+    for index in range(row_count):
+        syntax_line = syntax_lines[index] if index < len(syntax_lines) else ""
+        description_line = description_lines[index] if index < len(description_lines) else ""
+        left = (
+            _styled_help_syntax(
+                syntax_line, command,
+                first=highlight_command and index == 0,
+                accent_color=accent_color,
+            )
+            if syntax_line else ""
+        )
+        padding = " " * (syntax_width - visible_width(syntax_line))
+        right = colored(description_line, fg_color=VALUE_COLOR) if description_line else ""
+        rows.append(f"{left}{padding}  {right}".rstrip())
+    return rows
+
+
+@dataclass(frozen=True)
+class _HelpEntryState:
+    syntax: str
+    description: str
+    highlight_command: bool = True
+
+
+def _take_help_page(
+    states: Sequence[_HelpEntryState], *, width: int, syntax_width: int,
+    capacity: int, accent_color: int,
+) -> tuple[list[str], list[_HelpEntryState]]:
+    """Render one page and retain reflowable source text for the next one."""
+    page: list[str] = []
+    remaining = list(states)
+    while remaining:
+        state = remaining[0]
+        syntax_lines = _wrap_help_syntax(state.syntax, syntax_width)
+        description_width = max(1, width - syntax_width - 2)
+        description_lines = wrap_to_width(state.description, description_width)
+        block = _render_help_entry(
+            state.syntax,
+            state.description,
+            width=width,
+            syntax_width=syntax_width,
+            accent_color=accent_color,
+            highlight_command=state.highlight_command,
+        )
+        room = capacity - len(page)
+        if page and len(block) > room:
+            break
+        if len(block) <= room:
+            page.extend(block)
+            remaining.pop(0)
+            continue
+
+        # Even a one-row viewport must make progress. Keep the undisplayed
+        # source fragments so a resize before the next page can reflow them.
+        page.extend(block[:room])
+        remaining_syntax = " ".join(syntax_lines[room:])
+        remaining_description = " ".join(description_lines[room:])
+        remaining[0] = _HelpEntryState(
+            remaining_syntax,
+            remaining_description,
+            highlight_command=False,
+        )
+        if not remaining_syntax and not remaining_description:
+            remaining.pop(0)
+        break
+    return page, remaining
+
+
+def _help_page_count(
+    states: Sequence[_HelpEntryState], *, width: int, syntax_width: int,
+    capacity: int, accent_color: int,
+) -> int:
+    count = 0
+    remaining = list(states)
+    while remaining:
+        _page, next_remaining = _take_help_page(
+            remaining,
+            width=width,
+            syntax_width=syntax_width,
+            capacity=capacity,
+            accent_color=accent_color,
+        )
+        count += 1
+        remaining = next_remaining
+    return count
+
+
+_HelpPageWriter = Callable[[Sequence[str], int, int, bool], Awaitable[bool]]
+
+
+async def _show_help_pages(
+    session: Session,
+    entries: Sequence[tuple[str, str]],
+    *,
+    pinned_ui_enabled: bool | Callable[[int], bool],
+    accent_color: int = ACCENT_COLOR,
+    header_color: int = HEADER_COLOR,
+    page_writer: _HelpPageWriter | None = None,
+    message: str | None = None,
+) -> None:
+    async def write_direct(
+        lines: Sequence[str], _width: int, _height: int, _pinned: bool,
+    ) -> bool:
+        for line in lines:
+            await session.write_line(line)
+        return True
+
+    write_page = page_writer or write_direct
+    remaining = [_HelpEntryState(syntax, description) for syntax, description in entries]
+    page_number = 1
+    while remaining or message is not None:
+        width = max(1, getattr(session, "terminal_width", 80))
+        height = max(1, getattr(session, "terminal_height", 24))
+        pinned = pinned_ui_enabled(height) if callable(pinned_ui_enabled) else pinned_ui_enabled
+
+        if message is not None:
+            if await write_page((message,), width, height, pinned):
+                return
+            continue
+
+        current_entries = [(state.syntax, state.description) for state in remaining]
+        syntax_width = _help_column_width(current_entries, width)
+        # Three heading rows and an optional continuation prompt are written
+        # into the scroll region. Keep one further row unused because the
+        # final write_line CRLF advances the cursor and can scroll the title.
+        scroll_height = max(1, height - (_PINNED_ROWS if pinned else 0))
+        content_height = max(1, scroll_height - 5)
+        page, next_remaining = _take_help_page(
+            remaining,
+            width=width,
+            syntax_width=syntax_width,
+            capacity=content_height,
+            accent_color=accent_color,
+        )
+        projected_count = page_number - 1 + _help_page_count(
+            remaining,
+            width=width,
+            syntax_width=syntax_width,
+            capacity=content_height,
+            accent_color=accent_color,
+        )
+        suffix = f" (page {page_number} of {projected_count})" if projected_count > 1 else ""
+        lines = [
+            colored(f"Chat commands{suffix}", fg_color=header_color, bold=True),
+            colored("COMMAND".ljust(syntax_width), fg_color=header_color, bold=True)
+            + "  "
+            + colored("DESCRIPTION", fg_color=header_color, bold=True),
+            colored("-" * width, fg_color=RULE_COLOR),
+            *page,
+        ]
+        if next_remaining:
+            lines.append(
+                colored(f"More -- press any key [{page_number}/{projected_count}]", fg_color=MUTED_COLOR)
+            )
+        if not await write_page(lines, width, height, pinned):
+            continue
+        remaining = next_remaining
+        if remaining:
+            await session.read_any_key(echo=False)
+            page_number += 1
+
+
+async def _handle_help(ctx: ChatCommandContext, args: str) -> ChatAction:
     """
     `/help` (no args, design doc): lists every command visible
     to the caller — reuses the exact same `_COMMAND_VISIBILITY`
@@ -2080,49 +2327,35 @@ async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
     shouldn't be nudged toward.
     """
     target = args.strip().lstrip("/").lower()
+
+    def _theme(db: Database) -> tuple[int, int]:
+        return effective_accent_color_256(db), effective_header_color_256(db)
+
     if target:
+        accent_color, header_color = await ctx.lane.run(_theme)
         info = _COMMAND_INFO.get(target)
         if info is None:
-            await ctx.session.write_line(
-                colored(f"Unknown command: /{sanitize_text(target)}", fg_color=MUTED_COLOR)
+            return _ShowHelp(
+                (), accent_color, header_color,
+                message=colored(f"Unknown command: /{sanitize_text(target)}", fg_color=MUTED_COLOR),
             )
-            return
-        syntax, description = info
-        await ctx.session.write_line(colored(syntax, fg_color=MUTED_COLOR, bold=True))
-        await ctx.session.write_line(description)
-        return
+        return _ShowHelp((info,), accent_color, header_color)
 
-    def _visible_names(db: Database) -> list[str]:
-        return sorted(
+    def _visible_help(db: Database) -> tuple[tuple[tuple[str, str], ...], int, int]:
+        visible_names = sorted(
             name
             for name in _COMMANDS
             if name in _COMMAND_INFO
             and (_COMMAND_VISIBILITY.get(name) is None or _COMMAND_VISIBILITY[name](db, ctx.channel, ctx.user))
         )
+        return (
+            tuple(_COMMAND_INFO[name] for name in visible_names),
+            effective_accent_color_256(db),
+            effective_header_color_256(db),
+        )
 
-    await ctx.session.write_line(colored("Available commands:", fg_color=MUTED_COLOR, bold=True))
-    visible_names = await ctx.lane.run(_visible_names)
-    width = getattr(ctx.session, "terminal_width", 80)
-    for name in visible_names:
-        syntax, description = _COMMAND_INFO[name]
-        # Dogfood report: with ~29 commands, several `syntax - description`
-        # lines run past an 80-column terminal and wrap raggedly client-
-        # side. Word-wrap the plain composite text ourselves instead --
-        # `wrap_to_width` isn't ANSI-safe (`netbbs.net.help_overlay`'s own
-        # documented constraint), so wrapping happens on the plain string
-        # first, and only the syntax prefix on the first physical line (the
-        # one case guaranteed to still start with it) gets colored back in.
-        plain = f"{syntax} - {description}"
-        if visible_width(plain) <= width:
-            await ctx.session.write_line(f"{colored(syntax, fg_color=MUTED_COLOR, bold=True)} - {description}")
-            continue
-        for i, wrapped in enumerate(wrap_to_width(plain, width)):
-            if i == 0 and wrapped.startswith(syntax):
-                await ctx.session.write_line(
-                    colored(syntax, fg_color=MUTED_COLOR, bold=True) + wrapped[len(syntax):]
-                )
-            else:
-                await ctx.session.write_line(wrapped)
+    entries, accent_color, header_color = await ctx.lane.run(_visible_help)
+    return _ShowHelp(entries, accent_color, header_color)
 
 
 async def _dispatch_command(ctx: ChatCommandContext, line: str) -> ChatAction | None:
@@ -4524,6 +4757,46 @@ async def _chat_loop(
             # to the channel.
             private_target: User | RemotePrivateTarget | None = None
 
+            def command_context(*, pinned: bool) -> ChatCommandContext:
+                return ChatCommandContext(
+                    session=session,
+                    lane=lane,
+                    hub=hub,
+                    presence=presence,
+                    mailbox=mailbox,
+                    channel=channel,
+                    user=user,
+                    participant_id=participant_id,
+                    pinned_ui_enabled=pinned,
+                    session_registry=session_registry,
+                    direct_invites=direct_invites,
+                    realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
+                    link_context=link_context,
+                    mrc_bridge=mrc_bridge,
+                    mrc_session_state=mrc_session_state,
+                )
+
+            async def write_help_page(
+                lines: Sequence[str], expected_width: int, expected_height: int,
+                expected_pinned: bool,
+            ) -> bool:
+                """Write one complete page atomically, retrying after a resize."""
+                async with lock:
+                    pinned_height = await pinned_ui.sync(
+                        session, lane, hub, presence, channel, user, live_buffer
+                    )
+                    if (
+                        session.terminal_width != expected_width
+                        or session.terminal_height != expected_height
+                        or (pinned_height is not None) != expected_pinned
+                    ):
+                        return False
+                    if pinned_height is not None:
+                        await _enter_content_region(session, pinned_height)
+                    for help_line in lines:
+                        await session.write_line(help_line)
+                    return True
+
             async def list_candidates(candidates: Sequence[str], line_text: str, cursor: int) -> None:
                 await _print_candidates_and_redraw_input(
                     session, live_buffer, session.terminal_height, candidates, line_text, cursor,
@@ -4537,6 +4810,57 @@ async def _chat_loop(
                     list_candidates=list_candidates if pinned_ui.active else None,
                 )
                 line = raw_line.strip()
+
+                # Help is modal because it reads page-turn keys. Prepare its
+                # result through ordinary command dispatch, then render each
+                # page outside the shared chat lock. The page writer above
+                # reacquires the lock only for one atomic screenful, leaving
+                # receive_loop free to deliver and act on a priority kick
+                # while this task waits indefinitely for the next key.
+                command_word = line[1:].partition(" ")[0].lower() if line.startswith("/") else ""
+                if command_word in {"help", "?"}:
+                    try:
+                        async with lock:
+                            pinned_height = await pinned_ui.sync(
+                                session, lane, hub, presence, channel, user, live_buffer
+                            )
+                            if pinned_height is not None:
+                                await _enter_content_region(session, pinned_height)
+                            if not await lane.run(account_still_active, user):
+                                await session.write_line(
+                                    colored(
+                                        "\r\nYour account is no longer active. Disconnecting.",
+                                        fg_color=MUTED_COLOR,
+                                    )
+                                )
+                                return _Quit()
+
+                        action = await _dispatch_command(
+                            command_context(pinned=pinned_ui.active), line
+                        )
+                        if not isinstance(action, _ShowHelp):
+                            raise RuntimeError("help handler returned an invalid chat action")
+                        await _show_help_pages(
+                            session,
+                            action.entries,
+                            pinned_ui_enabled=lambda height: height >= _PINNED_UI_MIN_HEIGHT,
+                            accent_color=action.accent_color,
+                            header_color=action.header_color,
+                            page_writer=write_help_page,
+                            message=action.message,
+                        )
+                    finally:
+                        async with lock:
+                            pinned_height = await pinned_ui.sync(
+                                session, lane, hub, presence, channel, user, live_buffer
+                            )
+                            if pinned_height is not None:
+                                await _repaint_input_row(
+                                    session, live_buffer, pinned_height,
+                                    accent_color=pinned_ui.accent_color,
+                                    unicode_style=pinned_ui.unicode_style,
+                                )
+                    continue
 
                 # Everything from here to the next read_line() call is one
                 # atomic critical section under `lock` (design doc)
@@ -4600,23 +4924,7 @@ async def _chat_loop(
                             ))
                             continue
                         if line.startswith("/"):
-                            ctx = ChatCommandContext(
-                                session=session,
-                                lane=lane,
-                                hub=hub,
-                                presence=presence,
-                                mailbox=mailbox,
-                                channel=channel,
-                                user=user,
-                                participant_id=participant_id,
-                                pinned_ui_enabled=pinned_ui_enabled,
-                                session_registry=session_registry,
-                                direct_invites=direct_invites,
-                                realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
-                                link_context=link_context,
-                                mrc_bridge=mrc_bridge,
-                                mrc_session_state=mrc_session_state,
-                            )
+                            ctx = command_context(pinned=pinned_height is not None)
                             action = await _dispatch_command(ctx, line)
                             if isinstance(action, _EnterPrivate):
                                 private_target = action.target
