@@ -259,8 +259,19 @@ def test_touching_last_login_refuses_a_row_that_is_not_that_account(tmp_path):
     db, guest, sysop = _db(tmp_path)
     delete_user(db, guest, deleted_by=sysop)
     replacement = create_user(db, "someone-else", password="hunter2", user_level=1)
-    db.connection.execute("UPDATE users SET id = ? WHERE id = ?", (guest.id, replacement.id))
+    # The replacement's `created_at` is set explicitly, not left to the
+    # clock. `touch_last_login` tells the accounts apart by `id` *and*
+    # `created_at`, and `utc_now_iso()` on Windows can hand both accounts
+    # the same string when they are created in the same tick -- which
+    # made this test fail only when the two `create_user` calls happened
+    # to land together, and pass when run alone. A stranger holding the
+    # id is what this is about; whether the clock resolved them is not.
+    db.connection.execute(
+        "UPDATE users SET id = ?, created_at = ? WHERE id = ?",
+        (guest.id, "2026-01-01T00:00:00.000000Z", replacement.id),
+    )
     db.connection.commit()
+    assert guest.created_at != "2026-01-01T00:00:00.000000Z"
 
     assert touch_last_login(db, guest) is None
     landed = db.connection.execute(
