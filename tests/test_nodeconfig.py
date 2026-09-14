@@ -1110,12 +1110,18 @@ def test_a_managed_dns_service_url_may_not_embed_credentials():
         "https://user:hunter2@dns.example.org:abc",
         "https://user:hunter2@dns.example.org?a=1",
         "http://user:hunter2@dns.example.org",
+        # Mistyped, so the userinfo lands in what `urlsplit` calls the
+        # path rather than the authority. The guard is a bare "contains
+        # @" precisely so spellings like this cannot slip past it.
+        "https:////user:hunter2@dns.example.org",
+        "https://dns.example.org/x@y",
     ):
         with pytest.raises(ConfigError) as caught:
             config(bad).validate()
-        assert "username or password" in str(caught.value)
+        assert "'@'" in str(caught.value)
         assert "hunter2" not in str(caught.value)
         assert bad not in str(caught.value)
 
-    # An `@` in the path is not userinfo and is nobody's password.
-    config("https://dns.example.org/tenant@a").validate()
+    # The escape hatch the message names, for the path segment the rule
+    # costs.
+    config("https://dns.example.org/tenant%40a").validate()

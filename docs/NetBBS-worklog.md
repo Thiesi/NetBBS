@@ -3612,7 +3612,7 @@ HTTP, never imports it.
   15-minute pass), release/rename/cancellation refuse, and registration
   starts over rather than reclaiming. It compares canonicalised URLs, so
   an equivalent spelling is not a change. The setting is https-only away
-  from loopback and refuses embedded userinfo, because the credential
+  from loopback and refuses `@` outright, because the credential
   rides every request and the address reaches the database, the log and
   SysOp-facing messages; a loopback address is dialed with
   `trust_env=False` so that exception holds on a proxied host as well.

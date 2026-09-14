@@ -462,25 +462,28 @@ class NodeConfig:
                 _validate_base_url(transport.public_url, f"{name}.public_url")
 
         if self.managed_dns.service_url is not None:
-            # Asked first, and without parsing: every other message in
-            # this validator names the value it rejected, and this is the
-            # one setting whose value may carry a password -- a URL that
-            # is *also* malformed some other way would otherwise be
-            # refused by the shared validator, password and all, before
-            # reaching a guard that promises not to echo it (Codex review
-            # of PR #587). A textual look at the authority catches it
-            # whether or not the rest of the URL parses at all.
-            _, _, after_scheme = self.managed_dns.service_url.partition("//")
-            if "@" in after_scheme.split("/", 1)[0]:
-                # The node copies this address into its database and
-                # prints it in log lines and SysOp-facing diagnostics, so
-                # an embedded password would leak wherever those go.
-                # Deliberately the one message here that does not echo
-                # the value it rejected.
+            # Asked first, before anything that could quote the value
+            # back: the node copies this address into its database and
+            # prints it in log lines and SysOp-facing diagnostics, so an
+            # embedded password would leak wherever those go, and every
+            # other message in this validator deliberately names what it
+            # rejected (Codex review of PR #587).
+            #
+            # A bare "does it contain @ at all", not a look at the
+            # authority specifically. Two rounds of that review found
+            # the same promise broken by a spelling the parse did not
+            # see the way a person would -- `https:////user:pw@host`
+            # puts the userinfo in what `urlsplit` calls the path -- and
+            # the way to stop rediscovering those one at a time is a
+            # rule with nothing to slip past. The cost is a path segment
+            # containing a literal `@`, which no address of this one
+            # service plausibly needs and which `%40` expresses anyway.
+            if "@" in self.managed_dns.service_url:
                 raise ConfigError(
-                    "managed_dns.service_url must not embed a username or password -- this node "
-                    "records the address in its database and prints it in logs; put credentials "
-                    "in the service's own reverse proxy instead"
+                    "managed_dns.service_url must not contain '@' -- this node records the "
+                    "address in its database and prints it in logs, so a URL that embeds a "
+                    "username or password would leak it there. Put credentials in the "
+                    "service's own reverse proxy; write a literal '@' in a path as %40"
                 )
             _validate_base_url(self.managed_dns.service_url, "managed_dns.service_url")
             # Unlike `public_url`, which names a listener callers reach

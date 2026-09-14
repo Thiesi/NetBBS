@@ -164,9 +164,12 @@ is the development case, and is why the exception exists -- a node dials
 a loopback service address directly, ignoring `HTTP_PROXY`, so the
 "nothing leaves the machine" premise holds on a proxied host too.
 
-It may not embed a username or password: the node records the address in
-its database and prints it in logs and SysOp-facing messages. Put any
-access control in the service's own reverse proxy.
+It may not contain `@` at all: the node records the address in its
+database and prints it in logs and SysOp-facing messages, so a URL
+embedding a username or password would leak it there, and a rule with
+nothing to slip past beats one that has to recognise every spelling. Put
+any access control in the service's own reverse proxy; a literal `@` in
+a path is `%40`.
 
 A node that already holds a registration and is then pointed somewhere
 else does **not** carry its credential across. The address that issued
