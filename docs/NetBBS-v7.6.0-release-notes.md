@@ -27,8 +27,9 @@ them, and their topics, including rooms whose topic is empty.
   rather than going stale.
 - Background discovery runs on the shared refresh limit, so it never
   spends a caller's interactive message allowance; an explicit `/rooms`
-  still costs a normal command. Two callers asking at once reuse the one
-  pending reply instead of extending its expiry.
+  still costs a normal command. Asking twice while a reply is pending
+  reuses that reply rather than extending its expiry — per caller: two
+  different callers still send a request each.
 - Changing hub settings clears both discovery caches and reloads what
   the node retained locally, so a retained room shows the topic it has
   now — including a topic that was cleared — rather than an older
@@ -64,8 +65,14 @@ terminal. It is now paginated inside the live chat viewport, reserving
 the pinned chat rows rather than drawing over them, with syntax and
 description in separate columns and command names, parameters,
 descriptions, headings and rules each coloured distinctly. Long syntax
-wraps at a separator that means something. Permission-aware help is
-unchanged: you still see only what you can use.
+wraps at a separator that means something.
+
+Permission-aware help is unchanged, and worth stating precisely: bare
+`/help` lists what you can use, the same predicate Tab completion
+applies. `/help <command>` answers for any command by name, deliberately
+— visibility gating is a suggestion filter, not an authorization check,
+so asking about a command explicitly is not treated as a passive listing
+a non-moderator should be nudged away from.
 
 ## Fields in a column (#528, #529)
 
@@ -74,6 +81,13 @@ screen's sections, so a screen reads as a table rather than as a ragged
 list, and a seeded edit is positioned by the wrapped screen row it is
 actually on — which is what lets a typed field be edited in place instead
 of being re-asked. Scrolling prompts and validation feedback survive it.
+
+**In-place editing follows the caller's own redraw preference.** An
+account created since that preference existed has it on and gets the new
+behaviour. An account that has never touched it — which is every account
+predating it — has it off, keeps the scrolling path, and gets the value
+pre-filled at the prompt instead. It is `[R]` on *Your profile*; the
+alignment work above applies either way.
 
 If you have written tests against these screens, note that `label: value`
 is now `label:` followed by the padding that aligns the column. Assertions
@@ -131,13 +145,22 @@ The landing page is a caller's session; the overview is a SysOp's.
 Replace the wheel and restart. The node database migrates **65 → 66** on
 first start.
 
-**Rolling back to 7.5.0 requires a restore.** This is the manual part:
+**Rolling back to 7.5.0 requires a restore, and a restore costs more
+than the migration did.** This is the manual part, and the important
+sentence is the second one:
+
 `_apply_migrations` refuses a database whose schema is newer than the
 build understands, so a 7.5.0 wheel will not open a database that 7.6.0
-has opened. Take a backup before upgrading, and restore it if you go
-back. The column itself is additive and carries nothing but a colour
-index, so nothing is lost by the restore except MRC sender colours on
-messages received while 7.6.0 was running.
+has opened. There is no down-migration. Going back means restoring the
+backup you took before upgrading — **which rewinds the whole database to
+that moment**. Every post, message, account, permission change and
+configuration change made while 7.6.0 was running is discarded, not just
+the column the migration added. The longer the node ran, the more that
+is.
+
+So: take the backup immediately before upgrading, and decide early. If
+7.6.0 is going to be rolled back, it is far cheaper in the first hour
+than on the third day.
 
 Nothing else changes shape: no Link protocol change, no save-format
 change in either bundled game, no new `node_config` key.
