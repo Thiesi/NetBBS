@@ -24,6 +24,9 @@ from netbbs.managed_dns.credential import (
     save_credential,
 )
 from netbbs.managed_dns.state import (
+    DEFAULT_SERVICE_URL,
+    foreign_credential_service_url,
+    get_credential_service_url,
     OptIn,
     RegistrationStatus,
     get_dynamic,
@@ -43,6 +46,9 @@ from netbbs.managed_dns.state import (
 )
 
 __all__ = [
+    "DEFAULT_SERVICE_URL",
+    "get_credential_service_url",
+    "foreign_credential_service_url",
     "credential_path_for",
     "save_credential",
     "load_credential",

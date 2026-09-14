@@ -3582,7 +3582,7 @@ than compounding the mess.
 
 ### Managed netbbs.org subdomain + dynamic DNS is two independently-deployed components, not one (issue #201)
 
-Design doc §16 locks seven decisions; `services/managed_dns/` (the
+Design doc §16 locks eight decisions; `services/managed_dns/` (the
 project-operated backend, one instance for all of netbbs.org) and
 `src/netbbs/managed_dns/` (the node-side client every opted-in SysOp's
 own BBS runs) are genuinely separate deployables that happen to share
@@ -3593,6 +3593,38 @@ scoping (see the `examples/` entry just below) never packages it into a
 node's own install — a SysOp who opts in talks to the backend over
 HTTP, never imports it.
 
+- **The service address reaches `netbbs.managed_dns.state` only through
+  `netbbs.__main__.run`.** It writes `[managed_dns] service_url` into
+  the node database once per startup *including when that setting is
+  absent*, which is what makes removing it fall back to the shipped
+  `DEFAULT_SERVICE_URL` rather than pin the node to an old override; it
+  is also the only production writer of that key, so it cannot clobber
+  a decision made elsewhere. `DEFAULT_SERVICE_URL` is `None` until the
+  backend is actually deployed, guarded by a test that has to be flipped
+  with it. The lesson: a setter whose only callers are tests is not
+  "configurable", and a domain layer reading a value nothing writes
+  fails at the far end of a user-visible flow instead of at startup.
+- **A managed-DNS credential is bound to the service that issued it.**
+  That address is written in the same transaction as the registration
+  (`set_registration_result_state`), and `foreign_credential_service_url`
+  is the single gate every path that would present the secret asks
+  first: the updater pauses (one log line per actual change, not per
+  15-minute pass), release/rename/cancellation refuse, and registration
+  starts over rather than reclaiming. It compares canonicalised URLs, so
+  an equivalent spelling is not a change. The setting is https-only away
+  from loopback and refuses `@` outright, because the credential
+  rides every request and the address reaches the database, the log and
+  SysOp-facing messages; a loopback address is dialed with
+  `trust_env=False` so that exception holds on a proxied host as well.
+  Canonicalisation uses `urlsplit`, since `urlparse` peels a final-
+  segment path parameter into `params` and those are part of which
+  service an address names, and normalises an IP literal through
+  `ipaddress` so two spellings of one address match. Every
+  credential-bearing request sets `allow_redirects=False`: a followed
+  307/308 resends the body to an address neither the issuer comparison
+  nor the https rule ever checked. The consequence: **moving the service's own
+  address is not transparent** -- nodes already registered with it pause
+  rather than follow it.
 - **The bearer credential is not the node's Ed25519 key, and the server
   never stores it in recoverable form.** `POST /register` mints a
   separate per-registration secret server-side, returns it once, and

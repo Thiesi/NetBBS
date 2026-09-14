@@ -14,7 +14,9 @@ that does *not* belong here is the credential itself -- see
 
 from __future__ import annotations
 
+import ipaddress
 from enum import Enum
+from urllib.parse import urlsplit
 
 from netbbs.config import get_config, set_config
 from netbbs.storage.database import Database
@@ -62,6 +64,22 @@ PREVIOUS_NAME_CONFIG_KEY = "managed_dns_previous_name"
 PREVIOUS_STATUS_CONFIG_KEY = "managed_dns_previous_status"
 PUBLISHED_CONFIG_KEY = "managed_dns_published"
 PREVIOUS_PUBLISHED_CONFIG_KEY = "managed_dns_previous_published"
+CREDENTIAL_SERVICE_URL_CONFIG_KEY = "managed_dns_credential_service_url"
+
+# The address of the project's own `services.managed_dns` instance, as
+# shipped -- what a node reaches when its operator configures nothing,
+# which is every ordinary node (design doc §16 Decision 8). `None` while
+# that backend is not standing anywhere: a node then simply has no
+# service to talk to, which `netbbs.net.managed_dns_flow` now says
+# plainly instead of telling the SysOp to go ask an operator who is
+# themselves (issue #583).
+#
+# Deploying the backend is an operational step
+# (`services/managed_dns/README.md`); the code change that follows it is
+# this one line. Same shape, and the same reason, as `netbbs.link.
+# reliable_nodes.RELIABLE_NODES_URL`: a project-run service a node must
+# not need to be told about to use.
+DEFAULT_SERVICE_URL: str | None = None
 
 
 def _set_config_values(db: Database, values: tuple[tuple[str, str], ...]) -> None:
@@ -92,10 +110,16 @@ def set_pending_rename_state(
 
 
 def set_registration_result_state(
-    db: Database, *, name: str, status: RegistrationStatus, dynamic: bool,
+    db: Database, *, name: str, status: RegistrationStatus, dynamic: bool, service_url: str,
 ) -> None:
-    """Commit an interactive registration result as one conservative view."""
+    """Commit an interactive registration result as one conservative view.
+
+    `service_url` is the address that issued the credential this result
+    came with, recorded in the same transaction as the registration it
+    belongs to so the two can never disagree -- see
+    `foreign_credential_service_url`."""
     _set_config_values(db, (
+        (CREDENTIAL_SERVICE_URL_CONFIG_KEY, service_url),
         (NAME_CONFIG_KEY, name),
         (STATUS_CONFIG_KEY, status.value),
         # Registration/reclaim never proves provider publication. A later
@@ -181,22 +205,118 @@ def set_node_fingerprint(db: Database, fingerprint: str) -> None:
 
 def get_service_url(db: Database) -> str | None:
     """The managed-DNS service's own base URL (e.g.
-    `"https://managed.netbbs.org"`) -- `None` until an operator
-    configures it. Deliberately not a hardcoded default: this project
-    runs one instance of `services.managed_dns`, but its real production
-    address is an operational decision independent of this client code,
-    the same "which DNS provider... is implementation-time detail, not
-    blocking" reasoning design doc §16 already applies to the DNS
-    provider choice itself. `set_service_url` stores `None` as `""`
-    (same "empty string means None" convention as `set_registered_
-    name`), so this translates it back rather than ever returning an
-    empty string a caller never actually set."""
+    `"https://managed.netbbs.org"`) -- this node's `[managed_dns]
+    service_url` if its operator set one, otherwise the shipped
+    `DEFAULT_SERVICE_URL`, and `None` only when neither exists.
+
+    This used to be database-only and documented as deliberately having
+    no default, on the reasoning that the production address is an
+    operational decision independent of this client code. That reasoning
+    held; what was missing is that nothing ever carried the operational
+    decision *in*. `set_service_url` had no caller outside the tests, so
+    every node that accepted the opt-in (the pre-set answer, design doc
+    §16 Decision 7) dead-ended at registration with no way forward from
+    any surface a SysOp or operator has -- issue #583. Both halves are
+    answered now: a shipped default for the project's own instance, and
+    `netbbs.net.nodeconfig`'s `[managed_dns] service_url` (mirrored here
+    at startup by `netbbs.__main__.run`) for anyone pointing a node at a
+    different one.
+
+    `set_service_url` stores `None` as `""` (same "empty string means
+    None" convention as `set_registered_name`), so this translates it
+    back rather than ever returning an empty string a caller never
+    actually set -- and, because a cleared config key is indistinguishable
+    from an absent one here, removing `service_url` from a node's
+    configuration correctly falls back to the shipped default on the
+    next startup rather than stranding the node on a stale override."""
     value = get_config(db, SERVICE_URL_CONFIG_KEY)
-    return value or None
+    return value or DEFAULT_SERVICE_URL
 
 
 def set_service_url(db: Database, url: str | None) -> None:
     set_config(db, SERVICE_URL_CONFIG_KEY, url or "")
+
+
+def get_credential_service_url(db: Database) -> str | None:
+    """The managed-DNS service that issued this node's stored
+    credential, recorded by `set_registration_result_state`. `None` on a
+    node that has never registered."""
+    return get_config(db, CREDENTIAL_SERVICE_URL_CONFIG_KEY) or None
+
+
+def canonical_service_url(url: str) -> str:
+    """`url` reduced to the form two spellings of the same address
+    share, for comparison only -- never for display or for what is
+    actually dialed.
+
+    Codex review of PR #587: the issuer comparison below is the
+    difference between a node heartbeating and a node paused, so
+    `https://DNS.EXAMPLE`, `https://dns.example:443` and
+    `https://dns.example/` must not read as three different services.
+    Scheme and host are lowercased, a default port for the scheme is
+    dropped, and a trailing slash goes; userinfo is dropped because it
+    is refused at config load and is not part of which service this is.
+    An IP literal is normalised through `ipaddress` so two spellings of
+    one address match, and an IPv6 one is re-bracketed afterwards, since
+    the split hands back `hostname` without its brackets.
+
+    `urlsplit`, not `urlparse`: `urlparse` peels a final-segment path
+    parameter off into `params`, so a canonical form built from `path`
+    alone would read `https://dns.example/api;tenant=a` and
+    `.../api;tenant=b` as one service and hand the first one's
+    credential to the second (Codex review of PR #587). Path parameters
+    are deliberately accepted by `netbbs.net.nodeconfig`'s own
+    validation -- that is how a node behind a reverse-proxy subpath is
+    reached -- so they are part of which service this is. `urlsplit`
+    never separates them.
+
+    A string this cannot parse is returned trimmed rather than raised
+    over: this function only ever decides whether two addresses match,
+    and a validated address is the only kind that reaches it."""
+    try:
+        parsed = urlsplit(url)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return url.strip().rstrip("/")
+    try:
+        # `::1` and `0:0:0:0:0:0:0:1` are the same address written two
+        # ways, and this comparison is the difference between a node
+        # heartbeating and a node paused (Codex review of PR #587).
+        # Raises for an ordinary hostname, which is left alone.
+        host = ipaddress.ip_address(host).compressed
+    except ValueError:
+        pass
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None and port != {"http": 80, "https": 443}.get(scheme):
+        host = f"{host}:{port}"
+    return f"{scheme}://{host}{parsed.path.rstrip('/')}"
+
+
+def foreign_credential_service_url(db: Database, base_url: str) -> str | None:
+    """The issuing service's address when this node's stored credential
+    belongs to a *different* managed-DNS service than `base_url` --
+    otherwise `None`.
+
+    A node's managed-DNS credential is a bearer secret: whoever holds it
+    controls that registration, including releasing it (design doc §16
+    Decision 2). Since issue #583 the service address is an operator
+    setting, so it can change under a node that already holds one, and
+    an unguarded heartbeat, rename, release or reclaim would then hand
+    the secret issued by one service straight to another operator's
+    (Codex review of PR #587). Every caller that is about to present the
+    credential asks this first and declines rather than sending it.
+
+    `None` when no credential has ever been issued, so a node that has
+    never registered is never held back by a comparison there is nothing
+    to make.
+    """
+    issuer = get_credential_service_url(db)
+    if issuer is None or canonical_service_url(issuer) == canonical_service_url(base_url):
+        return None
+    return issuer
 
 
 def get_registered_name(db: Database) -> str | None:

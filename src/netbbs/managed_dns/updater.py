@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 import asyncio
 from aiohttp import ClientSession
@@ -40,6 +41,7 @@ from netbbs.managed_dns.state import (
     get_registered_name,
     get_registration_status,
     get_service_url,
+    foreign_credential_service_url,
     set_heartbeat_reconciliation_state,
 )
 from netbbs.storage.database import Database
@@ -90,6 +92,25 @@ async def run_scheduled_managed_dns_updater(
         await sleep(interval_seconds)
 
 
+# Which foreign issuer each node database has already been warned about
+# -- the pass runs every 15 minutes and the condition is an operator
+# setting that will not change on its own, so one line per actual change
+# is the whole of what is worth saying.
+_reported_foreign_credentials: dict[Path, tuple[str, str]] = {}
+
+
+def _report_foreign_credential(db_path: Path, issuer: str, base_url: str) -> None:
+    if _reported_foreign_credentials.get(db_path) == (issuer, base_url):
+        return
+    _reported_foreign_credentials[db_path] = (issuer, base_url)
+    _logger.warning(
+        "managed-DNS updates are paused: this node's registration credential was issued by %s "
+        "but its configured service is %s. Register with the new service, or point the node back "
+        "at %s, from the SysOp console's DNS screen.",
+        issuer, base_url, issuer,
+    )
+
+
 async def _run_managed_dns_update_pass(db: Database) -> None:
     """Heartbeat and reconcile one credential generation under its lock."""
     if get_opt_in(db) is not OptIn.ACCEPTED:
@@ -111,6 +132,16 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
         return
     credential = load_credential(credential_path_for(db.path))
     if credential is None:
+        return
+    issuer = foreign_credential_service_url(db, base_url)
+    if issuer is not None:
+        # This node's credential was issued by a different managed-DNS
+        # service (its address is an operator setting since issue #583).
+        # Heartbeating it here would hand that service's bearer secret to
+        # this one, so the pass stops instead -- the registration at the
+        # issuer is left to lapse on its own, and the SysOp is told what
+        # to do about it the moment they touch the DNS screen.
+        _report_foreign_credential(db.path, issuer, base_url)
         return
     previous_result = None
     previous_inactive = False

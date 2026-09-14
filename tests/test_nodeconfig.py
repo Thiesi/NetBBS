@@ -976,3 +976,152 @@ def test_a_public_url_with_an_unusable_port_is_refused():
             web_config(bad).validate()
 
     web_config("https://bbs.example.org:8443").validate()
+
+
+# -- [managed_dns] (issue #583) ----------------------------------------------
+
+
+def test_the_managed_dns_service_url_is_unset_by_default():
+    """An ordinary node configures nothing here and reaches the
+    project's own instance through `netbbs.managed_dns.state.
+    DEFAULT_SERVICE_URL`."""
+    assert NodeConfig().managed_dns.service_url is None
+
+
+def test_a_managed_dns_service_url_is_read_from_the_config_file(tmp_path):
+    path = tmp_path / "netbbs.toml"
+    path.write_text(
+        '[managed_dns]\nservice_url = "https://dns.example.org"\n', encoding="utf-8"
+    )
+
+    config = load_config(["--config", str(path)])
+
+    assert config.managed_dns.service_url == "https://dns.example.org"
+
+
+def test_surrounding_whitespace_and_a_trailing_slash_are_stripped_at_load(tmp_path):
+    """`netbbs.managed_dns.client` appends `/register` and friends to
+    this value, so a trailing slash would dial `//register`."""
+    path = tmp_path / "netbbs.toml"
+    path.write_text(
+        '[managed_dns]\nservice_url = "  https://dns.example.org/  "\n', encoding="utf-8"
+    )
+
+    config = load_config(["--config", str(path)])
+
+    assert config.managed_dns.service_url == "https://dns.example.org"
+
+
+def test_the_cli_service_url_overrides_the_config_file(tmp_path):
+    path = tmp_path / "netbbs.toml"
+    path.write_text(
+        '[managed_dns]\nservice_url = "https://dns.example.org"\n', encoding="utf-8"
+    )
+
+    config = load_config(
+        ["--config", str(path), "--managed-dns-service-url", "http://127.0.0.1:8099/"]
+    )
+
+    assert config.managed_dns.service_url == "http://127.0.0.1:8099"
+
+
+def test_an_unknown_managed_dns_setting_is_refused(tmp_path):
+    path = tmp_path / "netbbs.toml"
+    path.write_text('[managed_dns]\nservice_ur = "https://dns.example.org"\n', encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="unknown setting"):
+        load_config(["--config", str(path)])
+
+
+def test_a_non_string_managed_dns_service_url_is_refused(tmp_path):
+    path = tmp_path / "netbbs.toml"
+    path.write_text("[managed_dns]\nservice_url = 8080\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="service_url"):
+        load_config(["--config", str(path)])
+
+
+def test_an_unusable_managed_dns_service_url_is_refused():
+    """The same checks `public_url` already carries, now shared: this
+    value is concatenated with a path and dialed, so the same typos
+    break it the same way."""
+    from netbbs.net.nodeconfig import ManagedDnsConfig
+
+    def config(service_url):
+        return NodeConfig(managed_dns=ManagedDnsConfig(service_url=service_url))
+
+    for bad in (
+        "dns.example.org",
+        "ftp://dns.example.org",
+        "https://:8443",
+        "http://[",
+        "https://dns.example.org:99999",
+        "https://dns.example.org?a=1",
+        "https://dns.example.org#x",
+        "https://dns example.org",
+    ):
+        with pytest.raises(ConfigError, match="managed_dns.service_url"):
+            config(bad).validate()
+
+    config("https://dns.example.org").validate()
+    config("https://dns.example.org:8443/managed").validate()
+
+
+def test_a_remote_managed_dns_service_url_must_be_https():
+    """Codex review of PR #587. Unlike `public_url`, this value carries
+    a secret: every registration, heartbeat, rename and release presents
+    the node's managed-DNS bearer credential, and whoever reads it off
+    the wire can release or repoint that node's DNS record."""
+    from netbbs.net.nodeconfig import ManagedDnsConfig
+
+    def config(service_url):
+        return NodeConfig(managed_dns=ManagedDnsConfig(service_url=service_url))
+
+    with pytest.raises(ConfigError, match="https"):
+        config("http://dns.example.org").validate()
+    with pytest.raises(ConfigError, match="https"):
+        # Not a literal loopback address, and `is_loopback_host` is
+        # deliberately conservative about names it cannot resolve.
+        config("http://dns.internal").validate()
+
+    config("https://dns.example.org").validate()
+    # The one honest exception: nothing leaves the machine, and it is how
+    # `services.managed_dns` is developed against.
+    for local in ("http://127.0.0.1:8099", "http://localhost:8099", "http://[::1]:8099"):
+        config(local).validate()
+
+
+def test_a_managed_dns_service_url_may_not_embed_credentials():
+    """Codex review of PR #587. The node copies this address into its
+    database and prints it in log lines and SysOp-facing diagnostics, so
+    an embedded password would leak wherever those go -- and the refusal
+    itself must not echo it back."""
+    from netbbs.net.nodeconfig import ManagedDnsConfig
+
+    def config(service_url):
+        return NodeConfig(managed_dns=ManagedDnsConfig(service_url=service_url))
+
+    for bad in (
+        "https://user:hunter2@dns.example.org",
+        "https://user@dns.example.org",
+        # Also malformed some other way: the userinfo guard has to run
+        # *before* the shared validator, which names what it rejected
+        # (Codex review of PR #587).
+        "https://user:hunter2@dns.example.org:abc",
+        "https://user:hunter2@dns.example.org?a=1",
+        "http://user:hunter2@dns.example.org",
+        # Mistyped, so the userinfo lands in what `urlsplit` calls the
+        # path rather than the authority. The guard is a bare "contains
+        # @" precisely so spellings like this cannot slip past it.
+        "https:////user:hunter2@dns.example.org",
+        "https://dns.example.org/x@y",
+    ):
+        with pytest.raises(ConfigError) as caught:
+            config(bad).validate()
+        assert "'@'" in str(caught.value)
+        assert "hunter2" not in str(caught.value)
+        assert bad not in str(caught.value)
+
+    # The escape hatch the message names, for the path segment the rule
+    # costs.
+    config("https://dns.example.org/tenant%40a").validate()

@@ -272,3 +272,63 @@ def test_rename_and_cancel_round_trip_against_a_real_server(db):
     assert cancelled.previous_name == "oldboard"
     assert cancelled.status == "cancelled"
     assert cancelled.previous_last_known_address is None
+
+
+async def _serve(app) -> tuple[web.AppRunner, int]:
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    return runner, site._server.sockets[0].getsockname()[1]
+
+
+def test_a_redirect_never_carries_the_credential_to_its_target():
+    """Codex review of PR #587. aiohttp follows redirects by default and
+    a 307/308 resends the whole POST body, credential included, to
+    whatever `Location` names -- an address neither the issuer
+    comparison nor the https rule ever saw, since both only ever check
+    `base_url`. It has to surface as an ordinary failure instead."""
+    async def scenario():
+        received = []
+
+        async def target(request):
+            received.append(await request.json())
+            return web.json_response({"name": "myboard", "status": "pending"}, status=201)
+
+        target_app = web.Application()
+        target_app.router.add_post("/register", target)
+        target_app.router.add_post("/release", target)
+        target_runner, target_port = await _serve(target_app)
+
+        async def redirector(_request):
+            raise web.HTTPTemporaryRedirect(
+                location=f"http://127.0.0.1:{target_port}/register"
+            )
+
+        redirect_app = web.Application()
+        redirect_app.router.add_post("/register", redirector)
+        redirect_app.router.add_post("/release", redirector)
+        redirect_runner, redirect_port = await _serve(redirect_app)
+
+        errors = []
+        try:
+            async with aiohttp.ClientSession() as session:
+                base = f"http://127.0.0.1:{redirect_port}"
+                for call in (
+                    lambda: register(
+                        session, base, name="myboard", node_fingerprint="fp-1",
+                        dynamic=True, credential="the-secret",
+                    ),
+                    lambda: release(session, base, credential="the-secret"),
+                ):
+                    with pytest.raises(ManagedDnsError) as caught:
+                        await call()
+                    errors.append(str(caught.value))
+        finally:
+            await redirect_runner.cleanup()
+            await target_runner.cleanup()
+        return received, errors
+
+    received, errors = asyncio.run(scenario())
+    assert received == []  # the secret never left the address it was addressed to
+    assert all("307" in message for message in errors)  # and the hop is visible

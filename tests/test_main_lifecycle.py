@@ -46,9 +46,11 @@ from netbbs.link.transport import (
 )
 from netbbs.link.trust import TrustDimension, TrustState, TrustSubject, set_trust_override
 from netbbs.net.maintenance import MaintenanceMode
-from netbbs.net.nodeconfig import LinkConfig, NodeConfig, ShutdownConfig, TransportConfig
+from netbbs.net.nodeconfig import (
+    LinkConfig, ManagedDnsConfig, NodeConfig, ShutdownConfig, TransportConfig,
+)
 from netbbs.net.session_registry import ActiveSessionRegistry
-from netbbs.managed_dns.state import set_node_fingerprint
+from netbbs.managed_dns.state import get_service_url, set_node_fingerprint
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_telnet import skip_initial_negotiation
@@ -1522,3 +1524,47 @@ def test_explicit_link_disabled_wins_over_accepted_participation(tmp_path, caplo
     with caplog.at_level(logging.INFO, logger="netbbs.__main__"):
         asyncio.run(_run_until_ready_then_shut_down(config))
     assert not _link_listener_started(caplog)
+
+
+# -- the configured managed-DNS service address (issue #583) -----------------
+
+
+def test_run_mirrors_a_configured_managed_dns_service_url_into_the_database(tmp_path):
+    """The only path by which an operator's `[managed_dns] service_url`
+    reaches `netbbs.managed_dns.state`, which every other part of the
+    feature -- the updater, the opt-in continuation, the SysOp console's
+    DNS screen -- reads it from. Before #583 nothing in the installed
+    package wrote that key at all."""
+    config = _config(
+        tmp_path,
+        telnet=TransportConfig(True, "127.0.0.1", 12441),
+        managed_dns=ManagedDnsConfig(service_url="http://127.0.0.1:8099"),
+    )
+
+    asyncio.run(_run_until_ready_then_shut_down(config))
+
+    db = Database(config.db_path)
+    assert get_service_url(db) == "http://127.0.0.1:8099"
+    db.close()
+
+
+def test_run_clears_a_managed_dns_service_url_the_operator_removed(tmp_path):
+    """Written unconditionally, absence included: a node whose operator
+    takes the setting back out returns to the shipped default on the
+    next startup rather than staying pinned to an address it was told
+    about once."""
+    configured = _config(
+        tmp_path,
+        telnet=TransportConfig(True, "127.0.0.1", 12442),
+        managed_dns=ManagedDnsConfig(service_url="http://127.0.0.1:8099"),
+    )
+    asyncio.run(_run_until_ready_then_shut_down(configured))
+
+    plain = _config(tmp_path, seed_sysop=False, telnet=TransportConfig(True, "127.0.0.1", 12442))
+    asyncio.run(_run_until_ready_then_shut_down(plain))
+
+    db = Database(plain.db_path)
+    # DEFAULT_SERVICE_URL is None until the service is deployed, so this
+    # is also "back to nothing configured".
+    assert get_service_url(db) is None
+    db.close()

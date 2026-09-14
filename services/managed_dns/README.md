@@ -125,7 +125,62 @@ systemd/rc.d supervision the same way the netbbs.org website's own
 deployment is supervised -- this service has no built-in restart-on-
 crash behavior of its own.
 
-## 6. Verify end to end
+## 6. Point nodes at it
+
+A running instance is not reachable by anybody until nodes know its
+address. There are exactly two ways one gets there, and neither is a
+thing a SysOp is ever asked to type (design doc §16 Decision 8, issue
+#583):
+
+**The shipped address, for every ordinary node.** Set
+`DEFAULT_SERVICE_URL` in `src/netbbs/managed_dns/state.py` to this
+instance's public base URL -- the reverse proxy's `https://` address,
+not the `MANAGED_DNS_HOST`/`MANAGED_DNS_PORT` bind -- and release. It is
+`None` until then, which is why a node today records the SysOp's opt-in
+and says the service is not running yet. `tests/test_managed_dns_state.
+py` has a test asserting it is still `None`; flip that test in the same
+commit.
+
+**`[managed_dns] service_url` in a node's `netbbs.toml`**, or
+`--managed-dns-service-url` on its command line, for a node that should
+talk to a *different* instance -- a developer running this service
+locally, or a staging deployment:
+
+```toml
+[managed_dns]
+service_url = "https://dns.example.org"
+```
+
+The value is a base URL with no trailing slash, no query and no
+fragment; `/register`, `/heartbeat` and the rest are appended to it. It
+is read into the node's database at startup, so a node has to be
+restarted after the setting changes, and *removing* the setting returns
+that node to the shipped address on its next start.
+
+It must be `https://` unless it names a loopback address: every request
+carries the node's bearer credential, so a plaintext hop to a remote
+host hands that secret to anyone on the path. `http://127.0.0.1:<port>`
+is the development case, and is why the exception exists -- a node dials
+a loopback service address directly, ignoring `HTTP_PROXY`, so the
+"nothing leaves the machine" premise holds on a proxied host too.
+
+It may not contain `@` at all: the node records the address in its
+database and prints it in logs and SysOp-facing messages, so a URL
+embedding a username or password would leak it there, and a rule with
+nothing to slip past beats one that has to recognise every spelling. Put
+any access control in the service's own reverse proxy; a literal `@` in
+a path is `%40`.
+
+A node that already holds a registration and is then pointed somewhere
+else does **not** carry its credential across. The address that issued
+it is recorded alongside the registration; the updater pauses, and
+release, rename and cancellation refuse, until the node is pointed back
+or registers fresh with the new service. That means moving this service
+to a new address is not transparent to nodes already registered with it
+-- they keep the name at the old address until they re-register, and
+their old registrations lapse through the ordinary abandonment sweep.
+
+## 7. Verify end to end
 
 Before pointing real SysOps at this instance:
 

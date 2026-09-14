@@ -103,7 +103,16 @@ def test_offer_opt_in_declining_records_declined_and_asks_nothing_more(tmp_path)
     db.close()
 
 
-def test_offer_opt_in_accepting_with_no_service_url_configured_shows_a_message(tmp_path):
+def test_offer_opt_in_accepting_with_no_service_address_records_the_decision_and_says_so(tmp_path):
+    """Issue #583. The message this replaced told the SysOp to "ask your
+    operator to set the service address" -- an operator who is
+    themselves, for a setting no surface of the product could write. The
+    replacement says what is actually true, and the acceptance is still
+    recorded so the question is never asked twice.
+
+    `FakeSession` raises on exhausted input, so the single "y" is itself
+    the assertion that no registration editor was drawn over a service
+    that cannot answer it."""
     db = Database(tmp_path / "node.db")
     lane = DatabaseLane(db.path)
     session = FakeSession(["y"])
@@ -112,7 +121,57 @@ def test_offer_opt_in_accepting_with_no_service_url_configured_shows_a_message(t
     asyncio.run(offer_managed_dns_opt_in(session, lane))
 
     assert get_opt_in(db) is OptIn.ACCEPTED
-    assert any("hasn't been configured" in line for line in session.written)
+    written = " ".join(session.written)
+    assert "isn't running yet" in written
+    assert "operator" not in written
+    assert get_registered_name(db) is None
+    lane.close()
+    db.close()
+
+
+def test_offer_opt_in_accepting_reaches_registration_through_the_shipped_default(
+    tmp_path, monkeypatch
+):
+    """The other half of #583: a node told nothing by its operator still
+    has somewhere to register, so accepting the pre-set first-run answer
+    leads to the name editor rather than a dead end. `[B]ack` out of it
+    rather than dialing the (unreachable) address."""
+    from netbbs.managed_dns import state
+
+    monkeypatch.setattr(state, "DEFAULT_SERVICE_URL", "http://127.0.0.1:1")
+    db = Database(tmp_path / "node.db")
+    set_node_fingerprint(db, "fp-1")
+    lane = DatabaseLane(db.path)
+    session = FakeSession(["y", "b"])
+
+    asyncio.run(offer_managed_dns_opt_in(session, lane))
+
+    assert get_opt_in(db) is OptIn.ACCEPTED
+    written = " ".join(session.written)
+    assert "isn't running yet" not in written
+    assert "Subdomain name" in written
+    lane.close()
+    db.close()
+
+
+def test_registering_from_the_sysop_console_with_no_service_address_explains_why(tmp_path):
+    """The same gap reached from the other direction -- the `[R]egister`
+    action on the SysOp console's DNS screen. A different message from
+    the first-run one: this SysOp pressed a key on purpose and is owed a
+    reason nothing happened, plus the one way out that does exist today
+    (running an instance and pointing the node at it)."""
+    db = Database(tmp_path / "node.db")
+    set_node_fingerprint(db, "fp-1")
+    lane = DatabaseLane(db.path)
+    session = FakeSession([])
+    assert get_service_url(db) is None  # precondition
+
+    held = asyncio.run(register_via_prompt(session, lane))
+
+    assert held is True
+    written = " ".join(session.written)
+    assert "isn't running yet" in written
+    assert "netbbs.toml" in written
     assert get_registered_name(db) is None
     lane.close()
     db.close()
@@ -136,6 +195,11 @@ def test_offer_opt_in_accepting_and_leaving_the_name_blank_registers_nothing(tmp
 def test_offer_opt_in_releases_the_decision_lock_before_registration(tmp_path, monkeypatch):
     async def scenario():
         db = Database(tmp_path / "node.db")
+        # This test is about the decision lock, not about the service:
+        # an accept only continues into registration at all when the
+        # node has a service address (issue #583), and the stand-in
+        # below is never dialed.
+        set_service_url(db, "http://127.0.0.1:1")
         lane = DatabaseLane(db.path)
         registration_started = asyncio.Event()
         finish_registration = asyncio.Event()
@@ -684,3 +748,153 @@ def test_cancelled_rename_is_recoverable_if_reverse_credential_journaling_crashe
     assert load_credential(previous_credential_path_for(db.path)) is None
     assert get_registered_name(db) == "old-name"
     db.close()
+
+
+# -- the credential belongs to the service that issued it (Codex, PR #587) ---
+
+
+def _registered_against(tmp_path, issuer: str) -> Database:
+    """A node holding a registration and credential issued by `issuer`,
+    without dialing anything."""
+    from netbbs.managed_dns.state import set_registration_result_state
+
+    db = Database(tmp_path / "node.db")
+    set_node_fingerprint(db, "fp-1")
+    set_registration_result_state(
+        db, name="myboard", status=RegistrationStatus.MATURED, dynamic=True, service_url=issuer,
+    )
+    save_credential(credential_path_for(db.path), "issued-by-the-other-service")
+    return db
+
+
+def test_release_refuses_to_present_a_credential_another_service_issued(tmp_path):
+    """A managed-DNS credential is a bearer secret for one service's
+    registration; since issue #583 the address can change under a node
+    still holding one. Releasing at the new address would hand that
+    secret to a different operator."""
+    db = _registered_against(tmp_path, "https://dns.example")
+    set_service_url(db, "https://other.example")
+    lane = DatabaseLane(db.path)
+    session = FakeSession(["y"])  # confirm the release; it must still not be sent
+
+    asyncio.run(release_registration(session, lane))
+
+    written = " ".join(session.written)
+    assert "https://dns.example" in written and "https://other.example" in written
+    assert get_registration_status(db) is RegistrationStatus.MATURED  # untouched
+    lane.close()
+    db.close()
+
+
+def test_changing_the_name_refuses_across_a_service_change(tmp_path):
+    db = _registered_against(tmp_path, "https://dns.example")
+    set_service_url(db, "https://other.example")
+    lane = DatabaseLane(db.path)
+    session = FakeSession(["newboard", "y"])
+
+    asyncio.run(rename_registration(session, lane))
+
+    assert "https://dns.example" in " ".join(session.written)
+    assert get_previous_name(db) is None  # no transition was started
+    lane.close()
+    db.close()
+
+
+def test_cancelling_a_name_change_refuses_across_a_service_change(tmp_path):
+    db = _registered_against(tmp_path, "https://dns.example")
+    set_previous_name(db, "oldboard")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    save_credential(previous_credential_path_for(db.path), "old-secret")
+    set_service_url(db, "https://other.example")
+    lane = DatabaseLane(db.path)
+    session = FakeSession(["y"])
+
+    asyncio.run(cancel_registration_rename(session, lane))
+
+    assert "https://dns.example" in " ".join(session.written)
+    assert get_previous_name(db) == "oldboard"  # nothing was cancelled
+    lane.close()
+    db.close()
+
+
+def test_registering_with_a_new_service_starts_over_instead_of_reclaiming(tmp_path):
+    """Registration *is* allowed after a service change -- it is simply a
+    fresh registration. The old secret is never presented, so the new
+    service cannot be handed control of the registration at the old one,
+    and the SysOp is warned once that the credential file is replaced."""
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = _registered_against(tmp_path, "https://dns.example")
+            new_url = f"http://127.0.0.1:{server.port}"
+            set_service_url(db, new_url)
+            lane = DatabaseLane(db.path)
+            # the name is prefilled from the existing registration:
+            # [D]ynamic off, [R]egister, then confirm the replacement
+            session = FakeSession(["d", "r", "y"])
+
+            await register_via_prompt(session, lane)
+
+            lane.close()
+            return db, session, new_url
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, session, new_url = asyncio.run(scenario())
+    written = " ".join(session.written)
+    assert "https://dns.example" in written  # the warning named the old issuer
+    assert "Registered myboard.netbbs.org" in written  # fresh, not "Reclaimed"
+    from netbbs.managed_dns.state import get_credential_service_url
+
+    assert get_credential_service_url(db) == new_url
+    assert load_credential(credential_path_for(db.path)) != "issued-by-the-other-service"
+    db.close()
+
+
+def test_declining_the_credential_replacement_registers_nothing(tmp_path):
+    db = _registered_against(tmp_path, "https://dns.example")
+    set_service_url(db, "https://other.example")
+    lane = DatabaseLane(db.path)
+    # [D]ynamic off, [R]egister, refuse the replacement, [B]ack out and
+    # discard the edited draft
+    session = FakeSession(["d", "r", "n", "b", "y"])
+
+    asyncio.run(register_via_prompt(session, lane))
+
+    from netbbs.managed_dns.state import get_credential_service_url
+
+    assert get_credential_service_url(db) == "https://dns.example"
+    assert load_credential(credential_path_for(db.path)) == "issued-by-the-other-service"
+    lane.close()
+    db.close()
+
+
+def test_a_loopback_service_is_dialed_directly_and_a_remote_one_through_the_proxy():
+    """Codex review of PR #587. `netbbs.net.nodeconfig` allows plain
+    HTTP to a loopback service address precisely because nothing leaves
+    the machine -- but with `HTTP_PROXY` set and no matching `NO_PROXY`,
+    `trust_env=True` would forward that plaintext request, credential
+    and all, to the proxy. A loopback address never needs one."""
+    from netbbs.managed_dns.client import outbound_session
+
+    async def scenario():
+        seen = {}
+        for url in (
+            "http://127.0.0.1:8099", "http://localhost:8099", "http://[::1]:8099",
+            "https://dns.example", "http://dns.example",
+        ):
+            async with outbound_session(url) as http_session:
+                seen[url] = http_session.trust_env
+        return seen
+
+    seen = asyncio.run(scenario())
+    assert seen["http://127.0.0.1:8099"] is False
+    assert seen["http://localhost:8099"] is False
+    assert seen["http://[::1]:8099"] is False
+    # Everything else keeps the project-wide proxy-aware default, which is
+    # what lets a node behind a corporate forward proxy reach the service.
+    assert seen["https://dns.example"] is True
+    assert seen["http://dns.example"] is True

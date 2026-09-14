@@ -324,6 +324,100 @@ class ShutdownConfig:
 
 
 @dataclass(frozen=True)
+class ManagedDnsConfig:
+    """Where this node reaches the managed netbbs.org subdomain service
+    (design doc §16, issue #201). Operators of an ordinary node set
+    nothing here: `service_url` is `None`, and
+    `netbbs.managed_dns.state.get_service_url` falls back to the
+    project's own shipped `DEFAULT_SERVICE_URL`.
+
+    It exists for the two cases a shipped constant cannot serve -- a
+    developer or self-hoster running their own `services.managed_dns`
+    instance, and the project itself pointing a node at a staging
+    deployment before an address is shipped. Before issue #583 neither
+    was possible at all: the database key existed and nothing in the
+    installed package ever wrote it, so a node that accepted the opt-in
+    could never complete a registration.
+    """
+
+    service_url: str | None = None
+
+
+def _validate_base_url(value: str, label: str) -> None:
+    """The shared shape of every absolute base URL this module accepts
+    from an operator: a transport's `public_url`, which a transfer token
+    is appended to, and `[managed_dns] service_url`, which `/register`,
+    `/heartbeat` and the rest are appended to (`netbbs.managed_dns.
+    client`). Identical requirements for an identical reason -- both are
+    concatenated with a path and then dialed, so the same typos break
+    both the same way -- and every check below was found the hard way on
+    the first of them (Codex reviews of #482 and #508) rather than
+    reasoned out in advance, which is exactly why the second should not
+    rediscover them one at a time. `label` names the setting in each
+    message (`web.public_url`, `managed_dns.service_url`) so a
+    diagnostic still points at the line the operator wrote.
+
+    A scheme-less or authority-less string does not fail where it is
+    used: it fails in somebody's browser, resolved relative to whatever
+    page they were on, or as an HTTP request to nothing.
+    """
+    try:
+        parsed = urlparse(value)
+        # Touched deliberately, not incidentally: `urlparse` accepts
+        # `:abc` and `:99999` quite happily and only raises when the
+        # port is *read*, so a check that never reads it passes them
+        # through to a URL nobody can open. `hostname` is read for the
+        # same reason.
+        _ = (parsed.hostname, parsed.port)
+    except ValueError as exc:
+        # `urlparse` raises on some malformed authorities -- `http://[`
+        # among them -- so the check meant to turn a typo into a clear
+        # diagnostic could itself escape as a traceback past `main`'s
+        # own `ConfigError` handler.
+        raise ConfigError(f"{label} is not a usable URL ({exc}), got {value!r}") from exc
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ConfigError(
+            f"{label} must be an absolute http:// or https:// URL, got {value!r}"
+        )
+    if not parsed.hostname:
+        # `https://:8443` and `http://@` both parse with a truthy
+        # `netloc` and no host whatsoever, so the check above waves them
+        # through and the node emits URLs every browser and every `curl`
+        # rejects as hostless.
+        raise ConfigError(f"{label} must name a host, got {value!r}")
+    if any(character.isspace() for character in value):
+        # Whitespace cannot be validated through the parse: `urlparse`
+        # keeps a trailing space in `hostname`, making it truthy, and
+        # silently *drops* a trailing tab so the parse looks perfect
+        # while the stored string -- the one the caller concatenates --
+        # still carries it. Either way the result is a URL nothing
+        # accepts. A surrounding space is stripped at load because it is
+        # never intended; one in the middle is a typo worth saying out
+        # loud.
+        raise ConfigError(f"{label} must not contain whitespace, got {value!r}")
+    if "?" in value or "#" in value:
+        # The caller appends a path to this value, so anything after the
+        # path silently breaks every URL built from it: a query puts the
+        # appended part in the wrong place, and a fragment never reaches
+        # the server at all. A path prefix is fine and stays supported --
+        # that is how a node behind a reverse-proxy subpath is reached,
+        # including one carrying a path parameter: `;` never breaks the
+        # append, and rejecting `parsed.params` refused `/bbs;tenant=foo`
+        # while accepting the equivalent `/a;x/b`, whose semicolon
+        # `urlparse` happens to leave in `path`.
+        #
+        # Asked of the raw string rather than `parsed.query` and
+        # `parsed.fragment`, because a bare trailing delimiter parses to
+        # an *empty* component: a truthiness test on those accepts
+        # `https://bbs.example.org?`, which appends into the query and
+        # breaks exactly as the non-empty case does.
+        raise ConfigError(
+            f"{label} must not carry a query or fragment (a path prefix is "
+            f"fine), got {value!r}"
+        )
+
+
+@dataclass(frozen=True)
 class NodeConfig:
     db_path: Path = Path("netbbs.db")
     # Design doc: the node's own key-lifecycle state (root
@@ -356,6 +450,7 @@ class NodeConfig:
     link: LinkConfig = field(default_factory=LinkConfig)
     throttle: ThrottleConfig = field(default_factory=ThrottleConfig)
     shutdown: ShutdownConfig = field(default_factory=ShutdownConfig)
+    managed_dns: ManagedDnsConfig = field(default_factory=ManagedDnsConfig)
 
     def validate(self) -> None:
         for name, transport in (("telnet", self.telnet), ("ssh", self.ssh), ("web", self.web)):
@@ -364,85 +459,53 @@ class NodeConfig:
             if not transport.host.strip():
                 raise ConfigError(f"{name}.host must not be empty")
             if transport.public_url is not None:
-                # Codex review of #482, unaddressed at merge: this value
-                # is handed to callers as the base of a transfer link, so
-                # a scheme-less or authority-less string does not fail
-                # here -- it fails in somebody's browser, resolved
-                # relative to whatever page they were on, or printed to a
-                # terminal caller as a URL that identifies nothing.
-                try:
-                    parsed = urlparse(transport.public_url)
-                    # Touched deliberately, not incidentally (Codex review
-                    # of #508): `urlparse` accepts `:abc` and `:99999`
-                    # quite happily and only raises when the port is
-                    # *read*, so a check that never reads it passes them
-                    # through to a link nobody can open. `hostname` is
-                    # read for the same reason.
-                    _ = (parsed.hostname, parsed.port)
-                except ValueError as exc:
-                    # `urlparse` raises on some malformed authorities --
-                    # `http://[` among them -- so the check meant to turn
-                    # a typo into a clear diagnostic could itself escape
-                    # as a traceback past `main`'s `ConfigError` handler
-                    # (Codex review of #508).
-                    raise ConfigError(
-                        f"{name}.public_url is not a usable URL ({exc}), got "
-                        f"{transport.public_url!r}"
-                    ) from exc
-                if parsed.scheme not in ("http", "https") or not parsed.netloc:
-                    raise ConfigError(
-                        f"{name}.public_url must be an absolute http:// or https:// URL, got "
-                        f"{transport.public_url!r}"
-                    )
-                if not parsed.hostname:
-                    # `https://:8443` and `http://@` both parse with a
-                    # truthy `netloc` and no host whatsoever (Codex review
-                    # of #508), so the check above waves them through and
-                    # the node prints transfer links that every browser
-                    # and every `curl` rejects as hostless.
-                    raise ConfigError(
-                        f"{name}.public_url must name a host, got {transport.public_url!r}"
-                    )
-                if any(character.isspace() for character in transport.public_url):
-                    # Whitespace cannot be validated through the parse
-                    # (Codex review of #508): `urlparse` keeps a trailing
-                    # space in `hostname`, making it truthy, and silently
-                    # *drops* a trailing tab so the parse looks perfect
-                    # while the stored string -- the one `url_for`
-                    # concatenates -- still carries it. Either way the
-                    # node prints links no browser accepts. A surrounding
-                    # space is stripped at load because it is never
-                    # intended; one in the middle is a typo worth saying
-                    # out loud.
-                    raise ConfigError(
-                        f"{name}.public_url must not contain whitespace, got "
-                        f"{transport.public_url!r}"
-                    )
-                if "?" in transport.public_url or "#" in transport.public_url:
-                    # A transfer link is this value with `/transfer/<token>`
-                    # appended, so anything after the path silently breaks
-                    # every link the node prints (Codex review of #508): a
-                    # query puts the token in the wrong place, and a
-                    # fragment never reaches the server at all. A path
-                    # prefix is fine and stays supported -- that is how a
-                    # node behind a reverse proxy subpath is reached,
-                    # including one carrying a path parameter: `;` never
-                    # breaks the append, and rejecting `parsed.params`
-                    # refused `/bbs;tenant=foo` while accepting the
-                    # equivalent `/a;x/b`, whose semicolon `urlparse`
-                    # happens to leave in `path` (Codex review of #508).
-                    #
-                    # Asked of the raw string rather than `parsed.query`
-                    # and `parsed.fragment`, because a bare trailing
-                    # delimiter parses to an *empty* component: a
-                    # truthiness test on those accepts
-                    # `https://bbs.example.org?`, which appends the token
-                    # into the query and breaks exactly as the non-empty
-                    # case does.
-                    raise ConfigError(
-                        f"{name}.public_url must not carry a query or fragment (a path prefix is "
-                        f"fine), got {transport.public_url!r}"
-                    )
+                _validate_base_url(transport.public_url, f"{name}.public_url")
+
+        if self.managed_dns.service_url is not None:
+            # Asked first, before anything that could quote the value
+            # back: the node copies this address into its database and
+            # prints it in log lines and SysOp-facing diagnostics, so an
+            # embedded password would leak wherever those go, and every
+            # other message in this validator deliberately names what it
+            # rejected (Codex review of PR #587).
+            #
+            # A bare "does it contain @ at all", not a look at the
+            # authority specifically. Two rounds of that review found
+            # the same promise broken by a spelling the parse did not
+            # see the way a person would -- `https:////user:pw@host`
+            # puts the userinfo in what `urlsplit` calls the path -- and
+            # the way to stop rediscovering those one at a time is a
+            # rule with nothing to slip past. The cost is a path segment
+            # containing a literal `@`, which no address of this one
+            # service plausibly needs and which `%40` expresses anyway.
+            if "@" in self.managed_dns.service_url:
+                raise ConfigError(
+                    "managed_dns.service_url must not contain '@' -- this node records the "
+                    "address in its database and prints it in logs, so a URL that embeds a "
+                    "username or password would leak it there. Put credentials in the "
+                    "service's own reverse proxy; write a literal '@' in a path as %40"
+                )
+            _validate_base_url(self.managed_dns.service_url, "managed_dns.service_url")
+            # Unlike `public_url`, which names a listener callers reach
+            # however that listener is configured, this one carries a
+            # secret: every registration, heartbeat, rename and release
+            # presents the node's managed-DNS bearer credential, and
+            # whoever reads it off the wire can release or repoint that
+            # node's DNS record (Codex review of PR #587). The service's
+            # own process speaks plain HTTP behind a TLS-terminating
+            # proxy (`services/managed_dns/README.md`), which is exactly
+            # why the *node's* side of it must be the proxy's https://
+            # address. A loopback address is the one honest exception:
+            # nothing leaves the machine (`netbbs.managed_dns.client.
+            # outbound_session` dials it directly, past any proxy), and
+            # it is how the service is developed against.
+            parsed = urlparse(self.managed_dns.service_url)
+            if parsed.scheme != "https" and not is_loopback_host(parsed.hostname or ""):
+                raise ConfigError(
+                    "managed_dns.service_url must be an https:// URL unless it names a loopback "
+                    "address -- it carries this node's managed-DNS credential on every request, "
+                    f"got {self.managed_dns.service_url!r}"
+                )
 
         # Only an *explicit* `enabled = true` validates the Link block at
         # config-load time. A silent config (`None`, design doc §16 issue
@@ -646,6 +709,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         parser.add_argument(f"--{transport}-host", dest=f"{transport}_host", default=None)
         parser.add_argument(f"--{transport}-port", dest=f"{transport}_port", type=int, default=None)
 
+    # Design doc §16 (issue #583): an ordinary node never passes this --
+    # `netbbs.managed_dns.state.DEFAULT_SERVICE_URL` is the address of
+    # the project's own instance. This points a node at a different one.
+    parser.add_argument(
+        "--managed-dns-service-url", dest="managed_dns_service_url", default=None,
+        help="base URL of the managed netbbs.org subdomain service to use instead of the shipped one",
+    )
+
     # Link: special-cased, not folded into the _TRANSPORTS
     # loop above -- LinkConfig carries outgoing_only/advertised_host/
     # advertised_port beyond bare TransportConfig's enabled/host/port.
@@ -776,6 +847,24 @@ def _shutdown_from_toml(data: dict, current: ShutdownConfig) -> ShutdownConfig:
     return replace(current, **overrides)
 
 
+def _managed_dns_from_toml(data: dict, current: ManagedDnsConfig) -> ManagedDnsConfig:
+    table = data.get("managed_dns", {})
+    if not isinstance(table, dict):
+        raise ConfigError("[managed_dns] in the config file must be a table")
+    unknown = set(table) - set(ManagedDnsConfig.__dataclass_fields__)
+    if unknown:
+        raise ConfigError(f"[managed_dns] has unknown setting(s): {', '.join(sorted(unknown))}")
+    service_url = table.get("service_url", current.service_url)
+    if service_url is not None and not isinstance(service_url, str):
+        raise ConfigError(
+            f"[managed_dns] service_url must be a string, got {type(service_url).__name__}"
+        )
+    # Stripped and de-slashed exactly as `public_url` is, and for the
+    # same reason: `netbbs.managed_dns.client` appends `/register` and
+    # friends to this, so a trailing slash would dial `//register`.
+    return replace(current, service_url=str(service_url).strip().rstrip("/") if service_url else None)
+
+
 def _node_from_toml(data: dict, config: NodeConfig) -> tuple[Path, str]:
     table = data.get("node", {})
     if not isinstance(table, dict):
@@ -856,7 +945,9 @@ def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
 
 
 def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
-    known_tables = {"database", "node", "telnet", "ssh", "web", "link", "throttle", "shutdown"}
+    known_tables = {
+        "database", "node", "telnet", "ssh", "web", "link", "throttle", "shutdown", "managed_dns",
+    }
     unknown = set(data) - known_tables
     if unknown:
         raise ConfigError(f"config file has unknown section(s): {', '.join(sorted(unknown))}")
@@ -878,6 +969,7 @@ def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
         link=_link_from_toml(data, config.link),
         throttle=_throttle_from_toml(data, config.throttle),
         shutdown=_shutdown_from_toml(data, config.shutdown),
+        managed_dns=_managed_dns_from_toml(data, config.managed_dns),
     )
 
 
@@ -888,6 +980,19 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
         config = replace(config, identity_dir=args.identity_dir)
     if args.node_name is not None:
         config = replace(config, node_name=args.node_name)
+    if args.managed_dns_service_url is not None:
+        # Same strip/rstrip normalisation `_managed_dns_from_toml`
+        # applies, so a CLI value and a config value that differ only in
+        # a trailing slash cannot behave differently. An empty value is
+        # how one invocation takes a config file's setting back out and
+        # returns that node to the shipped address.
+        config = replace(
+            config,
+            managed_dns=replace(
+                config.managed_dns,
+                service_url=args.managed_dns_service_url.strip().rstrip("/") or None,
+            ),
+        )
     for transport in _TRANSPORTS:
         current: TransportConfig = getattr(config, transport)
         enabled = getattr(args, f"{transport}_enabled")

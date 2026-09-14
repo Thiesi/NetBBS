@@ -8689,6 +8689,62 @@ file (`netbbs.managed_dns.credential`) joined §13.4's backup manifest as
 its thirteenth artifact, the same plain-file-copy handling already used
 for node identity and the SSH host key — see §13.4's own table.
 
+**Decision 8 (locked in) — a node learns the managed service's address
+from a shipped constant, overridable per node; it is not waiting on an
+instruction from an operator there was never a way to give.** Issue
+#583: a freshly bootstrapped 7.6.0 node accepted the opt-in — the
+pre-set answer under Decision 7 — and stopped immediately at "ask your
+operator to set the service address." `netbbs.managed_dns.state.
+set_service_url` had no caller anywhere in the installed package: no CLI
+flag, no `netbbs.toml` key, no admin screen. The address had no route
+into the database every other part of the feature reads it from, so
+every node that accepted the offer dead-ended identically, and the
+message sent each SysOp looking for an operator who was themselves. The
+original reasoning — that the production address is an operational
+decision independent of this client code — was right about *where the
+decision lives* and silent about *how it travels*; an operational
+decision still has to be expressible somewhere. Both halves exist now.
+`DEFAULT_SERVICE_URL` (`netbbs.managed_dns.state`) carries the project's
+own instance, the same shape and the same reason as `netbbs.link.
+reliable_nodes.RELIABLE_NODES_URL` — a project-run service a node must
+not need to be told about in order to use. `[managed_dns] service_url`
+(or `--managed-dns-service-url`) points a node at a different one, which
+is what a self-hoster running their own `services.managed_dns`, or the
+project pointing a node at a staging deployment, needs. The configured
+value is mirrored into the node database once per startup, *including
+its absence*: an operator who removes the setting returns that node to
+the shipped address rather than leaving it pinned to an override it was
+told about once.
+
+Making the address configurable makes it *changeable*, which the
+credential's own design (Decision 2) has to answer: a managed-DNS
+credential is a bearer secret for one service's registration, so a node
+that already holds one must never present it to a service that did not
+issue it. The issuing address is recorded in the same transaction as the
+registration it belongs to, and every path that would send the
+credential checks it first: the updater pauses its heartbeat (saying so
+once in the log), release, rename and cancellation refuse and name the
+two addresses that disagree, and registration against a new service
+starts over as a fresh registration rather than presenting the old
+secret — behind one confirmation, because it replaces the credential
+file and leaves the registration at the old service to lapse on its own.
+For the same reason the setting is restricted to `https://` unless it
+names a loopback address: the service's own process speaks plain HTTP
+behind a TLS-terminating proxy, so the node's side of it is the proxy's
+address, and a plaintext hop to a remote host would put the credential
+on the wire on every heartbeat.
+
+Until the backend is actually deployed anywhere, `DEFAULT_SERVICE_URL`
+is `None` and a node simply has no service to register against. The
+opt-in is still asked, and still recorded exactly once, per Decisions 1
+and 7; what changes is only that the node says plainly that the service
+is not running yet. Deliberately not "hide the question until the
+service exists": the decision being asked is whether this node may
+contact project infrastructure at all, the first-run screen is the one
+moment that question is naturally in front of a SysOp, and deferring it
+would mean either re-opening a settled consent question later or
+enrolling a node that had said yes to something narrower.
+
 **Implemented.** Node-side client (`src/netbbs/managed_dns/`, shipped
 inside the installable `netbbs` package: opt-in prompt, credential
 storage, the periodic heartbeat/updater task, the SysOp status/register/
@@ -8714,7 +8770,8 @@ shared by both voluntary release and abandonment (Decision 5, "on the
 order of 90 days" as locked in above). Actually standing the backend up
 — a host, DNS delegation, a real BIND server's `allow-update` ACL and
 matching TSIG key — is an operational step the code does not perform on
-its own; see `services/managed_dns/README.md`.
+its own; see `services/managed_dns/README.md`. Until that is done, the
+shipped `DEFAULT_SERVICE_URL` stays `None` (Decision 8).
 
 The minimum-age period measures uninterrupted successful heartbeat
 contact, not wall-clock time since registration: first contact starts
