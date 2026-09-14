@@ -530,7 +530,15 @@ def test_upgrade_from_released_mrc_schema_preserves_rooms_and_doors(tmp_path, mo
     try:
         assert upgraded.connection.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
         for table, rows in snapshots.items():
-            assert [dict(row) for row in upgraded.connection.execute(f"SELECT * FROM {table}")] == rows
+            # Every column the old schema had, with the value it had. Not
+            # `dict(row) == rows`: an additive migration is *allowed* to put a
+            # new column on these tables, and one that does (65 -> 66, the MRC
+            # sender colour) would fail an equality that also asserts no
+            # column was added. What an upgrade must not do is lose a value.
+            columns = list(rows[0]) if rows else []
+            kept = [{name: row[name] for name in columns}
+                    for row in upgraded.connection.execute(f"SELECT * FROM {table}")]
+            assert kept == rows
         door = get_door_by_name(upgraded, "Existing native")
         assert door.profile is None and door.args == ("game.py",) and door.min_play_level == 10
         assert upgraded.connection.execute("PRAGMA foreign_key_check").fetchall() == []
