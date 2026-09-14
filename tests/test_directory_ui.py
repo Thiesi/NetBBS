@@ -21,6 +21,17 @@ from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 
+def squeezed(text: str) -> str:
+    """`text` with runs of spaces collapsed to one.
+
+    Field screens align values into a shared column (#529), so a label and
+    its value are separated by as many spaces as that column needs. An
+    assertion about *which* value is shown should not also pin the width of
+    the column it is shown in.
+    """
+    return re.sub(r" {2,}", " ", text)
+
+
 class FakeSession:
     def __init__(self, keys=None, lines=None):
         self._keys = iter(keys or [])
@@ -159,7 +170,7 @@ def test_selecting_a_directory_entry_shows_their_vcard(tmp_path):
 
     assert "Retro computing enthusiast" in session.output
     assert "NetBBS › Directory › bob" in session.visible_output
-    assert colored("Member since: ", fg_color=LABEL_COLOR) in session.output
+    assert colored("Member since: ", fg_color=LABEL_COLOR) in squeezed(session.output)
     assert colored("Retro computing enthusiast", fg_color=VALUE_COLOR) in session.output
     db.close()
 
@@ -206,7 +217,7 @@ def test_edit_profile_shows_current_state(tmp_path):
     asyncio.run(_edit_profile(session, lane, user))
 
     assert "no bio set" in session.output
-    assert colored("  Visibility", fg_color=LABEL_COLOR) + ": " in session.output
+    assert colored("  Visibility:", fg_color=LABEL_COLOR) in session.output
     assert colored("private", fg_color=MUTED_COLOR) in session.output
     lane.close()
     db.close()
@@ -277,7 +288,7 @@ def test_edit_profile_signature_shows_none_by_default(tmp_path):
 
     # Label and value are two separate colored() calls with a reset
     # code between them -- needs the ANSI-stripped text, not raw.
-    assert "Signature: (none)" in session.visible_output
+    assert "Signature: (none)" in squeezed(session.visible_output)
     lane.close()
     db.close()
 

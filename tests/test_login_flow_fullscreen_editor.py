@@ -46,6 +46,17 @@ _EDITOR_KEY_SENTINELS: dict[str, EditorKeyKind] = {
 }
 
 
+def squeezed(text: str) -> str:
+    """`text` with runs of spaces collapsed to one.
+
+    Field screens align values into a shared column (#529), so a label and
+    its value are separated by as many spaces as that column needs. An
+    assertion about *which* value is shown should not also pin the width of
+    the column it is shown in.
+    """
+    return re.sub(r" {2,}", " ", text)
+
+
 class FakeSession(Session):
     """Same shape tests/test_ansi_editor.py's FakeSession established:
     a single ordered input queue serves read_key/read_line/
@@ -209,8 +220,8 @@ def test_profile_toggle_switches_the_preference_on_and_off(db, lane, alice):
     # First "f" turns it on, second turns it back off.
     assert fullscreen_editor_enabled(db, alice) is False
     text = _visible(session)
-    assert "Fullscreen editor for posts/bio: on" in text
-    assert "Fullscreen editor for posts/bio: off" in text
+    assert "Fullscreen editor for posts/bio: on" in squeezed(text)
+    assert "Fullscreen editor for posts/bio: off" in squeezed(text)
 
 
 def test_profile_color_depth_toggle_cycles_auto_truecolor_256(db, lane, alice):
@@ -219,9 +230,9 @@ def test_profile_color_depth_toggle_cycles_auto_truecolor_256(db, lane, alice):
     session = FakeSession(["c", "c", "c", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible(session)
-    assert "Color depth: truecolor (forced)" in text
-    assert "Color depth: 256 (forced)" in text
-    assert "Color depth: auto (detected:" in text
+    assert "Color depth: truecolor (forced)" in squeezed(text)
+    assert "Color depth: 256 (forced)" in squeezed(text)
+    assert "Color depth: auto (detected:" in squeezed(text)
     # Three presses of a 3-state cycle return to the starting state.
     assert color_depth_override(db, alice) is None
 
@@ -233,9 +244,9 @@ def test_profile_menu_descriptions_toggle_cycles_off_brief_detailed(db, lane, al
     session = FakeSession(["d", "d", "d", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible(session)
-    assert "Menu descriptions: detailed" in text
-    assert "Menu descriptions: off" in text
-    assert "Menu descriptions: brief" in text
+    assert "Menu descriptions: detailed" in squeezed(text)
+    assert "Menu descriptions: off" in squeezed(text)
+    assert "Menu descriptions: brief" in squeezed(text)
     # Three presses of a 3-state cycle starting from "brief" return to it.
     assert menu_description_level(db, alice) == "brief"
 
@@ -249,8 +260,8 @@ def test_profile_redraw_in_place_toggle_switches_on_and_off(db, lane, alice):
     # First "r" turns it on, second turns it back off.
     assert redraw_in_place_enabled(db, alice) is False
     text = _visible(session)
-    assert "In-place redraw: on" in text
-    assert "In-place redraw: off" in text
+    assert "In-place redraw: on" in squeezed(text)
+    assert "In-place redraw: off" in squeezed(text)
 
 
 def test_profile_unicode_style_toggle_switches_on_and_off(db, lane, alice):
@@ -262,8 +273,8 @@ def test_profile_unicode_style_toggle_switches_on_and_off(db, lane, alice):
     # First "u" turns it off, second turns it back on.
     assert unicode_style_enabled(db, alice) is True
     text = _visible(session)
-    assert "Unicode decorative style: off" in text
-    assert "Unicode decorative style: on" in text
+    assert "Unicode decorative style: off" in squeezed(text)
+    assert "Unicode decorative style: on" in squeezed(text)
 
 
 # -- SSH public key self-service --------------------------------------------
@@ -415,7 +426,7 @@ def test_main_menu_refreshes_the_session_user_after_a_profile_key_change(db, lan
     # mean the second visit still thought there was no key). Label and
     # value are two separate colored() calls with a reset code between
     # them, so this needs the ANSI-stripped text, not the raw stream.
-    assert _visible(session).count("SSH public key(s): (none)") == 1
+    assert squeezed(_visible(session)).count("SSH public key(s): (none)") == 1
 
 
 # -- composing a new post ---------------------------------------------------

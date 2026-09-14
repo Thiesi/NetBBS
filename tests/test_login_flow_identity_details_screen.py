@@ -42,6 +42,17 @@ from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 
+def squeezed(text: str) -> str:
+    """`text` with runs of spaces collapsed to one.
+
+    Field screens align values into a shared column (#529), so a label and
+    its value are separated by as many spaces as that column needs. An
+    assertion about *which* value is shown should not also pin the width of
+    the column it is shown in.
+    """
+    return re.sub(r" {2,}", " ", text)
+
+
 class FakeSession(Session):
     """One ordered input queue serves both `read_key()` and `read_line()`
     -- same shape tests/test_login_flow_sort_preferences_screen.py's own
@@ -116,15 +127,15 @@ def test_shows_current_state_with_nothing_set(db, lane, alice):
     session = FakeSession(["b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = _visible(session)
-    assert "Display name: (not set)" in text
-    assert "Display name visibility: private" in text
-    assert "Location: (not set)" in text
-    assert "Location visibility: private" in text
-    assert "Birthdate: (not set)" in text
-    assert "Age visibility: private" in text
-    assert "Verified: (none)" in text
-    assert "Share verified age over Link: (not verified)" in text
-    assert "Share verified name over Link: (not verified)" in text
+    assert "Display name: (not set)" in squeezed(text)
+    assert "Display name visibility: private" in squeezed(text)
+    assert "Location: (not set)" in squeezed(text)
+    assert "Location visibility: private" in squeezed(text)
+    assert "Birthdate: (not set)" in squeezed(text)
+    assert "Age visibility: private" in squeezed(text)
+    assert "Verified: (none)" in squeezed(text)
+    assert "Share verified age over Link: (not verified)" in squeezed(text)
+    assert "Share verified name over Link: (not verified)" in squeezed(text)
 
 
 def test_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
@@ -145,14 +156,14 @@ def test_display_name_edit_sets_only_the_value(db, lane, alice):
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_display_name(db, alice) == "Alice W"
     assert is_display_name_visible(db, alice) is False
-    assert "Display name: Alice W" in _visible(session)
+    assert "Display name: Alice W" in squeezed(_visible(session))
 
 
 def test_display_name_visibility_is_its_own_toggle(db, lane, alice):
     session = FakeSession(["i", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert is_display_name_visible(db, alice) is True
-    assert "Display name visibility: public" in _visible(session)
+    assert "Display name visibility: public" in squeezed(_visible(session))
 
 
 def test_blank_value_prompt_leaves_visibility_untouched(db, lane, alice):
@@ -184,9 +195,9 @@ def test_location_edit_and_visibility_toggle(db, lane, alice):
     # Two presses of the toggle return to the starting state.
     assert is_location_visible(db, alice) is False
     text = _visible(session)
-    assert "Location: Retro City" in text
-    assert "Location visibility: public" in text
-    assert "Location visibility: private" in text
+    assert "Location: Retro City" in squeezed(text)
+    assert "Location visibility: public" in squeezed(text)
+    assert "Location visibility: private" in squeezed(text)
 
 
 def test_birthdate_edit_sets_value_and_age(db, lane, alice):
@@ -196,7 +207,7 @@ def test_birthdate_edit_sets_value_and_age(db, lane, alice):
     assert is_birthdate_visible(db, alice) is True
     text = _visible(session)
     assert f"(age {compute_age(date(2000, 1, 1))})" in text
-    assert "Age visibility: public" in text
+    assert "Age visibility: public" in squeezed(text)
 
 
 def test_birthdate_rejects_an_invalid_date_format(db, lane, alice):
@@ -220,9 +231,9 @@ def test_verified_summary_shows_attested_attributes(db, lane, alice):
     session = FakeSession(["b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = _visible(session)
-    assert "Verified: age" in text
-    assert "Share verified age over Link: off" in text
-    assert "Share verified name over Link: (not verified)" in text
+    assert "Verified: age" in squeezed(text)
+    assert "Share verified age over Link: off" in squeezed(text)
+    assert "Share verified name over Link: (not verified)" in squeezed(text)
 
 
 def test_remote_sharing_rejects_an_attribute_with_no_attestation(db, lane, alice):
@@ -238,7 +249,7 @@ def test_remote_sharing_toggles_both_ways_without_a_question(db, lane, alice):
     session = FakeSession(["h", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_attestation(db, alice, "name").link_visible is True
-    assert "Share verified name over Link: on" in _visible(session)
+    assert "Share verified name over Link: on" in squeezed(_visible(session))
     assert "Allow this verified" not in _written_text(session)
 
     # Turning it off is the same single keystroke -- previously the
@@ -247,7 +258,7 @@ def test_remote_sharing_toggles_both_ways_without_a_question(db, lane, alice):
     session = FakeSession(["h", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_attestation(db, alice, "name").link_visible is False
-    assert "Share verified name over Link: off" in _visible(session)
+    assert "Share verified name over Link: off" in squeezed(_visible(session))
 
 
 def test_remote_sharing_refreshes_instead_of_toggling_a_changed_attestation(db, lane, alice):
@@ -277,7 +288,7 @@ def test_remote_sharing_refreshes_instead_of_toggling_a_changed_attestation(db, 
     session = ReattestingSession(["s", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = _visible(session)
-    assert "Share verified age over Link: on" in text  # what the caller saw first
+    assert "Share verified age over Link: on" in squeezed(text)  # what the caller saw first
     assert "changed since this screen was drawn" in text
     assert get_attestation(db, alice, "age").link_visible is False
     assert get_attestation(db, alice, "age").attested_value == "1991-06-02"
@@ -312,5 +323,5 @@ def test_remote_sharing_reports_an_attestation_removed_since_the_draw(db, lane, 
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = _visible(session)
     assert "was removed since this screen was drawn" in text
-    assert "Share verified name over Link: (not verified)" in text
+    assert "Share verified name over Link: (not verified)" in squeezed(text)
     assert get_attestation(db, alice, "name") is None
