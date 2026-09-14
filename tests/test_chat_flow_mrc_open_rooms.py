@@ -638,10 +638,92 @@ def test_background_directory_refresh_preserves_the_callers_message_allowance(db
             now += bridge._userlist_refresh
             bridge.refresh_directory(mapping.channel, "alice")
             await _wait_for(lambda: len(fake.packets(body_prefix="LIST")) == 2, what="periodic directory refresh")
+            await fake.send_line("SERVER~~~alice~~~*.:__ # = Normal~")
+            await fake.send_line("SERVER~~~CLIENT~~lobby~USERLIST:done~")
+            await _wait_for(lambda: bridge.remote_roster(mapping.channel) == ["done"], what="directory completed")
             # Explicit commands continue to share the interactive allowance.
-            for _ in range(3):
+            for command in ("LIST", "CHATTERS", "CHATTERS"):
+                assert bridge.send_hub_command(mapping.channel, "alice", command) is None
+            assert bridge.send_hub_command(mapping.channel, "alice", "CHATTERS") == "you're sending faster than MRC allows"
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_duplicate_directory_requests_share_one_reply(db, lane, hub, alice, automatic):
+    from tests.test_chat_flow_mrc import _wait_for
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        fake.reply_lines = lambda command, params: []
+        try:
+            mapping = await bridge.open_room("lobby", "alice")
+            mine = hub.join(mapping.channel.name, ParticipantId("alice", 997))
+            other = hub.join(mapping.channel.name, ParticipantId("bob", 998))
+            await bridge.local_join(mapping.channel, "alice")
+            if automatic:
+                bridge.refresh_directory(mapping.channel, "alice")
+            else:
                 assert bridge.send_hub_command(mapping.channel, "alice", "LIST") is None
-            assert bridge.send_hub_command(mapping.channel, "alice", "LIST") == "you're sending faster than MRC allows"
+            await fake.wait_for(lambda p: p.body == "LIST")
+            assert bridge.send_hub_command(mapping.channel, "alice", "LIST") is None
+            assert bridge.send_hub_command(mapping.channel, "alice", "CHATTERS") is None
+            await fake.wait_for(lambda p: p.body == "CHATTERS")
+            assert len(fake.packets(body_prefix="LIST")) == 1
+            await fake.send_line("SERVER~~~CLIENT~~lobby~*.: #chess 1 Open games~")
+            await fake.send_line("SERVER~~~CLIENT~~lobby~*.:__ # = Normal~")
+            await fake.send_line("SERVER~~~CLIENT~~lobby~USERLIST:done~")
+            await _wait_for(lambda: bridge.remote_roster(mapping.channel) == ["done"], what="directory completed")
+            lines = []
+            while not mine.empty():
+                lines.append(mine.get_nowait().text)
+            assert sum("#chess" in text for text in lines) == 1
+            assert other.empty()
+            # Completion releases the request so the next refresh is sent.
+            assert bridge.send_hub_command(mapping.channel, "alice", "LIST") is None
+            await _wait_for(lambda: len(fake.packets(body_prefix="LIST")) == 2, what="next directory")
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_picker_offers_lobby_with_other_preconfigured_rooms(db, lane, hub, alice):
+    general = create_channel(db, "general", creator=alice)
+    set_mrc_room(db, general, "otherroom")
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        try:
+            assert bridge.observed_rooms() == ["otherroom"]
+            session = FakeSession(["b"])
+            await chat_flow._pick_mrc_room(session, lane, hub, alice, bridge)
+            text = _visible_text(session)
+            assert "lobby" in text and "entering loads the network room directory" in text
+            assert "otherroom" in text
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_join_completion_hides_unmapped_rooms_when_opening_is_disabled(db, lane, hub, presence, alice):
+    general = create_channel(db, "general", creator=alice)
+    set_mrc_room(db, general, "mapped")
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        try:
+            bridge._observe_room("unmapped")
+            completer = await chat_flow._build_completer(lane, hub, presence, general, alice, mrc_bridge=bridge)
+            assert completer("/join ") == ["mapped", "unmapped"]
+            save_open_room_settings(db, OpenRoomSettings(enabled=False))
+            await bridge.refresh_channel_mappings()
+            # The closure already handed to the line editor sees the change.
+            assert completer("/join ") == ["mapped"]
+            assert completer("/join mrc:") == []
         finally:
             await bridge.close()
             await fake.close()

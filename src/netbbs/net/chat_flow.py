@@ -915,8 +915,8 @@ async def _pick_mrc_room(
         visible_open = await lane.run(_load)
         known = {mapping.room.lower() for mapping in await lane.run(list_open_rooms)}
         discovered = mrc_bridge.observed_rooms()
-        if not discovered and "lobby" not in known:
-            discovered = ["lobby"]
+        if "lobby" not in known and not any(room.lower() == "lobby" for room in discovered):
+            discovered = ["lobby", *discovered]
         observed = [
             _ObservedRoomEntry(room, index)
             for index, room in enumerate(discovered)
@@ -3580,7 +3580,8 @@ async def _build_completer(
                     return sorted(name for name in names if name.lower().startswith(fragment))
             if lower.startswith("/join ") and " " not in text[6:]:
                 return sorted(room for room in mrc_bridge.observed_rooms()
-                              if room.lower().startswith(lower[6:]) and not mrc_bridge.room_blocked(room))
+                              if room.lower().startswith(lower[6:]) and not mrc_bridge.room_blocked(room)
+                              and (mrc_bridge.open_rooms_enabled or mrc_bridge.mapping_for_room(room) is not None))
         if text.startswith("/") and " " not in text:
             prefix = text[1:].lower()
             return sorted(name for name in visible_commands if name[1:].lower().startswith(prefix))

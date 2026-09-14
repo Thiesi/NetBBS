@@ -1447,6 +1447,12 @@ session needs the same treatment.
   reloads locally retained mappings. Empty topics do not exclude valid rows.
   Automatic LIST requests use the shared refresh interval and bounded writer
   with normal wire spacing, never the caller's interactive token allowance.
+  Repeated LIST asks from the same nick reuse its pending reply, making
+  remaining output visible if it began as background discovery. They enqueue
+  no duplicate and do not extend its original 30-second expiry; the footer
+  releases the request. The picker offers lobby when it is neither retained
+  nor observed, even with other configured rooms. When opening is disabled,
+  bare `/join` completion offers only rooms that already have mappings.
 - Generic-client STATS replies update the shared reading; explicit requests
   alone cause displayed replies. Generic-client USERROOM/USERNICK can name
   no individual caller: apply them only with exactly one announced account.

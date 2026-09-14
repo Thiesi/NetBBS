@@ -2245,6 +2245,14 @@ class MrcBridge:
             return "nothing to send"
         if len(body) > protocol.MAX_BODY:
             return f"that command is longer than MRC allows ({protocol.MAX_BODY} characters)"
+        if body.upper() == "LIST":
+            pending = self._directory_requests.get(nick.lower())
+            if pending is not None and self._clock() - pending[0] <= 30:
+                # Reuse the in-flight reply, promoting background discovery
+                # to visible output. Keep its original expiry: repeated asks
+                # must not extend a lost response's lifetime indefinitely.
+                self._directory_requests[nick.lower()] = (pending[0], True)
+                return None
         bucket = self._user_bucket(username)
         if not bucket.has_token():
             self._dropped_outbound += 1
