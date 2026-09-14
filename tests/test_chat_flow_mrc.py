@@ -383,3 +383,57 @@ def test_mrc_command_is_only_suggested_in_a_mapped_channel(db, channel, alice):
     set_mrc_room(db, channel, "lobby")
     assert chat_flow._channel_is_mrc_bridged(db, channel, alice)
     assert "mrc" in chat_flow._COMMAND_INFO and "mrc" in chat_flow._COMMANDS
+
+
+def test_status_counts_remote_roster_without_inventing_remote_away(db, lane, hub, presence, channel, alice):
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            async def push(session):
+                await rig.fake.send_line("SERVER~~~CLIENT~~lobby~USERLIST:alice@My_Board,bob@Other,carol@Third~")
+                await _wait_for(lambda: len(rig.bridge.remote_roster(channel)) == 2, what="remote roster")
+                await rig.fake.send_line("bob~Other~lobby~~~lobby~status repaint~")
+                await _wait_for(lambda: "2 MRC" in _text(session), what="MRC occupancy in status bar")
+            session, _ = await _run(lane, hub, presence, channel, alice, ["/quit"], mrc_bridge=rig.bridge, while_joined=push)
+            assert "1 here (0 away)" in _text(session)
+            assert "3 online" not in _text(session)
+        finally:
+            await rig.close()
+    asyncio.run(scenario())
+
+
+def test_hub_reply_rows_do_not_repaint_the_status_bar(db, lane, hub, presence, channel, alice, monkeypatch):
+    render_status = chat_flow._render_chat_status_line
+    paints = []
+
+    def count_paints(*args, **kwargs):
+        paints.append(None)
+        return render_status(*args, **kwargs)
+
+    async def scenario():
+        clock_started = asyncio.Event()
+
+        async def parked_clock(*args, **kwargs):
+            clock_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(chat_flow, "_render_chat_status_line", count_paints)
+        monkeypatch.setattr(chat_flow, "_clock_loop", parked_clock)
+        rig = await _rig(db, lane, hub, channel)
+        rig.fake.reply_lines = lambda command, params: [f"help row {i}" for i in range(12)]
+        try:
+            async def push(session):
+                await asyncio.wait_for(clock_started.wait(), timeout=2)
+                before = len(paints)
+                assert rig.bridge.send_hub_command(channel, alice.username, "HELP") is None
+                await _wait_for(lambda: "help row 11" in _text(session), what="complete hub reply")
+                await lane.run(lambda db: None)  # finish any queued status render
+                assert len(paints) == before
+                # Ordinary incoming chat still triggers its normal repaint.
+                await rig.fake.send_line("bob~Other~lobby~~~lobby~live message~")
+                await _wait_for(lambda: len(paints) > before, what="chat status repaint")
+
+            await _run(lane, hub, presence, channel, alice, ["/quit"], mrc_bridge=rig.bridge, while_joined=push)
+        finally:
+            await rig.close()
+    asyncio.run(scenario())

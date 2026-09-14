@@ -7134,7 +7134,10 @@ with it:
   SGR by `netbbs.rendering.pipe_codes` only after sanitization, per
   viewer, under a Profile toggle that defaults to on; every other pipe
   token is stripped at the parse boundary, identity fields lose all of
-  them, and the search index receives the plain words. A caller's own
+  them, and the search index receives the plain words. The recognized sender
+  prefix's foreground is stored separately as `mrc_nick_color` and applied
+  to the author on live display and replay under the same colour toggle.
+  Old rows keep their text and default author styling. A caller's own
   typed codes are still stripped: letting them through would put codes
   into local scrollback and Link-signed exports of mapped channels.
 - **The hub's reply to one caller goes to that caller.** A `SERVER`
@@ -7143,7 +7146,12 @@ with it:
   sessions alone under a per-caller line allowance, never recorded;
   `/mrc <subcommand>` sends the asks. `USERROOM` re-announces the
   caller in the mapped room at most once per keepalive tick,
-  `USERNICK` retargets the announced nick, `TERMINATE` is fatal like
+  `USERNICK` retargets the announced nick. Generic-client corrections apply
+  only when exactly one caller is announced; with multiple callers they
+  produce a bounded diagnostic and a caller notice without guessing an
+  identity. Generic-client `STATS` replies update the network summary and
+  are shown only to callers with outstanding explicit requests.
+  `TERMINATE` is fatal like
   `OLDVERSION`. An empty `to_room` is a network broadcast, shown in
   every active bridged channel (ENiGMA½'s reading).
 - **CTCP lives in the bridge.** `VERSION`, `TIME` (UTC only), `PING`
@@ -7214,23 +7222,34 @@ without teaching native chat anything about MRC. Decisions:
   on `/join` does not count against itself unless another session of
   the same account stays behind. A nick suffix was rejected: it would
   present a second person to the network.
-- **Finding rooms.** The top-level channel picker gains a "[Multi Relay
-  Chat]" entry (only with MRC on and open rooms allowed) that opens its
-  own picker: rooms open here with local and hub occupancy, rooms the
-  bridge has heard of (opened here, `USERROOM` targets, join/leave
-  chatter naming a room; bounded, in memory, rebuilt on connect), and
-  "[Open a room by name]" — one prompt, since a room that does not
-  exist yet is created by entering it. Inside an MRC room, `/join
-  <name>` resolves to an already-open `mrc:<name>`, then a local
-  channel, then opens `<name>` as a room; `/join mrc:<name>` opens the
-  room from anywhere; `/rooms` asks the hub. Open rooms are excluded
-  from the ordinary channel list, since the section is their place.
-- **What the protocol page settled (read 2026-09-09, rev 1.26; issue
-  #378):** the `LIST` reply has no documented shape ("Return the list
-  of rooms"), so the observed-room list stays fed by join and leave
-  chatter and `/rooms` shows the hub's text; `ROOM_OPEN`/`ROOM_CLOSE`
-  do not exist in the protocol (they were ENiGMA½ names). Neither is
-  deferred any more; there is nothing to wait for.
+- **Finding rooms.** With MRC and open rooms enabled, Chat's Multi Relay
+  Chat section lists retained rooms and discovered network rooms with hub
+  user counts and topics. A fresh directory offers `lobby` as a starting
+  point, plus opening a room by name. Entering a room requests `LIST` in
+  the background, also on reconnect and roster refresh, at most once per
+  five minutes per connection without spending callers' message allowance;
+  `/rooms` refreshes it
+  explicitly and shows a readable listing. Discovery never opens the
+  listed rooms. Local access rules and the blocklist still gate entry.
+  Refusals stay in the picker's header through redraws. Open rooms appear
+  in this section, not the ordinary channel list. Inside MRC, `/join <name>`
+  finds an open MRC room, then a local channel, then opens an MRC room;
+  `/join mrc:<name>` opens or finds that MRC room from anywhere.
+  `/join <room>` and `/mrc` subcommands and recipients have completion.
+- **Directory evidence.** The hub's room-list layout observed during live
+  use supplies the parser's anchored rows. Only replies to recent `LIST`
+  requests populate the bounded cache; unfamiliar output remains text,
+  never guessed room names. Counts and topics are advisory snapshots, with
+  stale readings labeled. Reconfiguring the hub clears its directory and
+  observed room names, then reloads locally retained mappings. Unknown
+  generic-client LIST lines stay scoped to explicit requesters and are
+  suppressed for automatic requests, never broadcast to other callers.
+- **Occupancy.** The status line separates local participants and their
+  local away count from the hub's remote roster count. An absent roster
+  reads `?`, not zero; stale snapshots are marked. MRC roster replies do
+  not supply structured away flags, so NetBBS does not invent a remote
+  away count. The status refreshes at most five seconds after roster
+  changes even in an otherwise quiet room.
 
 **Issue #304 (presence and welcome)** carries the presence a caller
 already has here onto the network and lets the network's own life show

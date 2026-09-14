@@ -77,7 +77,19 @@ unexpected node-identity warning with your SysOp.
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your
 profile; they are not confidential from that network. Use `/mrc` for its help
-and commands. Ordinary NetBBS Link mail is protected between nodes but does
+and commands. In **Chat > Multi Relay Chat**, start with `lobby` to discover
+network rooms. `/rooms` refreshes the list; return to the picker to choose a
+room with its user count and topic, or use `/join room`. Tab completes MRC
+subcommands, room names and recipients for `/mrc msg`.
+If opening a room is refused, the reason stays visible in the picker while
+you choose another room or go back.
+
+The status bar separates people **here** (including their away count) from
+people on **MRC**. Remote away counts are unavailable; `?` means the roster
+has not arrived, and stale readings are labeled. Profile's MRC colour switch
+controls incoming body and nickname colours, including scrollback.
+
+Ordinary NetBBS Link mail is protected between nodes but does
 not hide its contents from the home-node operators.
 
 ## Exchange files

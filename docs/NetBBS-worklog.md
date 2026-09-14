@@ -1164,6 +1164,10 @@ session needs the same treatment.
   of the 140-character budget. Inbound, `split_sender_prefix` peels a prefix
   only when the embedded name equals `from_user` (the underscored and the
   spaced spelling both count); a body naming anyone else is recorded whole.
+  Its foreground is retained separately in nullable `mrc_nick_color`, not
+  encoded in the author identity or prepended to the text. Re-parsing old
+  already-peeled bodies would remove legitimate words that happen to start
+  with the author's name. The additive migration leaves all old text intact.
   The fake hub's bare bodies hid this for a release: any new body test must
   use one of the four reference templates.
 - Pipe codes have two fates at the parse boundary: identity fields lose every
@@ -1423,17 +1427,44 @@ session needs the same treatment.
   welcome for the next room after the link returns.
 - `remote_roster` hides every entry at this node's own site, not only nicks
   currently announced: a USERLIST fetched moments before a caller left still
-  names them, and "0 here, 1 on MRC" for one's own ghost is wrong.
-- Observed rooms are bridge memory (200 entries, least recently seen
-  evicted), fed by openings, `USERROOM` targets and the anchored `*** Joining
-  <room>:` / `*** Leaving <room>:` templates; the hub only sends join chatter
-  for rooms this node is in, so the list mostly reflects this node's own
-  history; the protocol page (rev 1.26) documents no `LIST` reply format,
-  so this is the design, not a stopgap (issue #378).
+  names them, and "0 here, 1 on MRC" for one's own ghost is wrong. For bare
+  nicknames, retain which entries belonged to local callers when the roster
+  arrived, intersected with each new roster so this cache stays bounded.
+  This keeps a caller's departure from reclassifying their cached entry as
+  remote. Snapshot timestamps distinguish missing, current and stale counts;
+  USERLIST has no structured remote-away state.
+- The observed-room and network-directory caches each hold at most 200
+  entries. LIST rows use the anchored layout observed on the live hub;
+  only replies to a recent request may populate the directory. Header,
+  footer, malformed rows and unfamiliar prose never become room names.
+  Automatic first-join refreshes suppress recognized listing rows; explicit
+  `/rooms` shows reformatted rows. Unknown generic-client LIST lines follow
+  the outstanding request: explicit requesters see them as text, automatic
+  requests suppress them. Structured control replies and presence chatter
+  retain their own handlers; caller-addressed unfamiliar replies retain
+  their addressed destination. Requests expire after 30 seconds and follow
+  nickname corrections. Settings reload clears both discovery caches, then
+  reloads locally retained mappings. Empty topics do not exclude valid rows.
+  Automatic LIST requests use the shared refresh interval and bounded writer
+  with normal wire spacing, never the caller's interactive token allowance.
+  Repeated LIST asks from the same nick reuse its pending reply, making
+  remaining output visible if it began as background discovery. They enqueue
+  no duplicate and do not extend its original 30-second expiry; the footer
+  releases the request. The picker offers lobby when it is neither retained
+  nor observed, even with other configured rooms. When opening is disabled,
+  bare `/join` completion offers only rooms that already have mappings.
+- Generic-client STATS replies update the shared reading; explicit requests
+  alone cause displayed replies. Generic-client USERROOM/USERNICK can name
+  no individual caller: apply them only with exactly one announced account.
+  Multiple callers get a bounded notice, never a guessed rename or move.
 - The picker's section entry uses stable id 0 (channels are positive,
   categories negated), the section's own picker uses -1 for "open by name"
   and -2-n for observed rooms; `pick_item` shows the id beside every entry,
-  so these must stay small.
+  so these must stay small. Opening refusals belong in the picker's retained
+  header, which is drawn after clearing and included in its row budget;
+  printing before re-entering the picker loses the reason with in-place
+  redraws. Regression checks must inspect output after the latest clear,
+  including a subsequent Ctrl-L, rather than the entire transcript.
 - Private messages (issue #305): the opt-in is read on the lane with the
   nick colour (`load_private_optin`, injectable) by `_ensure_nick_color`,
   which caches each value it could read; a failed opt-in read is logged and

@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import time
 
+import pytest
+
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.scrollback import get_scrollback, record_message
@@ -69,6 +71,7 @@ def test_inbound_bodies_lose_the_senders_own_embedded_handle(db, lane, lobby, al
                 ("message", "bob@Mystic (MRC)", "<carol> quoted someone else"),
             ]
             assert all(m.external_source == "mrc" for m in delivered)
+            assert [m.mrc_nick_color for m in delivered] == [11, 2, None, 7, 13, None]
             # The search index gets the words, never the codes.
             hits = db.connection.execute(
                 "SELECT body FROM channel_message_search WHERE channel_id = ? ORDER BY message_id", (lobby.id,)
@@ -426,6 +429,67 @@ def test_reply_truncation_notice_is_once_per_burst_even_when_the_hub_trickles(db
                 await fake.send_line(f"SERVER~~~alice~~~again {i}~")
             second = await drain(5)
             assert second[:4] == ["again 0", "again 1", "again 2", "again 3"] and "cut short" in second[4]
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_generic_hub_controls_update_a_single_caller_and_stats(db, lane, lobby, alice):
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body.startswith("NEWROOM:"))
+            await fake.send_line("SERVER~~~CLIENT~~~USERNICK:alice2~")
+            notice = await asyncio.wait_for(queue.get(), timeout=2)
+            assert "alice2" in notice.text
+            assert bridge.send_hub_command(lobby, "alice", "STATS") is None
+            await fake.wait_for(lambda p: p.from_user == "alice2" and p.body == "STATS")
+            await fake.send_line("SERVER~~~CLIENT~~~STATS:12 3 35 1~")
+            await _wait_until(lambda: bridge.status().network_users == 35)
+            await fake.send_line("SERVER~~~CLIENT~~~USERROOM:elsewhere~")
+            await fake.wait_for(lambda p: p.from_user == "alice2" and p.body == "NEWROOM:elsewhere:lobby")
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("command", ["USERNICK", "USERROOM"])
+@pytest.mark.parametrize("target", ["CLIENT", "ALL", ""])
+def test_repeated_ambiguous_corrections_are_consumed(db, lane, lobby, alice, command, target):
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        other_queue = hub.join(lobby.name, ParticipantId("carol", 2))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM:")) == 2)
+            packet = f"SERVER~~~{target}~~lobby~{command}:someone~"
+            await fake.send_line(packet)
+            for recipient in (queue, other_queue):
+                notice = await asyncio.wait_for(recipient.get(), timeout=2)
+                assert "without identifying" in notice.text
+            await fake.send_line(packet)
+            await fake.send_line(packet)
+            # A later structured reply fences processing of both repeats.
+            await fake.send_line("SERVER~~~CLIENT~~~STATS:12 3 123 1~")
+            await _wait_until(lambda: bridge.status().network_users == 123)
+            assert queue.empty() and other_queue.empty()
+            assert bridge._caller_for_nick("alice") is not None
+            assert bridge._caller_for_nick("carol") is not None
+            assert bridge._caller_for_nick("someone") is None
+            assert len(fake.packets(body_prefix="NEWROOM:")) == 2
         finally:
             await bridge.close()
             await fake.close()

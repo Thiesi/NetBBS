@@ -134,7 +134,7 @@ def _sender_prefix_patterns(from_user: str) -> list[tuple[str, re.Pattern[str]]]
     spellings = {from_user, from_user.replace("_", " ")}
     nick = "(?:" + "|".join(re.escape(spelling) for spelling in sorted(spellings)) + ")"
     return [
-        (kind, re.compile(template.format(pipe=_PIPE, nick=nick), re.IGNORECASE | re.DOTALL))
+        (kind, re.compile(template.format(pipe=_PIPE, nick=f"(?P<nick>{nick})"), re.IGNORECASE | re.DOTALL))
         for kind, template in _SENDER_PREFIX_TEMPLATES
     ]
 
@@ -376,6 +376,21 @@ def parse_userlist(params: str) -> list[str]:
     return [entry for entry in entries if entry]
 
 
+def parse_room_list_row(text: str) -> tuple[str, int, str] | None:
+    """Parse the room rows observed on the hub; unknown layouts stay text.
+
+    The anchored prefix and strict room validation prevent headers, footers
+    and wrapped prose from becoming rooms. This is not a general table parser.
+    """
+    match = re.fullmatch(r"\*\.:\s+#([^\s]{1,20})\s+([0-9]{1,6})(?:\s+(.*))?", strip_pipe_codes(text).strip())
+    if match is None:
+        return None
+    room, users, topic = match.groups()
+    if sanitize_room(room) != room:
+        return None
+    return room, int(users), sanitize_body(topic or "")[:MAX_TOPIC]
+
+
 def looks_like_presence_chatter(body: str) -> bool:
     """Join/part/timeout chatter the hub and other clients broadcast as
     ordinary text (`*** Joining ...`, `- nick has left chat.`) -- shown
@@ -511,6 +526,18 @@ def split_sender_prefix(body: str, from_user: str) -> tuple[str, str]:
             if match is not None:
                 return kind, match.group("text")
     return "message", body
+
+
+def sender_color(body: str, from_user: str) -> int | None:
+    """Foreground of a recognized sender prefix; backgrounds never style identity."""
+    if from_user:
+        for _kind, pattern in _sender_prefix_patterns(from_user):
+            match = pattern.match(body)
+            if match is not None:
+                colors = [int(value) for value in re.findall(r"\|([0-9]{2})", body[:match.start("nick")])
+                          if int(value) < 16]
+                return colors[-1] if colors else None
+    return None
 
 
 def format_room_body(nick: str, text: str, *, nick_color: int = DEFAULT_NICK_COLOR) -> str:

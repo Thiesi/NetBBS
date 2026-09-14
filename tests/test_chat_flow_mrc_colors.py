@@ -184,3 +184,20 @@ def test_help_lists_the_subcommands(db, lane, hub, presence, channel, alice):
         finally:
             await rig.close()
     asyncio.run(scenario())
+
+
+def test_remote_nickname_color_survives_live_delivery_and_scrollback(db, lane, hub, presence, channel, alice):
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            async def push(session):
+                await rig.fake.send_line("bob~Other~lobby~~~lobby~|03<|11bob|03>|16|07 distinct body~")
+                await _wait_for(lambda: "distinct body" in _text(session), what="styled message")
+            session, _ = await _run(lane, hub, presence, channel, alice, ["/quit"], mrc_bridge=rig.bridge, while_joined=push)
+            assert fg(cga_to_xterm(11)) + "bob" in "\n".join(session.written)
+            replay, _ = await _run(lane, hub, presence, channel, alice, ["/quit"], mrc_bridge=rig.bridge)
+            assert fg(cga_to_xterm(11)) + "bob" in "\n".join(replay.written)
+            assert _text(replay).count("bob@Other (MRC)") == 1
+        finally:
+            await rig.close()
+    asyncio.run(scenario())

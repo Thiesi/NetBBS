@@ -146,6 +146,7 @@ from netbbs.link.node_profiles import (
     latest_identity_observation,
 )
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX
+from netbbs.rendering.pipe_codes import cga_to_xterm
 from netbbs.mrc.protocol import MAX_ARGUMENT, display_roster_entry
 from netbbs.mrc.bridge import MrcBridge, MrcNotice, MrcStatus
 from netbbs.mrc.settings import (
@@ -839,6 +840,7 @@ async def _open_or_find_room(
     room: str,
     *,
     leaving: Channel | None = None,
+    on_denial: Callable[[str], None] | None = None,
 ) -> MrcChannelMapping | None:
     """Resolve MRC `room` to a channel for `user`, opening it if no
     channel carries it yet. An existing channel -- the SysOp's mapped
@@ -846,38 +848,38 @@ async def _open_or_find_room(
     on entry); only a *new* row is subject to the node-wide open-room
     gates, the blocklist and the one-identity rule, all checked before
     anything is written so a refused caller never spends the cap.
-    Every refusal is spoken; `None` means nothing to enter."""
+    Refusals go to the picker's persistent feedback callback when given,
+    otherwise to chat output; `None` means nothing to enter."""
+    async def _refuse(reason: str) -> None:
+        if on_denial is not None:
+            on_denial(reason)
+        else:
+            await session.write_line(colored(sanitize_text(reason), fg_color=MUTED_COLOR))
+
     existing = mrc_bridge.mapping_for_room(room)
     if existing is not None:
         if existing.is_open_room and mrc_bridge.room_blocked(existing.room):
-            await session.write_line(
-                colored(f"The SysOp has blocked MRC room #{sanitize_text(existing.room)} on this node.", fg_color=MUTED_COLOR)
-            )
+            await _refuse(f"The SysOp has blocked MRC room #{existing.room} on this node.")
             return None
         return existing
     if mrc_bridge.room_blocked(room):
-        await session.write_line(
-            colored(f"The SysOp has blocked MRC room #{sanitize_text(room)} on this node.", fg_color=MUTED_COLOR)
-        )
+        await _refuse(f"The SysOp has blocked MRC room #{room} on this node.")
         return None
     held = mrc_bridge.identity_room_held(user.username, leaving=leaving)
     if held is not None:
-        await session.write_line(
-            colored(
-                f"Your MRC identity is already in #{sanitize_text(held)} from another session; "
-                "MRC allows one room per user. Leave it there first.",
-                fg_color=MUTED_COLOR,
-            )
+        await _refuse(
+            f"Your MRC identity is already in #{held} from another session; "
+            "MRC allows one room per user. Leave it there first."
         )
         return None
     denial = await lane.run(_open_room_gate_denial, user, mrc_bridge.open_room_settings)
     if denial is not None:
-        await session.write_line(colored(denial, fg_color=MUTED_COLOR))
+        await _refuse(denial)
         return None
     try:
         return await mrc_bridge.open_room(room, user.username)
     except MrcSettingsError as exc:
-        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        await _refuse(str(exc))
         return None
 
 
@@ -914,9 +916,12 @@ async def _pick_mrc_room(
 
         visible_open = await lane.run(_load)
         known = {mapping.room.lower() for mapping in await lane.run(list_open_rooms)}
+        discovered = mrc_bridge.observed_rooms()
+        if "lobby" not in known and not any(room.lower() == "lobby" for room in discovered):
+            discovered = ["lobby", *discovered]
         observed = [
             _ObservedRoomEntry(room, index)
-            for index, room in enumerate(mrc_bridge.observed_rooms())
+            for index, room in enumerate(discovered)
             if room.lower() not in known and not mrc_bridge.room_blocked(room)
         ]
         return [_JoinByNameEntry(), *visible_open, *observed]
@@ -932,10 +937,23 @@ async def _pick_mrc_room(
         if isinstance(item, _JoinByNameEntry):
             return "type the MRC room to open; a room that does not exist yet is created by entering it"
         if isinstance(item, _ObservedRoomEntry):
+            details = mrc_bridge.directory_details(item.room)
+            if details is not None:
+                users, topic, fresh = details
+                return f"{users} on MRC{' (stale)' if not fresh else ''} | {topic}"
+            if item.room.lower() == "lobby":
+                return "start here; entering loads the network room directory"
             return "seen on the network -- nobody here is in it"
         here = hub.participant_count(item.channel.name)
-        there = len(mrc_bridge.remote_roster(item.channel))
-        bits = [f"{here} here", f"{there} on MRC"]
+        there, fresh = mrc_bridge.room_presence(item.channel)
+        remote = f"{there if there is not None else '?'} on MRC"
+        if there is not None and not fresh:
+            remote += " (stale)"
+        bits = [f"{here} here", remote]
+        # ROOMTOPIC updates the retained channel, including clearing its
+        # topic; a previous LIST snapshot must not override that state.
+        if item.channel.topic:
+            bits.append(item.channel.topic)
         if item.paused:
             bits.append("paused by the SysOp")
         return ", ".join(bits)
@@ -946,6 +964,17 @@ async def _pick_mrc_room(
         if isinstance(item, _ObservedRoomEntry):
             return _JOIN_BY_NAME_STABLE_ID - 1 - item.index
         return item.channel.id
+
+    feedback = ""
+
+    def _show_denial(reason: str) -> None:
+        nonlocal feedback
+        feedback = colored(sanitize_text(reason), fg_color=MUTED_COLOR)
+
+    async def _header() -> str:
+        # The picker clears before drawing its masthead and budgets its
+        # wrapped rows. Keep feedback there across paging/refresh/Ctrl-L.
+        return "\r\n".join(part for part in (masthead, feedback) if part)
 
     while True:
         status = mrc_bridge.status()
@@ -964,27 +993,21 @@ async def _pick_mrc_room(
             unicode_style=unicode_style,
             collapsed=collapsed,
             accent_color=accent,
-            masthead=masthead,
+            masthead=_header,
         )
         if selected is None:
             return None
         if isinstance(selected, MrcChannelMapping):
             if not mrc_bridge.open_rooms_enabled:
-                await session.write_line(
-                    colored("Opening MRC rooms is switched off on this node.", fg_color=MUTED_COLOR)
-                )
-                return None
+                _show_denial("Opening MRC rooms is switched off on this node.")
+                continue
             if mrc_bridge.room_blocked(selected.room):
-                await session.write_line(
-                    colored(f"The SysOp has blocked MRC room #{sanitize_text(selected.room)} on this node.", fg_color=MUTED_COLOR)
-                )
+                _show_denial(f"The SysOp has blocked MRC room #{selected.room} on this node.")
                 continue
             # The list on screen may be older than the sweeper's last pass.
             current = await lane.run(get_mrc_mapping, selected.channel)
             if current is None:
-                await session.write_line(
-                    colored(f"MRC room #{sanitize_text(selected.room)} was retired while you were looking; pick again.", fg_color=MUTED_COLOR)
-                )
+                _show_denial(f"MRC room #{selected.room} was retired while you were looking; pick again.")
                 continue
             return current.channel
         if isinstance(selected, _ObservedRoomEntry):
@@ -994,12 +1017,12 @@ async def _pick_mrc_room(
             room = (await session.read_line()).strip()
             if not room:
                 continue
-        mapping = await _open_or_find_room(session, lane, mrc_bridge, user, room)
+        mapping = await _open_or_find_room(session, lane, mrc_bridge, user, room, on_denial=_show_denial)
         if mapping is None:
             continue
         allowed, denial = await lane.run(_authorize_channel_entry, mapping.channel, user)
         if not allowed:
-            await session.write_line(colored(denial, fg_color=MUTED_COLOR))
+            _show_denial(denial or "You are not authorized to enter this channel.")
             continue
         if not status.connected:
             await session.write_line(
@@ -1416,6 +1439,10 @@ def _render_channel_message(
     carry its own embedded color.
     """
     author_label = _message_author_label(db, channel, message)
+    mrc_nick_color = (
+        message.mrc_nick_color
+        if message.external_source == "mrc" and mrc_colors_enabled(db, viewer) else None
+    )
     if message.kind == "join":
         line = _colored_around("*** ", author_label, " has joined the channel.", fg_color=MUTED_COLOR)
     elif message.kind == "leave":
@@ -1426,7 +1453,11 @@ def _render_channel_message(
             # The body is its own reset-terminated span beside the muted
             # label: SGR reset restores no outer colour, so the two are
             # composed independently rather than nested (issue #298).
-            line = _colored_around(bullet, author_label, " ", fg_color=MUTED_COLOR) + _mrc_body(db, viewer, message.body)
+            nick_style = cga_to_xterm(mrc_nick_color) if mrc_nick_color is not None else effective_accent_color_256(db)
+            line = (
+                colored(bullet, fg_color=MUTED_COLOR) + _mrc_styled_author(author_label, nick_style)
+                + " " + _mrc_body(db, viewer, message.body)
+            )
         else:
             line = _colored_around(
                 bullet, author_label, f" {sanitize_text(message.body)}", fg_color=MUTED_COLOR
@@ -1435,6 +1466,12 @@ def _render_channel_message(
         color = SELF_COLOR if self_message else effective_accent_color_256(db)
         label = _colored_around("<", author_label, ">", fg_color=color, bold=self_message)
         if message.external_source == "mrc":
+            if mrc_nick_color is not None:
+                label = (
+                    colored("<", fg_color=MUTED_COLOR)
+                    + _mrc_styled_author(author_label, cga_to_xterm(mrc_nick_color))
+                    + colored(">", fg_color=MUTED_COLOR)
+                )
             line = f"{label} {_mrc_body(db, viewer, message.body)}"
         else:
             # Dogfood feedback: "system messages are barely readable, and
@@ -3009,6 +3046,14 @@ async def _relay_to_mrc(session: Session, mrc_bridge: MrcBridge, channel: Channe
         )
 
 
+def _mrc_styled_author(author: str, foreground: int) -> str:
+    """Keep the sender prominent and the network provenance quieter."""
+    nick, separator, provenance = author.rpartition("@")
+    if not separator:
+        return colored(author, fg_color=foreground)
+    return colored(nick, fg_color=foreground) + colored("@" + provenance, fg_color=MUTED_COLOR)
+
+
 def _mrc_body(db: Database, viewer: User, body: str | None) -> str:
     """An MRC-sourced body for `viewer`'s screen (issue #298): sanitized
     first, then either its `|NN` colour codes rendered or every code
@@ -3216,6 +3261,7 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
     await ctx.session.write_line(
         colored(f"Private MRC messages: {optin_text} (Profile > Communication)", fg_color=MUTED_COLOR)
     )
+    await ctx.session.write_line("MRC roster counts are last reported by the hub; remote away counts are unavailable.")
     roster = _mrc_roster_entries(ctx)
     if roster:
         await ctx.session.write_line(f"{len(roster)} MRC user{'s' if len(roster) != 1 else ''} here: " + ", ".join(roster))
@@ -3701,7 +3747,8 @@ _INVITE_COMMAND_PREFIX = "/invite "
 
 
 async def _build_completer(
-    lane: DatabaseLane, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
+    lane: DatabaseLane, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User,
+    mrc_bridge: MrcBridge | None = None,
 ) -> Completer:
     """
     Builds one Tab-completion closure per `read_line()` call in
@@ -3746,6 +3793,29 @@ async def _build_completer(
     roster_usernames = _roster_usernames(hub, channel)
 
     def completer(text: str) -> list[str]:
+        lower = text.lower()
+        if mrc_bridge is not None and mrc_bridge.open_rooms_enabled and lower.startswith("/join mrc:"):
+            fragment = lower[len("/join mrc:"):]
+            return sorted("mrc:" + room for room in mrc_bridge.observed_rooms()
+                          if room.lower().startswith(fragment) and not mrc_bridge.room_blocked(room))
+        if mrc_bridge is not None and mrc_bridge.is_bridged(channel):
+            if lower.startswith("/mrc ") and " " not in text[5:]:
+                choices = {*_MRC_HUB_COMMANDS, *_MRC_SECRET_COMMANDS, "msg", "r", "ctcp", "update", "send"}
+                return sorted(command for command in choices if command.startswith(lower[5:]))
+            if lower.startswith("/mrc update "):
+                return ["password"] if "password".startswith(lower[len("/mrc update "):]) else []
+            if lower.startswith("/mrc ctcp ") and " " in text[len("/mrc ctcp "):]:
+                _nick, _, fragment = text[len("/mrc ctcp "):].partition(" ")
+                return [verb for verb in ("VERSION", "TIME", "PING", "CLIENTINFO") if verb.lower().startswith(fragment.lower())]
+            for prefix in ("/mrc msg ", "/mrc ctcp ", "/mrc lastseen "):
+                if lower.startswith(prefix) and " " not in text[len(prefix):]:
+                    fragment = lower[len(prefix):]
+                    names = {entry.partition("@")[0] for entry in mrc_bridge.remote_roster(channel)}
+                    return sorted(name for name in names if name.lower().startswith(fragment))
+            if lower.startswith("/join ") and " " not in text[6:]:
+                return sorted(room for room in mrc_bridge.observed_rooms()
+                              if room.lower().startswith(lower[6:]) and not mrc_bridge.room_blocked(room)
+                              and (mrc_bridge.open_rooms_enabled or mrc_bridge.mapping_for_room(room) is not None))
         if text.startswith("/") and " " not in text:
             prefix = text[1:].lower()
             return sorted(name for name in visible_commands if name[1:].lower().startswith(prefix))
@@ -3954,7 +4024,8 @@ def _channel_name_spans(name: str, *, accent: int) -> list[_StatusSpan]:
 
 
 def _render_chat_status_line(
-    db: Database, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
+    db: Database, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User,
+    mrc_presence: tuple[int | None, bool] | None = None,
 ) -> list[_StatusGroup]:
     """
     The status line's content, as an ordered list of colored field
@@ -3977,9 +4048,9 @@ def _render_chat_status_line(
     background-less look for "I've stepped back"), so there is nothing
     here to drop or truncate for it. A channel bridged to an MRC room
     (issue #275) gets an `[MRC]` span beside its type, read from the DB
-    mapping -- it says *bridged*, not *connected*: this runs on the lane
-    thread with no in-memory bridge in reach, and live hub state is
-    `/mrc`'s job. Still deliberately *not* included: any per-channel
+    mapping. The event loop supplies an immutable remote-count snapshot;
+    this worker never reaches into the live bridge. Local away counts are
+    explicitly local; the hub's roster does not report remote away flags. Still deliberately *not* included: any per-channel
     "linked vs. local" origin marker.
 
     The clock forces a bare `%H:%M` (`override_format`), not the
@@ -4031,6 +4102,13 @@ def _render_chat_status_line(
     mrc_mapping = get_mrc_mapping(db, channel)
     if mrc_mapping is not None and mrc_mapping.active:
         groups[0].append(_StatusSpan("[MRC]", fg_color=CHANNEL_TYPE_COLOR, bold=True))
+        if mrc_mapping.is_open_room:
+            groups[0] = [*_channel_name_spans(mrc_mapping.room, accent=accent),
+                         _StatusSpan("[MRC]", fg_color=CHANNEL_TYPE_COLOR, bold=True)]
+        groups[1][1] = _StatusSpan(" here (", fg_color=MUTED_COLOR)
+        count, fresh = mrc_presence if mrc_presence is not None else (None, False)
+        remote = f"{count if count is not None else '?'} MRC" + (" (stale)" if count is not None and not fresh else "")
+        groups.insert(2, [_StatusSpan(remote, fg_color=header if fresh else MUTED_COLOR, bold=fresh)])
 
     topic_text = channel.topic or channel.description
     if topic_text:
@@ -4144,7 +4222,7 @@ def _compose_status_line(groups: list[_StatusGroup], width: int, *, active: bool
 
 async def _repaint_status_line(
     session: Session, lane: DatabaseLane, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User,
-    *, unicode_style: bool = False, truecolor: bool = False,
+    *, unicode_style: bool = False, truecolor: bool = False, mrc_bridge: MrcBridge | None = None,
 ) -> None:
     """
     Redraws the pinned status row in place, leaving the user's own
@@ -4154,7 +4232,8 @@ async def _repaint_status_line(
     height = session.terminal_height
     if height < _PINNED_UI_MIN_HEIGHT:
         return
-    groups = await lane.run(_render_chat_status_line, hub, presence, channel, user)
+    snapshot = mrc_bridge.room_presence(channel) if mrc_bridge is not None else None
+    groups = await lane.run(_render_chat_status_line, hub, presence, channel, user, mrc_presence=snapshot)
     line = _compose_status_line(groups, session.terminal_width, active=not presence.is_away(user.username))
     shelf = _shelf_divider(session.terminal_width, unicode_style=unicode_style, truecolor=truecolor)
     await session.write(
@@ -4298,6 +4377,7 @@ class _PinnedUIState:
     accent_color: int = ACCENT_COLOR
     unicode_style: bool = False
     truecolor: bool = False
+    mrc_bridge: MrcBridge | None = None
 
     async def sync(
         self,
@@ -4320,6 +4400,7 @@ class _PinnedUIState:
                 await _repaint_status_line(
                     session, lane, hub, presence, channel, user,
                     unicode_style=self.unicode_style, truecolor=self.truecolor,
+                    mrc_bridge=self.mrc_bridge,
                 )
                 await _repaint_input_row(
                     session, live_buffer, height,
@@ -4361,19 +4442,22 @@ async def _clock_loop(
     *,
     unicode_style: bool = False,
     truecolor: bool = False,
+    mrc_bridge: MrcBridge | None = None,
     now: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.timezone.utc),
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """
-    Repaints the pinned status row once a minute, aligned to the real
-    wall-clock minute boundary.
+    Repaints the clock on minute boundaries. An MRC room also refreshes
+    its roster snapshot every five seconds without writing chat notices.
     """
     while True:
-        await sleep(_seconds_until_next_minute(now()))
+        interval = _seconds_until_next_minute(now())
+        await sleep(min(interval, 5.0) if mrc_bridge is not None and mrc_bridge.is_bridged(channel) else interval)
         async with lock:
             await _repaint_status_line(
                 session, lane, hub, presence, channel, user,
                 unicode_style=unicode_style, truecolor=truecolor,
+                mrc_bridge=mrc_bridge,
             )
 
 
@@ -4571,6 +4655,7 @@ async def _chat_loop(
             accent_color=accent_color,
             unicode_style=unicode_style,
             truecolor=truecolor,
+            mrc_bridge=mrc_bridge,
         )
         if pinned_ui_enabled:
             await session.write(clear_screen() + set_scroll_region(1, initial_height - _PINNED_ROWS))
@@ -4633,6 +4718,8 @@ async def _chat_loop(
         if mrc_bridge is not None and mrc_bridge.is_bridged(channel):
             await _announce_mrc_bridge(session, mrc_bridge, channel, user)
             await mrc_bridge.local_join(channel, user.username)
+            if mrc_bridge.open_rooms_enabled:
+                mrc_bridge.refresh_directory(channel, user.username)
             if mrc_session_state is not None and not mrc_session_state.get("welcomed"):
                 # Issue #304: the hub's welcome, once per session -- its
                 # banner as remembered by the bridge, then MOTD asked for
@@ -4648,6 +4735,7 @@ async def _chat_loop(
             await _repaint_status_line(
                 session, lane, hub, presence, channel, user,
                 unicode_style=unicode_style, truecolor=truecolor,
+                mrc_bridge=mrc_bridge,
             )
             # Neither task is running yet (both are created below, after
             # this initial setup completes) -- no concurrent writer exists
@@ -4675,6 +4763,7 @@ async def _chat_loop(
                     await _repaint_status_line(
                         session, lane, hub, presence, channel, user,
                         unicode_style=pinned_ui.unicode_style, truecolor=pinned_ui.truecolor,
+                        mrc_bridge=mrc_bridge,
                     )
 
         session.pinned_notice_hook = deliver
@@ -4728,6 +4817,8 @@ async def _chat_loop(
                         if mrc_session_state is not None and not mrc_session_state.get("private_noted"):
                             mrc_session_state["private_noted"] = True
                             await deliver(colored(_MRC_PRIVATE_NOTE, fg_color=MUTED_COLOR))
+                    # Multi-line command replies do not change occupancy;
+                    # the clock loop refreshes cached MRC counts separately.
                     await deliver(rendered, repaint_status=message.kind != "reply")
                     continue
                 if isinstance(message, QueueOverflowNotice):
@@ -4804,7 +4895,7 @@ async def _chat_loop(
                 )
 
             while True:
-                completer = await _build_completer(lane, hub, presence, channel, user)
+                completer = await _build_completer(lane, hub, presence, channel, user, mrc_bridge=mrc_bridge)
                 raw_line = await session.read_line(
                     history=history, completer=completer, live_buffer=live_buffer, lock=lock,
                     list_candidates=list_candidates if pinned_ui.active else None,
@@ -4950,7 +5041,7 @@ async def _chat_loop(
                             # is simpler than enumerating which ones matter and no
                             # more expensive (design doc).
                             if pinned_ui_enabled:
-                                await _repaint_status_line(session, lane, hub, presence, channel, user)
+                                await _repaint_status_line(session, lane, hub, presence, channel, user, mrc_bridge=mrc_bridge)
                             continue
 
                         if private_target is not None:
@@ -5012,7 +5103,7 @@ async def _chat_loop(
                             # new mute the way kick/ban get one, so this rejection
                             # is the first opportunity to reflect it.
                             if pinned_ui_enabled:
-                                await _repaint_status_line(session, lane, hub, presence, channel, user)
+                                await _repaint_status_line(session, lane, hub, presence, channel, user, mrc_bridge=mrc_bridge)
                             continue
 
                         # GitHub issue #64: re-checked here against
@@ -5096,6 +5187,7 @@ async def _chat_loop(
                             await _repaint_status_line(
                                 session, lane, hub, presence, channel, user,
                                 unicode_style=pinned_ui.unicode_style, truecolor=pinned_ui.truecolor,
+                                mrc_bridge=mrc_bridge,
                             )
                 finally:
                     # Re-synced once more here, not just trusted from the
@@ -5230,6 +5322,7 @@ async def _chat_loop(
             _clock_loop(
                 session, lane, hub, presence, channel, user, lock,
                 unicode_style=unicode_style, truecolor=truecolor,
+                mrc_bridge=mrc_bridge,
             )
         )
 
