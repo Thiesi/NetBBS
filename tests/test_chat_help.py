@@ -15,11 +15,18 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.hub import ParticipantId
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.moderation import ChannelPermission, grant_permissions
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
+from netbbs.net.node_theme import (
+    effective_accent_color_256,
+    effective_header_color_256,
+    set_accent_color_override,
+    set_header_color_override,
+)
 from netbbs.rendering import (
     ACCENT_COLOR,
     LABEL_COLOR,
@@ -94,6 +101,29 @@ class PagingSession(FakeSession):
         return " "
 
 
+class ResizingPagingSession(PagingSession):
+    async def read_any_key(self, echo: bool = True) -> str:
+        result = await super().read_any_key(echo=echo)
+        if self.page_turns == 1:
+            self.terminal_width = 40
+            self.terminal_height = 12
+        return result
+
+
+class BlockingPagingSession(PagingSession):
+    def __init__(self, lines=None, *, width=80, height=24):
+        super().__init__(lines, width=width, height=height)
+        self.waiting_for_page = asyncio.Event()
+
+    async def read_any_key(self, echo: bool = True) -> str:
+        self.page_turns += 1
+        if self.page_turns > 1:
+            return " "
+        self.waiting_for_page.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
 # -- bare /help: permission-aware listing ------------------------------
 
 
@@ -142,6 +172,17 @@ def test_help_colors_commands_parameters_and_descriptions_separately(
     assert colored("Show a user's public profile.", fg_color=VALUE_COLOR) in output
 
 
+def test_help_honors_configured_accent_and_header_colors(
+    db, lane, hub, presence, alice, channel,
+):
+    set_accent_color_override(db, (210, 70, 40))
+    set_header_color_override(db, (30, 180, 220))
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/help finger", "/quit"]))
+    output = _written_text(session)
+    assert colored("/finger", fg_color=effective_accent_color_256(db), bold=True) in output
+    assert colored("Chat commands", fg_color=effective_header_color_256(db), bold=True) in output
+
+
 def test_help_pages_fit_the_live_chat_viewport_and_wait_between_pages():
     session = PagingSession(width=80, height=24)
     asyncio.run(
@@ -157,7 +198,52 @@ def test_help_pages_fit_the_live_chat_viewport_and_wait_between_pages():
     assert session.page_turns == len(page_starts) - 1
     for index, start in enumerate(page_starts):
         end = page_starts[index + 1] if index + 1 < len(page_starts) else len(visible_writes)
-        assert end - start <= session.terminal_height - 2
+        assert end - start <= session.terminal_height - chat_flow._PINNED_ROWS - 1
+
+
+def test_help_reflows_remaining_pages_after_a_terminal_resize():
+    session = ResizingPagingSession(width=80, height=24)
+    asyncio.run(
+        chat_flow._show_help_pages(
+            session,
+            list(chat_flow._COMMAND_INFO.values()),
+            pinned_ui_enabled=lambda height: height >= chat_flow._PINNED_UI_MIN_HEIGHT,
+        )
+    )
+    visible_writes = [strip_ansi(write).rstrip("\r\n") for write in session.written]
+    second_page = next(
+        index for index, line in enumerate(visible_writes)
+        if line.startswith("Chat commands (page 2")
+    )
+    assert all(visible_width(line) <= 40 for line in visible_writes[second_page:])
+    assert "-" * 40 in visible_writes[second_page:]
+
+
+def test_help_page_wait_does_not_block_a_priority_kick(
+    db, lane, hub, presence, alice, channel,
+):
+    async def scenario():
+        session = BlockingPagingSession(["/help"])
+        mailbox = MessageMailbox()
+        history = InputHistory()
+        task = asyncio.create_task(
+            chat_flow._chat_loop(
+                session, lane, hub, presence, mailbox, history, channel, alice,
+            )
+        )
+        await asyncio.wait_for(session.waiting_for_page.wait(), timeout=1)
+        participant_id = ParticipantId(username=alice.username, session_key=id(session))
+        await hub.send_to(
+            channel.name,
+            participant_id,
+            chat_flow._KickNotice(reason="kicked"),
+            priority=True,
+        )
+        await asyncio.wait_for(task, timeout=1)
+        return session
+
+    session = asyncio.run(scenario())
+    assert "You have been kicked from this channel" in strip_ansi(_written_text(session))
 
 
 def test_long_help_syntax_stays_inside_a_narrow_terminal():

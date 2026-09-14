@@ -1192,7 +1192,7 @@ state, invitations/membership, `/who`, `/whois`, `/names`, `/list`, `/join`,
 
 Chat `/help` is a width- and height-aware command table. It aligns descriptions
 in one column, colors command names, parameters, and descriptions as distinct
-fields, and paginates within the scrolling region while preserving chat's two
+fields, and paginates within the scrolling region while preserving chat's three
 pinned rows. The bare list remains permission-aware; `/help <command>` may
 explain a command outside that list without granting permission to run it.
 
