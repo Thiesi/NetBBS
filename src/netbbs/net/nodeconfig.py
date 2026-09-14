@@ -476,6 +476,17 @@ class NodeConfig:
             # nothing leaves the machine, and it is how the service is
             # developed against.
             parsed = urlparse(self.managed_dns.service_url)
+            if parsed.username or parsed.password:
+                # The node copies this address into its database and
+                # prints it in log lines and SysOp-facing diagnostics, so
+                # an embedded password would leak wherever those go
+                # (Codex review of PR #587). Deliberately the one message
+                # here that does not echo the value it rejected.
+                raise ConfigError(
+                    "managed_dns.service_url must not embed a username or password -- this node "
+                    "records the address in its database and prints it in logs; put credentials "
+                    "in the service's own reverse proxy instead"
+                )
             if parsed.scheme != "https" and not is_loopback_host(parsed.hostname or ""):
                 raise ConfigError(
                     "managed_dns.service_url must be an https:// URL unless it names a loopback "

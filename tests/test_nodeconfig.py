@@ -1089,3 +1089,24 @@ def test_a_remote_managed_dns_service_url_must_be_https():
     # `services.managed_dns` is developed against.
     for local in ("http://127.0.0.1:8099", "http://localhost:8099", "http://[::1]:8099"):
         config(local).validate()
+
+
+def test_a_managed_dns_service_url_may_not_embed_credentials():
+    """Codex review of PR #587. The node copies this address into its
+    database and prints it in log lines and SysOp-facing diagnostics, so
+    an embedded password would leak wherever those go -- and the refusal
+    itself must not echo it back."""
+    from netbbs.net.nodeconfig import ManagedDnsConfig
+
+    def config(service_url):
+        return NodeConfig(managed_dns=ManagedDnsConfig(service_url=service_url))
+
+    for bad in (
+        "https://user:hunter2@dns.example.org",
+        "https://user@dns.example.org",
+    ):
+        with pytest.raises(ConfigError) as caught:
+            config(bad).validate()
+        assert "username or password" in str(caught.value)
+        assert "hunter2" not in str(caught.value)
+        assert bad not in str(caught.value)

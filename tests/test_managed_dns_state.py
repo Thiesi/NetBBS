@@ -358,3 +358,41 @@ def test_a_node_that_never_registered_has_no_foreign_credential(tmp_path):
     assert state.get_credential_service_url(db) is None
     assert state.foreign_credential_service_url(db, "https://dns.example") is None
     db.close()
+
+
+def test_an_equivalent_spelling_of_the_same_address_is_not_a_service_change(tmp_path):
+    """Codex review of PR #587. The issuer comparison decides whether a
+    node heartbeats or pauses, so a case change, an explicit default
+    port and a trailing slash must not read as three different
+    services."""
+    db = Database(tmp_path / "node.db")
+    set_registration_result_state(
+        db, name="myboard", status=RegistrationStatus.PENDING, dynamic=True,
+        service_url="https://dns.example",
+    )
+
+    for equivalent in (
+        "https://dns.example",
+        "https://DNS.EXAMPLE",
+        "https://dns.example:443",
+        "https://dns.example/",
+        "https://Dns.Example:443/",
+    ):
+        assert state.foreign_credential_service_url(db, equivalent) is None, equivalent
+
+    # A different scheme, host, path or non-default port is a real change.
+    for different in (
+        "http://dns.example",
+        "https://other.example",
+        "https://dns.example:8443",
+        "https://dns.example/staging",
+    ):
+        assert state.foreign_credential_service_url(db, different) == "https://dns.example", different
+    db.close()
+
+
+def test_canonicalisation_leaves_an_unparseable_address_alone(tmp_path):
+    """Only validated addresses reach this, and its only job is deciding
+    whether two match -- so a string it cannot parse is compared as
+    written rather than raised over."""
+    assert state.canonical_service_url("http://[") == "http://["

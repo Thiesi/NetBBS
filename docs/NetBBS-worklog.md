@@ -3593,41 +3593,30 @@ scoping (see the `examples/` entry just below) never packages it into a
 node's own install — a SysOp who opts in talks to the backend over
 HTTP, never imports it.
 
-- **Two separate deployables still need one line connecting them, and
-  for three releases there wasn't one.** `netbbs.managed_dns.state.
-  set_service_url` existed, was tested, and had no caller anywhere in
-  the installed package: no CLI flag, no `netbbs.toml` key, no admin
-  screen. Every node that accepted the first-run opt-in — the pre-set
-  answer — therefore dead-ended at registration, and the message it
-  dead-ended with named an operator the SysOp would have had to be
-  (issue #583). The address now arrives two ways, both in
-  `netbbs.managed_dns.state`: the shipped `DEFAULT_SERVICE_URL`
-  constant for the project's own instance (`None` until that instance
-  is deployed, guarded by a test that must be flipped in the same
-  commit), and `[managed_dns] service_url` for a node pointed at a
-  different one. `netbbs.__main__.run` mirrors the configured value
-  into the database on every startup *including when it is absent*,
-  which is what makes removing the setting fall back rather than strand
-  the node; that write is the only production writer of the key, so it
-  cannot clobber a decision made elsewhere. The general shape worth
-  keeping: a setter whose only callers are tests is not "configurable",
-  and a domain layer that reads a value nothing writes fails at the far
-  end of a user-visible flow, not at startup where it would be noticed.
-- **A configurable service address makes the bearer credential's origin
-  a real question.** The managed-DNS credential controls one service's
-  registration and nothing else, so it must never be presented to a
-  service that did not issue it -- a node pointed at a second instance
-  would otherwise hand the first one's secret to a different operator.
-  The issuing address is written in the same transaction as the
-  registration (`set_registration_result_state`), and
-  `foreign_credential_service_url` is the single gate every sending path
-  asks: the updater pauses (logging once per actual change, not once per
-  15-minute pass), release/rename/cancel refuse and name both addresses,
-  and registration starts over rather than reclaiming. The setting is
-  also https-only away from loopback, since the credential rides every
-  heartbeat. The consequence worth remembering: **moving the service's
-  own address is not transparent** -- already-registered nodes stop
-  heartbeating rather than follow it.
+- **The service address reaches `netbbs.managed_dns.state` only through
+  `netbbs.__main__.run`.** It writes `[managed_dns] service_url` into
+  the node database once per startup *including when that setting is
+  absent*, which is what makes removing it fall back to the shipped
+  `DEFAULT_SERVICE_URL` rather than pin the node to an old override; it
+  is also the only production writer of that key, so it cannot clobber
+  a decision made elsewhere. `DEFAULT_SERVICE_URL` is `None` until the
+  backend is actually deployed, guarded by a test that has to be flipped
+  with it. The lesson: a setter whose only callers are tests is not
+  "configurable", and a domain layer reading a value nothing writes
+  fails at the far end of a user-visible flow instead of at startup.
+- **A managed-DNS credential is bound to the service that issued it.**
+  That address is written in the same transaction as the registration
+  (`set_registration_result_state`), and `foreign_credential_service_url`
+  is the single gate every path that would present the secret asks
+  first: the updater pauses (one log line per actual change, not per
+  15-minute pass), release/rename/cancellation refuse, and registration
+  starts over rather than reclaiming. It compares canonicalised URLs, so
+  an equivalent spelling is not a change. The setting is https-only away
+  from loopback and refuses embedded userinfo, because the credential
+  rides every request and the address reaches the database, the log and
+  SysOp-facing messages. The consequence: **moving the service's own
+  address is not transparent** -- nodes already registered with it pause
+  rather than follow it.
 - **The bearer credential is not the node's Ed25519 key, and the server
   never stores it in recoverable form.** `POST /register` mints a
   separate per-registration secret server-side, returns it once, and

@@ -162,6 +162,10 @@ carries the node's bearer credential, so a plaintext hop to a remote
 host hands that secret to anyone on the path. `http://127.0.0.1:<port>`
 is the development case, and is why the exception exists.
 
+It may not embed a username or password: the node records the address in
+its database and prints it in logs and SysOp-facing messages. Put any
+access control in the service's own reverse proxy.
+
 A node that already holds a registration and is then pointed somewhere
 else does **not** carry its credential across. The address that issued
 it is recorded alongside the registration; the updater pauses, and

@@ -15,6 +15,7 @@ that does *not* belong here is the credential itself -- see
 from __future__ import annotations
 
 from enum import Enum
+from urllib.parse import urlparse
 
 from netbbs.config import get_config, set_config
 from netbbs.storage.database import Database
@@ -242,6 +243,38 @@ def get_credential_service_url(db: Database) -> str | None:
     return get_config(db, CREDENTIAL_SERVICE_URL_CONFIG_KEY) or None
 
 
+def canonical_service_url(url: str) -> str:
+    """`url` reduced to the form two spellings of the same address
+    share, for comparison only -- never for display or for what is
+    actually dialed.
+
+    Codex review of PR #587: the issuer comparison below is the
+    difference between a node heartbeating and a node paused, so
+    `https://DNS.EXAMPLE`, `https://dns.example:443` and
+    `https://dns.example/` must not read as three different services.
+    Scheme and host are lowercased, a default port for the scheme is
+    dropped, and a trailing slash goes; userinfo is dropped because it
+    is refused at config load and is not part of which service this is.
+    An IPv6 literal is re-bracketed, since `urlparse` hands back
+    `hostname` without its brackets.
+
+    A string this cannot parse is returned trimmed rather than raised
+    over: this function only ever decides whether two addresses match,
+    and a validated address is the only kind that reaches it."""
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return url.strip().rstrip("/")
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None and port != {"http": 80, "https": 443}.get(scheme):
+        host = f"{host}:{port}"
+    return f"{scheme}://{host}{parsed.path.rstrip('/')}"
+
+
 def foreign_credential_service_url(db: Database, base_url: str) -> str | None:
     """The issuing service's address when this node's stored credential
     belongs to a *different* managed-DNS service than `base_url` --
@@ -261,7 +294,9 @@ def foreign_credential_service_url(db: Database, base_url: str) -> str | None:
     to make.
     """
     issuer = get_credential_service_url(db)
-    return issuer if issuer is not None and issuer != base_url else None
+    if issuer is None or canonical_service_url(issuer) == canonical_service_url(base_url):
+        return None
+    return issuer
 
 
 def get_registered_name(db: Database) -> str | None:
