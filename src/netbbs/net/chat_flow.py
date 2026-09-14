@@ -4583,7 +4583,9 @@ async def _chat_loop(
                         if mrc_session_state is not None and not mrc_session_state.get("private_noted"):
                             mrc_session_state["private_noted"] = True
                             await deliver(colored(_MRC_PRIVATE_NOTE, fg_color=MUTED_COLOR))
-                    await deliver(rendered, repaint_status=True)
+                    # Multi-line command replies do not change occupancy;
+                    # the clock loop refreshes cached MRC counts separately.
+                    await deliver(rendered, repaint_status=message.kind != "reply")
                     continue
                 if isinstance(message, QueueOverflowNotice):
                     # GitHub issue #31: this session's own queue overflowed

@@ -671,8 +671,9 @@ def test_seconds_until_next_minute_mid_minute_with_microseconds():
     assert chat_flow._seconds_until_next_minute(now) == 29.5
 
 
-def test_clock_loop_sleeps_until_the_minute_then_repaints_the_status_line(
-    lane, hub, presence, channel, alice
+@pytest.mark.parametrize("mrc_enabled", [False, True])
+def test_clock_loop_sleeps_until_refresh_then_repaints_the_status_line(
+    db, lane, hub, presence, channel, alice, mrc_enabled
 ):
     """`now`/`sleep` injected -- same shape as `netbbs.net.daybreak.
     run_daybreak_announcer`'s own test -- so this doesn't actually wait a
@@ -685,6 +686,13 @@ def test_clock_loop_sleeps_until_the_minute_then_repaints_the_status_line(
     hub.join(channel.name, ParticipantId(username="alice", session_key=1))
     session = FakeSession([])
     lock = asyncio.Lock()
+    bridge = None
+    if mrc_enabled:
+        from types import SimpleNamespace
+        from netbbs.mrc.settings import set_mrc_room
+
+        set_mrc_room(db, channel, "lobby")
+        bridge = SimpleNamespace(is_bridged=lambda channel: True, room_presence=lambda channel: (2, True))
 
     sleep_calls: list[float] = []
     parked = asyncio.Event()
@@ -700,7 +708,7 @@ def test_clock_loop_sleeps_until_the_minute_then_repaints_the_status_line(
     async def scenario():
         task = asyncio.create_task(
             chat_flow._clock_loop(
-                session, lane, hub, presence, channel, alice, lock, now=fake_now, sleep=fake_sleep
+                session, lane, hub, presence, channel, alice, lock, now=fake_now, sleep=fake_sleep, mrc_bridge=bridge
             )
         )
         while not session.written:
@@ -717,5 +725,7 @@ def test_clock_loop_sleeps_until_the_minute_then_repaints_the_status_line(
     # clock text itself still comes from _render_chat_status_line's own
     # real utc_now_iso() call, so this checks for the repaint happening
     # at all (recognizable status-line content), not a specific time.
-    assert sleep_calls[0] == 60.0
+    assert sleep_calls[0] == (5.0 if mrc_enabled else 60.0)
     assert any("#lobby" in chunk for chunk in session.written)
+    if mrc_enabled:
+        assert any("2 MRC" in chunk for chunk in session.written)
