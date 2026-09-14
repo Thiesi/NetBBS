@@ -1771,13 +1771,16 @@ class MrcBridge:
             callers = [(cid, name) for cid, nicks in self._announced.items() for name in nicks]
             if len(callers) == 1:
                 addressed = callers[0]
-            elif callers and command not in self._ambiguous_controls:
-                self._ambiguous_controls.add(command)
-                _logger.warning("MRC hub sent %s without identifying one of %d callers", command, len(callers))
-                for _cid, username in callers:
-                    await self._deliver_to_caller(username, MrcNotice(
-                        "The MRC hub sent a room or nickname correction without identifying its caller; "
-                        "it could not be applied. Check /mrc before continuing.", utc_now_iso()), priority=True)
+            else:
+                if callers and command not in self._ambiguous_controls:
+                    self._ambiguous_controls.add(command)
+                    _logger.warning("MRC hub sent %s without identifying one of %d callers", command, len(callers))
+                    for _cid, username in callers:
+                        await self._deliver_to_caller(username, MrcNotice(
+                            "The MRC hub sent a room or nickname correction without identifying its caller; "
+                            "it could not be applied. Check /mrc before continuing.", utc_now_iso()), priority=True)
+                # Only the diagnostic is once per command; every unapplied
+                # correction must be consumed before the chat fallback.
                 return
         if addressed is not None:
             channel_id, username = addressed

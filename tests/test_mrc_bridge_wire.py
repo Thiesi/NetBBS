@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import time
 
+import pytest
+
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.scrollback import get_scrollback, record_message
@@ -459,7 +461,9 @@ def test_generic_hub_controls_update_a_single_caller_and_stats(db, lane, lobby, 
     asyncio.run(scenario())
 
 
-def test_ambiguous_generic_identity_correction_never_renames_multiple_callers(db, lane, lobby, alice):
+@pytest.mark.parametrize("command", ["USERNICK", "USERROOM"])
+@pytest.mark.parametrize("target", ["CLIENT", "ALL", ""])
+def test_repeated_ambiguous_corrections_are_consumed(db, lane, lobby, alice, command, target):
     async def scenario():
         fake = FakeMrcHub()
         await fake.start()
@@ -467,16 +471,25 @@ def test_ambiguous_generic_identity_correction_never_renames_multiple_callers(db
         set_mrc_room(db, lobby, "lobby")
         hub = ChatHub()
         queue = hub.join(lobby.name, ParticipantId("alice", 1))
-        hub.join(lobby.name, ParticipantId("carol", 2))
+        other_queue = hub.join(lobby.name, ParticipantId("carol", 2))
         bridge = await _connected_bridge(db, lane, hub, fake)
         try:
             await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM:")) == 2)
-            await fake.send_line("SERVER~~~CLIENT~~~USERNICK:someone~")
-            notice = await asyncio.wait_for(queue.get(), timeout=2)
-            assert "without identifying" in notice.text
+            packet = f"SERVER~~~{target}~~lobby~{command}:someone~"
+            await fake.send_line(packet)
+            for recipient in (queue, other_queue):
+                notice = await asyncio.wait_for(recipient.get(), timeout=2)
+                assert "without identifying" in notice.text
+            await fake.send_line(packet)
+            await fake.send_line(packet)
+            # A later structured reply fences processing of both repeats.
+            await fake.send_line("SERVER~~~CLIENT~~~STATS:12 3 123 1~")
+            await _wait_until(lambda: bridge.status().network_users == 123)
+            assert queue.empty() and other_queue.empty()
             assert bridge._caller_for_nick("alice") is not None
             assert bridge._caller_for_nick("carol") is not None
             assert bridge._caller_for_nick("someone") is None
+            assert len(fake.packets(body_prefix="NEWROOM:")) == 2
         finally:
             await bridge.close()
             await fake.close()
