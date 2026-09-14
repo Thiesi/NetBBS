@@ -37,6 +37,17 @@ from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 
+def squeezed(text: str) -> str:
+    """`text` with runs of spaces collapsed to one.
+
+    Field screens align values into a shared column (#529), so a label and
+    its value are separated by as many spaces as that column needs. An
+    assertion about *which* value is shown should not also pin the width of
+    the column it is shown in.
+    """
+    return re.sub(r" {2,}", " ", text)
+
+
 class FakeSession:
     def __init__(self, inputs: list[str] | None = None):
         self._inputs = list(inputs or [])
@@ -373,7 +384,7 @@ def test_profile_screen_toggles_session_history_name_visibility(tmp_path):
     # live_choice_field (issue #160's cursor-nav follow-up) has no
     # separate "X is now Y" confirmation of its own -- the redrawn
     # field's own "label: value" line is the confirmation.
-    assert "Name shown in Last sessions: no (hidden)" in _visible(session)
+    assert "Name shown in Last sessions: no (hidden)" in squeezed(_visible(session))
     lane.close()
     database.close()
 
@@ -405,8 +416,8 @@ def test_profile_shows_color_capability_provenance(tmp_path):
     asyncio.run(_run_main_menu(session, database, alice, lane=lane))
 
     text = _written_text(session)
-    assert colored("  Color depth", fg_color=LABEL_COLOR) + ": " in text
-    assert colored("Transport report: ", fg_color=LABEL_COLOR) in text
+    assert colored("  Color depth:", fg_color=LABEL_COLOR) in text
+    assert colored("Transport report: ", fg_color=LABEL_COLOR) in squeezed(text)
     assert colored(session.truecolor_diagnostic, fg_color=METADATA_COLOR) in text
     lane.close()
     database.close()

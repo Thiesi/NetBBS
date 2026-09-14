@@ -31,6 +31,17 @@ from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 
+def squeezed(text: str) -> str:
+    """`text` with runs of spaces collapsed to one.
+
+    Field screens align values into a shared column (#529), so a label and
+    its value are separated by as many spaces as that column needs. An
+    assertion about *which* value is shown should not also pin the width of
+    the column it is shown in.
+    """
+    return re.sub(r" {2,}", " ", text)
+
+
 class FakeSession(Session):
     def __init__(self, inputs: list[str] | None = None):
         self._inputs = list(inputs or [])
@@ -588,6 +599,6 @@ def test_profile_screen_toggles_direct_message_acceptance(tmp_path):
     # live_choice_field (issue #160's cursor-nav follow-up) has no
     # separate "X is now Y" confirmation of its own -- the redrawn
     # field's own "label: value" line is the confirmation.
-    assert "Direct messages (Who's online): not accepted" in _visible(session)
+    assert "Direct messages (Who's online): not accepted" in squeezed(_visible(session))
     lane.close()
     database.close()
