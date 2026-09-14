@@ -82,15 +82,19 @@ nothing.
 ## Capturing new screens
 
 `scripts/website_capture_*.py` drive real code paths against a real
-`Database`/`DatabaseLane` — no network, nothing installed. For the bundled door
-games, drive the door as a subprocess through `scripts/door_gallery.py` and
-convert with `website_ansi_to_html.py`.
+`Database`/`DatabaseLane` — no network, nothing installed. A door cannot be
+driven that way: it is a subprocess with its own terminal, so
+`website_capture_door_screen.py` reuses `door_gallery.py`'s fixtures and walks
+and writes one screen instead of a page of panels. That is not only convenience
+— it means a screen the website shows is a screen the presentation review
+already covers, under the same label, so the two cannot drift apart silently.
 
 **Every embedded capture is reproducible.** `website_capture_screens.py --list`
 names the ten NetBBS screens; `website_capture_chat_mrc.py`,
-`website_capture_door_menu.py` and `website_capture_door_profile.py` cover the
-other three. The raw ANSI for each lives in `shots/raw-<name>.txt` and its
-converted form in `shots/shot-<name>.html`, so a capture can be regenerated,
+`website_capture_door_menu.py` and `website_capture_door_profile.py` cover three
+more; `website_capture_door_screen.py <door> --list` names the walks the two
+bundled games offer. The raw ANSI for each lives in `shots/raw-<name>.txt` and
+its converted form in `shots/shot-<name>.html`, so a capture can be regenerated,
 diffed, and re-embedded rather than rebuilt by hand.
 
 That was not always true, and the cost of it not being true is worth
@@ -100,15 +104,48 @@ layout the product had replaced several releases earlier, and every grey on
 both pages was a `MUTED_COLOR` the palette no longer used. **A capture nobody
 can regenerate is a screenshot of a product you no longer ship.**
 
-Regenerate all thirteen, convert each at its own geometry, then re-embed:
+Regenerate all fifteen, convert each at the width its capture was drawn
+for, then re-embed:
 
 ```sh
 for s in $(PYTHONPATH=src python scripts/website_capture_screens.py --list); do
   PYTHONPATH=src python scripts/website_capture_screens.py "$s" web/shots/raw-$s.txt
 done
 PYTHONPATH=src python scripts/website_ansi_to_html.py web/shots/raw-files.txt \
-  web/shots/shot-files.html --width 88 --height 24
+  web/shots/shot-files.html --width 88 --height 60
 ```
+
+The two bundled games are captured the same way, by the walk's own label.
+`--setup` plays keys first, in a launch whose screens are thrown away: it is
+how a world gets wear the cached fixture does not have, by playing the door
+rather than by writing its tables.
+
+```sh
+PYTHONPATH=src python scripts/website_capture_door_screen.py voidrunner \
+  "Command Deck" web/shots/raw-voidrunner.txt --fixture played \
+  --expect "Command Deck"
+PYTHONPATH=src python scripts/website_capture_door_screen.py war_dialer \
+  Switchboard web/shots/raw-war_dialer.txt --setup 'X{Bay}N*A'
+```
+
+A walk that is given `--fixture` or `--setup` starts somewhere its own keys
+did not, so it can end somewhere else: `Command Deck --fixture combat`
+stops on the combat screen and would publish under the deck's caption.
+The capture is checked against `door_gallery.SHOWS`, and where that has no
+marker -- it covers War Dialer and not Voidrunner -- `--expect` is required
+and the capture is refused without it.
+
+**Convert at the capture's own terminal width**, not at the width of its
+widest row. `website_ansi_to_html.py` emulates a terminal, and a capture
+repaints with absolute cursor moves, so the wrong canvas width puts rows in
+the wrong places — the chat screen came out 21 rows of 164 columns. Every
+screen is drawn at 80 columns except boards and files, which are captured at
+88. Height only has to be generous; trailing blank rows are trimmed.
+
+**A door capture comes from a played career.** A fresh one draws every gauge
+full or empty, which is the least informative state a gauge can be in. The
+Voidrunner shot names the `played` fixture for that reason, and its hull
+reads `36/60 Scuffed` rather than full.
 
 `website_check_pages.py` reports each capture's rows × columns and whether it
 needs `shot-tall` (17–24 rows do; fewer do not). Recapturing changes those
