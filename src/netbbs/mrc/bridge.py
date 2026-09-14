@@ -1716,7 +1716,8 @@ class MrcBridge:
             # inbound rate limit cannot bound on its own.
             if room_key is not None and room_key in self._by_room:
                 names = tuple({name.lower(): name for name in protocol.parse_userlist(params)}.values())
-                own = {nick.lower() for nicks in self._announced.values() for nick in nicks.values()}
+                channel_id = self._by_room[room_key].channel.id
+                own = {nick.lower() for nick in self._announced.get(channel_id, {}).values()}
                 own |= self._roster_local_nicks.get(room_key, set())
                 self._roster_local_nicks[room_key] = own & {name.partition("@")[0].lower() for name in names}
                 self._rosters[room_key] = names

@@ -944,13 +944,14 @@ async def _pick_mrc_room(
             return "seen on the network -- nobody here is in it"
         here = hub.participant_count(item.channel.name)
         there, fresh = mrc_bridge.room_presence(item.channel)
-        details = mrc_bridge.directory_details(item.room)
         remote = f"{there if there is not None else '?'} on MRC"
         if there is not None and not fresh:
             remote += " (stale)"
         bits = [f"{here} here", remote]
-        if details is not None and details[1]:
-            bits.append(details[1])
+        # ROOMTOPIC updates the retained channel, including clearing its
+        # topic; a previous LIST snapshot must not override that state.
+        if item.channel.topic:
+            bits.append(item.channel.topic)
         if item.paused:
             bits.append("paused by the SysOp")
         return ", ".join(bits)

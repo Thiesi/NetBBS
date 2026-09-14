@@ -728,3 +728,61 @@ def test_join_completion_hides_unmapped_rooms_when_opening_is_disabled(db, lane,
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_local_roster_names_are_scoped_to_their_room(db, lane, hub, presence, alice, bob):
+    from tests.test_chat_flow_mrc import _wait_for
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        try:
+            first = (await bridge.open_room("first", "alice")).channel
+            second = (await bridge.open_room("second", "bob")).channel
+            hub.join(first.name, ParticipantId("alice", 1001))
+            hub.join(second.name, ParticipantId("bob", 1002))
+            await bridge.local_join(first, "alice")
+            await bridge.local_join(second, "bob")
+            await fake.wait_for(lambda p: p.body == "NEWROOM::second")
+            await fake.send_line("SERVER~~~CLIENT~~second~USERLIST:alice,bob~")
+            await fake.send_line("SERVER~~~CLIENT~~~STATS:12 3 234 1~")
+            await _wait_for(lambda: bridge.status().network_users == 234, what="roster processed")
+            # Local alice is elsewhere; this room's bare alice is remote.
+            assert bridge.remote_roster(second) == ["alice"]
+            assert bridge.room_presence(second) == (1, True)
+            completer = await chat_flow._build_completer(lane, hub, presence, second, bob, mrc_bridge=bridge)
+            assert completer("/mrc msg a") == ["alice"]
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("topic", ["Updated hub topic", ""])
+def test_retained_room_picker_uses_current_topic_including_clears(db, lane, hub, alice, topic):
+    from tests.test_chat_flow_mrc import _wait_for
+
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        fake.reply_lines = lambda command, params: ["*.: #lobby 1 Original hub topic"] if command == "LIST" else []
+        try:
+            channel = (await bridge.open_room("lobby", "alice")).channel
+            hub.join(channel.name, ParticipantId("alice", 1003))
+            await bridge.local_join(channel, "alice")
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await fake.send_line("SERVER~~~CLIENT~~~ROOMTOPIC:lobby:Original hub topic~")
+            await _wait_for(lambda: get_channel_by_name(db, channel.name).topic == "Original hub topic", what="initial topic")
+            bridge.refresh_directory(channel, "alice")
+            await _wait_for(lambda: bridge.directory_details("lobby") is not None, what="directory topic")
+            await fake.send_line(f"SERVER~~~CLIENT~~~ROOMTOPIC:lobby:{topic}~")
+            await _wait_for(lambda: get_channel_by_name(db, channel.name).topic == (topic or None), what="topic update")
+            assert bridge.directory_details("lobby")[1] == "Original hub topic"
+            session = FakeSession(["b"])
+            await chat_flow._pick_mrc_room(session, lane, hub, alice, bridge)
+            text = _visible_text(session)
+            assert "Original hub topic" not in text
+            if topic:
+                assert topic in text
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
