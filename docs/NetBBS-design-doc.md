@@ -1190,6 +1190,12 @@ Local chat includes bounded persistent channel scrollback, presence, away
 state, invitations/membership, `/who`, `/whois`, `/names`, `/list`, `/join`,
 `/leave`, `/topic`, completion, and online private conversation.
 
+Chat `/help` is a width- and height-aware command table. It aligns descriptions
+in one column, colors command names, parameters, and descriptions as distinct
+fields, and paginates within the scrolling region while preserving chat's two
+pinned rows. The bare list remains permission-aware; `/help <command>` may
+explain a command outside that list without granting permission to run it.
+
 Chat lines carry a per-user display timestamp, **on by default** and toggled
 with `/timestamps`. The default is the answer for an account that has never
 expressed a preference, so it applies to existing accounts as well as new

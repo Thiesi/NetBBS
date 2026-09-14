@@ -173,11 +173,14 @@ def test_help_lists_the_subcommands(db, lane, hub, presence, channel, alice):
         rig = await _rig(db, lane, hub, channel)
         try:
             session, _ = await _run(lane, hub, presence, channel, alice, ["/help mrc", "/quit"], mrc_bridge=rig.bridge)
-            # Both lines wrap at the terminal width; compare with the
-            # wrap-inserted line breaks folded back into single spaces.
+            # The syntax and description occupy separate aligned columns;
+            # check both ends of the long syntax rather than assuming their
+            # physical rows are contiguous in flattened terminal text.
             text = " ".join(_text(session).split())
-            assert "/mrc [rooms|who|bbses [search]|info <bbs>|motd" in text
-            assert "shown to you alone" in text
+            assert "/mrc [rooms|who|bbses" in text
+            assert "CLIENTINFO>]" in text
+            assert "Show this channel's MRC bridge" in text
+            assert "you opted in." in text
         finally:
             await rig.close()
     asyncio.run(scenario())

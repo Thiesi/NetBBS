@@ -181,6 +181,7 @@ from netbbs.rendering import (
     CHANNEL_TYPE_COLOR,
     GATE_COLOR,
     HEADER_COLOR,
+    LABEL_COLOR,
     MENU_KEY_COLOR,
     MUTED_COLOR,
     RULE_COLOR,
@@ -191,6 +192,7 @@ from netbbs.rendering import (
     STATUS_BAR_BACKGROUND,
     SUCCESS_COLOR,
     TOPIC_COLOR,
+    VALUE_COLOR,
     badge,
     clear_line,
     clear_screen,
@@ -2061,6 +2063,145 @@ async def _handle_dm(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     return _EnterDirectChat(target)
 
 
+def _help_syntax_parts(syntax: str) -> tuple[str, str]:
+    """Split a help-table syntax into the command and its arguments."""
+    command, separator, parameters = syntax.partition(" ")
+    return command, f"{separator}{parameters}" if separator else ""
+
+
+def _help_column_width(entries: Sequence[tuple[str, str]], width: int) -> int:
+    """Choose a useful command column without starving the description."""
+    widest = max((visible_width(syntax) for syntax, _description in entries), default=7)
+    description_floor = 12
+    available = max(1, width - 2 - description_floor)
+    preferred = max(14, width // 2 - 2)
+    return max(1, min(widest, 32, preferred, available))
+
+
+def _styled_help_syntax(fragment: str, command: str, *, first: bool) -> str:
+    if first and fragment.startswith(command):
+        parameters = fragment[len(command):]
+        return colored(command, fg_color=ACCENT_COLOR, bold=True) + (
+            colored(parameters, fg_color=LABEL_COLOR) if parameters else ""
+        )
+    return colored(fragment, fg_color=LABEL_COLOR)
+
+
+def _wrap_help_syntax(syntax: str, width: int) -> list[str]:
+    """Wrap command syntax at spaces and alternative separators before words."""
+    tokens: list[tuple[str, bool]] = []
+    for word_index, word in enumerate(syntax.split()):
+        start = 0
+        first_segment = True
+        for index, char in enumerate(word):
+            if char != "|":
+                continue
+            tokens.append((word[start:index + 1], word_index > 0 and first_segment))
+            start = index + 1
+            first_segment = False
+        if start < len(word):
+            tokens.append((word[start:], word_index > 0 and first_segment))
+
+    lines: list[str] = []
+    current = ""
+    for token, separated in tokens:
+        separator = " " if separated and current else ""
+        candidate = f"{current}{separator}{token}"
+        if visible_width(candidate) <= width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        if visible_width(token) <= width:
+            current = token
+            continue
+        pieces = wrap_to_width(token, width)
+        lines.extend(pieces[:-1])
+        current = pieces[-1]
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _render_help_entry(
+    syntax: str, description: str, *, width: int, syntax_width: int,
+) -> list[str]:
+    """Render one command as aligned, independently colored table rows."""
+    command, _parameters = _help_syntax_parts(syntax)
+    syntax_lines = _wrap_help_syntax(syntax, syntax_width)
+    description_width = max(1, width - syntax_width - 2)
+    description_lines = wrap_to_width(description, description_width)
+    row_count = max(len(syntax_lines), len(description_lines), 1)
+    rows: list[str] = []
+    for index in range(row_count):
+        syntax_line = syntax_lines[index] if index < len(syntax_lines) else ""
+        description_line = description_lines[index] if index < len(description_lines) else ""
+        left = _styled_help_syntax(syntax_line, command, first=index == 0) if syntax_line else ""
+        padding = " " * (syntax_width - visible_width(syntax_line))
+        right = colored(description_line, fg_color=VALUE_COLOR) if description_line else ""
+        rows.append(f"{left}{padding}  {right}".rstrip())
+    return rows
+
+
+def _paginate_help_entries(entry_rows: Sequence[Sequence[str]], capacity: int) -> list[list[str]]:
+    """Pack complete command entries onto pages whenever one page can hold them."""
+    pages: list[list[str]] = [[]]
+    for block in entry_rows:
+        remaining = list(block)
+        if pages[-1] and len(pages[-1]) + len(remaining) > capacity:
+            pages.append([])
+        while remaining:
+            room = capacity - len(pages[-1])
+            if room == 0:
+                pages.append([])
+                room = capacity
+            pages[-1].extend(remaining[:room])
+            remaining = remaining[room:]
+            if remaining:
+                pages.append([])
+    return pages
+
+
+async def _show_help_pages(
+    session: Session,
+    entries: Sequence[tuple[str, str]],
+    *,
+    pinned_ui_enabled: bool,
+) -> None:
+    width = max(1, getattr(session, "terminal_width", 80))
+    height = max(1, getattr(session, "terminal_height", 24))
+    syntax_width = _help_column_width(entries, width)
+    entry_rows = [
+        _render_help_entry(syntax, description, width=width, syntax_width=syntax_width)
+        for syntax, description in entries
+    ]
+
+    # The live chat owns its final two rows. Each page also owns a title,
+    # column heading and rule, plus a continuation prompt on every non-final
+    # page. Reserving all four fixed rows keeps page sizes stable.
+    viewport_height = height - (2 if pinned_ui_enabled else 0)
+    content_height = max(1, viewport_height - 4)
+    pages = _paginate_help_entries(entry_rows, content_height)
+    page_count = len(pages)
+
+    for page_number, page in enumerate(pages, start=1):
+        suffix = f" (page {page_number} of {page_count})" if page_count > 1 else ""
+        await session.write_line(colored(f"Chat commands{suffix}", fg_color=HEADER_COLOR, bold=True))
+        await session.write_line(
+            colored("COMMAND".ljust(syntax_width), fg_color=HEADER_COLOR, bold=True)
+            + "  "
+            + colored("DESCRIPTION", fg_color=HEADER_COLOR, bold=True)
+        )
+        await session.write_line(colored("-" * width, fg_color=RULE_COLOR))
+        for row in page:
+            await session.write_line(row)
+        if page_number < page_count:
+            await session.write_line(
+                colored(f"More -- press any key [{page_number}/{page_count}]", fg_color=MUTED_COLOR)
+            )
+            await session.read_any_key(echo=False)
+
+
 async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
     """
     `/help` (no args, design doc): lists every command visible
@@ -2087,9 +2228,9 @@ async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
                 colored(f"Unknown command: /{sanitize_text(target)}", fg_color=MUTED_COLOR)
             )
             return
-        syntax, description = info
-        await ctx.session.write_line(colored(syntax, fg_color=MUTED_COLOR, bold=True))
-        await ctx.session.write_line(description)
+        await _show_help_pages(
+            ctx.session, [info], pinned_ui_enabled=ctx.pinned_ui_enabled,
+        )
         return
 
     def _visible_names(db: Database) -> list[str]:
@@ -2100,29 +2241,12 @@ async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
             and (_COMMAND_VISIBILITY.get(name) is None or _COMMAND_VISIBILITY[name](db, ctx.channel, ctx.user))
         )
 
-    await ctx.session.write_line(colored("Available commands:", fg_color=MUTED_COLOR, bold=True))
     visible_names = await ctx.lane.run(_visible_names)
-    width = getattr(ctx.session, "terminal_width", 80)
-    for name in visible_names:
-        syntax, description = _COMMAND_INFO[name]
-        # Dogfood report: with ~29 commands, several `syntax - description`
-        # lines run past an 80-column terminal and wrap raggedly client-
-        # side. Word-wrap the plain composite text ourselves instead --
-        # `wrap_to_width` isn't ANSI-safe (`netbbs.net.help_overlay`'s own
-        # documented constraint), so wrapping happens on the plain string
-        # first, and only the syntax prefix on the first physical line (the
-        # one case guaranteed to still start with it) gets colored back in.
-        plain = f"{syntax} - {description}"
-        if visible_width(plain) <= width:
-            await ctx.session.write_line(f"{colored(syntax, fg_color=MUTED_COLOR, bold=True)} - {description}")
-            continue
-        for i, wrapped in enumerate(wrap_to_width(plain, width)):
-            if i == 0 and wrapped.startswith(syntax):
-                await ctx.session.write_line(
-                    colored(syntax, fg_color=MUTED_COLOR, bold=True) + wrapped[len(syntax):]
-                )
-            else:
-                await ctx.session.write_line(wrapped)
+    await _show_help_pages(
+        ctx.session,
+        [_COMMAND_INFO[name] for name in visible_names],
+        pinned_ui_enabled=ctx.pinned_ui_enabled,
+    )
 
 
 async def _dispatch_command(ctx: ChatCommandContext, line: str) -> ChatAction | None:
@@ -4609,7 +4733,7 @@ async def _chat_loop(
                                 channel=channel,
                                 user=user,
                                 participant_id=participant_id,
-                                pinned_ui_enabled=pinned_ui_enabled,
+                                pinned_ui_enabled=pinned_height is not None,
                                 session_registry=session_registry,
                                 direct_invites=direct_invites,
                                 realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
