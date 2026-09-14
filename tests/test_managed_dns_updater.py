@@ -766,3 +766,79 @@ def test_updater_records_publication_only_when_the_service_reports_an_address(tm
     assert get_published(db)
     assert not get_previous_published(db)
     db.close()
+
+
+def test_updater_never_heartbeats_a_credential_another_service_issued(tmp_path, monkeypatch, caplog):
+    """Codex review of PR #587. The service address became an operator
+    setting in #583, so it can change under a node that already holds a
+    bearer secret issued by a different service. Heartbeating it at the
+    new address would hand that secret to a different operator, who
+    could then release or repoint the registration it belongs to.
+
+    `_send_heartbeat` is recorded rather than inferred: an unreachable
+    address would produce the same unchanged local state whether the
+    request was skipped or merely failed."""
+    from netbbs.managed_dns import updater as updater_module
+    from netbbs.managed_dns.state import set_registration_result_state
+
+    dialed = []
+
+    async def _recording_heartbeat(base_url, credential):
+        dialed.append((base_url, credential))
+        return None, False
+
+    monkeypatch.setattr(updater_module, "_send_heartbeat", _recording_heartbeat)
+    monkeypatch.setattr(updater_module, "_reported_foreign_credentials", {})
+
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        set_opt_in(db, OptIn.ACCEPTED)
+        set_node_fingerprint(db, "fp-1")
+        set_registration_result_state(
+            db, name="myboard", status=RegistrationStatus.MATURED, dynamic=True,
+            service_url="https://dns.example",
+        )
+        save_credential(credential_path_for(db.path), "issued-by-dns-example")
+        # The operator has since pointed this node somewhere else.
+        set_service_url(db, "https://other.example")
+        sleep_calls = _fake_sleep_recorder()
+        with caplog.at_level("WARNING"):
+            await _run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: False)
+        return db, sleep_calls[1]
+
+    db, sleep_calls = asyncio.run(scenario())
+    assert dialed == []
+    assert get_last_contact_at(db) is None
+    assert sleep_calls == [900.0]  # paused, not crashed
+    assert any("dns.example" in record.getMessage() for record in caplog.records)
+    db.close()
+
+
+def test_the_foreign_credential_warning_is_logged_once_per_change(tmp_path, monkeypatch, caplog):
+    """The pass runs every 15 minutes and the condition is a config
+    setting that will not change on its own, so one line per actual
+    change is the whole of what is worth saying."""
+    from netbbs.managed_dns import updater as updater_module
+    from netbbs.managed_dns.state import set_registration_result_state
+
+    monkeypatch.setattr(updater_module, "_reported_foreign_credentials", {})
+
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        set_opt_in(db, OptIn.ACCEPTED)
+        set_node_fingerprint(db, "fp-1")
+        set_registration_result_state(
+            db, name="myboard", status=RegistrationStatus.MATURED, dynamic=True,
+            service_url="https://dns.example",
+        )
+        save_credential(credential_path_for(db.path), "issued-by-dns-example")
+        set_service_url(db, "https://other.example")
+        with caplog.at_level("WARNING"):
+            await updater_module._run_managed_dns_update_pass(db)
+            await updater_module._run_managed_dns_update_pass(db)
+        return db
+
+    db = asyncio.run(scenario())
+    paused = [r for r in caplog.records if "managed-DNS updates are paused" in r.getMessage()]
+    assert len(paused) == 1
+    db.close()

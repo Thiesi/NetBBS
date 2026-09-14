@@ -1065,3 +1065,27 @@ def test_an_unusable_managed_dns_service_url_is_refused():
 
     config("https://dns.example.org").validate()
     config("https://dns.example.org:8443/managed").validate()
+
+
+def test_a_remote_managed_dns_service_url_must_be_https():
+    """Codex review of PR #587. Unlike `public_url`, this value carries
+    a secret: every registration, heartbeat, rename and release presents
+    the node's managed-DNS bearer credential, and whoever reads it off
+    the wire can release or repoint that node's DNS record."""
+    from netbbs.net.nodeconfig import ManagedDnsConfig
+
+    def config(service_url):
+        return NodeConfig(managed_dns=ManagedDnsConfig(service_url=service_url))
+
+    with pytest.raises(ConfigError, match="https"):
+        config("http://dns.example.org").validate()
+    with pytest.raises(ConfigError, match="https"):
+        # Not a literal loopback address, and `is_loopback_host` is
+        # deliberately conservative about names it cannot resolve.
+        config("http://dns.internal").validate()
+
+    config("https://dns.example.org").validate()
+    # The one honest exception: nothing leaves the machine, and it is how
+    # `services.managed_dns` is developed against.
+    for local in ("http://127.0.0.1:8099", "http://localhost:8099", "http://[::1]:8099"):
+        config(local).validate()

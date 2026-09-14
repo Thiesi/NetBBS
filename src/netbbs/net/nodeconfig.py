@@ -463,6 +463,25 @@ class NodeConfig:
 
         if self.managed_dns.service_url is not None:
             _validate_base_url(self.managed_dns.service_url, "managed_dns.service_url")
+            # Unlike `public_url`, which names a listener callers reach
+            # however that listener is configured, this one carries a
+            # secret: every registration, heartbeat, rename and release
+            # presents the node's managed-DNS bearer credential, and
+            # whoever reads it off the wire can release or repoint that
+            # node's DNS record (Codex review of PR #587). The service's
+            # own process speaks plain HTTP behind a TLS-terminating
+            # proxy (`services/managed_dns/README.md`), which is exactly
+            # why the *node's* side of it must be the proxy's https://
+            # address. A loopback address is the one honest exception:
+            # nothing leaves the machine, and it is how the service is
+            # developed against.
+            parsed = urlparse(self.managed_dns.service_url)
+            if parsed.scheme != "https" and not is_loopback_host(parsed.hostname or ""):
+                raise ConfigError(
+                    "managed_dns.service_url must be an https:// URL unless it names a loopback "
+                    "address -- it carries this node's managed-DNS credential on every request, "
+                    f"got {self.managed_dns.service_url!r}"
+                )
 
         # Only an *explicit* `enabled = true` validates the Link block at
         # config-load time. A silent config (`None`, design doc §16 issue

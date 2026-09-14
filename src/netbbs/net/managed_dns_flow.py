@@ -39,6 +39,7 @@ from netbbs.managed_dns.state import (
     get_dynamic,
     get_registered_name,
     get_service_url,
+    foreign_credential_service_url,
     set_cancelled_rename_state,
     set_opt_in,
     get_published,
@@ -90,6 +91,22 @@ _SERVICE_UNAVAILABLE_SYSOP_NOTE = (
     "right away if you run an instance of it yourself and point this "
     "node at it with service_url under [managed_dns] in netbbs.toml.)"
 )
+
+def _foreign_credential_line(action: str, issuer: str, base_url: str) -> str:
+    """Codex review of PR #587. A managed-DNS credential is a bearer
+    secret for one service's registration, and since issue #583 the
+    service address is an operator setting that can change under a node
+    still holding one. Release, rename and cancellation can only ever be
+    addressed to the issuer, so rather than send the secret somewhere it
+    does not belong they say which two addresses disagree -- the one
+    thing the SysOp needs in order to fix it."""
+    return (
+        f"Cannot {action} -- this node's managed-DNS registration was made with "
+        f"{sanitize_text(issuer)}, but the node is configured to use "
+        f"{sanitize_text(base_url)}. Point it back at {sanitize_text(issuer)} to finish there, "
+        "or register fresh with the configured service."
+    )
+
 
 # Statuses design doc §16 Decision 3/5 treat as "this node currently has
 # a live-or-maturing registration" -- the gate for whether [R]egister
@@ -254,7 +271,25 @@ async def register_via_prompt(
         if not raw_name:
             raise ValueError("a subdomain name is required")
         stored_credential = load_credential(credential_path_for(lane.path))
-        if (
+        issuer = await lane.run(foreign_credential_service_url, base_url)
+        foreign = stored_credential is not None and issuer is not None
+        if foreign:
+            # Codex review of PR #587: presenting this secret here would
+            # let the configured service act on the registration held at
+            # the one that issued it. Registering is still allowed --
+            # it is simply a *fresh* registration, and it overwrites the
+            # credential file, so it is worth one keystroke of warning.
+            proceed = await prompt_yes_no(
+                session,
+                f"This node's saved credential was issued by {sanitize_text(issuer)}. Registering "
+                f"with {sanitize_text(base_url)} starts over: the credential is replaced, and the "
+                "registration at the other service is left to lapse on its own. Continue?",
+                default=False,
+            )
+            if not proceed:
+                raise ValueError("No change made. The draft is kept; [B]ack discards it.")
+            stored_credential = None
+        elif (
             stored_credential is not None and previous_name is not None
             and raw_name.lower() != previous_name.lower()
         ):
@@ -278,8 +313,9 @@ async def register_via_prompt(
 
         async with managed_dns_transition_lock(lane.path):
             # The editor may have been open while another transition completed.
-            # Reload the credential generation that this request will replace.
-            stored_credential = load_credential(credential_path_for(lane.path))
+            # Reload the credential generation that this request will replace --
+            # still never one this service did not issue.
+            stored_credential = None if foreign else load_credential(credential_path_for(lane.path))
             try:
                 async with ClientSession(trust_env=True) as http_session:
                     result = await register(
@@ -308,6 +344,7 @@ async def register_via_prompt(
                 name=result.name,
                 status=RegistrationStatus(result.status),
                 dynamic=dynamic,
+                service_url=base_url,
             )
             delete_credential(previous_credential_path_for(lane.path))
 
@@ -386,6 +423,10 @@ async def release_registration(session: Session, lane: DatabaseLane) -> None:
                 colored("Cannot release -- managed-DNS state changed; review it and try again.", fg_color=MUTED_COLOR)
             )
             return
+        issuer = await lane.run(foreign_credential_service_url, base_url)
+        if issuer is not None:
+            await _write_note(session, _foreign_credential_line("release", issuer, base_url))
+            return
         try:
             async with ClientSession(trust_env=True) as http_session:
                 result = await release(http_session, base_url, credential=stored_credential)
@@ -440,6 +481,10 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
             await session.write_line(
                 colored("Cannot change name -- missing service URL or credential.", fg_color=MUTED_COLOR)
             )
+            return
+        issuer = await lane.run(foreign_credential_service_url, base_url)
+        if issuer is not None:
+            await _write_note(session, _foreign_credential_line("change the name", issuer, base_url))
             return
         try:
             async with ClientSession(trust_env=True) as http_session:
@@ -503,6 +548,10 @@ async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> No
             await session.write_line(
                 colored("Cannot cancel -- required service or credential state is missing.", fg_color=MUTED_COLOR)
             )
+            return
+        issuer = await lane.run(foreign_credential_service_url, base_url)
+        if issuer is not None:
+            await _write_note(session, _foreign_credential_line("cancel the name change", issuer, base_url))
             return
         try:
             async with ClientSession(trust_env=False) as http_session:

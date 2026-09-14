@@ -62,6 +62,7 @@ PREVIOUS_NAME_CONFIG_KEY = "managed_dns_previous_name"
 PREVIOUS_STATUS_CONFIG_KEY = "managed_dns_previous_status"
 PUBLISHED_CONFIG_KEY = "managed_dns_published"
 PREVIOUS_PUBLISHED_CONFIG_KEY = "managed_dns_previous_published"
+CREDENTIAL_SERVICE_URL_CONFIG_KEY = "managed_dns_credential_service_url"
 
 # The address of the project's own `services.managed_dns` instance, as
 # shipped -- what a node reaches when its operator configures nothing,
@@ -107,10 +108,16 @@ def set_pending_rename_state(
 
 
 def set_registration_result_state(
-    db: Database, *, name: str, status: RegistrationStatus, dynamic: bool,
+    db: Database, *, name: str, status: RegistrationStatus, dynamic: bool, service_url: str,
 ) -> None:
-    """Commit an interactive registration result as one conservative view."""
+    """Commit an interactive registration result as one conservative view.
+
+    `service_url` is the address that issued the credential this result
+    came with, recorded in the same transaction as the registration it
+    belongs to so the two can never disagree -- see
+    `foreign_credential_service_url`."""
     _set_config_values(db, (
+        (CREDENTIAL_SERVICE_URL_CONFIG_KEY, service_url),
         (NAME_CONFIG_KEY, name),
         (STATUS_CONFIG_KEY, status.value),
         # Registration/reclaim never proves provider publication. A later
@@ -226,6 +233,35 @@ def get_service_url(db: Database) -> str | None:
 
 def set_service_url(db: Database, url: str | None) -> None:
     set_config(db, SERVICE_URL_CONFIG_KEY, url or "")
+
+
+def get_credential_service_url(db: Database) -> str | None:
+    """The managed-DNS service that issued this node's stored
+    credential, recorded by `set_registration_result_state`. `None` on a
+    node that has never registered."""
+    return get_config(db, CREDENTIAL_SERVICE_URL_CONFIG_KEY) or None
+
+
+def foreign_credential_service_url(db: Database, base_url: str) -> str | None:
+    """The issuing service's address when this node's stored credential
+    belongs to a *different* managed-DNS service than `base_url` --
+    otherwise `None`.
+
+    A node's managed-DNS credential is a bearer secret: whoever holds it
+    controls that registration, including releasing it (design doc §16
+    Decision 2). Since issue #583 the service address is an operator
+    setting, so it can change under a node that already holds one, and
+    an unguarded heartbeat, rename, release or reclaim would then hand
+    the secret issued by one service straight to another operator's
+    (Codex review of PR #587). Every caller that is about to present the
+    credential asks this first and declines rather than sending it.
+
+    `None` when no credential has ever been issued, so a node that has
+    never registered is never held back by a comparison there is nothing
+    to make.
+    """
+    issuer = get_credential_service_url(db)
+    return issuer if issuer is not None and issuer != base_url else None
 
 
 def get_registered_name(db: Database) -> str | None:

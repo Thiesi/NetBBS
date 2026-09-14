@@ -212,6 +212,7 @@ def test_registration_result_state_rolls_back_as_one_transaction(tmp_path):
     with pytest.raises(sqlite3.IntegrityError, match="simulated registration result failure"):
         set_registration_result_state(
             db, name="new-name", status=RegistrationStatus.PENDING, dynamic=True,
+            service_url="https://dns.example",
         )
 
     assert get_registered_name(db) == "old-name"
@@ -230,6 +231,7 @@ def test_registration_result_state_clears_expired_rename_metadata(tmp_path):
 
     set_registration_result_state(
         db, name="fresh-name", status=RegistrationStatus.PENDING, dynamic=True,
+        service_url="https://dns.example",
     )
 
     assert get_previous_name(db) is None
@@ -316,3 +318,43 @@ def test_the_shipped_default_is_unset_until_the_service_is_deployed():
     the plain "not running yet" the flow says today. Flip this test in
     the same commit that flips the constant."""
     assert state.DEFAULT_SERVICE_URL is None
+
+
+# -- the credential's issuing service (Codex review of PR #587) --------------
+
+
+def test_a_registration_records_the_service_that_issued_its_credential(tmp_path):
+    db = Database(tmp_path / "node.db")
+
+    set_registration_result_state(
+        db, name="myboard", status=RegistrationStatus.PENDING, dynamic=True,
+        service_url="https://dns.example",
+    )
+
+    assert state.get_credential_service_url(db) == "https://dns.example"
+    assert state.foreign_credential_service_url(db, "https://dns.example") is None
+    db.close()
+
+
+def test_a_changed_service_address_marks_the_stored_credential_foreign(tmp_path):
+    """The whole reason the credential's issuer is recorded: since issue
+    #583 the service address is an operator setting, so it can change
+    under a node that already holds a bearer secret for another
+    service."""
+    db = Database(tmp_path / "node.db")
+    set_registration_result_state(
+        db, name="myboard", status=RegistrationStatus.PENDING, dynamic=True,
+        service_url="https://dns.example",
+    )
+
+    assert state.foreign_credential_service_url(db, "https://other.example") == "https://dns.example"
+    db.close()
+
+
+def test_a_node_that_never_registered_has_no_foreign_credential(tmp_path):
+    """Nothing to compare, so nothing is held back."""
+    db = Database(tmp_path / "node.db")
+
+    assert state.get_credential_service_url(db) is None
+    assert state.foreign_credential_service_url(db, "https://dns.example") is None
+    db.close()

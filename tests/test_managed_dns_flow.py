@@ -748,3 +748,125 @@ def test_cancelled_rename_is_recoverable_if_reverse_credential_journaling_crashe
     assert load_credential(previous_credential_path_for(db.path)) is None
     assert get_registered_name(db) == "old-name"
     db.close()
+
+
+# -- the credential belongs to the service that issued it (Codex, PR #587) ---
+
+
+def _registered_against(tmp_path, issuer: str) -> Database:
+    """A node holding a registration and credential issued by `issuer`,
+    without dialing anything."""
+    from netbbs.managed_dns.state import set_registration_result_state
+
+    db = Database(tmp_path / "node.db")
+    set_node_fingerprint(db, "fp-1")
+    set_registration_result_state(
+        db, name="myboard", status=RegistrationStatus.MATURED, dynamic=True, service_url=issuer,
+    )
+    save_credential(credential_path_for(db.path), "issued-by-the-other-service")
+    return db
+
+
+def test_release_refuses_to_present_a_credential_another_service_issued(tmp_path):
+    """A managed-DNS credential is a bearer secret for one service's
+    registration; since issue #583 the address can change under a node
+    still holding one. Releasing at the new address would hand that
+    secret to a different operator."""
+    db = _registered_against(tmp_path, "https://dns.example")
+    set_service_url(db, "https://other.example")
+    lane = DatabaseLane(db.path)
+    session = FakeSession(["y"])  # confirm the release; it must still not be sent
+
+    asyncio.run(release_registration(session, lane))
+
+    written = " ".join(session.written)
+    assert "https://dns.example" in written and "https://other.example" in written
+    assert get_registration_status(db) is RegistrationStatus.MATURED  # untouched
+    lane.close()
+    db.close()
+
+
+def test_changing_the_name_refuses_across_a_service_change(tmp_path):
+    db = _registered_against(tmp_path, "https://dns.example")
+    set_service_url(db, "https://other.example")
+    lane = DatabaseLane(db.path)
+    session = FakeSession(["newboard", "y"])
+
+    asyncio.run(rename_registration(session, lane))
+
+    assert "https://dns.example" in " ".join(session.written)
+    assert get_previous_name(db) is None  # no transition was started
+    lane.close()
+    db.close()
+
+
+def test_cancelling_a_name_change_refuses_across_a_service_change(tmp_path):
+    db = _registered_against(tmp_path, "https://dns.example")
+    set_previous_name(db, "oldboard")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    save_credential(previous_credential_path_for(db.path), "old-secret")
+    set_service_url(db, "https://other.example")
+    lane = DatabaseLane(db.path)
+    session = FakeSession(["y"])
+
+    asyncio.run(cancel_registration_rename(session, lane))
+
+    assert "https://dns.example" in " ".join(session.written)
+    assert get_previous_name(db) == "oldboard"  # nothing was cancelled
+    lane.close()
+    db.close()
+
+
+def test_registering_with_a_new_service_starts_over_instead_of_reclaiming(tmp_path):
+    """Registration *is* allowed after a service change -- it is simply a
+    fresh registration. The old secret is never presented, so the new
+    service cannot be handed control of the registration at the old one,
+    and the SysOp is warned once that the credential file is replaced."""
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = _registered_against(tmp_path, "https://dns.example")
+            new_url = f"http://127.0.0.1:{server.port}"
+            set_service_url(db, new_url)
+            lane = DatabaseLane(db.path)
+            # the name is prefilled from the existing registration:
+            # [D]ynamic off, [R]egister, then confirm the replacement
+            session = FakeSession(["d", "r", "y"])
+
+            await register_via_prompt(session, lane)
+
+            lane.close()
+            return db, session, new_url
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, session, new_url = asyncio.run(scenario())
+    written = " ".join(session.written)
+    assert "https://dns.example" in written  # the warning named the old issuer
+    assert "Registered myboard.netbbs.org" in written  # fresh, not "Reclaimed"
+    from netbbs.managed_dns.state import get_credential_service_url
+
+    assert get_credential_service_url(db) == new_url
+    assert load_credential(credential_path_for(db.path)) != "issued-by-the-other-service"
+    db.close()
+
+
+def test_declining_the_credential_replacement_registers_nothing(tmp_path):
+    db = _registered_against(tmp_path, "https://dns.example")
+    set_service_url(db, "https://other.example")
+    lane = DatabaseLane(db.path)
+    # [D]ynamic off, [R]egister, refuse the replacement, [B]ack out and
+    # discard the edited draft
+    session = FakeSession(["d", "r", "n", "b", "y"])
+
+    asyncio.run(register_via_prompt(session, lane))
+
+    from netbbs.managed_dns.state import get_credential_service_url
+
+    assert get_credential_service_url(db) == "https://dns.example"
+    assert load_credential(credential_path_for(db.path)) == "issued-by-the-other-service"
+    lane.close()
+    db.close()

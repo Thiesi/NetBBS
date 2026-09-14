@@ -3613,6 +3613,21 @@ HTTP, never imports it.
   keeping: a setter whose only callers are tests is not "configurable",
   and a domain layer that reads a value nothing writes fails at the far
   end of a user-visible flow, not at startup where it would be noticed.
+- **A configurable service address makes the bearer credential's origin
+  a real question.** The managed-DNS credential controls one service's
+  registration and nothing else, so it must never be presented to a
+  service that did not issue it -- a node pointed at a second instance
+  would otherwise hand the first one's secret to a different operator.
+  The issuing address is written in the same transaction as the
+  registration (`set_registration_result_state`), and
+  `foreign_credential_service_url` is the single gate every sending path
+  asks: the updater pauses (logging once per actual change, not once per
+  15-minute pass), release/rename/cancel refuse and name both addresses,
+  and registration starts over rather than reclaiming. The setting is
+  also https-only away from loopback, since the credential rides every
+  heartbeat. The consequence worth remembering: **moving the service's
+  own address is not transparent** -- already-registered nodes stop
+  heartbeating rather than follow it.
 - **The bearer credential is not the node's Ed25519 key, and the server
   never stores it in recoverable form.** `POST /register` mints a
   separate per-registration secret server-side, returns it once, and

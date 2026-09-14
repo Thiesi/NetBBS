@@ -157,6 +157,20 @@ is read into the node's database at startup, so a node has to be
 restarted after the setting changes, and *removing* the setting returns
 that node to the shipped address on its next start.
 
+It must be `https://` unless it names a loopback address: every request
+carries the node's bearer credential, so a plaintext hop to a remote
+host hands that secret to anyone on the path. `http://127.0.0.1:<port>`
+is the development case, and is why the exception exists.
+
+A node that already holds a registration and is then pointed somewhere
+else does **not** carry its credential across. The address that issued
+it is recorded alongside the registration; the updater pauses, and
+release, rename and cancellation refuse, until the node is pointed back
+or registers fresh with the new service. That means moving this service
+to a new address is not transparent to nodes already registered with it
+-- they keep the name at the old address until they re-register, and
+their old registrations lapse through the ordinary abandonment sweep.
+
 ## 7. Verify end to end
 
 Before pointing real SysOps at this instance:

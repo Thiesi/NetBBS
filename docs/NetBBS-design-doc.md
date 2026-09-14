@@ -8716,6 +8716,24 @@ its absence*: an operator who removes the setting returns that node to
 the shipped address rather than leaving it pinned to an override it was
 told about once.
 
+Making the address configurable makes it *changeable*, which the
+credential's own design (Decision 2) has to answer: a managed-DNS
+credential is a bearer secret for one service's registration, so a node
+that already holds one must never present it to a service that did not
+issue it. The issuing address is recorded in the same transaction as the
+registration it belongs to, and every path that would send the
+credential checks it first: the updater pauses its heartbeat (saying so
+once in the log), release, rename and cancellation refuse and name the
+two addresses that disagree, and registration against a new service
+starts over as a fresh registration rather than presenting the old
+secret — behind one confirmation, because it replaces the credential
+file and leaves the registration at the old service to lapse on its own.
+For the same reason the setting is restricted to `https://` unless it
+names a loopback address: the service's own process speaks plain HTTP
+behind a TLS-terminating proxy, so the node's side of it is the proxy's
+address, and a plaintext hop to a remote host would put the credential
+on the wire on every heartbeat.
+
 Until the backend is actually deployed anywhere, `DEFAULT_SERVICE_URL`
 is `None` and a node simply has no service to register against. The
 opt-in is still asked, and still recorded exactly once, per Decisions 1
