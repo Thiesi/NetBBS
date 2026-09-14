@@ -17,10 +17,12 @@ at save schema 2 and War Dialer worlds at world schema 10.
 
 ## An MRC room directory (#574)
 
-The bridge could carry a conversation; it could not tell you which
-conversations existed. The room picker now reads the hub's own `LIST`
-reply and offers what it finds — room names, how many people are in
-them, and their topics, including rooms whose topic is empty.
+7.5.0 could already *ask*: `/rooms` sent the hub a `LIST` and printed
+the reply back to whoever asked. What it could not do was use the
+answer. The room picker now parses that reply into rows it offers you —
+room names, how many people are in them, and their topics, including
+rooms whose topic is empty — instead of leaving the picker to list only
+what it had happened to observe from openings and chatter.
 
 - The lobby is offered even when the SysOp has preconfigured other
   rooms, and the directory refreshes after joining or reconnecting
@@ -82,12 +84,13 @@ list, and a seeded edit is positioned by the wrapped screen row it is
 actually on — which is what lets a typed field be edited in place instead
 of being re-asked. Scrolling prompts and validation feedback survive it.
 
-**In-place editing follows the caller's own redraw preference.** An
-account created since that preference existed has it on and gets the new
-behaviour. An account that has never touched it — which is every account
-predating it — has it off, keeps the scrolling path, and gets the value
-pre-filled at the prompt instead. It is `[R]` on *Your profile*; the
-alignment work above applies either way.
+**In-place editing follows the caller's own redraw preference.** Both
+paths that create an account for a person — signing up, and a SysOp
+creating one — set it on, so anyone who joined since that landed gets the
+new behaviour. Accounts predating it have it unset, which resolves to
+off: they keep the scrolling path and get the value pre-filled at the
+prompt instead. It is `[R]` on *Your profile*, and the alignment work
+above applies either way.
 
 If you have written tests against these screens, note that `label: value`
 is now `label:` followed by the padding that aligns the column. Assertions
@@ -111,9 +114,17 @@ neither reported by anything:
   the terminal, not the art, decided whether they took one column or two,
   and the frame moved with the choice.
 
-Two tests now measure both, so neither can come back quietly. A SysOp who
-had chosen one of these presets needs to do nothing; the art is package
-data and the new wheel carries the fixed copies.
+Two tests now measure both, so neither can come back quietly.
+
+**If your node already applied one of these presets, re-apply it.** This
+is the one thing in the release that needs a SysOp's hand. Applying a
+preset copies its bytes to the node's own banner or masthead file
+(`path.write_bytes(data)`), and that copy is what callers see. Replacing
+the wheel replaces the package resource and leaves the copy alone, so a
+node that applied `cathedral_of_signals` last week still shows the
+version whose frame did not close. Re-select the preset in the gallery
+and apply it again; nothing else is needed, and a node that never applied
+one of the fourteen has nothing to do.
 
 ## The website
 
@@ -164,6 +175,11 @@ than on the third day.
 
 Nothing else changes shape: no Link protocol change, no save-format
 change in either bundled game, no new `node_config` key.
+
+One manual step besides the backup: **re-apply any banner or masthead
+preset your node had already applied**, for the reason given under *Every
+frame closes* — the wheel carries the fixed art, but your node is showing
+its own copy of the old.
 
 ## Verification boundaries
 
