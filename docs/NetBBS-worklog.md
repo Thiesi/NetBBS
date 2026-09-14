@@ -3614,7 +3614,11 @@ HTTP, never imports it.
   an equivalent spelling is not a change. The setting is https-only away
   from loopback and refuses embedded userinfo, because the credential
   rides every request and the address reaches the database, the log and
-  SysOp-facing messages. The consequence: **moving the service's own
+  SysOp-facing messages; a loopback address is dialed with
+  `trust_env=False` so that exception holds on a proxied host as well.
+  Canonicalisation uses `urlsplit`, since `urlparse` peels a final-
+  segment path parameter into `params` and those are part of which
+  service an address names. The consequence: **moving the service's own
   address is not transparent** -- nodes already registered with it pause
   rather than follow it.
 - **The bearer credential is not the node's Ed25519 key, and the server

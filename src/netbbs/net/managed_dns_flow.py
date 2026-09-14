@@ -306,8 +306,7 @@ async def register_via_prompt(
         # module must not require merely to import itself -- see this
         # module's own docstring.
         try:
-            from aiohttp import ClientSession
-            from netbbs.managed_dns.client import ManagedDnsError, register
+            from netbbs.managed_dns.client import ManagedDnsError, outbound_session, register
         except ModuleNotFoundError:
             return "Registration requires NetBBS's optional HTTP support."
 
@@ -317,7 +316,7 @@ async def register_via_prompt(
             # still never one this service did not issue.
             stored_credential = None if foreign else load_credential(credential_path_for(lane.path))
             try:
-                async with ClientSession(trust_env=True) as http_session:
+                async with outbound_session(base_url) as http_session:
                     result = await register(
                         http_session, base_url, name=raw_name, node_fingerprint=node_fingerprint,
                         dynamic=dynamic, credential=stored_credential,
@@ -408,8 +407,7 @@ async def release_registration(session: Session, lane: DatabaseLane) -> None:
         return
 
     try:
-        from aiohttp import ClientSession
-        from netbbs.managed_dns.client import ManagedDnsError, release
+        from netbbs.managed_dns.client import ManagedDnsError, outbound_session, release
     except ModuleNotFoundError:
         await session.write_line(colored("Release requires NetBBS's optional HTTP support.", fg_color=MUTED_COLOR))
         return
@@ -428,7 +426,7 @@ async def release_registration(session: Session, lane: DatabaseLane) -> None:
             await _write_note(session, _foreign_credential_line("release", issuer, base_url))
             return
         try:
-            async with ClientSession(trust_env=True) as http_session:
+            async with outbound_session(base_url) as http_session:
                 result = await release(http_session, base_url, credential=stored_credential)
         except ManagedDnsError as exc:
             await session.write_line(colored(f"Release failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
@@ -460,8 +458,7 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
     ):
         return
     try:
-        from aiohttp import ClientSession
-        from netbbs.managed_dns.client import ManagedDnsError, rename
+        from netbbs.managed_dns.client import ManagedDnsError, outbound_session, rename
     except ModuleNotFoundError:
         await session.write_line(colored("Changing a name requires NetBBS's optional HTTP support.", fg_color=MUTED_COLOR))
         return
@@ -487,7 +484,7 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
             await _write_note(session, _foreign_credential_line("change the name", issuer, base_url))
             return
         try:
-            async with ClientSession(trust_env=True) as http_session:
+            async with outbound_session(base_url) as http_session:
                 result = await rename(http_session, base_url, name=new_name, credential=old_credential)
         except ManagedDnsError as exc:
             await session.write_line(colored(f"Name change failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))

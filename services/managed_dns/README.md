@@ -160,7 +160,9 @@ that node to the shipped address on its next start.
 It must be `https://` unless it names a loopback address: every request
 carries the node's bearer credential, so a plaintext hop to a remote
 host hands that secret to anyone on the path. `http://127.0.0.1:<port>`
-is the development case, and is why the exception exists.
+is the development case, and is why the exception exists -- a node dials
+a loopback service address directly, ignoring `HTTP_PROXY`, so the
+"nothing leaves the machine" premise holds on a proxied host too.
 
 It may not embed a username or password: the node records the address in
 its database and prints it in logs and SysOp-facing messages. Put any

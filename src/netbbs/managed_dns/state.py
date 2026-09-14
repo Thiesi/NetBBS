@@ -15,7 +15,7 @@ that does *not* belong here is the credential itself -- see
 from __future__ import annotations
 
 from enum import Enum
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from netbbs.config import get_config, set_config
 from netbbs.storage.database import Database
@@ -255,14 +255,24 @@ def canonical_service_url(url: str) -> str:
     Scheme and host are lowercased, a default port for the scheme is
     dropped, and a trailing slash goes; userinfo is dropped because it
     is refused at config load and is not part of which service this is.
-    An IPv6 literal is re-bracketed, since `urlparse` hands back
+    An IPv6 literal is re-bracketed, since the split hands back
     `hostname` without its brackets.
+
+    `urlsplit`, not `urlparse`: `urlparse` peels a final-segment path
+    parameter off into `params`, so a canonical form built from `path`
+    alone would read `https://dns.example/api;tenant=a` and
+    `.../api;tenant=b` as one service and hand the first one's
+    credential to the second (Codex review of PR #587). Path parameters
+    are deliberately accepted by `netbbs.net.nodeconfig`'s own
+    validation -- that is how a node behind a reverse-proxy subpath is
+    reached -- so they are part of which service this is. `urlsplit`
+    never separates them.
 
     A string this cannot parse is returned trimmed rather than raised
     over: this function only ever decides whether two addresses match,
     and a validated address is the only kind that reaches it."""
     try:
-        parsed = urlparse(url)
+        parsed = urlsplit(url)
         scheme = parsed.scheme.lower()
         host = (parsed.hostname or "").lower()
         port = parsed.port

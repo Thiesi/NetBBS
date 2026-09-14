@@ -18,6 +18,8 @@ from dataclasses import dataclass
 
 from aiohttp import ClientError, ClientSession, ClientTimeout
 
+from urllib.parse import urlsplit
+
 from netbbs.link.events import strict_json_loads
 from netbbs.managed_dns.state import RegistrationStatus
 
@@ -35,6 +37,39 @@ class ManagedDnsError(Exception):
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+def outbound_session(base_url: str) -> ClientSession:
+    """A `ClientSession` for talking to `base_url` -- proxy-aware,
+    except to a loopback address.
+
+    `trust_env=True` is the project-wide rule for outbound calls (see
+    this module's docstring), and it is what lets a node behind a
+    corporate forward proxy reach the service at all. It is wrong for a
+    loopback service address: `netbbs.net.nodeconfig` accepts
+    `http://127.0.0.1:<port>` precisely *because* nothing leaves the
+    machine, but with `HTTP_PROXY` set and no matching `NO_PROXY`,
+    aiohttp would forward that plaintext request -- carrying a freshly
+    minted or presented bearer credential -- to the proxy instead, and
+    the proxy would resolve `127.0.0.1` as itself (Codex review of PR
+    #587). A loopback address never needs a proxy, so this takes the
+    exception at its word and dials directly.
+
+    `is_loopback_host` is imported rather than re-implemented on
+    purpose: it is the same function that decided the address was
+    loopback enough to allow plain HTTP, and a second, subtly different
+    notion of "local" here would reopen exactly this hole.
+    """
+    # Local import: `netbbs.net.nodeconfig` pulls in argparse/tomllib for
+    # its own job, and this module is imported on an outbound call path,
+    # not at node startup.
+    from netbbs.net.nodeconfig import is_loopback_host
+
+    try:
+        host = urlsplit(base_url).hostname or ""
+    except ValueError:
+        host = ""
+    return ClientSession(trust_env=not is_loopback_host(host))
 
 
 @dataclass(frozen=True)

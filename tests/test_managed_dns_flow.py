@@ -870,3 +870,31 @@ def test_declining_the_credential_replacement_registers_nothing(tmp_path):
     assert load_credential(credential_path_for(db.path)) == "issued-by-the-other-service"
     lane.close()
     db.close()
+
+
+def test_a_loopback_service_is_dialed_directly_and_a_remote_one_through_the_proxy():
+    """Codex review of PR #587. `netbbs.net.nodeconfig` allows plain
+    HTTP to a loopback service address precisely because nothing leaves
+    the machine -- but with `HTTP_PROXY` set and no matching `NO_PROXY`,
+    `trust_env=True` would forward that plaintext request, credential
+    and all, to the proxy. A loopback address never needs one."""
+    from netbbs.managed_dns.client import outbound_session
+
+    async def scenario():
+        seen = {}
+        for url in (
+            "http://127.0.0.1:8099", "http://localhost:8099", "http://[::1]:8099",
+            "https://dns.example", "http://dns.example",
+        ):
+            async with outbound_session(url) as http_session:
+                seen[url] = http_session.trust_env
+        return seen
+
+    seen = asyncio.run(scenario())
+    assert seen["http://127.0.0.1:8099"] is False
+    assert seen["http://localhost:8099"] is False
+    assert seen["http://[::1]:8099"] is False
+    # Everything else keeps the project-wide proxy-aware default, which is
+    # what lets a node behind a corporate forward proxy reach the service.
+    assert seen["https://dns.example"] is True
+    assert seen["http://dns.example"] is True

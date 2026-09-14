@@ -396,3 +396,24 @@ def test_canonicalisation_leaves_an_unparseable_address_alone(tmp_path):
     whether two match -- so a string it cannot parse is compared as
     written rather than raised over."""
     assert state.canonical_service_url("http://[") == "http://["
+
+
+def test_a_path_parameter_is_part_of_which_service_this_is(tmp_path):
+    """Codex review of PR #587. `urlparse` peels a final-segment path
+    parameter off into `params`, so a canonical form built from `path`
+    alone reads two tenants of the same host as one service -- and hands
+    the first one's credential to the second. Path parameters are
+    deliberately accepted by the config validation (a reverse-proxy
+    subpath), so they have to be part of the identity."""
+    db = Database(tmp_path / "node.db")
+    set_registration_result_state(
+        db, name="myboard", status=RegistrationStatus.PENDING, dynamic=True,
+        service_url="https://dns.example/api;tenant=a",
+    )
+
+    assert state.foreign_credential_service_url(db, "https://dns.example/api;tenant=a") is None
+    assert (
+        state.foreign_credential_service_url(db, "https://dns.example/api;tenant=b")
+        == "https://dns.example/api;tenant=a"
+    )
+    db.close()
