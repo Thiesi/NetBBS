@@ -189,3 +189,14 @@ What this release does **not** establish:
 - **The POSIX-only door tests have still never executed** (#509).
 - The picker's page counter can still say "page 2/2" while `[N]ext` has
   another page, after a mid-browse resize (#558). Cosmetic.
+
+Gate for this release: full suite **9,396 passed / 53 skipped**,
+`PYTEST_EXIT=0`, on this tree. Getting there took three passes and found
+three things the release did not put there: an upgrade-compatibility
+assertion that forbade adding a column (#579), a guest-login test whose
+premise evaporated when two accounts landed on one clock tick (#580, and
+the guard it exposed, #581), and eighteen field assertions still spelling
+a separator as one space (#577). All are fixed and in this release. The
+first gate pass also lost one Voidrunner test to a ten-second subprocess
+timeout under load; it did not recur, and the Voidrunner suite passes
+2,391 on its own.
