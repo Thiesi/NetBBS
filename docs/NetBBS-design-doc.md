@@ -3839,7 +3839,12 @@ committed, so every receipt in an archive names a post that archive's snapshot
 contains. The reverse pairing — a post whose receipt is missing — remains
 possible and is what the door contract already describes; a receipt naming a
 post the restored database never issued is the one a door could act on, and this
-ordering makes it impossible. Only what NetBBS itself wrote is captured (a
+ordering rules it out for every post the node still had. A post the node itself
+deleted is the exception and is deliberately preserved: deleting a board removes
+its posts and leaves the receipts, so the running node already holds that pair,
+and an archive that quietly dropped those receipts would restore a node tidier
+than the one it was taken from. Capture is not a validation pass over a door's
+history. Only what NetBBS itself wrote is captured (a
 regular file named as `_write_result` names one, within its size), bounded by
 the door module's own retention rule per door and by 64 door directories
 overall; anything else found there is left in place and counted in the manifest

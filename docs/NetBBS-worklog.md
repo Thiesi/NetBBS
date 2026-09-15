@@ -3506,8 +3506,11 @@ Being written beside the database is what made capture possible, not what
 performed it; the comment claiming a backup carried them predated any code that
 did. Capture them before the database snapshot, never after: a receipt is written
 only once its post is committed, so capturing first makes "a receipt naming a post
-the snapshot lacks" unreachable, and leaves only the reverse case the door
-contract already covers. Restore switches the whole directory, and must plan the
+the snapshot lacks" unreachable for every post the node still had, and leaves only
+the reverse case the door contract already covers. A post the node deleted is not
+that case and is not repaired here -- `delete_board` leaves the receipts of the
+posts it removes, so the live node already holds the pair, and dropping them at
+capture would restore a node tidier than the one backed up. Restore switches the whole directory, and must plan the
 artifact even when the archive has none, so a later generation's receipts cannot
 stand beside an older database. Two shapes constrain that plan: a node database
 named `door-outbound` occupies the exact path the receipts root derives to, so

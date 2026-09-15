@@ -353,13 +353,16 @@ request identifier in your game data and choose request filenames accordingly.
 Do not promise exactly-once delivery after a crash or retry merely because
 result files have unique launch prefixes.
 
-Backup and restore carry receipts with the node. Every receipt in an archive
-names a post that archive's database snapshot contains, and a restore replaces
-the receipts on disk with the ones belonging to the database it restores — so a
-receipt never survives into a generation that never issued its post. A restored
-node can still hold a published post whose receipt is missing, which is the same
-case as a pruned receipt: a missing receipt is never proof either way, and never
-grounds on its own for publishing again.
+Backup and restore carry receipts with the node. A restore replaces the
+receipts on disk with the ones belonging to the database it restores, so a
+receipt never survives into a generation that never issued its post, and a
+`"posted"` receipt in an archive names a post that archive's database snapshot
+contains — unless the post had since been deleted, which a running node shows you
+just the same (deleting a board takes its posts and leaves the receipts). A
+restored node can also hold a published post whose receipt is missing, the same
+case as a pruned receipt. Neither direction is proof: a missing receipt is not
+grounds on its own for publishing again, and a receipt is a record of what was
+published, not of what is still there.
 
 ## Implementing NetBBS Link
 

@@ -31,10 +31,16 @@ can leave a post in the snapshot whose receipt is missing, which the
 door contract already covers ("a missing receipt is not proof of
 publication"); the reverse -- a receipt naming a post the restored
 database never had -- is the one a door could act on, and this ordering
-makes it impossible. Restore replaces the live receipts wholesale with
-the archive's own, including replacing them with nothing when the
-archive predates this component: receipts from a newer generation
-beside an older database claim post IDs that database never had.
+rules out for every post the node still had. A post the node itself
+deleted is the exception, and not one this ordering could repair:
+`delete_board` removes its board's posts outright and leaves the
+receipts, so the live node is already holding a receipt for a post its
+own database no longer has. The archive reproduces that pair rather
+than inventing or tidying it -- a backup restores the node it was taken
+from. Restore replaces the live receipts wholesale with the archive's
+own, including replacing them with nothing when the archive predates
+this component: receipts from a newer generation beside an older
+database claim post IDs that database never had.
 
 When its save directory exists, Voidrunner adds a checksummed component
 containing careers, recovery copies, and scores. Capture it while game
@@ -150,7 +156,14 @@ _DOOR_OUTBOUND_MAX_DOORS = 64
 #: what a restore will stage.
 _DOOR_OUTBOUND_MAX_RECEIPTS = 1024
 _DOOR_OUTBOUND_MAX_RECEIPT_BYTES = 64 * 1024
-_DOOR_ID_PATTERN = re.compile(r"[0-9]{1,18}")
+#: How many entries either listing below will enumerate before giving up.
+#: `sorted(iterdir())` materializes a whole directory before any retention
+#: bound can apply, and a door writes into this tree -- the same reasoning
+#: `netbbs.doors.outbound._MAX_REQUESTS_SCANNED` already applies to the drop
+#: directory, at the same multiple of what is kept.
+_DOOR_OUTBOUND_SCAN_FACTOR = 4
+#: A door id is a SQLite rowid, so nineteen digits is all of them.
+_DOOR_ID_PATTERN = re.compile(r"[0-9]{1,19}")
 _RESERVED_BACKUP_ENTRIES = (_MANIFEST_FILENAME, _FILES_DIRNAME, _IDENTITY_DIRNAME)
 
 # node_config keys (netbbs.config's generic key-value store) -- same
@@ -781,8 +794,8 @@ def _validate_war_dialer_component(source: Path, manifest: dict) -> None:
         raise BackupError("War Dialer files do not match their coverage manifest.")
 
 
-def _door_outbound_receipts(directory: Path, kept: int) -> tuple[list[Path], int]:
-    """One door's receipts, the newest `kept` of them, plus what was left behind.
+def _door_outbound_receipts(directory: Path, kept: int) -> tuple[list[Path], int, int]:
+    """One door's receipts, the newest `kept` of them, and what was left behind.
 
     Only what NetBBS itself wrote and can read back: a regular file named the
     way `_write_result` names one, within the size such a file has. A door
@@ -793,31 +806,55 @@ def _door_outbound_receipts(directory: Path, kept: int) -> tuple[list[Path], int
     the blob tree -- but it is counted, so an archive never silently claims to
     hold more than it does.
 
+    Returned as `(receipts, skipped, pruned)`: what the node discarded while
+    this ran is a different fact about the archive from what was never a
+    receipt, and reporting both as one number would describe a receipt this
+    backup lost as a door's stray file.
+
     `kept` mirrors the door module's own retention rule instead of inventing a
     second one: anything past it is what the next drain would prune anyway.
+    Enumeration stops well before that, at a multiple of it: `iterdir()` orders
+    the whole directory before any bound can apply, and a door is what fills
+    this one.
     """
     from netbbs.doors.outbound import RESULT_SUFFIX
 
     receipts: list[tuple[float, str, Path]] = []
-    skipped = 0
+    skipped = pruned = 0
+    limit = _DOOR_OUTBOUND_SCAN_FACTOR * kept
     try:
-        entries = sorted(directory.iterdir())
+        with os.scandir(directory) as entries:
+            for scanned, entry in enumerate(entries, 1):
+                if scanned > limit:
+                    raise BackupError(
+                        f"Door outbound receipts at {directory} hold more than {limit} entries, "
+                        f"where this node keeps {kept}. Receipts are disposable -- clear what a "
+                        "door has left there, then retry.")
+                path = Path(entry.path)
+                try:
+                    if (not entry.name.endswith(RESULT_SUFFIX) or entry.is_symlink()
+                            or not entry.is_file()
+                            or entry.stat().st_size > _DOOR_OUTBOUND_MAX_RECEIPT_BYTES):
+                        skipped += 1
+                        continue
+                    receipts.append((entry.stat().st_mtime, entry.name, path))
+                except FileNotFoundError:
+                    pruned += 1
+                except OSError as exc:
+                    raise BackupError(f"Cannot read door outbound receipt {path}: {exc}") from exc
+    except (FileNotFoundError, NotADirectoryError):
+        # `disable_outbound` releases a door's whole directory, and a SysOp
+        # may switch a hook off while this backup runs. The same judgment the
+        # copy below makes: what the node is discarding is not worth failing
+        # an archive over.
+        return [], 0, 0
     except OSError as exc:
         raise BackupError(f"Cannot read door outbound receipts at {directory}: {exc}") from exc
-    for entry in entries:
-        try:
-            if (not entry.name.endswith(RESULT_SUFFIX) or entry.is_symlink()
-                    or not entry.is_file()
-                    or entry.stat().st_size > _DOOR_OUTBOUND_MAX_RECEIPT_BYTES):
-                skipped += 1
-                continue
-            receipts.append((entry.stat().st_mtime, entry.name, entry))
-        except OSError:
-            skipped += 1
-    # Oldest first out, exactly as `_prune_results` chooses what to keep.
+    # Oldest first out, exactly as `_prune_results` chooses what to keep, and
+    # ordered here rather than by the filesystem: `scandir` promises no order.
     receipts.sort()
     skipped += max(0, len(receipts) - kept)
-    return [entry for _, _, entry in receipts[-kept:]], skipped
+    return [path for _, _, path in receipts[-kept:]], skipped, pruned
 
 
 def _capture_door_outbound(db_path: Path, destination: Path, checksums: dict) -> dict | None:
@@ -848,12 +885,23 @@ def _capture_door_outbound(db_path: Path, destination: Path, checksums: dict) ->
     resolved = destination.resolve()
     if resolved == root.resolve() or resolved.is_relative_to(root.resolve()):
         raise BackupError("A backup destination cannot be inside the door outbound receipts directory.")
+    doors: list[Path] = []
+    skipped = pruned = 0
+    limit = _DOOR_OUTBOUND_SCAN_FACTOR * _DOOR_OUTBOUND_MAX_DOORS
     try:
-        entries = sorted(root.iterdir())
+        with os.scandir(root) as entries:
+            for scanned, entry in enumerate(entries, 1):
+                if scanned > limit:
+                    raise BackupError(
+                        f"Door outbound receipts at {root} hold more than {limit} entries. "
+                        "Receipts are disposable -- remove what belongs to doors this node no "
+                        "longer has, then retry.")
+                if entry.is_dir() and not entry.is_symlink() and _DOOR_ID_PATTERN.fullmatch(entry.name):
+                    doors.append(Path(entry.path))
+                else:
+                    skipped += 1
     except OSError as exc:
         raise BackupError(f"Cannot read door outbound receipts at {root}: {exc}") from exc
-    doors = [entry for entry in entries
-             if entry.is_dir() and not entry.is_symlink() and _DOOR_ID_PATTERN.fullmatch(entry.name)]
     if len(doors) > _DOOR_OUTBOUND_MAX_DOORS:
         raise BackupError(
             f"Door outbound receipts cover more than {_DOOR_OUTBOUND_MAX_DOORS} doors at {root}. "
@@ -862,10 +910,10 @@ def _capture_door_outbound(db_path: Path, destination: Path, checksums: dict) ->
     output = destination / _DOOR_OUTBOUND_DIRNAME
     output.mkdir()
     captured = []
-    skipped = len(entries) - len(doors)
-    for entry in sorted(doors, key=lambda path: int(path.name)):
-        receipts, ignored = _door_outbound_receipts(entry, RESULTS_KEPT)
+    for entry in sorted(doors, key=lambda path: (int(path.name), path.name)):
+        receipts, ignored, gone = _door_outbound_receipts(entry, RESULTS_KEPT)
         skipped += ignored
+        pruned += gone
         if not receipts:
             continue
         target = output / entry.name
@@ -875,14 +923,18 @@ def _capture_door_outbound(db_path: Path, destination: Path, checksums: dict) ->
             captured_path = target / path.name
             try:
                 shutil.copy2(path, captured_path)
-            except OSError:
+            except FileNotFoundError:
                 # A drain running while this backup does can prune a receipt
                 # between the listing above and this copy. Losing a receipt
                 # the node itself was discarding is the outcome a door already
-                # expects; failing an entire archive over it is not.
+                # expects; failing an entire archive over it is not. Only that
+                # one failure, though -- an unreadable or unwritable receipt is
+                # an incomplete archive presented as a complete one.
                 captured_path.unlink(missing_ok=True)
-                skipped += 1
+                pruned += 1
                 continue
+            except OSError as exc:
+                raise BackupError(f"Cannot capture door outbound receipt {path}: {exc}") from exc
             checksums[f"{_DOOR_OUTBOUND_DIRNAME}/{entry.name}/{path.name}"] = _sha256_of_file(captured_path)
             names.append(path.name)
         if not names:
@@ -891,7 +943,7 @@ def _capture_door_outbound(db_path: Path, destination: Path, checksums: dict) ->
             target.rmdir()
             continue
         captured.append({"key": entry.name, "source_path": str(entry), "receipts": sorted(names)})
-    return {"version": 1, "doors": captured, "skipped": skipped}
+    return {"version": 1, "doors": captured, "skipped": skipped, "pruned": pruned}
 
 
 def _validate_door_outbound_component(source: Path, manifest: dict) -> None:
@@ -1419,7 +1471,30 @@ def _restore_switch_plan(
             # credential-generation artifact may survive over the snapshot.
             plan.append((credential_path.name, None, credential_path))
 
+    _refuse_overlapping_live_paths(plan)
     return plan
+
+
+def _refuse_overlapping_live_paths(plan: list[tuple[str, Path | None, Path]]) -> None:
+    """No two artifacts may restore onto the same live path, or into each other.
+
+    Every live path is derived from `db_path` except `identity_dir`, which the
+    caller supplies and nothing checks against the rest. A node pointed at its
+    own receipts root or blob tree for identity would have had its keys
+    switched aside by whichever artifact is planned after them, and the restore
+    would have reported success. The artifacts are independent, so "the last
+    one wins" is never the answer; refuse before the first switch instead.
+    """
+    seen: list[tuple[str, Path]] = []
+    for name, _staged_path, live_path in plan:
+        resolved = live_path.resolve()
+        for other_name, other in seen:
+            if resolved == other or resolved.is_relative_to(other) or other.is_relative_to(resolved):
+                raise BackupError(
+                    f"Restore targets overlap: {name!r} at {resolved} and {other_name!r} at "
+                    f"{other} cannot both be restored. Give the node's database, identity "
+                    "directory and derived paths separate locations.")
+        seen.append((name, resolved))
 
 
 class _SwitchRollbackError(BackupError):
@@ -1796,11 +1871,14 @@ def main(argv: list[str] | None = None) -> None:
             total = sum(len(door["receipts"]) for door in receipts["doors"])
             doors = len(receipts["doors"])
             left = receipts.get("skipped") or 0
+            gone = receipts.get("pruned") or 0
             print_wrapped(
                 f"Door outbound: included {total} receipt{'' if total == 1 else 's'} for "
                 f"{doors} door{'' if doors == 1 else 's'}."
                 + (f" {left} other entr{'y' if left == 1 else 'ies'} left in place, not "
-                   "receipts this node wrote." if left else ""))
+                   "receipts this node wrote." if left else "")
+                + (f" {gone} receipt{'' if gone == 1 else 's'} the node pruned while this "
+                   "backup ran." if gone else ""))
         created = json.loads((destination / _MANIFEST_FILENAME).read_text())
         coverage = created.get("voidrunner")
         # From the manifest this run just wrote, never a fresh lookup

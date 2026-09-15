@@ -7,8 +7,10 @@ them, and until this component existed a restored node came back with the
 posts and without the outcomes.
 
 What these tests hold down is the pairing, not the copy: a captured receipt
-never names a post the snapshot taken beside it lacks, and a restore never
-leaves a newer generation's receipts standing over an older database.
+never names a post the snapshot taken beside it lacks -- for any post the node
+still had, a deleted one being the node's own doing and preserved as such -- and
+a restore never leaves a newer generation's receipts standing over an older
+database.
 """
 
 from __future__ import annotations
@@ -22,9 +24,10 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.backup import BackupError, create_backup, restore_backup
-from netbbs.boards.boards import create_board
+from netbbs.boards.boards import create_board, delete_board, list_boards
 from netbbs.doors import create_door
 from netbbs.doors import outbound as outbound_module
+from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.doors.outbound import allow_target, drain, enable_outbound, results_dir, results_root
 from netbbs.storage.database import Database
 from netbbs import backup as backup_module
@@ -61,6 +64,16 @@ def _run_a_door(db_path, workdir):
                          for path in sorted(results_dir(db, door.id).iterdir())}
     finally:
         db.close()
+
+
+def board_named(db, name):
+    return next(board for board in list_boards(db) if board.name == name)
+
+
+def db_user(db, username):
+    from netbbs.auth.users import get_user_by_username
+
+    return get_user_by_username(db, username)
 
 
 def _manifest(backup):
@@ -167,7 +180,7 @@ def test_an_empty_receipts_directory_is_still_an_answer(tmp_path, db_path, ident
 
     backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
 
-    assert _manifest(backup)["door_outbound"] == {"version": 1, "doors": [], "skipped": 0}
+    assert _manifest(backup)["door_outbound"] == {"version": 1, "doors": [], "skipped": 0, "pruned": 0}
     _run_a_door(db_path, tmp_path / "launch-one")
 
     restore_backup(source=backup, db_path=db_path, identity_dir=identity_dir)
@@ -295,15 +308,18 @@ def test_a_receipt_pruned_while_the_backup_runs_does_not_fail_it(
     original = backup_module._door_outbound_receipts
 
     def vanishing(directory, kept):
-        found, skipped = original(directory, kept)
-        return [*(found if survivors else []), directory / "launch-one.pruned.result.json"], skipped
+        found, skipped, pruned = original(directory, kept)
+        return ([*(found if survivors else []), directory / "launch-one.pruned.result.json"],
+                skipped, pruned)
 
     monkeypatch.setattr(backup_module, "_door_outbound_receipts", vanishing)
 
     backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
 
     metadata = _manifest(backup)["door_outbound"]
-    assert metadata["skipped"] == 1
+    # Counted as pruned, not as a stray file: a receipt this backup lost is a
+    # different fact from one a door left behind.
+    assert (metadata["pruned"], metadata["skipped"]) == (1, 0)
     if survivors:
         assert sorted(metadata["doors"][0]["receipts"]) == sorted(receipts)
     else:
@@ -314,3 +330,115 @@ def test_a_receipt_pruned_while_the_backup_runs_does_not_fail_it(
     restore_backup(source=backup, db_path=db_path, identity_dir=identity_dir)
     assert _live_receipts(db_path) == (
         {f"{door_id}/{name}": raw for name, raw in receipts.items()} if survivors else {})
+
+
+def test_a_door_whose_hook_is_switched_off_mid_backup_does_not_fail_it(
+    tmp_path, db_path, identity_dir, monkeypatch,
+):
+    """`disable_outbound` releases a door's whole directory.
+
+    A SysOp can do that while a backup runs, which is the same call the
+    pruning race makes: what the node is discarding is not worth failing an
+    archive over.
+    """
+    door_id, _ = _run_a_door(db_path, tmp_path / "launch-one")
+    original = backup_module._door_outbound_receipts
+
+    def released(directory, kept):
+        shutil.rmtree(directory)
+        return original(directory, kept)
+
+    monkeypatch.setattr(backup_module, "_door_outbound_receipts", released)
+
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+
+    assert _manifest(backup)["door_outbound"]["doors"] == []
+    assert not (backup / "door-outbound" / str(door_id)).exists()
+
+
+def test_a_receipt_outlives_a_deleted_post_exactly_as_it_does_live(tmp_path, db_path, identity_dir):
+    """Deleting a board takes its posts and leaves the receipts behind.
+
+    Capture ordering rules out this archive *inventing* that pair; it cannot
+    repair one the node already made, and must not try. A backup restores the
+    node it was taken from, not a tidier one -- and a door reading a receipt
+    for a deleted post gets the same answer either way.
+    """
+    door_id, receipts = _run_a_door(db_path, tmp_path / "launch-one")
+    db = Database(db_path)
+    try:
+        sysop = db_user(db, "sysop")
+        delete_board(db, board_named(db, "Chronicle"), deleted_by=sysop)
+    finally:
+        db.close()
+
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    restore_backup(source=backup, db_path=db_path, identity_dir=identity_dir)
+
+    assert _live_receipts(db_path) == {f"{door_id}/{name}": raw for name, raw in receipts.items()}
+    db = Database(db_path)
+    try:
+        assert db.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 0
+    finally:
+        db.close()
+
+
+def test_an_unreadable_receipt_fails_the_backup_rather_than_shrinking_it(
+    tmp_path, db_path, identity_dir, monkeypatch,
+):
+    """Only a receipt that vanished is tolerated.
+
+    Anything else -- an unreadable source, a full destination -- would present
+    an incomplete archive as a complete one.
+    """
+    _run_a_door(db_path, tmp_path / "launch-one")
+
+    def refuse(source, destination, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(backup_module.shutil, "copy2", refuse)
+
+    with pytest.raises(BackupError, match="Cannot capture door outbound receipt"):
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+
+
+@pytest.mark.parametrize("where", ["door", "root"])
+def test_an_unbounded_directory_stops_the_scan_rather_than_the_node(
+    tmp_path, db_path, identity_dir, monkeypatch, where,
+):
+    """A door writes into this tree, so neither listing may be unbounded.
+
+    `iterdir()` orders a whole directory before any retention bound applies;
+    the drain already refuses to enumerate a door's drop directory without a
+    cap, and this is the same directory's other end.
+    """
+    door_id, _ = _run_a_door(db_path, tmp_path / "launch-one")
+    monkeypatch.setattr(outbound_module, "RESULTS_KEPT", 2)
+    if where == "door":
+        directory = _door_directory(db_path, door_id)
+        for index in range(2 * backup_module._DOOR_OUTBOUND_SCAN_FACTOR + 2):
+            (directory / f"junk-{index}.txt").write_text("x", encoding="utf-8")
+    else:
+        for index in range(backup_module._DOOR_OUTBOUND_SCAN_FACTOR
+                           * backup_module._DOOR_OUTBOUND_MAX_DOORS + 1):
+            (results_root(db_path) / f"junk-{index}.txt").write_text("x", encoding="utf-8")
+
+    with pytest.raises(BackupError, match="more than"):
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+
+
+def test_a_restore_refuses_targets_that_would_overwrite_each_other(tmp_path, db_path, identity_dir):
+    """Nothing validates `identity_dir` against the paths derived from the database.
+
+    A node pointed at its own receipts root for identity would have had its
+    keys switched into the rollback directory by whichever artifact is planned
+    after them, and the restore would have reported success.
+    """
+    _run_a_door(db_path, tmp_path / "launch-one")
+    bootstrap_node_identity("test-node").save(identity_dir)
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+
+    with pytest.raises(BackupError, match="Restore targets overlap"):
+        restore_backup(source=backup, db_path=db_path, identity_dir=results_root(db_path))
+
+    assert _live_receipts(db_path), "refused before the first switch"
