@@ -769,7 +769,11 @@ def _validate_war_dialer_component(source: Path, manifest: dict) -> None:
     metadata = manifest.get("war_dialer")
     root = source / _WAR_DIALER_DIRNAME
     if metadata is None:
-        if root.exists() and _database_filename_from_manifest(manifest) != _WAR_DIALER_DIRNAME:
+        # Case-folded, and the entry must be the snapshot file itself: the
+        # same latent alias the door outbound component had, in the same
+        # shape the Voidrunner validator already uses.
+        legacy_database = _database_filename_from_manifest(manifest).casefold() == _WAR_DIALER_DIRNAME
+        if root.exists() and not (legacy_database and root.is_file()):
             raise BackupError("War Dialer component has no coverage manifest.")
         return
     if (not isinstance(metadata, dict) or metadata.get("version") != 1
@@ -1019,10 +1023,16 @@ def _validate_door_outbound_component(source: Path, manifest: dict) -> None:
     if metadata is None:
         # A node database *named* `door-outbound` keeps that name in the
         # archive when this component is absent, exactly as the War Dialer
-        # and Voidrunner components already allow for.
-        if root.exists() and _database_filename_from_manifest(manifest) != _DOOR_OUTBOUND_DIRNAME:
+        # and Voidrunner components already allow for -- case-folded and
+        # required to be the snapshot file itself, the shape the Voidrunner
+        # validator already uses, because on a case-insensitive filesystem
+        # `Door-Outbound` is this very entry.
+        legacy_database = _database_filename_from_manifest(manifest).casefold() == _DOOR_OUTBOUND_DIRNAME
+        if root.exists() and not (legacy_database and root.is_file()):
             raise BackupError("Door outbound component has no coverage manifest.")
         return
+    if _database_filename_from_manifest(manifest).casefold() == _DOOR_OUTBOUND_DIRNAME:
+        raise BackupError("Door outbound component collides with the database snapshot filename.")
     if (not isinstance(metadata, dict) or metadata.get("version") != 1
             or not isinstance(metadata.get("doors"), list)
             or len(metadata["doors"]) > _DOOR_OUTBOUND_MAX_DOORS
@@ -1505,11 +1515,14 @@ def _restore_switch_plan(
     # kept under that name when nothing was captured.
     staged_receipts = staging_dir / _DOOR_OUTBOUND_DIRNAME
     live_receipts = _door_outbound_root_for(db_path)
-    if live_receipts == db_path:
+    if db_path.name.casefold() == _DOOR_OUTBOUND_DIRNAME:
         # A node database named `door-outbound` occupies the exact path its
         # own receipts would live at, so that node has none and cannot have
         # any -- but planning the artifact anyway would rename the database
-        # this restore just put there into the rollback directory.
+        # this restore just put there into the rollback directory. Decided by
+        # name rather than by comparing the two paths: on a case-insensitive
+        # filesystem `Door-Outbound` is that same path while `==` says it is
+        # not, and neither path need exist yet when this plan is built.
         if staged_receipts.is_dir():
             raise BackupError(
                 "This backup carries door outbound receipts, which live at the same path as a "
@@ -1604,7 +1617,11 @@ def _switch_one(name: str, staged_path: Path | None, live_path: Path, rollback_d
         _switch_game(staged_path, live_path, rollback_dir)
         return
     moved = False
-    if live_path.exists():
+    if live_path.exists() or live_path.is_symlink():
+        # `exists()` follows links, so a dangling one is invisible to it --
+        # and switching absence over a dangling link would leave it in place
+        # for its target to come back to, holding a generation this restore
+        # replaced.
         rollback_dir.mkdir(parents=True, exist_ok=True)
         live_path.rename(rollback_dir / name)
         moved = True
@@ -1633,9 +1650,9 @@ def _rollback_switched(switched: list[tuple[str, Path | None, Path]], rollback_d
             for path in _game_data_entries(rollback_dir / name):
                 path.rename(live_path / path.name)
             continue
-        if live_path.is_dir():
+        if live_path.is_dir() and not live_path.is_symlink():
             shutil.rmtree(live_path)
-        elif live_path.exists():
+        elif live_path.exists() or live_path.is_symlink():
             live_path.unlink()
         rolled_back = rollback_dir / name
         if rolled_back.exists():

@@ -732,3 +732,24 @@ def test_no_single_unreadable_request_strands_the_rest(db, door, sysop, board, t
 
     assert drain(db, door, tmp_path) == (1, 1), f"{what} stranded the request after it"
     assert _result(db, door, good)["status"] == "posted"
+
+
+def test_a_refusal_quotes_a_doors_own_text_back_at_it_bounded(db, door, sysop, board, tmp_path):
+    """A result file must stay the size a result is.
+
+    A request may legally carry a board name of nearly the whole request
+    limit, and a reason that echoed all of it would make NetBBS write a
+    receipt far larger than any receipt is meant to be -- one the door then
+    has to read, and one a backup will not recognise as node state.
+    """
+    _enable(db, door, sysop, board)
+    request = _request(tmp_path, subject="Hello", body="...", board="X" * 100_000)
+
+    assert drain(db, door, tmp_path) == (0, 1)
+
+    result = _result(db, door, request)
+    assert result["status"] == "rejected"
+    assert "not allowlisted" in result["reason"]
+    assert len(result["reason"]) < 400
+    written = next(results_dir(db, door.id).glob("*.result.json"))
+    assert written.stat().st_size < 64 * 1024, "a receipt a backup would not carry"

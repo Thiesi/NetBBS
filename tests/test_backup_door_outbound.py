@@ -265,31 +265,42 @@ def test_a_component_without_a_manifest_entry_is_refused(tmp_path, db_path, iden
         restore_backup(source=backup, db_path=db_path, identity_dir=identity_dir)
 
 
-def test_a_database_named_door_outbound_remains_backupable(tmp_path, db_path, identity_dir):
+@pytest.mark.parametrize("filename", ["door-outbound", "Door-Outbound"])
+def test_a_database_named_door_outbound_remains_backupable(tmp_path, db_path, identity_dir, filename):
     """That node's database occupies the path its receipts would live at.
 
     So it has none, the archive says so, and the restore must not plan the
     artifact -- doing that would rename the database it had just restored
     into the rollback directory.
     """
-    custom = tmp_path / "custom-node" / "door-outbound"
+    custom = tmp_path / "custom-node" / filename
     custom.parent.mkdir()
     shutil.copy2(db_path, custom)
 
     backup = create_backup(db_path=custom, identity_dir=identity_dir, destination=tmp_path / "backup")
 
     assert _manifest(backup)["door_outbound"] is None
-    assert _manifest(backup)["database_filename"] == "door-outbound"
+    assert _manifest(backup)["database_filename"] == filename
     restore_backup(source=backup, db_path=custom, identity_dir=identity_dir)
     assert custom.is_file()
     with sqlite3.connect(custom) as restored:
         assert restored.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
-def test_a_database_named_door_outbound_refuses_an_archive_with_receipts(tmp_path, db_path, identity_dir):
+@pytest.mark.parametrize("filename", ["door-outbound", "Door-Outbound"])
+def test_a_database_named_door_outbound_refuses_an_archive_with_receipts(
+    tmp_path, db_path, identity_dir, filename,
+):
+    """Decided by name, not by comparing the two paths.
+
+    On a case-insensitive filesystem `Door-Outbound` *is* the receipts root
+    while `==` says it is not, and neither path need exist yet when the plan
+    is built -- so the database would have been restored and then renamed into
+    the rollback directory, with the restore reporting success.
+    """
     _run_a_door(db_path, tmp_path / "launch-one")
     backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
-    elsewhere = tmp_path / "other-node" / "door-outbound"
+    elsewhere = tmp_path / "other-node" / filename
     elsewhere.parent.mkdir()
 
     with pytest.raises(BackupError, match="another name"):
@@ -572,3 +583,21 @@ def test_a_symlinked_receipts_root_is_followed_rather_than_reported_absent(
     backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
 
     assert sorted(_manifest(backup)["door_outbound"]["doors"][0]["receipts"]) == sorted(receipts)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks")
+def test_restoring_absence_clears_a_dangling_receipts_link(tmp_path, db_path, identity_dir):
+    """`exists()` follows links, so a dangling one is invisible to it.
+
+    Left in place, it is a directory waiting for its volume to come back --
+    holding the generation this restore replaced, beside a database that
+    never issued those posts.
+    """
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    assert _manifest(backup)["door_outbound"] is None
+    results_root(db_path).symlink_to(tmp_path / "volume-that-went-away", target_is_directory=True)
+
+    rollback = restore_backup(source=backup, db_path=db_path, identity_dir=identity_dir)
+
+    assert not results_root(db_path).is_symlink() and not results_root(db_path).exists()
+    assert (rollback / "door-outbound").is_symlink()

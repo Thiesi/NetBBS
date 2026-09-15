@@ -381,6 +381,23 @@ def _log_refusal_once_per_window(db: Database, door, config: OutboundConfig,
                   object_id=door.id, detail=f"door={door.name!r} reason={reason}")
 
 
+#: How much of a door's own text a refusal quotes back at it. A request may
+#: legally carry a board name of nearly `_MAX_REQUEST_BYTES`, and a reason
+#: that echoed all of it would make NetBBS write a receipt far larger than any
+#: receipt is meant to be -- one the door then has to read, and one a backup
+#: would not recognize as node state. Everything else a result carries is
+#: bounded already, so this is what keeps a receipt a receipt.
+_MAX_QUOTED_REQUEST_CHARS = 120
+
+
+def _quoted(value: object) -> str:
+    """A door's own value, quoted back at it and bounded."""
+    text = repr(value)
+    if len(text) <= _MAX_QUOTED_REQUEST_CHARS:
+        return text
+    return text[:_MAX_QUOTED_REQUEST_CHARS] + "..."
+
+
 def _resolve_board(db: Database, door_id: int, requested: object) -> tuple[Board | None, str]:
     """Pick the allowlisted board a request names, or say why we cannot."""
     allowed = targets(db, door_id)
@@ -408,9 +425,9 @@ def _resolve_board(db: Database, door_id: int, requested: object) -> tuple[Board
     if len(folded) == 1:
         return folded[0], ""
     if folded:
-        return None, (f"board {requested!r} matches more than one allowlisted board; "
+        return None, (f"board {_quoted(requested)} matches more than one allowlisted board; "
                       "spell it exactly")
-    return None, f"board {requested!r} is not allowlisted for this door"
+    return None, f"board {_quoted(requested)} is not allowlisted for this door"
 
 
 def _is_storable(text: str) -> bool:
