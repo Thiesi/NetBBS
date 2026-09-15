@@ -120,11 +120,13 @@ from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display
 
 
-# How many recent sessions [L]ast sessions shows -- generous enough to
-# be useful, small enough to fit on one screen page without its own
-# pagination affordance (unlike pick_item-backed screens, this is a
-# plain listing: there's no per-entry detail beyond what's already on
-# its one line, so there's nothing a selection would actually do).
+# How many of your own calls [H]istory shows -- generous enough to be
+# useful, and one screen page at the 80 columns a row fits on. A
+# narrow terminal breaks each row in two and the listing scrolls,
+# which is the ordinary behaviour of every plain listing here: there
+# is no per-entry detail beyond the row itself, so there is nothing a
+# pick_item selection would do, and nothing gained by hiding calls the
+# caller asked for behind a pager.
 _SESSION_HISTORY_DISPLAY_LIMIT = 20
 _PREVIOUS_CALLERS_DISPLAY_LIMIT = 10
 _PREVIOUS_CALLERS_FIXED_ROWS = 8
@@ -727,18 +729,39 @@ async def _last_sessions_screen(session: Session, db: Database, user: User) -> N
             else:
                 status = "still connected"
                 status_color = SUCCESS_COLOR
-            await session.write_line(
-                colored_truncate(
-                    [
-                        ("  ", None),
-                        ("connected ", LABEL_COLOR),
-                        (connected, accent),
-                        (", ", LABEL_COLOR),
-                        (status, status_color),
-                    ],
-                    session.terminal_width,
+            # Nothing on this row is truncated (Codex review of issue
+            # #592). A completed call at the supported 40-column
+            # minimum runs past 60 columns, so `colored_truncate` --
+            # which this screen used while the row was one line of
+            # everyone's names -- would cut away the disconnect time
+            # and the duration the screen exists to show. Every
+            # segment here is the node's own text, no caller's, so the
+            # composed row can go to `write_line` and be wrapped
+            # rather than cut (AGENTS.md: retain all text).
+            #
+            # It is broken at the comma first, into a line per fact,
+            # because `wrap_terminal_text` continues at column zero and
+            # unindented continuations make twenty rows read as one
+            # paragraph. Whatever still does not fit -- the interrupted
+            # sentence, narrower than 40 -- `write_line` wraps.
+            plain = f"  connected {connected}, {status}"
+            if display_width(plain) <= session.terminal_width:
+                await session.write_line(
+                    "  "
+                    + colored("connected ", fg_color=LABEL_COLOR)
+                    + colored(connected, fg_color=accent)
+                    + colored(", ", fg_color=LABEL_COLOR)
+                    + colored(status, fg_color=status_color)
                 )
-            )
+            else:
+                await session.write_line(
+                    "  "
+                    + colored("connected ", fg_color=LABEL_COLOR)
+                    + colored(connected, fg_color=accent)
+                )
+                await session.write_line(
+                    "    " + colored(status, fg_color=status_color)
+                )
     await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 

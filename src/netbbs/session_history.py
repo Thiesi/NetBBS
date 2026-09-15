@@ -33,6 +33,25 @@ from netbbs.user_preferences import get_user_preference
 # bound over a node's lifetime.
 _MAX_SESSION_HISTORY_ROWS = 500
 
+# ...except that a node-wide row count cannot, on its own, keep the
+# promise `[H]istory` makes to one caller (issue #592, Codex review).
+# That screen is now the viewer's own calls, and a global cap retires
+# rows in the order they arrived regardless of whose they are: let 500
+# other logins happen between one caller's visits and every row that
+# caller ever had is gone, leaving them a screen that shows only the
+# session they are sitting in -- the busy-node failure the split was
+# meant to fix.
+#
+# So a row survives if it is among the newest `_MAX_SESSION_HISTORY_
+# ROWS` on the node *or* among its own account's newest
+# `_MAX_SESSION_HISTORY_ROWS_PER_USER`. That is still an explicit
+# bound, just a two-part one: at most 500 + 20 x (accounts + 1) rows,
+# the +1 being the shared bucket every deleted account's rows fall
+# into once `user_id` is cleared. Twenty is what `[H]istory` itself
+# displays, so the rule retains exactly one screenful per account and
+# not a row more.
+_MAX_SESSION_HISTORY_ROWS_PER_USER = 20
+
 _NAME_VISIBLE_KEY = "session_history_name_visible"
 _PREVIOUS_CALLERS_ENABLED_KEY = "previous_callers_enabled"
 
@@ -73,23 +92,55 @@ def record_session_start(db: Database, user: User) -> int:
         (user.id, user.username, utc_now_iso(), int(session_history_name_visible(db, user))),
     )
     row_id = db.connection.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-    # Pruning happens alongside the insert that could have grown the
-    # table past the cap, the same "bound it right where it grows"
-    # placement `LinkDiagnosticLogHandler.emit` uses -- keeps the most
-    # recent rows by id (insertion order), not by connected_at, so a
-    # session started slightly "out of order" relative to another
-    # (clock skew is not a concern here -- both are this node's own
-    # utc_now_iso()) is never a factor.
-    db.connection.execute(
-        """
-        DELETE FROM session_history WHERE id NOT IN (
-            SELECT id FROM session_history ORDER BY id DESC LIMIT ?
-        )
-        """,
-        (_MAX_SESSION_HISTORY_ROWS,),
-    )
+    _prune_session_history(db)
     db.connection.commit()
     return row_id
+
+
+def _prune_session_history(db: Database) -> None:
+    """Enforce both retention rules, right where the table grows.
+
+    The same "bound it right where it grows" placement
+    `LinkDiagnosticLogHandler.emit` uses. Rows are ranked by `id`
+    (insertion order), not `connected_at`, so a session started
+    slightly "out of order" relative to another (clock skew is not a
+    concern -- both are this node's own `utc_now_iso()`) is never a
+    factor.
+
+    The count comes first because it decides whether anything has to
+    happen at all. On a node the size this project designs for, the
+    table never reaches `_MAX_SESSION_HISTORY_ROWS` and the correlated
+    per-account rank below -- which is not cheap, the table carrying no
+    index on `user_id` -- never runs. Above the cap it runs once per
+    login, which is a human-paced event.
+
+    `newer.user_id IS keep.user_id` rather than `=`: every row left by
+    a deleted account has `user_id NULL`, and `=` is never true for
+    NULL, so those rows would each rank first among no one and outlive
+    every cap. `IS` groups them into the one shared bucket the
+    retention bound accounts for.
+    """
+    total = db.connection.execute(
+        "SELECT COUNT(*) AS total FROM session_history"
+    ).fetchone()["total"]
+    if total <= _MAX_SESSION_HISTORY_ROWS:
+        return
+    db.connection.execute(
+        """
+        DELETE FROM session_history
+        WHERE id NOT IN (
+            SELECT id FROM session_history ORDER BY id DESC LIMIT ?
+        )
+        AND id NOT IN (
+            SELECT keep.id FROM session_history AS keep
+            WHERE (
+                SELECT COUNT(*) FROM session_history AS newer
+                WHERE newer.user_id IS keep.user_id AND newer.id > keep.id
+            ) < ?
+        )
+        """,
+        (_MAX_SESSION_HISTORY_ROWS, _MAX_SESSION_HISTORY_ROWS_PER_USER),
+    )
 
 
 def record_session_end(db: Database, history_id: int) -> SessionHistoryEntry | None:

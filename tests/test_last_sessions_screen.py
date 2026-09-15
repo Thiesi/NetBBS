@@ -32,6 +32,7 @@ from netbbs.rendering import (
     colored,
     display_width,
 )
+from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.session_history import (
     reconcile_interrupted_sessions,
     set_previous_callers_enabled,
@@ -571,22 +572,60 @@ def test_profile_shows_color_capability_provenance(tmp_path):
     database.close()
 
 
-def test_history_narrow_truncation_preserves_complete_ansi_sequences(tmp_path):
+def test_history_rows_wrap_at_forty_columns_without_losing_the_duration(tmp_path):
+    """Issue #592, Codex review: a completed call runs well past 40
+    columns once it carries a disconnect time and a duration, so the
+    `colored_truncate` this screen used to pre-cut rows with would have
+    thrown away both -- the two facts the split exists to show.
+    `Session.write_line` wraps; nothing here truncates."""
     database = db_(tmp_path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)
-    record_session_start(database, alice)
+    history_id = record_session_start(database, alice)
+    database.connection.execute(
+        "UPDATE session_history SET connected_at = ?, disconnected_at = ? WHERE id = ?",
+        ("2026-09-15T10:00:00.000000Z", "2026-09-15T11:02:30.000000Z", history_id),
+    )
+    database.connection.commit()
+
     session = FakeSession(["h", " ", "l", "y"])
-    session.terminal_width = 28
+    session.terminal_width = 40
 
     asyncio.run(_run_main_menu(session, database, alice))
 
-    ansi = re.compile(r"\x1b\[[0-9;]*m")
-    history_lines = [chunk for chunk in session.written if "connected" in chunk]
-    assert history_lines
-    for line in history_lines:
-        visible = ansi.sub("", line).rstrip("\n")
-        assert len(visible) <= session.terminal_width
-        assert "\x1b" not in visible
+    # What the caller actually sees: each chunk put through the wrap
+    # `Session.write_line` applies and this FakeSession does not.
+    wrapped = "\n".join(
+        wrap_terminal_text(chunk, session.terminal_width) for chunk in session.written
+    ).replace("\r\n", "\n")
+    visible = _ANSI_ESCAPE_RE.sub("", wrapped)
+
+    assert "11:02" in visible
+    assert "1h 02m 30s" in visible
+    for line in visible.split("\n"):
+        assert display_width(line) <= session.terminal_width, line
+    # Every escape that survived the wrap is a complete SGR sequence.
+    assert not re.search(r"\x1b(?!\[[0-9;]*m)", wrapped)
+    database.close()
+
+
+def test_history_rows_stay_on_one_line_when_they_fit(tmp_path):
+    """The break is a narrow-terminal measure, not the shape of the row:
+    at 80 columns a completed call is still one line."""
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    record_session_end(database, record_session_start(database, alice))
+
+    session = FakeSession(["h", " ", "l", "y"])
+    asyncio.run(_run_main_menu(session, database, alice))
+
+    rows = [
+        _ANSI_ESCAPE_RE.sub("", chunk).strip()
+        for chunk in session.written
+        if "connected " in chunk
+    ]
+    assert len(rows) == 1
+    assert rows[0].startswith("connected ")
+    assert "until " in rows[0]
     database.close()
 
 

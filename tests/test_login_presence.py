@@ -173,10 +173,18 @@ def test_presence_left_even_if_main_menu_raises(db, monkeypatch):
     async def fake_auth(db, username, password):
         return user
 
+    reached = []
+
+    # `**kwargs`, not a copy of the real keyword list (issue #592): a
+    # stand-in that re-declares every parameter has to be edited every
+    # time the menu gains one, and the failure mode when it is not is a
+    # TypeError raised *before* the simulated one -- which this test,
+    # catching RuntimeError, would have reported as the cleanup
+    # working.
     async def broken_main_menu(
-        session, db, hub, presence, mailbox, history, user, *,
-        node_controls=None, lane=None, link_context=None, direct_invites=None,
+        session, db, hub, presence, mailbox, history, user, **kwargs
     ):
+        reached.append(True)
         raise RuntimeError("simulated failure")
 
     monkeypatch.setattr(login_flow, "authenticate_password_async", fake_auth)
@@ -185,13 +193,23 @@ def test_presence_left_even_if_main_menu_raises(db, monkeypatch):
 
     async def scenario() -> None:
         presence = _SpyPresence()
-        session = FakeSession(["alice", "correct-password"])
+        # "n" answers the one-time post-login Unicode-style prompt, as
+        # in the sibling tests. Without it this session ran out of
+        # scripted lines inside `_confirm_unicode_style`, and the
+        # `StopIteration` that raised from a coroutine arrives as a
+        # `RuntimeError` -- indistinguishable, to the `except` below,
+        # from the failure this test means to simulate. It passed for
+        # years without the main menu ever being reached (AGENTS.md:
+        # confirm scripted UI tests still reach the path their name
+        # claims); `reached` is what keeps that honest now.
+        session = FakeSession(["alice", "correct-password", "n"])
         config = _throttle_config()
         try:
             await login_flow.handle_session(session, db, ChatHub(), presence, MessageMailbox(), _throttle(config), config, ActiveSessionRegistry(), MaintenanceMode())
         except RuntimeError:
             pass
 
+        assert reached == [True]
         assert presence.entered == ["alice"]
         assert presence.left == ["alice"]
         assert presence.is_online("alice") is False

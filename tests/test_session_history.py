@@ -8,6 +8,7 @@ import pytest
 from netbbs.auth.users import create_user, delete_user
 from netbbs.session_history import (
     _MAX_SESSION_HISTORY_ROWS,
+    _MAX_SESSION_HISTORY_ROWS_PER_USER,
     list_recent_sessions,
     previous_callers_enabled,
     reconcile_interrupted_sessions,
@@ -285,3 +286,77 @@ def test_list_recent_sessions_filtered_excludes_a_deleted_accounts_rows(db, alic
 
     assert [e.username_label for e in list_recent_sessions(db)] == ["alice", "bob"]
     assert [e.username_label for e in list_recent_sessions(db, user_id=alice.id)] == ["alice"]
+
+
+# -- per-account retention ---------------------------------------------
+
+
+def test_a_quiet_callers_history_survives_a_flood_of_other_logins(db, alice):
+    """Issue #592, Codex review: the node-wide cap retires rows in
+    arrival order regardless of whose they are. Once `[H]istory` became
+    one caller's own calls, that cap alone could empty it -- the busy-
+    node failure the screen was split apart to fix."""
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    for _ in range(3):
+        record_session_end(db, record_session_start(db, alice))
+    for _ in range(_MAX_SESSION_HISTORY_ROWS + 100):
+        record_session_end(db, record_session_start(db, bob))
+
+    assert len(list_recent_sessions(db, user_id=alice.id)) == 3
+
+
+def test_per_account_retention_keeps_one_screenful_and_no_more(db, alice):
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    for _ in range(_MAX_SESSION_HISTORY_ROWS_PER_USER + 15):
+        record_session_end(db, record_session_start(db, alice))
+    for _ in range(_MAX_SESSION_HISTORY_ROWS + 100):
+        record_session_end(db, record_session_start(db, bob))
+
+    kept = list_recent_sessions(db, limit=10_000, user_id=alice.id)
+    assert len(kept) == _MAX_SESSION_HISTORY_ROWS_PER_USER
+    # The newest ones, not an arbitrary twenty.
+    assert kept == sorted(kept, key=lambda e: e.id, reverse=True)
+
+
+def test_the_table_stays_bounded_while_honoring_both_rules(db, sysop):
+    """The bound is two-part, not absent: the node's newest 500 plus one
+    screenful per account."""
+    accounts = [
+        create_user(db, f"caller{index}", password="hunter2", user_level=10)
+        for index in range(5)
+    ]
+    for account in accounts:
+        for _ in range(_MAX_SESSION_HISTORY_ROWS_PER_USER + 10):
+            record_session_end(db, record_session_start(db, account))
+    flooder = create_user(db, "flooder", password="hunter2", user_level=10)
+    for _ in range(_MAX_SESSION_HISTORY_ROWS + 200):
+        record_session_end(db, record_session_start(db, flooder))
+
+    total = db.connection.execute(
+        "SELECT COUNT(*) AS n FROM session_history"
+    ).fetchone()["n"]
+    ceiling = _MAX_SESSION_HISTORY_ROWS + _MAX_SESSION_HISTORY_ROWS_PER_USER * (
+        len(accounts) + 2
+    )
+    assert total <= ceiling
+    for account in accounts:
+        assert len(list_recent_sessions(db, limit=10_000, user_id=account.id)) == (
+            _MAX_SESSION_HISTORY_ROWS_PER_USER
+        )
+
+
+def test_deleted_accounts_share_one_retention_bucket(db, alice, sysop):
+    """Every deleted account's rows carry `user_id NULL`. SQLite's `=`
+    is never true for NULL, so ranking them with `=` would give each
+    row a rank of first-of-none and exempt the lot from every cap."""
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    for _ in range(_MAX_SESSION_HISTORY_ROWS_PER_USER + 10):
+        record_session_end(db, record_session_start(db, bob))
+    delete_user(db, bob, deleted_by=sysop)
+    for _ in range(_MAX_SESSION_HISTORY_ROWS + 100):
+        record_session_end(db, record_session_start(db, alice))
+
+    orphaned = db.connection.execute(
+        "SELECT COUNT(*) AS n FROM session_history WHERE user_id IS NULL"
+    ).fetchone()["n"]
+    assert orphaned == _MAX_SESSION_HISTORY_ROWS_PER_USER
