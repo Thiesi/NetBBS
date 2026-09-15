@@ -1520,14 +1520,16 @@ def test_delete_with_blank_confirmation_does_not_delete(db, lane, sysop):
 
 def test_delete_warning_describes_retained_session_history_identity_data(db, lane, sysop):
     """Issue #111's own acceptance criterion: the deletion confirmation
-    must accurately describe what happens to Last sessions identity data
-    -- it survives, honoring whatever name-visibility choice was already
-    in effect, not silently revealed or silently erased."""
+    must accurately describe what happens to the deleted account's
+    session-history identity data -- it survives, honoring whatever
+    name-visibility choice was already in effect, not silently revealed
+    or silently erased. Issue #592 renamed the screen those rows are
+    read on, so the copy names the previous-callers history now."""
     create_user(db, "alice", password="hunter2", user_level=10)
     session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "Last sessions" in text
+    assert "previous-callers history" in text
     assert "name-visibility" in text or "visibility choice" in text
 
 

@@ -238,3 +238,50 @@ def test_set_name_visible_true_after_false(db, alice):
     set_session_history_name_visible(db, alice, False)
     set_session_history_name_visible(db, alice, True)
     assert session_history_name_visible(db, alice) is True
+
+
+# -- list_recent_sessions(user_id=...) ---------------------------------
+
+
+def test_list_recent_sessions_without_a_filter_spans_the_node(db, alice, sysop):
+    record_session_start(db, alice)
+    record_session_start(db, sysop)
+
+    labels = {entry.username_label for entry in list_recent_sessions(db)}
+
+    assert labels == {"alice", "sysop"}
+
+
+def test_list_recent_sessions_filtered_returns_only_that_accounts_calls(db, alice, sysop):
+    """Issue #592: what `[H]istory` needs, and what it never had."""
+    record_session_start(db, sysop)
+    record_session_start(db, alice)
+    record_session_start(db, sysop)
+
+    entries = list_recent_sessions(db, user_id=alice.id)
+
+    assert [entry.username_label for entry in entries] == ["alice"]
+
+
+def test_list_recent_sessions_filtered_is_newest_first_and_honors_limit(db, alice):
+    for _ in range(3):
+        record_session_start(db, alice)
+
+    entries = list_recent_sessions(db, limit=2, user_id=alice.id)
+
+    assert len(entries) == 2
+    assert entries[0].id > entries[1].id
+
+
+def test_list_recent_sessions_filtered_excludes_a_deleted_accounts_rows(db, alice, sysop):
+    """A deleted account's rows survive with `user_id` cleared, so they
+    stay on the node-wide roll (under whatever name-visibility choice
+    was in effect) and can never be claimed by a filter -- there is no
+    longer an account to claim them."""
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    record_session_start(db, bob)
+    record_session_start(db, alice)
+    delete_user(db, bob, deleted_by=sysop)
+
+    assert [e.username_label for e in list_recent_sessions(db)] == ["alice", "bob"]
+    assert [e.username_label for e in list_recent_sessions(db, user_id=alice.id)] == ["alice"]

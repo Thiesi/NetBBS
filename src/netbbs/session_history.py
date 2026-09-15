@@ -116,13 +116,35 @@ def record_session_end(db: Database, history_id: int) -> SessionHistoryEntry | N
     return _entry_from_row(row) if row is not None else None
 
 
-def list_recent_sessions(db: Database, *, limit: int = 20) -> list[SessionHistoryEntry]:
-    """Most recent first."""
-    rows = db.connection.execute(
-        "SELECT id, user_id, username_label, connected_at, disconnected_at, interrupted_at, "
-        "name_visible_fallback FROM session_history ORDER BY id DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
+def list_recent_sessions(
+    db: Database, *, limit: int = 20, user_id: int | None = None
+) -> list[SessionHistoryEntry]:
+    """Most recent first.
+
+    `user_id` narrows the listing to one account's own calls. The two
+    caller-facing screens want genuinely different things and must not
+    share one query: `[H]istory` is *your* call record (issue #592 --
+    it had always listed the whole node, contradicting its own menu
+    description), while the previous-callers roll is the node-wide
+    "who has been here lately" view and passes no filter.
+
+    Rows belonging to a deleted account keep their denormalized
+    `username_label` but have `user_id IS NULL`, so they can never
+    match a live account's filter -- correct: a filtered listing is the
+    viewer's own history, and a deleted account has no viewer.
+    """
+    if user_id is None:
+        rows = db.connection.execute(
+            "SELECT id, user_id, username_label, connected_at, disconnected_at, interrupted_at, "
+            "name_visible_fallback FROM session_history ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    else:
+        rows = db.connection.execute(
+            "SELECT id, user_id, username_label, connected_at, disconnected_at, interrupted_at, "
+            "name_visible_fallback FROM session_history WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
     return [
         _entry_from_row(row)
         for row in rows

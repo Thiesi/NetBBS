@@ -1703,7 +1703,8 @@ active content styling after colored borders on wrapped box continuations.
 Shared semantic roles (`LABEL_COLOR`, `VALUE_COLOR`, `METADATA_COLOR`,
 `SUCCESS_COLOR`, and `ERROR_COLOR`) are the presentation contract for mature
 line-oriented surfaces. Caller and SysOp Who use the same picker palette;
-mail detail and outcomes, vCards and profiles, Last sessions, picker feedback,
+mail detail and outcomes, vCards and profiles, the session-history screens,
+picker feedback,
 and welcome-banner/main-menu-masthead administration use the shared roles
 instead of inventing screen-local colors. When styled fields must fit a terminal width, build the
 trusted ANSI segments independently and use `colored_truncate`; slicing the

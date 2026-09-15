@@ -718,6 +718,11 @@ async def run_authenticated_session(
         intentional_logoff = await _main_menu(
             session, db, hub, presence, mailbox, history, user,
             node_controls=node_controls, lane=lane, link_context=link_context, direct_invites=direct_invites,
+            # Issue #592: the previous-callers roll is reachable from the
+            # menu too, and excludes this session there for the same
+            # reason the splash does -- the viewer's own connection is
+            # not a previous caller.
+            current_history_id=history_id,
         )
     finally:
         presence.leave(user.username)

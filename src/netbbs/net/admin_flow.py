@@ -4422,7 +4422,8 @@ async def _delete_user_confirm(
     await session.write_line(
         colored(
             "\r\nThis permanently deletes the account. Posts and files they created "
-            "keep their recorded author name; their entries in Last sessions also "
+            "keep their recorded author name; their entries in the node's "
+            "previous-callers history also "
             "survive, keeping whatever name-visibility choice was in effect at the "
             "time (a prior opt-out stays hidden -- SysOps still see the real name "
             "regardless); moderator grants, chat channel membership/invitations, "
