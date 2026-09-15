@@ -120,14 +120,19 @@ from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display
 
 
-# How many recent sessions [L]ast sessions shows -- generous enough to
-# be useful, small enough to fit on one screen page without its own
-# pagination affordance (unlike pick_item-backed screens, this is a
-# plain listing: there's no per-entry detail beyond what's already on
-# its one line, so there's nothing a selection would actually do).
+# How many of your own calls [H]istory shows -- generous enough to be
+# useful, and one screen page at the 80 columns a row fits on. A
+# narrow terminal breaks each row in two and the listing scrolls,
+# which is the ordinary behaviour of every plain listing here: there
+# is no per-entry detail beyond the row itself, so there is nothing a
+# pick_item selection would do, and nothing gained by hiding calls the
+# caller asked for behind a pager.
 _SESSION_HISTORY_DISPLAY_LIMIT = 20
 _PREVIOUS_CALLERS_DISPLAY_LIMIT = 10
 _PREVIOUS_CALLERS_FIXED_ROWS = 8
+# Two rows more than the splash: reached from the main menu, the panel
+# sits under a breadcrumbed `screen_title` the splash does not draw.
+_PREVIOUS_CALLERS_MENU_FIXED_ROWS = 10
 _PREVIOUS_CALLERS_GRADIENT = [
     (0, 245, 255),
     (120, 80, 255),
@@ -179,41 +184,35 @@ def _session_history_display_name(
     return "(name hidden)"
 
 
-async def _show_previous_callers_screen(
+def _previous_caller_entries(
+    db: Database, *, limit: int, exclude_history_id: int | None
+) -> list[SessionHistoryEntry]:
+    """The node-wide roll, newest first, minus one session by id.
+
+    Over-fetches by one so that excluding the viewer's own in-progress
+    session still fills the panel.
+    """
+    return [
+        entry
+        for entry in list_recent_sessions(db, limit=limit + 1)
+        if entry.id != exclude_history_id
+    ][:limit]
+
+
+def _render_previous_callers_panel(
     session: Session,
     db: Database,
     user: User,
+    entries: list[SessionHistoryEntry],
     *,
-    current_history_id: int,
-) -> bool:
-    """Show the adaptive post-login caller roll and wait for dismissal.
-
-    The current session has already been recorded so it can be finalized
-    reliably on every exit path.  It is excluded by id here, leaving only
-    connections which genuinely preceded this one.  An empty history is a
-    complete non-event so the first caller on a new node is not paused at an
-    empty screen.
+    frame_width: int,
+) -> list[str]:
+    """The framed caller roll, as rendered rows, drawn identically for
+    both places it appears (issue #592): the post-login splash and the
+    main menu's own `P[r]evious callers` entry. One renderer, so the
+    name-visibility policy and the column measurement below can never
+    drift between the two.
     """
-    if not previous_callers_enabled(db):
-        return False
-
-    entry_limit = min(
-        _PREVIOUS_CALLERS_DISPLAY_LIMIT,
-        max(0, session.terminal_height - _PREVIOUS_CALLERS_FIXED_ROWS),
-    )
-    frame_width = min(session.terminal_width, 78)
-    if entry_limit == 0 or frame_width < 4:
-        return False
-
-    entries = [
-        entry
-        for entry in list_recent_sessions(db, limit=_PREVIOUS_CALLERS_DISPLAY_LIMIT + 1)
-        if entry.id != current_history_id
-    ][:_PREVIOUS_CALLERS_DISPLAY_LIMIT]
-    entries = entries[:entry_limit]
-    if not entries:
-        return False
-
     use_truecolor = effective_truecolor(session, db, user)
     unicode_style = unicode_style_enabled(db, user)
     viewer_is_sysop = meets_level(user, SYSOP_LEVEL)
@@ -397,12 +396,131 @@ async def _show_previous_callers_screen(
         )
 
     rendered.append(_rule(bottom_left, bottom_right))
+    return rendered
+
+
+async def _show_previous_callers_screen(
+    session: Session,
+    db: Database,
+    user: User,
+    *,
+    current_history_id: int,
+) -> bool:
+    """Show the adaptive post-login caller roll and wait for dismissal.
+
+    The current session has already been recorded so it can be finalized
+    reliably on every exit path.  It is excluded by id here, leaving only
+    connections which genuinely preceded this one.  An empty history is a
+    complete non-event so the first caller on a new node is not paused at an
+    empty screen.
+
+    The node setting gates this automatic splash only, which is exactly
+    what the SysOp toggle offers ("shown after login" / "hidden after
+    login").  The same roll stays reachable on demand from the main
+    menu, as the node-wide listing has always been -- before issue #592
+    it was what `[H]istory` showed.
+    """
+    if not previous_callers_enabled(db):
+        return False
+
+    entry_limit = min(
+        _PREVIOUS_CALLERS_DISPLAY_LIMIT,
+        max(0, session.terminal_height - _PREVIOUS_CALLERS_FIXED_ROWS),
+    )
+    frame_width = min(session.terminal_width, 78)
+    if entry_limit == 0 or frame_width < 4:
+        return False
+
+    entries = _previous_caller_entries(
+        db,
+        limit=_PREVIOUS_CALLERS_DISPLAY_LIMIT,
+        exclude_history_id=current_history_id,
+    )[:entry_limit]
+    if not entries:
+        return False
+
+    rendered = _render_previous_callers_panel(
+        session, db, user, entries, frame_width=frame_width
+    )
     await session.write_line("\r\n" + "\r\n".join(rendered))
     await session.write_line(
         colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
     )
     await session.read_any_key()
     return True
+
+
+async def _previous_callers_screen(
+    session: Session,
+    db: Database,
+    user: User,
+    *,
+    current_history_id: int | None = None,
+) -> None:
+    """The same caller roll, reached deliberately from the main menu
+    (issue #592).
+
+    Everything that differs from the post-login splash follows from this
+    one being asked for rather than offered. It ignores the node
+    setting, which only says whether the roll interrupts a login. It
+    keeps at least one row on a terminal too short for the splash's own
+    budget. And where the splash may silently skip itself -- nobody
+    asked for it -- every path here ends in something drawn: an empty
+    roll and a terminal too narrow to frame one each say so, because a
+    hotkey that draws nothing reads as a broken key (design doc
+    section 3.5).
+
+    `current_history_id` is still excluded where the caller knows it:
+    the viewer's own live session is already on `[W]ho's online`, and
+    listing it here as `ONLINE NOW` would spend one of ten scarce rows
+    telling the viewer they are connected.
+    """
+    entry_limit = max(
+        1,
+        min(
+            _PREVIOUS_CALLERS_DISPLAY_LIMIT,
+            session.terminal_height - _PREVIOUS_CALLERS_MENU_FIXED_ROWS,
+        ),
+    )
+    frame_width = min(session.terminal_width, 78)
+
+    await session.write_line(
+        "\r\n" + screen_title(
+            "Previous callers",
+            breadcrumb=(session.node_display_name,),
+            width=session.terminal_width,
+            clear=redraw_in_place_enabled(db, user),
+            unicode_style=unicode_style_enabled(db, user),
+            collapsed=breadcrumb_collapsed_enabled(db, user),
+            header_color=effective_header_color(session, db),
+            node_name_gradient=session.node_name_gradient,
+        )
+    )
+    entries = _previous_caller_entries(
+        db,
+        limit=_PREVIOUS_CALLERS_DISPLAY_LIMIT,
+        exclude_history_id=current_history_id,
+    )[:entry_limit]
+    if frame_width < 4:
+        # The splash simply skips itself here; this screen was asked
+        # for, so it says why nothing is drawn rather than looking
+        # broken. A frame needs two corners and something between them.
+        await session.write_line(
+            colored("Your terminal is too narrow for this list.", fg_color=MUTED_COLOR)
+        )
+    elif not entries:
+        await session.write_line(
+            colored("Nobody else has called this node yet.", fg_color=MUTED_COLOR)
+        )
+    else:
+        rendered = _render_previous_callers_panel(
+            session, db, user, entries, frame_width=frame_width
+        )
+        await session.write_line("\r\n".join(rendered))
+    await session.write_line(
+        colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
+    )
+    await session.read_any_key()
 
 
 def _format_call_duration(connected_at: str, disconnected_at: str) -> str:
@@ -537,13 +655,25 @@ async def _show_logoff_summary_screen(
 
 async def _last_sessions_screen(session: Session, db: Database, user: User) -> None:
     """
-    Issue #100: a caller-facing "who recently visited" list, backed by
-    the persisted `netbbs.session_history` table -- distinct from
-    `[W]ho's online` (issue #99), which only ever shows who's currently
-    connected. A session whose account has opted out of being shown by
-    name still appears -- the session itself is never hidden, only the
-    name, same "still listed, not suppressed" shape issue #99's opt-out
-    already established.
+    Issue #592: *your* calls, not the node's. The menu entry has always
+    described itself as "Your recent sessions", but the listing behind
+    it was the whole node's -- every caller's connect and disconnect
+    times, under a heading claiming they were yours. The node-wide roll
+    is a real screen and keeps existing; it is the previous-callers
+    panel, now reachable on its own main-menu hotkey rather than only
+    as a post-login splash. Splitting them lets each say one true
+    thing, and leaves the name-visibility policy in the one place it
+    was ever about: a listing other callers read.
+
+    No privacy question survives the filter, so none is asked here. The
+    rows are the viewer's own, so `session_history_name_visible` (which
+    governs whether *other* callers see your name) has nothing to
+    decide, and the name itself is dropped from the row -- it is the
+    same name on all twenty of them. What the freed width buys is the
+    call duration, which the node-wide roll has no room for.
+
+    Distinct from `[W]ho's online` (issue #99), which only ever shows
+    who is currently connected.
 
     Issue #110: `interrupted_at` (reconciled once at startup, before any
     listener could accept a new session -- see `netbbs.session_history.
@@ -565,10 +695,12 @@ async def _last_sessions_screen(session: Session, db: Database, user: User) -> N
     (`netbbs.net.help_overlay.show_help`'s own "Press any key to
     continue..." convention).
     """
-    entries = list_recent_sessions(db, limit=_SESSION_HISTORY_DISPLAY_LIMIT)
+    entries = list_recent_sessions(
+        db, limit=_SESSION_HISTORY_DISPLAY_LIMIT, user_id=user.id
+    )
     await session.write_line(
         "\r\n" + screen_title(
-            "Last sessions",
+            "Your sessions",
             breadcrumb=(session.node_display_name,),
             width=session.terminal_width,
             clear=redraw_in_place_enabled(db, user),
@@ -578,15 +710,18 @@ async def _last_sessions_screen(session: Session, db: Database, user: User) -> N
         node_name_gradient=session.node_name_gradient)
     )
     if not entries:
-        await session.write_line(colored("No session history yet.", fg_color=MUTED_COLOR))
+        await session.write_line(
+            colored("You have no recorded sessions yet.", fg_color=MUTED_COLOR)
+        )
     else:
-        viewer_is_sysop = meets_level(user, SYSOP_LEVEL)
         accent = effective_accent_color(session, db)
         for entry in entries:
-            name = _session_history_display_name(db, entry, viewer_is_sysop=viewer_is_sysop)
             connected = format_for_display(entry.connected_at, db)
             if entry.disconnected_at is not None:
-                status = f"until {format_for_display(entry.disconnected_at, db)}"
+                status = (
+                    f"until {format_for_display(entry.disconnected_at, db)}"
+                    f" ({_format_call_duration(entry.connected_at, entry.disconnected_at)})"
+                )
                 status_color = METADATA_COLOR
             elif entry.interrupted_at is not None:
                 status = "connection lost -- session did not end cleanly"
@@ -594,20 +729,39 @@ async def _last_sessions_screen(session: Session, db: Database, user: User) -> N
             else:
                 status = "still connected"
                 status_color = SUCCESS_COLOR
-            name_color = MUTED_COLOR if name == "(name hidden)" else accent
-            await session.write_line(
-                colored_truncate(
-                    [
-                        ("  ", None),
-                        (sanitize_text(name), name_color),
-                        (" -- connected ", LABEL_COLOR),
-                        (connected, METADATA_COLOR),
-                        (", ", LABEL_COLOR),
-                        (status, status_color),
-                    ],
-                    session.terminal_width,
+            # Nothing on this row is truncated (Codex review of issue
+            # #592). A completed call at the supported 40-column
+            # minimum runs past 60 columns, so `colored_truncate` --
+            # which this screen used while the row was one line of
+            # everyone's names -- would cut away the disconnect time
+            # and the duration the screen exists to show. Every
+            # segment here is the node's own text, no caller's, so the
+            # composed row can go to `write_line` and be wrapped
+            # rather than cut (AGENTS.md: retain all text).
+            #
+            # It is broken at the comma first, into a line per fact,
+            # because `wrap_terminal_text` continues at column zero and
+            # unindented continuations make twenty rows read as one
+            # paragraph. Whatever still does not fit -- the interrupted
+            # sentence, narrower than 40 -- `write_line` wraps.
+            plain = f"  connected {connected}, {status}"
+            if display_width(plain) <= session.terminal_width:
+                await session.write_line(
+                    "  "
+                    + colored("connected ", fg_color=LABEL_COLOR)
+                    + colored(connected, fg_color=accent)
+                    + colored(", ", fg_color=LABEL_COLOR)
+                    + colored(status, fg_color=status_color)
                 )
-            )
+            else:
+                await session.write_line(
+                    "  "
+                    + colored("connected ", fg_color=LABEL_COLOR)
+                    + colored(connected, fg_color=accent)
+                )
+                await session.write_line(
+                    "    " + colored(status, fg_color=status_color)
+                )
     await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -996,17 +1150,18 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         ),
         FieldSpec(
             key="history_name_visible", hotkey="h", menu_text=menu_key("H", "istory visibility"),
-            label="Name shown in Last sessions",
+            label="Name shown to other callers",
             render=lambda d: "yes" if d["history_name_visible"] else "no (hidden)",
             prompt=live_choice_field(
                 "history_name_visible", [False, True],
                 persist=lambda lane, v: lane.run(set_session_history_name_visible, user, v),
             ),
-            brief="Show your name in Last sessions",
+            brief="Show your name to other callers",
             help=(
-                "Whether your username appears in the node's public 'Last sessions' history. "
-                "Hiding it only affects what ordinary callers see -- a SysOp can always see "
-                "the real name."
+                "Whether your username appears in this node's previous-callers roll -- the "
+                "list shown after login and from the main menu. Your own [H]istory screen is "
+                "unaffected; it only ever shows you your own calls. Hiding it only affects "
+                "what ordinary callers see -- a SysOp can always see the real name."
             ),
             section="Communication",
         ),

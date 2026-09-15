@@ -1703,7 +1703,8 @@ active content styling after colored borders on wrapped box continuations.
 Shared semantic roles (`LABEL_COLOR`, `VALUE_COLOR`, `METADATA_COLOR`,
 `SUCCESS_COLOR`, and `ERROR_COLOR`) are the presentation contract for mature
 line-oriented surfaces. Caller and SysOp Who use the same picker palette;
-mail detail and outcomes, vCards and profiles, Last sessions, picker feedback,
+mail detail and outcomes, vCards and profiles, the session-history screens,
+picker feedback,
 and welcome-banner/main-menu-masthead administration use the shared roles
 instead of inventing screen-local colors. When styled fields must fit a terminal width, build the
 trusted ANSI segments independently and use `colored_truncate`; slicing the
@@ -4713,15 +4714,34 @@ live preference before accounts can be deleted, so databases created before
 the fallback migration do not preserve a stale default merely because no later
 preference edit happened.
 
-The post-login previous-callers splash is a second presentation of this same
+The previous-callers roll is a second presentation of this same
 session-history data, not a separate caller log. `run_authenticated_session`
 records the current row first so its existing `finally` block still owns
-cleanup, then passes that row id to the splash so it can be excluded. The
-splash must reuse `_session_history_display_name` and therefore preserve live
-opt-outs and deletion-time fallbacks exactly like `[H]istory`; it may reduce
-its 10-row display limit to fit `Session.terminal_height`, but must never query
-or retain an unbounded history slice. An empty history and a disabled
-node-wide setting are non-events and consume no input.
+cleanup, then passes that row id onward so the viewer's own session can be
+excluded — from the post-login splash and from the main menu's own
+`P[r]evious callers` screen alike, both of which render through one panel
+builder for that reason. The roll is the only screen where one caller reads
+another's name, so it is the sole consumer of `_session_history_display_name`
+and the only place live opt-outs and deletion-time fallbacks apply; `[H]istory`
+is the viewer's own calls, filtered by `user_id`, and resolves no names at all.
+Either presentation may reduce its 10-row display limit to fit
+`Session.terminal_height`, but must never query or retain an unbounded history
+slice. An empty history and a disabled node-wide setting are non-events for the
+splash and consume no input; the menu screen ignores the setting, which governs
+only whether a login is interrupted, and always draws something.
+
+Retention is two rules, not one, because `[H]istory` is per-caller. A row
+survives while it is among its own account's newest 20 — one screenful, so no
+account is worth keeping more of — and the surviving candidates then fill a
+fixed node-wide budget newest-first. Dropping the first rule lets one caller's
+flood evict every other caller's history; dropping the second makes the ceiling
+proportional to an account count that `RegistrationMode.OPEN` lets a remote
+caller set. The per-account rank is a correlated count over an unindexed
+`user_id`, and `record_session_start` runs on the event-loop thread, so the
+sweep fires in batches once the table drifts past the budget rather than on
+every login. Rank with `IS`, never `=`: every deleted account's rows carry
+`user_id NULL`, and `=` would rank each of them first-among-none and keep them
+candidates forever.
 
 The clean-logoff summary must be keyed to the main menu's explicit confirmed
 Log off result, not merely to `run_authenticated_session` reaching the code

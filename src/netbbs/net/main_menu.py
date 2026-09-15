@@ -50,7 +50,12 @@ from netbbs.net.node_theme import (
     effective_header_color_256,
 )
 from netbbs.net.picker import pick_item
-from netbbs.net.profile_flow import _edit_profile, _last_sessions_screen, _verify_identity_menu
+from netbbs.net.profile_flow import (
+    _edit_profile,
+    _last_sessions_screen,
+    _previous_callers_screen,
+    _verify_identity_menu,
+)
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.scan_and_find import _find_screen, _new_scan_screen
 from netbbs.net.session import Session, write_preformatted_line, write_prompt
@@ -221,6 +226,14 @@ async def _draw_main_menu(
             ),
             MenuEntry(label=menu_key("E", mail_label), brief="Read and send private mail"),
             MenuEntry(label=menu_key("H", "istory"), brief="Your recent sessions"),
+            MenuEntry(
+                label=menu_key("R", "evious callers", prefix="P"),
+                brief="Who else called this node",
+                detailed=(
+                    "The node's recent callers -- the same roll shown after login, "
+                    "on demand."
+                ),
+            ),
     ]
     if node_controls is not None:
         personal_options.append(
@@ -384,6 +397,7 @@ async def _main_menu(
     lane: DatabaseLane | None = None,
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
+    current_history_id: int | None = None,
 ) -> bool:
     """
     The main menu, now dispatching immediately on a single keystroke
@@ -615,6 +629,12 @@ async def _main_menu(
         elif choice == "h":
             await session.write_line("")
             await _last_sessions_screen(session, db, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
+        elif choice == "r":
+            await session.write_line("")
+            await _previous_callers_screen(
+                session, db, user, current_history_id=current_history_id
+            )
             await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         elif choice == "w" and node_controls is not None:
             await session.write_line("")

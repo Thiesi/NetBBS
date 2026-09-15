@@ -1,9 +1,16 @@
 """
-Tests for the caller-facing [H]istory screen (issue #100) --
-`netbbs.net.profile_flow._last_sessions_screen`, backed by the persisted
+Tests for the two caller-facing screens over the persisted
 `netbbs.session_history` table (covered at the library level in
-tests/test_session_history.py). These drive the real `_main_menu` entry
-point and the profile screen's own visibility toggle.
+tests/test_session_history.py), and for the profile toggle that governs
+what one of them shows.
+
+`[H]istory` (issue #100, narrowed to its own menu description by issue
+#592) is the viewer's own call record. `P[r]evious callers` (issue #592)
+is the node-wide roll -- the same panel the post-login splash draws, on
+its own main-menu hotkey -- and is where every name-visibility rule now
+lives, since it is the only one of the two that other callers appear in.
+
+These drive the real `_main_menu` entry point throughout.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ from netbbs.rendering import (
     colored,
     display_width,
 )
+from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.session_history import (
     reconcile_interrupted_sessions,
     set_previous_callers_enabled,
@@ -90,9 +98,10 @@ def _visible(session: FakeSession) -> str:
     return _ANSI_ESCAPE_RE.sub("", _written_text(session))
 
 
-async def _run_main_menu(session, db, user, *, lane=None):
+async def _run_main_menu(session, db, user, *, lane=None, current_history_id=None):
     await _main_menu(
-        session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), user, lane=lane
+        session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), user,
+        lane=lane, current_history_id=current_history_id,
     )
 
 
@@ -107,7 +116,65 @@ def test_history_screen_reports_no_sessions_yet(tmp_path):
 
     asyncio.run(_run_main_menu(session, database, alice))
 
-    assert "No session history yet." in _written_text(session)
+    assert "You have no recorded sessions yet." in _written_text(session)
+    database.close()
+
+
+def test_history_screen_shows_only_the_viewers_own_sessions(tmp_path):
+    """Issue #592, the whole point: `[H]istory` calls itself "Your recent
+    sessions" in the menu it is reached from, and used to list the entire
+    node -- every other caller's connect and disconnect times under that
+    heading. bob's call must not appear on alice's screen at all."""
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    bob = create_user(database, "bob", password="hunter2", user_level=10)
+    record_session_start(database, bob)
+    record_session_start(database, alice)
+
+    session = FakeSession(["h", " ", "l", "y"])
+    asyncio.run(_run_main_menu(session, database, alice))
+
+    text = _written_text(session)
+    assert "Your sessions" in _visible(session)
+    assert "connected" in text
+    assert "bob" not in text
+    database.close()
+
+
+def test_history_screen_shows_only_the_viewers_own_sessions_for_a_sysop(tmp_path):
+    """The SysOp's unconditional see-every-name privilege is about the
+    node-wide roll, not about whose calls `[H]istory` lists: a SysOp
+    asking for their own history gets their own history."""
+    database = db_(tmp_path)
+    sysop = create_user(database, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    bob = create_user(database, "bob", password="hunter2", user_level=10)
+    record_session_start(database, bob)
+    record_session_start(database, sysop)
+
+    session = FakeSession(["h", " ", "l", "y"])
+    asyncio.run(_run_main_menu(session, database, sysop))
+
+    assert "bob" not in _written_text(session)
+    database.close()
+
+
+def test_history_screen_shows_how_long_each_of_your_calls_lasted(tmp_path):
+    """The width freed by dropping the name column -- the same name on
+    every row, once the listing is the viewer's own -- buys the duration,
+    which the node-wide roll has no room for."""
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    history_id = record_session_start(database, alice)
+    database.connection.execute(
+        "UPDATE session_history SET connected_at = ?, disconnected_at = ? WHERE id = ?",
+        ("2026-09-15T10:00:00.000000Z", "2026-09-15T11:02:30.000000Z", history_id),
+    )
+    database.connection.commit()
+
+    session = FakeSession(["h", " ", "l", "y"])
+    asyncio.run(_run_main_menu(session, database, alice))
+
+    assert "(1h 02m 30s)" in _visible(session)
     database.close()
 
 
@@ -219,15 +286,96 @@ def test_previous_callers_screen_is_a_no_op_when_node_setting_is_off(tmp_path):
 def test_history_screen_shows_a_recorded_session(tmp_path):
     database = db_(tmp_path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)
-    bob = create_user(database, "bob", password="hunter2", user_level=10)
-    record_session_start(database, bob)
+    record_session_start(database, alice)
 
     session = FakeSession(["h", " ", "l", "y"])
     asyncio.run(_run_main_menu(session, database, alice))
 
-    assert "bob" in _written_text(session)
-    assert colored("bob", fg_color=ACCENT_COLOR) in _written_text(session)
-    assert colored(" -- connected ", fg_color=LABEL_COLOR) in _written_text(session)
+    assert colored("connected ", fg_color=LABEL_COLOR) in _written_text(session)
+    database.close()
+
+
+def test_previous_callers_menu_screen_shows_another_caller(tmp_path):
+    """The node-wide roll kept its meaning; it moved to its own hotkey."""
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    bob = create_user(database, "bob", password="hunter2", user_level=10)
+    record_session_start(database, bob)
+
+    session = FakeSession(["r", " ", "l", "y"])
+    asyncio.run(_run_main_menu(session, database, alice))
+
+    text = _visible(session)
+    assert "P R E V I O U S   C A L L E R S" in text
+    assert "bob" in text
+    database.close()
+
+
+def test_previous_callers_menu_entry_is_offered(tmp_path):
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["l", "y"])
+
+    asyncio.run(_run_main_menu(session, database, alice))
+
+    assert "P[r]evious callers" in _visible(session)
+    database.close()
+
+
+def test_previous_callers_menu_screen_says_so_when_empty(tmp_path):
+    """Design doc section 3.5: a hotkey that draws nothing reads as a
+    broken key. The splash may skip itself silently -- nobody asked for
+    it -- but this screen was asked for."""
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["r", " ", "l", "y"])
+
+    asyncio.run(_run_main_menu(session, database, alice))
+
+    assert "Nobody else has called this node yet." in _visible(session)
+    database.close()
+
+
+def test_previous_callers_menu_screen_ignores_the_post_login_toggle(tmp_path):
+    """The SysOp setting reads "shown after login" / "hidden after
+    login" and governs exactly that. Turning the splash off must not
+    also silently remove a main-menu entry -- the node-wide listing was
+    unconditionally reachable before issue #592 too, as `[H]istory`."""
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    bob = create_user(database, "bob", password="hunter2", user_level=10)
+    record_session_start(database, bob)
+    set_previous_callers_enabled(database, False)
+
+    session = FakeSession(["r", " ", "l", "y"])
+    asyncio.run(_run_main_menu(session, database, alice))
+
+    assert "bob" in _visible(session)
+    database.close()
+
+
+def test_previous_callers_menu_screen_excludes_the_viewers_own_session(tmp_path):
+    """Same exclusion as the splash, for the same reason: the viewer's
+    own connection is not a previous caller, and `ONLINE NOW` against
+    their own name would spend one of ten scarce rows telling them they
+    are connected."""
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    bob = create_user(database, "bob", password="hunter2", user_level=10)
+    record_session_end(database, record_session_start(database, bob))
+    history_id = record_session_start(database, alice)
+
+    session = FakeSession(["r", " ", "l", "y"])
+    asyncio.run(
+        _run_main_menu(session, database, alice, current_history_id=history_id)
+    )
+
+    text = _visible(session)
+    assert "bob" in text
+    # bob's call is the only one on the panel, and it is finished --
+    # alice's own still-open row is the one that was excluded.
+    assert "SIGNED OFF" in text
+    assert "ONLINE NOW" not in text
     database.close()
 
 
@@ -254,8 +402,7 @@ def test_history_screen_shows_connection_lost_after_startup_reconciliation(tmp_p
     normal clean disconnect."""
     database = db_(tmp_path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)
-    bob = create_user(database, "bob", password="hunter2", user_level=10)
-    record_session_start(database, bob)  # never ended -- simulates a crash/kill
+    record_session_start(database, alice)  # never ended -- simulates a crash/kill
     reconcile_interrupted_sessions(database)  # what a real restart would run
 
     session = FakeSession(["h", " ", "l", "y"])
@@ -267,14 +414,14 @@ def test_history_screen_shows_connection_lost_after_startup_reconciliation(tmp_p
     database.close()
 
 
-def test_history_screen_hides_name_when_target_opted_out(tmp_path):
+def test_previous_callers_screen_hides_name_when_target_opted_out(tmp_path):
     database = db_(tmp_path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)
     bob = create_user(database, "bob", password="hunter2", user_level=10)
     set_session_history_name_visible(database, bob, False)
     record_session_start(database, bob)
 
-    session = FakeSession(["h", " ", "l", "y"])
+    session = FakeSession(["r", " ", "l", "y"])
     asyncio.run(_run_main_menu(session, database, alice))
 
     text = _written_text(session)
@@ -283,16 +430,18 @@ def test_history_screen_hides_name_when_target_opted_out(tmp_path):
     database.close()
 
 
-def test_history_screen_sysop_always_sees_real_names(tmp_path):
+def test_previous_callers_screen_sysop_always_sees_real_names(tmp_path):
     """Issue #100's own acceptance criterion: SysOps see real names
-    unconditionally, regardless of the target's own opt-out."""
+    unconditionally, regardless of the target's own opt-out. It applies
+    to the node-wide roll, the only screen where one caller reads
+    another's name."""
     database = db_(tmp_path)
     sysop = create_user(database, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     bob = create_user(database, "bob", password="hunter2", user_level=10)
     set_session_history_name_visible(database, bob, False)
     record_session_start(database, bob)
 
-    session = FakeSession(["h", " ", "l", "y"])
+    session = FakeSession(["r", " ", "l", "y"])
     asyncio.run(_run_main_menu(session, database, sysop))
 
     text = _written_text(session)
@@ -301,7 +450,7 @@ def test_history_screen_sysop_always_sees_real_names(tmp_path):
     database.close()
 
 
-def test_history_screen_shows_denormalized_label_for_a_deleted_account(tmp_path):
+def test_previous_callers_screen_shows_denormalized_label_for_a_deleted_account(tmp_path):
     """bob never opted out, so the persisted `name_visible_fallback`
     (issue #111) this row was recorded with is `True` -- the label is
     shown as-is once the account is gone, same observable result as
@@ -316,14 +465,14 @@ def test_history_screen_shows_denormalized_label_for_a_deleted_account(tmp_path)
     record_session_start(database, bob)
     delete_user(database, bob, deleted_by=sysop)
 
-    session = FakeSession(["h", " ", "l", "y"])
+    session = FakeSession(["r", " ", "l", "y"])
     asyncio.run(_run_main_menu(session, database, alice))
 
     assert "bob" in _written_text(session)
     database.close()
 
 
-def test_history_screen_keeps_a_deleted_accounts_opted_out_name_hidden(tmp_path):
+def test_previous_callers_screen_keeps_a_deleted_accounts_opted_out_name_hidden(tmp_path):
     """Issue #111's own concrete privacy-reversal scenario, reproduced
     end to end through the real screen: bob opts out, a session is
     recorded, the account is deleted -- an ordinary caller must still
@@ -339,7 +488,7 @@ def test_history_screen_keeps_a_deleted_accounts_opted_out_name_hidden(tmp_path)
     record_session_start(database, bob)
     delete_user(database, bob, deleted_by=sysop)
 
-    session = FakeSession(["h", " ", "l", "y"])
+    session = FakeSession(["r", " ", "l", "y"])
     asyncio.run(_run_main_menu(session, database, alice))
 
     text = _written_text(session)
@@ -348,7 +497,7 @@ def test_history_screen_keeps_a_deleted_accounts_opted_out_name_hidden(tmp_path)
     database.close()
 
 
-def test_history_screen_sysop_sees_real_name_even_for_a_deleted_opted_out_account(tmp_path):
+def test_previous_callers_screen_sysop_sees_real_name_even_for_a_deleted_opted_out_account(tmp_path):
     """SysOp administrative visibility (issue #100) is unconditional --
     unaffected by both the target's opt-out and the account's own
     deletion (issue #111 must not accidentally hide names from SysOps
@@ -362,7 +511,7 @@ def test_history_screen_sysop_sees_real_name_even_for_a_deleted_opted_out_accoun
     record_session_start(database, bob)
     delete_user(database, bob, deleted_by=sysop)
 
-    session = FakeSession(["h", " ", "l", "y"])
+    session = FakeSession(["r", " ", "l", "y"])
     asyncio.run(_run_main_menu(session, database, sysop))
 
     text = _written_text(session)
@@ -384,7 +533,7 @@ def test_profile_screen_toggles_session_history_name_visibility(tmp_path):
     # live_choice_field (issue #160's cursor-nav follow-up) has no
     # separate "X is now Y" confirmation of its own -- the redrawn
     # field's own "label: value" line is the confirmation.
-    assert "Name shown in Last sessions: no (hidden)" in squeezed(_visible(session))
+    assert "Name shown to other callers: no (hidden)" in squeezed(_visible(session))
     lane.close()
     database.close()
 
@@ -423,21 +572,89 @@ def test_profile_shows_color_capability_provenance(tmp_path):
     database.close()
 
 
-def test_history_narrow_truncation_preserves_complete_ansi_sequences(tmp_path):
+def test_history_rows_wrap_at_forty_columns_without_losing_the_duration(tmp_path):
+    """Issue #592, Codex review: a completed call runs well past 40
+    columns once it carries a disconnect time and a duration, so the
+    `colored_truncate` this screen used to pre-cut rows with would have
+    thrown away both -- the two facts the split exists to show.
+    `Session.write_line` wraps; nothing here truncates."""
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    history_id = record_session_start(database, alice)
+    database.connection.execute(
+        "UPDATE session_history SET connected_at = ?, disconnected_at = ? WHERE id = ?",
+        ("2026-09-15T10:00:00.000000Z", "2026-09-15T11:02:30.000000Z", history_id),
+    )
+    database.connection.commit()
+
+    session = FakeSession(["h", " ", "l", "y"])
+    session.terminal_width = 40
+
+    asyncio.run(_run_main_menu(session, database, alice))
+
+    # What the caller actually sees: each chunk put through the wrap
+    # `Session.write_line` applies and this FakeSession does not.
+    wrapped = "\n".join(
+        wrap_terminal_text(chunk, session.terminal_width) for chunk in session.written
+    ).replace("\r\n", "\n")
+    visible = _ANSI_ESCAPE_RE.sub("", wrapped)
+
+    assert "11:02" in visible
+    assert "1h 02m 30s" in visible
+    for line in visible.split("\n"):
+        assert display_width(line) <= session.terminal_width, line
+    # Every escape that survived the wrap is a complete SGR sequence.
+    assert not re.search(r"\x1b(?!\[[0-9;]*m)", wrapped)
+    database.close()
+
+
+def test_history_rows_stay_on_one_line_when_they_fit(tmp_path):
+    """The break is a narrow-terminal measure, not the shape of the row:
+    at 80 columns a completed call is still one line."""
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    record_session_end(database, record_session_start(database, alice))
+
+    session = FakeSession(["h", " ", "l", "y"])
+    asyncio.run(_run_main_menu(session, database, alice))
+
+    rows = [
+        _ANSI_ESCAPE_RE.sub("", chunk).strip()
+        for chunk in session.written
+        if "connected " in chunk
+    ]
+    assert len(rows) == 1
+    assert rows[0].startswith("connected ")
+    assert "until " in rows[0]
+    database.close()
+
+
+def test_previous_callers_menu_screen_says_a_too_narrow_terminal_is_why(tmp_path):
+    """Every path through the menu screen ends in something drawn."""
     database = db_(tmp_path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)
     bob = create_user(database, "bob", password="hunter2", user_level=10)
     record_session_start(database, bob)
-    session = FakeSession(["h", " ", "l", "y"])
-    session.terminal_width = 28
+    session = FakeSession(["r", " ", "l", "y"])
+    session.terminal_width = 3
 
     asyncio.run(_run_main_menu(session, database, alice))
 
-    ansi = re.compile(r"\x1b\[[0-9;]*m")
-    history_lines = [chunk for chunk in session.written if "connected" in chunk]
-    assert history_lines
-    for line in history_lines:
-        visible = ansi.sub("", line).rstrip("\n")
-        assert len(visible) <= session.terminal_width
-        assert "\x1b" not in visible
+    assert "too narrow" in _visible(session)
+    database.close()
+
+
+def test_previous_callers_menu_screen_keeps_one_row_on_a_short_terminal(tmp_path):
+    """The splash's height budget would leave no rows at all here and
+    skip itself; a screen the caller asked for shows what it can."""
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    bob = create_user(database, "bob", password="hunter2", user_level=10)
+    record_session_start(database, bob)
+    session = FakeSession(["r", " ", "l", "y"])
+    session.terminal_height = 8
+
+    asyncio.run(_run_main_menu(session, database, alice))
+
+    assert "bob" in _visible(session)
     database.close()

@@ -33,6 +33,47 @@ from netbbs.user_preferences import get_user_preference
 # bound over a node's lifetime.
 _MAX_SESSION_HISTORY_ROWS = 500
 
+# ...except that a node-wide row count cannot, on its own, keep the
+# promise `[H]istory` makes to one caller (issue #592, Codex review).
+# That screen is now the viewer's own calls, and a global cap retires
+# rows in the order they arrived regardless of whose they are: let 500
+# other logins happen between one caller's visits and every row that
+# caller ever had is gone, leaving them a screen that shows only the
+# session they are sitting in -- the busy-node failure the split was
+# meant to fix.
+#
+# So recency stops being the only thing that decides. A row is a
+# candidate only while it is among its own account's newest
+# `_MAX_SESSION_HISTORY_ROWS_PER_USER` -- twenty, which is exactly what
+# `[H]istory` displays, so no account is worth keeping more of -- and
+# the candidates then fill the same fixed `_MAX_SESSION_HISTORY_ROWS`
+# budget newest-first. One caller's flood can no longer evict another
+# caller's history, because past its twentieth row a flood stops being
+# a candidate at all.
+#
+# The budget stays absolute (Codex review). An earlier revision made
+# the per-account share an *exemption* from the global cap, which reads
+# as the same rule and is not: `RegistrationMode.OPEN` is the default,
+# so accounts are remotely creatable, and a ceiling of
+# "500 + 20 x accounts" is therefore proportional to something an
+# attacker sets. Cycling new accounts grew the table without limit.
+_MAX_SESSION_HISTORY_ROWS_PER_USER = 20
+
+# How far over budget the table is allowed to drift before a prune runs
+# (Codex review). Ranking every row by account is a correlated count
+# over a column the schema carries no index for, so doing it on every
+# login would put a table scan on the event-loop thread that
+# `record_session_start` is called from, once per authenticated
+# connection. Pruning in batches instead amortizes that to one cheap
+# `COUNT(*)` per login and one ranked sweep per `_SESSION_HISTORY_
+# PRUNE_SLACK` logins, and the table's real ceiling is simply the
+# budget plus the slack -- still a fixed number, and still small.
+# Measured on this table at its ceiling, the sweep is a few
+# milliseconds; the alternative was a migration for an index, which is
+# a schema bump and a restore-only rollback for a node's benefit that
+# a batch size buys just as well.
+_SESSION_HISTORY_PRUNE_SLACK = 100
+
 _NAME_VISIBLE_KEY = "session_history_name_visible"
 _PREVIOUS_CALLERS_ENABLED_KEY = "previous_callers_enabled"
 
@@ -73,23 +114,73 @@ def record_session_start(db: Database, user: User) -> int:
         (user.id, user.username, utc_now_iso(), int(session_history_name_visible(db, user))),
     )
     row_id = db.connection.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-    # Pruning happens alongside the insert that could have grown the
-    # table past the cap, the same "bound it right where it grows"
-    # placement `LinkDiagnosticLogHandler.emit` uses -- keeps the most
-    # recent rows by id (insertion order), not by connected_at, so a
-    # session started slightly "out of order" relative to another
-    # (clock skew is not a concern here -- both are this node's own
-    # utc_now_iso()) is never a factor.
-    db.connection.execute(
-        """
-        DELETE FROM session_history WHERE id NOT IN (
-            SELECT id FROM session_history ORDER BY id DESC LIMIT ?
-        )
-        """,
-        (_MAX_SESSION_HISTORY_ROWS,),
-    )
+    _prune_session_history(db)
     db.connection.commit()
     return row_id
+
+
+def _prune_session_history(db: Database) -> None:
+    """Decide whether a sweep is due, right where the table grows.
+
+    The same "bound it right where it grows" placement
+    `LinkDiagnosticLogHandler.emit` uses -- but only the `COUNT(*)`
+    happens on every login. `_sweep_session_history` is the expensive
+    half and runs once the table has drifted a whole
+    `_SESSION_HISTORY_PRUNE_SLACK` past its budget, which is what keeps
+    a ranked table scan off the event-loop thread that
+    `record_session_start` is called from.
+    """
+    total = db.connection.execute(
+        "SELECT COUNT(*) AS total FROM session_history"
+    ).fetchone()["total"]
+    if total <= _MAX_SESSION_HISTORY_ROWS + _SESSION_HISTORY_PRUNE_SLACK:
+        return
+    _sweep_session_history(db)
+
+
+def _sweep_session_history(db: Database) -> None:
+    """Apply the retention rule itself, unconditionally.
+
+    Rows are ranked by `id` (insertion order), not `connected_at`, so a
+    session started slightly "out of order" relative to another (clock
+    skew is not a concern -- both are this node's own `utc_now_iso()`)
+    is never a factor.
+
+    One statement, one meaning: keep the newest `_MAX_SESSION_HISTORY_
+    ROWS` rows *among those still within their own account's newest
+    `_MAX_SESSION_HISTORY_ROWS_PER_USER`*. The inner `WHERE` decides
+    candidacy per account, the `ORDER BY ... LIMIT` spends the fixed
+    node-wide budget on the newest candidates. Neither clause is
+    optional: without the first, one caller's flood evicts every other
+    caller's history; without the second, the ceiling becomes
+    proportional to an account count a remote caller controls.
+
+    What the two together do *not* promise is that every account keeps
+    rows forever. Enough distinct accounts and the budget is spent on
+    the newest candidates whoever they belong to -- which is the
+    honest outcome of a fixed budget, and a far higher bar than the
+    500 ordinary logins that used to be enough.
+
+    `newer.user_id IS keep.user_id` rather than `=`: every row left by
+    a deleted account has `user_id NULL`, and `=` is never true for
+    NULL, so those rows would each rank first among no one and every
+    one of them would stay a candidate forever.
+    """
+    db.connection.execute(
+        """
+        DELETE FROM session_history
+        WHERE id NOT IN (
+            SELECT keep.id FROM session_history AS keep
+            WHERE (
+                SELECT COUNT(*) FROM session_history AS newer
+                WHERE newer.user_id IS keep.user_id AND newer.id > keep.id
+            ) < ?
+            ORDER BY keep.id DESC
+            LIMIT ?
+        )
+        """,
+        (_MAX_SESSION_HISTORY_ROWS_PER_USER, _MAX_SESSION_HISTORY_ROWS),
+    )
 
 
 def record_session_end(db: Database, history_id: int) -> SessionHistoryEntry | None:
@@ -116,13 +207,35 @@ def record_session_end(db: Database, history_id: int) -> SessionHistoryEntry | N
     return _entry_from_row(row) if row is not None else None
 
 
-def list_recent_sessions(db: Database, *, limit: int = 20) -> list[SessionHistoryEntry]:
-    """Most recent first."""
-    rows = db.connection.execute(
-        "SELECT id, user_id, username_label, connected_at, disconnected_at, interrupted_at, "
-        "name_visible_fallback FROM session_history ORDER BY id DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
+def list_recent_sessions(
+    db: Database, *, limit: int = 20, user_id: int | None = None
+) -> list[SessionHistoryEntry]:
+    """Most recent first.
+
+    `user_id` narrows the listing to one account's own calls. The two
+    caller-facing screens want genuinely different things and must not
+    share one query: `[H]istory` is *your* call record (issue #592 --
+    it had always listed the whole node, contradicting its own menu
+    description), while the previous-callers roll is the node-wide
+    "who has been here lately" view and passes no filter.
+
+    Rows belonging to a deleted account keep their denormalized
+    `username_label` but have `user_id IS NULL`, so they can never
+    match a live account's filter -- correct: a filtered listing is the
+    viewer's own history, and a deleted account has no viewer.
+    """
+    if user_id is None:
+        rows = db.connection.execute(
+            "SELECT id, user_id, username_label, connected_at, disconnected_at, interrupted_at, "
+            "name_visible_fallback FROM session_history ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    else:
+        rows = db.connection.execute(
+            "SELECT id, user_id, username_label, connected_at, disconnected_at, interrupted_at, "
+            "name_visible_fallback FROM session_history WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
     return [
         _entry_from_row(row)
         for row in rows

@@ -468,6 +468,23 @@ truecolor is a progressive visual enhancement with a deliberately polished
 256-color fallback. The SysOp can toggle the splash node-wide from Settings;
 new and upgraded nodes default to showing it.
 
+The same roll is a home-menu screen of its own, `P[r]evious callers`, rendered
+by the one renderer the splash uses so the two can never disagree about who is
+listed or under what name. The screen differs from the splash only where being
+asked for rather than offered demands it: the node setting governs the
+automatic splash alone, so the menu screen ignores it; an empty roll says so
+instead of drawing nothing; and at least one row is kept on a terminal too
+short for the splash's own budget. The viewer's own live session is excluded in
+both places.
+
+The home menu's `[H]istory` is the complementary per-caller screen: the
+viewer's own recent calls, with connect time, how each one ended, and its
+duration. It asks no name-visibility question, because the rows are the
+viewer's own; that policy governs only the node-wide roll, where other callers
+read it. The two screens were one listing until issue #592, which meant
+`[H]istory` described itself as "your recent sessions" while showing every
+caller's.
+
 ### 3.4 SysOp operations console
 
 The SysOp entry point is an operational control center, not a flat catalogue
@@ -5039,7 +5056,8 @@ Completed product work informed by dogfood includes:
   generic menu hotkeys; invalid keys retry and accepted choices end their row;
 - current-build visual/capability verification plus bounded semantic-color
   polish on named mature surfaces (#136) — implemented: caller and SysOp Who
-  share one picker palette; Who, mail, vCards, Last sessions, profile fields,
+  share one picker palette; Who, mail, vCards, the session-history screens,
+  profile fields,
   picker feedback, and welcome-banner administration distinguish labels,
   values, metadata, success, and failure through shared theme roles; colored
   narrow output is truncated by visible width rather than raw ANSI length.

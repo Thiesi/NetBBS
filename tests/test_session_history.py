@@ -8,6 +8,9 @@ import pytest
 from netbbs.auth.users import create_user, delete_user
 from netbbs.session_history import (
     _MAX_SESSION_HISTORY_ROWS,
+    _MAX_SESSION_HISTORY_ROWS_PER_USER,
+    _SESSION_HISTORY_PRUNE_SLACK,
+    _sweep_session_history,
     list_recent_sessions,
     previous_callers_enabled,
     reconcile_interrupted_sessions,
@@ -84,12 +87,17 @@ def test_previous_callers_splash_defaults_on_and_can_be_disabled(db):
 
 
 def test_row_count_pruning_keeps_only_the_most_recent_rows(db, alice):
-    # +5 over the cap -- confirms pruning actually removes the oldest
-    # ones rather than merely capping list_recent_sessions's own read.
-    for _ in range(_MAX_SESSION_HISTORY_ROWS + 5):
+    # Well past the point a sweep must have run -- confirms pruning
+    # actually removes rows rather than merely capping
+    # list_recent_sessions's own read. The assertion is the ceiling,
+    # not the budget: sweeps run in batches (issue #592, Codex review),
+    # so the table is allowed to sit up to _SESSION_HISTORY_PRUNE_SLACK
+    # rows above _MAX_SESSION_HISTORY_ROWS between them.
+    for _ in range(_MAX_SESSION_HISTORY_ROWS * 3):
         record_session_start(db, alice)
     total = db.connection.execute("SELECT COUNT(*) AS n FROM session_history").fetchone()["n"]
-    assert total == _MAX_SESSION_HISTORY_ROWS
+    assert total <= _MAX_SESSION_HISTORY_ROWS + _SESSION_HISTORY_PRUNE_SLACK
+    assert total < _MAX_SESSION_HISTORY_ROWS * 3
 
 
 def test_deleting_the_account_sets_user_id_null_but_keeps_the_row_and_label(db, alice, sysop):
@@ -238,3 +246,152 @@ def test_set_name_visible_true_after_false(db, alice):
     set_session_history_name_visible(db, alice, False)
     set_session_history_name_visible(db, alice, True)
     assert session_history_name_visible(db, alice) is True
+
+
+# -- list_recent_sessions(user_id=...) ---------------------------------
+
+
+def test_list_recent_sessions_without_a_filter_spans_the_node(db, alice, sysop):
+    record_session_start(db, alice)
+    record_session_start(db, sysop)
+
+    labels = {entry.username_label for entry in list_recent_sessions(db)}
+
+    assert labels == {"alice", "sysop"}
+
+
+def test_list_recent_sessions_filtered_returns_only_that_accounts_calls(db, alice, sysop):
+    """Issue #592: what `[H]istory` needs, and what it never had."""
+    record_session_start(db, sysop)
+    record_session_start(db, alice)
+    record_session_start(db, sysop)
+
+    entries = list_recent_sessions(db, user_id=alice.id)
+
+    assert [entry.username_label for entry in entries] == ["alice"]
+
+
+def test_list_recent_sessions_filtered_is_newest_first_and_honors_limit(db, alice):
+    for _ in range(3):
+        record_session_start(db, alice)
+
+    entries = list_recent_sessions(db, limit=2, user_id=alice.id)
+
+    assert len(entries) == 2
+    assert entries[0].id > entries[1].id
+
+
+def test_list_recent_sessions_filtered_excludes_a_deleted_accounts_rows(db, alice, sysop):
+    """A deleted account's rows survive with `user_id` cleared, so they
+    stay on the node-wide roll (under whatever name-visibility choice
+    was in effect) and can never be claimed by a filter -- there is no
+    longer an account to claim them."""
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    record_session_start(db, bob)
+    record_session_start(db, alice)
+    delete_user(db, bob, deleted_by=sysop)
+
+    assert [e.username_label for e in list_recent_sessions(db)] == ["alice", "bob"]
+    assert [e.username_label for e in list_recent_sessions(db, user_id=alice.id)] == ["alice"]
+
+
+# -- per-account retention ---------------------------------------------
+#
+# Two rules, and the tests keep them apart. *Which* rows a sweep keeps
+# is `_sweep_session_history`, called directly; *when* a sweep runs is
+# `_prune_session_history`'s batching, which the ceiling tests observe
+# through `record_session_start` alone.
+
+
+def test_a_quiet_callers_history_survives_a_flood_of_other_logins(db, alice):
+    """Issue #592, Codex review: the node-wide cap retires rows in
+    arrival order regardless of whose they are. Once `[H]istory` became
+    one caller's own calls, that cap alone could empty it -- the busy-
+    node failure the screen was split apart to fix."""
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    for _ in range(3):
+        record_session_end(db, record_session_start(db, alice))
+    for _ in range(_MAX_SESSION_HISTORY_ROWS + 300):
+        record_session_end(db, record_session_start(db, bob))
+
+    assert len(list_recent_sessions(db, user_id=alice.id)) == 3
+
+
+def test_a_sweep_keeps_one_screenful_per_account_and_no_more(db, alice):
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    for _ in range(_MAX_SESSION_HISTORY_ROWS_PER_USER + 15):
+        record_session_end(db, record_session_start(db, alice))
+    for _ in range(_MAX_SESSION_HISTORY_ROWS_PER_USER + 15):
+        record_session_end(db, record_session_start(db, bob))
+
+    _sweep_session_history(db)
+
+    for account in (alice, bob):
+        kept = list_recent_sessions(db, limit=10_000, user_id=account.id)
+        assert len(kept) == _MAX_SESSION_HISTORY_ROWS_PER_USER
+        # The newest ones, not an arbitrary twenty.
+        assert kept == sorted(kept, key=lambda e: e.id, reverse=True)
+
+
+def test_cycling_fresh_accounts_cannot_grow_the_table(db, alice):
+    """Codex review: an earlier revision made the per-account share an
+    *exemption* from the node-wide cap, so the ceiling read
+    "500 + 20 x accounts". `RegistrationMode.OPEN` is the default and
+    accounts are created remotely, which made that ceiling proportional
+    to a number an attacker sets."""
+    record_session_end(db, record_session_start(db, alice))
+    peak = 0
+    for index in range(_MAX_SESSION_HISTORY_ROWS + 200):
+        throwaway = create_user(db, f"throwaway{index}", password="hunter2", user_level=10)
+        record_session_end(db, record_session_start(db, throwaway))
+        peak = max(
+            peak,
+            db.connection.execute(
+                "SELECT COUNT(*) AS n FROM session_history"
+            ).fetchone()["n"],
+        )
+
+    assert peak <= _MAX_SESSION_HISTORY_ROWS + _SESSION_HISTORY_PRUNE_SLACK
+    # alice's single old call is gone, and that is the honest cost of a
+    # fixed budget: past several hundred *accounts* the budget is spent
+    # on the newest candidates whoever they belong to. What the rule
+    # buys is that it now takes that many accounts rather than the 500
+    # ordinary logins by one caller that used to suffice.
+    assert list_recent_sessions(db, user_id=alice.id) == []
+
+
+def test_the_table_stays_bounded_with_many_busy_accounts(db):
+    """The other direction: real accounts, all active, none of them a
+    flood. The ceiling is a fixed number either way."""
+    accounts = [
+        create_user(db, f"caller{index}", password="hunter2", user_level=10)
+        for index in range(40)
+    ]
+    for _ in range(_MAX_SESSION_HISTORY_ROWS_PER_USER + 5):
+        for account in accounts:
+            record_session_end(db, record_session_start(db, account))
+
+    total = db.connection.execute(
+        "SELECT COUNT(*) AS n FROM session_history"
+    ).fetchone()["n"]
+    assert total <= _MAX_SESSION_HISTORY_ROWS + _SESSION_HISTORY_PRUNE_SLACK
+
+
+def test_a_sweep_gives_deleted_accounts_one_shared_bucket(db, alice, sysop):
+    """Every deleted account's rows carry `user_id NULL`. SQLite's `=`
+    is never true for NULL, so ranking them with `=` would give each row
+    a rank of first-of-none and keep every one of them a candidate
+    forever."""
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    for _ in range(_MAX_SESSION_HISTORY_ROWS_PER_USER + 10):
+        record_session_end(db, record_session_start(db, bob))
+    delete_user(db, bob, deleted_by=sysop)
+    for _ in range(_MAX_SESSION_HISTORY_ROWS_PER_USER + 10):
+        record_session_end(db, record_session_start(db, alice))
+
+    _sweep_session_history(db)
+
+    orphaned = db.connection.execute(
+        "SELECT COUNT(*) AS n FROM session_history WHERE user_id IS NULL"
+    ).fetchone()["n"]
+    assert orphaned == _MAX_SESSION_HISTORY_ROWS_PER_USER
