@@ -794,6 +794,21 @@ def _validate_war_dialer_component(source: Path, manifest: dict) -> None:
         raise BackupError("War Dialer files do not match their coverage manifest.")
 
 
+def _is_capturable_receipt_name(name: str, suffix: str) -> bool:
+    """A receipt this tool will carry between platforms.
+
+    `_write_result` builds a receipt's name from the door's own request
+    filename, and a door on the POSIX target may legally call a request
+    `foo\\bar.json`. The resulting receipt is a perfectly good file there and
+    a path with a directory in it on Windows, so an archive must not contain
+    one: capture and validation ask the same question here rather than capture
+    taking a name that validation then refuses, which used to fail the whole
+    backup over one door's odd filename.
+    """
+    return (name.endswith(suffix) and name not in {".", ".."}
+            and "/" not in name and "\\" not in name)
+
+
 def _door_outbound_receipts(directory: Path, kept: int) -> tuple[list[Path], int, int]:
     """One door's receipts, the newest `kept` of them, and what was left behind.
 
@@ -813,9 +828,9 @@ def _door_outbound_receipts(directory: Path, kept: int) -> tuple[list[Path], int
 
     `kept` mirrors the door module's own retention rule instead of inventing a
     second one: anything past it is what the next drain would prune anyway.
-    Enumeration stops well before that, at a multiple of it: `iterdir()` orders
-    the whole directory before any bound can apply, and a door is what fills
-    this one.
+    Enumeration stops well before that, at a multiple of it, and through
+    `scandir` rather than `iterdir`: the latter orders a whole directory before
+    any bound can apply, and a door is what fills this one.
     """
     from netbbs.doors.outbound import RESULT_SUFFIX
 
@@ -832,8 +847,8 @@ def _door_outbound_receipts(directory: Path, kept: int) -> tuple[list[Path], int
                         "door has left there, then retry.")
                 path = Path(entry.path)
                 try:
-                    if (not entry.name.endswith(RESULT_SUFFIX) or entry.is_symlink()
-                            or not entry.is_file()
+                    if (not _is_capturable_receipt_name(entry.name, RESULT_SUFFIX)
+                            or entry.is_symlink() or not entry.is_file()
                             or entry.stat().st_size > _DOOR_OUTBOUND_MAX_RECEIPT_BYTES):
                         skipped += 1
                         continue
@@ -874,13 +889,25 @@ def _capture_door_outbound(db_path: Path, destination: Path, checksums: dict) ->
     Live-safe, like the rest of this module: a receipt is written
     temp-then-rename, so a capture taken while a door is running never copies
     a half-written one, and a receipt a concurrent drain prunes between the
-    listing and the copy is counted as left behind rather than failing the
-    whole archive.
+    listing and the copy is counted as pruned rather than failing the whole
+    archive. What it is not is one instant: a SysOp who switches a hook off
+    between this capture and the database snapshot leaves an archive whose
+    receipts are a moment older than its snapshot, the same boundary the game
+    components already draw. It is the direction that matters here, and it is
+    the one this ordering fixes.
+
+    A symlinked root is followed rather than reported absent -- doors reach it
+    through the same symlink, and this is the SysOp's own placement of node
+    state, exactly like a symlinked blob tree. (Restore then puts a real
+    directory at the node path and preserves the link in the rollback
+    generation, since it switches by rename like every other artifact.) A
+    symlink *inside* it is a different thing and is still skipped: NetBBS
+    never writes one there.
     """
     from netbbs.doors.outbound import RESULTS_KEPT
 
     root = _door_outbound_root_for(db_path)
-    if not root.is_dir() or root.is_symlink():
+    if not root.is_dir():
         return None
     resolved = destination.resolve()
     if resolved == root.resolve() or resolved.is_relative_to(root.resolve()):
@@ -1014,8 +1041,7 @@ def _validate_door_outbound_component(source: Path, manifest: dict) -> None:
             raise BackupError("Door outbound component is missing a door's receipt directory.")
         expected_names = set()
         for name in door["receipts"]:
-            if (not isinstance(name, str) or not name.endswith(RESULT_SUFFIX)
-                    or "/" in name or "\\" in name or name in {".", ".."}):
+            if not isinstance(name, str) or not _is_capturable_receipt_name(name, RESULT_SUFFIX):
                 raise BackupError("Invalid door outbound receipt name in manifest.")
             receipt = directory / name
             if (not receipt.is_file() or receipt.is_symlink()
@@ -1027,6 +1053,22 @@ def _validate_door_outbound_component(source: Path, manifest: dict) -> None:
             expected_names.add(name)
         _refuse_unlisted_entries(directory, expected_names, "Door outbound receipts")
     _refuse_unlisted_entries(root, expected_doors, "Door outbound directories")
+
+
+def _discard_incomplete_backup(destination: Path, exc: BaseException) -> None:
+    """Remove the destination this run created; the caller re-raises `exc`.
+
+    No prior backup is ever removed here: `create_backup` refuses a
+    destination that already exists, so this only ever discards what this run
+    made. A rejected session, an unreadable file or a failed self-check must
+    leave the path free, or the retry the operator is about to make cannot use
+    it either.
+    """
+    try:
+        shutil.rmtree(destination)
+    except OSError as cleanup:
+        raise BackupError(f"{exc} Incomplete backup at {destination} could not be removed: {cleanup}. "
+                          "Remove it manually before retrying.") from exc
 
 
 def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
@@ -1100,13 +1142,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         receipt_metadata = _capture_door_outbound(db_path, destination, checksums)
         door_metadata = _capture_door_installs(db_path, destination)
     except BaseException as exc:
-        # This call created the fresh destination; no prior backup is removed.
-        # A rejected active session or bad file must allow retry at the same path.
-        try:
-            shutil.rmtree(destination)
-        except OSError as cleanup:
-            raise BackupError(f"{exc} Incomplete backup at {destination} could not be removed: {cleanup}. "
-                              "Remove it manually before retrying.") from exc
+        _discard_incomplete_backup(destination, exc)
         raise
     if ((game_metadata is not None and database_filename.casefold() == _VOIDRUNNER_DIRNAME)
             or (war_metadata is not None and database_filename.casefold() == _WAR_DIALER_DIRNAME)
@@ -1168,9 +1204,17 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         "door_installs": door_metadata,
         "door_outbound": receipt_metadata,
     }
-    _validate_war_dialer_component(destination, manifest)
-    _validate_door_outbound_component(destination, manifest)
-    (destination / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2))
+    try:
+        # Checked against what was actually written, and inside the same
+        # cleanup this function's capture phase uses: a self-check that fails
+        # leaves no destination behind, or the next run cannot even retry at
+        # the same path.
+        _validate_war_dialer_component(destination, manifest)
+        _validate_door_outbound_component(destination, manifest)
+        (destination / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2))
+    except BaseException as exc:
+        _discard_incomplete_backup(destination, exc)
+        raise
 
     _record_backup_state(db_path, destination)
     return destination

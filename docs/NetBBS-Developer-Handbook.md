@@ -364,6 +364,11 @@ case as a pruned receipt. Neither direction is proof: a missing receipt is not
 grounds on its own for publishing again, and a receipt is a record of what was
 published, not of what is still there.
 
+Name your requests as ordinary filenames. A receipt is named after the request
+it answers, so a request name holding a path separator — legal on the POSIX
+target — makes a receipt that is one file there and a path on another platform.
+Backups leave those out rather than carry a name that does not travel.
+
 ## Implementing NetBBS Link
 
 ### Scope and reading order

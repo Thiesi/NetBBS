@@ -502,3 +502,73 @@ def test_an_archive_may_not_carry_a_door_directory_it_does_not_list(tmp_path, db
 
     with pytest.raises(BackupError, match="Door outbound directories do not match"):
         restore_backup(source=backup, db_path=db_path, identity_dir=identity_dir)
+
+
+@pytest.mark.parametrize("name", ["launch.a/b.result.json", "launch.a" + chr(92) + "b.result.json",
+                                  ".", "..", "launch.a.result.json.part"])
+def test_capture_and_validation_agree_on_what_a_receipt_may_be_called(name):
+    r"""`_write_result` builds a receipt's name from the door's own filename.
+
+    A door on the POSIX target may legally name a request `a\b.json`, which
+    makes a receipt that is one file there and a path with a directory in it
+    on Windows. Capture used to take such a name and validation then refuse
+    it, failing the whole backup over one door's odd request.
+    """
+    from netbbs.doors.outbound import RESULT_SUFFIX
+
+    assert not backup_module._is_capturable_receipt_name(name, RESULT_SUFFIX)
+    assert backup_module._is_capturable_receipt_name("launch.a.result.json", RESULT_SUFFIX)
+
+
+def test_a_manifest_naming_a_receipt_outside_its_directory_is_refused(tmp_path, db_path, identity_dir):
+    door_id, _ = _run_a_door(db_path, tmp_path / "launch-one")
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    manifest = _manifest(backup)
+    manifest["door_outbound"]["doors"][0]["receipts"] = ["../../escape.result.json"]
+    (backup / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(BackupError, match="Invalid door outbound receipt name"):
+        restore_backup(source=backup, db_path=db_path, identity_dir=identity_dir)
+
+
+def test_a_failed_self_check_leaves_no_destination_to_retry_around(
+    tmp_path, db_path, identity_dir, monkeypatch,
+):
+    """The capture phase already cleaned up after itself; this one did not.
+
+    A destination left behind is not merely untidy: `create_backup` refuses a
+    destination that already exists, so the operator's retry cannot use the
+    same path.
+    """
+    _run_a_door(db_path, tmp_path / "launch-one")
+
+    def refuse(source, manifest):
+        raise BackupError("component self-check failed")
+
+    monkeypatch.setattr(backup_module, "_validate_door_outbound_component", refuse)
+
+    with pytest.raises(BackupError, match="self-check failed"):
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+
+    assert not (tmp_path / "backup").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks")
+def test_a_symlinked_receipts_root_is_followed_rather_than_reported_absent(
+    tmp_path, db_path, identity_dir,
+):
+    """A SysOp may keep this state on another volume.
+
+    Doors reach it through the same symlink, so reporting the component
+    absent would have produced a backup with no receipts at all and a restore
+    that removed the link as though the node had never had any.
+    """
+    elsewhere = tmp_path / "other-volume"
+    elsewhere.mkdir()
+    results_root(db_path).symlink_to(elsewhere, target_is_directory=True)
+    door_id, receipts = _run_a_door(db_path, tmp_path / "launch-one")
+    assert sorted(path.name for path in (elsewhere / str(door_id)).iterdir()) == sorted(receipts)
+
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+
+    assert sorted(_manifest(backup)["door_outbound"]["doors"][0]["receipts"]) == sorted(receipts)
