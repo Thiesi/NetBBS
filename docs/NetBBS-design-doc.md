@@ -1067,6 +1067,52 @@ maximum active lifetime is 365 days. Revocation is a separate signed
 `remote_identity_attestation_revocation` object naming the exact original
 content ID; neither expiry nor revocation deletes the signed historical row.
 
+Issuance is reconciled once per sync pass against current local consent, not
+performed by the screen that records it: the signature must be made by the
+node's current operational key, and a caller session has no business holding
+one. Each pass signs an object for every Link-visible attestation without a
+live one, re-issues one approaching expiry, and signs a revocation whenever the
+consent behind a live object has gone — the toggle switched off, the
+attestation removed, the value re-verified, or the account deleted. A deleted
+account's signed objects therefore outlive the account itself long enough to be
+revoked, rather than leaving subscribers holding a live assertion about a user
+who no longer exists.
+
+Issued lifetime is 90 days, renewed once 30 days remain. The 365-day ceiling is
+what a receiver must tolerate; a shorter issued lifetime is what an issuer
+chooses, because a node that goes dark cannot withdraw consent it has already
+published, and the issued lifetime is the window in which an opt-out that never
+reached a subscriber still leaves a live assertion standing. Overlapping the
+renewal with the object it replaces is deliberate: a receiver selects the
+newest unexpired record, so the handover needs no revocation, and revoking
+would tell a subscriber to stop trusting a value being re-asserted in the same
+breath.
+
+Propagation is an explicit subscription pull, like trust objects (§12.7), and
+uses its own separately signed `remote_attestation_pull_request` object type so
+a request signed for one subscription cannot be re-aimed at the other. The
+subscription set is the receiver's configured attestation authorities, never
+its trust reporters. A node serves only the objects it signed itself: unlike a
+trust signal, which any carrier may re-serve unchanged, an attestation is a
+statement about the issuer's own users, so a pull naming a third-party issuer
+is refused rather than answered. The served stream includes expired and revoked
+objects, so a subscriber returning after an absence still receives the
+revocation that retired an object it holds; a stream that depended on when it
+was read could not be resumed from a cursor. There is no `revocations_only`
+containment mode: an attestation only ever loosens a local gate, so a
+quarantined authority is simply not pulled.
+
+A SysOp can see everything their node currently asserts about its own users,
+and stop any of it. That listing names the subject, the attribute, and the
+expiry, but never the attested value: it is a screen about what leaves the
+node, not a place a verified real name belongs. Withdrawal clears the
+subject's consent and lets the ordinary reconcile sign the revocation, so the
+operator action and the sync pass can never disagree about whether an object
+should exist. There is deliberately no operator way to switch sharing *on*:
+propagation is conditional on the subject's own opt-in, and a SysOp who
+should not be asserting something can stop asserting it or withdraw the
+verification itself, neither of which requires speaking for the caller.
+
 Receiving nodes verify canonical bytes with the issuer's currently authorized
 operational signing key before persistence. Acceptance then remains purely
 local and attribute-scoped: an explicit attestation-authority grant, its
@@ -1085,6 +1131,16 @@ value in unrelated screens.
 
 A carrying node may always apply its own local attestations to its own users
 when enforcing a carried resource’s local age/name policy.
+
+For a remote author the same gate consults the accepted remote attestation, at
+the point §12.8 puts every Link enforcement decision: before remotely
+influenced persistence. A carried board post whose author fails the board's own
+`min_age`/`name_requirement` is not materialized, which is the same honest
+exclusion as a board this node does not carry — the signed event is retained,
+nothing is projected, and the SysOp's rebuild pass materializes the post if the
+attestation arrives later. The refusal is silent on the wire: telling the
+network which of its users fail a local gate would disclose exactly the policy
+§12.8 keeps undisclosed.
 
 ---
 

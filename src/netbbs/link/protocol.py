@@ -131,6 +131,7 @@ from netbbs.link.events import (
     strict_json_loads,
 )
 from netbbs.link.node_identity import NodeIdentity, NodeIdentityError, resolve_current_operational_key
+from netbbs.link.remote_attestation import AttestationPullRequest
 from netbbs.link.trust_wire import TrustPullRequest
 from netbbs.timeutil import utc_now_iso
 
@@ -1681,6 +1682,7 @@ class LinkNode:
     relay_state: RelayState = field(default_factory=RelayState)
     inventory_requests: InventoryRequestState = field(default_factory=InventoryRequestState)
     trust_pull_requests: InventoryRequestState = field(default_factory=InventoryRequestState)
+    attestation_pull_requests: InventoryRequestState = field(default_factory=InventoryRequestState)
     # Design doc §9.6, issue #87.
     channel_events: ChannelEventState = field(default_factory=ChannelEventState)
     # Design doc §11, issue #89.
@@ -2195,6 +2197,61 @@ class LinkNode:
         replay_key = (sender_fingerprint, request.nonce)
         if replay_key in seen:
             raise LinkProtocolError("trust pull reuses a recent nonce")
+        while len(seen) >= _MAX_SEEN_TRUST_PULL_NONCES:
+            seen.pop(next(iter(seen)))
+        seen[replay_key] = received_at
+
+    def handle_attestation_pull_request(
+        self,
+        sender_fingerprint: str,
+        request: AttestationPullRequest,
+        *,
+        now_iso: str | None = None,
+    ) -> None:
+        """Authenticate one explicit, replay-bounded attestation subscription pull.
+
+        Identical in shape to `handle_trust_pull_request`, with one extra
+        check: the requested issuer must be this node.  A trust pull may name
+        a third-party issuer because any carrier may re-serve an unchanged
+        signal (design doc §12.7); an attestation is a statement about the
+        responder's own users, so the only copy worth serving is its own.
+
+        The replay cache is separate from the trust one.  They must not be
+        shared: the two request types are separately signed, so one nonce may
+        legitimately appear once in each, and a shared cache would turn that
+        into a spurious replay rejection.
+        """
+        if sender_fingerprint not in self.peers:
+            raise LinkProtocolError(
+                "refusing attestation pull from a peer without a completed hello"
+            )
+        if request.requester_fingerprint != sender_fingerprint:
+            raise LinkProtocolError("attestation pull requester does not match the wire peer")
+        if request.responder_fingerprint != self.identity.fingerprint:
+            raise LinkProtocolError("attestation pull is addressed to a different responder")
+        if request.issuer_fingerprint != self.identity.fingerprint:
+            raise LinkProtocolError("attestation pull asks for another issuer's objects")
+        verify_key = self._resolve_sender_signing_key(
+            self.peers[sender_fingerprint], sender_fingerprint, "attestation_pull_request"
+        )
+        if not request.verifies(verify_key):
+            raise LinkProtocolError("attestation pull signature does not verify")
+        received_at = _parse_aware_timestamp(now_iso or utc_now_iso(), field_name="current time")
+        created_at = _parse_aware_timestamp(
+            request.created_at, field_name="attestation_pull_request.created_at"
+        )
+        if abs((received_at - created_at).total_seconds()) > _TRUST_PULL_FRESHNESS_SECONDS:
+            raise LinkProtocolError(
+                "attestation pull is outside the five-minute freshness window"
+            )
+        cutoff = received_at.timestamp() - _TRUST_PULL_FRESHNESS_SECONDS
+        seen = self.attestation_pull_requests.seen_nonces
+        for key, seen_at in list(seen.items()):
+            if seen_at.timestamp() < cutoff:
+                seen.pop(key, None)
+        replay_key = (sender_fingerprint, request.nonce)
+        if replay_key in seen:
+            raise LinkProtocolError("attestation pull reuses a recent nonce")
         while len(seen) >= _MAX_SEEN_TRUST_PULL_NONCES:
             seen.pop(next(iter(seen)))
         seen[replay_key] = received_at

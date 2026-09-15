@@ -63,6 +63,7 @@ from zoneinfo import available_timezones
 
 import nacl.signing
 
+from netbbs.attestation import AttestationError, withdraw_link_visibility
 from netbbs.auth.users import (
     NEW_ACCOUNT_SENTINEL,
     SYSOP_LEVEL,
@@ -230,8 +231,10 @@ from netbbs.link.remote_attestation import (
     configure_attestation_authority,
     get_remote_attestation_state,
     list_attestation_authorities,
+    list_issued_attestations,
     list_remote_attestation_audit,
     list_remote_attestation_overrides,
+    reconcile_issued_attestations,
     remove_attestation_authority,
     set_remote_attestation_override,
 )
@@ -1622,7 +1625,7 @@ async def _system_menu(
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "p":
             await session.write_line("")
-            await _trust_menu(session, lane, actor)
+            await _trust_menu(session, lane, actor, link_context=link_context)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "l" and link_context is not None:
@@ -2223,7 +2226,9 @@ async def _set_node_name_gradient_screen(
 # -- trust policy (Phase 4, issue #129) -------------------------------------
 
 
-async def _trust_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _trust_menu(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
@@ -2252,6 +2257,7 @@ async def _trust_menu(session: Session, lane: DatabaseLane, actor: User) -> None
             MenuEntry(label=menu_key("A", "nchors"), brief="Root trust anchor keys"),
             MenuEntry(label=menu_key("R", "eporters"), brief="Who can report abuse remotely"),
             MenuEntry(label=menu_key("I", "dentity authorities"), brief="Attestation authority list"),
+            MenuEntry(label=menu_key("P", "ublished identity"), brief="What this node asserts about its own users"),
             MenuEntry(label=menu_key("E", "xceptions"), brief="Sole-authority deviations"),
             MenuEntry(label=menu_key("H", "istory"), brief="Trust config change log"),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
@@ -2284,6 +2290,8 @@ async def _trust_menu(session: Session, lane: DatabaseLane, actor: User) -> None
             await _trust_reporters_screen(session, lane, actor)
         elif choice == "i":
             await _attestation_authorities_screen(session, lane, actor)
+        elif choice == "p":
+            await _published_identity_screen(session, lane, actor, link_context=link_context)
         elif choice == "e":
             await _trust_exceptions_screen(session, lane, actor)
         elif choice == "h":
@@ -3303,6 +3311,240 @@ async def _attestation_authorities_screen(
             session, lane, actor, title="Attestation authority", fields=fields, draft=draft, save=save,
             node_key="node",
         )
+
+
+_ISSUED_COLUMNS = [
+    ListColumn("attribute", 9, VALUE_COLOR),
+    # Wide enough for "withdrawing", the longest status this list returns --
+    # the column exists to be scanned, and one too narrow for its own longest
+    # value is a riddle rather than a column (the lesson `_USER_COLUMNS`
+    # already records).
+    ListColumn("status", 11, VALUE_COLOR),
+]
+
+_ISSUED_STATUS_COLORS = {
+    "published": SUCCESS_COLOR,
+    "withdrawing": WARNING_COLOR,
+    "expired": MUTED_COLOR,
+    "revoked": MUTED_COLOR,
+}
+
+
+def _issued_columns(record) -> list[str | tuple[str, SegmentColor]]:
+    return [
+        record.attribute,
+        (record.status, _ISSUED_STATUS_COLORS.get(record.status, VALUE_COLOR)),
+    ]
+
+
+def _issued_when(record) -> str:
+    """The date a row's own status is about.
+
+    A revoked object still carries the expiry it was signed with, so showing
+    that unconditionally reads as though it were still counting down. Each
+    status has exactly one date that means anything for it.
+    """
+    if record.status == "revoked":
+        return f"revoked {sanitize_text((record.revoked_at or '')[:10])}".strip()
+    if record.status == "expired":
+        return f"expired {sanitize_text(record.expires_at[:10])}"
+    return f"expires {sanitize_text(record.expires_at[:10])}"
+
+
+def _issued_subject(record) -> str:
+    """The account a signed object is about, or what is left of it.
+
+    A deleted account leaves its signed rows behind on purpose -- they have to
+    outlive it long enough to be revoked -- so this list is the one place a
+    removed user still has to be nameable.
+    """
+    if record.username is not None:
+        return sanitize_text(record.username)
+    return "(account removed)"
+
+
+async def _published_identity_screen(
+    session: Session,
+    lane: DatabaseLane,
+    actor: User,
+    *,
+    link_context: LinkContext | None = None,
+) -> None:
+    """What this node asserts about its own users, and how to stop asserting it.
+
+    The operator view of the issuing half of design doc §5.5 (issue #584).
+    Every other attestation screen here is about what this node *accepts*;
+    this is the only one about what leaves it, which is the half a SysOp is
+    accountable for.
+
+    `[W]ithdraw` is the only action, deliberately. A SysOp may stop their node
+    asserting something -- they verified it, and can un-verify it outright --
+    but §5.5 makes propagation conditional on the subject's own opt-in, so
+    there is no way to switch sharing *on* for a caller from here.
+    """
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    header_color = await lane.run(effective_header_color_256)
+    show_all = False
+    while True:
+        records = await lane.run(list_issued_attestations, include_inactive=show_all)
+        live = [record for record in records if record.is_live]
+        await session.write_line(
+            colored(
+                "\r\nPublished over Link about this node's own users:",
+                fg_color=header_color, bold=True,
+            )
+        )
+        for record in records:
+            await session.write_line(
+                f"{_issued_subject(record)} "
+                + colored(record.attribute, fg_color=LABEL_COLOR)
+                + " "
+                + colored(
+                    record.status,
+                    fg_color=_ISSUED_STATUS_COLORS.get(record.status, VALUE_COLOR),
+                )
+                + colored(f" -- {_issued_when(record)}", fg_color=METADATA_COLOR)
+            )
+        if not records:
+            await session.write_line(
+                colored(
+                    "Nothing. No caller has opted in to sharing a verified "
+                    "age or name over Link."
+                    if not show_all
+                    else "Nothing. This node has never published an attestation.",
+                    fg_color=SUCCESS_COLOR,
+                )
+            )
+        pending = [record for record in live if record.status == "withdrawing"]
+        if pending:
+            await session.write_line(
+                colored(
+                    f"{len(pending)} awaiting revocation on the next Link sync pass.",
+                    fg_color=WARNING_COLOR,
+                )
+            )
+        if link_context is None:
+            await session.write_line(
+                colored(
+                    "Link is not running here, so a withdrawal takes effect when it next is.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
+        toggle = menu_key("C", "urrent only") if show_all else menu_key("S", "how all")
+        await write_prompt(
+            session,
+            action_bar(
+                [menu_key("W", "ithdraw"), toggle, menu_key("B", "ack")],
+                width=session.terminal_width,
+            )
+            + ": ",
+        )
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
+        if choice == "b":
+            return
+        if choice == ("c" if show_all else "s"):
+            show_all = not show_all
+            continue
+        if choice != "w":
+            await session.write(reject_unhandled_key(choice))
+            continue
+        async def _reload_live():
+            return [
+                record
+                for record in await lane.run(list_issued_attestations)
+                if record.is_live
+            ]
+
+        selected = await pick_item(
+            session, live,
+            name_of=_issued_subject,
+            stable_id_of=lambda record: record.content_id,
+            description_of=lambda record: f"signed {record.issued_at[:10]}, expires {record.expires_at[:10]}",
+            columns=_ISSUED_COLUMNS,
+            column_values_of=_issued_columns,
+            title="Stop publishing which attestation?",
+            empty_message="This node is publishing nothing to withdraw.",
+            # Without `refresh`, an empty list hits `pick_item`'s silent early
+            # return and this screen's own redraw wipes `empty_message` before
+            # it can be read -- the bug the Subjects picker above already
+            # carries a dogfood report about. This list also genuinely goes
+            # stale while the screen is open: a sync pass running alongside it
+            # revokes and renews.
+            refresh=_reload_live,
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=header_color,
+        )
+        if selected is None:
+            continue
+        if not await prompt_yes_no(
+            session,
+            f"Stop publishing the verified {selected.attribute} of "
+            f"{_issued_subject(selected)} over Link?",
+            default=False,
+        ):
+            continue
+        await _withdraw_published_attestation(session, lane, actor, selected, link_context)
+
+
+async def _withdraw_published_attestation(
+    session: Session,
+    lane: DatabaseLane,
+    actor: User,
+    record,
+    link_context: LinkContext | None,
+) -> None:
+    """Clear the consent, then let the ordinary reconcile sign the revocation.
+
+    Clearing consent is not enough on its own and signing is not enough on its
+    own: leave the consent set and the very next reconcile pass re-mints what
+    was just revoked, so the withdrawal silently undoes itself. Running the
+    *same* `reconcile_issued_attestations` the sync loop runs, rather than a
+    second revocation path of this screen's own, is what keeps the two from
+    ever disagreeing about when an object should exist.
+    """
+    subject = await lane.run(get_user_by_id, record.user_id) if record.user_id is not None else None
+    if subject is not None:
+        try:
+            await lane.run(withdraw_link_visibility, subject, record.attribute, actor=actor)
+        except AttestationError as exc:
+            await session.write_line(
+                colored(f"Sharing not changed: {exc}", fg_color=ERROR_COLOR)
+            )
+            return
+    if link_context is None:
+        await session.write_line(
+            colored(
+                "Sharing withdrawn. The signed revocation goes out when Link next runs.",
+                fg_color=SUCCESS_COLOR,
+            )
+        )
+        return
+    try:
+        await lane.run(
+            reconcile_issued_attestations,
+            link_context.node_identity.signing_key,
+            home_node_fingerprint=link_context.node_identity.fingerprint,
+        )
+    except (ValueError, sqlite3.Error) as exc:
+        await session.write_line(
+            colored(
+                f"Sharing withdrawn, but the revocation was not signed ({exc}) -- "
+                "the next Link sync pass retries it.",
+                fg_color=WARNING_COLOR,
+            )
+        )
+        return
+    await session.write_line(
+        colored(
+            "Sharing withdrawn and the revocation signed. Subscribers pick it up "
+            "on their next pull.",
+            fg_color=SUCCESS_COLOR,
+        )
+    )
 
 
 async def _remote_attestation_override_screen(

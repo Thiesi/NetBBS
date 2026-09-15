@@ -296,3 +296,33 @@ def test_remote_real_name_disclosure_stays_resource_scoped(db, subject, authorit
     )
     assert disclosed.startswith("alice@home ")
     assert "(=Private Real Name=)" in disclosed
+
+
+def test_an_unknown_link_identity_is_answered_rather_than_crashed(db):
+    """A gate asked about an identity this node has never accepted anything
+    from must say no, not raise.
+
+    `link_remote_attestation_effective` has a foreign key to
+    `link_trust_subjects`, so recomputing a projection for an unregistered
+    subject fails with an integrity error. Nothing hit that while the three
+    gates had no production caller (issue #584); the first one -- a carried
+    board post from a remote author on an age-gated board -- hits it on the
+    ordinary path, because the overwhelmingly common case is an author with no
+    attestation at all.
+    """
+    stranger = TrustSubject.user("never-met-node", "opaque-stranger")
+
+    state = get_remote_attestation_state(db, stranger, "age", now_iso=stamp(NOW))
+
+    assert not state.accepted
+    assert state.reason_code == "unknown_link_identity"
+    assert state.attestation is None
+    assert not remote_meets_age(db, stranger, 18, now_iso=stamp(NOW))
+    assert not remote_meets_name_requirement(db, stranger, "verified", now_iso=stamp(NOW))
+    # An absent gate still passes: "no requirement" is not "denied".
+    assert remote_meets_age(db, stranger, None, now_iso=stamp(NOW))
+    assert remote_meets_name_requirement(db, stranger, None, now_iso=stamp(NOW))
+    # And nothing was persisted on the way to that answer.
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM link_remote_attestation_effective"
+    ).fetchone()[0] == 0

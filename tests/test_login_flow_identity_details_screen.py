@@ -148,7 +148,16 @@ def test_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
     assert "No help is available" not in text
     assert "self-reported and unverified" in text.lower()
     assert "minimum age to post or join" in text
-    assert "trust/vouch policy" in text
+    # The Link-sharing help used to say the value reaches "a remote node's
+    # trust/vouch policy", which design doc §5.5 explicitly denies -- reporter
+    # and vouch configuration grant no attestation authority. Issue #584 made
+    # the toggle actually do something and corrected the claim with it, so
+    # what this pins is the true one: the caller's own gate-passing, and who
+    # it does and does not reach.
+    assert "trust/vouch policy" not in text
+    assert "an age gate can let you in" in text
+    assert "requires a verified name can let you in" in text
+    assert "accept this node's verifications" in text
 
 
 def test_display_name_edit_sets_only_the_value(db, lane, alice):

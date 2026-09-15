@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import secrets
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
@@ -20,7 +21,8 @@ import nacl.exceptions
 import nacl.signing
 
 from netbbs.attestation import compute_age, get_attestation
-from netbbs.auth.users import User
+from netbbs.auth.users import User, get_user_by_id
+from netbbs.identity.keys import Identity
 from netbbs.link.events import canonical_bytes
 from netbbs.link.trust import (
     TrustDimension,
@@ -105,9 +107,23 @@ def _parse_time(value: str, field: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _stamp(value: datetime) -> str:
+    """`value` in the project's sortable storage format.
+
+    `utc_now_iso()`'s fixed six decimals and `Z` suffix exist so stored
+    timestamps compare correctly as strings, which is how every liveness query
+    here asks whether an object has expired.  `datetime.isoformat()` produces
+    `+00:00` and a variable number of decimals instead, and `"...+00:00" <
+    "...Z"` at the same instant -- so a derived timestamp written that way
+    sorts wrongly against a stored `now`.  Every timestamp this module derives
+    goes through here.
+    """
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def _now(now_iso: str | None) -> tuple[str, datetime]:
-    value = now_iso or utc_now_iso()
-    return value, _parse_time(value, "now")
+    parsed = _parse_time(now_iso or utc_now_iso(), "now")
+    return _stamp(parsed), parsed
 
 
 def _validate_attribute(attribute: str) -> str:
@@ -355,8 +371,12 @@ def ingest_remote_attestation(
     issuer = str(payload.get("issuer_fingerprint", ""))
     if not issuer:
         raise ValueError("remote attestation issuer is required")
-    issued_at = str(payload.get("issued_at", ""))
-    issued = _parse_time(issued_at, "issued_at")
+    issued = _parse_time(str(payload.get("issued_at", "")), "issued_at")
+    # Stored in this module's sortable format, never as the issuer wrote it:
+    # these columns are compared as strings against `now_value`, and a peer's
+    # `+00:00` spelling sorts before a `Z` one at the same instant. The signed
+    # bytes are untouched -- they live in `envelope_json`.
+    issued_at = _stamp(issued)
     if issued > now + _FUTURE_TOLERANCE:
         raise ValueError("remote attestation is too far in the future")
     signature_b64 = str(wire["signature"])
@@ -399,8 +419,8 @@ def ingest_remote_attestation(
     subject = _subject_from_payload(payload["subject"])
     attribute = _validate_attribute(str(payload["attribute"]))
     value = _validate_value(attribute, str(payload["attested_value"]))
-    expires_at = str(payload["expires_at"])
-    expires = _parse_time(expires_at, "expires_at")
+    expires = _parse_time(str(payload["expires_at"]), "expires_at")
+    expires_at = _stamp(expires)
     if expires <= issued or expires > issued + _MAX_LIFETIME:
         raise ValueError("remote attestation lifetime must be positive and at most 365 days")
     with db.connection:
@@ -531,6 +551,21 @@ def get_remote_attestation_state(
 ) -> RemoteAttestationState:
     attribute = _validate_attribute(attribute)
     now_value, _ = _now(now_iso)
+    if db.connection.execute(
+        "SELECT 1 FROM link_trust_subjects WHERE subject_id = ?", (subject.subject_id,)
+    ).fetchone() is None:
+        # An identity this node has never accepted anything from.  Answered
+        # rather than recomputed: `link_remote_attestation_effective` has a
+        # foreign key to `link_trust_subjects`, so persisting a projection for
+        # an unregistered subject fails outright -- and an unknown identity has
+        # no accepted attestation anyway, which is the same answer without the
+        # write.  This is reachable from every gate (`remote_meets_age`,
+        # `remote_meets_name_requirement`, `format_remote_name_for_resource`),
+        # which before issue #584 had no production caller to reach it.
+        return RemoteAttestationState(
+            subject, attribute, False, "unknown_link_identity", None,
+            {"rejected_issuers": []}, now_value,
+        )
     with db.connection:
         _recompute(db, subject, attribute, now_value)
     row = db.connection.execute(
@@ -711,4 +746,515 @@ def _audit(
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (subject_id, object_kind, object_id, action,
          json.dumps(details, sort_keys=True, separators=(",", ":")), actor_user_id, now_value),
+    )
+
+
+# -- the issuing half (issue #584) -------------------------------------------
+#
+# Everything above this line is the *receiving* half: verify a peer's signed
+# object, store it, and project a local acceptance decision.  Until issue #584
+# that was all there was, so `link_remote_attestations` was empty on every node
+# in production and the Profile screen's "Share verified age/name over Link"
+# toggle recorded a consent nothing ever acted on.
+#
+# The issuing half below closes that loop.  A node signs its own users'
+# Link-visible attestations, retires them with signed revocations when consent
+# or the attested value changes, and serves both to the subscribers that have
+# configured it as an attestation authority.
+
+ATTESTATION_PULL_REQUEST_OBJECT_TYPE = "remote_attestation_pull_request"
+
+MAX_ATTESTATION_OBJECTS_PER_RESPONSE = 100
+MAX_ATTESTATION_RESPONSE_BYTES = 1024 * 1024
+
+# Well inside the 365-day protocol ceiling `build_remote_attestation` enforces.
+# The ceiling is what a receiver must tolerate; this is what this node chooses
+# to assert.  A node that goes dark cannot withdraw consent it has already
+# published, so the shorter the issued lifetime, the shorter the window in
+# which an opt-out that never reached a subscriber still leaves a live
+# assertion standing there.  Ninety days keeps that window to a quarter while
+# renewing rarely enough that an ordinary sync interval never notices.
+ISSUED_ATTESTATION_LIFETIME = timedelta(days=90)
+
+# Re-issue once a third of the lifetime remains, so an intermittently connected
+# subscriber has many sync passes in which to see the replacement before the
+# one it holds expires.  The old object is left to expire rather than revoked:
+# `_recompute` selects the newest unexpired candidate, so an overlap is a
+# seamless handover, and a revocation would only tell a subscriber to stop
+# trusting a value this node is simultaneously re-asserting.
+ISSUED_ATTESTATION_RENEW_WITHIN = timedelta(days=30)
+
+
+@dataclass(frozen=True)
+class IssuedAttestationChange:
+    """One signing action `reconcile_issued_attestations` took."""
+
+    action: str  # "issued" | "renewed" | "revoked"
+    content_id: str
+    user_id: int | None
+    attribute: str
+    reason: str
+
+
+def list_attestation_authority_fingerprints(db: Database) -> list[str]:
+    """This node's explicit attestation subscription set, in stable order.
+
+    The attestation analogue of `trust_wire.list_trusted_reporter_fingerprints`,
+    and deliberately a separate set: design doc §5.5 and §12.3 both state that
+    reporter or vouch configuration grants no attestation authority.
+    """
+    return [
+        row[0]
+        for row in db.connection.execute(
+            "SELECT fingerprint FROM link_attestation_authorities ORDER BY fingerprint"
+        ).fetchall()
+    ]
+
+
+def _issued_active_row(db: Database, user_id: int, attribute: str, now_value: str):
+    return db.connection.execute(
+        """SELECT content_id, attested_value, expires_at FROM link_issued_remote_attestations
+           WHERE object_type = ? AND user_id = ? AND attribute = ?
+             AND revoked_at IS NULL AND expires_at > ?
+           ORDER BY issued_at DESC, content_id DESC LIMIT 1""",
+        (REMOTE_ATTESTATION_OBJECT_TYPE, user_id, attribute, now_value),
+    ).fetchone()
+
+
+def _store_issued(
+    db: Database,
+    wire: dict[str, object],
+    *,
+    object_type: str,
+    user_id: int | None,
+    attribute: str | None,
+    attested_value: str | None,
+    issued_at: str,
+    expires_at: str | None,
+    now_value: str,
+) -> str:
+    envelope = wire["envelope"]
+    content_id = hashlib.sha256(canonical_bytes(envelope)).hexdigest()
+    db.connection.execute(
+        """INSERT OR IGNORE INTO link_issued_remote_attestations
+           (content_id, object_type, user_id, attribute, attested_value, envelope_json,
+            signature_b64, issued_at, expires_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (content_id, object_type, user_id, attribute, attested_value,
+         json.dumps(envelope, sort_keys=True), str(wire["signature"]),
+         issued_at, expires_at, now_value),
+    )
+    return content_id
+
+
+def _revoke_issued(
+    db: Database,
+    signing_identity: Identity,
+    row,
+    *,
+    home_node_fingerprint: str,
+    now_value: str,
+) -> str:
+    wire = build_remote_attestation_revocation(
+        signing_identity.signing_key,
+        issuer_fingerprint=home_node_fingerprint,
+        revoked_content_id=row["content_id"],
+        issued_at=now_value,
+    )
+    content_id = _store_issued(
+        db, wire,
+        object_type=REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE,
+        user_id=None, attribute=None, attested_value=None,
+        issued_at=now_value, expires_at=None, now_value=now_value,
+    )
+    db.connection.execute(
+        """UPDATE link_issued_remote_attestations
+           SET revoked_by_content_id = ?, revoked_at = ?
+           WHERE content_id = ? AND revoked_at IS NULL""",
+        (content_id, now_value, row["content_id"]),
+    )
+    return content_id
+
+
+def reconcile_issued_attestations(
+    db: Database,
+    signing_identity: Identity,
+    *,
+    home_node_fingerprint: str,
+    now_iso: str | None = None,
+) -> list[IssuedAttestationChange]:
+    """Bring this node's signed attestation objects in line with local consent.
+
+    Called once per sync pass rather than from the Profile screen, because
+    signing needs the node's current operational key and a caller session has
+    no business holding it.  The lag is one sync interval in either direction,
+    which is already the granularity at which anything reaches a subscriber.
+
+    Mints an object for every Link-visible attestation that has none, renews
+    one approaching expiry, and signs a revocation whenever the consent behind
+    a live object has gone: the toggle switched off, the attestation removed,
+    the value re-verified (which clears `link_visible` anyway), or the account
+    deleted.  A deleted account is why the `user_id` column is `SET NULL`
+    rather than `CASCADE` -- the signed row has to outlive the account long
+    enough to be revoked, or subscribers would hold a live assertion about a
+    user who no longer exists until it expired on its own.
+    """
+    now_value, now = _now(now_iso)
+    changes: list[IssuedAttestationChange] = []
+    with db.connection:
+        consented = {
+            (int(row["subject_user_id"]), str(row["attribute"])): str(row["attested_value"])
+            for row in db.connection.execute(
+                """SELECT subject_user_id, attribute, attested_value FROM user_attestations
+                   WHERE link_visible = 1"""
+            ).fetchall()
+        }
+        live = db.connection.execute(
+            """SELECT content_id, user_id, attribute, attested_value, expires_at
+               FROM link_issued_remote_attestations
+               WHERE object_type = ? AND revoked_at IS NULL AND expires_at > ?""",
+            (REMOTE_ATTESTATION_OBJECT_TYPE, now_value),
+        ).fetchall()
+        for row in live:
+            user_id = row["user_id"]
+            key = (int(user_id), str(row["attribute"])) if user_id is not None else None
+            if user_id is None:
+                reason = "account_removed"
+            elif key not in consented:
+                reason = "consent_withdrawn"
+            elif consented[key] != row["attested_value"]:
+                reason = "attested_value_replaced"
+            else:
+                continue
+            content_id = _revoke_issued(
+                db, signing_identity, row,
+                home_node_fingerprint=home_node_fingerprint, now_value=now_value,
+            )
+            changes.append(IssuedAttestationChange(
+                "revoked", content_id, user_id, str(row["attribute"]), reason,
+            ))
+
+        expires_at = _stamp(now + ISSUED_ATTESTATION_LIFETIME)
+        renew_before = _stamp(now + ISSUED_ATTESTATION_RENEW_WITHIN)
+        for (user_id, attribute), attested_value in sorted(consented.items()):
+            active = _issued_active_row(db, user_id, attribute, now_value)
+            if active is not None and active["attested_value"] == attested_value:
+                if active["expires_at"] > renew_before:
+                    continue
+                action, reason = "renewed", "approaching_expiry"
+            else:
+                action, reason = "issued", "consent_granted"
+            user = get_user_by_id(db, user_id)
+            if user is None:
+                # The account vanished between the two queries above; the
+                # revocation sweep on the next pass owns it.
+                continue
+            try:
+                wire = build_link_visible_remote_attestation(
+                    db, user, signing_identity.signing_key,
+                    home_node_fingerprint=home_node_fingerprint,
+                    attribute=attribute,
+                    issued_at=now_value,
+                    expires_at=expires_at,
+                )
+            except ValueError:
+                # Consent or the value moved under us between the read above
+                # and here; the next pass reconciles against what is now true.
+                continue
+            content_id = _store_issued(
+                db, wire,
+                object_type=REMOTE_ATTESTATION_OBJECT_TYPE,
+                user_id=user_id, attribute=attribute, attested_value=attested_value,
+                issued_at=now_value, expires_at=expires_at, now_value=now_value,
+            )
+            changes.append(IssuedAttestationChange(action, content_id, user_id, attribute, reason))
+    return changes
+
+
+@dataclass(frozen=True)
+class IssuedAttestation:
+    """One object this node has signed about one of its own users.
+
+    Deliberately carries no `attested_value`. The SysOp's question here is
+    *what is my node asserting about whom, and until when* -- the value itself
+    is a verified birthdate or real name they already hold, and design doc
+    §5.5 keeps a verified name off screens that do not require it. A listing
+    of everything the node publishes is exactly such a screen.
+    """
+
+    content_id: str
+    user_id: int | None
+    username: str | None
+    attribute: str
+    issued_at: str
+    expires_at: str
+    revoked_at: str | None
+    status: str  # "published" | "withdrawing" | "expired" | "revoked"
+
+    @property
+    def is_live(self) -> bool:
+        """Whether a subscriber that pulled today would act on this."""
+        return self.status in {"published", "withdrawing"}
+
+
+def list_issued_attestations(
+    db: Database,
+    *,
+    include_inactive: bool = False,
+    limit: int = 500,
+    now_iso: str | None = None,
+) -> list[IssuedAttestation]:
+    """What this node currently publishes about its own users.
+
+    The operator view of the issuing half. Without it a SysOp can see every
+    attestation the node has *accepted* (`list_remote_attestation_overrides`,
+    `list_remote_attestation_audit`) and nothing it *asserts*, which is the
+    half that leaves their node.
+
+    `status` is derived from the same predicate `reconcile_issued_attestations`
+    revokes on, so the screen cannot claim a different answer from the pass
+    that acts on it: a live object whose consent has gone -- toggle off,
+    attestation removed, value re-verified, account deleted -- reads as
+    `withdrawing`, and the next pass signs its revocation.
+    """
+    now_value, _ = _now(now_iso)
+    rows = db.connection.execute(
+        """SELECT i.content_id, i.user_id, u.username, i.attribute, i.attested_value,
+                  i.issued_at, i.expires_at, i.revoked_at,
+                  a.link_visible AS consented, a.attested_value AS consented_value
+           FROM link_issued_remote_attestations AS i
+           LEFT JOIN users AS u ON u.id = i.user_id
+           LEFT JOIN user_attestations AS a
+                  ON a.subject_user_id = i.user_id AND a.attribute = i.attribute
+           WHERE i.object_type = ?
+           ORDER BY i.created_at DESC, i.content_id DESC
+           LIMIT ?""",
+        (REMOTE_ATTESTATION_OBJECT_TYPE, max(1, limit)),
+    ).fetchall()
+    result: list[IssuedAttestation] = []
+    for row in rows:
+        if row["revoked_at"] is not None:
+            status = "revoked"
+        elif row["expires_at"] <= now_value:
+            status = "expired"
+        elif not row["consented"] or row["consented_value"] != row["attested_value"]:
+            status = "withdrawing"
+        else:
+            status = "published"
+        record = IssuedAttestation(
+            row["content_id"], row["user_id"], row["username"], row["attribute"],
+            row["issued_at"], row["expires_at"], row["revoked_at"], status,
+        )
+        if include_inactive or record.is_live:
+            result.append(record)
+    return result
+
+
+def load_issued_attestation_page(
+    db: Database,
+    *,
+    after_content_id: str | None = None,
+    limit: int = MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
+) -> tuple[list[dict[str, object]], bool]:
+    """Return one stable, byte-bounded page of this node's signed objects.
+
+    Ordered by `(created_at, content_id)` and served whole -- expired and
+    revoked objects included.  A subscriber that has been away needs the
+    revocation that retired an object it still holds, and an expired object
+    costs it nothing: `_recompute` already ignores both.  Dropping them here
+    would instead make the stream depend on *when* it is read, and a cursor
+    into a stream like that skips objects rather than resuming.
+    """
+    limit = max(1, min(limit, MAX_ATTESTATION_OBJECTS_PER_RESPONSE))
+    after_created = ""
+    if after_content_id:
+        row = db.connection.execute(
+            "SELECT created_at FROM link_issued_remote_attestations WHERE content_id = ?",
+            (after_content_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("unknown attestation pull cursor")
+        after_created = row[0]
+    rows = db.connection.execute(
+        """SELECT content_id, envelope_json, signature_b64
+           FROM link_issued_remote_attestations
+           WHERE (? IS NULL OR created_at > ? OR (created_at = ? AND content_id > ?))
+           ORDER BY created_at, content_id LIMIT ?""",
+        (after_content_id, after_created, after_created, after_content_id, limit + 1),
+    ).fetchall()
+    more = len(rows) > limit
+    result: list[dict[str, object]] = []
+    total = 2
+    for _, envelope_json, signature_b64 in rows[:limit]:
+        item = {"envelope": json.loads(envelope_json), "signature": signature_b64}
+        item_size = len(json.dumps(item, separators=(",", ":")).encode("utf-8")) + 1
+        if result and total + item_size > MAX_ATTESTATION_RESPONSE_BYTES:
+            more = True
+            break
+        if item_size > MAX_ATTESTATION_RESPONSE_BYTES:
+            raise ValueError("stored attestation object exceeds the response byte limit")
+        result.append(item)
+        total += item_size
+    return result, more
+
+
+def load_attestation_pull_cursor(
+    db: Database, responder_fingerprint: str, issuer_fingerprint: str
+) -> str | None:
+    row = db.connection.execute(
+        """SELECT after_content_id FROM link_attestation_pull_cursors
+           WHERE responder_fingerprint = ? AND issuer_fingerprint = ?""",
+        (responder_fingerprint, issuer_fingerprint),
+    ).fetchone()
+    return row[0] if row is not None else None
+
+
+def save_attestation_pull_cursor(
+    db: Database,
+    responder_fingerprint: str,
+    issuer_fingerprint: str,
+    after_content_id: str,
+    *,
+    now_iso: str | None = None,
+) -> None:
+    now_value, _ = _now(now_iso)
+    with db.connection:
+        db.connection.execute(
+            """INSERT INTO link_attestation_pull_cursors
+               (responder_fingerprint, issuer_fingerprint, after_content_id, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(responder_fingerprint, issuer_fingerprint) DO UPDATE SET
+                 after_content_id = excluded.after_content_id,
+                 updated_at = excluded.updated_at""",
+            (responder_fingerprint, issuer_fingerprint, after_content_id, now_value),
+        )
+
+
+@dataclass(frozen=True)
+class AttestationPullRequest:
+    """One authenticated request for a page of an issuer's own attestations.
+
+    Deliberately its own signed object type rather than a reuse of
+    `trust_wire.TrustPullRequest`.  The two carry the same fields, but the
+    object type is inside the signature, so a request a peer signed for one
+    subscription cannot be re-aimed at the other: without that, a carrier
+    holding a signed trust pull could spend its one-shot nonce against the
+    attestation endpoint and make the trust pull fail as a replay.
+
+    `issuer_fingerprint` must be the responder itself.  A node serves only
+    objects it signed: unlike a trust signal, which any carrier may re-serve
+    unchanged (design doc §12.7), an attestation is a statement about the
+    issuer's *own* users, so there is no third party whose copy is worth
+    asking for.
+    """
+
+    requester_fingerprint: str
+    responder_fingerprint: str
+    issuer_fingerprint: str
+    after_content_id: str | None
+    limit: int
+    created_at: str
+    nonce: str
+    signature: bytes
+
+    @property
+    def payload(self) -> dict[str, object]:
+        return {
+            "requester_fingerprint": self.requester_fingerprint,
+            "responder_fingerprint": self.responder_fingerprint,
+            "issuer_fingerprint": self.issuer_fingerprint,
+            "after_content_id": self.after_content_id,
+            "limit": self.limit,
+            "created_at": self.created_at,
+            "nonce": self.nonce,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        return {**self.payload, "signature": base64.b64encode(self.signature).decode("ascii")}
+
+    @classmethod
+    def from_dict(cls, data: object) -> "AttestationPullRequest":
+        keys = {
+            "requester_fingerprint", "responder_fingerprint", "issuer_fingerprint",
+            "after_content_id", "limit", "created_at", "nonce", "signature",
+        }
+        if not isinstance(data, dict) or set(data) != keys:
+            raise ValueError("invalid attestation pull request fields")
+        try:
+            signature = base64.b64decode(str(data["signature"]), validate=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid attestation pull signature encoding") from exc
+        request = cls(signature=signature, **{key: data[key] for key in keys - {"signature"}})
+        if any(not isinstance(value, str) or not value for value in (
+            request.requester_fingerprint, request.responder_fingerprint,
+            request.issuer_fingerprint, request.created_at, request.nonce,
+        )):
+            raise ValueError(
+                "attestation pull fingerprints, timestamp, and nonce must be non-empty strings"
+            )
+        if request.after_content_id is not None and (
+            not isinstance(request.after_content_id, str) or len(request.after_content_id) != 64
+        ):
+            raise ValueError("invalid attestation pull cursor")
+        if (
+            not isinstance(request.limit, int)
+            or isinstance(request.limit, bool)
+            or not 1 <= request.limit <= MAX_ATTESTATION_OBJECTS_PER_RESPONSE
+        ):
+            raise ValueError("attestation pull limit must be between 1 and 100")
+        _parse_time(request.created_at, "created_at")
+        if len(request.nonce) != 32:
+            raise ValueError("attestation pull nonce must contain 128 bits of hexadecimal data")
+        try:
+            bytes.fromhex(request.nonce)
+        except ValueError as exc:
+            raise ValueError("attestation pull nonce is not hexadecimal") from exc
+        return request
+
+    def verifies(self, verify_key: nacl.signing.VerifyKey) -> bool:
+        envelope = {
+            "netbbs_protocol": 1,
+            "object_type": ATTESTATION_PULL_REQUEST_OBJECT_TYPE,
+            "payload": self.payload,
+        }
+        try:
+            verify_key.verify(canonical_bytes(envelope), self.signature)
+        except (nacl.exceptions.BadSignatureError, ValueError):
+            return False
+        return True
+
+
+def build_attestation_pull_request(
+    *,
+    signing_identity: Identity,
+    requester_fingerprint: str,
+    responder_fingerprint: str,
+    issuer_fingerprint: str,
+    after_content_id: str | None = None,
+    limit: int = MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
+    created_at: str | None = None,
+    nonce: str | None = None,
+) -> AttestationPullRequest:
+    unsigned = AttestationPullRequest(
+        requester_fingerprint=requester_fingerprint,
+        responder_fingerprint=responder_fingerprint,
+        issuer_fingerprint=issuer_fingerprint,
+        after_content_id=after_content_id,
+        limit=limit,
+        created_at=created_at or utc_now_iso(),
+        nonce=nonce or secrets.token_hex(16),
+        signature=b"",
+    )
+    # Run the receiving side's own structural validation before signing, so a
+    # malformed request is this node's error rather than the responder's.
+    AttestationPullRequest.from_dict(
+        {**unsigned.to_dict(), "signature": base64.b64encode(b"x").decode()}
+    )
+    envelope = {
+        "netbbs_protocol": 1,
+        "object_type": ATTESTATION_PULL_REQUEST_OBJECT_TYPE,
+        "payload": unsigned.payload,
+    }
+    return AttestationPullRequest(
+        **unsigned.payload, signature=signing_identity.sign(canonical_bytes(envelope))
     )
