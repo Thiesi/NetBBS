@@ -3455,6 +3455,71 @@ isolation. Any future call site that constructs its own
 easy to add a new session and forget this, since everything works
 identically in every environment except one with no direct egress.
 
+### Remote identity attestation: the issuing half, and what it exposed (issue #584)
+
+`LinkNode.identity.signing_key` is an `Identity`, not a
+`nacl.signing.SigningKey` -- `NodeIdentity.signing_key` holds the node's
+*current operational* signing identity, which is what §12.6 requires every
+signed object to be signed by. A new function typed as taking a raw nacl key
+therefore reads as correct at every call site and fails at the first `.sign()`,
+because `Identity.sign()` returns detached bytes while
+`SigningKey.sign()` returns a `SignedMessage`. Take an `Identity`, the way
+`trust_wire.build_trust_pull_request` already does, and reach through to
+`.signing_key` only for the builders whose published signature is a nacl key.
+
+`link_remote_attestation_effective` has a foreign key to
+`link_trust_subjects`, so recomputing a projection for a subject this node has
+never registered raises `sqlite3.IntegrityError` rather than returning "not
+accepted". Every remote gate reaches that recompute
+(`remote_meets_age`, `remote_meets_name_requirement`,
+`format_remote_name_for_resource`), and the overwhelmingly common input to all
+three is an author with no attestation at all, so
+`get_remote_attestation_state` answers an unregistered subject directly with
+`unknown_link_identity` and writes nothing. Nothing hit this while the three
+gates had no production caller, which is the second-order cost of an unwired
+subsystem: its error paths are unexercised too, not merely unused.
+
+The attestation pull is a *separate signed object type* from the trust pull
+(`remote_attestation_pull_request`), not the same request on a second URL. The
+object type is inside the signature, and each request type has its own bounded
+nonce cache; sharing one request type across two endpoints would let a holder
+of a signed trust pull spend its one-shot nonce against the attestation
+endpoint and make the trust pull fail as a replay. Two endpoints serving
+different object families need two signed request types.
+
+An issuer's served stream includes expired and revoked objects. A subscriber
+returning after an absence needs the revocation that retired an object it still
+holds, and filtering by current validity would make the stream depend on *when*
+it is read -- a cursor into a stream like that skips objects instead of resuming
+from them. Filtering belongs at the receiver's projection
+(`_recompute` already ignores both), never in the page.
+
+`link_issued_remote_attestations.user_id` is `ON DELETE SET NULL`, not
+`CASCADE`. A signed object has to outlive the account it is about long enough
+to be revoked; cascading it away leaves every subscriber holding a live
+assertion about a deleted user until it expires on its own. The reconcile
+treats an active row with a null `user_id` as "revoke".
+
+A timestamp this module *derives* must go through the same format
+`utc_now_iso()` writes -- fixed six decimals and a `Z` suffix -- because every
+liveness query is a string comparison against a stored `now`, and
+`datetime.isoformat()` writes `+00:00` and a variable number of decimals
+instead. `"...+00:00" < "...Z"` at the same instant, so an `expires_at` written
+with `isoformat()` reads as already expired and the reconcile re-mints on every
+pass. `_now()` therefore normalizes whatever the caller passed, and a received
+object's `issued_at`/`expires_at` *columns* are normalized on the way in too --
+a peer may legitimately spell them either way, and the signed bytes it spelled
+them in stay untouched in `envelope_json`.
+
+Issued lifetime (90 days) is deliberately far below the protocol ceiling (365).
+The ceiling is what a receiver must tolerate; the issued lifetime is the window
+in which an opt-out that never reached a subscriber still leaves a live
+assertion standing, because a node that has gone dark cannot withdraw consent
+it already published. Renewal overlaps the object it replaces rather than
+revoking it: the receiver selects the newest unexpired record, so a revocation
+would only tell a subscriber to distrust a value being re-asserted in the same
+breath.
+
 ---
 
 ## 10. Operational constraints

@@ -45,6 +45,8 @@ from netbbs.communities import (
     get_effective_name_requirement,
 )
 from netbbs.link.node_profiles import present_link_author_label
+from netbbs.link.remote_attestation import format_remote_name_for_resource
+from netbbs.link.trust import TrustSubject
 from netbbs.link.boards import (
     LinkContext,
     queue_board_post_edit_if_linked,
@@ -971,7 +973,32 @@ def _author_display_name(db: Database, post: Post, *, name_requirement: str | No
         author = get_user_by_id(db, post.author_user_id)
         if author is not None:
             return format_name_for_resource(db, author, name_requirement=name_requirement)
+        # A Link-carried post has no local account, so the attested name has
+        # to come from the attestation its home node signed and this node
+        # accepted (design doc §5.5, issue #584). Same `(=...=)` unit, same
+        # resource scoping -- the value appears only inside a board that
+        # requires it, never on an unrelated screen.
+        subject = _remote_author_subject(post.author_label)
+        if subject is not None:
+            return format_remote_name_for_resource(
+                db, subject,
+                sanitize_text(present_link_author_label(db, post.author_label)),
+                name_requirement=name_requirement,
+            )
     return sanitize_text(present_link_author_label(db, post.author_label))
+
+
+def _remote_author_subject(author_label: str) -> TrustSubject | None:
+    """The Link identity behind a carried post's `user@fingerprint` label.
+
+    `None` for a local label, which has no `@` -- and for a malformed one,
+    since a label this node cannot resolve to a stable Link identity is
+    exactly a label whose attested name it must not go looking for.
+    """
+    local_user_id, separator, home = author_label.rpartition("@")
+    if not separator or not local_user_id or not home:
+        return None
+    return TrustSubject.user(home, local_user_id)
 
 
 def _render_quoted_body(body: str, width: int) -> str:

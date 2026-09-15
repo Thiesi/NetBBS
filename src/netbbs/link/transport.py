@@ -180,6 +180,12 @@ from netbbs.link.store import (
     save_peer,
     save_relay_consent,
 )
+from netbbs.link.remote_attestation import (
+    MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
+    MAX_ATTESTATION_RESPONSE_BYTES,
+    AttestationPullRequest,
+    load_issued_attestation_page,
+)
 from netbbs.link.trust_wire import (
     MAX_EMBEDDED_EVIDENCE_BYTES,
     TrustPullRequest,
@@ -1652,6 +1658,9 @@ class LinkServer:
         app.router.add_post(f"{LINK_PATH_PREFIX}/relay-mailbox/pickup", self._handle_relay_mailbox_pickup)
         app.router.add_post(f"{LINK_PATH_PREFIX}/inventory/{{fingerprint}}", self._handle_inventory)
         app.router.add_post(f"{LINK_PATH_PREFIX}/trust-pull/{{fingerprint}}", self._handle_trust_pull)
+        app.router.add_post(
+            f"{LINK_PATH_PREFIX}/attestation-pull/{{fingerprint}}", self._handle_attestation_pull
+        )
         app.router.add_post(f"{LINK_PATH_PREFIX}/file-chunk/{{fingerprint}}", self._handle_file_chunk_request)
 
         self._runner = web.AppRunner(app)
@@ -1881,6 +1890,34 @@ class LinkServer:
             )
         except (KeyError, TypeError, ValueError, TrustWireError) as exc:
             return web.json_response({"error": f"malformed trust pull: {exc}"}, status=400)
+        except LinkProtocolError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        return web.json_response({"objects": objects, "more_available": more})
+
+    async def _handle_attestation_pull(self, request: web.Request) -> web.Response:
+        """Serve one authenticated page of this node's own signed attestations.
+
+        The issuing half of design doc §5.5 (issue #584).  Shares the trust
+        pull's shape -- signed request, completed peer, five-minute freshness,
+        bounded nonce cache, `LinkPolicyAction.TRUST` gate -- because the two
+        expose the same class of thing: bounded, already-signed objects a
+        subscriber has explicitly configured this node to supply.
+        """
+        fingerprint = request.match_info["fingerprint"]
+        try:
+            body = await request.json(loads=strict_json_loads)
+            pull = AttestationPullRequest.from_dict(body)
+            self._node.handle_attestation_pull_request(fingerprint, pull)
+            decision = await self._decide(fingerprint, LinkPolicyAction.TRUST)
+            if decision is not None and not decision.allowed:
+                return self._policy_rejection(decision)
+            objects, more = await self._lane.run(
+                load_issued_attestation_page,
+                after_content_id=pull.after_content_id,
+                limit=pull.limit,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            return web.json_response({"error": f"malformed attestation pull: {exc}"}, status=400)
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=403)
         return web.json_response({"objects": objects, "more_available": more})
@@ -2380,6 +2417,55 @@ async def request_trust_objects(
         return objects, bool(body["more_available"])
     except (KeyError, TypeError) as exc:
         raise LinkTransportError(f"malformed trust pull response from {url}: {exc}") from exc
+
+
+async def request_remote_attestations(
+    node: LinkNode,
+    session: ClientSession,
+    base_url: str,
+    pull_request: AttestationPullRequest,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[list[dict], bool]:
+    """Pull one bounded page of an issuer's own signed identity attestations."""
+    url = f"{base_url}{LINK_PATH_PREFIX}/attestation-pull/{node.identity.fingerprint}"
+    try:
+        async with session.post(
+            url, json=pull_request.to_dict(), timeout=ClientTimeout(total=timeout)
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise LinkTransportError(
+                    f"attestation pull from {url} failed: HTTP {response.status}: {text}"
+                )
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, TimeoutError, ValueError) as exc:
+        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
+    try:
+        objects = body["objects"]
+        if not isinstance(objects, list):
+            raise TypeError("objects is not a list")
+    except (KeyError, TypeError) as exc:
+        raise LinkTransportError(
+            f"malformed attestation pull response from {url}: {exc}"
+        ) from exc
+    # Ingress bounds on what a responder actually sent, not on what this node
+    # asked for (design doc §12.7: "over-limit input is rejected or deferred
+    # visibly, never converted into evidence"). The trust pull gets these from
+    # `ingest_trust_objects`, which bounds a whole batch before admitting any
+    # of it; attestations are ingested one object at a time, so the page-level
+    # bound has to live here or nothing applies it at all.
+    if len(objects) > MAX_ATTESTATION_OBJECTS_PER_RESPONSE:
+        raise LinkTransportError(
+            f"attestation pull response from {url} exceeds "
+            f"{MAX_ATTESTATION_OBJECTS_PER_RESPONSE} objects"
+        )
+    encoded = len(json.dumps(objects, separators=(",", ":")).encode("utf-8"))
+    if encoded > MAX_ATTESTATION_RESPONSE_BYTES:
+        raise LinkTransportError(
+            f"attestation pull response from {url} exceeds the 1 MiB response limit"
+        )
+    return objects, bool(body["more_available"])
 
 
 async def fetch_trust_evidence(
