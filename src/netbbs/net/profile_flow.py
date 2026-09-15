@@ -1728,9 +1728,11 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
                 "Whether your SysOp-verified age is shared over NetBBS Link, so a remote "
                 "board with an age gate can let you in. Off by default -- this "
                 "node's own verification of you isn't shared elsewhere unless you opt in, "
-                "and a fresh verification switches it off again. It reaches only those "
-                "nodes whose own SysOp has chosen to accept this node's verifications; "
-                "switching it back off withdraws it from them."
+                "and a fresh verification switches it off again. While it is on, your "
+                "verified date of birth can be read by any node this one has linked with "
+                "that your SysOp's trust policy admits -- not only the nodes that chose to "
+                "accept this node's verifications. Switching it back off withdraws it "
+                "from them."
             ),
             section="SysOp-verified",
         ),
@@ -1744,9 +1746,11 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
                 "Whether your SysOp-verified real name is shared over NetBBS Link, so a "
                 "remote board that requires a verified name can let you in. Off "
                 "by default -- this node's own verification of you isn't shared elsewhere "
-                "unless you opt in, and a fresh verification switches it off again. It "
-                "reaches only those nodes whose own SysOp has chosen to accept this node's "
-                "verifications; switching it back off withdraws it from them."
+                "unless you opt in, and a fresh verification switches it off again. While "
+                "it is on, your verified real name can be read by any node this one has "
+                "linked with that your SysOp's trust policy admits -- not only the nodes "
+                "that chose to accept this node's verifications. Switching it back off "
+                "withdraws it from them."
             ),
             section="SysOp-verified",
         ),

@@ -80,21 +80,26 @@ said the value reaches "a remote node's trust/vouch policy", which §5.5
 explicitly denies. It was rewritten to say what happens, including that
 switching the toggle off withdraws the value from the nodes that have it.
 
-**That rewritten text is still not accurate, and you should know before
-you let a caller act on it.** It tells the caller their verified value
-"reaches only those nodes whose own SysOp has chosen to accept this
-node's verifications." The issuer does not enforce that: the pull
-endpoint checks that the requester is an established peer allowed by
-local trust policy, and then serves every attestation this node has
-signed. The receiver's list of accepted authorities is the *receiver's*
-local state; the issuer never sees it. So any node you have federated
+**That rewrite then had to be corrected again, and the second correction
+is the one worth reading.** As #590 merged it, the text told the caller
+their value "reaches only those nodes whose own SysOp has chosen to
+accept this node's verifications." The issuer does not enforce that. The
+pull endpoint checks that the requester is an established peer allowed by
+local trust policy and then serves every attestation this node has
+signed; the receiver's list of accepted authorities is the *receiver's*
+local state, which the issuer never sees. So any node you have federated
 with, and your policy admits, can read the birthdate or real name behind
-an opted-in attestation. That is narrower than the open internet and
-wider than what the caller was told — and the caller is not the person
-who decides who this node peers with. Filed as **#596**, with the
-issuer-side disclosure scope to be decided there. Until it is settled,
-treat the Link-share toggles as sharing with your federation, not with a
-subset of it.
+an opted-in attestation — narrower than the open internet, wider than
+what the caller was told, and the caller is not the person who decides
+who this node peers with.
+
+Both toggles now say that plainly: the value "can be read by any node
+this one has linked with that your SysOp's trust policy admits — not only
+the nodes that chose to accept this node's verifications." Some callers
+will decline on reading it, which is the correct outcome of telling them
+the truth. Adding issuer-side disclosure scope, so the original narrower
+promise could be made true, is **#596** and is a design decision rather
+than a patch.
 
 **#584 is not closed.** Two of its three pieces landed here; trust-object
 issuance is filed as #589 and needs a decision before it needs code, and
@@ -312,12 +317,14 @@ What this release does **not** establish:
   `[managed_dns] service_url`. A guard test has to be flipped in the same
   commit that flips the constant, and `services/managed_dns/README.md`
   carries the step.
-- **The attestation consent text promises a disclosure scope the issuer
-  does not enforce (#596).** Any established peer your trust policy
-  admits can pull every attestation this node has signed, values
-  included; the receiver's accepted-authority list is not visible to the
-  issuer and is not consulted. The caller-facing text says otherwise.
-  Whether to add issuer-side scope or correct the text is undecided.
+- **The issuer does not scope attestation disclosure (#596).** Any
+  established peer your trust policy admits can pull every attestation
+  this node has signed, values included; the receiver's
+  accepted-authority list is not visible to the issuer and is not
+  consulted. The consent text now says so rather than promising
+  otherwise, but saying so is not enforcing it — a SysOp who wants the
+  narrower behaviour does not have it, and #596 is where that gets
+  decided.
 - **Remote attestation has not been exercised between two live nodes.**
   Its validation is the new `tests/test_link_attestation_issuance.py`,
   which deliberately never calls a builder directly — every test starts
