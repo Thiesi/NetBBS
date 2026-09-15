@@ -896,10 +896,19 @@ def _capture_door_outbound(db_path: Path, destination: Path, checksums: dict) ->
                         f"Door outbound receipts at {root} hold more than {limit} entries. "
                         "Receipts are disposable -- remove what belongs to doors this node no "
                         "longer has, then retry.")
-                if entry.is_dir() and not entry.is_symlink() and _DOOR_ID_PATTERN.fullmatch(entry.name):
-                    doors.append(Path(entry.path))
-                else:
-                    skipped += 1
+                try:
+                    if (entry.is_dir() and not entry.is_symlink()
+                            and _DOOR_ID_PATTERN.fullmatch(entry.name)):
+                        doors.append(Path(entry.path))
+                    else:
+                        skipped += 1
+                except FileNotFoundError:
+                    # `disable_outbound` releases a door's whole directory, and
+                    # a SysOp can do that between this listing and the metadata
+                    # call it needs -- a `DirEntry` stats lazily. The per-door
+                    # scan already treats that removal as harmless; failing the
+                    # whole backup here would make the two disagree.
+                    pruned += 1
     except OSError as exc:
         raise BackupError(f"Cannot read door outbound receipts at {root}: {exc}") from exc
     if len(doors) > _DOOR_OUTBOUND_MAX_DOORS:
@@ -944,6 +953,27 @@ def _capture_door_outbound(db_path: Path, destination: Path, checksums: dict) ->
             continue
         captured.append({"key": entry.name, "source_path": str(entry), "receipts": sorted(names)})
     return {"version": 1, "doors": captured, "skipped": skipped, "pruned": pruned}
+
+
+def _refuse_unlisted_entries(directory: Path, expected: set[str], what: str) -> None:
+    """`directory` holds exactly `expected`, checked while enumerating it.
+
+    An archive is operator-supplied and may be corrupt or hostile, so this
+    never materializes a listing the manifest did not describe: the first name
+    the manifest does not claim ends the scan, which bounds the work at what
+    the manifest itself declares.
+    """
+    seen = set()
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.name not in expected:
+                    raise BackupError(f"{what} do not match their coverage manifest.")
+                seen.add(entry.name)
+    except OSError as exc:
+        raise BackupError(f"Cannot read {what.lower()} at {directory}: {exc}") from exc
+    if seen != expected:
+        raise BackupError(f"{what} do not match their coverage manifest.")
 
 
 def _validate_door_outbound_component(source: Path, manifest: dict) -> None:
@@ -995,10 +1025,8 @@ def _validate_door_outbound_component(source: Path, manifest: dict) -> None:
             if f"{_DOOR_OUTBOUND_DIRNAME}/{door['key']}/{name}" not in manifest.get("checksums", {}):
                 raise BackupError("Door outbound receipt has no checksum.")
             expected_names.add(name)
-        if {path.name for path in directory.iterdir()} != expected_names:
-            raise BackupError("Door outbound receipts do not match their coverage manifest.")
-    if {path.name for path in root.iterdir()} != expected_doors:
-        raise BackupError("Door outbound directories do not match their coverage manifest.")
+        _refuse_unlisted_entries(directory, expected_names, "Door outbound receipts")
+    _refuse_unlisted_entries(root, expected_doors, "Door outbound directories")
 
 
 def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,

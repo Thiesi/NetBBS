@@ -15,10 +15,12 @@ database.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import shutil
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -442,3 +444,61 @@ def test_a_restore_refuses_targets_that_would_overwrite_each_other(tmp_path, db_
         restore_backup(source=backup, db_path=db_path, identity_dir=results_root(db_path))
 
     assert _live_receipts(db_path), "refused before the first switch"
+
+
+def test_a_hook_switched_off_during_the_root_scan_does_not_fail_the_backup(
+    tmp_path, db_path, identity_dir, monkeypatch,
+):
+    """A `DirEntry` stats lazily, so the root listing races the same call.
+
+    `disable_outbound` releases a door's whole directory; the per-door scan
+    already treats that as harmless, and the listing above it must agree or a
+    SysOp switching a hook off fails a live backup.
+    """
+    _run_a_door(db_path, tmp_path / "launch-one")
+    root = results_root(db_path)
+    real_scandir = os.scandir
+
+    class _Released:
+        name = "404"
+        path = str(root / "404")
+
+        def is_dir(self):
+            raise FileNotFoundError(2, "No such file or directory")
+
+        def is_symlink(self):
+            return False
+
+    class _WithReleased:
+        def __init__(self, scan):
+            self._scan = scan
+
+        def __enter__(self):
+            return itertools.chain(self._scan.__enter__(), [_Released()])
+
+        def __exit__(self, *exc_info):
+            return self._scan.__exit__(*exc_info)
+
+    def scandir(path):
+        scan = real_scandir(path)
+        return _WithReleased(scan) if Path(path) == root else scan
+
+    monkeypatch.setattr(backup_module.os, "scandir", scandir)
+
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+
+    assert _manifest(backup)["door_outbound"]["pruned"] == 1
+
+
+def test_an_archive_may_not_carry_a_door_directory_it_does_not_list(tmp_path, db_path, identity_dir):
+    """The other half of the unlisted-receipt refusal.
+
+    Restore switches this directory in whole, so anything the manifest does
+    not claim would land beside the node database.
+    """
+    _run_a_door(db_path, tmp_path / "launch-one")
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    (backup / "door-outbound" / "999").mkdir()
+
+    with pytest.raises(BackupError, match="Door outbound directories do not match"):
+        restore_backup(source=backup, db_path=db_path, identity_dir=identity_dir)
