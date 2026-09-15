@@ -440,19 +440,25 @@ def test_an_unbounded_directory_stops_the_scan_rather_than_the_node(
         create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
 
 
-def test_a_restore_refuses_targets_that_would_overwrite_each_other(tmp_path, db_path, identity_dir):
+@pytest.mark.parametrize("spelling", ["door-outbound", "Door-Outbound"])
+def test_a_restore_refuses_targets_that_would_overwrite_each_other(
+    tmp_path, db_path, identity_dir, spelling,
+):
     """Nothing validates `identity_dir` against the paths derived from the database.
 
     A node pointed at its own receipts root for identity would have had its
     keys switched into the rollback directory by whichever artifact is planned
-    after them, and the restore would have reported success.
+    after them, and the restore would have reported success. Spelling does not
+    save it: on a case-insensitive filesystem the second name is that same
+    directory, and `resolve()` keeps whichever spelling it was handed.
     """
     _run_a_door(db_path, tmp_path / "launch-one")
     bootstrap_node_identity("test-node").save(identity_dir)
     backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
 
     with pytest.raises(BackupError, match="Restore targets overlap"):
-        restore_backup(source=backup, db_path=db_path, identity_dir=results_root(db_path))
+        restore_backup(source=backup, db_path=db_path,
+                       identity_dir=results_root(db_path).parent / spelling)
 
     assert _live_receipts(db_path), "refused before the first switch"
 
@@ -601,3 +607,29 @@ def test_restoring_absence_clears_a_dangling_receipts_link(tmp_path, db_path, id
 
     assert not results_root(db_path).is_symlink() and not results_root(db_path).exists()
     assert (rollback / "door-outbound").is_symlink()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks")
+def test_a_rollback_puts_a_dangling_receipts_link_back(tmp_path, db_path, identity_dir, monkeypatch):
+    """The other end of the dangling-link fix.
+
+    Moving the link aside is only half of it: if a later artifact then fails,
+    the automatic rollback must put the previous generation back, and a
+    previous generation that was a dangling link is still one -- otherwise the
+    restore reports a rollback it did not complete and deletes its journal.
+    """
+    backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    results_root(db_path).symlink_to(tmp_path / "volume-that-went-away", target_is_directory=True)
+    original = backup_module._switch_one
+
+    def failing(name, staged_path, live_path, rollback_dir):
+        if "managed_dns" in name:
+            raise OSError("the switch after the receipts")
+        return original(name, staged_path, live_path, rollback_dir)
+
+    monkeypatch.setattr(backup_module, "_switch_one", failing)
+
+    with pytest.raises(BackupError, match="automatically rolled back"):
+        restore_backup(source=backup, db_path=db_path, identity_dir=identity_dir)
+
+    assert results_root(db_path).is_symlink()

@@ -1560,6 +1560,19 @@ def _restore_switch_plan(
     return plan
 
 
+def _overlap_key(path: Path) -> Path:
+    """`path` as the strictest filesystem would read it, for comparison only.
+
+    Case-folded as well as `normcase`d: `Door-Outbound` is the derived
+    receipts path on a case-insensitive filesystem, `resolve()` keeps whatever
+    spelling it was given, and neither target need exist yet when a plan is
+    built -- so nothing about the live paths can settle this. Two targets that
+    differ only in case are refused even where they could coexist, the same
+    conservative answer the database's own name already gets.
+    """
+    return Path(os.path.normcase(str(path)).casefold())
+
+
 def _refuse_overlapping_live_paths(plan: list[tuple[str, Path | None, Path]]) -> None:
     """No two artifacts may restore onto the same live path, or into each other.
 
@@ -1570,16 +1583,17 @@ def _refuse_overlapping_live_paths(plan: list[tuple[str, Path | None, Path]]) ->
     would have reported success. The artifacts are independent, so "the last
     one wins" is never the answer; refuse before the first switch instead.
     """
-    seen: list[tuple[str, Path]] = []
+    seen: list[tuple[str, Path, Path]] = []
     for name, _staged_path, live_path in plan:
         resolved = live_path.resolve()
-        for other_name, other in seen:
-            if resolved == other or resolved.is_relative_to(other) or other.is_relative_to(resolved):
+        key = _overlap_key(resolved)
+        for other_name, other_key, other in seen:
+            if key == other_key or key.is_relative_to(other_key) or other_key.is_relative_to(key):
                 raise BackupError(
                     f"Restore targets overlap: {name!r} at {resolved} and {other_name!r} at "
                     f"{other} cannot both be restored. Give the node's database, identity "
                     "directory and derived paths separate locations.")
-        seen.append((name, resolved))
+        seen.append((name, key, resolved))
 
 
 class _SwitchRollbackError(BackupError):
@@ -1655,7 +1669,9 @@ def _rollback_switched(switched: list[tuple[str, Path | None, Path]], rollback_d
         elif live_path.exists() or live_path.is_symlink():
             live_path.unlink()
         rolled_back = rollback_dir / name
-        if rolled_back.exists():
+        if rolled_back.exists() or rolled_back.is_symlink():
+            # `exists()` follows links here too, and a previous generation
+            # that was a dangling link is still the previous generation.
             rolled_back.rename(live_path)
 
 
