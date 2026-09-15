@@ -93,13 +93,28 @@ an opted-in attestation — narrower than the open internet, wider than
 what the caller was told, and the caller is not the person who decides
 who this node peers with.
 
-Both toggles now say that plainly: the value "can be read by any node
-this one has linked with that your SysOp's trust policy admits — not only
-the nodes that chose to accept this node's verifications." Some callers
-will decline on reading it, which is the correct outcome of telling them
-the truth. Adding issuer-side disclosure scope, so the original narrower
-promise could be made true, is **#596** and is a design decision rather
-than a patch.
+**And switching the toggle off does not undo it.** Revocation marks the
+signed row and mints a revocation object; it does not delete the
+original, and the served stream deliberately includes expired and revoked
+objects so a subscriber returning after an absence still receives the
+revocation for something it holds. Those historical envelopes still carry
+the value. A peer that links with your node tomorrow and pulls from the
+start therefore reads a birthdate a caller opted out of sharing last
+year. Revocation ends the *assertion*; it cannot retract the disclosure.
+
+Both toggles now say all of this plainly: the value "can be read by any
+node this one has linked with that your SysOp's trust policy admits — not
+only the nodes that chose to accept this node's verifications", and
+switching off "tells those nodes to stop relying on it, but cannot take
+the date back: it stays in this node's signed history, which any such
+node can still read. Treat opting in as a decision you cannot reverse."
+
+Some callers will decline on reading that, which is the correct outcome
+of telling them the truth. Both the disclosure scope and the
+non-retractability are **#596**, and both are design decisions rather
+than patches — the stream serves revoked objects for a real reason, so
+redacting the value out of a retired envelope is a change with its own
+consequences, not an oversight to correct.
 
 **#584 is not closed.** Two of its three pieces landed here; trust-object
 issuance is filed as #589 and needs a decision before it needs code, and
@@ -339,13 +354,17 @@ What this release does **not** establish:
   `[managed_dns] service_url`. A guard test has to be flipped in the same
   commit that flips the constant, and `services/managed_dns/README.md`
   carries the step.
-- **The issuer does not scope attestation disclosure (#596).** Any
-  established peer your trust policy admits can pull every attestation
-  this node has signed, values included; the receiver's
-  accepted-authority list is not visible to the issuer and is not
-  consulted. The consent text now says so rather than promising
-  otherwise, but saying so is not enforcing it — a SysOp who wants the
-  narrower behaviour does not have it, and #596 is where that gets
+- **The issuer does not scope attestation disclosure, and opting out
+  does not retract it (#596).** Any established peer your trust policy
+  admits can pull every attestation this node has signed, values
+  included — the receiver's accepted-authority list is not visible to
+  the issuer and is not consulted. And because the served stream
+  deliberately includes revoked and expired objects, a peer linking
+  later and pulling from the start reads values their subjects opted out
+  of sharing. The consent text now says both rather than promising
+  otherwise, but saying so is not enforcing it: a SysOp who wants the
+  narrower behaviour does not have it, and a caller who changes their
+  mind cannot actually take the value back. #596 is where both get
   decided.
 - **Remote attestation has not been exercised between two live nodes.**
   Its validation is the new `tests/test_link_attestation_issuance.py`,

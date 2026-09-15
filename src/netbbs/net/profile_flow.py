@@ -1731,8 +1731,10 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
                 "and a fresh verification switches it off again. While it is on, your "
                 "verified date of birth can be read by any node this one has linked with "
                 "that your SysOp's trust policy admits -- not only the nodes that chose to "
-                "accept this node's verifications. Switching it back off withdraws it "
-                "from them."
+                "accept this node's verifications. Switching it back off tells those nodes "
+                "to stop relying on it, but cannot take the date back: it stays in this "
+                "node's signed history, which any such node can still read. Treat opting "
+                "in as a decision you cannot reverse."
             ),
             section="SysOp-verified",
         ),
@@ -1750,7 +1752,9 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
                 "it is on, your verified real name can be read by any node this one has "
                 "linked with that your SysOp's trust policy admits -- not only the nodes "
                 "that chose to accept this node's verifications. Switching it back off "
-                "withdraws it from them."
+                "tells those nodes to stop relying on it, but cannot take the name back: "
+                "it stays in this node's signed history, which any such node can still "
+                "read. Treat opting in as a decision you cannot reverse."
             ),
             section="SysOp-verified",
         ),
