@@ -14,11 +14,19 @@ import asyncio
 import base64
 import re
 import threading
+from datetime import date
 
 import nacl.signing
 import pytest
 
+from netbbs.attestation import (
+    attest_age,
+    attest_name,
+    get_attestation,
+    set_attestation_link_visible,
+)
 from netbbs.auth.users import SYSOP_LEVEL, count_sysops, create_user, list_users
+from netbbs.identity.keys import Identity, IdentityKind
 from netbbs.net.admin_flow import admin_menu
 from netbbs.link.trust import (
     TrustDimension,
@@ -31,6 +39,7 @@ from netbbs.link.trust import (
     set_trust_override,
 )
 from netbbs.link.remote_attestation import (
+    reconcile_issued_attestations,
     build_remote_attestation,
     configure_attestation_authority,
     get_remote_attestation_state,
@@ -8796,3 +8805,160 @@ def test_user_picker_filtered_to_empty_still_offers_the_way_back(db, lane, sysop
     assert "Showing: Disabled users only" in after, "it says which filter emptied it"
     assert "[S]earch" in after, "and offers the key that clears the search"
     assert "[G]oto" in after
+
+
+# -- published identity: what this node asserts about its own users ---------
+# -- (issue #584 follow-up) -------------------------------------------------
+
+
+def _shared_attestation(db, *, sysop, attribute="name", value="Alice Example"):
+    """One caller who has opted in to sharing a verified attribute."""
+    alice = create_user(db, "alice", password="hunter2")
+    if attribute == "name":
+        attest_name(db, alice, value, verifier=sysop)
+    else:
+        attest_age(db, alice, date(1990, 4, 1), verifier=sysop)
+    set_attestation_link_visible(db, alice, attribute, True)
+    return alice
+
+
+def _publish(db):
+    """Sign what consent currently allows, exactly as a sync pass would."""
+    identity = Identity(
+        kind=IdentityKind.NODE, label="node",
+        signing_key=nacl.signing.SigningKey(b"\x11" * 32),
+        created_at="2026-09-15T12:00:00.000000Z",
+    )
+    reconcile_issued_attestations(db, identity, home_node_fingerprint="home-node")
+
+
+def test_published_identity_screen_says_so_when_nothing_is_shared(db, lane, sysop):
+    session = FakeSession(["s", "p", "p", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "Published over Link about this node's own users:" in text
+    assert "No caller has opted in to sharing a verified age or name over Link." in text
+
+
+def test_published_identity_screen_lists_what_the_node_asserts(db, lane, sysop):
+    _shared_attestation(db, sysop=sysop)
+    _publish(db)
+    session = FakeSession(["s", "p", "p", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "alice" in text
+    assert "published" in text
+    # Never the value itself: a listing of everything the node publishes is
+    # exactly the screen design doc §5.5 keeps a verified real name off.
+    assert "Alice Example" not in text
+
+
+def test_published_identity_screen_marks_a_pending_revocation(db, lane, sysop):
+    alice = _shared_attestation(db, sysop=sysop)
+    _publish(db)
+    set_attestation_link_visible(db, alice, "name", False)
+    session = FakeSession(["s", "p", "p", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "withdrawing" in text
+    assert "1 awaiting revocation on the next Link sync pass." in text
+
+
+def test_published_identity_screen_hides_history_until_asked(db, lane, sysop):
+    alice = _shared_attestation(db, sysop=sysop)
+    _publish(db)
+    set_attestation_link_visible(db, alice, "name", False)
+    _publish(db)  # signs the revocation
+    session = FakeSession(["s", "p", "p", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+    default_view = _visible(_written_text(session))
+    assert "revoked" not in default_view
+    assert "This node has never published an attestation." not in default_view
+
+    session = FakeSession(["s", "p", "p", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert "revoked" in _visible(_written_text(session))
+
+
+def test_sysop_can_withdraw_a_published_attestation(db, lane, sysop):
+    alice = _shared_attestation(db, sysop=sysop)
+    _publish(db)
+    session = FakeSession(["s", "p", "p", "w", "0", "1", "y", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "Sharing withdrawn" in text
+    assert get_attestation(db, alice, "name").link_visible is False
+    # No LinkContext in this harness, so the revocation is honestly deferred
+    # rather than claimed.
+    assert "The signed revocation goes out when Link next runs." in text
+    assert "Link is not running here" in text
+
+
+def test_withdrawing_does_not_delete_the_verification_itself(db, lane, sysop):
+    """Stopping the node asserting something is not un-verifying it: the
+    caller keeps their verified badge and every local gate still passes."""
+    alice = _shared_attestation(db, sysop=sysop)
+    _publish(db)
+    session = FakeSession(["s", "p", "p", "w", "0", "1", "y", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    attestation = get_attestation(db, alice, "name")
+    assert attestation is not None
+    assert attestation.attested_value == "Alice Example"
+
+
+def test_published_identity_screen_offers_no_way_to_publish(db, lane, sysop):
+    """Design doc §5.5 makes propagation conditional on the subject's own
+    opt-in, so a SysOp may stop an assertion here but never start one."""
+    _shared_attestation(db, sysop=sysop)
+    session = FakeSession(["s", "p", "p", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    bar = [line for line in text.splitlines() if "]ithdraw" in line]
+    assert bar, text
+    assert "ublish" not in bar[-1]
+    assert "hare" not in bar[-1]
+
+
+def test_published_identity_picker_holds_when_there_is_nothing_to_withdraw(db, lane, sysop):
+    """The empty picker has to stay on an interactive prompt: without
+    `refresh` it returns silently, and this screen's own redraw wipes the
+    message before a SysOp can read it -- the same dogfood report the Subjects
+    picker already carries."""
+    session = FakeSession(["s", "p", "p", "w", "b", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "This node is publishing nothing to withdraw." in text
+    assert "Ctrl-R: refresh" in text
+
+
+def test_a_revoked_row_is_dated_by_its_revocation_not_its_expiry(db, lane, sysop):
+    """A revoked object still carries the expiry it was signed with, so showing
+    that unconditionally reads as though it were still counting down."""
+    alice = _shared_attestation(db, sysop=sysop)
+    _publish(db)
+    set_attestation_link_visible(db, alice, "name", False)
+    _publish(db)
+    session = FakeSession(["s", "p", "p", "s", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "revoked" in text
+    rows = [line for line in text.splitlines() if line.startswith("alice ")]
+    assert rows, text
+    assert "expires" not in rows[-1]

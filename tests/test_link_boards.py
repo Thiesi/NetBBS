@@ -10,9 +10,16 @@ import json
 
 import pytest
 
-from netbbs.auth.users import create_user
+from netbbs.auth.users import SYSOP_LEVEL, create_user
+from netbbs.communities import create_community
 from netbbs.boards.boards import create_board, get_board_by_name
 from netbbs.boards.posts import approve_post, create_post, edit_post, tombstone_post
+from netbbs.link.remote_attestation import (
+    build_remote_attestation,
+    configure_attestation_authority,
+    ingest_remote_attestation,
+)
+from netbbs.link.trust import TrustSubject, register_subject
 from netbbs.link.boards import (
     BoardCarryLimitError,
     LinkBoardsError,
@@ -1341,3 +1348,177 @@ def test_load_own_board_events_includes_moderator_edit_and_tombstone(db, alice, 
     content_ids = {e.content_id for e in events}
     assert mod_edit.content_id in content_ids
     assert tombstone.content_id in content_ids
+
+
+# -- a carried board's own age/name gate, applied to a remote author --------
+# -- (design doc §5.5/§12.8, issue #584) ------------------------------------
+
+
+def _gate_board(db, remote_node_identity, *, min_age=None, name_requirement=None):
+    """A carried board with a local identity gate on it."""
+    board_id = _carried_board(db, remote_node_identity)
+    db.connection.execute(
+        "UPDATE boards SET min_age = ?, name_requirement = ? WHERE board_id = ?",
+        (min_age, name_requirement, board_id),
+    )
+    db.connection.commit()
+    return board_id
+
+
+def _accept_remote_attestation(
+    db, remote_node_identity, *, attribute="age", value="1990-04-01"
+):
+    """What a subscriber holds once it has pulled and accepted an attestation.
+
+    Built through the ingest path rather than by writing the tables, so the
+    projection under test is the one a real pull produces.
+    """
+    subject = TrustSubject.user(remote_node_identity.fingerprint, "wanderer")
+    register_subject(
+        db, subject, first_accepted_at="2026-08-01T00:00:00+00:00",
+        now_iso="2026-09-15T12:00:00+00:00",
+    )
+    configure_attestation_authority(
+        db, remote_node_identity.fingerprint, attributes=["age", "name"],
+        reason="peer operator", now_iso="2026-09-15T12:00:00+00:00",
+    )
+    ingest_remote_attestation(
+        db,
+        build_remote_attestation(
+            remote_node_identity.signing_key.signing_key,
+            issuer_fingerprint=remote_node_identity.fingerprint,
+            subject=subject,
+            attribute=attribute,
+            attested_value=value,
+            subject_opt_in=True,
+            issued_at="2026-09-15T11:00:00+00:00",
+            expires_at="2026-12-01T11:00:00+00:00",
+        ),
+        issuer_verify_key=remote_node_identity.signing_key.verify_key,
+        now_iso="2026-09-15T12:00:00+00:00",
+    )
+    return subject
+
+
+def test_an_ungated_carried_board_still_takes_every_remote_post(db, remote_node_identity):
+    """The gate must cost nothing on the ordinary board, which has neither."""
+    board_id = _gate_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+
+    assert materialize_carried_post(
+        db, post, sender_fingerprint=remote_node_identity.fingerprint
+    ) is not None
+
+
+def test_an_age_gated_board_refuses_a_remote_author_with_no_attestation(
+    db, remote_node_identity
+):
+    board_id = _gate_board(db, remote_node_identity, min_age=18)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+
+    result = materialize_carried_post(
+        db, post, sender_fingerprint=remote_node_identity.fingerprint
+    )
+
+    assert result is None
+    assert db.connection.execute("SELECT 1 FROM posts").fetchone() is None
+    # Honest exclusion, not deletion: the signed event is retained, which is
+    # what makes the rebuild recovery real. This assertion read `is None`
+    # when it was written, and passed -- the refusal returned before the
+    # `link_events` insert, so the post was simply lost, and the test agreed
+    # with the bug instead of with the documented behaviour.
+    assert db.connection.execute(
+        "SELECT 1 FROM link_events WHERE content_id = ?", (post.content_id,)
+    ).fetchone() is not None
+
+
+def test_an_age_gated_board_takes_a_remote_author_who_meets_it(db, remote_node_identity):
+    board_id = _gate_board(db, remote_node_identity, min_age=18)
+    _accept_remote_attestation(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+
+    assert materialize_carried_post(
+        db, post, sender_fingerprint=remote_node_identity.fingerprint
+    ) is not None
+
+
+def test_an_age_gated_board_refuses_a_remote_author_who_is_too_young(
+    db, remote_node_identity
+):
+    board_id = _gate_board(db, remote_node_identity, min_age=18)
+    _accept_remote_attestation(db, remote_node_identity, value="2020-04-01")
+    post = _remote_post(remote_node_identity, board_id=board_id)
+
+    assert materialize_carried_post(
+        db, post, sender_fingerprint=remote_node_identity.fingerprint
+    ) is None
+
+
+def test_a_name_gated_board_refuses_until_a_name_attestation_is_accepted(
+    db, remote_node_identity
+):
+    board_id = _gate_board(db, remote_node_identity, name_requirement="verified")
+    post = _remote_post(remote_node_identity, board_id=board_id)
+    assert materialize_carried_post(
+        db, post, sender_fingerprint=remote_node_identity.fingerprint
+    ) is None
+
+    _accept_remote_attestation(
+        db, remote_node_identity, attribute="name", value="Wanda Erer"
+    )
+
+    assert materialize_carried_post(
+        db, post, sender_fingerprint=remote_node_identity.fingerprint
+    ) is not None
+
+
+def test_a_post_refused_for_a_missing_attestation_materializes_on_rebuild(
+    db, remote_node_identity
+):
+    """The recovery path the refusal relies on: the event was accepted and
+    retained, so once the attestation arrives the SysOp's rebuild pass
+    projects the post rather than the post being lost."""
+    board_id = _gate_board(db, remote_node_identity, min_age=18)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+    # The refusal itself has to leave the event behind: `materialize_carried_
+    # post` is the only thing that writes a board post to `link_events`
+    # (`persist_accepted_events` skips its generic path for exactly this type),
+    # so a refusal that returned before that insert lost the post outright and
+    # this rebuild had nothing to find. Nothing is hand-inserted here for that
+    # reason -- the refusal below is what must persist it.
+    assert materialize_carried_post(
+        db, post, sender_fingerprint=remote_node_identity.fingerprint
+    ) is None
+    assert db.connection.execute(
+        "SELECT 1 FROM link_events WHERE content_id = ?", (post.content_id,)
+    ).fetchone() is not None
+    assert rebuild_carried_post_materialization(db) == 0
+
+    _accept_remote_attestation(db, remote_node_identity)
+
+    assert rebuild_carried_post_materialization(db) == 1
+
+
+def test_a_carried_board_applies_the_gate_it_inherits_from_its_community(
+    db, remote_node_identity
+):
+    """The local posting path resolves these through the Community cascade.
+    Reading the board's own raw columns let a remote author onto a board an
+    equivalent local author is refused from (Codex review of #590)."""
+    board_id = _carried_board(db, remote_node_identity)
+    sysop = create_user(db, "sysop", password="password", user_level=SYSOP_LEVEL)
+    community = create_community(
+        db, "Adults", description="", default_min_age=18, creator=sysop
+    )
+    db.connection.execute(
+        "UPDATE boards SET community_id = ? WHERE board_id = ?", (community.id, board_id)
+    )
+    db.connection.commit()
+    post = _remote_post(remote_node_identity, board_id=board_id)
+
+    assert materialize_carried_post(
+        db, post, sender_fingerprint=remote_node_identity.fingerprint
+    ) is None
+
+    _accept_remote_attestation(db, remote_node_identity)
+    assert rebuild_carried_post_materialization(db) == 1

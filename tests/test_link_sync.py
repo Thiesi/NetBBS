@@ -16,11 +16,13 @@ see `tests/test_link_transport.py`'s module docstring for why a
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 
 import aiohttp
 import pytest
 
-from netbbs.auth.users import create_user
+from netbbs.attestation import attest_age, set_attestation_link_visible
+from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import create_post, edit_post
 from netbbs.link.boards import link_board, queue_board_post_edit_if_linked, queue_board_post_if_linked
@@ -30,7 +32,12 @@ from netbbs.link.node_identity import bootstrap_node_identity, rotate_operationa
 from netbbs.link.protocol import MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode, PeerRecord
 from netbbs.link.onboarding import Participation, set_participation
 from netbbs.link.reliable_nodes import ReliableNode, set_cached_reliable_nodes
+from netbbs.link.remote_attestation import (
+    configure_attestation_authority,
+    remote_meets_age,
+)
 from netbbs.link.sync import run_link_sync
+from netbbs.link.trust import TrustSubject, register_subject
 from netbbs.link.transport import LinkServer, LinkTransportError
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -2213,3 +2220,193 @@ def test_sync_push_is_not_pinned_by_a_resource_the_seed_refused_to_carry(tmp_pat
     finally:
         dialer.close()
         seed.close()
+
+
+# -- remote identity attestations over real sync passes (issue #584) --------
+
+
+async def _one_pass(node, session, seeds, hello_provider, lane):
+    """Run exactly one full pass of `run_link_sync`, then return.
+
+    The stop event is set from inside the hello provider, which the loop calls
+    once per pass before it does any work -- so the pass it is already in
+    completes normally and the loop exits at the top of the next one, with no
+    sleep and nothing cancelled mid-flight.
+    """
+    stop_event = asyncio.Event()
+
+    def provider():
+        stop_event.set()
+        return hello_provider()
+
+    await run_link_sync(
+        node, session, seeds, provider, lane,
+        interval_seconds=0.0, stop_event=stop_event,
+    )
+
+
+class _AttestationPair:
+    """An issuer with one Link-visible attestation and a subscriber to it."""
+
+    def __init__(self, tmp_path, label: str) -> None:
+        self.issuer_identity = bootstrap_node_identity(f"{label}-issuer")
+        self.subscriber_identity = bootstrap_node_identity(f"{label}-subscriber")
+        self.issuer_node = LinkNode(identity=self.issuer_identity)
+        self.subscriber_node = LinkNode(identity=self.subscriber_identity)
+        self.issuer = _NodeDb(tmp_path, f"{label}-issuer")
+        self.subscriber = _NodeDb(tmp_path, f"{label}-subscriber")
+        self.port = 0
+
+        sysop = create_user(
+            self.issuer.db, "sysop", password="password", user_level=SYSOP_LEVEL
+        )
+        self.alice = create_user(self.issuer.db, "alice", password="password")
+        attest_age(self.issuer.db, self.alice, date(1990, 4, 1), verifier=sysop)
+        set_attestation_link_visible(self.issuer.db, self.alice, "age", True)
+
+        self.subject = TrustSubject.user(self.issuer_identity.fingerprint, "alice")
+        register_subject(
+            self.subscriber.db, self.subject,
+            first_accepted_at="2026-09-14T12:00:00+00:00",
+            now_iso="2026-09-15T12:00:00+00:00",
+        )
+        configure_attestation_authority(
+            self.subscriber.db, self.issuer_identity.fingerprint, attributes=["age"],
+            reason="peer operator", now_iso="2026-09-15T12:00:00+00:00",
+        )
+
+    def issuer_hello(self):
+        # The issuer has to be dialable for a subscriber to pull from it, so it
+        # advertises a real address rather than the outgoing-only hello the
+        # rest of this module's nodes use.
+        return self.issuer_node.build_hello(
+            addresses=[{"protocol": "http", "address": "127.0.0.1", "port": self.port}],
+            outgoing_only=False, created_at="2026-01-01T00:00:00+00:00",
+        )
+
+    async def start(self):
+        server = LinkServer(
+            host="127.0.0.1", port=0, node=self.issuer_node, lane=self.issuer.lane,
+            own_hello_provider=self.issuer_hello,
+        )
+        await server.start()
+        self.port = server.port
+        self.seeds = [f"http://127.0.0.1:{server.port}"]
+        return server
+
+    async def issuer_pass(self, session):
+        await _one_pass(self.issuer_node, session, [], self.issuer_hello, self.issuer.lane)
+
+    async def subscriber_pass(self, session):
+        await _one_pass(
+            self.subscriber_node, session, self.seeds,
+            lambda: _hello_for(self.subscriber_node), self.subscriber.lane,
+        )
+
+    def close(self):
+        self.issuer.close()
+        self.subscriber.close()
+
+
+def test_one_sync_pass_signs_serves_pulls_and_accepts_an_attestation(tmp_path):
+    """The loop-level half of design doc §5.5's issuing path.
+
+    `tests/test_link_attestation_issuance.py` proves the domain functions and
+    `tests/test_link_transport.py` proves the endpoint; both would stay green
+    if `run_link_sync` never called either, which is exactly the failure issue
+    #584 catalogued. This drives real passes of the loop and asserts on the
+    *subscriber's* tables, so the wiring itself is what is under test.
+    """
+    pair = _AttestationPair(tmp_path, "attesting")
+
+    async def scenario():
+        server = await pair.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                # One pass on the issuer: this is what signs the object.
+                await pair.issuer_pass(session)
+                # One pass on the subscriber, with the issuer as its seed: the
+                # dial completes the hello, and the attestation pull later in
+                # that same pass brings the object across.
+                await pair.subscriber_pass(session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert pair.issuer.db.connection.execute(
+            """SELECT COUNT(*) FROM link_issued_remote_attestations
+               WHERE object_type = 'remote_identity_attestation'"""
+        ).fetchone()[0] == 1
+        assert pair.subscriber.db.connection.execute(
+            "SELECT attested_value FROM link_remote_attestations WHERE subject_id = ?",
+            (pair.subject.subject_id,),
+        ).fetchone()[0] == "1990-04-01"
+        assert remote_meets_age(pair.subscriber.db, pair.subject, 18)
+        # Restart-safe: the cursor is on disk, so the next pass resumes rather
+        # than re-reading the whole stream.
+        assert pair.subscriber.db.connection.execute(
+            """SELECT after_content_id FROM link_attestation_pull_cursors
+               WHERE issuer_fingerprint = ?""",
+            (pair.issuer_identity.fingerprint,),
+        ).fetchone() is not None
+    finally:
+        pair.close()
+
+
+def test_a_withdrawn_opt_in_reaches_the_subscriber_over_the_loop(tmp_path):
+    """The direction the Profile toggle's promise actually rests on: switching
+    sharing off has to reach a node that already accepted the attestation."""
+    pair = _AttestationPair(tmp_path, "withdrawing")
+
+    async def scenario():
+        server = await pair.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await pair.issuer_pass(session)
+                await pair.subscriber_pass(session)
+                assert remote_meets_age(pair.subscriber.db, pair.subject, 18)
+
+                set_attestation_link_visible(pair.issuer.db, pair.alice, "age", False)
+                await pair.issuer_pass(session)
+                await pair.subscriber_pass(session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert not remote_meets_age(pair.subscriber.db, pair.subject, 18)
+        assert pair.subscriber.db.connection.execute(
+            "SELECT COUNT(*) FROM link_remote_attestation_revocations"
+        ).fetchone()[0] == 1
+    finally:
+        pair.close()
+
+
+def test_a_node_with_no_opt_in_signs_and_serves_nothing(tmp_path):
+    """The reconcile runs every pass whether or not anything changed, so the
+    no-consent case has to stay a no-op rather than an empty object."""
+    pair = _AttestationPair(tmp_path, "unshared")
+    set_attestation_link_visible(pair.issuer.db, pair.alice, "age", False)
+
+    async def scenario():
+        server = await pair.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await pair.issuer_pass(session)
+                await pair.issuer_pass(session)
+                await pair.subscriber_pass(session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert pair.issuer.db.connection.execute(
+            "SELECT COUNT(*) FROM link_issued_remote_attestations"
+        ).fetchone()[0] == 0
+        assert pair.subscriber.db.connection.execute(
+            "SELECT COUNT(*) FROM link_remote_attestations"
+        ).fetchone()[0] == 0
+        assert not remote_meets_age(pair.subscriber.db, pair.subject, 18)
+    finally:
+        pair.close()

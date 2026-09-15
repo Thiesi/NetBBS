@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 from netbbs.auth.users import User
 from netbbs.boards.boards import Board
 from netbbs.boards.posts import Post
+from netbbs.communities import get_effective_min_age, get_effective_name_requirement
 from netbbs.link.events import (
     BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
@@ -62,6 +63,11 @@ from netbbs.link.events import (
 )
 from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_key
 from netbbs.link.protocol import LinkNode, PeerRecord
+from netbbs.link.remote_attestation import (
+    remote_meets_age,
+    remote_meets_name_requirement,
+)
+from netbbs.link.trust import TrustSubject
 from netbbs.search import reindex_post
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -450,7 +456,7 @@ def materialize_carried_post(
 
     payload = post.payload
     board_row = db.connection.execute(
-        "SELECT id FROM boards WHERE board_id = ?", (payload["board_id"],)
+        "SELECT * FROM boards WHERE board_id = ?", (payload["board_id"],)
     ).fetchone()
     if board_row is None:
         return None
@@ -478,6 +484,14 @@ def materialize_carried_post(
             payload["board_id"],
         ),
     )
+    if not _remote_author_meets_board_identity_policy(db, payload["author"], board_row):
+        # The signed event is kept, only its projection is refused -- which is
+        # what makes the rebuild path below a real recovery rather than a
+        # claim. Committed, not rolled back: `link_events` is the record that
+        # this node accepted these bytes, and losing it would mean re-fetching
+        # the post from a peer that has no reason to send it again.
+        db.connection.commit()
+        return None
     db.connection.execute(
         """
         INSERT INTO posts
@@ -495,6 +509,48 @@ def materialize_carried_post(
 
     return _post_from_row(
         db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (post.content_id,)).fetchone()
+    )
+
+
+def _remote_author_meets_board_identity_policy(db: Database, author: dict, board_row) -> bool:
+    """Apply a carried board's own age/name gate to a remote author.
+
+    Design doc §5.5: remote propagation of attestations exists so a receiving
+    node can decide whether to trust a remote verifier, and §12.8 puts the
+    enforcement point before remotely influenced persistence. This is that
+    point for a carried board post -- the gate the board already applies to
+    local posters, asked of the attestation the author's home node signed and
+    this node accepted.
+
+    Refusal is the same honest exclusion as a board this node does not carry:
+    the signed event stays in `link_events`, nothing is materialized, and if
+    the attestation arrives later the SysOp's rebuild pass materializes the
+    post then. Silence is deliberate -- telling the network which of its users
+    fail a local gate would leak exactly the policy §12.8 keeps undisclosed.
+
+    Only the root post is gated, deliberately. `materialize_carried_post_edit`
+    already requires its root to be materialized, so an edit inherits this
+    decision transitively; re-asking the gate there would strand an edit chain
+    on a post the board has already admitted, which is a revision of admitted
+    content rather than a fresh admission.
+    """
+    board = _board_from_row(board_row)
+    # Through the Community cascade, exactly as the local posting path does:
+    # a board that inherits its gate from its Community must apply the same
+    # one to a remote author, or a remote poster gets onto a board a local
+    # poster is refused from.
+    min_age = get_effective_min_age(db, board)
+    name_requirement = get_effective_name_requirement(db, board)
+    if not min_age and name_requirement is None:
+        return True
+    home = author.get("home_node_fingerprint")
+    opaque = author.get("opaque_user_id") or author.get("local_user_id")
+    if not home or not opaque:
+        return False
+    subject = TrustSubject.user(home, opaque)
+    return (
+        remote_meets_age(db, subject, min_age)
+        and remote_meets_name_requirement(db, subject, name_requirement)
     )
 
 

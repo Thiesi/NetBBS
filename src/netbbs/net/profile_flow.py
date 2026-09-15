@@ -1725,10 +1725,12 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             prompt=_link_share_toggle("age"),
             brief="Toggle sharing your verified age",
             help=(
-                "Whether your SysOp-verified age is shared with linked nodes over NetBBS "
-                "Link, so a remote node's trust/vouch policy can see it too. Off by default "
-                "-- this node's own verification of you isn't shared elsewhere unless you "
-                "opt in, and a fresh verification switches it off again."
+                "Whether your SysOp-verified age is shared over NetBBS Link, so a remote "
+                "board with an age gate can let you in. Off by default -- this "
+                "node's own verification of you isn't shared elsewhere unless you opt in, "
+                "and a fresh verification switches it off again. It reaches only those "
+                "nodes whose own SysOp has chosen to accept this node's verifications; "
+                "switching it back off withdraws it from them."
             ),
             section="SysOp-verified",
         ),
@@ -1739,10 +1741,12 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             prompt=_link_share_toggle("name"),
             brief="Toggle sharing your verified name",
             help=(
-                "Whether your SysOp-verified real name is shared with linked nodes over "
-                "NetBBS Link, so a remote node's trust/vouch policy can see it too. Off by "
-                "default -- this node's own verification of you isn't shared elsewhere "
-                "unless you opt in, and a fresh verification switches it off again."
+                "Whether your SysOp-verified real name is shared over NetBBS Link, so a "
+                "remote board that requires a verified name can let you in. Off "
+                "by default -- this node's own verification of you isn't shared elsewhere "
+                "unless you opt in, and a fresh verification switches it off again. It "
+                "reaches only those nodes whose own SysOp has chosen to accept this node's "
+                "verifications; switching it back off withdraws it from them."
             ),
             section="SysOp-verified",
         ),

@@ -2698,4 +2698,44 @@ MIGRATIONS = [
             CHECK (mrc_nick_color IS NULL OR (external_source IS 'mrc' AND mrc_nick_color BETWEEN 0 AND 15));
         """,
     ),
+    Migration(
+        description=(
+            "Issue #584: the issuing half of remote identity attestations. Objects this "
+            "node signs for its own Link-visible attestations, the revocations that "
+            "retire them, and the per-authority pull cursor a subscriber advances. "
+            "`user_id` is SET NULL rather than CASCADE so a deleted account leaves its "
+            "signed rows behind to be revoked, instead of stranding live copies on "
+            "every subscriber until they expire."
+        ),
+        sql="""
+        CREATE TABLE link_issued_remote_attestations (
+            content_id             TEXT PRIMARY KEY,
+            object_type            TEXT NOT NULL CHECK (object_type IN (
+                                       'remote_identity_attestation',
+                                       'remote_identity_attestation_revocation')),
+            user_id                INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            attribute              TEXT CHECK (attribute IS NULL OR attribute IN ('age', 'name')),
+            attested_value         TEXT,
+            envelope_json          TEXT NOT NULL,
+            signature_b64          TEXT NOT NULL,
+            issued_at              TEXT NOT NULL,
+            expires_at             TEXT,
+            signing_key_fingerprint TEXT,
+            revoked_by_content_id  TEXT,
+            revoked_at             TEXT,
+            created_at             TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_link_issued_remote_attestations_active
+            ON link_issued_remote_attestations(user_id, attribute, revoked_at);
+
+        CREATE TABLE link_attestation_pull_cursors (
+            responder_fingerprint  TEXT NOT NULL,
+            issuer_fingerprint     TEXT NOT NULL,
+            after_content_id       TEXT NOT NULL,
+            updated_at             TEXT NOT NULL,
+            PRIMARY KEY (responder_fingerprint, issuer_fingerprint)
+        );
+        """,
+    ),
 ]
