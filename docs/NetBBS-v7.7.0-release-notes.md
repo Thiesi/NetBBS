@@ -77,9 +77,24 @@ in `transport.py` and used nowhere — would look wired up.
 
 The Profile help text was also wrong in a way #584 never mentioned: it
 said the value reaches "a remote node's trust/vouch policy", which §5.5
-explicitly denies. It now says what actually happens, including that
-sharing reaches only nodes whose own SysOp has accepted this node's
-verifications, and that switching it off withdraws it from them.
+explicitly denies. It was rewritten to say what happens, including that
+switching the toggle off withdraws the value from the nodes that have it.
+
+**That rewritten text is still not accurate, and you should know before
+you let a caller act on it.** It tells the caller their verified value
+"reaches only those nodes whose own SysOp has chosen to accept this
+node's verifications." The issuer does not enforce that: the pull
+endpoint checks that the requester is an established peer allowed by
+local trust policy, and then serves every attestation this node has
+signed. The receiver's list of accepted authorities is the *receiver's*
+local state; the issuer never sees it. So any node you have federated
+with, and your policy admits, can read the birthdate or real name behind
+an opted-in attestation. That is narrower than the open internet and
+wider than what the caller was told — and the caller is not the person
+who decides who this node peers with. Filed as **#596**, with the
+issuer-side disclosure scope to be decided there. Until it is settled,
+treat the Link-share toggles as sharing with your federation, not with a
+subset of it.
 
 **#584 is not closed.** Two of its three pieces landed here; trust-object
 issuance is filed as #589 and needs a decision before it needs code, and
@@ -255,6 +270,18 @@ So: take the backup immediately before upgrading, and decide early. If
 7.7.0 is going to be rolled back, it is far cheaper in the first hour
 than on the third day.
 
+**Restore before you put the 7.6.0 wheel back, not after.** This is the
+one place the usual rollback order is wrong, and it is new in this
+release. 7.6.0's restore has no `door-outbound` component: it does not
+know receipts exist, so it rewinds the database and leaves 7.7.0's
+receipts sitting beside it. Those receipts name post IDs the rewound
+database never issued, and a door reading them is told its work was
+published when the post is not there — the exact generation mismatch the
+new component exists to prevent. Stop 7.7.0, run **7.7.0's** restore, and
+only then install 7.6.0. If you have already gone the other way, delete
+the receipts directory before starting any door: an absent receipt is a
+state the door contract already covers, and a wrong one is not.
+
 One thing worth knowing about the new tables:
 `link_issued_remote_attestations.user_id` is `ON DELETE SET NULL`, not
 `CASCADE`. A signed object has to outlive the account it is about long
@@ -285,6 +312,12 @@ What this release does **not** establish:
   `[managed_dns] service_url`. A guard test has to be flipped in the same
   commit that flips the constant, and `services/managed_dns/README.md`
   carries the step.
+- **The attestation consent text promises a disclosure scope the issuer
+  does not enforce (#596).** Any established peer your trust policy
+  admits can pull every attestation this node has signed, values
+  included; the receiver's accepted-authority list is not visible to the
+  issuer and is not consulted. The caller-facing text says otherwise.
+  Whether to add issuer-side scope or correct the text is undecided.
 - **Remote attestation has not been exercised between two live nodes.**
   Its validation is the new `tests/test_link_attestation_issuance.py`,
   which deliberately never calls a builder directly — every test starts
