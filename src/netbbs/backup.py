@@ -2,7 +2,7 @@
 Node backup and restore (design doc §13.4/§13.10, issue #60's first
 operational slice, hardened by issue #75).
 
-A node's recoverable state is fourteen `db_path`-relative artifacts, not
+A node's recoverable state is fifteen `db_path`-relative artifacts, not
 just the database: content blobs (`netbbs.files.storage`), node
 identity (`netbbs.link.node_identity`), the SSH host key
 (`netbbs.net.ssh`), the managed-DNS registration credential
@@ -10,16 +10,31 @@ identity (`netbbs.link.node_identity`), the SSH host key
 #201), the welcome banner (`netbbs.net.welcome_banner`), the main-menu
 masthead (`netbbs.net.main_menu_banner`, issue #161), the logoff banner
 (`netbbs.net.logoff_banner`, issue #177), the two new-account banners
-(`netbbs.net.new_account_banner_before`/`_after`, issue #177), and the
+(`netbbs.net.new_account_banner_before`/`_after`, issue #177), the
 three submenu mastheads (`netbbs.net.board_list_banner`/`file_area_
-banner`/`chat_channel_picker_banner`, issue #176) all live at derived
-paths alongside the database, each with no independent config field of
-its own. A backup covering only the database silently loses the SSH
-host key (every client gets a MITM warning after restore) and, far more
-seriously, the Link node identity -- root-key custody is explicitly
-"part of ordinary node backup and restore" (design doc §4.5), not a
-separate ceremony. This module treats all fourteen as one atomic backup
-operation, never a DB-only one.
+banner`/`chat_channel_picker_banner`, issue #176), and the door
+outbound receipts (`netbbs.doors.outbound`, issue #556) all live at
+derived paths alongside the database, each with no independent config
+field of its own. A backup covering only the database silently loses
+the SSH host key (every client gets a MITM warning after restore) and,
+far more seriously, the Link node identity -- root-key custody is
+explicitly "part of ordinary node backup and restore" (design doc
+§4.5), not a separate ceremony. This module treats all fifteen as one
+atomic backup operation, never a DB-only one.
+
+The receipts are the one of the fifteen with a generation of its own to
+respect. A receipt records what became of one door's post request, and
+a `"posted"` one names a `post_id` in the database beside it -- so it
+is captured *before* the database snapshot, the same direction the
+Voidrunner component is captured for the same reason. That ordering
+can leave a post in the snapshot whose receipt is missing, which the
+door contract already covers ("a missing receipt is not proof of
+publication"); the reverse -- a receipt naming a post the restored
+database never had -- is the one a door could act on, and this ordering
+makes it impossible. Restore replaces the live receipts wholesale with
+the archive's own, including replacing them with nothing when the
+archive predates this component: receipts from a newer generation
+beside an older database claim post IDs that database never had.
 
 When its save directory exists, Voidrunner adds a checksummed component
 containing careers, recovery copies, and scores. Capture it while game
@@ -117,11 +132,25 @@ _IDENTITY_DIRNAME = "identity"
 _VOIDRUNNER_DIRNAME = "voidrunner"
 _WAR_DIALER_DIRNAME = "war-dialer"
 _DOOR_INSTALLS_DIRNAME = "door-installs"
+_DOOR_OUTBOUND_DIRNAME = "door-outbound"
 _WAR_DIALER_MAX_WORLDS = 64
 _WAR_DIALER_MAX_BYTES = 512 * 1024 * 1024
 _VOIDRUNNER_MAX_FILES = 10_000
 _VOIDRUNNER_MAX_FILE_BYTES = 4 * 1024 * 1024
 _VOIDRUNNER_MAX_TOTAL_BYTES = 512 * 1024 * 1024
+#: One directory per door that has ever had its outbound hook switched on.
+#: Nothing removes one when a door is deleted, so this is an accumulation
+#: bound rather than a count of doors; 64 of them on one node means stale
+#: directories to clear, not a node this tool should quietly half-cover.
+_DOOR_OUTBOUND_MAX_DOORS = 64
+#: What a receipt can be, on the way in from an untrusted archive. NetBBS
+#: writes a few hundred bytes of JSON; the per-door count is generous
+#: against `netbbs.doors.outbound.RESULTS_KEPT` so an archive written by a
+#: build with a different retention still validates. The two together bound
+#: what a restore will stage.
+_DOOR_OUTBOUND_MAX_RECEIPTS = 1024
+_DOOR_OUTBOUND_MAX_RECEIPT_BYTES = 64 * 1024
+_DOOR_ID_PATTERN = re.compile(r"[0-9]{1,18}")
 _RESERVED_BACKUP_ENTRIES = (_MANIFEST_FILENAME, _FILES_DIRNAME, _IDENTITY_DIRNAME)
 
 # node_config keys (netbbs.config's generic key-value store) -- same
@@ -194,6 +223,20 @@ def _storage_root_for(db_path: Path) -> Path:
     live `Database`, and this module deliberately never opens one for
     the reason its own docstring gives."""
     return db_path.parent / f"{db_path.stem}_files"
+
+
+def _door_outbound_root_for(db_path: Path) -> Path:
+    """The live door outbound receipts root (issue #556).
+
+    Imported rather than mirrored, unlike the derived paths below it: their
+    counterparts need a live `Database` this module deliberately never opens,
+    while `results_root` was given the node path for exactly this caller. The
+    component restores into this directory and doors read it by the same
+    formula, so the two must not be able to drift apart.
+    """
+    from netbbs.doors.outbound import results_root
+
+    return results_root(db_path)
 
 
 def _ssh_host_key_path_for(db_path: Path) -> Path:
@@ -738,6 +781,174 @@ def _validate_war_dialer_component(source: Path, manifest: dict) -> None:
         raise BackupError("War Dialer files do not match their coverage manifest.")
 
 
+def _door_outbound_receipts(directory: Path, kept: int) -> tuple[list[Path], int]:
+    """One door's receipts, the newest `kept` of them, plus what was left behind.
+
+    Only what NetBBS itself wrote and can read back: a regular file named the
+    way `_write_result` names one, within the size such a file has. A door
+    runs as the BBS user and can put anything here, and the half-written
+    `.part` of an interrupted write is already an ordinary case. None of that
+    is node state, so it is left alone rather than captured or treated as
+    corruption -- the same judgment `_is_content_addressed_name` makes about
+    the blob tree -- but it is counted, so an archive never silently claims to
+    hold more than it does.
+
+    `kept` mirrors the door module's own retention rule instead of inventing a
+    second one: anything past it is what the next drain would prune anyway.
+    """
+    from netbbs.doors.outbound import RESULT_SUFFIX
+
+    receipts: list[tuple[float, str, Path]] = []
+    skipped = 0
+    try:
+        entries = sorted(directory.iterdir())
+    except OSError as exc:
+        raise BackupError(f"Cannot read door outbound receipts at {directory}: {exc}") from exc
+    for entry in entries:
+        try:
+            if (not entry.name.endswith(RESULT_SUFFIX) or entry.is_symlink()
+                    or not entry.is_file()
+                    or entry.stat().st_size > _DOOR_OUTBOUND_MAX_RECEIPT_BYTES):
+                skipped += 1
+                continue
+            receipts.append((entry.stat().st_mtime, entry.name, entry))
+        except OSError:
+            skipped += 1
+    # Oldest first out, exactly as `_prune_results` chooses what to keep.
+    receipts.sort()
+    skipped += max(0, len(receipts) - kept)
+    return [entry for _, _, entry in receipts[-kept:]], skipped
+
+
+def _capture_door_outbound(db_path: Path, destination: Path, checksums: dict) -> dict | None:
+    """Capture every door's outbound receipts (issue #556).
+
+    Called before the database snapshot: a `"posted"` receipt names a post
+    that was committed before the receipt was written, so capturing receipts
+    first guarantees the snapshot taken after them contains every post they
+    name.
+
+    Returns metadata whenever the node has a receipts root at all, even an
+    empty one. Its presence in the manifest is what tells restore that this
+    archive has an opinion about receipts, and "the node had none" is an
+    opinion worth restoring: leaving a later generation's receipts in place
+    would pair them with a database that never issued those posts.
+
+    Live-safe, like the rest of this module: a receipt is written
+    temp-then-rename, so a capture taken while a door is running never copies
+    a half-written one, and a receipt a concurrent drain prunes between the
+    listing and the copy is counted as left behind rather than failing the
+    whole archive.
+    """
+    from netbbs.doors.outbound import RESULTS_KEPT
+
+    root = _door_outbound_root_for(db_path)
+    if not root.is_dir() or root.is_symlink():
+        return None
+    resolved = destination.resolve()
+    if resolved == root.resolve() or resolved.is_relative_to(root.resolve()):
+        raise BackupError("A backup destination cannot be inside the door outbound receipts directory.")
+    try:
+        entries = sorted(root.iterdir())
+    except OSError as exc:
+        raise BackupError(f"Cannot read door outbound receipts at {root}: {exc}") from exc
+    doors = [entry for entry in entries
+             if entry.is_dir() and not entry.is_symlink() and _DOOR_ID_PATTERN.fullmatch(entry.name)]
+    if len(doors) > _DOOR_OUTBOUND_MAX_DOORS:
+        raise BackupError(
+            f"Door outbound receipts cover more than {_DOOR_OUTBOUND_MAX_DOORS} doors at {root}. "
+            "Receipts are disposable -- remove the directories belonging to doors this node no "
+            "longer has, then retry.")
+    output = destination / _DOOR_OUTBOUND_DIRNAME
+    output.mkdir()
+    captured = []
+    skipped = len(entries) - len(doors)
+    for entry in sorted(doors, key=lambda path: int(path.name)):
+        receipts, ignored = _door_outbound_receipts(entry, RESULTS_KEPT)
+        skipped += ignored
+        if not receipts:
+            continue
+        target = output / entry.name
+        target.mkdir()
+        names = []
+        for path in receipts:
+            captured_path = target / path.name
+            try:
+                shutil.copy2(path, captured_path)
+            except OSError:
+                # A drain running while this backup does can prune a receipt
+                # between the listing above and this copy. Losing a receipt
+                # the node itself was discarding is the outcome a door already
+                # expects; failing an entire archive over it is not.
+                captured_path.unlink(missing_ok=True)
+                skipped += 1
+                continue
+            checksums[f"{_DOOR_OUTBOUND_DIRNAME}/{entry.name}/{path.name}"] = _sha256_of_file(captured_path)
+            names.append(path.name)
+        if not names:
+            # No empty directory the manifest does not account for: the
+            # component's own validator refuses one, and rightly.
+            target.rmdir()
+            continue
+        captured.append({"key": entry.name, "source_path": str(entry), "receipts": sorted(names)})
+    return {"version": 1, "doors": captured, "skipped": skipped}
+
+
+def _validate_door_outbound_component(source: Path, manifest: dict) -> None:
+    """Everything this component claims, checked before a live path moves.
+
+    An archive is operator-supplied and its manifest is untrusted on restore,
+    so names are checked for being plain filenames rather than paths, entries
+    for being real files rather than links, and the tree for holding nothing
+    the manifest does not list -- restore switches this directory in whole, so
+    an unlisted file in the archive would land beside the node database.
+    """
+    from netbbs.doors.outbound import RESULT_SUFFIX
+
+    metadata = manifest.get("door_outbound")
+    root = source / _DOOR_OUTBOUND_DIRNAME
+    if metadata is None:
+        # A node database *named* `door-outbound` keeps that name in the
+        # archive when this component is absent, exactly as the War Dialer
+        # and Voidrunner components already allow for.
+        if root.exists() and _database_filename_from_manifest(manifest) != _DOOR_OUTBOUND_DIRNAME:
+            raise BackupError("Door outbound component has no coverage manifest.")
+        return
+    if (not isinstance(metadata, dict) or metadata.get("version") != 1
+            or not isinstance(metadata.get("doors"), list)
+            or len(metadata["doors"]) > _DOOR_OUTBOUND_MAX_DOORS
+            or not root.is_dir() or root.is_symlink()):
+        raise BackupError("Invalid door outbound coverage manifest.")
+    expected_doors = set()
+    for door in metadata["doors"]:
+        if (not isinstance(door, dict) or not isinstance(door.get("key"), str)
+                or not _DOOR_ID_PATTERN.fullmatch(door["key"]) or door["key"] in expected_doors
+                or not isinstance(door.get("receipts"), list)
+                or not 1 <= len(door["receipts"]) <= _DOOR_OUTBOUND_MAX_RECEIPTS):
+            raise BackupError("Invalid door outbound receipt manifest.")
+        expected_doors.add(door["key"])
+        directory = root / door["key"]
+        if not directory.is_dir() or directory.is_symlink():
+            raise BackupError("Door outbound component is missing a door's receipt directory.")
+        expected_names = set()
+        for name in door["receipts"]:
+            if (not isinstance(name, str) or not name.endswith(RESULT_SUFFIX)
+                    or "/" in name or "\\" in name or name in {".", ".."}):
+                raise BackupError("Invalid door outbound receipt name in manifest.")
+            receipt = directory / name
+            if (not receipt.is_file() or receipt.is_symlink()
+                    or receipt.stat().st_size > _DOOR_OUTBOUND_MAX_RECEIPT_BYTES):
+                raise BackupError("Door outbound receipt is not a regular file within "
+                                  f"{_DOOR_OUTBOUND_MAX_RECEIPT_BYTES} bytes: {receipt}")
+            if f"{_DOOR_OUTBOUND_DIRNAME}/{door['key']}/{name}" not in manifest.get("checksums", {}):
+                raise BackupError("Door outbound receipt has no checksum.")
+            expected_names.add(name)
+        if {path.name for path in directory.iterdir()} != expected_names:
+            raise BackupError("Door outbound receipts do not match their coverage manifest.")
+    if {path.name for path in root.iterdir()} != expected_doors:
+        raise BackupError("Door outbound directories do not match their coverage manifest.")
+
+
 def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
                   voidrunner_save_dir: Path | None = None) -> Path:
     """
@@ -803,6 +1014,10 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
             # and this module's own validator ignore unknown keys.
             game_metadata["source_provenance"] = game_source_provenance
         war_metadata = _capture_war_dialer(db_path, destination, checksums)
+        # Before the database snapshot, like the game components above and for
+        # a related reason: a receipt must never name a post the snapshot
+        # beside it does not contain (issue #556).
+        receipt_metadata = _capture_door_outbound(db_path, destination, checksums)
         door_metadata = _capture_door_installs(db_path, destination)
     except BaseException as exc:
         # This call created the fresh destination; no prior backup is removed.
@@ -815,7 +1030,8 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         raise
     if ((game_metadata is not None and database_filename.casefold() == _VOIDRUNNER_DIRNAME)
             or (war_metadata is not None and database_filename.casefold() == _WAR_DIALER_DIRNAME)
-            or (door_metadata is not None and database_filename.casefold() == _DOOR_INSTALLS_DIRNAME)):
+            or (door_metadata is not None and database_filename.casefold() == _DOOR_INSTALLS_DIRNAME)
+            or (receipt_metadata is not None and database_filename.casefold() == _DOOR_OUTBOUND_DIRNAME)):
         # The live custom filename remains valid. Only its archive name changes;
         # the manifest and explicit restore --db already separate those paths.
         database_filename = _LEGACY_DB_FILENAME
@@ -870,8 +1086,10 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         },
         "war_dialer": war_metadata,
         "door_installs": door_metadata,
+        "door_outbound": receipt_metadata,
     }
     _validate_war_dialer_component(destination, manifest)
+    _validate_door_outbound_component(destination, manifest)
     (destination / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2))
 
     _record_backup_state(db_path, destination)
@@ -954,6 +1172,7 @@ def _validate_backup_source(source: Path, *, allow_migrate: bool) -> dict:
     if not db_snapshot.exists():
         raise BackupError(f"backup is missing its database snapshot: {db_snapshot}")
     _validate_war_dialer_component(source, manifest)
+    _validate_door_outbound_component(source, manifest)
 
     for relative_name, expected_hash in manifest.get("checksums", {}).items():
         candidate = source / relative_name
@@ -1154,8 +1373,31 @@ def _restore_switch_plan(
     if staged_identity.is_dir():
         plan.append(("identity", staged_identity, identity_dir))
 
+    # Planned whether or not this archive has the component (issue #556):
+    # a point-in-time restore must restore the absence of receipts too, or a
+    # later generation's receipts survive beside an older database and claim
+    # post IDs it never issued. `is_dir()` settles the one archive where this
+    # name is not the component -- a node database called `door-outbound`,
+    # kept under that name when nothing was captured.
+    staged_receipts = staging_dir / _DOOR_OUTBOUND_DIRNAME
+    live_receipts = _door_outbound_root_for(db_path)
+    if live_receipts == db_path:
+        # A node database named `door-outbound` occupies the exact path its
+        # own receipts would live at, so that node has none and cannot have
+        # any -- but planning the artifact anyway would rename the database
+        # this restore just put there into the rollback directory.
+        if staged_receipts.is_dir():
+            raise BackupError(
+                "This backup carries door outbound receipts, which live at the same path as a "
+                f"database named {db_path.name!r}. Restore the database under another name.")
+    else:
+        plan.append((_DOOR_OUTBOUND_DIRNAME,
+                     staged_receipts if staged_receipts.is_dir() else None,
+                     live_receipts))
+
     for entry in sorted(staging_dir.iterdir()):
-        if entry.name in (*_RESERVED_BACKUP_ENTRIES, _VOIDRUNNER_DIRNAME, _WAR_DIALER_DIRNAME, database_filename):
+        if entry.name in (*_RESERVED_BACKUP_ENTRIES, _VOIDRUNNER_DIRNAME, _WAR_DIALER_DIRNAME,
+                          _DOOR_OUTBOUND_DIRNAME, database_filename):
             continue
         if entry.is_file():
             live_path = db_path.parent / entry.name
@@ -1549,6 +1791,16 @@ def main(argv: list[str] | None = None) -> None:
         war = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("war_dialer")
         for world in war["worlds"] if war else []:
             print_wrapped(f"War Dialer world {world['key']}: included {world['source_path']}.")
+        receipts = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("door_outbound")
+        if receipts is not None:
+            total = sum(len(door["receipts"]) for door in receipts["doors"])
+            doors = len(receipts["doors"])
+            left = receipts.get("skipped") or 0
+            print_wrapped(
+                f"Door outbound: included {total} receipt{'' if total == 1 else 's'} for "
+                f"{doors} door{'' if doors == 1 else 's'}."
+                + (f" {left} other entr{'y' if left == 1 else 'ies'} left in place, not "
+                   "receipts this node wrote." if left else ""))
         created = json.loads((destination / _MANIFEST_FILENAME).read_text())
         coverage = created.get("voidrunner")
         # From the manifest this run just wrote, never a fresh lookup

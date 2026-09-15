@@ -602,10 +602,12 @@ private keys and account data. Neither off-site transfer nor rotation is built i
 Also preserve TOML, service configuration, and any game data outside the captured
 paths. Inspect `manifest.json` and the coverage messages before relying on an archive.
 
-Door outbound result receipts are currently omitted from built-in backups
-([#556](https://github.com/Thiesi/NetBBS/issues/556)). If a game relies on them,
-preserve `door-outbound/` beside the database separately while games are stopped.
-After recovery, a missing receipt does not mean its post was never published.
+Door outbound result receipts (`door-outbound/` beside the database) are
+included automatically and need no separate copy. Restore replaces them with the
+archive's own, so receipts a door wrote after that backup was taken go to the
+rollback generation rather than staying beside an older database; an archive made
+before NetBBS captured receipts clears them for the same reason. After recovery,
+a missing receipt still does not mean its post was never published.
 
 ### Restore
 

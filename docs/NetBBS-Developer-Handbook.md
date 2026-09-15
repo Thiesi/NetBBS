@@ -353,11 +353,13 @@ request identifier in your game data and choose request filenames accordingly.
 Do not promise exactly-once delivery after a crash or retry merely because
 result files have unique launch prefixes.
 
-Current backup limitation: `door-outbound/` receipts are not captured/restored
-by the built-in backup tooling
-([#556](https://github.com/Thiesi/NetBBS/issues/556)). A restored database can
-contain a published post whose receipt is missing. Do not automatically retry
-publication based only on receipt absence.
+Backup and restore carry receipts with the node. Every receipt in an archive
+names a post that archive's database snapshot contains, and a restore replaces
+the receipts on disk with the ones belonging to the database it restores — so a
+receipt never survives into a generation that never issued its post. A restored
+node can still hold a published post whose receipt is missing, which is the same
+case as a pruned receipt: a missing receipt is never proof either way, and never
+grounds on its own for publishing again.
 
 ## Implementing NetBBS Link
 

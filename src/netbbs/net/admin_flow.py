@@ -4926,6 +4926,10 @@ async def _backup_status_screen(
             "War Dialer: includes existing node-default and registered override worlds. "
             "Close War Dialer sessions before backup; restore requires explicit world destinations."
         )
+        await session.write_line(
+            "Door outbound receipts: included automatically, and restored beside the database "
+            "with the archive's own generation."
+        )
         installs_on = await lane.run(door_installs_included)
         await session.write_line(
             colored("Door installation directories: ", fg_color=LABEL_COLOR)

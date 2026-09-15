@@ -617,16 +617,16 @@ def test_an_exactly_spelled_board_wins_over_a_case_variant(db, door, sysop, tmp_
 
 
 def test_results_do_not_accumulate_without_limit(db, door, sysop, board, tmp_path):
-    from netbbs.doors.outbound import _RESULTS_KEPT
+    from netbbs.doors.outbound import RESULTS_KEPT
 
     _enable(db, door, sysop, board)
     set_rate_ceiling(db, door, 1, changed_by=sysop)
-    for index in range(_RESULTS_KEPT + 10):
+    for index in range(RESULTS_KEPT + 10):
         _request(tmp_path, name=f"post{index:04d}", subject="Season", body="...")
     drain(db, door, tmp_path)
 
     kept = list(results_dir(db, door.id).glob("*.result.json"))
-    assert len(kept) <= _RESULTS_KEPT
+    assert len(kept) <= RESULTS_KEPT
 
 
 # -- review round 2 -------------------------------------------------------
@@ -661,9 +661,9 @@ def test_a_post_its_rate_debit_and_its_audit_entry_are_all_or_nothing(
 def test_results_are_kept_for_everything_one_permitted_session_can_produce(db):
     """A door cannot read a result until its next launch, so pruning below what
     a single drain can answer would discard outcomes before anyone sees them."""
-    from netbbs.doors.outbound import _MAX_REQUESTS_PER_DRAIN, _RESULTS_KEPT
+    from netbbs.doors.outbound import _MAX_REQUESTS_PER_DRAIN, RESULTS_KEPT
 
-    assert _RESULTS_KEPT >= _MAX_REQUESTS_PER_DRAIN
+    assert RESULTS_KEPT >= _MAX_REQUESTS_PER_DRAIN
 
 
 def test_a_legal_non_ascii_post_is_not_refused_for_size(db, door, sysop, board, tmp_path):

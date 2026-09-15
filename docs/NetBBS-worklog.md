@@ -3499,9 +3499,22 @@ recorded-but-empty directory is a fact about the node, while an unrecorded
 lookup (a database that has not started since the fix) falls back to the calling
 process's home and is labelled a guess, whether or not that path happens to
 exist. Explicit `--voidrunner-save-dir` remains authoritative and is still the
-right instruction for any layout that differs from the handbook's. Outbound door receipts under
-`door-outbound/` currently have no backup component (#556); their location beside
-the database does not imply capture.
+right instruction for any layout that differs from the handbook's.
+
+Outbound door receipts under `door-outbound/` are a captured component (#556).
+Being written beside the database is what made capture possible, not what
+performed it; the comment claiming a backup carried them predated any code that
+did. Capture them before the database snapshot, never after: a receipt is written
+only once its post is committed, so capturing first makes "a receipt naming a post
+the snapshot lacks" unreachable, and leaves only the reverse case the door
+contract already covers. Restore switches the whole directory, and must plan the
+artifact even when the archive has none, so a later generation's receipts cannot
+stand beside an older database. Two shapes constrain that plan: a node database
+named `door-outbound` occupies the exact path the receipts root derives to, so
+planning the artifact unconditionally would rename the just-restored database
+into the rollback directory; and only what `_write_result` writes is node state,
+so a door's own files there are counted in the manifest and left alone rather
+than captured.
 
 This ordering can leave harmless unreferenced blobs, but must not leave a
 restored database referring to blobs absent from the backup.

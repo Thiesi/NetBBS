@@ -1,7 +1,7 @@
 """
 Tests for netbbs.backup (design doc §13.4, issue #60's first
 operational slice): create_backup/restore_backup capturing and
-restoring all fourteen recoverable-state artifacts, the ordering/safety
+restoring all fifteen recoverable-state artifacts, the ordering/safety
 invariants around them, and the `python -m netbbs.backup` CLI.
 """
 
