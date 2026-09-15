@@ -778,9 +778,6 @@ async def pick_item(
                 highlighted = start_index % start_page_size
                 break
 
-    def _total_pages() -> int:
-        return max(1, math.ceil(len(working_set) / _sized_page_size()))
-
     async def _render(*, keep_generation: bool = False) -> Sequence[T]:
         nonlocal page_start, frozen, render_generation
         # Freeze for the duration of this render; see `_dimensions`.
@@ -870,7 +867,6 @@ async def pick_item(
         # cleared rather than clamped: the row it pointed at may not be
         # on this page at all, and moving somebody's selection silently
         # is worse than asking them to make it again.
-        total_pages = _total_pages()
         # Clamped to a real row, then turned into a page number *for
         # display only* -- the offset itself stays absolute, so a page
         # size that changes under it moves the window without ever
@@ -883,9 +879,22 @@ async def pick_item(
         # showing "page 1/2" grew to 80x24, and [N]ext then showed the
         # last item as "page 1/1".
         page_index = len(page_history)
-        total_pages = max(total_pages, page_index + 1)
         page_items = working_set[page_start : page_start + page_size]
         page_end = page_start + len(page_items)
+        # And the denominator is counted the same way (issue #558): the
+        # pages walked, plus this one, plus what a page of the current
+        # size would take to cover what is left after it. Dividing the
+        # whole list by the current size instead estimated the pages
+        # already behind the caller as though they had been drawn at
+        # today's size -- so 31 items at 80x22 (14 to a page), grown to
+        # 80x24 and paged once, called itself "page 2/2" while item 31
+        # was still there and [N]ext still worked.
+        #
+        # Counted from `page_end` rather than from the page size, so the
+        # label and the nav are drawn from one fact: `include_next` is
+        # `page_end < len(working_set)`, which is true exactly when the
+        # remainder counted below is non-zero. The two cannot disagree.
+        total_pages = page_index + 1 + math.ceil((len(working_set) - page_end) / page_size)
         # Against what was actually sliced, not against the nominal page
         # size (Codex review): the last page is shorter than a full one,
         # so an index inside `page_size` can still be outside

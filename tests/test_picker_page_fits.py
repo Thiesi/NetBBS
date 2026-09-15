@@ -610,3 +610,46 @@ def test_opening_on_a_stored_item_leaves_prev_a_trail():
     assert pages[1][0] == pages[0][0] - 14, (
         f"[P]rev went to row {pages[1][0]}, not to the boundary before {pages[0][0]}"
     )
+
+
+def test_the_denominator_agrees_with_whether_next_is_offered():
+    """The page total was estimated by dividing the whole list by the
+    *current* page size, while the ordinal counted the pages actually
+    walked -- so after a resize mid-browse the two disagreed (issue
+    #558). 31 items at 80x22 page at 14; grown to 80x24 and paged once,
+    the label read "page 2/2" while item 31 was still there and [N]ext
+    still worked and still went to it.
+
+    Asserted as the invariant rather than as the one arithmetic answer:
+    a page that offers [N]ext is not the last page, and a page that is
+    the last page does not offer it. Both are drawn from the same state,
+    so nothing but a bug can separate them.
+    """
+    class Growing(FakeSession):
+        async def read_editor_key(self, *, distinguish_ctrl_h: bool = False):
+            self.terminal_height = 24
+            return await FakeSession.read_editor_key(self)
+
+    session = Growing(80, 22, ["n", "b"])
+    asyncio.run(
+        pick_item(
+            session, list(range(1, 32)),
+            name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
+            description_of=lambda i: "read 0/write 0, open",
+            title="File areas", empty_message="none",
+        )
+    )
+    plain = _ANSI.sub("", _SGR.sub("", "".join(session.written)))
+    checked = 0
+    for block in plain.split("ReLink /")[1:]:
+        label = re.search(r"page (\d+)/(\d+)", block)
+        if label is None:
+            continue
+        checked += 1
+        current, total = int(label.group(1)), int(label.group(2))
+        offers_next = "[N]ext" in block
+        assert (current < total) == offers_next, (
+            f"page {current}/{total} "
+            f"{'offers' if offers_next else 'does not offer'} [N]ext"
+        )
+    assert checked >= 2, f"expected the opening page and the one [N]ext drew, saw {checked}"
