@@ -210,21 +210,30 @@ into the database that the updater, the registration prompt and the
 console's DNS screen all read it from, so every node accepting the offer
 dead-ended identically.
 
-Both halves exist now. `DEFAULT_SERVICE_URL` carries the project's own
-instance, the same shape and reason as the reliable-nodes URL — a
-project-run service a node should not need to be told about. And
-`[managed_dns] service_url`, or `--managed-dns-service-url`, points a node
-at a different instance; it is mirrored into the node database on every
-startup *including when absent*, so removing the setting returns that
-node to the shipped address rather than stranding it on an override it
-was told about once.
+Both halves exist now, and only one of them carries an address today.
 
-**The shipped address is still `None`**, because `services.managed_dns`
-is not deployed — see *Verification boundaries*. What changes today is
-that a node says the service is not running yet, in two different
-messages: the first-run screen tells someone their answer is recorded and
-costs them nothing more, while the SysOp console tells someone who
-deliberately pressed `[R]egister` why nothing happened.
+`[managed_dns] service_url`, or `--managed-dns-service-url`, points a node
+at an instance. **This is the only route to a working managed-DNS
+registration in 7.7.0**, and it means an instance you run yourself. It is
+mirrored into the node database on every startup *including when absent*,
+so removing the setting returns the node to whatever the build ships
+rather than stranding it on an override it was told about once.
+
+`DEFAULT_SERVICE_URL` is the slot that shipped address will occupy —
+same shape and reason as the reliable-nodes URL, a project-run service a
+node should not need to be told about. **It is `None` in this release**,
+because `services.managed_dns` is not deployed: neither `dns.netbbs.org`
+nor `managed.netbbs.org` resolves. So a node with no `service_url` set
+has no service to reach, and the pre-set first-run opt-in is not usable
+on its own. A guard test has to be flipped in the same commit that fills
+the constant in, so the two cannot drift.
+
+What changes today, then, is not that managed DNS works — it is that the
+address has a route in at all, and that a node with no address says the
+service is not running yet instead of telling its SysOp to ask their
+operator. Two messages, not one: the first-run screen tells someone their
+answer is recorded and costs them nothing more, while the SysOp console
+tells someone who deliberately pressed `[R]egister` why nothing happened.
 
 Making the address configurable makes it changeable, and a managed-DNS
 credential is a bearer secret for one service's registration — whoever
@@ -275,17 +284,30 @@ So: take the backup immediately before upgrading, and decide early. If
 7.7.0 is going to be rolled back, it is far cheaper in the first hour
 than on the third day.
 
-**Restore before you put the 7.6.0 wheel back, not after.** This is the
-one place the usual rollback order is wrong, and it is new in this
-release. 7.6.0's restore has no `door-outbound` component: it does not
-know receipts exist, so it rewinds the database and leaves 7.7.0's
-receipts sitting beside it. Those receipts name post IDs the rewound
-database never issued, and a door reading them is told its work was
-published when the post is not there — the exact generation mismatch the
-new component exists to prevent. Stop 7.7.0, run **7.7.0's** restore, and
-only then install 7.6.0. If you have already gone the other way, delete
-the receipts directory before starting any door: an absent receipt is a
-state the door contract already covers, and a wrong one is not.
+**Roll back with the 7.6.0 build, and delete the receipts by hand.** The
+procedure has two steps that are each easy to get wrong in opposite
+directions, so in order:
+
+1. Stop 7.7.0 and install the **7.6.0** wheel.
+2. Restore your pre-upgrade backup **with 7.6.0**, not with 7.7.0.
+3. Before starting any door, delete the node's `door-outbound` receipts
+   directory.
+
+Step 2 is the counter-intuitive one. Restore does not merely copy a
+snapshot into place: it stages the snapshot and validates it with
+`allow_migrate=True`, which opens it as a real database and applies every
+pending migration — deliberately, because a restore normally wants the
+archive brought forward. Restoring a schema-66 backup with the **7.7.0**
+build therefore hands you a schema-**67** database, which the 7.6.0 you
+are rolling back to will refuse to open. The rollback defeats itself.
+7.6.0's own restore has nothing to apply and leaves the snapshot at 66.
+
+Step 3 exists because 7.6.0's restore has no `door-outbound` component —
+it does not know receipts exist, so it rewinds the database and leaves
+7.7.0's receipts standing beside it, naming post IDs that database never
+issued. A door reading one is told its work was published when the post
+is not there. Deleting them is safe: an absent receipt is a state the
+door contract already describes, and a wrong one is not.
 
 One thing worth knowing about the new tables:
 `link_issued_remote_attestations.user_id` is `ON DELETE SET NULL`, not
