@@ -3828,7 +3828,36 @@ different game builds remain unsupported. Limits are 10,000 captured files,
 4 MiB per file and 512 MiB total; unsupported entries or exceeded limits fail
 clearly rather than silently producing incomplete coverage.
 
-A node's recoverable state is not only its database — it is fourteen
+Door outbound receipt coverage (issue #556): a door's result receipts under
+`db_path.parent / "door-outbound"` are node state and are captured as a
+checksummed component with the rest of it. They were beside the database from
+the start so that a backup could carry them, which is not the same as a backup
+carrying them; before this component a restored node came back holding a door's
+posts and none of their outcomes. Capture precedes the database snapshot, in the
+direction that matters: a `"posted"` receipt is written only after its post is
+committed, so every receipt in an archive names a post that archive's snapshot
+contains. The reverse pairing — a post whose receipt is missing — remains
+possible and is what the door contract already describes; a receipt naming a
+post the restored database never issued is the one a door could act on, and this
+ordering rules it out for every post the node still had. A post the node itself
+deleted is the exception and is deliberately preserved: deleting a board removes
+its posts and leaves the receipts, so the running node already holds that pair,
+and an archive that quietly dropped those receipts would restore a node tidier
+than the one it was taken from. Capture is not a validation pass over a door's
+history. Only what NetBBS itself wrote is captured (a
+regular file named as `_write_result` names one, within its size), bounded by
+the door module's own retention rule per door and by 64 door directories
+overall; anything else found there is left in place and counted in the manifest
+rather than captured or called corruption. Restore replaces the live receipts in
+whole with the archive's own — including replacing them with nothing, when the
+archive predates this component or the node had none — because receipts from a
+later generation standing beside an older database claim post IDs it never
+issued. The previous generation goes to the ordinary rollback directory like
+every other replaced artifact. None of this makes receipt retention a
+publication ledger: it restores the same bounded, best-effort record a running
+node keeps, and a door still must not infer exactly-once publication from it.
+
+A node's recoverable state is not only its database — it is fifteen
 artifacts, today scattered across derived, `db_path`-relative filenames
 with no single existing tool that treats them as one recoverable set:
 
@@ -3848,12 +3877,13 @@ with no single existing tool that treats them as one recoverable set:
 | Board list masthead | `db_path.parent / f"{db_path.stem}_board_list_banner.ans"` | SysOp, via its own menu screen (issue #176) |
 | File area masthead | `db_path.parent / f"{db_path.stem}_file_area_banner.ans"` | SysOp, via its own menu screen (issue #176) |
 | Chat channel picker masthead | `db_path.parent / f"{db_path.stem}_chat_channel_picker_banner.ans"` | SysOp, via its own menu screen (issue #176) |
+| Door outbound receipts | `db_path.parent / "door-outbound"` (one directory per door, bounded by that door's own retention) | `netbbs.doors.outbound`, once per answered request (issue #556) |
 
 A backup covering only the database silently loses the SSH host key (every
 client gets a MITM warning on next connect after restore) and, far more
 seriously, the Link node identity (root-key custody is explicitly "part of
 ordinary node backup and restore" per §4.5's node identity model, not a
-separate ceremony) — so this design treats all fourteen as one atomic backup
+separate ceremony) — so this design treats all fifteen as one atomic backup
 operation, never a DB-only one.
 
 **Mechanism**: a new `netbbs.backup` module (synchronous, path-based — no
@@ -6387,7 +6417,12 @@ Compatibility extension (issues #296/#297):
   another SysOp vouches for it without disturbing its identity or allowlist.
   An outcome is written where the door can still read it after the run: the
   working directory is gone by then, so a result left there would make the
-  promise that a refusal is always visible untrue in practice. Reads of any
+  promise that a refusal is always visible untrue in practice. Those receipts
+  are node state and travel with the node (§13.4, issue #556): a backup
+  captures them before its database snapshot, and a restore pairs the receipts
+  it carries with the database generation they describe. They remain a bounded,
+  best-effort record rather than a publication ledger, so a door may not read
+  exactly-once delivery out of them. Reads of any
   kind remain out of scope, and the hook is available to locally-launched
   doors only -- a remote registration shares no filesystem, and a DOS guest
   cannot read the launch metadata that names the drop directory.

@@ -617,16 +617,16 @@ def test_an_exactly_spelled_board_wins_over_a_case_variant(db, door, sysop, tmp_
 
 
 def test_results_do_not_accumulate_without_limit(db, door, sysop, board, tmp_path):
-    from netbbs.doors.outbound import _RESULTS_KEPT
+    from netbbs.doors.outbound import RESULTS_KEPT
 
     _enable(db, door, sysop, board)
     set_rate_ceiling(db, door, 1, changed_by=sysop)
-    for index in range(_RESULTS_KEPT + 10):
+    for index in range(RESULTS_KEPT + 10):
         _request(tmp_path, name=f"post{index:04d}", subject="Season", body="...")
     drain(db, door, tmp_path)
 
     kept = list(results_dir(db, door.id).glob("*.result.json"))
-    assert len(kept) <= _RESULTS_KEPT
+    assert len(kept) <= RESULTS_KEPT
 
 
 # -- review round 2 -------------------------------------------------------
@@ -661,9 +661,9 @@ def test_a_post_its_rate_debit_and_its_audit_entry_are_all_or_nothing(
 def test_results_are_kept_for_everything_one_permitted_session_can_produce(db):
     """A door cannot read a result until its next launch, so pruning below what
     a single drain can answer would discard outcomes before anyone sees them."""
-    from netbbs.doors.outbound import _MAX_REQUESTS_PER_DRAIN, _RESULTS_KEPT
+    from netbbs.doors.outbound import _MAX_REQUESTS_PER_DRAIN, RESULTS_KEPT
 
-    assert _RESULTS_KEPT >= _MAX_REQUESTS_PER_DRAIN
+    assert RESULTS_KEPT >= _MAX_REQUESTS_PER_DRAIN
 
 
 def test_a_legal_non_ascii_post_is_not_refused_for_size(db, door, sysop, board, tmp_path):
@@ -732,3 +732,24 @@ def test_no_single_unreadable_request_strands_the_rest(db, door, sysop, board, t
 
     assert drain(db, door, tmp_path) == (1, 1), f"{what} stranded the request after it"
     assert _result(db, door, good)["status"] == "posted"
+
+
+def test_a_refusal_quotes_a_doors_own_text_back_at_it_bounded(db, door, sysop, board, tmp_path):
+    """A result file must stay the size a result is.
+
+    A request may legally carry a board name of nearly the whole request
+    limit, and a reason that echoed all of it would make NetBBS write a
+    receipt far larger than any receipt is meant to be -- one the door then
+    has to read, and one a backup will not recognise as node state.
+    """
+    _enable(db, door, sysop, board)
+    request = _request(tmp_path, subject="Hello", body="...", board="X" * 100_000)
+
+    assert drain(db, door, tmp_path) == (0, 1)
+
+    result = _result(db, door, request)
+    assert result["status"] == "rejected"
+    assert "not allowlisted" in result["reason"]
+    assert len(result["reason"]) < 400
+    written = next(results_dir(db, door.id).glob("*.result.json"))
+    assert written.stat().st_size < 64 * 1024, "a receipt a backup would not carry"

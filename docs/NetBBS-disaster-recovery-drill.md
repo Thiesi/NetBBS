@@ -42,13 +42,14 @@ The destination must not exist. Inspect the coverage output and `manifest.json`:
 - the uploaded content tree and representative file bytes;
 - Voidrunner career, previous checkpoint, recovery, and score files when present;
 - each War Dialer world's key, source path, ownership, and checksum;
+- each door's outbound receipts, and the count of entries left in place;
 - optional door installations if you enabled that capture.
 
 A backup with no game component does not recover that game's external data.
 Third-party installation copies are not quiesced automatically and are not
-automatically restored. Door outbound receipts are currently omitted
-([#556](https://github.com/Thiesi/NetBBS/issues/556)); preserve any needed receipts
-separately and do not infer an unrecorded post outcome after recovery.
+automatically restored. Door outbound receipts are captured and restored with the
+node, replacing whatever stands beside the restored database; still do not infer
+an unrecorded post outcome after recovery, in either direction.
 
 ## 2. Rehearse the refusal cases
 
@@ -66,7 +67,8 @@ archive for each corruption case:
 - truncate its database snapshot;
 - alter a blob's bytes without changing its content-addressed filename;
 - alter a recorded checksum or remove a checksummed identity file;
-- alter/remove a manifested career or War Dialer world.
+- alter/remove a manifested career or War Dialer world;
+- add a receipt file the manifest does not list.
 
 Attempt restoration and verify that the target state is unchanged. Use hashes
 and read-only inspection rather than trusting the error message alone.

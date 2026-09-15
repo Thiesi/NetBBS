@@ -63,21 +63,27 @@ _logger = logging.getLogger(__name__)
 #: republish uses, in the other direction.
 OUTBOUND_DIRNAME = "outbound"
 _REQUEST_SUFFIX = ".json"
-_RESULT_SUFFIX = ".result.json"
+
+#: How a result file is named. Public because `netbbs.backup` captures these
+#: files as node state and has to recognize the ones NetBBS itself wrote.
+RESULT_SUFFIX = ".result.json"
 
 #: Where a door's results are kept. Deliberately *not* the door's working
 #: directory: that is a fresh temporary directory per launch which is deleted
 #: the moment the run ends, so a result written there could never be read by
 #: anyone -- not by a door polling during the run, and not by the same door on
 #: its next launch, which is what the contract promises. Durable, per door,
-#: beside the node database so a backup carries it.
+#: beside the node database, where `netbbs.backup` captures it as the node's
+#: `door-outbound` component: being beside the database is what makes that
+#: capture possible, but it was never what performed it (issue #556).
 _RESULTS_DIRNAME = "door-outbound"
 
 #: Results kept per door. Sized against what one drain can actually produce,
 #: not against a round number: a door cannot read a result until its next
 #: launch, so keeping fewer than a single permitted session can generate would
 #: prune outcomes before anybody could ever see them. Bounded so the directory
-#: beside the node database is not a slow leak nobody notices.
+#: beside the node database is not a slow leak nobody notices. This is also
+#: the bound a backup captures per door, which is why it is public.
 #: Defined below `_MAX_REQUESTS_PER_DRAIN`, which it depends on.
 
 #: Default ceiling, per door, per rolling hour. One number rather than one
@@ -100,7 +106,7 @@ _MAX_REQUESTS_PER_DRAIN = MAX_POSTS_PER_HOUR + 16
 #: database work waits behind it. Scanning stops here instead.
 _MAX_REQUESTS_SCANNED = 4 * _MAX_REQUESTS_PER_DRAIN
 
-_RESULTS_KEPT = _MAX_REQUESTS_PER_DRAIN
+RESULTS_KEPT = _MAX_REQUESTS_PER_DRAIN
 
 #: Largest request we will read into memory. A door can stream a file to disk
 #: without it counting against its own `RLIMIT_AS`; `read_text()` and
@@ -375,6 +381,23 @@ def _log_refusal_once_per_window(db: Database, door, config: OutboundConfig,
                   object_id=door.id, detail=f"door={door.name!r} reason={reason}")
 
 
+#: How much of a door's own text a refusal quotes back at it. A request may
+#: legally carry a board name of nearly `_MAX_REQUEST_BYTES`, and a reason
+#: that echoed all of it would make NetBBS write a receipt far larger than any
+#: receipt is meant to be -- one the door then has to read, and one a backup
+#: would not recognize as node state. Everything else a result carries is
+#: bounded already, so this is what keeps a receipt a receipt.
+_MAX_QUOTED_REQUEST_CHARS = 120
+
+
+def _quoted(value: object) -> str:
+    """A door's own value, quoted back at it and bounded."""
+    text = repr(value)
+    if len(text) <= _MAX_QUOTED_REQUEST_CHARS:
+        return text
+    return text[:_MAX_QUOTED_REQUEST_CHARS] + "..."
+
+
 def _resolve_board(db: Database, door_id: int, requested: object) -> tuple[Board | None, str]:
     """Pick the allowlisted board a request names, or say why we cannot."""
     allowed = targets(db, door_id)
@@ -402,9 +425,9 @@ def _resolve_board(db: Database, door_id: int, requested: object) -> tuple[Board
     if len(folded) == 1:
         return folded[0], ""
     if folded:
-        return None, (f"board {requested!r} matches more than one allowlisted board; "
+        return None, (f"board {_quoted(requested)} matches more than one allowlisted board; "
                       "spell it exactly")
-    return None, f"board {requested!r} is not allowlisted for this door"
+    return None, f"board {_quoted(requested)} is not allowlisted for this door"
 
 
 def _is_storable(text: str) -> bool:
@@ -424,7 +447,7 @@ def _is_request(name: str) -> bool:
     place, so `POST.JSON` has to count.
     """
     lowered = name.lower()
-    return lowered.endswith(_REQUEST_SUFFIX) and not lowered.endswith(_RESULT_SUFFIX)
+    return lowered.endswith(_REQUEST_SUFFIX) and not lowered.endswith(RESULT_SUFFIX)
 
 
 def _scan_requests(directory: Path) -> tuple[list[Path], bool]:
@@ -480,18 +503,28 @@ def _discard_all(requests: list[Path]) -> int:
     return len(requests)
 
 
+def results_root(db_path: Path) -> Path:
+    """Where every door's results are kept, for this node.
+
+    Takes the database path rather than a `Database` so `netbbs.backup` --
+    which is deliberately path-based and never opens one -- can back this
+    directory up and restore it as the node artifact it is.
+    """
+    return db_path.parent / _RESULTS_DIRNAME
+
+
 def results_dir(db: Database, door_id: int) -> Path:
     """Where this door's results are kept, across launches."""
-    return db.path.parent / _RESULTS_DIRNAME / str(door_id)
+    return results_root(db.path) / str(door_id)
 
 
 def _prune_results(directory: Path) -> None:
     """Keep only the most recent results, oldest first out."""
     try:
-        existing = sorted(directory.glob("*" + _RESULT_SUFFIX), key=lambda path: path.stat().st_mtime)
+        existing = sorted(directory.glob("*" + RESULT_SUFFIX), key=lambda path: path.stat().st_mtime)
     except OSError:
         return
-    for stale in existing[:-_RESULTS_KEPT]:
+    for stale in existing[:-RESULTS_KEPT]:
         try:
             stale.unlink()
         except OSError:
@@ -524,7 +557,7 @@ def _write_result(db: Database, door_id: int, launch: str, request: Path, payloa
     directory = results_dir(db, door_id)
     stem = request.name[: -len(_REQUEST_SUFFIX)]
     payload = {**payload, "request": stem, "at": utc_now_iso()}
-    result = directory / f"{launch}.{stem}{_RESULT_SUFFIX}"
+    result = directory / f"{launch}.{stem}{RESULT_SUFFIX}"
     staging = result.with_name(result.name + ".part")
     try:
         directory.mkdir(parents=True, exist_ok=True)
