@@ -4536,6 +4536,24 @@ the identical reason (`channel_messages.id`/`created_at`). Any future
 tie-break from the start, not just once a test happens to catch the
 collision.
 
+**The same collision defeats identity, not just ordering: `(id, created_at)`
+is not a unique identity for a row (issue #581).** `users.id` and `doors.id`
+are `INTEGER PRIMARY KEY` without `AUTOINCREMENT`, so SQLite hands a freed
+rowid to the next insert, and `created_at` -- the tiebreaker every "is the row
+at this id still the row I read?" guard leans on -- is only as fine as the
+platform clock. `utc_now_iso()` stamps two rows created in one Windows tick
+with the identical string, which the suite has produced. Any such guard needs a
+third column that two *live* rows cannot share: `touch_last_login` matches
+`username` (UNIQUE, uniquely indexed `COLLATE NOCASE`, and never rewritten --
+nothing in this codebase renames an account), and `playable_registrations`
+matches the door's name for the same reason. That still leaves delete-and-
+recreate-under-the-same-name inside one tick, which is why the guest
+designation is also dropped inside `delete_user`'s own transaction rather than
+being left for the pair to catch afterwards: the reliable defence is to destroy
+the thing reuse would inherit, and the column match is the backstop for every
+way a row can stop being itself without passing through a delete -- a restore
+from an older backup, or a database edited by hand.
+
 **Testing a redraw-in-place screen: assert against the text *after* the
 triggering keystroke, not `in`/`.index()` over the whole cumulative
 output.** A `FakeSession` accumulates every `write`/`write_line` call

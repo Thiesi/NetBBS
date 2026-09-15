@@ -281,6 +281,44 @@ def test_touching_last_login_refuses_a_row_that_is_not_that_account(tmp_path):
     db.close()
 
 
+def test_touching_last_login_refuses_a_stranger_sharing_the_creation_tick(tmp_path):
+    """The same guard, against the collision that actually defeated it
+    (issue #581).
+
+    `created_at` was the only tiebreaker behind the reusable rowid, and
+    `utc_now_iso()` is no finer than the platform clock: on Windows two
+    accounts created in the same tick get the *same* string, and the
+    guard then accepted the stranger's row and stamped a login onto it.
+    The timestamp is set equal here rather than raced for, so this tests
+    the collision on every platform instead of only where the clock is
+    coarse enough to produce it by luck.
+    """
+    from netbbs.auth.users import touch_last_login
+
+    db, guest, sysop = _db(tmp_path)
+    delete_user(db, guest, deleted_by=sysop)
+    replacement = create_user(db, "someone-else", password="hunter2", user_level=1)
+    db.connection.execute(
+        "UPDATE users SET id = ?, created_at = ? WHERE id = ?",
+        (guest.id, guest.created_at, replacement.id),
+    )
+    db.connection.commit()
+    shared = db.connection.execute(
+        "SELECT username, created_at FROM users WHERE id = ?", (guest.id,)
+    ).fetchone()
+    assert shared["created_at"] == guest.created_at, "the collision this is about was not set up"
+    assert shared["username"] != guest.username
+
+    assert touch_last_login(db, guest) is None
+    landed = db.connection.execute(
+        "SELECT last_login_at FROM users WHERE id = ?", (guest.id,)
+    ).fetchone()
+    assert landed["last_login_at"] is None, (
+        "a stranger sharing the creation tick was stamped with the guest's login"
+    )
+    db.close()
+
+
 # -- The database decides what a name matches --------------------------
 
 

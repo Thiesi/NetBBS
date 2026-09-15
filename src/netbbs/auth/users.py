@@ -589,6 +589,24 @@ def touch_last_login(db: Database, user: User) -> User | None:
     that dropped the caller's whole session instead of the refusal the
     login path already knows how to say. Callers holding a row they
     read in the same breath will simply never see it.
+
+    **What "the same account" is matched on** (issue #581). `users.id`
+    is a reusable rowid, so the id alone is not an identity. `created_at`
+    was the tiebreaker and is not sufficient on its own: `utc_now_iso()`
+    resolves to whatever the platform clock does, and on Windows two
+    accounts created in the same tick are stamped with the *same string*
+    -- this project's own suite has produced that pair. A guard defeated
+    by clock resolution is worth nothing, so `username` is matched too:
+    it is `UNIQUE` (and uniquely indexed `COLLATE NOCASE`), nothing in
+    this codebase renames an account, and two *live* rows therefore
+    cannot share one.
+
+    What remains is a stranger that took the freed id, the same creation
+    tick *and* the same name -- which is to say an account deleted and
+    re-registered under its own name inside one tick, mid-login. Guest
+    login, the only caller, refuses that independently: `delete_user`
+    drops the designation in the same transaction as the delete, so
+    there is nothing for the replacement to inherit.
     """
     # One transaction across the identity check, the update and the
     # re-read (Codex review). As three separate statements, a delete
@@ -602,7 +620,8 @@ def touch_last_login(db: Database, user: User) -> User | None:
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         row = db.connection.execute(
-            "SELECT * FROM users WHERE id = ? AND created_at = ?", (user.id, user.created_at)
+            "SELECT * FROM users WHERE id = ? AND created_at = ? AND username = ?",
+            (user.id, user.created_at, user.username),
         ).fetchone()
         if row is None:
             # Ended explicitly, not left open (Codex review). Returning
