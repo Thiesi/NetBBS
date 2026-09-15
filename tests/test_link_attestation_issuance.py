@@ -22,9 +22,11 @@ import nacl.signing
 import pytest
 
 from netbbs.attestation import (
+    AttestationError,
     attest_age,
     attest_name,
     set_attestation_link_visible,
+    withdraw_link_visibility,
 )
 from netbbs.auth.users import SYSOP_LEVEL, create_user, delete_user
 from netbbs.link.remote_attestation import (
@@ -38,6 +40,7 @@ from netbbs.link.remote_attestation import (
     get_remote_attestation_state,
     ingest_remote_attestation,
     list_attestation_authority_fingerprints,
+    list_issued_attestations,
     load_attestation_pull_cursor,
     load_issued_attestation_page,
     reconcile_issued_attestations,
@@ -456,3 +459,139 @@ def test_a_caller_supplied_now_in_another_format_still_sorts(db, node_identity, 
     # And the object is seen as live by a second pass, which is the thing that
     # breaks when the formats disagree.
     assert reconcile(db, node_identity, at=NOW + timedelta(days=1)) == []
+
+
+# -- what a SysOp can see and stop (issue #584 follow-up) --------------------
+
+
+def test_the_operator_listing_shows_a_published_attestation(db, node_identity, alice):
+    set_attestation_link_visible(db, alice, "name", True)
+    reconcile(db, node_identity)
+
+    records = list_issued_attestations(db, now_iso=stamp(NOW))
+
+    assert [(r.username, r.attribute, r.status) for r in records] == [
+        ("alice", "name", "published")
+    ]
+    assert records[0].is_live
+
+
+def test_the_operator_listing_never_carries_the_attested_value(db, node_identity, alice):
+    """A listing of everything the node publishes is exactly the screen design
+    doc §5.5 keeps a verified real name off: the SysOp's question here is what
+    is asserted about whom and until when, not what the value is."""
+    set_attestation_link_visible(db, alice, "name", True)
+    reconcile(db, node_identity)
+
+    record = list_issued_attestations(db, now_iso=stamp(NOW))[0]
+
+    assert "Alice Example" not in repr(record)
+    assert not hasattr(record, "attested_value")
+
+
+def test_the_listing_agrees_with_the_reconcile_about_what_is_withdrawing(db, node_identity, alice):
+    """The status has to be derived from the predicate the reconcile revokes
+    on, or the screen tells a SysOp one thing and the next pass does another.
+
+    Each case below is one of the reconcile's own revocation reasons.
+    """
+    sysop = create_user(db, "sysop-b", password="password", user_level=SYSOP_LEVEL)
+    set_attestation_link_visible(db, alice, "name", True)
+    set_attestation_link_visible(db, alice, "age", True)
+    reconcile(db, node_identity)
+    assert {r.status for r in list_issued_attestations(db, now_iso=stamp(NOW))} == {"published"}
+
+    # consent_withdrawn
+    set_attestation_link_visible(db, alice, "name", False)
+    # attested_value_replaced: re-verifying clears link_visible too, so this is
+    # a distinct reason only in the reconcile; both must read as withdrawing.
+    attest_age(db, alice, datetime(1991, 5, 2).date(), verifier=sysop)
+
+    records = {r.attribute: r.status for r in list_issued_attestations(db, now_iso=stamp(NOW))}
+
+    assert records == {"name": "withdrawing", "age": "withdrawing"}
+    # And the reconcile does revoke exactly those two.
+    changes = reconcile(db, node_identity, at=NOW + timedelta(hours=1))
+    assert sorted(c.action for c in changes) == ["revoked", "revoked"]
+
+
+def test_expired_and_revoked_rows_are_hidden_until_asked_for(db, node_identity, alice):
+    set_attestation_link_visible(db, alice, "name", True)
+    reconcile(db, node_identity)
+    set_attestation_link_visible(db, alice, "name", False)
+    reconcile(db, node_identity, at=NOW + timedelta(hours=1))
+
+    later = stamp(NOW + timedelta(hours=2))
+    assert list_issued_attestations(db, now_iso=later) == []
+    history = list_issued_attestations(db, include_inactive=True, now_iso=later)
+    assert [r.status for r in history] == ["revoked"]
+
+
+def test_a_deleted_accounts_row_is_still_nameable_as_removed(db, node_identity, alice):
+    sysop = create_user(db, "sysop-c", password="password", user_level=SYSOP_LEVEL)
+    set_attestation_link_visible(db, alice, "name", True)
+    reconcile(db, node_identity)
+    delete_user(db, alice, deleted_by=sysop)
+
+    record = list_issued_attestations(db, now_iso=stamp(NOW))[0]
+
+    assert record.username is None
+    assert record.user_id is None
+    assert record.status == "withdrawing"
+
+
+def test_a_sysop_withdrawal_revokes_and_does_not_come_back(db, node_identity, alice):
+    """The trap this action exists to avoid: signing a revocation while the
+    caller's consent is still set means the very next reconcile re-mints what
+    was just revoked, so the withdrawal silently undoes itself."""
+    sysop = create_user(db, "sysop-d", password="password", user_level=SYSOP_LEVEL)
+    set_attestation_link_visible(db, alice, "name", True)
+    reconcile(db, node_identity)
+
+    assert withdraw_link_visibility(db, alice, "name", actor=sysop) is True
+    changes = reconcile(db, node_identity, at=NOW + timedelta(hours=1))
+    assert [(c.action, c.reason) for c in changes] == [("revoked", "consent_withdrawn")]
+
+    # Three more passes, spread over the renewal window: nothing comes back.
+    for days in (1, 40, 80):
+        assert reconcile(db, node_identity, at=NOW + timedelta(days=days)) == []
+    assert list_issued_attestations(db, now_iso=stamp(NOW + timedelta(days=80))) == []
+
+
+def test_a_sysop_withdrawal_is_recorded_against_the_account(db, node_identity, alice):
+    """A caller's own toggle is an ordinary preference; one person overriding
+    another's is what the moderation log is for."""
+    sysop = create_user(db, "sysop-e", password="password", user_level=SYSOP_LEVEL)
+    set_attestation_link_visible(db, alice, "name", True)
+
+    withdraw_link_visibility(db, alice, "name", actor=sysop)
+
+    entries = [
+        row["action"] for row in db.connection.execute(
+            "SELECT action FROM moderation_log WHERE target_user_id = ?", (alice.id,)
+        ).fetchall()
+    ]
+    assert "withdraw_link_name" in entries
+
+
+def test_withdrawing_twice_is_not_an_error_and_logs_once(db, node_identity, alice):
+    sysop = create_user(db, "sysop-f", password="password", user_level=SYSOP_LEVEL)
+    set_attestation_link_visible(db, alice, "name", True)
+
+    assert withdraw_link_visibility(db, alice, "name", actor=sysop) is True
+    assert withdraw_link_visibility(db, alice, "name", actor=sysop) is False
+
+    count = db.connection.execute(
+        "SELECT COUNT(*) FROM moderation_log WHERE action = 'withdraw_link_name'"
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_withdrawing_a_never_shared_attribute_changes_nothing(db, node_identity, alice):
+    """A SysOp who removed the attestation outright has already withdrawn the
+    consent attached to it, so this is a no-op rather than an error."""
+    sysop = create_user(db, "sysop-g", password="password", user_level=SYSOP_LEVEL)
+
+    assert withdraw_link_visibility(db, alice, "age", actor=sysop) is False
+    with pytest.raises(AttestationError, match="unknown attestation attribute"):
+        withdraw_link_visibility(db, alice, "shoe-size", actor=sysop)

@@ -1085,6 +1085,17 @@ was read could not be resumed from a cursor. There is no `revocations_only`
 containment mode: an attestation only ever loosens a local gate, so a
 quarantined authority is simply not pulled.
 
+A SysOp can see everything their node currently asserts about its own users,
+and stop any of it. That listing names the subject, the attribute, and the
+expiry, but never the attested value: it is a screen about what leaves the
+node, not a place a verified real name belongs. Withdrawal clears the
+subject's consent and lets the ordinary reconcile sign the revocation, so the
+operator action and the sync pass can never disagree about whether an object
+should exist. There is deliberately no operator way to switch sharing *on*:
+propagation is conditional on the subject's own opt-in, and a SysOp who
+should not be asserting something can stop asserting it or withdraw the
+verification itself, neither of which requires speaking for the caller.
+
 Receiving nodes verify canonical bytes with the issuer's currently authorized
 operational signing key before persistence. Acceptance then remains purely
 local and attribute-scoped: an explicit attestation-authority grant, its

@@ -319,6 +319,42 @@ def set_attestation_link_visible(
     return get_attestation(db, user, attribute)
 
 
+def withdraw_link_visibility(db: Database, user: User, attribute: str, *, actor: User) -> bool:
+    """Clear Link-sharing consent on a SysOp's authority, and say so in the log.
+
+    The operator half of `set_attestation_link_visible`, and deliberately only
+    that half. A SysOp may stop their node asserting something -- they are the
+    one who verified it, and can un-verify it outright -- but must never grant
+    consent on a caller's behalf, because design doc §5.5 makes remote
+    propagation conditional on the subject's own explicit opt-in. There is no
+    `publish` counterpart here for that reason.
+
+    Returns whether anything actually changed, so a caller can tell a real
+    withdrawal from a re-run. Unlike the caller's own toggle, which is an
+    ordinary preference, this writes to `moderation_log`: it is one person
+    overriding another's setting, which is exactly what that log is for.
+
+    Missing attestation is not an error. A SysOp who removed the attestation
+    outright has already withdrawn the consent attached to it, and the signed
+    object is revoked by the node's next reconcile pass either way.
+    """
+    if attribute not in {"age", "name"}:
+        # Checked here as well as in `set_attestation_link_visible`, which is
+        # not reached for an attribute no attestation exists under.
+        raise AttestationError(f"unknown attestation attribute: {attribute!r}")
+    attestation = get_attestation(db, user, attribute)
+    if attestation is None or not attestation.link_visible:
+        return False
+    # The write itself stays where it already lived; this function adds the
+    # authority and the audit, not a second way to clear the column.
+    set_attestation_link_visible(db, user, attribute, False)
+    record_action(
+        db, actor=actor, action=f"withdraw_link_{attribute}", target_user_id=user.id,
+        detail=f"stopped sharing the verified {attribute} of {user.username!r} over Link",
+    )
+    return True
+
+
 def has_any_verification(db: Database, user: User) -> bool:
     """The separate, general 'verified' badge (design doc §18) — just
     the boolean fact that at least one attribute has been verified, not

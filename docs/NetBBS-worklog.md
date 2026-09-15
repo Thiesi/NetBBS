@@ -3500,6 +3500,17 @@ to be revoked; cascading it away leaves every subscriber holding a live
 assertion about a deleted user until it expires on its own. The reconcile
 treats an active row with a null `user_id` as "revoke".
 
+Revoking a published attestation without clearing the consent behind it is a
+no-op that undoes itself: the next `reconcile_issued_attestations` pass sees
+consent set and no live object, and re-mints exactly what was just revoked. So
+the SysOp withdrawal path clears consent and then runs *that same reconcile*,
+rather than signing a revocation of its own. Two code paths that both decide
+when a signed object should exist will eventually disagree; one path called
+from two places cannot. The operator listing derives its `withdrawing` status
+from the reconcile's own revocation predicate for the same reason -- a screen
+that computed liveness separately would tell a SysOp one thing while the next
+pass did another.
+
 A timestamp this module *derives* must go through the same format
 `utc_now_iso()` writes -- fixed six decimals and a `Z` suffix -- because every
 liveness query is a string comparison against a stored `now`, and

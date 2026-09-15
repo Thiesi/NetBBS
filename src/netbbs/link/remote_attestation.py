@@ -971,6 +971,85 @@ def reconcile_issued_attestations(
     return changes
 
 
+@dataclass(frozen=True)
+class IssuedAttestation:
+    """One object this node has signed about one of its own users.
+
+    Deliberately carries no `attested_value`. The SysOp's question here is
+    *what is my node asserting about whom, and until when* -- the value itself
+    is a verified birthdate or real name they already hold, and design doc
+    §5.5 keeps a verified name off screens that do not require it. A listing
+    of everything the node publishes is exactly such a screen.
+    """
+
+    content_id: str
+    user_id: int | None
+    username: str | None
+    attribute: str
+    issued_at: str
+    expires_at: str
+    revoked_at: str | None
+    status: str  # "published" | "withdrawing" | "expired" | "revoked"
+
+    @property
+    def is_live(self) -> bool:
+        """Whether a subscriber that pulled today would act on this."""
+        return self.status in {"published", "withdrawing"}
+
+
+def list_issued_attestations(
+    db: Database,
+    *,
+    include_inactive: bool = False,
+    limit: int = 500,
+    now_iso: str | None = None,
+) -> list[IssuedAttestation]:
+    """What this node currently publishes about its own users.
+
+    The operator view of the issuing half. Without it a SysOp can see every
+    attestation the node has *accepted* (`list_remote_attestation_overrides`,
+    `list_remote_attestation_audit`) and nothing it *asserts*, which is the
+    half that leaves their node.
+
+    `status` is derived from the same predicate `reconcile_issued_attestations`
+    revokes on, so the screen cannot claim a different answer from the pass
+    that acts on it: a live object whose consent has gone -- toggle off,
+    attestation removed, value re-verified, account deleted -- reads as
+    `withdrawing`, and the next pass signs its revocation.
+    """
+    now_value, _ = _now(now_iso)
+    rows = db.connection.execute(
+        """SELECT i.content_id, i.user_id, u.username, i.attribute, i.attested_value,
+                  i.issued_at, i.expires_at, i.revoked_at,
+                  a.link_visible AS consented, a.attested_value AS consented_value
+           FROM link_issued_remote_attestations AS i
+           LEFT JOIN users AS u ON u.id = i.user_id
+           LEFT JOIN user_attestations AS a
+                  ON a.subject_user_id = i.user_id AND a.attribute = i.attribute
+           WHERE i.object_type = ?
+           ORDER BY i.created_at DESC, i.content_id DESC
+           LIMIT ?""",
+        (REMOTE_ATTESTATION_OBJECT_TYPE, max(1, limit)),
+    ).fetchall()
+    result: list[IssuedAttestation] = []
+    for row in rows:
+        if row["revoked_at"] is not None:
+            status = "revoked"
+        elif row["expires_at"] <= now_value:
+            status = "expired"
+        elif not row["consented"] or row["consented_value"] != row["attested_value"]:
+            status = "withdrawing"
+        else:
+            status = "published"
+        record = IssuedAttestation(
+            row["content_id"], row["user_id"], row["username"], row["attribute"],
+            row["issued_at"], row["expires_at"], row["revoked_at"], status,
+        )
+        if include_inactive or record.is_live:
+            result.append(record)
+    return result
+
+
 def load_issued_attestation_page(
     db: Database,
     *,
