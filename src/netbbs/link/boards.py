@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 from netbbs.auth.users import User
 from netbbs.boards.boards import Board
 from netbbs.boards.posts import Post
+from netbbs.communities import get_effective_min_age, get_effective_name_requirement
 from netbbs.link.events import (
     BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
@@ -455,14 +456,11 @@ def materialize_carried_post(
 
     payload = post.payload
     board_row = db.connection.execute(
-        "SELECT id, min_age, name_requirement FROM boards WHERE board_id = ?",
-        (payload["board_id"],),
+        "SELECT * FROM boards WHERE board_id = ?", (payload["board_id"],)
     ).fetchone()
     if board_row is None:
         return None
     board_local_id = board_row["id"]
-    if not _remote_author_meets_board_identity_policy(db, payload["author"], board_row):
-        return None
 
     parent_post_id = payload.get("parent_post_id")
     if parent_post_id is not None:
@@ -486,6 +484,14 @@ def materialize_carried_post(
             payload["board_id"],
         ),
     )
+    if not _remote_author_meets_board_identity_policy(db, payload["author"], board_row):
+        # The signed event is kept, only its projection is refused -- which is
+        # what makes the rebuild path below a real recovery rather than a
+        # claim. Committed, not rolled back: `link_events` is the record that
+        # this node accepted these bytes, and losing it would mean re-fetching
+        # the post from a peer that has no reason to send it again.
+        db.connection.commit()
+        return None
     db.connection.execute(
         """
         INSERT INTO posts
@@ -528,8 +534,13 @@ def _remote_author_meets_board_identity_policy(db: Database, author: dict, board
     on a post the board has already admitted, which is a revision of admitted
     content rather than a fresh admission.
     """
-    min_age = board_row["min_age"]
-    name_requirement = board_row["name_requirement"]
+    board = _board_from_row(board_row)
+    # Through the Community cascade, exactly as the local posting path does:
+    # a board that inherits its gate from its Community must apply the same
+    # one to a remote author, or a remote poster gets onto a board a local
+    # poster is refused from.
+    min_age = get_effective_min_age(db, board)
+    name_requirement = get_effective_name_requirement(db, board)
     if not min_age and name_requirement is None:
         return True
     home = author.get("home_node_fingerprint")

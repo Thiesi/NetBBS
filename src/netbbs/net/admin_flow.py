@@ -3461,7 +3461,11 @@ async def _published_identity_screen(
         selected = await pick_item(
             session, live,
             name_of=_issued_subject,
-            stable_id_of=lambda record: record.content_id,
+            # `pick_item`'s [G]oto # parses its input with `int()` and compares
+            # that to `stable_id_of`, so a hex content_id makes the advertised
+            # goto path unusable -- the same derivation the other hash-backed
+            # trust pickers use (Codex review of #590).
+            stable_id_of=lambda record: _stable_id_for(record.content_id),
             description_of=lambda record: f"signed {record.issued_at[:10]}, expires {record.expires_at[:10]}",
             columns=_ISSUED_COLUMNS,
             column_values_of=_issued_columns,

@@ -2720,13 +2720,11 @@ MIGRATIONS = [
             signature_b64          TEXT NOT NULL,
             issued_at              TEXT NOT NULL,
             expires_at             TEXT,
+            signing_key_fingerprint TEXT,
             revoked_by_content_id  TEXT,
             revoked_at             TEXT,
             created_at             TEXT NOT NULL
         );
-
-        CREATE INDEX idx_link_issued_remote_attestations_page
-            ON link_issued_remote_attestations(created_at, content_id);
 
         CREATE INDEX idx_link_issued_remote_attestations_active
             ON link_issued_remote_attestations(user_id, attribute, revoked_at);

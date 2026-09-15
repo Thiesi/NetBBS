@@ -2419,6 +2419,33 @@ async def request_trust_objects(
         raise LinkTransportError(f"malformed trust pull response from {url}: {exc}") from exc
 
 
+# An error body is read only to quote it back in a log line, so it needs a far
+# tighter bound than a real response.
+_MAX_ERROR_BODY_BYTES = 8 * 1024
+
+
+async def _read_bounded(response, limit: int, *, label: str = "response body") -> str:
+    """Read at most `limit` bytes, refusing rather than buffering more.
+
+    Reads `limit + 1` so that hitting the limit is distinguishable from
+    exactly filling it, and decodes only once the size is known to be within
+    bounds -- the point being that nothing this peer controls gets to decide
+    how much memory this process allocates.
+    """
+    # A loop, not one `read(limit + 1)`: `StreamReader.read(n)` returns *at
+    # most* n bytes and routinely returns fewer than are coming, so a single
+    # call silently accepts an oversized body that simply had not arrived yet.
+    buffered = bytearray()
+    while len(buffered) <= limit:
+        chunk = await response.content.read(limit + 1 - len(buffered))
+        if not chunk:
+            break
+        buffered.extend(chunk)
+    if len(buffered) > limit:
+        raise LinkTransportError(f"{label} exceeds {limit} bytes")
+    return bytes(buffered).decode("utf-8", errors="replace")
+
+
 async def request_remote_attestations(
     node: LinkNode,
     session: ClientSession,
@@ -2434,38 +2461,42 @@ async def request_remote_attestations(
             url, json=pull_request.to_dict(), timeout=ClientTimeout(total=timeout)
         ) as response:
             if response.status != 200:
-                text = await response.text()
+                text = await _read_bounded(response, _MAX_ERROR_BODY_BYTES)
                 raise LinkTransportError(
                     f"attestation pull from {url} failed: HTTP {response.status}: {text}"
                 )
-            body = await response.json(loads=strict_json_loads)
+            # Ingress bounds on the *bytes*, before anything decodes them
+            # (design doc §12.7: "over-limit input is rejected or deferred
+            # visibly, never converted into evidence"). `response.json()`
+            # downloads and parses the whole body first, so a hostile
+            # configured authority could exhaust this process's memory long
+            # before a length check on the decoded value ever ran.
+            raw = await _read_bounded(
+                response, MAX_ATTESTATION_RESPONSE_BYTES, label="attestation pull response"
+            )
+            body = strict_json_loads(raw)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
     try:
         objects = body["objects"]
         if not isinstance(objects, list):
             raise TypeError("objects is not a list")
+        # Read inside the guarded block, like `request_trust_objects`: a
+        # response that omits it otherwise raises `KeyError` out of this
+        # function, which `_pull_one_attestation_authority` does not catch, so
+        # one malformed peer would end all outbound sync rather than its own
+        # pull.
+        more_available = bool(body["more_available"])
     except (KeyError, TypeError) as exc:
         raise LinkTransportError(
             f"malformed attestation pull response from {url}: {exc}"
         ) from exc
-    # Ingress bounds on what a responder actually sent, not on what this node
-    # asked for (design doc §12.7: "over-limit input is rejected or deferred
-    # visibly, never converted into evidence"). The trust pull gets these from
-    # `ingest_trust_objects`, which bounds a whole batch before admitting any
-    # of it; attestations are ingested one object at a time, so the page-level
-    # bound has to live here or nothing applies it at all.
     if len(objects) > MAX_ATTESTATION_OBJECTS_PER_RESPONSE:
         raise LinkTransportError(
             f"attestation pull response from {url} exceeds "
             f"{MAX_ATTESTATION_OBJECTS_PER_RESPONSE} objects"
         )
-    encoded = len(json.dumps(objects, separators=(",", ":")).encode("utf-8"))
-    if encoded > MAX_ATTESTATION_RESPONSE_BYTES:
-        raise LinkTransportError(
-            f"attestation pull response from {url} exceeds the 1 MiB response limit"
-        )
-    return objects, bool(body["more_available"])
+    return objects, more_available
 
 
 async def fetch_trust_evidence(

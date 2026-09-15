@@ -39,6 +39,7 @@ from netbbs.attestation import attest_age, set_attestation_link_visible
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.link.remote_attestation import (
     MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
+    MAX_ATTESTATION_RESPONSE_BYTES,
     build_attestation_pull_request,
     build_remote_attestation,
     configure_attestation_authority,
@@ -3066,4 +3067,83 @@ def test_an_oversized_attestation_page_is_refused_before_anything_is_ingested(tm
             await runner.cleanup()
 
     with pytest.raises(LinkTransportError, match="exceeds 100 objects"):
+        asyncio.run(scenario())
+
+
+def test_a_response_missing_its_pagination_flag_is_a_transport_error(tmp_path):
+    """`_pull_one_attestation_authority` catches `LinkTransportError`, not
+    `KeyError`. Reading `more_available` outside the guarded block meant one
+    malformed peer response escaped `run_link_sync` and permanently ended all
+    outbound synchronization, rather than rejecting that one authority."""
+    node = LinkNode(identity=bootstrap_node_identity("flagless-subscriber"))
+    issuer_identity = bootstrap_node_identity("flagless-issuer")
+
+    async def _no_flag(request: web.Request) -> web.Response:
+        return web.json_response({"objects": []})
+
+    pull = build_attestation_pull_request(
+        signing_identity=node.identity.signing_key,
+        requester_fingerprint=node.identity.fingerprint,
+        responder_fingerprint=issuer_identity.fingerprint,
+        issuer_fingerprint=issuer_identity.fingerprint,
+    )
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/link/v1/attestation-pull/{fingerprint}", _no_flag)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await request_remote_attestations(
+                    node, session, f"http://127.0.0.1:{site.port}", pull
+                )
+        finally:
+            await runner.cleanup()
+
+    with pytest.raises(LinkTransportError, match="malformed attestation pull response"):
+        asyncio.run(scenario())
+
+
+def test_an_oversized_body_is_refused_before_it_is_parsed(tmp_path):
+    """The earlier check ran on the decoded value, so `response.json()` had
+    already downloaded and parsed the whole body -- a hostile configured
+    authority could exhaust this process's memory well inside the advertised
+    1 MiB ingress limit."""
+    node = LinkNode(identity=bootstrap_node_identity("bounded-body-subscriber"))
+    issuer_identity = bootstrap_node_identity("unbounded-body-issuer")
+    parsed: list[int] = []
+
+    async def _huge(request: web.Request) -> web.Response:
+        # Deliberately not valid JSON: if the bound is applied first, nothing
+        # ever tries to parse it, which is the property under test.
+        body = b"[" + b"A" * (MAX_ATTESTATION_RESPONSE_BYTES + 4096)
+        parsed.append(len(body))
+        return web.Response(body=body, content_type="application/json")
+
+    pull = build_attestation_pull_request(
+        signing_identity=node.identity.signing_key,
+        requester_fingerprint=node.identity.fingerprint,
+        responder_fingerprint=issuer_identity.fingerprint,
+        issuer_fingerprint=issuer_identity.fingerprint,
+    )
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/link/v1/attestation-pull/{fingerprint}", _huge)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await request_remote_attestations(
+                    node, session, f"http://127.0.0.1:{site.port}", pull
+                )
+        finally:
+            await runner.cleanup()
+
+    with pytest.raises(LinkTransportError, match="exceeds"):
         asyncio.run(scenario())

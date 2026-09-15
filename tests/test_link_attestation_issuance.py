@@ -15,6 +15,7 @@ round trip is driven end to end in `test_a_toggle_reaches_a_subscriber` and
 
 from __future__ import annotations
 
+import base64
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -32,9 +33,12 @@ from netbbs.auth.users import SYSOP_LEVEL, create_user, delete_user
 from netbbs.link.remote_attestation import (
     ATTESTATION_PULL_REQUEST_OBJECT_TYPE,
     AttestationPullRequest,
+    MAX_ACTIVE_ATTESTATIONS_PER_ISSUER,
     MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
     REMOTE_ATTESTATION_OBJECT_TYPE,
     REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE,
+    UnknownAttestationSubject,
+    build_remote_attestation,
     build_attestation_pull_request,
     configure_attestation_authority,
     get_remote_attestation_state,
@@ -48,6 +52,7 @@ from netbbs.link.remote_attestation import (
     save_attestation_pull_cursor,
 )
 from netbbs.identity.keys import Identity, IdentityKind
+from netbbs.link.events import canonical_bytes
 from netbbs.link.trust import TrustSubject, register_subject
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -595,3 +600,147 @@ def test_withdrawing_a_never_shared_attribute_changes_nothing(db, node_identity,
     assert withdraw_link_visibility(db, alice, "age", actor=sysop) is False
     with pytest.raises(AttestationError, match="unknown attestation attribute"):
         withdraw_link_visibility(db, alice, "shoe-size", actor=sysop)
+
+
+# -- Codex review of #590 ---------------------------------------------------
+
+
+def test_a_timestamp_that_overflows_normalization_is_a_rejected_object(db, node_identity):
+    """One signed object from one peer must not end the whole sync task.
+
+    `0001-01-01T00:00:00+23:59` parses fine and then overflows in
+    `astimezone`, and `OverflowError` is not a `ValueError`, so it escaped
+    every per-object handler in the pull loop.
+    """
+    key = nacl.signing.SigningKey.generate()
+    subject = TrustSubject.user("home-node-fingerprint", "alice")
+    register_subject(db, subject, first_accepted_at=stamp(NOW), now_iso=stamp(NOW))
+    wire = build_remote_attestation(
+        key, issuer_fingerprint=HOME, subject=subject, attribute="name",
+        attested_value="Alice Example", subject_opt_in=True,
+        issued_at=stamp(NOW), expires_at=stamp(NOW + timedelta(days=30)),
+    )
+    wire["envelope"]["payload"]["issued_at"] = "0001-01-01T00:00:00+23:59"
+
+    with pytest.raises(ValueError):
+        ingest_remote_attestation(
+            db, wire, issuer_verify_key=key.verify_key, now_iso=stamp(NOW)
+        )
+
+
+def test_an_issuer_cannot_accumulate_attestations_without_bound(db, node_identity):
+    """Per-page and per-pass limits bounded the rate; nothing bounded the
+    total, so a compromised authority could grow the database until the disk
+    filled by minting fresh objects for a subject it had already attested."""
+    key = nacl.signing.SigningKey.generate()
+    subject = TrustSubject.user("issuer-node", "alice")
+    register_subject(db, subject, first_accepted_at=stamp(NOW), now_iso=stamp(NOW))
+    configure_attestation_authority(
+        db, "issuer-node", attributes=["name"], reason="peer", now_iso=stamp(NOW)
+    )
+    db.connection.executemany(
+        """INSERT INTO link_remote_attestations
+           (content_id, issuer_fingerprint, subject_id, attribute, attested_value,
+            subject_opt_in, issued_at, expires_at, envelope_json, signature_b64, received_at)
+           VALUES (?, 'issuer-node', ?, 'name', 'x', 1, ?, ?, '{}', '', ?)""",
+        [
+            (f"{index:064x}", subject.subject_id, stamp(NOW),
+             stamp(NOW + timedelta(days=30)), stamp(NOW))
+            for index in range(MAX_ACTIVE_ATTESTATIONS_PER_ISSUER)
+        ],
+    )
+    db.connection.commit()
+
+    wire = build_remote_attestation(
+        key, issuer_fingerprint="issuer-node", subject=subject, attribute="name",
+        attested_value="One More", subject_opt_in=True,
+        issued_at=stamp(NOW), expires_at=stamp(NOW + timedelta(days=30)),
+    )
+    with pytest.raises(ValueError, match="active-attestation quota"):
+        ingest_remote_attestation(
+            db, wire, issuer_verify_key=key.verify_key, now_iso=stamp(NOW)
+        )
+
+
+def test_an_unknown_subject_is_a_named_rejection_a_later_event_can_undo(db):
+    """The one rejection that is retryable, so the puller can tell it from a
+    permanent one and leave its cursor where it is."""
+    key = nacl.signing.SigningKey.generate()
+    subject = TrustSubject.user("issuer-node", "never-met")
+    configure_attestation_authority(
+        db, "issuer-node", attributes=["name"], reason="peer", now_iso=stamp(NOW)
+    )
+    wire = build_remote_attestation(
+        key, issuer_fingerprint="issuer-node", subject=subject, attribute="name",
+        attested_value="Alice Example", subject_opt_in=True,
+        issued_at=stamp(NOW), expires_at=stamp(NOW + timedelta(days=30)),
+    )
+
+    with pytest.raises(UnknownAttestationSubject):
+        ingest_remote_attestation(
+            db, wire, issuer_verify_key=key.verify_key, now_iso=stamp(NOW)
+        )
+
+
+def test_rotating_the_signing_key_reissues_a_live_attestation(db, node_identity, alice):
+    """A subscriber resolves only the issuer's *current* operational key, so
+    an object signed by the previous one stops verifying the moment the node
+    rotates. Waiting for the ordinary renewal would leave the attestation
+    silently broken for months."""
+    set_attestation_link_visible(db, alice, "name", True)
+    reconcile(db, node_identity)
+    first = load_issued_attestation_page(db)[0]
+
+    rotated = Identity(
+        kind=IdentityKind.NODE, label="issuer",
+        signing_key=nacl.signing.SigningKey.generate(), created_at=stamp(NOW),
+    )
+    changes = reconcile_issued_attestations(
+        db, rotated, home_node_fingerprint=HOME, now_iso=stamp(NOW + timedelta(hours=1))
+    )
+
+    assert [(c.action, c.reason) for c in changes] == [("renewed", "signing_key_rotated")]
+    served = load_issued_attestation_page(db)[0]
+    assert len(served) == 2
+    # The replacement verifies against the key a subscriber would now resolve.
+    newest = served[-1]
+    rotated.verify_key.verify(
+        canonical_bytes(newest["envelope"]),
+        base64.b64decode(newest["signature"]),
+    )
+    assert _content_id(first[0]) != _content_id(newest)
+
+
+def test_a_value_that_can_never_be_exported_is_reported_not_swallowed(db, node_identity):
+    """A real name past the wire's 128-byte limit is accepted locally, so the
+    caller's toggle goes on and every pass then fails to build an object. That
+    is not the transient race the handler was written for."""
+    sysop = create_user(db, "sysop-h", password="password", user_level=SYSOP_LEVEL)
+    user = create_user(db, "verbose", password="password")
+    attest_name(db, user, "A" * 200, verifier=sysop)
+    set_attestation_link_visible(db, user, "name", True)
+
+    changes = reconcile(db, node_identity)
+
+    assert [(c.action, c.attribute) for c in changes] == [("refused", "name")]
+    assert "not_exportable" in changes[0].reason
+    assert load_issued_attestation_page(db)[0] == []
+
+
+def test_the_served_stream_survives_the_issuers_clock_going_backwards(db, node_identity, alice):
+    """A cursor into a wall-clock-ordered stream skips every object signed
+    while the clock was behind it, permanently -- including a revocation, so a
+    subscriber would keep trusting withdrawn identity data."""
+    set_attestation_link_visible(db, alice, "name", True)
+    reconcile(db, node_identity)
+    cursor = _content_id(load_issued_attestation_page(db)[0][0])
+
+    # The clock steps back an hour, and consent is withdrawn in that window.
+    set_attestation_link_visible(db, alice, "name", False)
+    reconcile(db, node_identity, at=NOW - timedelta(hours=1))
+
+    page, _ = load_issued_attestation_page(db, after_content_id=cursor)
+
+    assert [item["envelope"]["object_type"] for item in page] == [
+        REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE
+    ]

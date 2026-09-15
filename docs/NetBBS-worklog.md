@@ -3500,6 +3500,25 @@ to be revoked; cascading it away leaves every subscriber holding a live
 assertion about a deleted user until it expires on its own. The reconcile
 treats an active row with a null `user_id` as "revoke".
 
+`aiohttp`'s `StreamReader.read(n)` returns *at most* n bytes and routinely
+returns fewer than are still coming, so a single `read(limit + 1)` is not a
+size bound -- it silently accepts an oversized body that had not fully arrived
+yet. Bounding a response means looping until `limit + 1` bytes are buffered or
+the stream ends. The bound also has to run before the decode: `response.json()`
+downloads and parses the whole body first, so a length check on the decoded
+value is not an ingress limit at all, however correct the number in it is.
+
+A refusal that returns before the write it was supposed to precede deletes
+data. `materialize_carried_post` is the only thing that writes a `board_post`
+to `link_events` -- `persist_accepted_events` skips its generic `save_event`
+path for exactly that type -- so gating at the top of that function, rather
+than between the `link_events` insert and the `posts` insert, lost the event
+outright. The documented recovery (the SysOp rebuild pass) then had nothing to
+find, and the accompanying test asserted the event was absent, agreeing with
+the bug rather than with the behaviour the design doc described. When a
+refusal claims something is retained, the assertion to write is that it *is*
+retained.
+
 Revoking a published attestation without clearing the consent behind it is a
 no-op that undoes itself: the next `reconcile_issued_attestations` pass sees
 consent set and no live object, and re-mints exactly what was just revoked. So

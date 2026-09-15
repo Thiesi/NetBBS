@@ -190,6 +190,7 @@ from netbbs.link.onboarding import participation_accepted
 from netbbs.link.reliable_nodes import effective_reliable_nodes, record_observed_reliable_identity
 from netbbs.link.store import build_inventory_request, delete_relay_consent, save_event, save_peer
 from netbbs.link.remote_attestation import (
+    UnknownAttestationSubject,
     build_attestation_pull_request,
     ingest_remote_attestation,
     list_attestation_authority_fingerprints,
@@ -889,6 +890,14 @@ async def _reconcile_own_attestations(node: LinkNode, lane: DatabaseLane) -> Non
     for change in changes:
         # The attested value itself is never logged: it is the verified
         # birthdate or real name, and this log is not the place for either.
+        if change.action == "refused":
+            # A standing condition, not an event: the caller's toggle is on
+            # and nothing can be published under it until the value changes.
+            _logger.warning(
+                "Link attestations: cannot publish the %s attestation for user %s (%s)",
+                change.attribute, change.user_id, change.reason,
+            )
+            continue
         _logger.info(
             "Link attestations: %s %s attestation (%s)",
             change.action, change.attribute, change.reason,
@@ -951,25 +960,45 @@ async def _pull_one_attestation_authority(
                 raw_objects, more = await request_remote_attestations(
                     node, session, base_url, pull
                 )
+                durable = cursor
                 for raw in raw_objects:
                     if not isinstance(raw, dict):
                         raise ValueError("attestation response contains a non-object entry")
+                    # The signature verifies against the key of the authority
+                    # being pulled, but the payload names its own issuer, and
+                    # it is the payload's issuer that acceptance policy is
+                    # keyed on. Without this, a compromised authority A can
+                    # sign an object claiming to be authority B and inherit
+                    # B's attribute scope and trust state. The trust path
+                    # already makes exactly this check (Codex review of #590).
+                    if _attestation_issuer(raw) != issuer:
+                        raise ValueError(
+                            "attestation response contains an object from another issuer"
+                        )
                     # Per object, not per page. Every object carries its own
-                    # issuer signature and its own meaning, so one this node
-                    # cannot use -- a revocation for an attestation it never
-                    # received, an object whose subject it has never met --
-                    # must not discard the rest of the page with it. The
-                    # cursor still advances past it: it has been seen.
+                    # signature and its own meaning, so one this node cannot
+                    # use -- a revocation for an attestation it never received
+                    # -- must not discard the rest of the page with it.
                     try:
                         await lane.run(
                             ingest_remote_attestation, raw, issuer_verify_key=verify_key
                         )
+                    except UnknownAttestationSubject:
+                        # The one rejection a later event can undo: this node
+                        # has not met the subject *yet*. Advancing the cursor
+                        # past it would mean never being offered it again, so
+                        # the cursor stops here and the next pass re-reads
+                        # from the last object with a settled outcome. Ingest
+                        # is idempotent, so re-reading costs only bytes, and
+                        # the page budget bounds how many.
+                        break
                     except ValueError as exc:
                         _logger.info(
                             "Link attestation pull: skipped an object from %s: %s", issuer, exc
                         )
-                if raw_objects:
-                    cursor = _attestation_content_id(raw_objects[-1])
+                    durable = _attestation_content_id(raw)
+                if durable is not None and durable != cursor:
+                    cursor = durable
                     await lane.run(save_attestation_pull_cursor, issuer, issuer, cursor)
                 if not more:
                     completed = True
@@ -988,6 +1017,17 @@ async def _pull_one_attestation_authority(
             _logger.warning(
                 "Link attestation pull: rejected a response from authority %s: %s", issuer, exc
             )
+
+
+def _attestation_issuer(raw: dict) -> str:
+    """The issuer the signed payload claims, which is what policy keys on."""
+    envelope = raw.get("envelope")
+    if not isinstance(envelope, dict):
+        raise ValueError("attestation object has no envelope")
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("attestation object has no payload")
+    return str(payload.get("issuer_fingerprint", ""))
 
 
 def _attestation_content_id(raw: dict) -> str:

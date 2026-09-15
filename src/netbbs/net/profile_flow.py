@@ -1571,7 +1571,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             brief="Toggle sharing your verified age",
             help=(
                 "Whether your SysOp-verified age is shared over NetBBS Link, so a remote "
-                "board or channel with an age gate can let you in. Off by default -- this "
+                "board with an age gate can let you in. Off by default -- this "
                 "node's own verification of you isn't shared elsewhere unless you opt in, "
                 "and a fresh verification switches it off again. It reaches only those "
                 "nodes whose own SysOp has chosen to accept this node's verifications; "
@@ -1587,7 +1587,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             brief="Toggle sharing your verified name",
             help=(
                 "Whether your SysOp-verified real name is shared over NetBBS Link, so a "
-                "remote board or channel that requires a verified name can let you in. Off "
+                "remote board that requires a verified name can let you in. Off "
                 "by default -- this node's own verification of you isn't shared elsewhere "
                 "unless you opt in, and a fresh verification switches it off again. It "
                 "reaches only those nodes whose own SysOp has chosen to accept this node's "

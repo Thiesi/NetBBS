@@ -1061,6 +1061,17 @@ account's signed objects therefore outlive the account itself long enough to be
 revoked, rather than leaving subscribers holding a live assertion about a user
 who no longer exists.
 
+An object is also reissued when the node rotates its operational signing key,
+without waiting for the renewal window: a subscriber resolves only the issuer's
+current key, so anything the previous one signed stops verifying at the moment
+of rotation.
+
+Attestation ingress is bounded by total retained volume as well as by rate.
+The page and per-pass limits bound how fast a configured authority can deliver
+objects; a per-issuer cap on active attestations bounds how many it can
+accumulate, so an authority that turns hostile cannot grow a receiver's
+database without limit.
+
 Issued lifetime is 90 days, renewed once 30 days remain. The 365-day ceiling is
 what a receiver must tolerate; a shorter issued lifetime is what an issuer
 chooses, because a node that goes dark cannot withdraw consent it has already
@@ -1115,9 +1126,10 @@ value in unrelated screens.
 A carrying node may always apply its own local attestations to its own users
 when enforcing a carried resource’s local age/name policy.
 
-For a remote author the same gate consults the accepted remote attestation, at
-the point §12.8 puts every Link enforcement decision: before remotely
-influenced persistence. A carried board post whose author fails the board's own
+For a remote author the same gate consults the accepted remote attestation,
+resolved through the Community cascade exactly as the local posting path
+resolves it, at the point §12.8 puts every Link enforcement decision: before
+remotely influenced persistence. A carried board post whose author fails the board's own
 `min_age`/`name_requirement` is not materialized, which is the same honest
 exclusion as a board this node does not carry — the signed event is retained,
 nothing is projected, and the SysOp's rebuild pass materializes the post if the
