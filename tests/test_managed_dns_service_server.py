@@ -2103,7 +2103,11 @@ def test_a_revoked_name_cannot_be_reclaimed_with_the_credential_that_held_it(db)
 
     (reclaim_status, reclaim_body), (heartbeat_status, _) = asyncio.run(scenario())
     assert reclaim_status == 409
-    assert "not currently available" in reclaim_body["error"]
+    # The holder is told the truth -- the credential proves it is theirs
+    # to be told (design doc §16 Decision 4); see the test below for what
+    # anyone else learns.
+    assert "revoked by the service operator and cannot be reclaimed" in reclaim_body["error"]
+    assert reclaim_body["status"] == "revoked"
     assert heartbeat_status == 401
     assert get_registration_by_name(db, "badname").status == "revoked"
 
@@ -2622,3 +2626,220 @@ def test_reclaim_validates_its_body(db):
     status, body = asyncio.run(scenario())
     assert status == 400
     assert "boolean dynamic" in body["error"]
+
+
+# -- the operator's read and the registrant's answer (design doc §16 Decision 4)
+
+
+async def _admin_registrations(server: ManagedDnsServer, *, token: str | None):
+    headers = {} if token is None else {"Authorization": f"Bearer {token}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"http://127.0.0.1:{server.port}/admin/registrations", json={}, headers=headers,
+        ) as response:
+            return response.status, await response.json()
+
+
+def test_admin_registrations_lists_every_row_without_the_credential_hash(db):
+    async def scenario():
+        server = await _start_server(db, admin_token="s3cret", min_age_seconds=0)
+        try:
+            live = await _register(server, name="alpha", node_fingerprint="fp-1")
+            await _mature(server, db, name="alpha", credential=live["credential"])
+            gone = await _register(server, name="beta", node_fingerprint="fp-2")
+            await _release(server, credential=gone["credential"])
+            await _register(server, name="gamma", node_fingerprint="fp-3")
+            await _revoke(server, name="gamma", token="s3cret", reason="impersonation")
+            return await _admin_registrations(server, token="s3cret")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    rows = {row["name"]: row for row in body["registrations"]}
+    assert set(rows) == {"alpha", "beta", "gamma"}  # inactive rows included on purpose
+    assert rows["alpha"]["status"] == "matured" and rows["alpha"]["last_known_address"] == "127.0.0.1"
+    assert rows["beta"]["status"] == "released" and rows["beta"]["released_at"]
+    assert rows["gamma"]["status"] == "revoked" and rows["gamma"]["revoked_reason"] == "impersonation"
+    assert all("credential_hash" not in row and "credential" not in row for row in rows.values())
+
+
+def test_admin_registrations_is_refused_like_revoke(db):
+    async def scenario():
+        server = await _start_server(db, admin_token="s3cret")
+        try:
+            return (
+                await _admin_registrations(server, token=None),
+                await _admin_registrations(server, token="wrong"),
+            )
+        finally:
+            await server.stop()
+
+    (missing, _), (wrong, _) = asyncio.run(scenario())
+    assert missing == 401 and wrong == 401
+
+
+def test_a_revoked_credential_is_told_so_on_every_route_and_named_the_contact(db):
+    """The holder of the credential learns the fact and where to write
+    (never the reason); a heartbeat, a release, a rename and a
+    cancellation all say it, and so does a manual reclaim. Anyone else
+    still gets the uniform cooldown refusal."""
+    async def scenario():
+        server = await _start_server(db, admin_token="s3cret", min_age_seconds=0, contact="abuse@example.org")
+        try:
+            registered = await _register(server, name="badname")
+            await _mature(server, db, name="badname", credential=registered["credential"])
+            await _revoke(server, name="badname", token="s3cret")
+            credential = registered["credential"]
+            heartbeat = await _heartbeat(server, credential=credential)
+            release = await _release(server, credential=credential)
+            rename = await _rename(server, credential=credential, name="other")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"http://127.0.0.1:{server.port}/cancel-rename", json={"credential": credential},
+                ) as response:
+                    cancel = response.status, await response.json()
+            reclaim = await _register_raw(server, name="badname", credential=credential)
+            stranger = await _register_raw(server, name="badname", node_fingerprint="fp-9")
+            return heartbeat, release, rename, cancel, reclaim, stranger
+        finally:
+            await server.stop()
+
+    heartbeat, release, rename, cancel, reclaim, stranger = asyncio.run(scenario())
+    for status, body in (heartbeat, release, rename, cancel):
+        assert status == 401
+        assert body["status"] == "revoked"
+        assert "revoked by the service operator" in body["error"]
+        assert "contact abuse@example.org" in body["error"]
+        assert body["contact"] == "abuse@example.org"
+    assert reclaim[0] == 409 and reclaim[1]["status"] == "revoked"
+    assert stranger[0] == 409 and "cooldown" in stranger[1]["error"] and "revoked" not in stranger[1]["error"]
+
+
+def test_revoke_refuses_when_the_reviewed_node_no_longer_holds_the_name(db):
+    """The console sends the fingerprint of the row it showed; a name that
+    passed its cooldown and was registered by another node in the
+    meantime is not taken on the strength of a stale screen (Codex
+    review of PR #609)."""
+    async def scenario():
+        clock = {"now": datetime(2026, 9, 16, tzinfo=timezone.utc)}
+        server = await _start_server(db, admin_token="s3cret", cooldown_seconds=60, clock=lambda: clock["now"])
+        try:
+            first = await _register(server, name="wanted", node_fingerprint="fp-1")
+            await _release(server, credential=first["credential"])
+            clock["now"] += timedelta(seconds=120)
+            await _register(server, name="wanted", node_fingerprint="fp-2")
+            headers = {"Authorization": "Bearer s3cret"}
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"http://127.0.0.1:{server.port}/admin/revoke",
+                    json={"name": "wanted", "reason": "stale screen", "node_fingerprint": "fp-1"},
+                    headers=headers,
+                ) as response:
+                    stale = response.status, await response.json()
+                async with session.post(
+                    f"http://127.0.0.1:{server.port}/admin/revoke",
+                    json={"name": "wanted", "reason": "fresh screen", "node_fingerprint": "fp-2"},
+                    headers=headers,
+                ) as response:
+                    fresh = response.status, await response.json()
+            return stale, fresh
+        finally:
+            await server.stop()
+
+    (stale_status, stale_body), (fresh_status, _) = asyncio.run(scenario())
+    assert stale_status == 409 and "not the registration that was reviewed" in stale_body["error"]
+    assert fresh_status == 200
+    assert get_registration_by_name(db, "wanted").status == "revoked"
+
+
+def test_admin_registrations_shows_the_rename_from_the_live_name_too(db):
+    async def scenario():
+        server = await _start_server(db, admin_token="s3cret", min_age_seconds=0)
+        try:
+            live = await _register(server, name="oldname")
+            await _mature(server, db, name="oldname", credential=live["credential"])
+            await _rename(server, credential=live["credential"], name="newname")
+            return await _admin_registrations(server, token="s3cret")
+        finally:
+            await server.stop()
+
+    _, body = asyncio.run(scenario())
+    rows = {row["name"]: row for row in body["registrations"]}
+    assert rows["newname"]["replaces_name"] == "oldname"
+    assert rows["oldname"]["replaced_by"] == "newname"
+    assert rows["newname"]["replaced_by"] is None
+
+
+def test_register_bounds_the_fingerprint_and_credential_it_will_store_or_hash(db):
+    """Neither is a value the service has any reason to accept at any
+    length: a fingerprint is a short digest, a credential 43 characters.
+    Inactive rows do not count against the active cap, so an unbounded
+    fingerprint would let a registrant grow the retained table -- and the
+    operator's listing of it -- with every registration (Codex review of
+    PR #609)."""
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            long_fp = await _register_raw(server, name="a-name", node_fingerprint="f" * 129)
+            empty_fp = await _register_raw(server, name="a-name", node_fingerprint="")
+            long_cred = await _register_raw(server, name="a-name", credential="c" * 257)
+            fine = await _register_raw(server, name="a-name", node_fingerprint="f" * 128)
+            return long_fp, empty_fp, long_cred, fine
+        finally:
+            await server.stop()
+
+    long_fp, empty_fp, long_cred, fine = asyncio.run(scenario())
+    for status, body in (long_fp, empty_fp, long_cred):
+        assert status == 400 and "longer than this service accepts" in body["error"]
+    assert fine[0] == 201
+    assert get_registration_by_name(db, "a-name").node_fingerprint == "f" * 128
+
+
+def test_revoke_refuses_when_the_same_node_re_registered_the_name_since_the_review(db):
+    """Same node, same name, a fresh registration after the cooldown: a
+    different registration with a different `created_at`, so the
+    reviewed screen's confirmation does not carry over to it (Codex
+    review of PR #609)."""
+    async def scenario():
+        clock = {"now": datetime(2026, 9, 16, tzinfo=timezone.utc)}
+        server = await _start_server(db, admin_token="s3cret", cooldown_seconds=60, clock=lambda: clock["now"])
+        try:
+            first = await _register(server, name="wanted", node_fingerprint="fp-1")
+            await _release(server, credential=first["credential"])
+            clock["now"] += timedelta(seconds=120)
+            await _register(server, name="wanted", node_fingerprint="fp-1")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"http://127.0.0.1:{server.port}/admin/revoke",
+                    json={
+                        "name": "wanted", "reason": "stale", "node_fingerprint": "fp-1",
+                        "created_at": first["created_at"],
+                    },
+                    headers={"Authorization": "Bearer s3cret"},
+                ) as response:
+                    return response.status, await response.json()
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 409 and "not the registration that was reviewed" in body["error"]
+    assert get_registration_by_name(db, "wanted").status == "pending"
+
+
+def test_admin_registrations_shows_an_abandoned_replacement_from_the_live_name(db):
+    async def scenario():
+        server = await _start_server(db, admin_token="s3cret", min_age_seconds=0)
+        try:
+            live = await _register(server, name="oldname")
+            await _mature(server, db, name="oldname", credential=live["credential"])
+            await _rename(server, credential=live["credential"], name="newname")
+            mark_abandoned(db, "newname", released_at="2026-09-04T00:00:00+00:00")
+            return await _admin_registrations(server, token="s3cret")
+        finally:
+            await server.stop()
+
+    _, body = asyncio.run(scenario())
+    rows = {row["name"]: row for row in body["registrations"]}
+    assert rows["newname"]["status"] == "abandoned"
+    assert rows["oldname"]["replaced_by"] == "newname"

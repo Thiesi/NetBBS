@@ -7219,6 +7219,41 @@ def test_managed_dns_status_explains_abandonment_and_the_last_automatic_attempt(
     assert "standard ports" not in text
 
 
+def test_managed_dns_status_explains_a_revocation_and_names_the_contact(db, lane, sysop):
+    """Design doc §16 Decision 4: the registrant is told that, and where
+    to write -- not why, and not as an ABANDONED badge over a cooldown
+    refusal."""
+    from netbbs.managed_dns.state import OptIn, set_opt_in, set_registered_name, set_revoked_state
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "badname")
+    set_revoked_state(db, name="badname", contact="abuse@example.org")
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "REVOKED" in text
+    assert "The service operator revoked this name" in text
+    assert "To dispute it, contact abuse@example.org" in text
+    assert "[R]egister" in text
+    assert "Re[l]ease" not in text and "Change [n]ame" not in text
+
+
+def test_managed_dns_status_offers_service_administration_only_with_a_token(db, lane, sysop):
+    from netbbs.managed_dns.state import set_admin_token
+
+    session = FakeSession(["d", "a", "b", "b"])  # "a" is rejected without a token
+    _run(session, lane, sysop)
+    assert "[A]dminister service" not in _visible(_written_text(session))
+
+    set_admin_token(db, "s3cret")
+    session = FakeSession(["d", "a", "b", "b"])  # "a" now opens the screen, which says the service is unset
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "[A]dminister service" in text
+    assert "admin_token" in text  # no service address on this node: the screen explains rather than dials
+
+
 def test_managed_dns_status_says_the_name_is_held_while_no_reclaim_has_been_refused(db, lane, sysop):
     from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
 

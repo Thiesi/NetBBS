@@ -1091,6 +1091,29 @@ def test_a_remote_managed_dns_service_url_must_be_https():
         config(local).validate()
 
 
+def test_a_managed_dns_admin_token_is_read_from_the_config_file_only(tmp_path):
+    """Design doc §16 Decision 4: the operator's bearer token for the
+    service's `/admin/` routes. Stripped, blank means unset, and there
+    is deliberately no command-line flag for a secret."""
+    from netbbs.net.nodeconfig import load_config
+
+    path = tmp_path / "netbbs.toml"
+    path.write_text('[managed_dns]\nadmin_token = "  s3cret  "\n', encoding="utf-8")
+    assert load_config(["--config", str(path)]).managed_dns.admin_token == "s3cret"
+
+    path.write_text('[managed_dns]\nadmin_token = ""\n', encoding="utf-8")
+    assert load_config(["--config", str(path)]).managed_dns.admin_token is None
+
+    assert NodeConfig().managed_dns.admin_token is None
+
+    path.write_text("[managed_dns]\nadmin_token = 42\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="admin_token must be a string"):
+        load_config(["--config", str(path)])
+
+    with pytest.raises(SystemExit):
+        load_config(["--managed-dns-admin-token", "x"])
+
+
 def test_a_managed_dns_service_url_may_not_embed_credentials():
     """Codex review of PR #587. The node copies this address into its
     database and prints it in log lines and SysOp-facing diagnostics, so

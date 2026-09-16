@@ -274,6 +274,16 @@ def get_registration_by_name(db: Database, name: str) -> Registration | None:
     return _row_to_registration(row) if row is not None else None
 
 
+def list_registrations(db: Database) -> list[Registration]:
+    """Every row, by name -- the operator's view behind
+    `POST /admin/registrations` (design doc §16 Decision 4). Inactive
+    rows are included on purpose: a released or abandoned name inside
+    its cooldown can still be the subject of a complaint, and revoking it
+    is what stops its holder reclaiming it."""
+    rows = db.connection.execute("SELECT * FROM registrations ORDER BY name").fetchall()
+    return [_row_to_registration(row) for row in rows]
+
+
 def get_replacement_for_name(db: Database, name: str) -> Registration | None:
     """The still-manageable pending/abandoned replacement for ``name``."""
     row = db.connection.execute(

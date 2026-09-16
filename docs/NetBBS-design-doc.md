@@ -8820,6 +8820,43 @@ record they already deleted, and failing a revocation on a deletion that
 had nothing to delete would leave the credential reclaimable during
 exactly the provider outage an operator cannot wait out.
 
+**The registrant is told that, and where to write — not why.** The
+first cut of this left the taken-down SysOp with a 401 the node read as
+`abandoned`, and a `[R]egister` refusal that spoke of a cooldown: their
+board went dark under a badge that blamed their own uptime. The service's
+uniform "unknown or inactive registration" exists so that a caller
+presenting a stale or invented credential learns nothing; the credential
+that *held* a revoked name proves the caller is the one person the fact
+belongs to, and the only thing the answer reveals is their own
+registration's state. So every credential-bearing route — heartbeat,
+release, rename, cancellation, and a reclaim by either path — answers a
+revoked credential with `status: revoked` and the operator's contact
+channel (Decision 3's `MANAGED_DNS_CONTACT`), and the node adopts that as
+a terminal state of its own: the updater stops, the DNS screen shows
+REVOKED with the channel, and `[R]egister` with a different name works as
+usual. The reason stays the operator's. Anyone else asking for the name
+still gets the cooldown refusal and learns nothing.
+
+**The operator acts from inside NetBBS, not from a shell on the service
+host.** The node whose operator also runs the service carries
+`[managed_dns] admin_token` in its `netbbs.toml` — config file only,
+never a command-line flag, since a secret in `argv` is visible to every
+process on the host — mirrored into the node database at startup like
+`service_url`, absence included. Its presence is what makes the Managed
+DNS status screen offer `[A]dminister service`: the service's whole
+table (`POST /admin/registrations`, same token, same uniform refusal,
+every row but its credential hash, inactive rows included because a
+name inside its cooldown can still be the subject of a complaint), one
+registration in full — when it was registered, whose node, when it last
+checked in, what it publishes, whether a rename is in flight, the reason
+if already revoked — and `[R]evoke` behind a required reason and a
+type-the-name confirmation, the same shape every delete in the console
+uses. That is README §8's checklist made executable, minus the `dig`,
+which stays the operator's. The reason prompt before the type-the-name
+confirmation is a deliberate exception to §3.5's one-value rule: the
+reason is the audit record the runbook requires, and a revocation is an
+action against somebody else's board.
+
 **Reports arrive through the project's issue tracker**, which is a
 public channel and a real trade-off: an impersonation complaint tends to
 name the impersonated party. The alternative considered was a dedicated

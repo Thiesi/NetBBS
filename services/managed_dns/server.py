@@ -66,6 +66,7 @@ from services.managed_dns.store import (
     get_replacement_for_name,
     hash_credential,
     insert_registration,
+    list_registrations,
     list_stale_active_registrations,
     load_rate_limit_state,
     mark_abandoned,
@@ -90,6 +91,17 @@ _ACTIVE_STATUSES = ("pending", "matured")
 _MAX_REGISTRATIONS_PER_NODE = 1
 
 _CREDENTIAL_BYTES = 32
+
+# The longest values the public routes accept for the two caller-chosen
+# strings that are stored or hashed (Codex review of PR #609). A node
+# fingerprint is a short blake2b digest in `netbbs.identity.keys`; a
+# minted credential is 43 characters. Without a bound a registrant could
+# park kilobytes in every retained row, and inactive rows inside their
+# cooldown do not count against the active-registration cap, so the
+# operator's listing and the hash inputs would grow with whatever
+# arrived.
+_MAX_NODE_FINGERPRINT_CHARS = 128
+_MAX_CREDENTIAL_CHARS = 256
 
 # The zone every registered name is a label under -- design doc §16's
 # own "myboard.netbbs.org" example.
@@ -257,6 +269,7 @@ class ManagedDnsServer:
         app.router.add_post("/rename", self._handle_rename)
         app.router.add_post("/cancel-rename", self._handle_cancel_rename)
         app.router.add_post("/admin/revoke", self._handle_admin_revoke)
+        app.router.add_post("/admin/registrations", self._handle_admin_registrations)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self._host, self._port)
@@ -384,6 +397,76 @@ class ManagedDnsServer:
             presented.encode("utf-8"), self._admin_token.encode("utf-8")
         )
 
+    def _revoked_credential_response(self, *, reclaim: bool = False) -> web.Response:
+        """What the credential that held a revoked name is told when it
+        presents itself again (design doc §16 Decision 4). Distinguished
+        from the uniform "unknown or inactive registration" on purpose:
+        that uniformity exists so a caller presenting a stale or
+        invented credential learns nothing, but this caller *holds* the
+        credential -- the only thing the answer reveals is their own
+        registration's state, and the alternative was a SysOp watching
+        their board go dark under an ABANDONED badge and a cooldown
+        refusal that never said why. The reason stays the operator's;
+        the fact, and where to write, are the registrant's."""
+        message = "this registration was revoked by the service operator"
+        if reclaim:
+            message += " and cannot be reclaimed"
+        if self._contact is not None:
+            message += f"; to dispute it, contact {self._contact}"
+        return web.json_response(
+            {"error": message, "status": "revoked", "contact": self._contact},
+            status=409 if reclaim else 401,
+        )
+
+    @staticmethod
+    def _registration_view(registration: Registration, replaced_by: str | None = None) -> dict:
+        """The operator's view of one row: everything but the credential
+        hash, which nobody needs and which is the one field that could
+        be misused. `replaced_by` is the pending replacement's name when
+        this row is the live half of a rename -- the relationship is
+        stored on the replacement only, and the live name is the one a
+        complaint tends to name (Codex review of PR #609)."""
+        return {
+            "replaced_by": replaced_by,
+            "name": registration.name,
+            "status": registration.status,
+            "node_fingerprint": registration.node_fingerprint,
+            "dynamic": registration.dynamic,
+            "created_at": registration.created_at,
+            "matured_at": registration.matured_at,
+            "last_contact_at": registration.last_contact_at,
+            "released_at": registration.released_at,
+            "last_known_address": registration.last_known_address,
+            "replaces_name": registration.replaces_name,
+            "revoked_reason": registration.revoked_reason,
+        }
+
+    async def _handle_admin_registrations(self, request: web.Request) -> web.Response:
+        """Design doc §16 Decision 4: the operator's read of the table,
+        for the SysOp console's service-administration screen -- what
+        README §8's "look at the row" step used to mean opening the
+        SQLite file read-only. Same token, same uniform refusal. A
+        POST, like every other route here, and bounded by the cumulative
+        cap: the table can never hold more active rows than that, and
+        inactive rows are purged on the cooldown."""
+        if not self._admin_authorized(request):
+            return web.json_response({"error": "not authorized"}, status=401)
+        rows = list_registrations(self._db)
+        # Pending *or* abandoned: an abandoned replacement is still an
+        # outstanding rename (`get_replacement_for_name` keeps it, and a
+        # revocation of the live name takes it too), under the same
+        # ownership check revocation applies (Codex review of PR #609).
+        by_name = {row.name: row for row in rows}
+        replaced_by = {
+            row.replaces_name: row.name for row in rows
+            if row.replaces_name is not None and row.status in ("pending", "abandoned")
+            and row.replaces_name in by_name
+            and by_name[row.replaces_name].node_fingerprint == row.node_fingerprint
+        }
+        return web.json_response(
+            {"registrations": [self._registration_view(row, replaced_by.get(row.name)) for row in rows]}
+        )
+
     async def _handle_admin_revoke(self, request: web.Request) -> web.Response:
         """Design doc §16 Decision 4 (issue #599): the operator's end of
         the complaint-driven dispute process -- take a name down, and
@@ -414,9 +497,18 @@ class ManagedDnsServer:
             return web.json_response({"error": "request body must be a JSON object"}, status=400)
         raw_name = body.get("name")
         reason = body.get("reason")
-        if not isinstance(raw_name, str) or not isinstance(reason, str) or not reason.strip():
+        expected_fingerprint = body.get("node_fingerprint")
+        expected_created_at = body.get("created_at")
+        if (
+            not isinstance(raw_name, str) or not isinstance(reason, str) or not reason.strip()
+            or (expected_fingerprint is not None and not isinstance(expected_fingerprint, str))
+            or (expected_created_at is not None and not isinstance(expected_created_at, str))
+        ):
             return web.json_response(
-                {"error": "request must contain a string name and a non-empty string reason"},
+                {
+                    "error": "request must contain a string name, a non-empty string reason, and an "
+                    "optional string node_fingerprint"
+                },
                 status=400,
             )
         try:
@@ -429,14 +521,37 @@ class ManagedDnsServer:
                 {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
             )
         async with self._dns_transition_lock:
-            return await self._process_admin_revoke(name, reason.strip())
+            return await self._process_admin_revoke(
+                name, reason.strip(), expected_fingerprint, expected_created_at,
+            )
 
-    async def _process_admin_revoke(self, name: str, reason: str) -> web.Response:
+    async def _process_admin_revoke(
+        self, name: str, reason: str, expected_fingerprint: str | None = None,
+        expected_created_at: str | None = None,
+    ) -> web.Response:
         registration = get_registration_by_name(self._db, name)
         if registration is None:
             return web.json_response({"error": f"{name!r} is not registered"}, status=404)
         if registration.status == "revoked":
             return web.json_response({"error": f"{name!r} is already revoked"}, status=409)
+        if (
+            (expected_fingerprint is not None and registration.node_fingerprint != expected_fingerprint)
+            or (expected_created_at is not None and registration.created_at != expected_created_at)
+        ):
+            # The console sends the fingerprint and the creation time of
+            # the row the operator reviewed (Codex review of PR #609): a
+            # detail screen left open past an inactive row's cooldown
+            # could otherwise confirm a takedown of whatever registration
+            # holds the name since -- another node's, or the same node's
+            # fresh one, which is a different registration with a
+            # different `created_at`.
+            return web.json_response(
+                {
+                    "error": f"{name!r} is not the registration that was reviewed any more; "
+                    "reload and review it again"
+                },
+                status=409,
+            )
 
         # A rename in flight is one registrant holding two names (the
         # replacement plus the name it replaces), so revoking one and
@@ -565,6 +680,14 @@ class ManagedDnsServer:
                 },
                 status=400,
             )
+        if (
+            not node_fingerprint or len(node_fingerprint) > _MAX_NODE_FINGERPRINT_CHARS
+            or (credential is not None and len(credential) > _MAX_CREDENTIAL_CHARS)
+        ):
+            return web.json_response(
+                {"error": "node_fingerprint or credential is empty or longer than this service accepts"},
+                status=400,
+            )
 
         try:
             name = normalize_name(raw_name)
@@ -596,10 +719,14 @@ class ManagedDnsServer:
             # genuinely new registrant, via the branch below.
             cooldown_elapsed = now - datetime.fromisoformat(existing.released_at)
             if cooldown_elapsed < timedelta(seconds=self._cooldown_seconds):
-                if (
-                    existing.status != "revoked"
-                    and credential and hash_credential(credential) == existing.credential_hash
-                ):
+                if credential and hash_credential(credential) == existing.credential_hash:
+                    if existing.status == "revoked":
+                        # The holder trying the obvious thing -- `[R]egister`
+                        # with the name prefilled. Told the truth, since the
+                        # credential proves it is theirs to be told; anyone
+                        # else gets the uniform cooldown refusal below and
+                        # learns nothing.
+                        return self._revoked_credential_response(reclaim=True)
                     return await self._admit_reclaim(existing, request, credential, dynamic=dynamic)
                 return web.json_response(
                     {"error": f"{name!r} is in a cooldown period and not currently available"}, status=409
@@ -750,13 +877,7 @@ class ManagedDnsServer:
                 status=201,
             )
         if existing.status == "revoked":
-            return web.json_response(
-                {
-                    "error": f"{name!r} was revoked by the service operator and cannot be reclaimed",
-                    "status": "revoked",
-                },
-                status=409,
-            )
+            return self._revoked_credential_response(reclaim=True)
         if existing.status == "released":
             return web.json_response(
                 {
@@ -867,6 +988,8 @@ class ManagedDnsServer:
             )
         async with self._dns_transition_lock:
             current = get_registration_by_credential_hash(self._db, hash_credential(credential))
+            if current is not None and current.status == "revoked":
+                return self._revoked_credential_response()
             if current is None or current.status not in _ACTIVE_STATUSES:
                 return web.json_response({"error": "unknown or inactive registration"}, status=401)
             if current.replaces_name is not None:
@@ -999,6 +1122,8 @@ class ManagedDnsServer:
             )
         async with self._dns_transition_lock:
             authenticated = get_registration_by_credential_hash(self._db, hash_credential(credential))
+            if authenticated is not None and authenticated.status == "revoked":
+                return self._revoked_credential_response()
             replacement = authenticated
             if authenticated is not None and authenticated.replaces_name is None:
                 replacement = get_replacement_for_name(self._db, authenticated.name)
@@ -1152,6 +1277,8 @@ class ManagedDnsServer:
     async def _process_heartbeat(self, request: web.Request, credential: str) -> web.Response:
 
         registration = get_registration_by_credential_hash(self._db, hash_credential(credential))
+        if registration is not None and registration.status == "revoked":
+            return self._revoked_credential_response()
         if registration is None or registration.status not in _ACTIVE_STATUSES:
             # Deliberately the same message/status for "no such
             # credential" and "credential belongs to a released/
@@ -1160,6 +1287,8 @@ class ManagedDnsServer:
             # (design doc §16 Decision 3's own "none of these reasons
             # are anything a rejected peer needs to be told apart"
             # reasoning, reused here for the same kind of ambiguity).
+            # A *revoked* one is told, above: see
+            # `_revoked_credential_response` for why that is different.
             return web.json_response({"error": "unknown or inactive registration"}, status=401)
 
         now = self._clock()
@@ -1269,6 +1398,8 @@ class ManagedDnsServer:
     async def _process_release(self, credential: str) -> web.Response:
 
         registration = get_registration_by_credential_hash(self._db, hash_credential(credential))
+        if registration is not None and registration.status == "revoked":
+            return self._revoked_credential_response()
         if registration is None or registration.status not in _ACTIVE_STATUSES:
             return web.json_response({"error": "unknown or inactive registration"}, status=401)
 

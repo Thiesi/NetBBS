@@ -114,13 +114,16 @@ __main__.py` for the exact default values currently shipped):
   tracker. Unset, the refusal says the operator has not named a channel,
   and the service warns once at startup -- a self-hosted copy must not
   send its SysOps to this project.
-- `MANAGED_DNS_ADMIN_TOKEN` -- the bearer token for `/admin/revoke`
-  (Decision 4, section 8 below). Unset by default, which leaves that
-  route refusing every request: an instance whose operator has not set
+- `MANAGED_DNS_ADMIN_TOKEN` -- the bearer token for the `/admin/`
+  routes (Decision 4, section 8 below). Unset by default, which leaves
+  them refusing every request: an instance whose operator has not set
   one has no administrative surface at all. Set it before you need it.
-  Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`,
-  and keep `/admin/` off whatever the public reverse proxy exposes --
-  the operator reaches it on the loopback listener.
+  Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+  The same value goes into the operator's own node as
+  `[managed_dns] admin_token` (section 8), which is what puts the
+  administration screen on that node's SysOp console. Keep `/admin/` off
+  the public reverse proxy unless that node lives elsewhere: on the
+  service host the node reaches the loopback listener directly.
 
 ## 5. Run it
 
@@ -277,9 +280,46 @@ board's address.
    the old name live until the new one matures) and costs you a
    revocation you would rather not make.
 
-### Revoking
+### Looking and revoking from the SysOp console
 
-Requires `MANAGED_DNS_ADMIN_TOKEN` to be set in the running service's
+The node you operate the service from gets the whole of this section as
+screens, once its `netbbs.toml` carries the token the service was
+started with:
+
+```toml
+[managed_dns]
+service_url = "http://127.0.0.1:8080"   # the service's own listener, on its host
+admin_token = "<the MANAGED_DNS_ADMIN_TOKEN value>"
+```
+
+Restart the node. **Settings → DNS** now offers `[A]dminister service`:
+every registration the service holds, as a table (status, last contact,
+node fingerprint); pick one and it is shown in full — registered when,
+whose node, last contact, the published address, whether a rename is in
+flight, the reason if it was already revoked; `[R]evoke` asks for the
+reason, then for the name typed back, then does exactly what the `curl`
+below does and shows the answer. Steps 2 and 3 of the checklist above
+are that screen; step 1, the `dig`, is still yours.
+
+Two things to know about that node:
+
+- **Use the loopback address on the service host.** `service_url` is
+  the same address the node would register through, and a registration
+  made over loopback publishes `127.0.0.1` as its address -- so the
+  operator's node should decline the managed-DNS opt-in (Roanoke serves
+  `netbbs.org` itself and does exactly that). A node elsewhere needs
+  `/admin/` exposed on the public `https://` address; the token is the
+  only gate, so decide that deliberately.
+- **The token is in that node's database and backups**, mirrored from
+  the config file at every startup like `service_url`, absence included:
+  removing it from `netbbs.toml` withdraws the screen on the next start.
+  It shares the node's backup archive with the managed-DNS credential
+  (Decision 7), which is the same class of secret.
+
+### Revoking by hand
+
+The same act from a shell, for a service with no such node. Requires
+`MANAGED_DNS_ADMIN_TOKEN` to be set in the running service's
 environment. It is unset by default, which leaves `/admin/revoke`
 refusing every request — so set it before you need it, not during an
 incident:
@@ -314,18 +354,20 @@ marked revoked while the record is still resolving.
 ### What the former holder sees
 
 - Their record stops resolving immediately.
-- Their node's next heartbeat gets a 401, so the updater pauses and the
-  SysOp console shows the registration as inactive.
+- Their node's next heartbeat is told the registration was revoked and,
+  if `MANAGED_DNS_CONTACT` is set, whom to write to. The updater stops;
+  the SysOp console's DNS screen shows **REVOKED** with that channel.
 - Pressing `[R]egister` with the name prefilled — the obvious thing for
-  them to try — is refused. A revoked row is not reclaimable by any
-  credential, which is the difference between this and an ordinary
-  release.
+  them to try — is refused with the same answer. A revoked row is not
+  reclaimable by any credential, which is the difference between this
+  and an ordinary release; the node's automatic reclaim of an abandoned
+  name (Decision 10) is refused the same way.
 - They can still register a *different* name: revocation takes the name,
   not the node.
 
-They are not told why by the service. If the complaint was legitimate
-and the SysOp is reachable, telling them yourself is better than
-leaving them to work it out from a 401.
+They are told *that*, and where to write, never *why*: the reason is
+yours. If the complaint was legitimate and the SysOp is reachable,
+telling them yourself is still better than leaving it to a status line.
 
 ### After the cooldown
 
