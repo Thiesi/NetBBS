@@ -37,6 +37,7 @@ from netbbs.managed_dns.state import (
     get_last_contact_at,
     get_opt_in,
     get_previous_name,
+    get_recovery_note,
     get_previous_published,
     get_previous_status,
     get_published,
@@ -147,6 +148,12 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
         _report_foreign_credential(db.path, issuer, base_url)
         return
     if status is RegistrationStatus.ABANDONED and not has_outstanding_rename:
+        note = get_recovery_note(db)
+        if note is not None and note.final:
+            # A 409 already said this credential can never reclaim the
+            # name; asking again every pass changes nothing. The SysOp's
+            # `[R]egister` is the way forward, and the screen says so.
+            return
         # Design doc §16 Decision 10 (issue #600): abandonment is the
         # service noticing this node was away, not the SysOp choosing to
         # leave, so the node gets its name back by itself when it
@@ -263,7 +270,7 @@ async def _reclaim_abandoned_name(db: Database, base_url: str, name: str, creden
                 "stale and has been corrected", name,
             )
             return False
-        _report_reclaim_failure(db, name, str(exc))
+        _report_reclaim_failure(db, name, str(exc), final=exc.status_code == 409)
         return False
     if result.credential != credential:
         # `/reclaim` never mints, so this is a service that is not this
@@ -281,15 +288,15 @@ async def _reclaim_abandoned_name(db: Database, base_url: str, name: str, creden
     return True
 
 
-def _report_reclaim_failure(db: Database, name: str, detail: str) -> None:
-    set_recovery_note(db, RecoveryNote(at=utc_now_iso(), text=detail))
+def _report_reclaim_failure(db: Database, name: str, detail: str, *, final: bool = False) -> None:
+    set_recovery_note(db, RecoveryNote(at=utc_now_iso(), text=detail, final=final))
     if _reported_reclaim_failures.get(db.path) == (name, detail):
         return
     _reported_reclaim_failures[db.path] = (name, detail)
     _logger.warning(
         "Managed-DNS registration %r is abandoned and could not be reclaimed automatically: %s "
-        "(retrying every pass; [R]egister on the SysOp console's DNS screen registers afresh)",
-        name, detail,
+        "(%s; [R]egister on the SysOp console's DNS screen registers afresh)",
+        name, detail, "not retrying -- the refusal is final" if final else "retrying every pass",
     )
 
 

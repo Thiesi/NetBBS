@@ -948,6 +948,37 @@ def test_updater_never_registers_afresh_when_the_service_no_longer_holds_the_nam
     db.close()
 
 
+def test_a_final_refusal_is_not_retried_every_pass(tmp_path):
+    """A 409 means this credential can never reclaim the name; the note
+    records that and the next passes send nothing (Codex review of PR
+    #608). A capacity or transport refusal is still retried."""
+    from netbbs.managed_dns.state import get_recovery_note
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, min_age_seconds=0)
+        await server.start()
+        try:
+            db, _credential = await _abandoned_node(tmp_path, server, backend_db, mature=True)
+            await _run_passes(db, 1)
+            from services.managed_dns.store import delete_registration
+
+            delete_registration(backend_db, "myboard")
+            await _run_passes(db, 1)
+            first = get_recovery_note(db)
+            await _run_passes(db, 2)
+            return db, first, get_recovery_note(db)
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, first, later = asyncio.run(scenario())
+    assert first is not None and first.final
+    assert later == first  # untouched: no further attempt was made
+    assert get_registration_status(db) is RegistrationStatus.ABANDONED
+    db.close()
+
+
 def test_updater_leaves_a_released_name_alone(tmp_path):
     """Release is the SysOp's decision to stop (Decision 5); abandonment
     is the service noticing the node was away. Only the second is
@@ -1118,4 +1149,5 @@ def test_updater_fails_closed_against_a_service_without_the_reclaim_route(tmp_pa
     assert load_credential(credential_path_for(db.path)) == "old-credential"
     note = get_recovery_note(db)
     assert note is not None and "404" in note.text
+    assert not note.final  # an upgraded service would answer; keep asking
     db.close()

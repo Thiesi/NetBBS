@@ -105,8 +105,19 @@ async def _refused(prefix: str, response) -> ManagedDnsError:
     """Read at most `_MAX_REFUSAL_BYTES` of the refusal and build the
     error from it. `content.read(n)` stops at the bound; the remainder
     is never read, so a large body costs the bound, not its length."""
-    raw = await response.content.read(_MAX_REFUSAL_BYTES)
-    text = raw.decode("utf-8", errors="replace")
+    # `read(n)` returns whatever the buffer holds, up to `n`, so a body
+    # split across chunks needs the loop (Codex review of PR #608): a
+    # refusal cut mid-JSON would lose its structured `status`, and with
+    # it the `released` answer the updater adopts.
+    chunks: list[bytes] = []
+    remaining = _MAX_REFUSAL_BYTES
+    while remaining > 0:
+        chunk = await response.content.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    text = b"".join(chunks).decode("utf-8", errors="replace")
     refusal = _refusal(response.status, text)
     return ManagedDnsError(
         f"{prefix}: {refusal.detail}", status_code=response.status,

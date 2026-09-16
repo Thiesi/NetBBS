@@ -7200,6 +7200,7 @@ def test_managed_dns_status_explains_abandonment_and_the_last_automatic_attempt(
     set_recovery_note(db, RecoveryNote(
         at="2026-09-16T10:00:00+00:00",
         text="registration of 'myboard' failed: 'myboard' is not held for reclaim by this credential",
+        final=True,
     ))
 
     session = FakeSession(["d", "b", "b"])
@@ -7209,6 +7210,7 @@ def test_managed_dns_status_explains_abandonment_and_the_last_automatic_attempt(
     # A refused attempt means the service may no longer hold the name:
     # the screen must not claim it does (Codex review of PR #608).
     assert "automatic reclaim was refused (below)" in text
+    assert "will not be retried" in text
     assert "registers the name afresh if it is still free" in text
     assert "held for this node" not in text
     assert "Last automatic attempt (" in text

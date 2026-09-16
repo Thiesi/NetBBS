@@ -422,3 +422,39 @@ def test_a_refusal_body_is_read_only_up_to_a_bound():
     exc = asyncio.run(scenario())
     assert exc.status_code == 502
     assert len(str(exc)) <= _MAX_REFUSAL_BYTES + 64
+
+
+def test_a_chunked_refusal_body_is_read_whole_up_to_the_bound():
+    """`StreamReader.read(n)` hands back what the buffer holds; a refusal
+    delivered in pieces must still parse as the service's JSON so its
+    structured `status` survives (Codex review of PR #608)."""
+    async def handler(request):
+        response = web.StreamResponse(status=409, headers={"Content-Type": "application/json"})
+        await response.prepare(request)
+        await response.write(b'{"error": "\'myboard\' was released at this node')
+        await asyncio.sleep(0.05)
+        await response.write(b'\'s own request", "status": "released"}')
+        await response.write_eof()
+        return response
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/reclaim", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            from netbbs.managed_dns.client import reclaim
+
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(ManagedDnsError) as excinfo:
+                    await reclaim(session, f"http://127.0.0.1:{port}", name="myboard", credential="c", dynamic=False)
+            return excinfo.value
+        finally:
+            await runner.cleanup()
+
+    exc = asyncio.run(scenario())
+    assert exc.service_status == "released"
+    assert "own request" in str(exc)

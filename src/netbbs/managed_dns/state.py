@@ -477,6 +477,12 @@ class RecoveryNote:
 
     at: str
     text: str
+    #: The service refused with a 409: the row is purged, held by another
+    #: credential, or revoked -- nothing a later pass can change, so the
+    #: updater stops retrying and leaves it to the SysOp's `[R]egister`
+    #: (Codex review of PR #608). A refusal of any other kind (capacity,
+    #: unreachable, a service without the route) is retried every pass.
+    final: bool = False
 
 
 # A note is one refusal sentence from the service; this is the most of
@@ -487,7 +493,8 @@ _MAX_RECOVERY_NOTE_CHARS = 500
 def set_recovery_note(db: Database, note: RecoveryNote | None) -> None:
     set_config(
         db, RECOVERY_NOTE_CONFIG_KEY,
-        json.dumps({"at": note.at, "text": note.text[:_MAX_RECOVERY_NOTE_CHARS]}) if note else "",
+        json.dumps({"at": note.at, "text": note.text[:_MAX_RECOVERY_NOTE_CHARS], "final": note.final})
+        if note else "",
     )
 
 
@@ -501,4 +508,4 @@ def get_recovery_note(db: Database) -> RecoveryNote | None:
         return None
     if not isinstance(data, dict) or not isinstance(data.get("at"), str) or not isinstance(data.get("text"), str):
         return None
-    return RecoveryNote(at=data["at"], text=data["text"])
+    return RecoveryNote(at=data["at"], text=data["text"], final=data.get("final") is True)
