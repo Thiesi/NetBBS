@@ -40,6 +40,22 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
+          # The tools the code-review command declares. The action installs the
+          # inline-comment MCP server only when that tool is listed here, and
+          # denies any other tool the run does not declare.
+          claude_args: |
+            --allowedTools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),mcp__github_inline_comment__create_inline_comment"
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
+
+      # The job log hides Claude's messages, including which tool calls were
+      # denied. The transcript shows them. This repo is public, so any signed-in
+      # GitHub user can download it; it is kept for one day.
+      - name: Keep the review transcript
+        if: always() && steps.claude-review.outputs.execution_file != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: claude-review-transcript
+          path: ${{ steps.claude-review.outputs.execution_file }}
+          retention-days: 1
 
