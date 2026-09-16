@@ -121,10 +121,13 @@ _STANDARD_PORTS = (("ssh", "SSH", 22), ("telnet", "Telnet", 23), ("web", "HTTPS"
 def standard_ports_lines(listeners: ListenerFacts | None) -> list[str]:
     """Plain, unwrapped sentences stating the standard-ports convention
     and how this node's own listeners measure up to it. The node knows
-    its configured ports with certainty and nothing about what sits in
+    its *configured* ports with certainty and nothing about what sits in
     front of them, so every line says what will happen at the port and
     leaves the port-forward, proxy or firewall in front to the SysOp --
-    "cannot verify" is not "cannot mention"."""
+    "cannot verify" is not "cannot mention". "Configured", not
+    "listens": the facts are recorded before the listeners start, and an
+    enabled transport whose optional dependency is missing is skipped at
+    startup with a log line (Codex review of PR #608)."""
     lines = [
         "Callers reach a managed name on the standard ports: SSH 22, Telnet 23, HTTPS 443. "
         "The DNS record itself carries no port, so this is a convention the service cannot check."
@@ -146,21 +149,21 @@ def standard_ports_lines(listeners: ListenerFacts | None) -> list[str]:
             front = sanitize_text(listeners.web_public_url) if listeners.web_public_url else None
             if front and front.lower().startswith("https://"):
                 lines.append(
-                    f"Web: this node listens on {port} without TLS; its public URL is {front}. The web "
+                    f"Web: this node is configured for {port} without TLS; its public URL is {front}. The web "
                     "address is part of the promise only if that HTTPS front answers on 443 for the "
                     "managed name."
                 )
             else:
                 lines.append(
-                    f"Web: this node listens on {port} without TLS. The web address is part of the promise "
+                    f"Web: this node is configured for {port} without TLS. The web address is part of the promise "
                     "only behind an HTTPS-terminating proxy on 443 -- never NetBBS's own listener on 443, "
                     "which would serve passwords in plaintext on the port every caller assumes is HTTPS."
                 )
         elif port == standard:
-            lines.append(f"{label}: this node listens on {standard}, as callers expect.")
+            lines.append(f"{label}: this node is configured for {standard}, as callers expect.")
         else:
             lines.append(
-                f"{label}: this node listens on {port}, so a caller dialling {standard} needs a "
+                f"{label}: this node is configured for {port}, so a caller dialling {standard} needs a "
                 "port-forward or proxy in front of it -- or has to be told the port."
             )
     return lines

@@ -536,7 +536,7 @@ def test_register_via_prompt_states_the_ports_convention_against_this_nodes_list
     text = " ".join(_visible("".join(session.written)).split())
     assert get_registered_name(db) == "myboard"  # registration still succeeded
     assert "standard ports: SSH 22, Telnet 23, HTTPS 443" in text
-    assert "listens on 2222, so a caller dialling 22 needs a" in text
+    assert "is configured for 2222, so a caller dialling 22 needs a" in text
     assert "Telnet: not enabled on this node" in text
     assert "[W]eb" not in text
     assert "won't be part of the promise" not in text
@@ -559,15 +559,15 @@ def test_standard_ports_lines_cover_every_listener_shape():
     standard = standard_ports_lines(
         ListenerFacts(telnet_port=23, ssh_port=22, web_port=8080, web_public_url="https://board.example")
     )
-    assert "SSH: this node listens on 22, as callers expect." in standard
-    assert "Telnet: this node listens on 23, as callers expect." in standard
+    assert "SSH: this node is configured for 22, as callers expect." in standard
+    assert "Telnet: this node is configured for 23, as callers expect." in standard
     assert any("public URL is https://board.example" in line and "answers on 443" in line for line in standard)
 
     plain_web = standard_ports_lines(
         ListenerFacts(telnet_port=None, ssh_port=2222, web_port=8080, web_public_url="http://10.0.0.5:8080")
     )
     assert any("never NetBBS's own listener on 443" in line for line in plain_web)
-    assert any("listens on 2222, so a caller dialling 22" in line for line in plain_web)
+    assert any("is configured for 2222, so a caller dialling 22" in line for line in plain_web)
 
 
 def test_managed_name_change_and_cancel_preserve_the_old_registration(tmp_path, monkeypatch):
