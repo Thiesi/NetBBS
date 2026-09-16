@@ -329,14 +329,25 @@ class ManagedDnsServer:
     def _admin_authorized(self, request: web.Request) -> bool:
         """`Authorization: Bearer <MANAGED_DNS_ADMIN_TOKEN>`, compared
         with `secrets.compare_digest` so the comparison itself says
-        nothing about how much of a wrong token was right."""
+        nothing about how much of a wrong token was right.
+
+        Compared as UTF-8 bytes, not as `str` (Codex review of PR #604):
+        `compare_digest` accepts a `str` pair only when both are
+        ASCII-only and raises `TypeError` otherwise, which would have
+        escaped as a 500 for any non-ASCII bearer value. That breaks the
+        uniform refusal this route is built on -- an unconfigured
+        instance answers 401, so a 500 would have told a caller the
+        token exists -- and an operator who chose a non-ASCII token
+        would have been locked out of their own service."""
         if self._admin_token is None:
             return False
         header = request.headers.get("Authorization", "")
         scheme, _, presented = header.partition(" ")
         if scheme.lower() != "bearer" or not presented:
             return False
-        return secrets.compare_digest(presented, self._admin_token)
+        return secrets.compare_digest(
+            presented.encode("utf-8"), self._admin_token.encode("utf-8")
+        )
 
     async def _handle_admin_revoke(self, request: web.Request) -> web.Response:
         """Design doc §16 Decision 4 (issue #599): the operator's end of

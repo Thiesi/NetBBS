@@ -2154,6 +2154,42 @@ def test_revoke_is_refused_without_the_right_token(db):
     assert get_registration_by_name(db, "badname").status == "pending"
 
 
+def test_a_non_ascii_bearer_token_is_refused_like_any_other_wrong_one(db):
+    """Codex review of PR #604. `secrets.compare_digest` takes a `str`
+    pair only when both are ASCII-only, so a non-ASCII bearer value
+    raised `TypeError` and escaped as a 500 -- which, since an
+    unconfigured instance answers 401, told the caller the token
+    exists."""
+    async def scenario():
+        server = await _start_server(db, admin_token="s3cret")
+        try:
+            await _register(server, name="badname")
+            return await _revoke(server, name="badname", token="pässwörd-ü")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 401
+    assert body["error"] == "not authorized"
+    assert get_registration_by_name(db, "badname").status == "pending"
+
+
+def test_an_operator_can_choose_a_non_ascii_admin_token(db):
+    """The other half of the same bug: comparing as `str` locked an
+    operator out of their own service for choosing one."""
+    async def scenario():
+        server = await _start_server(db, admin_token="pässwörd-ü", min_age_seconds=0)
+        try:
+            await _register(server, name="badname")
+            return await _revoke(server, name="badname", token="pässwörd-ü")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["revoked"] == ["badname"]
+
+
 def test_revoke_is_unreachable_when_no_admin_token_is_configured(db):
     """The default. A public-facing service should not carry an
     administrative route that merely hopes nobody finds it."""
