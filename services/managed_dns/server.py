@@ -408,11 +408,15 @@ class ManagedDnsServer:
         )
 
     @staticmethod
-    def _registration_view(registration: Registration) -> dict:
+    def _registration_view(registration: Registration, replaced_by: str | None = None) -> dict:
         """The operator's view of one row: everything but the credential
         hash, which nobody needs and which is the one field that could
-        be misused."""
+        be misused. `replaced_by` is the pending replacement's name when
+        this row is the live half of a rename -- the relationship is
+        stored on the replacement only, and the live name is the one a
+        complaint tends to name (Codex review of PR #609)."""
         return {
+            "replaced_by": replaced_by,
             "name": registration.name,
             "status": registration.status,
             "node_fingerprint": registration.node_fingerprint,
@@ -437,7 +441,13 @@ class ManagedDnsServer:
         if not self._admin_authorized(request):
             return web.json_response({"error": "not authorized"}, status=401)
         rows = list_registrations(self._db)
-        return web.json_response({"registrations": [self._registration_view(row) for row in rows]})
+        replaced_by = {
+            row.replaces_name: row.name for row in rows
+            if row.replaces_name is not None and row.status == "pending"
+        }
+        return web.json_response(
+            {"registrations": [self._registration_view(row, replaced_by.get(row.name)) for row in rows]}
+        )
 
     async def _handle_admin_revoke(self, request: web.Request) -> web.Response:
         """Design doc §16 Decision 4 (issue #599): the operator's end of
@@ -469,9 +479,16 @@ class ManagedDnsServer:
             return web.json_response({"error": "request body must be a JSON object"}, status=400)
         raw_name = body.get("name")
         reason = body.get("reason")
-        if not isinstance(raw_name, str) or not isinstance(reason, str) or not reason.strip():
+        expected_fingerprint = body.get("node_fingerprint")
+        if (
+            not isinstance(raw_name, str) or not isinstance(reason, str) or not reason.strip()
+            or (expected_fingerprint is not None and not isinstance(expected_fingerprint, str))
+        ):
             return web.json_response(
-                {"error": "request must contain a string name and a non-empty string reason"},
+                {
+                    "error": "request must contain a string name, a non-empty string reason, and an "
+                    "optional string node_fingerprint"
+                },
                 status=400,
             )
         try:
@@ -484,14 +501,28 @@ class ManagedDnsServer:
                 {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
             )
         async with self._dns_transition_lock:
-            return await self._process_admin_revoke(name, reason.strip())
+            return await self._process_admin_revoke(name, reason.strip(), expected_fingerprint)
 
-    async def _process_admin_revoke(self, name: str, reason: str) -> web.Response:
+    async def _process_admin_revoke(
+        self, name: str, reason: str, expected_fingerprint: str | None = None,
+    ) -> web.Response:
         registration = get_registration_by_name(self._db, name)
         if registration is None:
             return web.json_response({"error": f"{name!r} is not registered"}, status=404)
         if registration.status == "revoked":
             return web.json_response({"error": f"{name!r} is already revoked"}, status=409)
+        if expected_fingerprint is not None and registration.node_fingerprint != expected_fingerprint:
+            # The console sends the fingerprint of the row the operator
+            # reviewed (Codex review of PR #609): a detail screen left open
+            # past an inactive row's cooldown could otherwise confirm a
+            # takedown of whoever registered the name since.
+            return web.json_response(
+                {
+                    "error": f"{name!r} now belongs to a different node than the one reviewed; "
+                    "reload and review it again"
+                },
+                status=409,
+            )
 
         # A rename in flight is one registrant holding two names (the
         # replacement plus the name it replaces), so revoking one and

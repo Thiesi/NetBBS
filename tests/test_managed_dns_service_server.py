@@ -2714,3 +2714,58 @@ def test_a_revoked_credential_is_told_so_on_every_route_and_named_the_contact(db
         assert body["contact"] == "abuse@example.org"
     assert reclaim[0] == 409 and reclaim[1]["status"] == "revoked"
     assert stranger[0] == 409 and "cooldown" in stranger[1]["error"] and "revoked" not in stranger[1]["error"]
+
+
+def test_revoke_refuses_when_the_reviewed_node_no_longer_holds_the_name(db):
+    """The console sends the fingerprint of the row it showed; a name that
+    passed its cooldown and was registered by another node in the
+    meantime is not taken on the strength of a stale screen (Codex
+    review of PR #609)."""
+    async def scenario():
+        clock = {"now": datetime(2026, 9, 16, tzinfo=timezone.utc)}
+        server = await _start_server(db, admin_token="s3cret", cooldown_seconds=60, clock=lambda: clock["now"])
+        try:
+            first = await _register(server, name="wanted", node_fingerprint="fp-1")
+            await _release(server, credential=first["credential"])
+            clock["now"] += timedelta(seconds=120)
+            await _register(server, name="wanted", node_fingerprint="fp-2")
+            headers = {"Authorization": "Bearer s3cret"}
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"http://127.0.0.1:{server.port}/admin/revoke",
+                    json={"name": "wanted", "reason": "stale screen", "node_fingerprint": "fp-1"},
+                    headers=headers,
+                ) as response:
+                    stale = response.status, await response.json()
+                async with session.post(
+                    f"http://127.0.0.1:{server.port}/admin/revoke",
+                    json={"name": "wanted", "reason": "fresh screen", "node_fingerprint": "fp-2"},
+                    headers=headers,
+                ) as response:
+                    fresh = response.status, await response.json()
+            return stale, fresh
+        finally:
+            await server.stop()
+
+    (stale_status, stale_body), (fresh_status, _) = asyncio.run(scenario())
+    assert stale_status == 409 and "different node" in stale_body["error"]
+    assert fresh_status == 200
+    assert get_registration_by_name(db, "wanted").status == "revoked"
+
+
+def test_admin_registrations_shows_the_rename_from_the_live_name_too(db):
+    async def scenario():
+        server = await _start_server(db, admin_token="s3cret", min_age_seconds=0)
+        try:
+            live = await _register(server, name="oldname")
+            await _mature(server, db, name="oldname", credential=live["credential"])
+            await _rename(server, credential=live["credential"], name="newname")
+            return await _admin_registrations(server, token="s3cret")
+        finally:
+            await server.stop()
+
+    _, body = asyncio.run(scenario())
+    rows = {row["name"]: row for row in body["registrations"]}
+    assert rows["newname"]["replaces_name"] == "oldname"
+    assert rows["oldname"]["replaced_by"] == "newname"
+    assert rows["newname"]["replaced_by"] is None

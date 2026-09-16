@@ -31,6 +31,7 @@ from netbbs.managed_dns.credential import (
 )
 from netbbs.managed_dns.state import (
     ListenerFacts,
+    set_revoked_state,
     OptIn,
     RegistrationStatus,
     get_local_listeners,
@@ -181,6 +182,17 @@ def _ports_preamble(session: Session, listeners: ListenerFacts | None) -> str:
             colored(wrapped, fg_color=MUTED_COLOR) for wrapped in wrap_to_width(line, session.terminal_width)
         )
     return "\r\n".join(rendered)
+
+
+async def _adopt_revocation_if_told(lane: DatabaseLane, exc, name: str | None) -> None:
+    """Every interactive path that presents the credential can be the
+    first to hear the name was revoked -- the updater may not have run
+    since, and the standalone admin console has no updater at all (Codex
+    review of PR #609). Whoever hears it first records the same terminal
+    state the background paths do, so the screen stops offering actions
+    on a name the operator took."""
+    if name is not None and getattr(exc, "revoked", False):
+        await lane.run(set_revoked_state, name=name, contact=exc.contact)
 
 
 # Statuses design doc §16 Decision 3/5 treat as "this node currently has
@@ -392,6 +404,11 @@ async def register_via_prompt(
                         dynamic=dynamic, credential=stored_credential,
                     )
             except ManagedDnsError as exc:
+                # Only a reclaim of the name this node holds can be told
+                # "revoked"; a fresh name cannot be, so `previous_name`
+                # is the right registration to mark.
+                if raw_name.lower() == (previous_name or "").lower():
+                    await _adopt_revocation_if_told(lane, exc, previous_name)
                 raise ValueError(f"Registration failed: {sanitize_text(str(exc))}") from exc
 
             # A reclaim always returns the exact same credential the caller
@@ -492,6 +509,7 @@ async def release_registration(session: Session, lane: DatabaseLane) -> None:
             async with outbound_session(base_url) as http_session:
                 result = await release(http_session, base_url, credential=stored_credential)
         except ManagedDnsError as exc:
+            await _adopt_revocation_if_told(lane, exc, name)
             await session.write_line(colored(f"Release failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
             return
 
@@ -550,6 +568,7 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
             async with outbound_session(base_url) as http_session:
                 result = await rename(http_session, base_url, name=new_name, credential=old_credential)
         except ManagedDnsError as exc:
+            await _adopt_revocation_if_told(lane, exc, old_name)
             await session.write_line(colored(f"Name change failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
             return
         stage_credential_transition(lane.path, old_credential, result.credential)
@@ -617,6 +636,7 @@ async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> No
             async with ClientSession(trust_env=False) as http_session:
                 result = await cancel_rename(http_session, base_url, credential=replacement_credential)
         except ManagedDnsError as exc:
+            await _adopt_revocation_if_told(lane, exc, new_name)
             await session.write_line(colored(f"Cancellation failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
             return
         restored_status = RegistrationStatus(result.previous_status) if result.previous_status else old_status
@@ -706,28 +726,43 @@ async def administer_service(session: Session, lane: DatabaseLane, actor: User) 
     if rows is None:
         return
 
+    # The goto number is the row's position in the service's own
+    # name-ordered table: short, and as stable as that table between two
+    # refreshes, which is all the picker asks of it here. Rebuilt on
+    # every load, since Ctrl-R can bring rows that were not there when
+    # the screen opened (Codex review of PR #609).
+    positions: dict[str, int] = {}
+
+    def index_rows(loaded):
+        positions.clear()
+        positions.update({row.name: index for index, row in enumerate(loaded, start=1)})
+        return loaded
+
     async def reload():
         fresh = await load()
-        return fresh if fresh is not None else rows
+        return index_rows(fresh) if fresh is not None else rows
 
     def columns_of(row):
         status_color = ALERT_COLOR if row.status == "revoked" else VALUE_COLOR
         return [(row.status, status_color), when(row.last_contact_at), row.node_fingerprint[:12]]
 
+    def describe(row):
+        # The prose form of the same three fields, for a terminal too
+        # narrow for the columns (design doc §3.6).
+        return f"{row.status}, last contact {when(row.last_contact_at)}, node {row.node_fingerprint[:12]}"
+
     while True:
         if not rows:
             await _write_note(session, "The service holds no registrations.")
             return
-        # The goto number is the row's position in the service's own
-        # name-ordered table: short, and as stable as that table between
-        # two refreshes, which is all the picker asks of it here.
-        positions = {row.name: index for index, row in enumerate(rows, start=1)}
+        index_rows(rows)
         chosen = await pick_item(
             session, rows,
             # The bare label: every row is under netbbs.org, and the
             # suffix only cost the column the width a long label needs.
             name_of=lambda row: row.name,
-            stable_id_of=lambda row: positions[row.name],
+            stable_id_of=lambda row: positions.get(row.name, len(positions) + 1),
+            description_of=describe,
             columns=_ADMIN_COLUMNS,
             column_values_of=columns_of,
             title="Managed DNS service administration",
@@ -766,6 +801,8 @@ async def _registration_detail(session: Session, lane: DatabaseLane, row, *, bas
             lines.append(field("Inactive since", when(row.released_at)))
         if row.replaces_name:
             lines.append(field("Replaces", f"{row.replaces_name}.netbbs.org (rename in flight)"))
+        if row.replaced_by:
+            lines.append(field("Replaced by", f"{row.replaced_by}.netbbs.org (rename in flight; revoking takes both)"))
         if row.revoked_reason:
             lines.append(field("Revocation reason", row.revoked_reason))
         return lines
@@ -822,6 +859,7 @@ async def _registration_detail(session: Session, lane: DatabaseLane, row, *, bas
                     async with outbound_session(base_url) as http_session:
                         result = await admin_revoke(
                             http_session, base_url, token=token, name=row.name, reason=reason,
+                            node_fingerprint=row.node_fingerprint,
                         )
                 except ManagedDnsError as exc:
                     await _write_note(session, f"Revocation failed: {sanitize_text(str(exc))}")

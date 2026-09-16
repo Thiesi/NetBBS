@@ -1029,3 +1029,101 @@ def test_operator_screen_says_when_the_service_holds_nothing(tmp_path):
 
     session, _ = asyncio.run(_operator_scenario(tmp_path, [], seed=False))
     assert "holds no registrations" in _visible("".join(session.written))
+
+
+def test_release_adopts_a_revocation_the_updater_has_not_seen_yet(tmp_path):
+    """The interactive paths can be the first to hear it -- the standalone
+    admin console has no updater at all (Codex review of PR #609)."""
+    from netbbs.managed_dns.state import get_service_contact
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, admin_token="s3cret", contact="abuse@example.org")
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            lane = DatabaseLane(db.path)
+            await register_via_prompt(FakeSession(["n", "myboard", "d", "r"]), lane)
+            import aiohttp
+
+            async with aiohttp.ClientSession() as http_session:
+                async with http_session.post(
+                    f"http://127.0.0.1:{server.port}/admin/revoke",
+                    json={"name": "myboard", "reason": "test"},
+                    headers={"Authorization": "Bearer s3cret"},
+                ) as response:
+                    assert response.status == 200
+            session = FakeSession(["y"])
+            await release_registration(session, lane)
+            lane.close()
+            return db, session
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    from tests.test_admin_flow import _visible
+
+    db, session = asyncio.run(scenario())
+    assert get_registration_status(db) is RegistrationStatus.REVOKED
+    assert get_service_contact(db) == "abuse@example.org"
+    assert "revoked by the service operator" in " ".join(_visible("".join(session.written)).split())
+    db.close()
+
+
+def test_operator_screen_survives_a_refresh_that_brings_a_new_row(tmp_path):
+    """Ctrl-R after another node registered: the goto numbers are rebuilt
+    with the refreshed table instead of raising on the new row (Codex
+    review of PR #609)."""
+    from netbbs.managed_dns.client import register
+    from netbbs.managed_dns.state import set_admin_token
+    from netbbs.net.managed_dns_flow import administer_service
+    from tests.test_admin_flow import _visible
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, admin_token="s3cret")
+        await server.start()
+        try:
+            base_url = f"http://127.0.0.1:{server.port}"
+            import aiohttp
+
+            db = Database(tmp_path / "node.db")
+            set_service_url(db, base_url)
+            set_node_fingerprint(db, "fp-op")
+            set_admin_token(db, "s3cret")
+            lane = DatabaseLane(db.path)
+            from netbbs.auth.users import SYSOP_LEVEL, create_user
+
+            actor = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+
+            class RegisteringSession(FakeSession):
+                """Registers a third name the moment the screen asks for its
+                first key, so the Ctrl-R that follows sees a row the
+                picker was not opened with."""
+                registered = False
+
+                async def read_editor_key(self, *, distinguish_ctrl_h: bool = False):
+                    if not self.registered:
+                        self.registered = True
+                        async with aiohttp.ClientSession() as http_session:
+                            await register(http_session, base_url, name="gamma", node_fingerprint="fp-3", dynamic=False)
+                    return await super().read_editor_key(distinguish_ctrl_h=distinguish_ctrl_h)
+
+            async with aiohttp.ClientSession() as http_session:
+                await register(http_session, base_url, name="alpha", node_fingerprint="fp-1", dynamic=True)
+                await register(http_session, base_url, name="beta", node_fingerprint="fp-2", dynamic=False)
+            session = RegisteringSession(["CTRL+r", "0", "3", "b", "b"])
+            await administer_service(session, lane, actor)
+            lane.close()
+            db.close()
+            return session
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    session = asyncio.run(scenario())
+    text = " ".join(_visible("".join(session.written)).split())
+    assert "03. 3 gamma" in text
+    assert "Node fingerprint: fp-3" in text

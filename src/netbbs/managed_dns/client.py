@@ -425,6 +425,7 @@ class AdminRegistration:
     last_known_address: str | None
     replaces_name: str | None
     revoked_reason: str | None
+    replaced_by: str | None = None
 
 
 def _admin_headers(token: str) -> dict[str, str]:
@@ -479,6 +480,7 @@ async def admin_registrations(
                 last_known_address=_optional_str(row, "last_known_address"),
                 replaces_name=_optional_str(row, "replaces_name"),
                 revoked_reason=_optional_str(row, "revoked_reason"),
+                replaced_by=_optional_str(row, "replaced_by"),
             ))
         except ValueError as exc:
             raise ManagedDnsError(f"malformed registrations response from {url}: invalid row") from exc
@@ -493,15 +495,20 @@ class AdminRevokeResult:
 
 async def admin_revoke(
     session: ClientSession, base_url: str, *, token: str, name: str, reason: str,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    node_fingerprint: str | None = None, timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> AdminRevokeResult:
     """`POST {base_url}/admin/revoke` -- the act itself (design doc §16
     Decision 4). `revoked` names every row that moved: two when the
-    registrant had a rename in flight."""
+    registrant had a rename in flight. `node_fingerprint`, when given, is
+    the row the operator reviewed; the service refuses if the name has
+    since passed to another node."""
     url = f"{base_url}/admin/revoke"
+    payload: dict = {"name": name, "reason": reason}
+    if node_fingerprint is not None:
+        payload["node_fingerprint"] = node_fingerprint
     try:
         async with session.post(
-            url, json={"name": name, "reason": reason}, headers=_admin_headers(token),
+            url, json=payload, headers=_admin_headers(token),
             timeout=ClientTimeout(total=timeout), allow_redirects=False,
         ) as response:
             if response.status != 200:
