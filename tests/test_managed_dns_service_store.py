@@ -7,15 +7,16 @@ import sqlite3
 import pytest
 
 from services.managed_dns.store import (
-    cancel_pending_replacement,
     Database,
     MIGRATIONS,
+    cancel_pending_replacement,
     count_registrations,
     count_registrations_for_node,
     delete_expired_registrations,
     delete_registration,
     get_registration_by_credential_hash,
     get_registration_by_name,
+    get_replacement_for_name,
     hash_credential,
     insert_registration,
     list_stale_active_registrations,
@@ -23,9 +24,10 @@ from services.managed_dns.store import (
     mark_matured,
     mark_released,
     reclaim,
-    set_last_known_address,
+    revoke_registration,
     set_contact_window,
     set_last_contact_at,
+    set_last_known_address,
 )
 
 
@@ -398,4 +400,132 @@ def test_cancel_pending_replacement_changes_nothing_when_no_rename_is_pending(tm
         db, "never-reserved", "old-name", revive_previous=True, contact_at="2026-09-04T00:00:00+00:00",
     )
     assert get_registration_by_name(db, "old-name").status == "abandoned"
+    db.close()
+
+
+# -- revocation (design doc §16 Decision 4, issue #599) --------------------
+
+
+def test_the_revoked_status_migration_preserves_every_earlier_row(tmp_path):
+    """The migration rebuilds the table to widen the status CHECK, so it
+    is exercised against a database holding one row of every shape the
+    earlier migrations can leave behind -- including a rename in flight,
+    whose partial unique index has to come back with it."""
+    path = tmp_path / "managed_dns.db"
+    connection = sqlite3.connect(path)
+    for migration in MIGRATIONS[:4]:
+        connection.executescript(migration.sql)
+    connection.execute("PRAGMA user_version = 4")
+    connection.executemany(
+        """
+        INSERT INTO registrations
+            (name, credential_hash, node_fingerprint, status, dynamic, created_at,
+             matured_at, last_contact_at, released_at, last_known_address,
+             contact_started_at, replaces_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("live", "hash-1", "fp-1", "matured", 1, "2026-09-01T00:00:00+00:00",
+             "2026-09-02T00:00:00+00:00", "2026-09-03T00:00:00+00:00", None,
+             "203.0.113.7", "2026-09-01T00:00:00+00:00", None),
+            ("waiting", "hash-2", "fp-2", "pending", 0, "2026-09-01T00:00:00+00:00",
+             None, None, None, None, None, None),
+            ("gone", "hash-3", "fp-3", "released", 0, "2026-09-01T00:00:00+00:00",
+             "2026-09-02T00:00:00+00:00", "2026-09-03T00:00:00+00:00",
+             "2026-09-04T00:00:00+00:00", None, "2026-09-01T00:00:00+00:00", None),
+            ("stale", "hash-4", "fp-4", "abandoned", 1, "2026-09-01T00:00:00+00:00",
+             None, "2026-09-02T00:00:00+00:00", "2026-09-10T00:00:00+00:00", None, None, None),
+            ("replacement", "hash-5", "fp-1", "pending", 1, "2026-09-05T00:00:00+00:00",
+             None, "2026-09-05T00:00:00+00:00", None, None, "2026-09-05T00:00:00+00:00", "live"),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    db = Database(path)
+
+    assert db.connection.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+    live = get_registration_by_name(db, "live")
+    assert live.status == "matured" and live.dynamic is True
+    assert live.last_known_address == "203.0.113.7"
+    assert live.matured_at == "2026-09-02T00:00:00+00:00"
+    assert live.revoked_reason is None
+    assert get_registration_by_name(db, "gone").released_at == "2026-09-04T00:00:00+00:00"
+    assert get_registration_by_name(db, "stale").status == "abandoned"
+    assert get_registration_by_name(db, "replacement").replaces_name == "live"
+    assert get_replacement_for_name(db, "live").name == "replacement"
+
+    # The rebuilt table keeps every constraint the old one carried.
+    with pytest.raises(sqlite3.IntegrityError):
+        db.connection.execute(
+            "INSERT INTO registrations (name, credential_hash, node_fingerprint, status, "
+            "dynamic, created_at, replaces_name) VALUES "
+            "('second', 'hash-6', 'fp-9', 'pending', 0, '2026-09-06T00:00:00+00:00', 'live')"
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.connection.execute(
+            "INSERT INTO registrations (name, credential_hash, node_fingerprint, status, "
+            "dynamic, created_at) VALUES ('bad', 'hash-7', 'fp-9', 'nonsense', 0, 'x')"
+        )
+    db.close()
+
+
+def test_revoke_registration_moves_a_live_row_and_records_the_reason(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db, "badname")
+    mark_matured(db, "badname", matured_at="2026-09-03T00:00:00+00:00")
+
+    assert revoke_registration(
+        db, "badname", released_at="2026-09-05T00:00:00+00:00", reason="impersonation"
+    ) is True
+
+    row = get_registration_by_name(db, "badname")
+    assert row.status == "revoked"
+    assert row.released_at == "2026-09-05T00:00:00+00:00"
+    assert row.revoked_reason == "impersonation"
+    db.close()
+
+
+def test_revoke_registration_also_reaches_an_already_released_row(tmp_path):
+    """A holder who has walked away still holds the credential, and
+    inside the cooldown that credential reclaims. Revoking is what stops
+    it, so the operator has to be able to revoke a row that is already
+    released."""
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db, "badname")
+    mark_released(db, "badname", released_at="2026-09-04T00:00:00+00:00")
+
+    assert revoke_registration(
+        db, "badname", released_at="2026-09-05T00:00:00+00:00", reason="impersonation"
+    ) is True
+    assert get_registration_by_name(db, "badname").status == "revoked"
+    db.close()
+
+
+def test_revoking_an_already_revoked_row_changes_nothing(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db, "badname")
+    revoke_registration(db, "badname", released_at="2026-09-05T00:00:00+00:00", reason="first")
+
+    assert revoke_registration(
+        db, "badname", released_at="2026-09-06T00:00:00+00:00", reason="second"
+    ) is False
+
+    row = get_registration_by_name(db, "badname")
+    assert row.revoked_reason == "first"
+    assert row.released_at == "2026-09-05T00:00:00+00:00"
+    db.close()
+
+
+def test_a_revoked_name_is_purged_on_the_ordinary_cooldown(tmp_path):
+    """The chosen shape (issue #599): revocation blocks reclaim by the
+    holder taken down, not the name forever. It expires on Decision 5's
+    same timer as release and abandonment."""
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db, "badname")
+    revoke_registration(db, "badname", released_at="2026-09-05T00:00:00+00:00", reason="impersonation")
+
+    assert delete_expired_registrations(db, older_than="2026-09-04T00:00:00+00:00") == 0
+    assert delete_expired_registrations(db, older_than="2026-12-05T00:00:00+00:00") == 1
+    assert get_registration_by_name(db, "badname") is None
     db.close()

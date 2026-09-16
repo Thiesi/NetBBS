@@ -107,6 +107,13 @@ __main__.py` for the exact default values currently shipped):
   reject once exceeded, no queue).
 - `MANAGED_DNS_CUMULATIVE_CAP` -- the ceiling on total active
   registrations (Decision 3, also a hard reject).
+- `MANAGED_DNS_ADMIN_TOKEN` -- the bearer token for `/admin/revoke`
+  (Decision 4, section 8 below). Unset by default, which leaves that
+  route refusing every request: an instance whose operator has not set
+  one has no administrative surface at all. Set it before you need it.
+  Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`,
+  and keep `/admin/` off whatever the public reverse proxy exposes --
+  the operator reaches it on the loopback listener.
 
 ## 5. Run it
 
@@ -212,3 +219,109 @@ Every automated test in `tests/test_managed_dns_*.py` runs against
 manual pass is the only verification that the TSIG key, the
 `allow-update` ACL, and the zone's primary address are actually
 correct together.
+
+## 8. Handling an abuse report
+
+Design doc §16 Decision 4: contested-name disputes are manual and
+complaint-driven. There is no automated detection and no appeal queue --
+a person reads the complaint and decides. This section is the executable
+half of that.
+
+### Where a report arrives
+
+Reports come in through the project's issue tracker:
+
+https://github.com/Thiesi/NetBBS/issues
+
+That is a public channel, which is a real trade-off. A complaint about
+impersonation usually names the impersonated party and sometimes carries
+evidence its author would rather not publish. Nothing about the
+mechanism below assumes the report arrived there; if a report reaches
+you privately, act on it the same way.
+
+### What to check before revoking
+
+Revocation removes a live DNS record from under a running board, and
+inside the cooldown the holder cannot get the name back by any means.
+Being slow here costs a few hours; being wrong costs someone their
+board's address.
+
+1. **Resolve it.** `dig +short <name>.netbbs.org` — confirm the name is
+   actually live and points where the complaint says.
+2. **Look at the row.** Open the service's database read-only and read
+   the registration: when it was created, its node fingerprint, its
+   last contact. A name registered an hour ago that already resolves to
+   a copy of somebody's login page is a different case from a five-year
+   board in a naming dispute.
+3. **Decide which problem it is.** Impersonation and abuse are what this
+   is for. A *naming dispute* between two legitimate boards is not:
+   Decision 3 is first-come-first-served deliberately, and revoking on
+   "we wanted that name" turns a governance rule into a matter of who
+   complains loudest.
+4. **Reach the SysOp first where the case allows it.** A board whose
+   name merely collides with a trademark may simply rename it — that
+   costs them nothing (`Change [N]ame` on their own SysOp console keeps
+   the old name live until the new one matures) and costs you a
+   revocation you would rather not make.
+
+### Revoking
+
+Requires `MANAGED_DNS_ADMIN_TOKEN` to be set in the running service's
+environment. It is unset by default, which leaves `/admin/revoke`
+refusing every request — so set it before you need it, not during an
+incident:
+
+```
+curl -sS -X POST http://127.0.0.1:8080/admin/revoke \
+  -H "Authorization: Bearer $MANAGED_DNS_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "badname", "reason": "impersonation, report 2026-09-16"}'
+```
+
+Address this at the service's own listener, not through the public
+reverse proxy — the token is a bearer secret and the loopback listener
+is the shorter path. `reason` is required, stored on the row, and
+printed to the log; write the one sentence that will make sense to you
+in six months.
+
+The response names every row that moved:
+
+```json
+{"revoked": ["badname"], "status": "revoked", "revoked_at": "..."}
+```
+
+Two rows come back when the registrant had a rename in flight — a
+rename is one registrant holding two names, and revoking one while the
+other matured would hand them a working name.
+
+If DNS deletion fails, nothing is revoked and the call returns 503:
+fix the provider problem and run it again rather than leaving a row
+marked revoked while the record is still resolving.
+
+### What the former holder sees
+
+- Their record stops resolving immediately.
+- Their node's next heartbeat gets a 401, so the updater pauses and the
+  SysOp console shows the registration as inactive.
+- Pressing `[R]egister` with the name prefilled — the obvious thing for
+  them to try — is refused. A revoked row is not reclaimable by any
+  credential, which is the difference between this and an ordinary
+  release.
+- They can still register a *different* name: revocation takes the name,
+  not the node.
+
+They are not told why by the service. If the complaint was legitimate
+and the SysOp is reachable, telling them yourself is better than
+leaving them to work it out from a 401.
+
+### After the cooldown
+
+A revoked name expires on `MANAGED_DNS_COOLDOWN_SECONDS`, the same timer
+as release and abandonment, after which it is available to a genuinely
+new registrant — including, in principle, the person you took it from.
+That is deliberate: revocation blocks the holder, not the name.
+
+For a name nobody should ever hold, add it to `RESERVED_NAMES` in
+`services/managed_dns/blocklist.py` and redeploy. That is the mechanism
+for permanence, and it is a code change on purpose — the blocklist is
+curated and reviewed, not appended to by a running process.

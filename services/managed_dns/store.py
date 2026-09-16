@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-RegistrationStatus = Literal["pending", "matured", "released", "abandoned"]
+RegistrationStatus = Literal["pending", "matured", "released", "abandoned", "revoked"]
 
 
 @dataclass(frozen=True)
@@ -100,6 +100,52 @@ MIGRATIONS = [
         ),
         sql="""
         ALTER TABLE registrations ADD COLUMN replaces_name TEXT;
+        CREATE UNIQUE INDEX idx_registrations_one_pending_replacement
+            ON registrations(replaces_name) WHERE replaces_name IS NOT NULL AND status = 'pending';
+        """,
+    ),
+    Migration(
+        description=(
+            "Add the 'revoked' terminal status and its reason (design doc §16 Decision 4, "
+            "issue #599) -- the state an operator's complaint-driven takedown leaves behind. "
+            "A table rebuild rather than an ALTER: the status column's CHECK constraint is "
+            "part of the table definition and SQLite cannot alter one in place."
+        ),
+        sql="""
+        CREATE TABLE registrations_migrated (
+            name                TEXT PRIMARY KEY,
+            credential_hash     TEXT NOT NULL,
+            node_fingerprint    TEXT NOT NULL,
+            status              TEXT NOT NULL CHECK (
+                status IN ('pending', 'matured', 'released', 'abandoned', 'revoked')
+            ),
+            dynamic             INTEGER NOT NULL CHECK (dynamic IN (0, 1)),
+            created_at          TEXT NOT NULL,
+            matured_at          TEXT,
+            last_contact_at     TEXT,
+            released_at         TEXT,
+            last_known_address  TEXT,
+            contact_started_at  TEXT,
+            replaces_name       TEXT,
+            revoked_reason      TEXT
+        );
+
+        INSERT INTO registrations_migrated (
+            name, credential_hash, node_fingerprint, status, dynamic, created_at,
+            matured_at, last_contact_at, released_at, last_known_address,
+            contact_started_at, replaces_name
+        )
+        SELECT name, credential_hash, node_fingerprint, status, dynamic, created_at,
+               matured_at, last_contact_at, released_at, last_known_address,
+               contact_started_at, replaces_name
+        FROM registrations;
+
+        DROP TABLE registrations;
+        ALTER TABLE registrations_migrated RENAME TO registrations;
+
+        CREATE UNIQUE INDEX idx_registrations_credential_hash ON registrations(credential_hash);
+        CREATE INDEX idx_registrations_node_fingerprint ON registrations(node_fingerprint);
+        CREATE INDEX idx_registrations_status ON registrations(status);
         CREATE UNIQUE INDEX idx_registrations_one_pending_replacement
             ON registrations(replaces_name) WHERE replaces_name IS NOT NULL AND status = 'pending';
         """,
@@ -181,6 +227,7 @@ class Registration:
     last_known_address: str | None
     contact_started_at: str | None
     replaces_name: str | None
+    revoked_reason: str | None
 
 
 def _row_to_registration(row: sqlite3.Row) -> Registration:
@@ -197,6 +244,7 @@ def _row_to_registration(row: sqlite3.Row) -> Registration:
         last_known_address=row["last_known_address"],
         contact_started_at=row["contact_started_at"],
         replaces_name=row["replaces_name"],
+        revoked_reason=row["revoked_reason"],
     )
 
 
@@ -449,6 +497,33 @@ def mark_abandoned(db: Database, name: str, *, released_at: str) -> None:
     db.connection.commit()
 
 
+def revoke_registration(db: Database, name: str, *, released_at: str, reason: str) -> bool:
+    """An operator's complaint-driven takedown (design doc §16 Decision
+    4, issue #599). Returns whether a row actually moved.
+
+    Reachable from every non-revoked status, including `released` and
+    `abandoned`: a name whose holder has already walked away can still
+    be the subject of a complaint, and revoking it is what stops that
+    holder reclaiming it inside the cooldown with the credential they
+    still have.
+
+    `released_at` is the same column, and therefore the same Decision 5
+    cooldown, that voluntary release and abandonment already use --
+    `delete_expired_registrations` purges a revoked row on the same
+    timer, after which the name is available to a genuinely new
+    registrant. What revocation adds on top is that *no* credential can
+    reclaim it in the meantime; see `services.managed_dns.server.
+    _handle_register`.
+    """
+    cursor = db.connection.execute(
+        "UPDATE registrations SET status = 'revoked', released_at = ?, revoked_reason = ? "
+        "WHERE name = ? AND status != 'revoked'",
+        (released_at, reason, name),
+    )
+    db.connection.commit()
+    return cursor.rowcount > 0
+
+
 def list_stale_active_registrations(db: Database, *, older_than: str) -> list[Registration]:
     """Every `pending`/`matured` registration whose most recent sign of
     life (`last_contact_at`, or `created_at` if it has never once
@@ -466,15 +541,23 @@ def list_stale_active_registrations(db: Database, *, older_than: str) -> list[Re
 
 
 def delete_expired_registrations(db: Database, *, older_than: str) -> int:
-    """Permanently removes every `released`/`abandoned` row whose
-    cooldown (Decision 5) has fully elapsed -- the name becomes
+    """Permanently removes every `released`/`abandoned`/`revoked` row
+    whose cooldown (Decision 5) has fully elapsed -- the name becomes
     available to a genuinely new, unrelated registrant from this point
     on, not just no-longer-blocked-from-reclaim-by-the-original-owner.
     Pure table hygiene otherwise (an expired row doesn't count against
     any cap or block anything on its own); returns the number of rows
-    removed, for the sweep's own logging."""
+    removed, for the sweep's own logging.
+
+    `revoked` (design doc §16 Decision 4, issue #599) expires on the
+    same timer deliberately: a revocation blocks reclaim by the holder
+    who was taken down, not the name itself forever. An operator who
+    wants a name permanently gone adds it to
+    `services.managed_dns.blocklist` instead, which is the mechanism
+    that exists for names nobody may hold."""
     cursor = db.connection.execute(
-        "DELETE FROM registrations WHERE status IN ('released', 'abandoned') AND released_at < ?",
+        "DELETE FROM registrations WHERE status IN ('released', 'abandoned', 'revoked') "
+        "AND released_at < ?",
         (older_than,),
     )
     db.connection.commit()

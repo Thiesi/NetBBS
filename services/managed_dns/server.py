@@ -73,6 +73,7 @@ from services.managed_dns.store import (
     mark_released,
     reclaim,
     replace_registration_credential,
+    revoke_registration,
     save_rate_limit_state,
     set_contact_window,
     set_last_contact_at,
@@ -187,6 +188,7 @@ class ManagedDnsServer:
         rate_limit_capacity: float = _DEFAULT_RATE_LIMIT_CAPACITY,
         rate_limit_refill_per_minute: float = _DEFAULT_RATE_LIMIT_REFILL_PER_MINUTE,
         cumulative_cap: int = _DEFAULT_CUMULATIVE_CAP,
+        admin_token: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -205,6 +207,12 @@ class ManagedDnsServer:
         self._sweep_interval_seconds = sweep_interval_seconds
         self._sweep_sleep = sweep_sleep
         self._cumulative_cap = cumulative_cap
+        # Design doc §16 Decision 4 (issue #599): `None` leaves
+        # /admin/revoke refusing every request, which is the right
+        # default for a route that exists only for the operator of this
+        # instance. An empty string is treated the same, so an
+        # accidentally-blank environment variable cannot open it.
+        self._admin_token = admin_token or None
         # Driven off this same injectable `clock` (converted to a plain
         # float via `datetime.timestamp()`) rather than a second,
         # independent clock -- one thing for a test to control
@@ -241,6 +249,7 @@ class ManagedDnsServer:
         app.router.add_post("/release", self._handle_release)
         app.router.add_post("/rename", self._handle_rename)
         app.router.add_post("/cancel-rename", self._handle_cancel_rename)
+        app.router.add_post("/admin/revoke", self._handle_admin_revoke)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self._host, self._port)
@@ -317,6 +326,115 @@ class ManagedDnsServer:
             return False
         return True
 
+    def _admin_authorized(self, request: web.Request) -> bool:
+        """`Authorization: Bearer <MANAGED_DNS_ADMIN_TOKEN>`, compared
+        with `secrets.compare_digest` so the comparison itself says
+        nothing about how much of a wrong token was right."""
+        if self._admin_token is None:
+            return False
+        header = request.headers.get("Authorization", "")
+        scheme, _, presented = header.partition(" ")
+        if scheme.lower() != "bearer" or not presented:
+            return False
+        return secrets.compare_digest(presented, self._admin_token)
+
+    async def _handle_admin_revoke(self, request: web.Request) -> web.Response:
+        """Design doc §16 Decision 4 (issue #599): the operator's end of
+        the complaint-driven dispute process -- take a name down, and
+        stop the registrant who held it getting it back.
+
+        Runs inside the service rather than as a separate CLI process so
+        it shares `_dns_transition_lock` with the heartbeat, the sweep
+        and every SysOp-driven transition. A second process editing the
+        same SQLite file could commit from a snapshot the sweep had
+        already moved on from; this cannot.
+
+        Deliberately not reachable at all without a configured token:
+        a public-facing service should not carry an administrative route
+        that merely hopes nobody finds it.
+        """
+        if not self._admin_authorized(request):
+            # One answer for "no token configured", "wrong token" and
+            # "no header": none of them is anything the caller needs
+            # told apart, and distinguishing them would say whether this
+            # instance has an admin token at all.
+            return web.json_response({"error": "not authorized"}, status=401)
+
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            return web.json_response({"error": f"malformed JSON body: {exc}"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "request body must be a JSON object"}, status=400)
+        raw_name = body.get("name")
+        reason = body.get("reason")
+        if not isinstance(raw_name, str) or not isinstance(reason, str) or not reason.strip():
+            return web.json_response(
+                {"error": "request must contain a string name and a non-empty string reason"},
+                status=400,
+            )
+        try:
+            name = normalize_name(raw_name)
+        except InvalidNameError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
+        if self._dns_transition_lock.locked():
+            return web.json_response(
+                {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
+            )
+        async with self._dns_transition_lock:
+            return await self._process_admin_revoke(name, reason.strip())
+
+    async def _process_admin_revoke(self, name: str, reason: str) -> web.Response:
+        registration = get_registration_by_name(self._db, name)
+        if registration is None:
+            return web.json_response({"error": f"{name!r} is not registered"}, status=404)
+        if registration.status == "revoked":
+            return web.json_response({"error": f"{name!r} is already revoked"}, status=409)
+
+        # A rename in flight is one registrant holding two names (the
+        # replacement plus the name it replaces), so revoking one and
+        # leaving the other would hand the taken-down registrant a
+        # working name. `_handle_release` refuses in this state and tells
+        # the SysOp to cancel first; an operator acting on a complaint
+        # has nobody to ask, so this takes both.
+        targets = [registration]
+        partner_name = registration.replaces_name
+        if partner_name is None:
+            replacement = get_replacement_for_name(self._db, name)
+            partner_name = replacement.name if replacement is not None else None
+        if partner_name is not None:
+            partner = get_registration_by_name(self._db, partner_name)
+            if partner is not None and partner.status != "revoked":
+                targets.append(partner)
+
+        # Publication is undone before the rows move, and a failure
+        # leaves everything untouched for a retry -- the same "release is
+        # not finalized until deletion succeeds" rule the voluntary path
+        # follows. Revoking a row whose record was never published (a
+        # pending, released or abandoned one) needs no provider call.
+        for target in targets:
+            if target.status == "matured" or target.last_known_address is not None:
+                if not await self._delete_record(target.name):
+                    return web.json_response(
+                        {
+                            "error": f"DNS deletion failed for {target.name!r}; "
+                            "nothing was revoked and this may be retried"
+                        },
+                        status=503,
+                    )
+
+        revoked_at = self._clock().isoformat()
+        revoked: list[str] = []
+        for target in targets:
+            if revoke_registration(self._db, target.name, released_at=revoked_at, reason=reason):
+                revoked.append(target.name)
+        _logger.warning(
+            "Managed-DNS registration(s) %s revoked by the operator (reason: %s)",
+            ", ".join(repr(revoked_name) for revoked_name in revoked), reason,
+        )
+        return web.json_response({"revoked": revoked, "status": "revoked", "revoked_at": revoked_at})
+
     async def _handle_register(self, request: web.Request) -> web.Response:
         """`credential` is optional (design doc §16 Decision 5) --
         reclaim is folded into this same endpoint rather than a
@@ -371,15 +489,26 @@ class ManagedDnsServer:
 
         now = self._clock()
         if existing is not None:
-            # existing.status is 'released' or 'abandoned' here -- decide
-            # whether this is a reclaim (same credential, still within
-            # the cooldown), a rejection (a *different* credential, or
-            # no credential, still within the cooldown -- Decision 5's
-            # whole point), or the cooldown has simply elapsed and the
-            # name is genuinely available to anyone now.
+            # existing.status is 'released', 'abandoned' or 'revoked'
+            # here -- decide whether this is a reclaim (same credential,
+            # still within the cooldown), a rejection (a *different*
+            # credential, or no credential, still within the cooldown --
+            # Decision 5's whole point), or the cooldown has simply
+            # elapsed and the name is genuinely available to anyone now.
+            #
+            # A revoked row is never reclaimable, whatever credential is
+            # presented (design doc §16 Decision 4, issue #599). Without
+            # that, a takedown would survive exactly as long as it took
+            # the registrant to press [R]egister: their node still holds
+            # the credential, and the draft prefills the name it just
+            # lost. The name still frees on the ordinary cooldown, to a
+            # genuinely new registrant, via the branch below.
             cooldown_elapsed = now - datetime.fromisoformat(existing.released_at)
             if cooldown_elapsed < timedelta(seconds=self._cooldown_seconds):
-                if credential and hash_credential(credential) == existing.credential_hash:
+                if (
+                    existing.status != "revoked"
+                    and credential and hash_credential(credential) == existing.credential_hash
+                ):
                     active_for_node = count_registrations_for_node(
                         self._db, existing.node_fingerprint, statuses=_ACTIVE_STATUSES
                     )
