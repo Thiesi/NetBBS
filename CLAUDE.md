@@ -15,8 +15,8 @@ quote the `AGENTS.md` rule and link to `AGENTS.md`. An `AGENTS.md` in a
 subdirectory applies only to files under that directory, the same scoping a
 nested CLAUDE.md has.
 
-The reviewable rules in the root `AGENTS.md` are its "Documentation policy"
-and "Working conventions" sections. Its introduction, "Start here",
-"Development direction", "Environment", "Current scope summary" and "Moradin's
-Forge" sections describe the project and how to work in it. They are not rules
-a diff can break, so do not flag a change against them.
+The reviewable rules in the root `AGENTS.md` are its "Documentation policy",
+"Working conventions" and "Moradin's Forge" sections. Its introduction, "Start
+here", "Development direction", "Environment" and "Current scope summary"
+sections describe the project and how to work in it. They are not rules a diff
+can break, so do not flag a change against them.
