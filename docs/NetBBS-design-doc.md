@@ -8814,7 +8814,7 @@ for node identity and the SSH host key — see §13.4's own table.
 from a shipped constant, overridable per node; it is not waiting on an
 instruction from an operator there was never a way to give.** Issue
 #583: a freshly bootstrapped 7.6.0 node accepted the opt-in — the
-pre-set answer under Decision 7 — and stopped immediately at "ask your
+pre-set answer under issue #219 Decision 7 — and stopped immediately at "ask your
 operator to set the service address." `netbbs.managed_dns.state.
 set_service_url` had no caller anywhere in the installed package: no CLI
 flag, no `netbbs.toml` key, no admin screen. The address had no route
@@ -8857,8 +8857,9 @@ on the wire on every heartbeat.
 
 Until the backend is actually deployed anywhere, `DEFAULT_SERVICE_URL`
 is `None` and a node simply has no service to register against. The
-opt-in is still asked, and still recorded exactly once, per Decisions 1
-and 7; what changes is only that the node says plainly that the service
+opt-in is still asked, and still recorded exactly once, per Decision 1
+and issue #219 Decision 7; what changes is only that the node says
+plainly that the service
 is not running yet. Deliberately not "hide the question until the
 service exists": the decision being asked is whether this node may
 contact project infrastructure at all, the first-run screen is the one
