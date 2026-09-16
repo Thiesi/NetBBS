@@ -675,7 +675,7 @@ Use `python -m netbbs --help` for the complete installed CLI.
 | `[link]` | Explicit `enabled` overrides stored participation; `outgoing_only = true`, HTTP port 7862, real-time port defaults to HTTP port + 1000 |
 | `[throttle]` | Cross-connection login-attempt controls |
 | `[shutdown]` | Caller warning delay and bounded background-task drain |
-| `[managed_dns]` | `service_url` points the node at a different managed netbbs.org service (https-only away from loopback; a node already registered elsewhere pauses rather than carrying its credential across); unset means the shipped address in `netbbs.managed_dns.state.DEFAULT_SERVICE_URL` |
+| `[managed_dns]` | `service_url` points the node at a different managed netbbs.org service (https-only away from loopback; a node already registered elsewhere pauses rather than carrying its credential across); unset means the shipped address in `netbbs.managed_dns.state.DEFAULT_SERVICE_URL`. `admin_token` is the service's `MANAGED_DNS_ADMIN_TOKEN`, for the one node whose operator runs the service; config file only, and its presence puts the service-administration screen on that node's SysOp console |
 
 Link configuration additionally includes seeds, sync interval, advertised
 addresses, relay consent/capacity, real-time listener settings, peer/carried-resource

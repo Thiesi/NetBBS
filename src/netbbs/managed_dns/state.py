@@ -53,6 +53,11 @@ class RegistrationStatus(str, Enum):
     MATURED = "matured"
     RELEASED = "released"
     ABANDONED = "abandoned"
+    #: The service operator took the name away (design doc §16 Decision
+    #: 4). Terminal for this node: the updater stops, `[R]egister` with
+    #: the same name is refused for the cooldown, and the screen says
+    #: so and names the contact channel the service gave.
+    REVOKED = "revoked"
 
 
 OPT_IN_CONFIG_KEY = "managed_dns_opt_in"
@@ -69,6 +74,8 @@ PREVIOUS_PUBLISHED_CONFIG_KEY = "managed_dns_previous_published"
 CREDENTIAL_SERVICE_URL_CONFIG_KEY = "managed_dns_credential_service_url"
 LISTENERS_CONFIG_KEY = "managed_dns_listeners"
 RECOVERY_NOTE_CONFIG_KEY = "managed_dns_recovery_note"
+SERVICE_CONTACT_CONFIG_KEY = "managed_dns_service_contact"
+ADMIN_TOKEN_CONFIG_KEY = "managed_dns_admin_token"
 
 # The address of the project's own `services.managed_dns` instance, as
 # shipped -- what a node reaches when its operator configures nothing,
@@ -494,3 +501,49 @@ def get_recovery_note(db: Database) -> RecoveryNote | None:
     if not isinstance(data, dict) or not isinstance(data.get("at"), str) or not isinstance(data.get("text"), str):
         return None
     return RecoveryNote(at=data["at"], text=data["text"])
+
+
+def set_service_contact(db: Database, contact: str | None) -> None:
+    """The operator's contact channel as the service last named it in a
+    refusal (design doc §16 Decision 3/4) -- kept so the DNS screen can
+    repeat it beside a REVOKED badge after the refusal itself has
+    scrolled away. Free text from the service, so it is sanitised and
+    bounded where it is shown, never here."""
+    set_config(db, SERVICE_CONTACT_CONFIG_KEY, (contact or "")[:512])
+
+
+def get_service_contact(db: Database) -> str | None:
+    return get_config(db, SERVICE_CONTACT_CONFIG_KEY) or None
+
+
+def set_revoked_state(db: Database, *, name: str, contact: str | None) -> None:
+    """The node's view once the service says its credential was revoked
+    (design doc §16 Decision 4): the name and, if a rename was in flight,
+    the previous name are both revoked -- the service takes both halves
+    -- nothing is published, and the contact channel is kept. One
+    transaction, like every other reconciliation here."""
+    previous_name = get_previous_name(db)
+    _set_config_values(db, (
+        (NAME_CONFIG_KEY, name),
+        (STATUS_CONFIG_KEY, RegistrationStatus.REVOKED.value),
+        (PUBLISHED_CONFIG_KEY, "0"),
+        (PREVIOUS_NAME_CONFIG_KEY, previous_name or ""),
+        (PREVIOUS_STATUS_CONFIG_KEY, RegistrationStatus.REVOKED.value if previous_name else ""),
+        (PREVIOUS_PUBLISHED_CONFIG_KEY, "0"),
+        (RECOVERY_NOTE_CONFIG_KEY, ""),
+        (SERVICE_CONTACT_CONFIG_KEY, (contact or "")[:512]),
+    ))
+
+
+def get_admin_token(db: Database) -> str | None:
+    """The bearer token for the managed service's `/admin/` routes, when
+    this node's operator is also the service's operator (design doc §16
+    Decision 4): `[managed_dns] admin_token` in `netbbs.toml`, mirrored
+    here by `netbbs.__main__.run` once per startup, absence included --
+    exactly as `service_url` travels. Its presence is what makes the
+    SysOp console offer the service-administration screen at all."""
+    return get_config(db, ADMIN_TOKEN_CONFIG_KEY) or None
+
+
+def set_admin_token(db: Database, token: str | None) -> None:
+    set_config(db, ADMIN_TOKEN_CONFIG_KEY, token or "")

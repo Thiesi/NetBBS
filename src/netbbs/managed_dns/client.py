@@ -57,6 +57,13 @@ class ManagedDnsError(Exception):
         #: The operator's contact channel, when the refusal named one.
         self.contact = contact
 
+    @property
+    def revoked(self) -> bool:
+        """The service said this credential's registration was revoked
+        (design doc §16 Decision 4) -- a state the updater and the flows
+        treat as its own rather than a generic 401."""
+        return self.service_status == "revoked"
+
 
 @dataclass(frozen=True)
 class _Refusal:
@@ -391,3 +398,119 @@ async def release(
     if not isinstance(name_value, str) or not name_value or status_value != RegistrationStatus.RELEASED.value:
         raise ManagedDnsError(f"malformed release response from {url}: invalid fields")
     return ReleaseResult(name_value, status_value)
+
+
+# -- the operator's side (design doc §16 Decision 4) -------------------------
+
+
+@dataclass(frozen=True)
+class AdminRegistration:
+    """One row of the service's table as `POST /admin/registrations`
+    shows it to the operator -- everything but the credential hash."""
+
+    name: str
+    status: str
+    node_fingerprint: str
+    dynamic: bool
+    created_at: str
+    matured_at: str | None
+    last_contact_at: str | None
+    released_at: str | None
+    last_known_address: str | None
+    replaces_name: str | None
+    revoked_reason: str | None
+
+
+def _admin_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _optional_str(body: dict, key: str) -> str | None:
+    value = body.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(key)
+    return value
+
+
+async def admin_registrations(
+    session: ClientSession, base_url: str, *, token: str, timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> list[AdminRegistration]:
+    """`POST {base_url}/admin/registrations` with the operator's bearer
+    token -- the read half of the SysOp console's service-administration
+    screen. A 401 is the service's uniform "not authorized", which
+    covers a wrong token and an instance with none configured alike."""
+    url = f"{base_url}/admin/registrations"
+    try:
+        async with session.post(
+            url, json={}, headers=_admin_headers(token), timeout=ClientTimeout(total=timeout),
+            allow_redirects=False,
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise _refused("listing registrations failed", response.status, text)
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, TimeoutError, ValueError) as exc:
+        raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
+    rows = body.get("registrations") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        raise ManagedDnsError(f"malformed registrations response from {url}: expected a list")
+    parsed: list[AdminRegistration] = []
+    for row in rows:
+        try:
+            if not isinstance(row, dict) or not isinstance(row.get("dynamic"), bool):
+                raise ValueError("row")
+            name, status, node_fingerprint, created_at = (
+                row.get("name"), row.get("status"), row.get("node_fingerprint"), row.get("created_at"),
+            )
+            if not all(isinstance(value, str) and value for value in (name, status, node_fingerprint, created_at)):
+                raise ValueError("row")
+            parsed.append(AdminRegistration(
+                name=name, status=status, node_fingerprint=node_fingerprint, dynamic=row["dynamic"],
+                created_at=created_at, matured_at=_optional_str(row, "matured_at"),
+                last_contact_at=_optional_str(row, "last_contact_at"),
+                released_at=_optional_str(row, "released_at"),
+                last_known_address=_optional_str(row, "last_known_address"),
+                replaces_name=_optional_str(row, "replaces_name"),
+                revoked_reason=_optional_str(row, "revoked_reason"),
+            ))
+        except ValueError as exc:
+            raise ManagedDnsError(f"malformed registrations response from {url}: invalid row") from exc
+    return parsed
+
+
+@dataclass(frozen=True)
+class AdminRevokeResult:
+    revoked: tuple[str, ...]
+    revoked_at: str
+
+
+async def admin_revoke(
+    session: ClientSession, base_url: str, *, token: str, name: str, reason: str,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> AdminRevokeResult:
+    """`POST {base_url}/admin/revoke` -- the act itself (design doc §16
+    Decision 4). `revoked` names every row that moved: two when the
+    registrant had a rename in flight."""
+    url = f"{base_url}/admin/revoke"
+    try:
+        async with session.post(
+            url, json={"name": name, "reason": reason}, headers=_admin_headers(token),
+            timeout=ClientTimeout(total=timeout), allow_redirects=False,
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise _refused(f"revoking {name!r} failed", response.status, text)
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, TimeoutError, ValueError) as exc:
+        raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
+    revoked = body.get("revoked") if isinstance(body, dict) else None
+    revoked_at = body.get("revoked_at") if isinstance(body, dict) else None
+    if (
+        not isinstance(revoked, list) or not revoked
+        or not all(isinstance(value, str) and value for value in revoked)
+        or not isinstance(revoked_at, str) or not revoked_at
+    ):
+        raise ManagedDnsError(f"malformed revoke response from {url}: invalid fields")
+    return AdminRevokeResult(tuple(revoked), revoked_at)

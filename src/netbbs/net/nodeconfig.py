@@ -338,9 +338,19 @@ class ManagedDnsConfig:
     was possible at all: the database key existed and nothing in the
     installed package ever wrote it, so a node that accepted the opt-in
     could never complete a registration.
+
+    `admin_token` is for one node in the world per service instance: the
+    one whose operator also runs that `services.managed_dns` (design doc
+    §16 Decision 4). It is the bearer token the service's `/admin/`
+    routes require, and its presence is what makes the SysOp console
+    offer the service-administration screen -- listing registrations and
+    revoking a name on a complaint -- from inside NetBBS rather than by
+    `curl` on the service host. Config file only, never a command-line
+    flag: a secret in `argv` is visible to every process on the host.
     """
 
     service_url: str | None = None
+    admin_token: str | None = None
 
 
 def _validate_base_url(value: str, label: str) -> None:
@@ -859,10 +869,22 @@ def _managed_dns_from_toml(data: dict, current: ManagedDnsConfig) -> ManagedDnsC
         raise ConfigError(
             f"[managed_dns] service_url must be a string, got {type(service_url).__name__}"
         )
+    admin_token = table.get("admin_token", current.admin_token)
+    if admin_token is not None and not isinstance(admin_token, str):
+        raise ConfigError(
+            f"[managed_dns] admin_token must be a string, got {type(admin_token).__name__}"
+        )
     # Stripped and de-slashed exactly as `public_url` is, and for the
     # same reason: `netbbs.managed_dns.client` appends `/register` and
     # friends to this, so a trailing slash would dial `//register`.
-    return replace(current, service_url=str(service_url).strip().rstrip("/") if service_url else None)
+    return replace(
+        current,
+        service_url=str(service_url).strip().rstrip("/") if service_url else None,
+        # Stripped, and blank means unset -- the service treats a blank
+        # token the same way, so the two can never disagree about
+        # whether an administrative surface exists.
+        admin_token=str(admin_token).strip() or None if admin_token else None,
+    )
 
 
 def _node_from_toml(data: dict, config: NodeConfig) -> tuple[Path, str]:

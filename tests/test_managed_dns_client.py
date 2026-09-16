@@ -392,3 +392,57 @@ def test_a_refusal_that_is_not_the_services_shape_keeps_its_status():
     assert exc.status_code == 502
     assert "HTTP 502" in str(exc)
     assert "Bad Gateway" in str(exc)
+
+
+# -- the operator's calls (design doc §16 Decision 4) ------------------------
+
+
+def test_admin_registrations_and_revoke_round_trip_against_a_real_server(db):
+    from netbbs.managed_dns.client import admin_registrations, admin_revoke
+
+    async def scenario():
+        server = ManagedDnsServer("127.0.0.1", 0, db, admin_token="s3cret")
+        await server.start()
+        try:
+            base_url = f"http://127.0.0.1:{server.port}"
+            async with aiohttp.ClientSession() as session:
+                await register(session, base_url, name="alpha", node_fingerprint="fp-1", dynamic=True)
+                await register(session, base_url, name="beta", node_fingerprint="fp-2", dynamic=False)
+                rows = await admin_registrations(session, base_url, token="s3cret")
+                result = await admin_revoke(session, base_url, token="s3cret", name="beta", reason="test")
+                after = await admin_registrations(session, base_url, token="s3cret")
+                with pytest.raises(ManagedDnsError) as refused:
+                    await admin_registrations(session, base_url, token="wrong")
+            return rows, result, after, refused.value
+        finally:
+            await server.stop()
+
+    rows, result, after, refused = asyncio.run(scenario())
+    assert [row.name for row in rows] == ["alpha", "beta"]
+    assert rows[0].dynamic is True and rows[0].status == "pending" and rows[0].matured_at is None
+    assert result.revoked == ("beta",) and result.revoked_at
+    assert {row.name: row.status for row in after} == {"alpha": "pending", "beta": "revoked"}
+    assert after[1].revoked_reason == "test"
+    assert refused.status_code == 401
+
+
+def test_admin_registrations_rejects_a_malformed_row():
+    from netbbs.managed_dns.client import admin_registrations
+
+    asyncio.run(_run_invalid_response_case(
+        "/admin/registrations", 200, {"registrations": [{"name": "x", "status": "pending"}]},
+        lambda session, base_url: admin_registrations(session, base_url, token="t"),
+    ))
+
+
+def test_a_revoked_refusal_is_structured_not_textual():
+    """`revoked` is read from the body's `status`, never from the words:
+    an error sentence that merely mentions revocation is not one."""
+    from netbbs.managed_dns.client import _refusal
+
+    structured = _refusal(401, '{"error": "this registration was revoked by the service operator", "status": "revoked", "contact": " x@y "}')
+    assert structured.service_status == "revoked" and structured.contact == "x@y"
+    textual = _refusal(401, '{"error": "revoked, they said"}')
+    assert textual.service_status is None and textual.contact is None
+    assert ManagedDnsError("m", status_code=401, service_status="revoked").revoked
+    assert not ManagedDnsError("m", status_code=401).revoked

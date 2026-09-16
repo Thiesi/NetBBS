@@ -914,3 +914,118 @@ def test_a_loopback_service_is_dialed_directly_and_a_remote_one_through_the_prox
     # what lets a node behind a corporate forward proxy reach the service.
     assert seen["https://dns.example"] is True
     assert seen["http://dns.example"] is True
+
+
+# -- the operator's console (design doc §16 Decision 4) ----------------------
+
+
+async def _operator_scenario(tmp_path, inputs, *, token="s3cret", contact=None, seed=True):
+    """A service with two registrations and an operator's node pointed
+    at it with the admin token; `inputs` drive `administer_service`."""
+    from netbbs.managed_dns.client import register
+    from netbbs.managed_dns.state import set_admin_token
+    from netbbs.net.managed_dns_flow import administer_service
+    from services.managed_dns.store import get_registration_by_name
+
+    backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+    server = ManagedDnsServer("127.0.0.1", 0, backend_db, admin_token="s3cret", contact=contact)
+    await server.start()
+    try:
+        base_url = f"http://127.0.0.1:{server.port}"
+        if seed:
+            import aiohttp
+
+            async with aiohttp.ClientSession() as http_session:
+                await register(http_session, base_url, name="alpha", node_fingerprint="fp-1", dynamic=True)
+                await register(http_session, base_url, name="beta", node_fingerprint="fp-2", dynamic=False)
+        db = Database(tmp_path / "node.db")
+        set_service_url(db, base_url)
+        set_node_fingerprint(db, "fp-op")
+        set_admin_token(db, token)
+        lane = DatabaseLane(db.path)
+        session = FakeSession(inputs)
+        from netbbs.auth.users import create_user
+        from netbbs.auth.users import SYSOP_LEVEL
+
+        actor = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+        await administer_service(session, lane, actor)
+        lane.close()
+        statuses = {
+            name: (row.status if row else None)
+            for name, row in ((n, get_registration_by_name(backend_db, n)) for n in ("alpha", "beta"))
+        }
+        db.close()
+        return session, statuses
+    finally:
+        await server.stop()
+        backend_db.close()
+
+
+def test_operator_lists_picks_and_revokes_a_registration(tmp_path):
+    """The whole of README §8's act from the console: the table, one
+    row in full, `[R]evoke`, the reason, the type-the-name confirmation,
+    and the service's answer -- then back to the (refreshed) table."""
+    from tests.test_admin_flow import _visible
+
+    session, statuses = asyncio.run(_operator_scenario(
+        tmp_path,
+        # pick row 02 (beta), revoke, reason, confirm by name, then [B]ack from the table
+        ["0", "2", "r", "impersonation, report 2026-09-16", "beta", "b"],
+    ))
+    text = " ".join(_visible("".join(session.written)).split())
+    assert "Managed DNS service administration" in text
+    assert "01. 1 alpha" in text and "02. 2 beta" in text  # position is the goto number
+    assert "beta.netbbs.org" in text  # the detail screen's title
+    assert "NetBBS › NetBBS" not in text  # the picker prepends the node name itself
+    assert "Node fingerprint: fp-2" in text
+    assert "Follows address: no" in text
+    assert "Type the name 'beta' to confirm revocation" in text
+    assert "Revoked: beta.netbbs.org." in text
+    assert statuses == {"alpha": "pending", "beta": "revoked"}
+
+
+def test_operator_revocation_is_cancelled_by_a_wrong_name_or_an_empty_reason(tmp_path):
+    from tests.test_admin_flow import _visible
+
+    session, statuses = asyncio.run(_operator_scenario(
+        tmp_path,
+        ["0", "2", "r", "a reason", "not-beta", "0", "2", "r", "", "b"],
+    ))
+    text = _visible("".join(session.written))
+    assert text.count("Cancelled.") == 2
+    assert statuses == {"alpha": "pending", "beta": "pending"}
+
+
+def test_operator_screen_offers_no_revoke_for_an_already_revoked_row(tmp_path):
+    from tests.test_admin_flow import _visible
+
+    session, statuses = asyncio.run(_operator_scenario(
+        tmp_path,
+        ["0", "2", "r", "first", "beta", "0", "2", "r", "b", "b"],  # second "r" is rejected: no action
+    ))
+    text = " ".join(_visible("".join(session.written)).split())
+    assert "Revocation reason: first" in text
+    assert statuses["beta"] == "revoked"
+
+
+def test_operator_screen_needs_the_token_and_says_so(tmp_path):
+    from tests.test_admin_flow import _visible
+
+    session, _ = asyncio.run(_operator_scenario(tmp_path, [], token=None))
+    assert "admin_token" in _visible("".join(session.written))
+
+
+def test_operator_screen_reports_a_refused_listing(tmp_path):
+    from tests.test_admin_flow import _visible
+
+    session, _ = asyncio.run(_operator_scenario(tmp_path, [], token="wrong"))
+    text = " ".join(_visible("".join(session.written)).split())  # wrapped at 80 columns
+    assert "Could not list the service's registrations" in text
+    assert "not authorized" in text
+
+
+def test_operator_screen_says_when_the_service_holds_nothing(tmp_path):
+    from tests.test_admin_flow import _visible
+
+    session, _ = asyncio.run(_operator_scenario(tmp_path, [], seed=False))
+    assert "holds no registrations" in _visible("".join(session.written))

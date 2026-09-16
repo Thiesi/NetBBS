@@ -984,8 +984,9 @@ def test_updater_leaves_a_released_name_alone(tmp_path):
 
 def test_updater_reclaim_is_refused_for_a_revoked_name_and_says_so(tmp_path):
     """A revoked row is reclaimable by nothing (Decision 4); the
-    automatic path must not become the loophole, and the DNS screen gets
-    the service's answer."""
+    automatic path must not become the loophole. The service's answer
+    carries `status: revoked`, and the node adopts it as its own terminal
+    state rather than retrying: REVOKED, not ABANDONED with a note."""
     async def scenario():
         backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
         server = ManagedDnsServer("127.0.0.1", 0, backend_db, min_age_seconds=0, admin_token="s3cret")
@@ -1007,10 +1008,10 @@ def test_updater_reclaim_is_refused_for_a_revoked_name_and_says_so(tmp_path):
 
     db, row = asyncio.run(scenario())
     assert row.status == "revoked"
-    assert get_registration_status(db) is RegistrationStatus.ABANDONED
+    assert get_registration_status(db) is RegistrationStatus.REVOKED
     from netbbs.managed_dns.state import get_recovery_note
 
-    assert get_recovery_note(db) is not None
+    assert get_recovery_note(db) is None
     db.close()
 
 
@@ -1118,4 +1119,98 @@ def test_updater_fails_closed_against_a_service_without_the_reclaim_route(tmp_pa
     assert load_credential(credential_path_for(db.path)) == "old-credential"
     note = get_recovery_note(db)
     assert note is not None and "404" in note.text
+    db.close()
+
+
+# -- what the registrant's node learns from a revocation (Decision 4) --------
+
+
+def test_updater_adopts_a_revocation_from_the_heartbeat_and_records_the_contact(tmp_path, caplog):
+    """The service revokes a live name; the node's next heartbeat is told
+    so, records REVOKED and the contact channel, stops heartbeating, and
+    logs it once."""
+    import logging
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer(
+            "127.0.0.1", 0, backend_db, min_age_seconds=0, admin_token="s3cret", contact="abuse@example.org",
+        )
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            base_url = f"http://127.0.0.1:{server.port}"
+            async with aiohttp.ClientSession() as session:
+                registered = await register(session, base_url, name="badname", node_fingerprint="fp-1", dynamic=True)
+                await heartbeat_once(session, base_url, registered.credential)
+                async with session.post(
+                    f"{base_url}/admin/revoke", json={"name": "badname", "reason": "test"},
+                    headers={"Authorization": "Bearer s3cret"},
+                ) as response:
+                    assert response.status == 200
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_node_fingerprint(db, "fp-1")
+            set_service_url(db, base_url)
+            set_registered_name(db, "badname")
+            set_registration_status(db, RegistrationStatus.MATURED)
+            set_published(db, True)
+            save_credential(credential_path_for(db.path), registered.credential)
+            await _run_passes(db, 3)
+            return db
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    with caplog.at_level(logging.WARNING, logger="netbbs.managed_dns.updater"):
+        db = asyncio.run(scenario())
+    from netbbs.managed_dns.state import get_service_contact
+
+    assert get_registration_status(db) is RegistrationStatus.REVOKED
+    assert not get_published(db)
+    assert get_service_contact(db) == "abuse@example.org"
+    revoked_lines = [r for r in caplog.records if "'badname' was revoked by the service operator" in r.getMessage()]
+    assert len(revoked_lines) == 1 and "abuse@example.org" in revoked_lines[0].getMessage()
+    # The two later passes had nothing to send: only the first pass's failed heartbeat is logged.
+    assert sum("heartbeat failed" in r.getMessage() for r in caplog.records) == 1
+    db.close()
+
+
+def test_updater_takes_both_names_when_a_rename_in_flight_is_revoked(tmp_path):
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, min_age_seconds=0, admin_token="s3cret")
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            base_url = f"http://127.0.0.1:{server.port}"
+            async with aiohttp.ClientSession() as session:
+                registered = await register(session, base_url, name="oldname", node_fingerprint="fp-1", dynamic=False)
+                await heartbeat_once(session, base_url, registered.credential)
+                renamed = await rename(session, base_url, name="newname", credential=registered.credential)
+                async with session.post(
+                    f"{base_url}/admin/revoke", json={"name": "oldname", "reason": "test"},
+                    headers={"Authorization": "Bearer s3cret"},
+                ) as response:
+                    assert response.status == 200
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_node_fingerprint(db, "fp-1")
+            set_service_url(db, base_url)
+            set_registered_name(db, "newname")
+            set_registration_status(db, RegistrationStatus.PENDING)
+            set_previous_name(db, "oldname")
+            set_previous_status(db, RegistrationStatus.MATURED)
+            set_previous_published(db, True)
+            save_credential(credential_path_for(db.path), renamed.credential)
+            save_credential(previous_credential_path_for(db.path), registered.credential)
+            await _run_passes(db, 2)
+            return db
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db = asyncio.run(scenario())
+    assert get_registration_status(db) is RegistrationStatus.REVOKED
+    assert get_previous_name(db) == "oldname"
+    assert get_previous_status(db) is RegistrationStatus.REVOKED
+    assert not get_previous_published(db)
     db.close()

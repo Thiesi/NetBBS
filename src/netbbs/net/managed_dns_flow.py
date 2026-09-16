@@ -40,6 +40,7 @@ from netbbs.managed_dns.state import (
     get_previous_status,
     get_dynamic,
     get_registered_name,
+    get_admin_token,
     get_service_url,
     foreign_credential_service_url,
     set_cancelled_rename_state,
@@ -52,14 +53,21 @@ from netbbs.managed_dns.state import (
 from netbbs.auth.users import User
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.picker import ListColumn, pick_item
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.resource_editor import FieldSpec, choice_field, choice_step, edit_resource_draft
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.unicode_style_preference import unicode_style_enabled
-from netbbs.rendering import menu_key, MUTED_COLOR, colored, sanitize_text, wrap_to_width
+from netbbs.rendering import (
+    ALERT_COLOR, LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, VALUE_COLOR, colored, menu_key, sanitize_text,
+    wrap_to_width,
+)
+from netbbs.rendering.layout import screen_title
+from netbbs.net.char_input import reject_unhandled_key
 from netbbs.storage.execution import DatabaseLane
+from netbbs.timeutil import format_for_display, resolve_display_preferences
 
 _OPT_IN_BLURB = (
     "NetBBS controls the netbbs.org domain and can host your board under "
@@ -625,3 +633,200 @@ async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> No
         stage_credential_cancellation(lane.path, old_credential)
         recover_credential_transition(lane.path)
     await session.write_line(colored(f"Kept {result.previous_name}.netbbs.org; the name change was cancelled.", fg_color=MUTED_COLOR))
+
+
+# -- the operator's side: service administration (design doc §16 Decision 4)
+
+
+_ADMIN_COLUMNS = [
+    ListColumn("status", 9, VALUE_COLOR),
+    ListColumn("last contact", 17, VALUE_COLOR),
+    ListColumn("node", 12, VALUE_COLOR),
+]
+
+
+async def administer_service(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """The SysOp console's end of design doc §16 Decision 4, for the one
+    node whose operator also runs the service: every registration the
+    service holds, as a table; one of them in full; and the act itself,
+    `[R]evoke`, with the reason the runbook requires and a type-the-name
+    confirmation. Offered only when `[managed_dns] admin_token` is set
+    (`netbbs.__main__.run` mirrors it into the database), and addressed
+    to the configured service address with that token.
+
+    What this replaces is `curl` on the service host and `sqlite3` on
+    its database (README §8's "look at the row"): the checks the runbook
+    asks for -- when it was registered, whose node it is, when it last
+    checked in, whether it resolves -- are what the detail screen shows,
+    minus the `dig`, which stays the operator's.
+    """
+    token = await lane.run(get_admin_token)
+    base_url = await lane.run(get_service_url)
+    if token is None or base_url is None:
+        await _write_note(
+            session,
+            "Service administration needs [managed_dns] admin_token (and a service address) in "
+            "netbbs.toml; this node has neither the token nor a reason to have it unless it "
+            "belongs to the service's operator.",
+        )
+        return
+    try:
+        from netbbs.managed_dns.client import ManagedDnsError, admin_registrations, outbound_session
+    except ModuleNotFoundError:
+        await _write_note(session, "Service administration requires NetBBS's optional HTTP support.")
+        return
+
+    presentation = {
+        "description_level": await lane.run(menu_description_level, actor),
+        "redraw_in_place": await lane.run(redraw_in_place_enabled, actor),
+        "unicode_style": await lane.run(unicode_style_enabled, actor),
+        "collapsed": await lane.run(breadcrumb_collapsed_enabled, actor),
+        "accent_color": await lane.run(effective_accent_color_256),
+        "header_color": await lane.run(effective_header_color_256),
+    }
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+
+    def when(iso: str | None) -> str:
+        if iso is None:
+            return "never"
+        try:
+            return format_for_display(iso, override_format=display_format, override_timezone=display_timezone)
+        except ValueError:
+            return sanitize_text(iso)
+
+    async def load():
+        try:
+            async with outbound_session(base_url) as http_session:
+                return await admin_registrations(http_session, base_url, token=token)
+        except ManagedDnsError as exc:
+            await _write_note(session, f"Could not list the service's registrations: {sanitize_text(str(exc))}")
+            return None
+
+    rows = await load()
+    if rows is None:
+        return
+
+    async def reload():
+        fresh = await load()
+        return fresh if fresh is not None else rows
+
+    def columns_of(row):
+        status_color = ALERT_COLOR if row.status == "revoked" else VALUE_COLOR
+        return [(row.status, status_color), when(row.last_contact_at), row.node_fingerprint[:12]]
+
+    while True:
+        if not rows:
+            await _write_note(session, "The service holds no registrations.")
+            return
+        # The goto number is the row's position in the service's own
+        # name-ordered table: short, and as stable as that table between
+        # two refreshes, which is all the picker asks of it here.
+        positions = {row.name: index for index, row in enumerate(rows, start=1)}
+        chosen = await pick_item(
+            session, rows,
+            # The bare label: every row is under netbbs.org, and the
+            # suffix only cost the column the width a long label needs.
+            name_of=lambda row: row.name,
+            stable_id_of=lambda row: positions[row.name],
+            columns=_ADMIN_COLUMNS,
+            column_values_of=columns_of,
+            title="Managed DNS service administration",
+            breadcrumb=("System", "Managed DNS"),
+            empty_message="The service holds no registrations.",
+            refresh=reload,
+            **presentation,
+        )
+        if chosen is None:
+            return
+        await _registration_detail(
+            session, lane, chosen, base_url=base_url, token=token, when=when, presentation=presentation,
+        )
+        rows = await reload()
+
+
+async def _registration_detail(session: Session, lane: DatabaseLane, row, *, base_url, token, when, presentation) -> None:
+    """One registration as the service holds it, and the action bar:
+    `[R]evoke` while it is not already revoked, `[B]ack` always."""
+    from netbbs.managed_dns.client import ManagedDnsError, admin_revoke, outbound_session
+
+    def draw_lines() -> list[str]:
+        def field(label: str, value: str) -> str:
+            return colored(f"{label}: ", fg_color=LABEL_COLOR) + colored(sanitize_text(value), fg_color=METADATA_COLOR)
+
+        lines = [
+            field("Status", row.status),
+            field("Node fingerprint", row.node_fingerprint),
+            field("Follows address", "yes" if row.dynamic else "no"),
+            field("Registered", when(row.created_at)),
+            field("Live since", when(row.matured_at)),
+            field("Last contact", when(row.last_contact_at)),
+            field("Published address", row.last_known_address or "none"),
+        ]
+        if row.released_at:
+            lines.append(field("Inactive since", when(row.released_at)))
+        if row.replaces_name:
+            lines.append(field("Replaces", f"{row.replaces_name}.netbbs.org (rename in flight)"))
+        if row.revoked_reason:
+            lines.append(field("Revocation reason", row.revoked_reason))
+        return lines
+
+    while True:
+        await session.write_line(
+            "\r\n"
+            + screen_title(
+                f"{row.name}.netbbs.org",
+                breadcrumb=(session.node_display_name, "System", "Managed DNS", "Service administration"),
+                subtitle="This registration as the service holds it.",
+                width=session.terminal_width,
+                clear=presentation["redraw_in_place"],
+                unicode_style=presentation["unicode_style"], collapsed=presentation["collapsed"],
+                header_color=presentation["header_color"],
+                node_name_gradient=session.node_name_gradient,
+            )
+        )
+        for line in draw_lines():
+            await session.write_line(line)
+        actions = []
+        if row.status != "revoked":
+            actions.append(menu_key("R", "evoke"))
+        actions.append(menu_key("B", "ack"))
+        await session.write_line("\r\n" + "    ".join(actions))
+
+        while True:
+            choice = (await session.read_key()).lower()
+            if choice == "b":
+                await session.write_line("")
+                return
+            if choice == "r" and row.status != "revoked":
+                await session.write_line("")
+                await _write_note(
+                    session,
+                    f"Revoking takes {row.name}.netbbs.org out of DNS now, and the registrant cannot get it "
+                    "back with the credential they hold: the name is held out of everyone's reach for the "
+                    "cooldown, then frees. If a rename is in flight, both names go. The reason is stored on "
+                    "the registration and printed to the service log; the registrant is told that the name "
+                    "was revoked and whom to contact, not why.",
+                )
+                await write_prompt(session, "Reason (required, one sentence you will understand in six months): ")
+                reason = (await session.read_line()).strip()
+                if not reason:
+                    await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+                    return
+                await write_prompt(
+                    session, f"Type the name {row.name!r} to confirm revocation, or anything else to cancel: "
+                )
+                if (await session.read_line()).strip() != row.name:
+                    await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+                    return
+                try:
+                    async with outbound_session(base_url) as http_session:
+                        result = await admin_revoke(
+                            http_session, base_url, token=token, name=row.name, reason=reason,
+                        )
+                except ManagedDnsError as exc:
+                    await _write_note(session, f"Revocation failed: {sanitize_text(str(exc))}")
+                    return
+                names = ", ".join(f"{revoked}.netbbs.org" for revoked in result.revoked)
+                await _write_note(session, f"Revoked: {names}. The record is gone and the holder cannot reclaim it.")
+                return
+            await session.write(reject_unhandled_key(choice))

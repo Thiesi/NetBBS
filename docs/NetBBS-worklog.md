@@ -3876,6 +3876,25 @@ HTTP, never imports it.
   from "held for this node" to "refused (below)" once one exists. A
   `released` refusal is adopted, not retried: the local `abandoned` was
   a stale backup's view of a name the SysOp had since released.
+- **A revoked credential is told so, and the node has a `REVOKED` state
+  of its own (Decision 4).** Every credential-bearing route answers a
+  revoked row's credential with `status: revoked` and the contact
+  channel in the body; `netbbs.managed_dns.client` carries both on
+  `ManagedDnsError` (`service_status`, `contact`), parsed from the JSON
+  only, never from the words. `_send_heartbeat` keeps its two-tuple
+  contract -- tests substitute it with fakes returning plain bools --
+  and signals revocation by returning the error itself as the truthy
+  `inactive`; the pass checks `isinstance` before anything else. The
+  updater never heartbeats a `REVOKED` registration again, and
+  `set_revoked_state` takes the previous name with it, since the
+  service takes both halves of a rename. Anyone presenting a credential
+  that is not the row's still gets the uniform refusal.
+- **The operator's token lives in the node database.** `[managed_dns]
+  admin_token` is mirrored by `netbbs.__main__.run` like `service_url`,
+  absence included, because the SysOp console cannot reach `NodeConfig`
+  and the standalone `python -m netbbs.admin` console should get the
+  screen too. It is therefore in backups, beside the managed-DNS
+  credential; there is no command-line flag for it on purpose.
 - **The client shows the service's sentence, not its JSON.** A refused
   request's `ManagedDnsError` carries the body's `error` field when the
   body is the service's shape and `HTTP <status>: <text>` otherwise;

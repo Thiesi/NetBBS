@@ -479,3 +479,43 @@ def test_recovery_note_round_trips_and_is_cleared_by_any_authoritative_answer(tm
     set_recovery_note(db, None)
     assert get_recovery_note(db) is None
     db.close()
+
+
+# -- revocation on the node side and the operator's token (Decision 4) --------
+
+
+def test_revoked_state_takes_both_names_and_keeps_the_contact(tmp_path):
+    from netbbs.managed_dns.state import (
+        get_previous_published, get_previous_status, get_published, get_service_contact, set_previous_name,
+        set_previous_published, set_previous_status, set_published, set_revoked_state,
+    )
+
+    db = Database(tmp_path / "node.db")
+    set_registered_name(db, "newname")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_previous_name(db, "oldname")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+    set_published(db, False)
+
+    set_revoked_state(db, name="newname", contact="abuse@example.org")
+
+    assert get_registration_status(db) is RegistrationStatus.REVOKED
+    assert get_previous_status(db) is RegistrationStatus.REVOKED
+    assert not get_published(db) and not get_previous_published(db)
+    assert get_service_contact(db) == "abuse@example.org"
+    set_revoked_state(db, name="newname", contact=None)
+    assert get_service_contact(db) is None
+    db.close()
+
+
+def test_admin_token_round_trips_and_clears(tmp_path):
+    from netbbs.managed_dns.state import get_admin_token, set_admin_token
+
+    db = Database(tmp_path / "node.db")
+    assert get_admin_token(db) is None
+    set_admin_token(db, "s3cret")
+    assert get_admin_token(db) == "s3cret"
+    set_admin_token(db, None)
+    assert get_admin_token(db) is None
+    db.close()

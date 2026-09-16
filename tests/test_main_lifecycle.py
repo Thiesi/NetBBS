@@ -50,7 +50,7 @@ from netbbs.net.nodeconfig import (
     LinkConfig, ManagedDnsConfig, NodeConfig, ShutdownConfig, TransportConfig,
 )
 from netbbs.net.session_registry import ActiveSessionRegistry
-from netbbs.managed_dns.state import get_local_listeners, get_service_url, set_node_fingerprint
+from netbbs.managed_dns.state import get_admin_token, get_local_listeners, get_service_url, set_node_fingerprint
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_telnet import skip_initial_negotiation
@@ -1568,6 +1568,27 @@ def test_run_records_the_nodes_listener_ports_for_the_dns_screen(tmp_path):
     assert facts.ssh_port is None
     assert facts.web_port is None
     assert facts.web_public_url == "https://board.example"
+    db.close()
+
+
+def test_run_mirrors_the_managed_dns_admin_token_and_clears_it_when_removed(tmp_path):
+    """Design doc §16 Decision 4: the token travels like `service_url`,
+    absence included, so taking it out of the config file withdraws the
+    administration screen on the next start."""
+    configured = _config(
+        tmp_path,
+        telnet=TransportConfig(True, "127.0.0.1", 12444),
+        managed_dns=ManagedDnsConfig(service_url="http://127.0.0.1:8099", admin_token="s3cret"),
+    )
+    asyncio.run(_run_until_ready_then_shut_down(configured))
+    db = Database(configured.db_path)
+    assert get_admin_token(db) == "s3cret"
+    db.close()
+
+    plain = _config(tmp_path, seed_sysop=False, telnet=TransportConfig(True, "127.0.0.1", 12444))
+    asyncio.run(_run_until_ready_then_shut_down(plain))
+    db = Database(plain.db_path)
+    assert get_admin_token(db) is None
     db.close()
 
 

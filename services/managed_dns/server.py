@@ -66,6 +66,7 @@ from services.managed_dns.store import (
     get_replacement_for_name,
     hash_credential,
     insert_registration,
+    list_registrations,
     list_stale_active_registrations,
     load_rate_limit_state,
     mark_abandoned,
@@ -257,6 +258,7 @@ class ManagedDnsServer:
         app.router.add_post("/rename", self._handle_rename)
         app.router.add_post("/cancel-rename", self._handle_cancel_rename)
         app.router.add_post("/admin/revoke", self._handle_admin_revoke)
+        app.router.add_post("/admin/registrations", self._handle_admin_registrations)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self._host, self._port)
@@ -383,6 +385,59 @@ class ManagedDnsServer:
         return secrets.compare_digest(
             presented.encode("utf-8"), self._admin_token.encode("utf-8")
         )
+
+    def _revoked_credential_response(self, *, reclaim: bool = False) -> web.Response:
+        """What the credential that held a revoked name is told when it
+        presents itself again (design doc §16 Decision 4). Distinguished
+        from the uniform "unknown or inactive registration" on purpose:
+        that uniformity exists so a caller presenting a stale or
+        invented credential learns nothing, but this caller *holds* the
+        credential -- the only thing the answer reveals is their own
+        registration's state, and the alternative was a SysOp watching
+        their board go dark under an ABANDONED badge and a cooldown
+        refusal that never said why. The reason stays the operator's;
+        the fact, and where to write, are the registrant's."""
+        message = "this registration was revoked by the service operator"
+        if reclaim:
+            message += " and cannot be reclaimed"
+        if self._contact is not None:
+            message += f"; to dispute it, contact {self._contact}"
+        return web.json_response(
+            {"error": message, "status": "revoked", "contact": self._contact},
+            status=409 if reclaim else 401,
+        )
+
+    @staticmethod
+    def _registration_view(registration: Registration) -> dict:
+        """The operator's view of one row: everything but the credential
+        hash, which nobody needs and which is the one field that could
+        be misused."""
+        return {
+            "name": registration.name,
+            "status": registration.status,
+            "node_fingerprint": registration.node_fingerprint,
+            "dynamic": registration.dynamic,
+            "created_at": registration.created_at,
+            "matured_at": registration.matured_at,
+            "last_contact_at": registration.last_contact_at,
+            "released_at": registration.released_at,
+            "last_known_address": registration.last_known_address,
+            "replaces_name": registration.replaces_name,
+            "revoked_reason": registration.revoked_reason,
+        }
+
+    async def _handle_admin_registrations(self, request: web.Request) -> web.Response:
+        """Design doc §16 Decision 4: the operator's read of the table,
+        for the SysOp console's service-administration screen -- what
+        README §8's "look at the row" step used to mean opening the
+        SQLite file read-only. Same token, same uniform refusal. A
+        POST, like every other route here, and bounded by the cumulative
+        cap: the table can never hold more active rows than that, and
+        inactive rows are purged on the cooldown."""
+        if not self._admin_authorized(request):
+            return web.json_response({"error": "not authorized"}, status=401)
+        rows = list_registrations(self._db)
+        return web.json_response({"registrations": [self._registration_view(row) for row in rows]})
 
     async def _handle_admin_revoke(self, request: web.Request) -> web.Response:
         """Design doc §16 Decision 4 (issue #599): the operator's end of
@@ -596,10 +651,14 @@ class ManagedDnsServer:
             # genuinely new registrant, via the branch below.
             cooldown_elapsed = now - datetime.fromisoformat(existing.released_at)
             if cooldown_elapsed < timedelta(seconds=self._cooldown_seconds):
-                if (
-                    existing.status != "revoked"
-                    and credential and hash_credential(credential) == existing.credential_hash
-                ):
+                if credential and hash_credential(credential) == existing.credential_hash:
+                    if existing.status == "revoked":
+                        # The holder trying the obvious thing -- `[R]egister`
+                        # with the name prefilled. Told the truth, since the
+                        # credential proves it is theirs to be told; anyone
+                        # else gets the uniform cooldown refusal below and
+                        # learns nothing.
+                        return self._revoked_credential_response(reclaim=True)
                     return await self._admit_reclaim(existing, request, credential, dynamic=dynamic)
                 return web.json_response(
                     {"error": f"{name!r} is in a cooldown period and not currently available"}, status=409
@@ -750,13 +809,7 @@ class ManagedDnsServer:
                 status=201,
             )
         if existing.status == "revoked":
-            return web.json_response(
-                {
-                    "error": f"{name!r} was revoked by the service operator and cannot be reclaimed",
-                    "status": "revoked",
-                },
-                status=409,
-            )
+            return self._revoked_credential_response(reclaim=True)
         if existing.status == "released":
             return web.json_response(
                 {
@@ -867,6 +920,8 @@ class ManagedDnsServer:
             )
         async with self._dns_transition_lock:
             current = get_registration_by_credential_hash(self._db, hash_credential(credential))
+            if current is not None and current.status == "revoked":
+                return self._revoked_credential_response()
             if current is None or current.status not in _ACTIVE_STATUSES:
                 return web.json_response({"error": "unknown or inactive registration"}, status=401)
             if current.replaces_name is not None:
@@ -999,6 +1054,8 @@ class ManagedDnsServer:
             )
         async with self._dns_transition_lock:
             authenticated = get_registration_by_credential_hash(self._db, hash_credential(credential))
+            if authenticated is not None and authenticated.status == "revoked":
+                return self._revoked_credential_response()
             replacement = authenticated
             if authenticated is not None and authenticated.replaces_name is None:
                 replacement = get_replacement_for_name(self._db, authenticated.name)
@@ -1152,6 +1209,8 @@ class ManagedDnsServer:
     async def _process_heartbeat(self, request: web.Request, credential: str) -> web.Response:
 
         registration = get_registration_by_credential_hash(self._db, hash_credential(credential))
+        if registration is not None and registration.status == "revoked":
+            return self._revoked_credential_response()
         if registration is None or registration.status not in _ACTIVE_STATUSES:
             # Deliberately the same message/status for "no such
             # credential" and "credential belongs to a released/
@@ -1160,6 +1219,8 @@ class ManagedDnsServer:
             # (design doc §16 Decision 3's own "none of these reasons
             # are anything a rejected peer needs to be told apart"
             # reasoning, reused here for the same kind of ambiguity).
+            # A *revoked* one is told, above: see
+            # `_revoked_credential_response` for why that is different.
             return web.json_response({"error": "unknown or inactive registration"}, status=401)
 
         now = self._clock()
@@ -1269,6 +1330,8 @@ class ManagedDnsServer:
     async def _process_release(self, credential: str) -> web.Response:
 
         registration = get_registration_by_credential_hash(self._db, hash_credential(credential))
+        if registration is not None and registration.status == "revoked":
+            return self._revoked_credential_response()
         if registration is None or registration.status not in _ACTIVE_STATUSES:
             return web.json_response({"error": "unknown or inactive registration"}, status=401)
 

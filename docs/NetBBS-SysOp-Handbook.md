@@ -478,13 +478,21 @@ decides whether the published record follows your address. A node the service
 has not heard from for about a week has its record taken out of DNS and the
 name held for it; the node reclaims the name by itself once it is back, and
 the DNS screen shows the last attempt's outcome under the ABANDONED badge
-until it succeeds. **Release** is the one exit the node never undoes.
+until it succeeds. **Release** is the one exit the node never undoes, and a
+name the service operator has **revoked** on a complaint is the other: the
+screen says so, names the operator's contact channel, and a different name
+can be registered as usual.
 
 Callers reach a managed name on the standard ports (SSH 22, Telnet 23, HTTPS
 443); the record itself carries no port. NetBBS listens on 2222/2323/8080 by
 default, so a bare `myboard.netbbs.org` reaches your board only through a
 port-forward or proxy in front of it. The DNS screen states this against your
 configured listeners; the service cannot check it for you.
+
+If you also run the managed-DNS service itself, `[managed_dns] admin_token` in
+`netbbs.toml` adds **[A]dminister service** to the DNS screen: the service's
+registrations as a table, each in full, and revocation with a reason and a
+typed-name confirmation. `services/managed_dns/README.md` §8 is the runbook.
 
 ## MRC chat bridge
 

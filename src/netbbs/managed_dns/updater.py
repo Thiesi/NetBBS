@@ -47,6 +47,7 @@ from netbbs.managed_dns.state import (
     set_heartbeat_reconciliation_state,
     set_recovery_note,
     set_registration_result_state,
+    set_revoked_state,
 )
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -129,9 +130,11 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
     # that outstanding rename so the next successful old heartbeat
     # can restore the usable registration instead of stranding it.
     has_outstanding_rename = previous_credential is not None and get_previous_name(db) is not None
-    if name is None or base_url is None or status is RegistrationStatus.RELEASED:
+    if name is None or base_url is None or status in (RegistrationStatus.RELEASED, RegistrationStatus.REVOKED):
         # Released is the SysOp's own decision to stop (design doc §16
-        # Decision 5): nothing here overrides it.
+        # Decision 5) and revoked is the operator's (Decision 4): nothing
+        # here overrides either. The SysOp's next `[R]egister` is where
+        # both end.
         return
     credential = load_credential(credential_path_for(db.path))
     if credential is None:
@@ -165,6 +168,13 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
             base_url, previous_credential
         )
     result, primary_inactive = await _send_heartbeat(base_url, credential)
+    if isinstance(primary_inactive, ManagedDnsError):
+        # Design doc §16 Decision 4: the operator took the name. The
+        # service takes both halves of a rename, so this is the whole
+        # answer for the previous name too, and nothing is retried --
+        # the state is terminal until the SysOp registers something else.
+        _apply_revocation(db, name=name, contact=primary_inactive.contact)
+        return
     if result is not None:
         _apply_heartbeat_result(
             db, result, previous_result=previous_result,
@@ -252,6 +262,12 @@ async def _reclaim_abandoned_name(db: Database, base_url: str, name: str, creden
                 session, base_url, name=name, credential=credential, dynamic=get_dynamic(db),
             )
     except ManagedDnsError as exc:
+        if exc.revoked:
+            # Not a failed reclaim to retry: the operator took the name
+            # (design doc §16 Decision 4), and the automatic path ends
+            # exactly where the manual one does.
+            _apply_revocation(db, name=name, contact=exc.contact)
+            return False
         if exc.service_status == "released":
             set_heartbeat_reconciliation_state(
                 db, name=name, status=RegistrationStatus.RELEASED, published=False,
@@ -314,7 +330,14 @@ def _apply_previous_heartbeat_result(
 
 async def _send_heartbeat(
     base_url: str, credential: str,
-) -> tuple[HeartbeatResult | None, bool]:
+) -> tuple[HeartbeatResult | None, bool | ManagedDnsError]:
+    """`(result, inactive)`. `inactive` is truthy for the authoritative
+    401 every caller already acts on; it is the `ManagedDnsError` itself
+    when that 401's body says the credential's registration was
+    *revoked* (design doc §16 Decision 4), so the contact channel it
+    names travels with it -- read from `ManagedDnsError.service_status`,
+    never from the message text. Tests substitute this function with
+    fakes returning plain bools, which stay valid."""
     try:
         # trust_env=True: honor HTTP_PROXY/HTTPS_PROXY/NO_PROXY, same as
         # every other outbound call this project makes to project-
@@ -327,8 +350,18 @@ async def _send_heartbeat(
             result = await heartbeat(session, base_url, credential=credential)
     except ManagedDnsError as exc:
         _logger.warning("Managed-DNS heartbeat failed: %s", exc)
-        return None, exc.status_code == 401
+        inactive = exc.status_code == 401
+        return None, (exc if inactive and exc.revoked else inactive)
     return result, False
+
+
+def _apply_revocation(db: Database, *, name: str, contact: str | None) -> None:
+    set_revoked_state(db, name=name, contact=contact)
+    _reported_reclaim_failures.pop(db.path, None)
+    _logger.warning(
+        "Managed-DNS registration %r was revoked by the service operator%s",
+        name, f" -- to dispute it, contact {contact}" if contact else "",
+    )
 
 
 async def _cancel_remote_rename(

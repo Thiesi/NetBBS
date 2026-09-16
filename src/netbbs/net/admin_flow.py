@@ -91,9 +91,11 @@ from netbbs.backup import (
     get_last_backup_summary,
 )
 from netbbs.managed_dns.state import (
+    get_admin_token as get_managed_dns_admin_token,
     get_local_listeners as get_managed_dns_local_listeners,
     get_published as get_managed_dns_published,
     get_recovery_note as get_managed_dns_recovery_note,
+    get_service_contact as get_managed_dns_service_contact,
     OptIn as ManagedDnsOptIn,
     RegistrationStatus as ManagedDnsRegistrationStatus,
     get_last_contact_at as get_managed_dns_last_contact_at,
@@ -103,6 +105,7 @@ from netbbs.managed_dns.state import (
     get_registration_status as get_managed_dns_registration_status,
 )
 from netbbs.net.managed_dns_flow import (
+    administer_service as administer_managed_dns_service,
     standard_ports_lines as managed_dns_standard_ports_lines,
     cancel_registration_rename, register_via_prompt, release_registration, rename_registration,
 )
@@ -5374,12 +5377,13 @@ async def _draw_managed_dns_status(
         # same line for what the node advertises). The badge used to say
         # LIVE on `matured` alone.
         live = status is ManagedDnsRegistrationStatus.MATURED and published
-        tone = "success" if live else "neutral"
+        tone = "success" if live else ("error" if status is ManagedDnsRegistrationStatus.REVOKED else "neutral")
         badge_text = {
             ManagedDnsRegistrationStatus.PENDING: "PENDING",
             ManagedDnsRegistrationStatus.MATURED: "LIVE" if published else "NOT YET PUBLISHED",
             ManagedDnsRegistrationStatus.RELEASED: "RELEASED",
             ManagedDnsRegistrationStatus.ABANDONED: "ABANDONED",
+            ManagedDnsRegistrationStatus.REVOKED: "REVOKED",
             ManagedDnsRegistrationStatus.NONE: "NONE",
         }[status]
         await session.write_line(status_badge(badge_text, tone=tone, unicode_style=unicode_style))
@@ -5388,12 +5392,20 @@ async def _draw_managed_dns_status(
         )
         # What the state means for the SysOp and what, if anything, they
         # need to do about it -- every state here used to be a bare badge.
-        if previous_name is None:
+        # A revocation takes both halves of a rename, so it is explained
+        # even while `previous_name` is still set.
+        if previous_name is None or status is ManagedDnsRegistrationStatus.REVOKED:
             note = (
                 await lane.run(get_managed_dns_recovery_note)
                 if status is ManagedDnsRegistrationStatus.ABANDONED else None
             )
-            for line in _managed_dns_state_guidance(status, published, recovery_refused=note is not None):
+            contact = (
+                await lane.run(get_managed_dns_service_contact)
+                if status is ManagedDnsRegistrationStatus.REVOKED else None
+            )
+            for line in _managed_dns_state_guidance(
+                status, published, recovery_refused=note is not None, contact=contact,
+            ):
                 await _write_wrapped_muted(session, line)
             if status is ManagedDnsRegistrationStatus.ABANDONED:
                 if note is not None:
@@ -5416,6 +5428,10 @@ async def _draw_managed_dns_status(
                         fg_color=WARNING_COLOR,
                     )
                 )
+            elif status is ManagedDnsRegistrationStatus.REVOKED:
+                await session.write_line(
+                    colored("Both names were revoked together; the change cannot be cancelled.", fg_color=MUTED_COLOR)
+                )
             else:
                 await session.write_line(colored("The new name is reserved and maturing.", fg_color=MUTED_COLOR))
         if last_contact_at is not None:
@@ -5435,12 +5451,16 @@ async def _draw_managed_dns_status(
                 await _write_wrapped_muted(session, line)
 
     actions = [menu_key("R", "egister")]
-    if previous_name is not None:
+    if previous_name is not None and status is not ManagedDnsRegistrationStatus.REVOKED:
         actions.append(menu_key("C", "ancel change"))
     elif status in _MANAGED_DNS_ACTIVE_STATUSES:
         if previous_name is None:
             actions.append(menu_key("l", "ease", prefix="Re"))
             actions.append(menu_key("N", "ame", prefix="Change "))
+    if await lane.run(get_managed_dns_admin_token) is not None:
+        # Design doc §16 Decision 4: the one node whose operator also
+        # runs the service gets the service's own table here.
+        actions.append(menu_key("A", "dminister service"))
     actions.append(menu_key("B", "ack"))
     await session.write_line("\r\n" + "    ".join(actions))
     return status
@@ -5453,6 +5473,7 @@ async def _write_wrapped_muted(session: Session, text: str) -> None:
 
 def _managed_dns_state_guidance(
     status: ManagedDnsRegistrationStatus, published: bool, *, recovery_refused: bool = False,
+    contact: str | None = None,
 ) -> list[str]:
     """One or two plain sentences per registration state: what it means
     and what happens next, for a standalone (not mid-rename) name. The
@@ -5488,6 +5509,19 @@ def _managed_dns_state_guidance(
         return [
             "Released by this node. The name is held for it for a while before anyone else may take it; "
             "[R]egister reclaims it."
+        ]
+    if status is ManagedDnsRegistrationStatus.REVOKED:
+        # Design doc §16 Decision 4: the registrant is told that, and
+        # where to write, not why. The channel is free text the service
+        # sent; sanitised and bounded here where it is shown.
+        where = (
+            f" To dispute it, contact {sanitize_text(contact)[:200]}."
+            if contact else " The service named no contact channel."
+        )
+        return [
+            "The service operator revoked this name. Its record is out of DNS, and this node cannot get "
+            "it back with the credential it holds; [R]egister with a different name works as usual."
+            + where
         ]
     return []
 
@@ -5536,9 +5570,14 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
             status = await _draw_managed_dns_status(session, lane, actor)
         elif (
             choice == "c" and await lane.run(get_managed_dns_previous_name) is not None
+            and status is not ManagedDnsRegistrationStatus.REVOKED
         ):
             await session.write_line("")
             await cancel_registration_rename(session, lane)
+            status = await _draw_managed_dns_status(session, lane, actor)
+        elif choice == "a" and await lane.run(get_managed_dns_admin_token) is not None:
+            await session.write_line("")
+            await administer_managed_dns_service(session, lane, actor)
             status = await _draw_managed_dns_status(session, lane, actor)
         else:
             await session.write(reject_unhandled_key(choice))
