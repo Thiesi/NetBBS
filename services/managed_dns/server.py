@@ -324,10 +324,15 @@ class ManagedDnsServer:
         cooldown-window `released`/`abandoned` row already has on file
         is reclaiming that exact row, not asking for a fresh one, and a
         request otherwise looks identical either way (same `name`
-        field). No `node_fingerprint`/`dynamic` re-validation on
-        reclaim -- those stay whatever the row already has; a reclaim
-        doesn't get to silently redirect an existing registration to a
-        different node or flip its dynamic-tracking preference.
+        field). `node_fingerprint` is not re-read on reclaim -- it stays
+        whatever the row already has, so a reclaim cannot silently
+        redirect an existing registration to a different node.
+        `dynamic` *is* taken from the request and applied (`_reclaim`
+        hands it straight to `store.reclaim`): the node's own reclaim
+        draft shows a `[D]ynamic IP` field seeded from the previous
+        registration and sends whatever it ends up on, so ignoring it
+        here would leave the node's cached view disagreeing with this
+        row for as long as the registration lives.
         """
         try:
             body = await request.json()
