@@ -479,8 +479,16 @@ class RecoveryNote:
     text: str
 
 
+# A note is one refusal sentence from the service; this is the most of
+# it that is ever persisted, whatever arrived (Codex review of PR #608).
+_MAX_RECOVERY_NOTE_CHARS = 500
+
+
 def set_recovery_note(db: Database, note: RecoveryNote | None) -> None:
-    set_config(db, RECOVERY_NOTE_CONFIG_KEY, json.dumps({"at": note.at, "text": note.text}) if note else "")
+    set_config(
+        db, RECOVERY_NOTE_CONFIG_KEY,
+        json.dumps({"at": note.at, "text": note.text[:_MAX_RECOVERY_NOTE_CHARS]}) if note else "",
+    )
 
 
 def get_recovery_note(db: Database) -> RecoveryNote | None:

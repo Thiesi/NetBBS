@@ -479,3 +479,12 @@ def test_recovery_note_round_trips_and_is_cleared_by_any_authoritative_answer(tm
     set_recovery_note(db, None)
     assert get_recovery_note(db) is None
     db.close()
+
+
+def test_a_recovery_note_is_bounded_when_stored(tmp_path):
+    from netbbs.managed_dns.state import RecoveryNote, _MAX_RECOVERY_NOTE_CHARS, get_recovery_note, set_recovery_note
+
+    db = Database(tmp_path / "node.db")
+    set_recovery_note(db, RecoveryNote(at="2026-09-16T10:00:00+00:00", text="y" * (_MAX_RECOVERY_NOTE_CHARS * 4)))
+    assert len(get_recovery_note(db).text) == _MAX_RECOVERY_NOTE_CHARS
+    db.close()

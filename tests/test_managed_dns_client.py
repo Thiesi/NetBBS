@@ -392,3 +392,33 @@ def test_a_refusal_that_is_not_the_services_shape_keeps_its_status():
     assert exc.status_code == 502
     assert "HTTP 502" in str(exc)
     assert "Bad Gateway" in str(exc)
+
+
+def test_a_refusal_body_is_read_only_up_to_a_bound():
+    """A reverse proxy's error page or a hostile endpoint must not cost
+    the node an unbounded read, log line or database write on every
+    pass (Codex review of PR #608)."""
+    from netbbs.managed_dns.client import _MAX_REFUSAL_BYTES
+
+    async def handler(_request):
+        return web.Response(text="x" * (_MAX_REFUSAL_BYTES * 8), status=502)
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/heartbeat", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(ManagedDnsError) as excinfo:
+                    await heartbeat(session, f"http://127.0.0.1:{port}", credential="x")
+            return excinfo.value
+        finally:
+            await runner.cleanup()
+
+    exc = asyncio.run(scenario())
+    assert exc.status_code == 502
+    assert len(str(exc)) <= _MAX_REFUSAL_BYTES + 64
