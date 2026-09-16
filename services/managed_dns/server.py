@@ -92,6 +92,17 @@ _MAX_REGISTRATIONS_PER_NODE = 1
 
 _CREDENTIAL_BYTES = 32
 
+# The longest values the public routes accept for the two caller-chosen
+# strings that are stored or hashed (Codex review of PR #609). A node
+# fingerprint is a short blake2b digest in `netbbs.identity.keys`; a
+# minted credential is 43 characters. Without a bound a registrant could
+# park kilobytes in every retained row, and inactive rows inside their
+# cooldown do not count against the active-registration cap, so the
+# operator's listing and the hash inputs would grow with whatever
+# arrived.
+_MAX_NODE_FINGERPRINT_CHARS = 128
+_MAX_CREDENTIAL_CHARS = 256
+
 # The zone every registered name is a label under -- design doc §16's
 # own "myboard.netbbs.org" example.
 _ZONE = "netbbs.org"
@@ -649,6 +660,14 @@ class ManagedDnsServer:
                     "error": "request must contain a string name, a string node_fingerprint, a boolean "
                     "dynamic, and an optional string credential"
                 },
+                status=400,
+            )
+        if (
+            not node_fingerprint or len(node_fingerprint) > _MAX_NODE_FINGERPRINT_CHARS
+            or (credential is not None and len(credential) > _MAX_CREDENTIAL_CHARS)
+        ):
+            return web.json_response(
+                {"error": "node_fingerprint or credential is empty or longer than this service accepts"},
                 status=400,
             )
 

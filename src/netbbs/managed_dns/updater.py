@@ -175,6 +175,13 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
             base_url, previous_credential
         )
     result, primary_inactive = await _send_heartbeat(base_url, credential)
+    if isinstance(previous_inactive, ManagedDnsError) and not isinstance(primary_inactive, ManagedDnsError):
+        # A revocation takes both halves of a rename, so hearing it on
+        # the old credential is the whole answer even while the new
+        # one's heartbeat merely failed transiently (Codex review of PR
+        # #609); without this the generic path below would record the
+        # old name as abandoned and keep retrying.
+        primary_inactive = previous_inactive
     if isinstance(primary_inactive, ManagedDnsError):
         # Design doc §16 Decision 4: the operator took the name. The
         # service takes both halves of a rename, so this is the whole

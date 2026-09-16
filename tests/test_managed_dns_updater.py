@@ -1246,3 +1246,42 @@ def test_updater_takes_both_names_when_a_rename_in_flight_is_revoked(tmp_path):
     assert get_previous_status(db) is RegistrationStatus.REVOKED
     assert not get_previous_published(db)
     db.close()
+
+
+def test_updater_adopts_a_revocation_heard_on_the_previous_credential_alone(tmp_path, monkeypatch):
+    """Mid-rename, the old credential's heartbeat is told "revoked" while
+    the new credential's heartbeat fails transiently: the revocation is
+    the whole answer for both names (Codex review of PR #609)."""
+    from netbbs.managed_dns.client import ManagedDnsError
+
+    async def fake_send_heartbeat(_base_url, credential):
+        if credential == "old-credential":
+            return None, ManagedDnsError(
+                "heartbeat failed: revoked", status_code=401, service_status="revoked", contact="abuse@example.org",
+            )
+        return None, False  # transient failure for the replacement
+
+    monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", fake_send_heartbeat)
+
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        set_opt_in(db, OptIn.ACCEPTED)
+        set_node_fingerprint(db, "fp-1")
+        set_service_url(db, "http://127.0.0.1:1")
+        set_registered_name(db, "newname")
+        set_registration_status(db, RegistrationStatus.PENDING)
+        set_previous_name(db, "oldname")
+        set_previous_status(db, RegistrationStatus.MATURED)
+        set_previous_published(db, True)
+        save_credential(credential_path_for(db.path), "new-credential")
+        save_credential(previous_credential_path_for(db.path), "old-credential")
+        await _run_passes(db, 1)
+        return db
+
+    db = asyncio.run(scenario())
+    from netbbs.managed_dns.state import get_service_contact
+
+    assert get_registration_status(db) is RegistrationStatus.REVOKED
+    assert get_previous_status(db) is RegistrationStatus.REVOKED
+    assert get_service_contact(db) == "abuse@example.org"
+    db.close()

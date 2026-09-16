@@ -2769,3 +2769,28 @@ def test_admin_registrations_shows_the_rename_from_the_live_name_too(db):
     assert rows["newname"]["replaces_name"] == "oldname"
     assert rows["oldname"]["replaced_by"] == "newname"
     assert rows["newname"]["replaced_by"] is None
+
+
+def test_register_bounds_the_fingerprint_and_credential_it_will_store_or_hash(db):
+    """Neither is a value the service has any reason to accept at any
+    length: a fingerprint is a short digest, a credential 43 characters.
+    Inactive rows do not count against the active cap, so an unbounded
+    fingerprint would let a registrant grow the retained table -- and the
+    operator's listing of it -- with every registration (Codex review of
+    PR #609)."""
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            long_fp = await _register_raw(server, name="a-name", node_fingerprint="f" * 129)
+            empty_fp = await _register_raw(server, name="a-name", node_fingerprint="")
+            long_cred = await _register_raw(server, name="a-name", credential="c" * 257)
+            fine = await _register_raw(server, name="a-name", node_fingerprint="f" * 128)
+            return long_fp, empty_fp, long_cred, fine
+        finally:
+            await server.stop()
+
+    long_fp, empty_fp, long_cred, fine = asyncio.run(scenario())
+    for status, body in (long_fp, empty_fp, long_cred):
+        assert status == 400 and "longer than this service accepts" in body["error"]
+    assert fine[0] == 201
+    assert get_registration_by_name(db, "a-name").node_fingerprint == "f" * 128
