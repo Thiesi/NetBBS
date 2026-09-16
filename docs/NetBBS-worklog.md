@@ -3858,17 +3858,24 @@ HTTP, never imports it.
 - **A managed name owes the service continuous contact, and the node
   gets an abandoned name back by itself (Decision 10).** The updater's
   early return for `abandoned` is gone: while the cached status is
-  `abandoned` and no rename is outstanding, each pass sends `/register`
-  with the held credential and `reclaim_only: true`, then continues into
-  the ordinary heartbeat on success. The flag makes the server refuse
-  anything but the reclaim that credential entitles the node to -- no
-  row, an expired row, a different credential's row, a revoked row --
+  `abandoned` and no rename is outstanding, each pass sends
+  `POST /reclaim` with the held credential, then continues into the
+  ordinary heartbeat on success. The route refuses anything but the
+  reclaim that credential entitles the node to -- no row, an expired
+  row, a different credential's row, a released row, a revoked row --
   so the background task can never mint a credential or spend a
-  rate-limit token. A refusal is written as a `RecoveryNote` for the DNS
-  screen and logged once per change; every registration result and every
-  heartbeat reconciliation clears the note, so it only ever describes an
-  attempt made after the current abandonment. `released` is never
-  reclaimed automatically.
+  rate-limit token, and a service without the route answers 404 so an
+  upgraded node fails closed against an older service (never a flag on
+  `/register`, which an older service would ignore and register afresh).
+  An already-active row under the same credential answers 201 with its
+  state: that is the retry of a reclaim whose response was lost. A
+  refusal is written as a `RecoveryNote` for the DNS screen and logged
+  once per change; every registration result and every heartbeat
+  reconciliation clears the note, so it only ever describes an attempt
+  made after the current abandonment, and the screen's wording switches
+  from "held for this node" to "refused (below)" once one exists. A
+  `released` refusal is adopted, not retried: the local `abandoned` was
+  a stale backup's view of a name the SysOp had since released.
 - **The client shows the service's sentence, not its JSON.** A refused
   request's `ManagedDnsError` carries the body's `error` field when the
   body is the service's shape and `HTTP <status>: <text>` otherwise;

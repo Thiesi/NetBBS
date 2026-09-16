@@ -251,6 +251,7 @@ class ManagedDnsServer:
     async def start(self) -> None:
         app = web.Application()
         app.router.add_post("/register", self._handle_register)
+        app.router.add_post("/reclaim", self._handle_reclaim)
         app.router.add_post("/heartbeat", self._handle_heartbeat)
         app.router.add_post("/release", self._handle_release)
         app.router.add_post("/rename", self._handle_rename)
@@ -353,9 +354,11 @@ class ManagedDnsServer:
         return web.json_response({"error": message, "contact": self._contact}, status=503)
 
     def _rate_limited_response(self) -> web.Response:
-        message = "too many registrations right now -- try again shortly"
+        message = "too many registrations right now -- try again shortly; if this keeps happening, "
         if self._contact is not None:
-            message += f"; if this keeps happening, contact {self._contact}"
+            message += f"contact {self._contact}"
+        else:
+            message += "ask whoever runs this service"
         return web.json_response({"error": message, "contact": self._contact}, status=429)
 
     def _admin_authorized(self, request: web.Request) -> bool:
@@ -551,16 +554,14 @@ class ManagedDnsServer:
         node_fingerprint = body.get("node_fingerprint")
         dynamic = body.get("dynamic", False)
         credential = body.get("credential")
-        reclaim_only = body.get("reclaim_only", False)
         if (
             not isinstance(raw_name, str) or not isinstance(node_fingerprint, str)
             or not isinstance(dynamic, bool) or (credential is not None and not isinstance(credential, str))
-            or not isinstance(reclaim_only, bool)
         ):
             return web.json_response(
                 {
                     "error": "request must contain a string name, a string node_fingerprint, a boolean "
-                    "dynamic, an optional string credential, and an optional boolean reclaim_only"
+                    "dynamic, and an optional string credential"
                 },
                 status=400,
             )
@@ -578,26 +579,6 @@ class ManagedDnsServer:
             return web.json_response({"error": f"{name!r} is already registered"}, status=409)
 
         now = self._clock()
-        if reclaim_only:
-            # Design doc §16 Decision 10 (issue #600): the node-side
-            # updater reclaims an abandoned name on its own, and the one
-            # thing it must never do on its own is register afresh --
-            # a fresh registration is a SysOp's keystroke, because it
-            # mints a new credential, spends a rate-limit token and, for
-            # a name the service no longer holds for this node, may not
-            # be theirs any more. So the automatic path says so, and this
-            # branch refuses everything except the reclaim it asked for.
-            reclaimable = (
-                existing is not None and existing.status != "revoked"
-                and credential is not None
-                and hash_credential(credential) == existing.credential_hash
-                and now - datetime.fromisoformat(existing.released_at)
-                < timedelta(seconds=self._cooldown_seconds)
-            )
-            if not reclaimable:
-                return web.json_response(
-                    {"error": f"{name!r} is not held for reclaim by this credential"}, status=409
-                )
         if existing is not None:
             # existing.status is 'released', 'abandoned' or 'revoked'
             # here -- decide whether this is a reclaim (same credential,
@@ -619,31 +600,7 @@ class ManagedDnsServer:
                     existing.status != "revoked"
                     and credential and hash_credential(credential) == existing.credential_hash
                 ):
-                    active_for_node = count_registrations_for_node(
-                        self._db, existing.node_fingerprint, statuses=_ACTIVE_STATUSES
-                    )
-                    if active_for_node >= _MAX_REGISTRATIONS_PER_NODE:
-                        return web.json_response(
-                            {"error": "this node already has an active managed-DNS registration"}, status=403
-                        )
-                    if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
-                        return self._at_capacity_response()
-                    if self._dns_transition_lock.locked():
-                        return web.json_response(
-                            {"error": "a managed-DNS transition is already in progress; retry shortly"},
-                            status=503,
-                        )
-                    async with self._dns_transition_lock:
-                        current = get_registration_by_name(self._db, name)
-                        if (
-                            current is None or current.status in _ACTIVE_STATUSES
-                            or hash_credential(credential) != current.credential_hash
-                        ):
-                            return web.json_response(
-                                {"error": f"{name!r} is already registered or no longer reclaimable"},
-                                status=409,
-                            )
-                        return await self._reclaim(current, request, credential, dynamic=dynamic)
+                    return await self._admit_reclaim(existing, request, credential, dynamic=dynamic)
                 return web.json_response(
                     {"error": f"{name!r} is in a cooldown period and not currently available"}, status=409
                 )
@@ -695,6 +652,123 @@ class ManagedDnsServer:
             },
             status=201,
         )
+
+    async def _admit_reclaim(
+        self, existing: Registration, request: web.Request, credential: str, *, dynamic: bool,
+    ) -> web.Response:
+        """The caps a reclaim must still fit and the lane it runs in
+        (design doc §16 Decision 3/5) -- shared by `/register`'s reclaim
+        path and `/reclaim`, so the two cannot drift. `existing` is an
+        inactive row inside its cooldown whose credential the caller has
+        already proven."""
+        active_for_node = count_registrations_for_node(
+            self._db, existing.node_fingerprint, statuses=_ACTIVE_STATUSES
+        )
+        if active_for_node >= _MAX_REGISTRATIONS_PER_NODE:
+            return web.json_response(
+                {"error": "this node already has an active managed-DNS registration"}, status=403
+            )
+        if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
+            return self._at_capacity_response()
+        if self._dns_transition_lock.locked():
+            return web.json_response(
+                {"error": "a managed-DNS transition is already in progress; retry shortly"},
+                status=503,
+            )
+        async with self._dns_transition_lock:
+            current = get_registration_by_name(self._db, existing.name)
+            if (
+                current is None or current.status in _ACTIVE_STATUSES
+                or hash_credential(credential) != current.credential_hash
+            ):
+                return web.json_response(
+                    {"error": f"{existing.name!r} is already registered or no longer reclaimable"},
+                    status=409,
+                )
+            return await self._reclaim(current, request, credential, dynamic=dynamic)
+
+    async def _handle_reclaim(self, request: web.Request) -> web.Response:
+        """`POST /reclaim` -- design doc §16 Decision 10 (issue #600): the
+        node-side updater getting an *abandoned* name back by itself,
+        and nothing else. A route of its own rather than a flag on
+        `/register` (Codex review of PR #608): a service older than this
+        route answers 404 and the node fails closed, whereas an older
+        service ignoring an unknown flag would have registered afresh --
+        minting a credential and spending a rate-limit token from a
+        background task, which is exactly what this path promises never
+        to do. Three more rules from the same review:
+
+        - a matching credential on a row that is *already active* is the
+          retry of a reclaim whose 201 was lost, and is answered with the
+          row's current state rather than "already registered" -- the
+          alternative left that node refusing every pass forever;
+        - a `released` row is refused and says so: release is the
+          SysOp's own decision to stop (Decision 5), and a node restored
+          from a backup taken before that release would otherwise undo
+          it on its first pass. `/register` with the same credential --
+          the SysOp's `[R]egister` -- still reclaims it;
+        - a `revoked` row is refused as it is everywhere (Decision 4).
+
+        The one response every other case gets is the same "not held for
+        reclaim by this credential": no row, a purged row, somebody
+        else's row. A credential that is not the row's learns nothing.
+        """
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            return web.json_response({"error": f"malformed JSON body: {exc}"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "request body must be a JSON object"}, status=400)
+        raw_name = body.get("name")
+        credential = body.get("credential")
+        dynamic = body.get("dynamic", False)
+        if (
+            not isinstance(raw_name, str) or not isinstance(credential, str) or not credential
+            or not isinstance(dynamic, bool)
+        ):
+            return web.json_response(
+                {"error": "request must contain a string name, a string credential and a boolean dynamic"},
+                status=400,
+            )
+        try:
+            name = normalize_name(raw_name)
+        except InvalidNameError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
+        existing = get_registration_by_name(self._db, name)
+        not_held = web.json_response(
+            {"error": f"{name!r} is not held for reclaim by this credential"}, status=409
+        )
+        if existing is None or hash_credential(credential) != existing.credential_hash:
+            return not_held
+        if existing.status in _ACTIVE_STATUSES:
+            return web.json_response(
+                {
+                    "name": existing.name, "credential": credential, "status": existing.status,
+                    "created_at": existing.created_at,
+                },
+                status=201,
+            )
+        if existing.status == "revoked":
+            return web.json_response(
+                {
+                    "error": f"{name!r} was revoked by the service operator and cannot be reclaimed",
+                    "status": "revoked",
+                },
+                status=409,
+            )
+        if existing.status == "released":
+            return web.json_response(
+                {
+                    "error": f"{name!r} was released at this node's own request; [R]egister reclaims it",
+                    "status": "released",
+                },
+                status=409,
+            )
+        now = self._clock()
+        if now - datetime.fromisoformat(existing.released_at) >= timedelta(seconds=self._cooldown_seconds):
+            return not_held
+        return await self._admit_reclaim(existing, request, credential, dynamic=dynamic)
 
     async def _reclaim(
         self, existing: Registration, request: web.Request, credential: str, *, dynamic: bool,

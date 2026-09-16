@@ -140,7 +140,10 @@ def standard_ports_lines(listeners: ListenerFacts | None) -> list[str]:
         if port is None:
             lines.append(f"{label}: not enabled on this node.")
         elif key == "web":
-            front = listeners.web_public_url
+            # Operator-written config, shown on a terminal: sanitised
+            # like anything else that reaches one (Codex review of PR
+            # #608 -- the URL validator refuses whitespace, not controls).
+            front = sanitize_text(listeners.web_public_url) if listeners.web_public_url else None
             if front and front.lower().startswith("https://"):
                 lines.append(
                     f"Web: this node listens on {port} without TLS; its public URL is {front}. The web "

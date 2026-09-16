@@ -7206,12 +7206,29 @@ def test_managed_dns_status_explains_abandonment_and_the_last_automatic_attempt(
     _run(session, lane, sysop)
     text = " ".join(_visible(_written_text(session)).split())  # wrapped at 80 columns
     assert "ABANDONED" in text
-    assert "holding the name for this node" in text
-    assert "tries to reclaim it every 15 minutes" in text
+    # A refused attempt means the service may no longer hold the name:
+    # the screen must not claim it does (Codex review of PR #608).
+    assert "automatic reclaim was refused (below)" in text
+    assert "registers the name afresh if it is still free" in text
+    assert "held for this node" not in text
     assert "Last automatic attempt (" in text
     assert "not held for reclaim by this credential" in text
     # Not a claim an inactive name can make.
     assert "standard ports" not in text
+
+
+def test_managed_dns_status_says_the_name_is_held_while_no_reclaim_has_been_refused(db, lane, sysop):
+    from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.ABANDONED)
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "The name is held for this node, which reclaims it by itself" in text
+    assert "Last automatic attempt" not in text
 
 
 def test_managed_dns_status_offers_register_when_not_active(db, lane, sysop):

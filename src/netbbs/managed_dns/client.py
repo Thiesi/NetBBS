@@ -43,15 +43,33 @@ class ManagedDnsError(Exception):
     still there" posture design doc §16 already established for the
     conceptually similar live-subscribe path (issue #148/#194)."""
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self, message: str, *, status_code: int | None = None,
+        service_status: str | None = None, contact: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        #: The service's structured word for the registration's state
+        #: when a refusal carries one (`released`, `revoked`), which the
+        #: updater treats as a state of its own rather than a generic
+        #: refusal. Parsed from the JSON body only, never from the text.
+        self.service_status = service_status
+        #: The operator's contact channel, when the refusal named one.
+        self.contact = contact
 
 
-def _refusal_detail(status: int, text: str) -> str:
+@dataclass(frozen=True)
+class _Refusal:
+    detail: str
+    service_status: str | None
+    contact: str | None
+
+
+def _refusal(status: int, text: str) -> _Refusal:
     """What a refused request's message should carry: the service's
     own `error` line when the body is its JSON shape, otherwise the raw
-    status and text.
+    status and text -- plus the structured `status`/`contact` fields
+    when the body has them.
 
     Every SysOp-facing flow shows `str(exc)` verbatim, and until issue
     #598 that was the whole response body -- a SysOp refused by the
@@ -64,10 +82,24 @@ def _refusal_detail(status: int, text: str) -> str:
     try:
         body = strict_json_loads(text)
     except ValueError:
-        return f"HTTP {status}: {text}"
-    if isinstance(body, dict) and isinstance(body.get("error"), str) and body["error"].strip():
-        return body["error"].strip()
-    return f"HTTP {status}: {text}"
+        return _Refusal(f"HTTP {status}: {text}", None, None)
+    if not isinstance(body, dict) or not isinstance(body.get("error"), str) or not body["error"].strip():
+        return _Refusal(f"HTTP {status}: {text}", None, None)
+    service_status = body.get("status")
+    contact = body.get("contact")
+    return _Refusal(
+        body["error"].strip(),
+        service_status if isinstance(service_status, str) and service_status else None,
+        contact.strip() if isinstance(contact, str) and contact.strip() else None,
+    )
+
+
+def _refused(prefix: str, status: int, text: str) -> ManagedDnsError:
+    refusal = _refusal(status, text)
+    return ManagedDnsError(
+        f"{prefix}: {refusal.detail}", status_code=status,
+        service_status=refusal.service_status, contact=refusal.contact,
+    )
 
 
 def outbound_session(base_url: str) -> ClientSession:
@@ -113,8 +145,7 @@ class RegisterResult:
 
 async def register(
     session: ClientSession, base_url: str, *, name: str, node_fingerprint: str, dynamic: bool,
-    credential: str | None = None, reclaim_only: bool = False,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    credential: str | None = None, timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> RegisterResult:
     """`POST {base_url}/register`. Raises `ManagedDnsError` for a
     rejected or unreachable request -- including a name already taken,
@@ -129,21 +160,14 @@ async def register(
     folded into this same call, not a separate function, matching
     `services.managed_dns.server._handle_register`'s own reclaim
     handling on the other end (see its docstring for why). Irrelevant,
-    and ignored server-side, for a genuinely new `name`.
-
-    `reclaim_only` (design doc §16 Decision 10, issue #600) is what the
-    updater's automatic recovery of an abandoned name sends: the service
-    then performs the reclaim `credential` entitles this node to, or
-    refuses -- it never registers afresh. A fresh registration mints a
-    new credential and spends a rate-limit token, and is a SysOp's own
-    keystroke, never the background task's.
+    and ignored server-side, for a genuinely new `name`. The updater's
+    automatic recovery of an abandoned name does *not* come through
+    here: that is `reclaim`, which can never register afresh.
     """
     url = f"{base_url}/register"
     payload = {"name": name, "node_fingerprint": node_fingerprint, "dynamic": dynamic}
     if credential is not None:
         payload["credential"] = credential
-    if reclaim_only:
-        payload["reclaim_only"] = True
     try:
         async with session.post(
             url, json=payload, timeout=ClientTimeout(total=timeout),
@@ -151,14 +175,15 @@ async def register(
         ) as response:
             if response.status != 201:
                 text = await response.text()
-                raise ManagedDnsError(
-                    f"registration of {name!r} failed: {_refusal_detail(response.status, text)}",
-                    status_code=response.status,
-                )
+                raise _refused(f"registration of {name!r} failed", response.status, text)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
 
+    return _parse_register_result(url, body)
+
+
+def _parse_register_result(url: str, body) -> RegisterResult:
     if not isinstance(body, dict):
         raise ManagedDnsError(f"malformed registration response from {url}: expected an object")
     name_value = body.get("name")
@@ -173,6 +198,34 @@ async def register(
     ):
         raise ManagedDnsError(f"malformed registration response from {url}: invalid fields")
     return RegisterResult(name_value, credential_value, status_value, created_at_value)
+
+
+async def reclaim(
+    session: ClientSession, base_url: str, *, name: str, credential: str, dynamic: bool,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> RegisterResult:
+    """`POST {base_url}/reclaim` (design doc §16 Decision 10, issue
+    #600): what the updater sends for an *abandoned* name it still holds
+    the credential for. The service performs that reclaim or refuses; it
+    never registers afresh, so this can never mint a credential or spend
+    a rate-limit token from a background task. A service without the
+    route answers 404, which surfaces here as an ordinary refusal and
+    fails closed. A refusal for a `released` or `revoked` row carries
+    that word in `service_status`, which is how the updater learns the
+    local view was stale."""
+    url = f"{base_url}/reclaim"
+    try:
+        async with session.post(
+            url, json={"name": name, "credential": credential, "dynamic": dynamic},
+            timeout=ClientTimeout(total=timeout), allow_redirects=False,
+        ) as response:
+            if response.status != 201:
+                text = await response.text()
+                raise _refused(f"reclaim of {name!r} failed", response.status, text)
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, TimeoutError, ValueError) as exc:
+        raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
+    return _parse_register_result(url, body)
 
 
 @dataclass(frozen=True)
@@ -202,10 +255,7 @@ async def heartbeat(
         ) as response:
             if response.status != 200:
                 text = await response.text()
-                raise ManagedDnsError(
-                    f"heartbeat failed: {_refusal_detail(response.status, text)}",
-                    status_code=response.status,
-                )
+                raise _refused("heartbeat failed", response.status, text)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -248,10 +298,7 @@ async def rename(
         ) as response:
             if response.status != 201:
                 text = await response.text()
-                raise ManagedDnsError(
-                    f"rename to {name!r} failed: {_refusal_detail(response.status, text)}",
-                    status_code=response.status,
-                )
+                raise _refused(f"rename to {name!r} failed", response.status, text)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -288,10 +335,7 @@ async def cancel_rename(
         ) as response:
             if response.status != 200:
                 text = await response.text()
-                raise ManagedDnsError(
-                    f"cancel rename failed: {_refusal_detail(response.status, text)}",
-                    status_code=response.status,
-                )
+                raise _refused("cancel rename failed", response.status, text)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -335,10 +379,7 @@ async def release(
         ) as response:
             if response.status != 200:
                 text = await response.text()
-                raise ManagedDnsError(
-                    f"release failed: {_refusal_detail(response.status, text)}",
-                    status_code=response.status,
-                )
+                raise _refused("release failed", response.status, text)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc

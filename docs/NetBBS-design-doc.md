@@ -9065,19 +9065,30 @@ the DNS screen lost it when the cooldown purged it. Abandonment is the
 service noticing the node was away, not the SysOp choosing to leave, so
 the node now performs that keystroke itself: on every pass while its
 cached status is `abandoned` (and no rename is outstanding), it sends
-`/register` with the credential it still holds and `reclaim_only` set,
-and on success carries straight on into the ordinary heartbeat. The
-flag is the safety of it: the service performs the reclaim the
-credential entitles the node to, or refuses — it never registers afresh
-on the node's behalf. A fresh registration mints a new credential,
-spends a rate-limit token and, once the cooldown has purged the row, is
-for a name that may no longer be this node's; all of that stays the
-SysOp's own `[R]egister`. A refusal (the row purged, the service at
-capacity, unreachable) is retried next pass and recorded as a recovery
-note the DNS screen shows beside the ABANDONED badge, with the sentence
-the service gave. `released` is never reclaimed automatically — that is
-the SysOp's decision to stop (Decision 5) — and a `revoked` row refuses
-the automatic path exactly as it refuses the manual one (Decision 4).
+`POST /reclaim` with the credential it still holds, and on success
+carries straight on into the ordinary heartbeat. The route is the
+safety of it: the service performs the reclaim the credential entitles
+the node to, or refuses — it never registers afresh on the node's
+behalf. A fresh registration mints a new credential, spends a
+rate-limit token and, once the cooldown has purged the row, is for a
+name that may no longer be this node's; all of that stays the SysOp's
+own `[R]egister`. It is a route of its own rather than a flag on
+`/register` so that a service older than it answers 404 and the node
+fails closed, where an older service ignoring an unknown flag would
+have registered afresh from a background task. A refusal (the row
+purged, the service at capacity, unreachable, a service without the
+route) is retried next pass and recorded as a recovery note the DNS
+screen shows beside the ABANDONED badge, with the sentence the service
+gave — and the screen then stops claiming the name is held. Three
+refusals are answers rather than failures: a row that is *already
+active* under the same credential is the retry of a reclaim whose
+response was lost, and is answered with the row's state so the node
+resumes heartbeating; a `released` row is refused with that word, since
+release is the SysOp's decision to stop (Decision 5) and a node
+restored from a backup taken before it would otherwise undo it on its
+first pass — the node adopts the service's word instead; and a
+`revoked` row refuses the automatic path exactly as it refuses the
+manual one (Decision 4).
 
 **Implemented.** Node-side client (`src/netbbs/managed_dns/`, shipped
 inside the installable `netbbs` package: opt-in prompt, credential

@@ -23,12 +23,11 @@ import asyncio
 from aiohttp import ClientSession
 
 from netbbs.managed_dns.client import (
-    CancelRenameResult, HeartbeatResult, ManagedDnsError, cancel_rename, heartbeat, register,
+    CancelRenameResult, HeartbeatResult, ManagedDnsError, cancel_rename, heartbeat, reclaim,
 )
 from netbbs.managed_dns.credential import (
     credential_path_for, delete_credential, load_credential, previous_credential_path_for,
-    managed_dns_transition_lock, recover_credential_transition, save_credential,
-    stage_credential_cancellation,
+    managed_dns_transition_lock, recover_credential_transition, stage_credential_cancellation,
 )
 from netbbs.managed_dns.state import (
     OptIn,
@@ -36,7 +35,6 @@ from netbbs.managed_dns.state import (
     RegistrationStatus,
     get_dynamic,
     get_last_contact_at,
-    get_node_fingerprint,
     get_opt_in,
     get_previous_name,
     get_previous_published,
@@ -231,36 +229,49 @@ async def _reclaim_abandoned_name(db: Database, base_url: str, name: str, creden
     """One automatic reclaim attempt for an abandoned name. Returns
     whether the registration is active again locally.
 
-    `reclaim_only` is the whole safety of this: the service performs the
+    `/reclaim` is the whole safety of this: the service performs the
     reclaim this credential entitles the node to, or refuses. It never
     registers afresh on the node's behalf -- a fresh registration mints
     a credential, spends a rate-limit token and, once the cooldown has
     purged the row, is for a name that may no longer be this node's; all
-    of that stays a SysOp's keystroke. A refusal is recorded as a
-    recovery note so the DNS screen can say what was tried and why it
-    did not work, and is retried next pass: capacity frees, services
-    come back, and the SysOp may act in between."""
-    node_fingerprint = get_node_fingerprint(db)
-    if node_fingerprint is None:
-        return False
+    of that stays a SysOp's keystroke -- and a service too old to have
+    the route answers 404, which fails closed here like any refusal
+    (Codex review of PR #608). A refusal is recorded as a recovery note
+    so the DNS screen can say what was tried and why it did not work,
+    and is retried next pass: capacity frees, services come back, and
+    the SysOp may act in between. One refusal is not retried: a row the
+    service says is *released* means the local `abandoned` was stale (a
+    backup restored from before the SysOp's own release), and the node
+    adopts the service's word rather than undoing a decision."""
     try:
         # Direct connection, as for the heartbeat: a matured reclaim
         # republishes the record at the address this request arrives
         # from, and through a forward proxy that would be the proxy.
         async with ClientSession(trust_env=False) as session:
-            result = await register(
-                session, base_url, name=name, node_fingerprint=node_fingerprint,
-                dynamic=get_dynamic(db), credential=credential, reclaim_only=True,
+            result = await reclaim(
+                session, base_url, name=name, credential=credential, dynamic=get_dynamic(db),
             )
     except ManagedDnsError as exc:
+        if exc.service_status == "released":
+            set_heartbeat_reconciliation_state(
+                db, name=name, status=RegistrationStatus.RELEASED, published=False,
+                last_contact_at=None, previous_name=None, previous_status=None, previous_published=False,
+            )
+            _reported_reclaim_failures.pop(db.path, None)
+            _logger.info(
+                "Managed-DNS registration %r is released at the service; the node's abandoned view was "
+                "stale and has been corrected", name,
+            )
+            return False
         _report_reclaim_failure(db, name, str(exc))
         return False
     if result.credential != credential:
-        # `reclaim_only` makes this unreachable against this project's
-        # service; a foreign implementation that ignored the flag and
-        # minted a fresh credential has still made this node the holder
-        # of that registration, and losing the secret would strand it.
-        save_credential(credential_path_for(db.path), result.credential)
+        # `/reclaim` never mints, so this is a service that is not this
+        # project's answering something else. Fail closed: adopting an
+        # unknown credential would make a background task the author of
+        # a registration nobody asked for (Codex review of PR #608).
+        _report_reclaim_failure(db, name, "the service answered with a different credential; not adopted")
+        return False
     set_registration_result_state(
         db, name=result.name, status=RegistrationStatus(result.status),
         dynamic=get_dynamic(db), service_url=base_url,

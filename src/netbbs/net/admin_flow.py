@@ -5389,10 +5389,13 @@ async def _draw_managed_dns_status(
         # What the state means for the SysOp and what, if anything, they
         # need to do about it -- every state here used to be a bare badge.
         if previous_name is None:
-            for line in _managed_dns_state_guidance(status, published):
+            note = (
+                await lane.run(get_managed_dns_recovery_note)
+                if status is ManagedDnsRegistrationStatus.ABANDONED else None
+            )
+            for line in _managed_dns_state_guidance(status, published, recovery_refused=note is not None):
                 await _write_wrapped_muted(session, line)
             if status is ManagedDnsRegistrationStatus.ABANDONED:
-                note = await lane.run(get_managed_dns_recovery_note)
                 if note is not None:
                     display_format, display_timezone = await lane.run(resolve_display_preferences)
                     when = format_for_display(
@@ -5448,12 +5451,17 @@ async def _write_wrapped_muted(session: Session, text: str) -> None:
         await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
 
 
-def _managed_dns_state_guidance(status: ManagedDnsRegistrationStatus, published: bool) -> list[str]:
+def _managed_dns_state_guidance(
+    status: ManagedDnsRegistrationStatus, published: bool, *, recovery_refused: bool = False,
+) -> list[str]:
     """One or two plain sentences per registration state: what it means
     and what happens next, for a standalone (not mid-rename) name. The
     node knows none of the service's timings for certain (they are
     operator parameters), so the durations are the shipped defaults
-    hedged as such."""
+    hedged as such. `recovery_refused` is whether an automatic reclaim
+    has already been turned down since this abandonment: then the
+    service may no longer hold the name for this node, and the screen
+    must not claim it does (Codex review of PR #608)."""
     if status is ManagedDnsRegistrationStatus.PENDING:
         return [
             "Reserved but not yet in DNS: it goes live once this node has stayed in contact with the "
@@ -5464,11 +5472,17 @@ def _managed_dns_state_guidance(status: ManagedDnsRegistrationStatus, published:
             "The service accepted the name but has not confirmed a published DNS record yet; the next "
             "check-in retries the publication. Nothing to do unless this persists."
         ]
+    if status is ManagedDnsRegistrationStatus.ABANDONED and recovery_refused:
+        return [
+            "The service stopped hearing from this node for about a week and took the record out of "
+            "DNS. The node's automatic reclaim was refused (below) and is retried every 15 minutes; "
+            "[R]egister registers the name afresh if it is still free."
+        ]
     if status is ManagedDnsRegistrationStatus.ABANDONED:
         return [
-            "The service stopped hearing from this node for about a week, took the record out of DNS "
-            "and is holding the name for this node. The node tries to reclaim it every 15 minutes; "
-            "[R]egister reclaims it now, or registers it afresh if the service no longer holds it."
+            "The service stopped hearing from this node for about a week and took the record out of "
+            "DNS. The name is held for this node, which reclaims it by itself (retrying every 15 "
+            "minutes); [R]egister reclaims it now."
         ]
     if status is ManagedDnsRegistrationStatus.RELEASED:
         return [
