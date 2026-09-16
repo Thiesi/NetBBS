@@ -41,6 +41,12 @@ _DEFAULT_TIMEOUT_SECONDS = 10.0
 # pass. Comfortably above the longest sentence the service writes.
 _MAX_REFUSAL_BYTES = 4096
 
+# The same bound for a *successful* body (Codex review of PR #608): a
+# registration, heartbeat or reclaim answer is a few hundred bytes, and
+# `response.json()` would otherwise read whatever a misconfigured or
+# hostile endpoint sends before anything validated it -- on every pass.
+_MAX_RESPONSE_BYTES = 64 * 1024
+
 
 class ManagedDnsError(Exception):
     """Raised for anything gone wrong talking to the managed-DNS
@@ -108,23 +114,35 @@ def _refusal(status: int, text: str) -> _Refusal:
     )
 
 
-async def _refused(prefix: str, response) -> ManagedDnsError:
-    """Read at most `_MAX_REFUSAL_BYTES` of the refusal and build the
-    error from it. `content.read(n)` stops at the bound; the remainder
-    is never read, so a large body costs the bound, not its length."""
-    # `read(n)` returns whatever the buffer holds, up to `n`, so a body
-    # split across chunks needs the loop (Codex review of PR #608): a
-    # refusal cut mid-JSON would lose its structured `status`, and with
-    # it the `released` answer the updater adopts.
+async def _read_bounded(response, limit: int) -> bytes:
+    """At most `limit` bytes of the body. `content.read(n)` returns
+    whatever the buffer holds, up to `n`, so a body split across chunks
+    needs the loop (Codex review of PR #608): a refusal cut mid-JSON
+    would lose its structured `status`, and with it the `released`
+    answer the updater adopts. The remainder past the bound is never
+    read, so a large body costs the bound, not its length."""
     chunks: list[bytes] = []
-    remaining = _MAX_REFUSAL_BYTES
+    remaining = limit
     while remaining > 0:
         chunk = await response.content.read(remaining)
         if not chunk:
             break
         chunks.append(chunk)
         remaining -= len(chunk)
-    text = b"".join(chunks).decode("utf-8", errors="replace")
+    return b"".join(chunks)
+
+
+async def _json_body(response, limit: int = _MAX_RESPONSE_BYTES):
+    """A successful body, read to the bound and parsed strictly. A body
+    the bound cuts is malformed JSON and raises `ValueError`, which every
+    caller already reports as a malformed response."""
+    return strict_json_loads(await _read_bounded(response, limit))
+
+
+async def _refused(prefix: str, response) -> ManagedDnsError:
+    """Read at most `_MAX_REFUSAL_BYTES` of the refusal and build the
+    error from it."""
+    text = (await _read_bounded(response, _MAX_REFUSAL_BYTES)).decode("utf-8", errors="replace")
     refusal = _refusal(response.status, text)
     return ManagedDnsError(
         f"{prefix}: {refusal.detail}", status_code=response.status,
@@ -205,7 +223,7 @@ async def register(
         ) as response:
             if response.status != 201:
                 raise await _refused(f"registration of {name!r} failed", response)
-            body = await response.json(loads=strict_json_loads)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
 
@@ -250,7 +268,7 @@ async def reclaim(
         ) as response:
             if response.status != 201:
                 raise await _refused(f"reclaim of {name!r} failed", response)
-            body = await response.json(loads=strict_json_loads)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
     return _parse_register_result(url, body)
@@ -283,7 +301,7 @@ async def heartbeat(
         ) as response:
             if response.status != 200:
                 raise await _refused("heartbeat failed", response)
-            body = await response.json(loads=strict_json_loads)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
 
@@ -325,7 +343,7 @@ async def rename(
         ) as response:
             if response.status != 201:
                 raise await _refused(f"rename to {name!r} failed", response)
-            body = await response.json(loads=strict_json_loads)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
     if not isinstance(body, dict):
@@ -361,7 +379,7 @@ async def cancel_rename(
         ) as response:
             if response.status != 200:
                 raise await _refused("cancel rename failed", response)
-            body = await response.json(loads=strict_json_loads)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
     if not isinstance(body, dict):
@@ -404,7 +422,7 @@ async def release(
         ) as response:
             if response.status != 200:
                 raise await _refused("release failed", response)
-            body = await response.json(loads=strict_json_loads)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
 

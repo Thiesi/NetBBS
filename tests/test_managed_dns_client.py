@@ -510,3 +510,31 @@ def test_a_chunked_refusal_body_is_read_whole_up_to_the_bound():
     exc = asyncio.run(scenario())
     assert exc.service_status == "released"
     assert "own request" in str(exc)
+
+
+def test_a_successful_body_is_read_only_up_to_a_bound_and_then_malformed():
+    """A 201 from a misconfigured or hostile endpoint is bounded like a
+    refusal (Codex review of PR #608): the node reads the bound, finds
+    no valid JSON in it, and reports a malformed response rather than
+    allocating the whole body."""
+    from netbbs.managed_dns.client import _MAX_RESPONSE_BYTES, reclaim
+
+    async def handler(_request):
+        return web.Response(text="[" + "1," * (_MAX_RESPONSE_BYTES) + "1]", status=201, content_type="application/json")
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/reclaim", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(ManagedDnsError, match="could not reach|malformed"):
+                    await reclaim(session, f"http://127.0.0.1:{port}", name="myboard", credential="c", dynamic=False)
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(scenario())

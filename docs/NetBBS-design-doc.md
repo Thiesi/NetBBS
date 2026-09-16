@@ -8970,7 +8970,7 @@ field whose answer was discarded, and the status screen showed
 `myboard.netbbs.org` with a LIVE badge and no port in sight. Now the
 registration editor and the Managed DNS status screen both state the
 convention and measure it against the listeners the node recorded at
-its last startup: "SSH: this node listens on 2222, so a caller dialling
+its last startup: "SSH: this node is configured for 2222, so a caller dialling
 22 needs a port-forward or proxy in front of it", "Telnet: not enabled
 on this node", and for web whether `[web] public_url` names an HTTPS
 front — the one statement a SysOp has already made about TLS, which
@@ -9112,12 +9112,16 @@ name that may no longer be this node's; all of that stays the SysOp's
 own `[R]egister`. It is a route of its own rather than a flag on
 `/register` so that a service older than it answers 404 and the node
 fails closed, where an older service ignoring an unknown flag would
-have registered afresh from a background task. A refusal (the row
-purged, the service at capacity, unreachable, a service without the
-route) is retried next pass and recorded as a recovery note the DNS
-screen shows beside the ABANDONED badge, with the sentence the service
-gave — and the screen then stops claiming the name is held. Three
-refusals are answers rather than failures: a row that is *already
+have registered afresh from a background task. A refusal is recorded
+as a recovery note the DNS screen shows beside the ABANDONED badge, with
+the sentence the service gave — and the screen then stops claiming the
+name is held. Which refusals are retried follows from what can change
+without the SysOp: the service at capacity, unreachable, or without the
+route (an upgrade will bring it) are retried next pass; a 409 — the row
+purged, held by another credential, or revoked — is *final*, since no
+later pass can change what this credential is entitled to, and the
+updater sends nothing more for that name until the SysOp's own
+`[R]egister`. Three refusals are answers rather than failures: a row that is *already
 active* under the same credential is the retry of a reclaim whose
 response was lost, and is answered with the row's state so the node
 resumes heartbeating; a `released` row is refused with that word, since

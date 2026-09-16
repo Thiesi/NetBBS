@@ -7181,7 +7181,7 @@ def test_managed_dns_status_explains_pending_and_states_the_ports_convention(db,
     text = " ".join(_visible(_written_text(session)).split())  # wrapped at 80 columns
     assert "goes live once this node has stayed in contact" in text
     assert "standard ports: SSH 22, Telnet 23, HTTPS 443" in text
-    assert "listens on 2222, so a caller dialling 22 needs a" in text
+    assert "is configured for 2222, so a caller dialling 22 needs a" in text
 
 
 def test_managed_dns_status_explains_abandonment_and_the_last_automatic_attempt(db, lane, sysop):
