@@ -862,7 +862,7 @@ async def _registration_detail(session: Session, lane: DatabaseLane, row, *, bas
                     async with outbound_session(base_url) as http_session:
                         result = await admin_revoke(
                             http_session, base_url, token=token, name=row.name, reason=reason,
-                            node_fingerprint=row.node_fingerprint,
+                            node_fingerprint=row.node_fingerprint, created_at=row.created_at,
                         )
                 except ManagedDnsError as exc:
                     await _write_note(session, f"Revocation failed: {sanitize_text(str(exc))}")

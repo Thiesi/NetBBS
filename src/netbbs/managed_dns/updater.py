@@ -199,6 +199,13 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
         cancellation, rename_absent = await _cancel_remote_rename(
             base_url, previous_credential
         )
+        if isinstance(rename_absent, ManagedDnsError):
+            # The cancellation was answered "revoked" (Codex review of PR
+            # #609): not a rename gone, a name taken. Treating it as
+            # absent would restore the old name from its last good
+            # heartbeat and advertise a name the operator removed.
+            _apply_revocation(db, name=name, contact=rename_absent.contact)
+            return
         if cancellation is not None:
             _apply_cancelled_rename_result(db, cancellation)
         elif rename_absent:
@@ -380,8 +387,12 @@ def _apply_revocation(db: Database, *, name: str, contact: str | None) -> None:
 
 async def _cancel_remote_rename(
     base_url: str, previous_credential: str,
-) -> tuple[CancelRenameResult | None, bool]:
-    """Cancel a retained remote rename; report whether it was already absent."""
+) -> tuple[CancelRenameResult | None, bool | ManagedDnsError]:
+    """Cancel a retained remote rename; report whether it was already
+    absent. The same contract as `_send_heartbeat`: the second element
+    is the error itself when the 401 says the credential's registration
+    was revoked, so the caller can tell a rename gone from a name taken.
+    Tests substitute this with fakes returning plain bools."""
     try:
         async with ClientSession(trust_env=False) as session:
             result = await cancel_rename(
@@ -389,7 +400,8 @@ async def _cancel_remote_rename(
             )
     except ManagedDnsError as exc:
         _logger.warning("Managed-DNS automatic rename cancellation failed: %s", exc)
-        return None, exc.status_code == 401
+        absent = exc.status_code == 401
+        return None, (exc if absent and exc.revoked else absent)
     return result, False
 
 

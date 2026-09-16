@@ -1285,3 +1285,51 @@ def test_updater_adopts_a_revocation_heard_on_the_previous_credential_alone(tmp_
     assert get_previous_status(db) is RegistrationStatus.REVOKED
     assert get_service_contact(db) == "abuse@example.org"
     db.close()
+
+
+def test_updater_adopts_a_revocation_answered_to_the_automatic_cancellation(tmp_path, monkeypatch):
+    """An outstanding rename with a live old credential and an inactive
+    replacement goes to automatic cancellation; if the operator revoked
+    in between, that answer is "revoked", not "rename gone", and must not
+    restore the old name from its last good heartbeat (Codex review of
+    PR #609)."""
+    from netbbs.managed_dns.client import HeartbeatResult, ManagedDnsError
+
+    async def fake_send_heartbeat(_base_url, credential):
+        if credential == "old-credential":
+            return HeartbeatResult("oldname", "matured", "203.0.113.5"), False
+        return None, True  # the replacement is authoritatively inactive
+
+    async def cancellation_revoked(_base_url, _credential):
+        return None, ManagedDnsError(
+            "cancel rename failed: revoked", status_code=401, service_status="revoked", contact="abuse@example.org",
+        )
+
+    monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", fake_send_heartbeat)
+    monkeypatch.setattr("netbbs.managed_dns.updater._cancel_remote_rename", cancellation_revoked)
+
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        set_opt_in(db, OptIn.ACCEPTED)
+        set_node_fingerprint(db, "fp-1")
+        set_service_url(db, "http://127.0.0.1:1")
+        set_registered_name(db, "newname")
+        set_registration_status(db, RegistrationStatus.PENDING)
+        set_previous_name(db, "oldname")
+        set_previous_status(db, RegistrationStatus.MATURED)
+        set_previous_published(db, True)
+        save_credential(credential_path_for(db.path), "new-credential")
+        save_credential(previous_credential_path_for(db.path), "old-credential")
+        await _run_passes(db, 1)
+        return db
+
+    db = asyncio.run(scenario())
+    from netbbs.managed_dns.state import get_service_contact
+
+    assert get_registration_status(db) is RegistrationStatus.REVOKED
+    assert get_previous_status(db) is RegistrationStatus.REVOKED
+    assert not get_previous_published(db)
+    assert get_service_contact(db) == "abuse@example.org"
+    # Both credentials stay on disk: nothing was swapped or deleted.
+    assert load_credential(previous_credential_path_for(db.path)) == "old-credential"
+    db.close()

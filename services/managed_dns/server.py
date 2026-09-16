@@ -452,9 +452,16 @@ class ManagedDnsServer:
         if not self._admin_authorized(request):
             return web.json_response({"error": "not authorized"}, status=401)
         rows = list_registrations(self._db)
+        # Pending *or* abandoned: an abandoned replacement is still an
+        # outstanding rename (`get_replacement_for_name` keeps it, and a
+        # revocation of the live name takes it too), under the same
+        # ownership check revocation applies (Codex review of PR #609).
+        by_name = {row.name: row for row in rows}
         replaced_by = {
             row.replaces_name: row.name for row in rows
-            if row.replaces_name is not None and row.status == "pending"
+            if row.replaces_name is not None and row.status in ("pending", "abandoned")
+            and row.replaces_name in by_name
+            and by_name[row.replaces_name].node_fingerprint == row.node_fingerprint
         }
         return web.json_response(
             {"registrations": [self._registration_view(row, replaced_by.get(row.name)) for row in rows]}
@@ -491,9 +498,11 @@ class ManagedDnsServer:
         raw_name = body.get("name")
         reason = body.get("reason")
         expected_fingerprint = body.get("node_fingerprint")
+        expected_created_at = body.get("created_at")
         if (
             not isinstance(raw_name, str) or not isinstance(reason, str) or not reason.strip()
             or (expected_fingerprint is not None and not isinstance(expected_fingerprint, str))
+            or (expected_created_at is not None and not isinstance(expected_created_at, str))
         ):
             return web.json_response(
                 {
@@ -512,24 +521,33 @@ class ManagedDnsServer:
                 {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
             )
         async with self._dns_transition_lock:
-            return await self._process_admin_revoke(name, reason.strip(), expected_fingerprint)
+            return await self._process_admin_revoke(
+                name, reason.strip(), expected_fingerprint, expected_created_at,
+            )
 
     async def _process_admin_revoke(
         self, name: str, reason: str, expected_fingerprint: str | None = None,
+        expected_created_at: str | None = None,
     ) -> web.Response:
         registration = get_registration_by_name(self._db, name)
         if registration is None:
             return web.json_response({"error": f"{name!r} is not registered"}, status=404)
         if registration.status == "revoked":
             return web.json_response({"error": f"{name!r} is already revoked"}, status=409)
-        if expected_fingerprint is not None and registration.node_fingerprint != expected_fingerprint:
-            # The console sends the fingerprint of the row the operator
-            # reviewed (Codex review of PR #609): a detail screen left open
-            # past an inactive row's cooldown could otherwise confirm a
-            # takedown of whoever registered the name since.
+        if (
+            (expected_fingerprint is not None and registration.node_fingerprint != expected_fingerprint)
+            or (expected_created_at is not None and registration.created_at != expected_created_at)
+        ):
+            # The console sends the fingerprint and the creation time of
+            # the row the operator reviewed (Codex review of PR #609): a
+            # detail screen left open past an inactive row's cooldown
+            # could otherwise confirm a takedown of whatever registration
+            # holds the name since -- another node's, or the same node's
+            # fresh one, which is a different registration with a
+            # different `created_at`.
             return web.json_response(
                 {
-                    "error": f"{name!r} now belongs to a different node than the one reviewed; "
+                    "error": f"{name!r} is not the registration that was reviewed any more; "
                     "reload and review it again"
                 },
                 status=409,
