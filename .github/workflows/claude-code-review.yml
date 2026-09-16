@@ -55,7 +55,7 @@ jobs:
         if: always() && steps.claude-review.outputs.execution_file != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: claude-review-transcript
+          name: claude-review-transcript-attempt-${{ github.run_attempt }}
           path: ${{ steps.claude-review.outputs.execution_file }}
           retention-days: 1
 
