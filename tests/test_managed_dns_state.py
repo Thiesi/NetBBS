@@ -432,3 +432,59 @@ def test_two_spellings_of_one_ip_literal_are_the_same_service(tmp_path):
     assert state.foreign_credential_service_url(db, "http://[0:0:0:0:0:0:0:1]:8099") is None
     assert state.foreign_credential_service_url(db, "http://[::1]:8100") == "http://[::1]:8099"
     db.close()
+
+
+# -- listener facts (issue #603) and the recovery note (issue #600) ----------
+
+
+def test_local_listeners_default_to_none_and_round_trip(tmp_path):
+    from netbbs.managed_dns.state import ListenerFacts, get_local_listeners, set_local_listeners
+
+    db = Database(tmp_path / "node.db")
+    assert get_local_listeners(db) is None
+    facts = ListenerFacts(telnet_port=None, ssh_port=2222, web_port=8080, web_public_url="https://b.example")
+    set_local_listeners(db, facts)
+    assert get_local_listeners(db) == facts
+    set_local_listeners(db, ListenerFacts(telnet_port=23, ssh_port=22, web_port=None, web_public_url=None))
+    assert get_local_listeners(db).ssh_port == 22
+    assert get_local_listeners(db).web_port is None
+    db.close()
+
+
+def test_recovery_note_round_trips_and_is_cleared_by_any_authoritative_answer(tmp_path):
+    """The note describes an automatic reclaim attempt made after the
+    current abandonment; a registration result or a heartbeat
+    reconciliation is the service's own answer and supersedes it."""
+    from netbbs.managed_dns.state import (
+        RecoveryNote, get_recovery_note, set_heartbeat_reconciliation_state, set_recovery_note,
+        set_registration_result_state,
+    )
+
+    db = Database(tmp_path / "node.db")
+    assert get_recovery_note(db) is None
+    set_recovery_note(db, RecoveryNote(at="2026-09-16T10:00:00+00:00", text="refused"))
+    assert get_recovery_note(db) == RecoveryNote(at="2026-09-16T10:00:00+00:00", text="refused")
+
+    set_registration_result_state(
+        db, name="myboard", status=RegistrationStatus.PENDING, dynamic=True, service_url="https://dns.example",
+    )
+    assert get_recovery_note(db) is None
+
+    set_recovery_note(db, RecoveryNote(at="2026-09-16T11:00:00+00:00", text="refused again"))
+    set_heartbeat_reconciliation_state(
+        db, name="myboard", status=RegistrationStatus.ABANDONED, published=False, last_contact_at=None,
+        previous_name=None, previous_status=None, previous_published=False,
+    )
+    assert get_recovery_note(db) is None
+    set_recovery_note(db, None)
+    assert get_recovery_note(db) is None
+    db.close()
+
+
+def test_a_recovery_note_is_bounded_when_stored(tmp_path):
+    from netbbs.managed_dns.state import RecoveryNote, _MAX_RECOVERY_NOTE_CHARS, get_recovery_note, set_recovery_note
+
+    db = Database(tmp_path / "node.db")
+    set_recovery_note(db, RecoveryNote(at="2026-09-16T10:00:00+00:00", text="y" * (_MAX_RECOVERY_NOTE_CHARS * 4)))
+    assert len(get_recovery_note(db).text) == _MAX_RECOVERY_NOTE_CHARS
+    db.close()

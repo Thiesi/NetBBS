@@ -3842,15 +3842,48 @@ HTTP, never imports it.
 - **The service-wide admission bucket is durable.** Its tokens and last
   refill timestamp live in the managed-service database, so a restart
   does not mint a fresh burst of registrations.
-- **Standard-ports confirmation (Decision 6) is purely informational,
-  never server-enforced.** The admin screen and the opt-in prompt both
-  ask whether the web listener sits behind an HTTPS-terminating reverse
-  proxy on 443 before registering; a "no" still registers the record
-  (useful for the Telnet/SSH dynamic-IP-tracking half alone) but shows
-  a caveat that no bare web address is implied. This can't be verified
-  remotely — the service has no way to confirm a proxy actually exists
-  in front of a given node — so don't add a server-side check that
-  pretends otherwise.
+- **The standard-ports convention (Decision 6) is stated, never
+  enforced, and measured against facts the node records at startup.**
+  `netbbs.__main__.run` writes the configured Telnet/SSH/web ports (a
+  disabled transport as none) and `[web] public_url` into `node_config`
+  (`netbbs.managed_dns.state.set_local_listeners`) because the SysOp
+  console cannot reach `NodeConfig`; `netbbs.net.managed_dns_flow.
+  standard_ports_lines` turns them into the sentences both the
+  registration editor and the status screen show. The service has no
+  way to confirm a proxy or port-forward exists in front of a node, so
+  don't add a server-side check that pretends otherwise -- and don't
+  bring back a draft field for it: the earlier `[W]eb behind HTTPS
+  proxy` question was asked and its answer discarded, and an https
+  `public_url` is the statement a SysOp has actually made.
+- **A managed name owes the service continuous contact, and the node
+  gets an abandoned name back by itself (Decision 10).** The updater's
+  early return for `abandoned` is gone: while the cached status is
+  `abandoned` and no rename is outstanding, each pass sends
+  `POST /reclaim` with the held credential, then continues into the
+  ordinary heartbeat on success. The route refuses anything but the
+  reclaim that credential entitles the node to -- no row, an expired
+  row, a different credential's row, a released row, a revoked row --
+  so the background task can never mint a credential or spend a
+  rate-limit token, and a service without the route answers 404 so an
+  upgraded node fails closed against an older service (never a flag on
+  `/register`, which an older service would ignore and register afresh).
+  An already-active row under the same credential answers 201 with its
+  state: that is the retry of a reclaim whose response was lost. A
+  refusal is written as a `RecoveryNote` for the DNS screen and logged
+  once per change; every registration result and every heartbeat
+  reconciliation clears the note, so it only ever describes an attempt
+  made after the current abandonment, and the screen's wording switches
+  from "held for this node" to "refused (below)" once one exists. A
+  `released` refusal is adopted, not retried: the local `abandoned` was
+  a stale backup's view of a name the SysOp had since released.
+- **The client shows the service's sentence, not its JSON.** A refused
+  request's `ManagedDnsError` carries the body's `error` field when the
+  body is the service's shape and `HTTP <status>: <text>` otherwise;
+  every SysOp-facing flow prints `str(exc)`, and until issue #598 that
+  put braces around the one sentence written for the SysOp. Refusal
+  texts on the service are therefore addressed to a person: the
+  cumulative-cap refusal says what frees a slot and names
+  `MANAGED_DNS_CONTACT`, and must never again say "try again later".
 
 ### `examples/` is not installed package data (issue #169)
 

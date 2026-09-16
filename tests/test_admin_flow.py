@@ -7124,16 +7124,113 @@ def test_managed_dns_status_shows_a_pending_registration(db, lane, sysop):
 
 
 def test_managed_dns_status_shows_a_live_matured_registration(db, lane, sysop):
-    from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
+    from netbbs.managed_dns.state import (
+        OptIn, RegistrationStatus, set_opt_in, set_published, set_registered_name, set_registration_status,
+    )
 
     set_opt_in(db, OptIn.ACCEPTED)
     set_registered_name(db, "myboard")
     set_registration_status(db, RegistrationStatus.MATURED)
+    set_published(db, True)
 
     session = FakeSession(["d", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "LIVE" in text
+    assert "NOT YET PUBLISHED" not in text
+
+
+def test_managed_dns_status_does_not_claim_live_before_a_record_is_confirmed(db, lane, sysop):
+    """`matured` is the service's age gate passing, not a record in DNS:
+    the service matures a registration before its first provider upsert
+    and a failed upsert leaves it matured with nothing published. The
+    badge used to say LIVE on `matured` alone, which is a claim a SysOp
+    would repeat to callers."""
+    from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.MATURED)  # published flag left at its False default
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = " ".join(_visible(_written_text(session)).split())  # wrapped at 80 columns
+    assert "NOT YET PUBLISHED" in text
+    assert "LIVE" not in text
+    assert "has not confirmed a published DNS record yet" in text
+
+
+def test_managed_dns_status_explains_pending_and_states_the_ports_convention(db, lane, sysop):
+    """Issue #603: after registering, the status screen is where a SysOp
+    looks, and it said nothing about ports at all. It now states design
+    doc §16 Decision 6's convention against the listeners this node
+    recorded at startup, and every state carries a sentence saying what
+    it means."""
+    from netbbs.managed_dns.state import (
+        ListenerFacts, OptIn, RegistrationStatus, set_local_listeners, set_opt_in, set_registered_name,
+        set_registration_status,
+    )
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_local_listeners(db, ListenerFacts(telnet_port=None, ssh_port=2222, web_port=None, web_public_url=None))
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = " ".join(_visible(_written_text(session)).split())  # wrapped at 80 columns
+    assert "goes live once this node has stayed in contact" in text
+    assert "standard ports: SSH 22, Telnet 23, HTTPS 443" in text
+    assert "is configured for 2222, so a caller dialling 22 needs a" in text
+
+
+def test_managed_dns_status_explains_abandonment_and_the_last_automatic_attempt(db, lane, sysop):
+    """Design doc §16 Decision 10 (issue #600): an ABANDONED badge over a
+    name the node is quietly trying to get back every pass told the
+    SysOp nothing. The screen now says what happened, that the node is
+    retrying, and how the last automatic attempt went."""
+    from netbbs.managed_dns.state import (
+        OptIn, RecoveryNote, RegistrationStatus, set_opt_in, set_recovery_note, set_registered_name,
+        set_registration_status,
+    )
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.ABANDONED)
+    set_recovery_note(db, RecoveryNote(
+        at="2026-09-16T10:00:00+00:00",
+        text="registration of 'myboard' failed: 'myboard' is not held for reclaim by this credential",
+        final=True,
+    ))
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = " ".join(_visible(_written_text(session)).split())  # wrapped at 80 columns
+    assert "ABANDONED" in text
+    # A refused attempt means the service may no longer hold the name:
+    # the screen must not claim it does (Codex review of PR #608).
+    assert "automatic reclaim was refused (below)" in text
+    assert "will not be retried" in text
+    assert "registers the name afresh if it is still free" in text
+    assert "held for this node" not in text
+    assert "Last automatic attempt (" in text
+    assert "not held for reclaim by this credential" in text
+    # Not a claim an inactive name can make.
+    assert "standard ports" not in text
+
+
+def test_managed_dns_status_says_the_name_is_held_while_no_reclaim_has_been_refused(db, lane, sysop):
+    from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.ABANDONED)
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "The name is held for this node, which reclaims it by itself" in text
+    assert "Last automatic attempt" not in text
 
 
 def test_managed_dns_status_offers_register_when_not_active(db, lane, sysop):

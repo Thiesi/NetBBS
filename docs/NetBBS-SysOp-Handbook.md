@@ -472,6 +472,20 @@ it; renaming a node does not transfer its reputation. Managed DNS changes and
 node display-name changes are separate. Use the DNS screen's staged rename
 and recovery controls; do not release and re-register a name as a rename shortcut.
 
+A managed name stays yours while this node keeps checking in with the service,
+which it does every 15 minutes on its own; the **Dynamic IP** choice only
+decides whether the published record follows your address. A node the service
+has not heard from for about a week has its record taken out of DNS and the
+name held for it; the node reclaims the name by itself once it is back, and
+the DNS screen shows the last attempt's outcome under the ABANDONED badge
+until it succeeds. **Release** is the one exit the node never undoes.
+
+Callers reach a managed name on the standard ports (SSH 22, Telnet 23, HTTPS
+443); the record itself carries no port. NetBBS listens on 2222/2323/8080 by
+default, so a bare `myboard.netbbs.org` reaches your board only through a
+port-forward or proxy in front of it. The DNS screen states this against your
+configured listeners; the service cannot check it for you.
+
 ## MRC chat bridge
 
 MRC is a separate, public inter-BBS chat network. It is not NetBBS Link and

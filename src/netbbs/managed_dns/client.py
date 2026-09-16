@@ -34,6 +34,19 @@ from netbbs.managed_dns.state import RegistrationStatus
 
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 
+# How much of a refusal body is read at all (Codex review of PR #608).
+# The service's own refusals are a sentence or two; anything longer is
+# a reverse proxy's error page or a hostile endpoint, and a node must
+# not allocate, log or persist an unbounded body on every 15-minute
+# pass. Comfortably above the longest sentence the service writes.
+_MAX_REFUSAL_BYTES = 4096
+
+# The same bound for a *successful* body (Codex review of PR #608): a
+# registration, heartbeat or reclaim answer is a few hundred bytes, and
+# `response.json()` would otherwise read whatever a misconfigured or
+# hostile endpoint sends before anything validated it -- on every pass.
+_MAX_RESPONSE_BYTES = 64 * 1024
+
 
 class ManagedDnsError(Exception):
     """Raised for anything gone wrong talking to the managed-DNS
@@ -43,9 +56,91 @@ class ManagedDnsError(Exception):
     still there" posture design doc §16 already established for the
     conceptually similar live-subscribe path (issue #148/#194)."""
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self, message: str, *, status_code: int | None = None,
+        service_status: str | None = None, contact: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        #: The service's structured word for the registration's state
+        #: when a refusal carries one (`released`, `revoked`), which the
+        #: updater treats as a state of its own rather than a generic
+        #: refusal. Parsed from the JSON body only, never from the text.
+        self.service_status = service_status
+        #: The operator's contact channel, when the refusal named one.
+        self.contact = contact
+
+
+@dataclass(frozen=True)
+class _Refusal:
+    detail: str
+    service_status: str | None
+    contact: str | None
+
+
+def _refusal(status: int, text: str) -> _Refusal:
+    """What a refused request's message should carry: the service's
+    own `error` line when the body is its JSON shape, otherwise the raw
+    status and text -- plus the structured `status`/`contact` fields
+    when the body has them.
+
+    Every SysOp-facing flow shows `str(exc)` verbatim, and until issue
+    #598 that was the whole response body -- a SysOp refused by the
+    capacity cap read `HTTP 503: {"error": "..."}`, braces and all. The
+    service writes its refusals as sentences addressed to that SysOp
+    (where a slot comes from, whom to contact), so the sentence is what
+    reaches them. A body that is not the service's shape -- a reverse
+    proxy's HTML error page, an empty body -- keeps the status code,
+    because then the status *is* the information."""
+    try:
+        body = strict_json_loads(text)
+    except ValueError:
+        return _Refusal(f"HTTP {status}: {text}", None, None)
+    if not isinstance(body, dict) or not isinstance(body.get("error"), str) or not body["error"].strip():
+        return _Refusal(f"HTTP {status}: {text}", None, None)
+    service_status = body.get("status")
+    contact = body.get("contact")
+    return _Refusal(
+        body["error"].strip(),
+        service_status if isinstance(service_status, str) and service_status else None,
+        contact.strip() if isinstance(contact, str) and contact.strip() else None,
+    )
+
+
+async def _read_bounded(response, limit: int) -> bytes:
+    """At most `limit` bytes of the body. `content.read(n)` returns
+    whatever the buffer holds, up to `n`, so a body split across chunks
+    needs the loop (Codex review of PR #608): a refusal cut mid-JSON
+    would lose its structured `status`, and with it the `released`
+    answer the updater adopts. The remainder past the bound is never
+    read, so a large body costs the bound, not its length."""
+    chunks: list[bytes] = []
+    remaining = limit
+    while remaining > 0:
+        chunk = await response.content.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+async def _json_body(response, limit: int = _MAX_RESPONSE_BYTES):
+    """A successful body, read to the bound and parsed strictly. A body
+    the bound cuts is malformed JSON and raises `ValueError`, which every
+    caller already reports as a malformed response."""
+    return strict_json_loads(await _read_bounded(response, limit))
+
+
+async def _refused(prefix: str, response) -> ManagedDnsError:
+    """Read at most `_MAX_REFUSAL_BYTES` of the refusal and build the
+    error from it."""
+    text = (await _read_bounded(response, _MAX_REFUSAL_BYTES)).decode("utf-8", errors="replace")
+    refusal = _refusal(response.status, text)
+    return ManagedDnsError(
+        f"{prefix}: {refusal.detail}", status_code=response.status,
+        service_status=refusal.service_status, contact=refusal.contact,
+    )
 
 
 def outbound_session(base_url: str) -> ClientSession:
@@ -106,7 +201,9 @@ async def register(
     folded into this same call, not a separate function, matching
     `services.managed_dns.server._handle_register`'s own reclaim
     handling on the other end (see its docstring for why). Irrelevant,
-    and ignored server-side, for a genuinely new `name`.
+    and ignored server-side, for a genuinely new `name`. The updater's
+    automatic recovery of an abandoned name does *not* come through
+    here: that is `reclaim`, which can never register afresh.
     """
     url = f"{base_url}/register"
     payload = {"name": name, "node_fingerprint": node_fingerprint, "dynamic": dynamic}
@@ -118,15 +215,15 @@ async def register(
             allow_redirects=False,
         ) as response:
             if response.status != 201:
-                text = await response.text()
-                raise ManagedDnsError(
-                    f"registration of {name!r} failed: HTTP {response.status}: {text}",
-                    status_code=response.status,
-                )
-            body = await response.json(loads=strict_json_loads)
+                raise await _refused(f"registration of {name!r} failed", response)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
 
+    return _parse_register_result(url, body)
+
+
+def _parse_register_result(url: str, body) -> RegisterResult:
     if not isinstance(body, dict):
         raise ManagedDnsError(f"malformed registration response from {url}: expected an object")
     name_value = body.get("name")
@@ -141,6 +238,33 @@ async def register(
     ):
         raise ManagedDnsError(f"malformed registration response from {url}: invalid fields")
     return RegisterResult(name_value, credential_value, status_value, created_at_value)
+
+
+async def reclaim(
+    session: ClientSession, base_url: str, *, name: str, credential: str, dynamic: bool,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> RegisterResult:
+    """`POST {base_url}/reclaim` (design doc §16 Decision 10, issue
+    #600): what the updater sends for an *abandoned* name it still holds
+    the credential for. The service performs that reclaim or refuses; it
+    never registers afresh, so this can never mint a credential or spend
+    a rate-limit token from a background task. A service without the
+    route answers 404, which surfaces here as an ordinary refusal and
+    fails closed. A refusal for a `released` or `revoked` row carries
+    that word in `service_status`, which is how the updater learns the
+    local view was stale."""
+    url = f"{base_url}/reclaim"
+    try:
+        async with session.post(
+            url, json={"name": name, "credential": credential, "dynamic": dynamic},
+            timeout=ClientTimeout(total=timeout), allow_redirects=False,
+        ) as response:
+            if response.status != 201:
+                raise await _refused(f"reclaim of {name!r} failed", response)
+            body = await _json_body(response)
+    except (ClientError, TimeoutError, ValueError) as exc:
+        raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
+    return _parse_register_result(url, body)
 
 
 @dataclass(frozen=True)
@@ -169,11 +293,8 @@ async def heartbeat(
             allow_redirects=False,
         ) as response:
             if response.status != 200:
-                text = await response.text()
-                raise ManagedDnsError(
-                    f"heartbeat failed: HTTP {response.status}: {text}", status_code=response.status,
-                )
-            body = await response.json(loads=strict_json_loads)
+                raise await _refused("heartbeat failed", response)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
 
@@ -214,12 +335,8 @@ async def rename(
             allow_redirects=False,
         ) as response:
             if response.status != 201:
-                text = await response.text()
-                raise ManagedDnsError(
-                    f"rename to {name!r} failed: HTTP {response.status}: {text}",
-                    status_code=response.status,
-                )
-            body = await response.json(loads=strict_json_loads)
+                raise await _refused(f"rename to {name!r} failed", response)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
     if not isinstance(body, dict):
@@ -254,11 +371,8 @@ async def cancel_rename(
             allow_redirects=False,
         ) as response:
             if response.status != 200:
-                text = await response.text()
-                raise ManagedDnsError(
-                    f"cancel rename failed: HTTP {response.status}: {text}", status_code=response.status,
-                )
-            body = await response.json(loads=strict_json_loads)
+                raise await _refused("cancel rename failed", response)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
     if not isinstance(body, dict):
@@ -300,11 +414,8 @@ async def release(
             allow_redirects=False,
         ) as response:
             if response.status != 200:
-                text = await response.text()
-                raise ManagedDnsError(
-                    f"release failed: HTTP {response.status}: {text}", status_code=response.status,
-                )
-            body = await response.json(loads=strict_json_loads)
+                raise await _refused("release failed", response)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
 

@@ -332,3 +332,157 @@ def test_a_redirect_never_carries_the_credential_to_its_target():
     received, errors = asyncio.run(scenario())
     assert received == []  # the secret never left the address it was addressed to
     assert all("307" in message for message in errors)  # and the hop is visible
+
+
+# -- what a refusal reads like to the SysOp (issue #598) --------------------
+
+
+def test_a_refusal_carries_the_services_own_sentence_not_its_json(db):
+    """Every SysOp-facing flow shows `str(exc)`; until #598 that was the
+    raw JSON body, braces and all, wrapped around the one sentence the
+    service wrote for them."""
+    async def scenario():
+        server = ManagedDnsServer("127.0.0.1", 0, db, cumulative_cap=1, contact="dns@example.org")
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await register(
+                    session, f"http://127.0.0.1:{server.port}",
+                    name="board-a", node_fingerprint="fp-1", dynamic=False,
+                )
+                with pytest.raises(ManagedDnsError) as excinfo:
+                    await register(
+                        session, f"http://127.0.0.1:{server.port}",
+                        name="board-b", node_fingerprint="fp-2", dynamic=False,
+                    )
+            return excinfo.value
+        finally:
+            await server.stop()
+
+    exc = asyncio.run(scenario())
+    assert exc.status_code == 503
+    assert "{" not in str(exc)
+    assert "contact dns@example.org" in str(exc)
+    assert str(exc).startswith("registration of 'board-b' failed: the managed-DNS service is at capacity")
+
+
+def test_a_refusal_that_is_not_the_services_shape_keeps_its_status():
+    """A reverse proxy's HTML error page, or an empty body: then the
+    status code is the information, and it stays in the message."""
+    async def handler(_request):
+        return web.Response(text="<html>Bad Gateway</html>", status=502)
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/heartbeat", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(ManagedDnsError) as excinfo:
+                    await heartbeat(session, f"http://127.0.0.1:{port}", credential="x")
+            return excinfo.value
+        finally:
+            await runner.cleanup()
+
+    exc = asyncio.run(scenario())
+    assert exc.status_code == 502
+    assert "HTTP 502" in str(exc)
+    assert "Bad Gateway" in str(exc)
+
+
+def test_a_refusal_body_is_read_only_up_to_a_bound():
+    """A reverse proxy's error page or a hostile endpoint must not cost
+    the node an unbounded read, log line or database write on every
+    pass (Codex review of PR #608)."""
+    from netbbs.managed_dns.client import _MAX_REFUSAL_BYTES
+
+    async def handler(_request):
+        return web.Response(text="x" * (_MAX_REFUSAL_BYTES * 8), status=502)
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/heartbeat", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(ManagedDnsError) as excinfo:
+                    await heartbeat(session, f"http://127.0.0.1:{port}", credential="x")
+            return excinfo.value
+        finally:
+            await runner.cleanup()
+
+    exc = asyncio.run(scenario())
+    assert exc.status_code == 502
+    assert len(str(exc)) <= _MAX_REFUSAL_BYTES + 64
+
+
+def test_a_chunked_refusal_body_is_read_whole_up_to_the_bound():
+    """`StreamReader.read(n)` hands back what the buffer holds; a refusal
+    delivered in pieces must still parse as the service's JSON so its
+    structured `status` survives (Codex review of PR #608)."""
+    async def handler(request):
+        response = web.StreamResponse(status=409, headers={"Content-Type": "application/json"})
+        await response.prepare(request)
+        await response.write(b'{"error": "\'myboard\' was released at this node')
+        await asyncio.sleep(0.05)
+        await response.write(b'\'s own request", "status": "released"}')
+        await response.write_eof()
+        return response
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/reclaim", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            from netbbs.managed_dns.client import reclaim
+
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(ManagedDnsError) as excinfo:
+                    await reclaim(session, f"http://127.0.0.1:{port}", name="myboard", credential="c", dynamic=False)
+            return excinfo.value
+        finally:
+            await runner.cleanup()
+
+    exc = asyncio.run(scenario())
+    assert exc.service_status == "released"
+    assert "own request" in str(exc)
+
+
+def test_a_successful_body_is_read_only_up_to_a_bound_and_then_malformed():
+    """A 201 from a misconfigured or hostile endpoint is bounded like a
+    refusal (Codex review of PR #608): the node reads the bound, finds
+    no valid JSON in it, and reports a malformed response rather than
+    allocating the whole body."""
+    from netbbs.managed_dns.client import _MAX_RESPONSE_BYTES, reclaim
+
+    async def handler(_request):
+        return web.Response(text="[" + "1," * (_MAX_RESPONSE_BYTES) + "1]", status=201, content_type="application/json")
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/reclaim", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(ManagedDnsError, match="could not reach|malformed"):
+                    await reclaim(session, f"http://127.0.0.1:{port}", name="myboard", credential="c", dynamic=False)
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(scenario())

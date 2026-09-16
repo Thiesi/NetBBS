@@ -30,8 +30,10 @@ from netbbs.managed_dns.credential import (
     transition_credential_path_for,
 )
 from netbbs.managed_dns.state import (
+    ListenerFacts,
     OptIn,
     RegistrationStatus,
+    get_local_listeners,
     get_node_fingerprint,
     get_opt_in,
     get_previous_name,
@@ -108,6 +110,74 @@ def _foreign_credential_line(action: str, issuer: str, base_url: str) -> str:
     )
 
 
+# Design doc §16 Decision 6: the caller-facing address of a managed name
+# is a convention, and this is the one place the convention is written
+# down for a SysOp (issue #603). Shown wherever the name is -- the
+# registration editor and the status screen -- rather than behind a
+# help key on a screen visited once.
+_STANDARD_PORTS = (("ssh", "SSH", 22), ("telnet", "Telnet", 23), ("web", "HTTPS", 443))
+
+
+def standard_ports_lines(listeners: ListenerFacts | None) -> list[str]:
+    """Plain, unwrapped sentences stating the standard-ports convention
+    and how this node's own listeners measure up to it. The node knows
+    its *configured* ports with certainty and nothing about what sits in
+    front of them, so every line says what will happen at the port and
+    leaves the port-forward, proxy or firewall in front to the SysOp --
+    "cannot verify" is not "cannot mention". "Configured", not
+    "listens": the facts are recorded before the listeners start, and an
+    enabled transport whose optional dependency is missing is skipped at
+    startup with a log line (Codex review of PR #608)."""
+    lines = [
+        "Callers reach a managed name on the standard ports: SSH 22, Telnet 23, HTTPS 443. "
+        "The DNS record itself carries no port, so this is a convention the service cannot check."
+    ]
+    if listeners is None:
+        lines.append(
+            "This node has not recorded its own listener ports yet (they are noted at startup); "
+            "compare them against the convention yourself until it restarts."
+        )
+        return lines
+    for key, label, standard in _STANDARD_PORTS:
+        port = getattr(listeners, f"{key}_port")
+        if port is None:
+            lines.append(f"{label}: not enabled on this node.")
+        elif key == "web":
+            # Operator-written config, shown on a terminal: sanitised
+            # like anything else that reaches one (Codex review of PR
+            # #608 -- the URL validator refuses whitespace, not controls).
+            front = sanitize_text(listeners.web_public_url) if listeners.web_public_url else None
+            if front and front.lower().startswith("https://"):
+                lines.append(
+                    f"Web: this node is configured for {port} without TLS; its public URL is {front}. The web "
+                    "address is part of the promise only if that HTTPS front answers on 443 for the "
+                    "managed name."
+                )
+            else:
+                lines.append(
+                    f"Web: this node is configured for {port} without TLS. The web address is part of the promise "
+                    "only behind an HTTPS-terminating proxy on 443 -- never NetBBS's own listener on 443, "
+                    "which would serve passwords in plaintext on the port every caller assumes is HTTPS."
+                )
+        elif port == standard:
+            lines.append(f"{label}: this node is configured for {standard}, as callers expect.")
+        else:
+            lines.append(
+                f"{label}: this node is configured for {port}, so a caller dialling {standard} needs a "
+                "port-forward or proxy in front of it -- or has to be told the port."
+            )
+    return lines
+
+
+def _ports_preamble(session: Session, listeners: ListenerFacts | None) -> str:
+    rendered: list[str] = []
+    for line in standard_ports_lines(listeners):
+        rendered.extend(
+            colored(wrapped, fg_color=MUTED_COLOR) for wrapped in wrap_to_width(line, session.terminal_width)
+        )
+    return "\r\n".join(rendered)
+
+
 # Statuses design doc §16 Decision 3/5 treat as "this node currently has
 # a live-or-maturing registration" -- the gate for whether [R]egister
 # (a fresh attempt would just be rejected) or [L] Release (nothing
@@ -178,10 +248,12 @@ async def register_via_prompt(
 
     Issue #282: a draft editor rather than a fixed chain -- `[N]ame`
     (prefilled with the previous registration, so reclaiming is just
-    `[R]egister`; design doc §16 Decision 5), `[D]ynamic IP` (seeded
+    `[R]egister`; design doc §16 Decision 5) and `[D]ynamic IP` (seeded
     from the previous registration's own setting, `True` for a fresh
-    one), `[W]eb behind HTTPS proxy` (informational: sets expectations,
-    not the request), then `[R]egister`; `[B]ack` sends nothing. The
+    one), then `[R]egister`; `[B]ack` sends nothing. Decision 6's
+    standard-ports convention is stated above the fields, measured
+    against this node's own listeners (issue #603) -- it used to be a
+    `[W]eb behind HTTPS proxy` field whose answer went nowhere. The
     request itself runs inside the register step so a service rejection
     (reserved, taken, rate-limited, unreachable) keeps the draft on
     screen for another try; the credential-replacement confirmation
@@ -217,7 +289,8 @@ async def register_via_prompt(
 
     previous_name = await lane.run(get_registered_name)
     previous_dynamic = await lane.run(get_dynamic) if previous_name is not None else True
-    draft: dict = {"name": previous_name or "", "dynamic": previous_dynamic, "web_behind_proxy": False}
+    draft: dict = {"name": previous_name or "", "dynamic": previous_dynamic}
+    listeners = await lane.run(get_local_listeners)
 
     async def _name_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         shown = sanitize_text(draft["name"]) if draft["name"] else "(none)"
@@ -244,20 +317,12 @@ async def register_via_prompt(
             render=lambda d: "yes" if d["dynamic"] else "no",
             prompt=choice_field("dynamic", [True, False]), step=choice_step("dynamic", [True, False]),
             brief="Keep the record pointed at this node",
-            help="Keep the managed record pointed at this node's current address if it changes (dynamic IP).",
-        ),
-        FieldSpec(
-            key="web_behind_proxy", hotkey="w", menu_text=menu_key("W", "eb behind HTTPS proxy"),
-            label="Web served via an HTTPS proxy on 443",
-            render=lambda d: "yes" if d["web_behind_proxy"] else "no (web address is not part of the promise)",
-            prompt=choice_field("web_behind_proxy", [False, True]), step=choice_step("web_behind_proxy", [False, True]),
-            brief="Sets expectations only",
             help=(
-                "Telnet/SSH are always assumed to be on their standard ports. A bare A/AAAA record can't "
-                "say which port a web caller should use, and this node's own web listener has no TLS, so "
-                "the web address only counts as part of the promise behind an HTTPS-terminating reverse "
-                "proxy on 443. Neither this node nor the service can verify one; this only sets your own "
-                "expectations."
+                "Keep the managed record pointed at this node's current address as it changes (dynamic "
+                "IP). Either way this node checks in with the service every 15 minutes while it runs: "
+                "that is what keeps the name yours. A name the service stops hearing from for about a "
+                "week is taken offline and held for this node, which reclaims it by itself when it is "
+                "back."
             ),
         ),
     ]
@@ -347,14 +412,6 @@ async def register_via_prompt(
             )
             delete_credential(previous_credential_path_for(lane.path))
 
-        if not draft["web_behind_proxy"]:
-            for wrapped in wrap_to_width(
-                "(Noting that -- the managed record still tracks this node's address, "
-                "but a bare web address won't be part of the promise; telling callers "
-                "how to actually reach any web interface stays your own responsibility.)",
-                session.terminal_width,
-            ):
-                await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
         if was_reclaim:
             if result.status == "matured":
                 return f"Reclaimed {result.name}.netbbs.org -- it's live again."
@@ -379,6 +436,7 @@ async def register_via_prompt(
         session, lane,
         title="Managed DNS registration",
         subtitle="Register (or reclaim) this node's netbbs.org subdomain.",
+        preamble=_ports_preamble(session, listeners),
         fields=fields, draft=draft, save=save, error_type=ValueError,
         save_menu_text=menu_key("R", "egister"), save_hotkey="r", back_menu_text=menu_key("B", "ack"),
         **presentation,

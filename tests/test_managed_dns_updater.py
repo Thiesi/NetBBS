@@ -842,3 +842,312 @@ def test_the_foreign_credential_warning_is_logged_once_per_change(tmp_path, monk
     paused = [r for r in caplog.records if "managed-DNS updates are paused" in r.getMessage()]
     assert len(paused) == 1
     db.close()
+
+
+# -- automatic reclaim after abandonment (design doc §16 Decision 10, issue #600)
+
+
+async def _abandoned_node(tmp_path, server, backend_db, *, mature: bool):
+    """A node whose name the service swept as abandoned while the node's
+    own cached view still says it is active -- exactly what a node back
+    from an outage looks like on its first pass."""
+    db = Database(tmp_path / "node.db")
+    base_url = f"http://127.0.0.1:{server.port}"
+    async with aiohttp.ClientSession() as session:
+        registered = await register(session, base_url, name="myboard", node_fingerprint="fp-1", dynamic=True)
+        if mature:
+            await heartbeat_once(session, base_url, registered.credential)
+    mark_abandoned(backend_db, "myboard", released_at="2026-09-04T00:00:00+00:00")
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_node_fingerprint(db, "fp-1")
+    set_service_url(db, base_url)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.MATURED if mature else RegistrationStatus.PENDING)
+    set_published(db, mature)
+    from netbbs.managed_dns.state import set_dynamic
+
+    set_dynamic(db, True)
+    save_credential(credential_path_for(db.path), registered.credential)
+    return db, registered.credential
+
+
+async def heartbeat_once(session, base_url, credential):
+    from netbbs.managed_dns.client import heartbeat
+
+    await heartbeat(session, base_url, credential=credential)
+
+
+async def _run_passes(db, count):
+    """`count` consecutive passes of the updater against a real service."""
+    for _ in range(count):
+        sleep_calls = _fake_sleep_recorder()
+        await _run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: False)
+
+
+def test_updater_reclaims_an_abandoned_name_by_itself_once_the_node_is_back(tmp_path):
+    """Pass one: the heartbeat 401s and the node learns it was abandoned.
+    Pass two: the node reclaims the name with the credential it still
+    holds and heartbeats it -- the name is live again with no SysOp
+    involvement, which is the whole of Decision 10."""
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, min_age_seconds=0)
+        await server.start()
+        try:
+            db, credential = await _abandoned_node(tmp_path, server, backend_db, mature=True)
+            await _run_passes(db, 1)
+            after_first = get_registration_status(db)
+            await _run_passes(db, 1)
+            return db, credential, after_first, get_registration_by_name(backend_db, "myboard")
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, credential, after_first, row = asyncio.run(scenario())
+    assert after_first is RegistrationStatus.ABANDONED
+    assert get_registration_status(db) is RegistrationStatus.MATURED
+    assert get_published(db)
+    assert row.status == "matured"
+    assert load_credential(credential_path_for(db.path)) == credential  # a reclaim, not a fresh registration
+    from netbbs.managed_dns.state import get_recovery_note
+
+    assert get_recovery_note(db) is None
+    db.close()
+
+
+def test_updater_never_registers_afresh_when_the_service_no_longer_holds_the_name(tmp_path):
+    """The cooldown purged the row (or the service forgot it). A fresh
+    registration mints a credential and spends a rate-limit token, and
+    the name may be somebody else's by now -- that stays a SysOp's own
+    keystroke. The node keeps saying ABANDONED, records why the attempt
+    failed for the DNS screen, and the service has no new row."""
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, min_age_seconds=0)
+        await server.start()
+        try:
+            db, _credential = await _abandoned_node(tmp_path, server, backend_db, mature=True)
+            await _run_passes(db, 1)
+            from services.managed_dns.store import delete_registration
+
+            delete_registration(backend_db, "myboard")
+            await _run_passes(db, 2)
+            return db, get_registration_by_name(backend_db, "myboard")
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, row = asyncio.run(scenario())
+    assert row is None  # nothing was registered on the node's behalf
+    assert get_registration_status(db) is RegistrationStatus.ABANDONED
+    from netbbs.managed_dns.state import get_recovery_note
+
+    note = get_recovery_note(db)
+    assert note is not None
+    assert "not held for reclaim by this credential" in note.text
+    db.close()
+
+
+def test_a_final_refusal_is_not_retried_every_pass(tmp_path):
+    """A 409 means this credential can never reclaim the name; the note
+    records that and the next passes send nothing (Codex review of PR
+    #608). A capacity or transport refusal is still retried."""
+    from netbbs.managed_dns.state import get_recovery_note
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, min_age_seconds=0)
+        await server.start()
+        try:
+            db, _credential = await _abandoned_node(tmp_path, server, backend_db, mature=True)
+            await _run_passes(db, 1)
+            from services.managed_dns.store import delete_registration
+
+            delete_registration(backend_db, "myboard")
+            await _run_passes(db, 1)
+            first = get_recovery_note(db)
+            await _run_passes(db, 2)
+            return db, first, get_recovery_note(db)
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, first, later = asyncio.run(scenario())
+    assert first is not None and first.final
+    assert later == first  # untouched: no further attempt was made
+    assert get_registration_status(db) is RegistrationStatus.ABANDONED
+    db.close()
+
+
+def test_updater_leaves_a_released_name_alone(tmp_path):
+    """Release is the SysOp's decision to stop (Decision 5); abandonment
+    is the service noticing the node was away. Only the second is
+    undone automatically."""
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, min_age_seconds=0)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            base_url = f"http://127.0.0.1:{server.port}"
+            async with aiohttp.ClientSession() as session:
+                registered = await register(session, base_url, name="myboard", node_fingerprint="fp-1", dynamic=False)
+                from netbbs.managed_dns.client import release
+
+                await release(session, base_url, credential=registered.credential)
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_node_fingerprint(db, "fp-1")
+            set_service_url(db, base_url)
+            set_registered_name(db, "myboard")
+            set_registration_status(db, RegistrationStatus.RELEASED)
+            save_credential(credential_path_for(db.path), registered.credential)
+            await _run_passes(db, 2)
+            return db, get_registration_by_name(backend_db, "myboard")
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, row = asyncio.run(scenario())
+    assert row.status == "released"
+    assert get_registration_status(db) is RegistrationStatus.RELEASED
+    db.close()
+
+
+def test_updater_reclaim_is_refused_for_a_revoked_name_and_says_so(tmp_path):
+    """A revoked row is reclaimable by nothing (Decision 4); the
+    automatic path must not become the loophole, and the DNS screen gets
+    the service's answer."""
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, min_age_seconds=0, admin_token="s3cret")
+        await server.start()
+        try:
+            db, _credential = await _abandoned_node(tmp_path, server, backend_db, mature=True)
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"http://127.0.0.1:{server.port}/admin/revoke",
+                    json={"name": "myboard", "reason": "test"},
+                    headers={"Authorization": "Bearer s3cret"},
+                ) as response:
+                    assert response.status == 200
+            await _run_passes(db, 2)
+            return db, get_registration_by_name(backend_db, "myboard")
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, row = asyncio.run(scenario())
+    assert row.status == "revoked"
+    assert get_registration_status(db) is RegistrationStatus.ABANDONED
+    from netbbs.managed_dns.state import get_recovery_note
+
+    assert get_recovery_note(db) is not None
+    db.close()
+
+
+def test_the_automatic_reclaim_failure_is_logged_once_per_change(tmp_path, caplog):
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, min_age_seconds=0)
+        await server.start()
+        try:
+            db, _credential = await _abandoned_node(tmp_path, server, backend_db, mature=True)
+            await _run_passes(db, 1)
+            from services.managed_dns.store import delete_registration
+
+            delete_registration(backend_db, "myboard")
+            await _run_passes(db, 3)
+            return db
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="netbbs.managed_dns.updater"):
+        db = asyncio.run(scenario())
+    warnings = [r for r in caplog.records if "could not be reclaimed automatically" in r.getMessage()]
+    assert len(warnings) == 1
+    db.close()
+
+
+def test_updater_adopts_the_services_word_when_a_stale_abandoned_view_meets_a_released_row(tmp_path):
+    """A node restored from a backup taken before the SysOp released the
+    name: its first heartbeat 401s, it concludes `abandoned`, and its
+    automatic reclaim must not undo the release (Codex review of PR
+    #608). The service says released; the node adopts that and stops."""
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, min_age_seconds=0)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            base_url = f"http://127.0.0.1:{server.port}"
+            async with aiohttp.ClientSession() as session:
+                registered = await register(session, base_url, name="myboard", node_fingerprint="fp-1", dynamic=False)
+                from netbbs.managed_dns.client import release
+
+                await heartbeat_once(session, base_url, registered.credential)
+                await release(session, base_url, credential=registered.credential)
+            # The "backup": the node still believes the name is live.
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_node_fingerprint(db, "fp-1")
+            set_service_url(db, base_url)
+            set_registered_name(db, "myboard")
+            set_registration_status(db, RegistrationStatus.MATURED)
+            set_published(db, True)
+            save_credential(credential_path_for(db.path), registered.credential)
+            await _run_passes(db, 3)
+            return db, get_registration_by_name(backend_db, "myboard")
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, row = asyncio.run(scenario())
+    assert row.status == "released"  # untouched by the node
+    assert get_registration_status(db) is RegistrationStatus.RELEASED
+    db.close()
+
+
+def test_updater_fails_closed_against_a_service_without_the_reclaim_route(tmp_path):
+    """A service older than `/reclaim` answers 404; the node records it
+    and stays `abandoned` rather than falling back to `/register`, which
+    on that service would have registered afresh (Codex review of PR
+    #608)."""
+    from aiohttp import web
+
+    async def not_found(_request):
+        # What aiohttp answers for an unknown route: plain text, not the
+        # service's JSON shape, so the client keeps the status code.
+        return web.Response(status=404, text="404: Not Found")
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/reclaim", not_found)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            db = Database(tmp_path / "node.db")
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_node_fingerprint(db, "fp-1")
+            set_service_url(db, f"http://127.0.0.1:{port}")
+            set_registered_name(db, "myboard")
+            set_registration_status(db, RegistrationStatus.ABANDONED)
+            save_credential(credential_path_for(db.path), "old-credential")
+            await _run_passes(db, 1)
+            return db
+        finally:
+            await runner.cleanup()
+
+    db = asyncio.run(scenario())
+    from netbbs.managed_dns.state import get_recovery_note
+
+    assert get_registration_status(db) is RegistrationStatus.ABANDONED
+    assert load_credential(credential_path_for(db.path)) == "old-credential"
+    note = get_recovery_note(db)
+    assert note is not None and "404" in note.text
+    assert not note.final  # an upgraded service would answer; keep asking
+    db.close()

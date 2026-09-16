@@ -2435,3 +2435,190 @@ def test_revoke_skips_a_target_the_row_under_which_changed_mid_flight(db):
     replacement = get_registration_by_name(db, "newname")
     assert replacement.status == "pending"
     assert replacement.credential_hash == hash_credential("a-brand-new-secret")
+
+
+# -- the contact channel and honest capacity wording (issue #598) ------------
+
+
+def test_the_capacity_refusal_names_the_contact_channel_and_stops_promising_that_waiting_helps(db):
+    async def scenario():
+        server = await _start_server(db, cumulative_cap=1, contact="https://example.org/managed-dns")
+        try:
+            await _register(server, name="board-a", node_fingerprint="fp-1")
+            return await _register_raw(server, name="board-b", node_fingerprint="fp-2")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 503
+    assert "retrying will not help" in body["error"]
+    assert "released or abandoned" in body["error"]
+    assert "contact https://example.org/managed-dns" in body["error"]
+    assert body["contact"] == "https://example.org/managed-dns"
+    assert "try again later" not in body["error"]
+
+
+def test_the_rate_limit_refusal_keeps_try_again_shortly_and_names_the_contact_channel(db):
+    async def scenario():
+        server = await _start_server(db, rate_limit_capacity=1, contact="dns@example.org")
+        try:
+            await _register(server, name="board-a", node_fingerprint="fp-1")
+            return await _register_raw(server, name="board-b", node_fingerprint="fp-2")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 429
+    assert "try again shortly" in body["error"]
+    assert "contact dns@example.org" in body["error"]
+
+
+def test_an_instance_without_a_contact_channel_says_so_rather_than_naming_the_projects(db):
+    """A self-hosted copy has no business telling its SysOps to write
+    to this project; blank means blank."""
+    async def scenario():
+        server = await _start_server(db, cumulative_cap=1)
+        try:
+            await _register(server, name="board-a", node_fingerprint="fp-1")
+            return await _register_raw(server, name="board-b", node_fingerprint="fp-2")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 503
+    assert "whoever runs this service" in body["error"]
+    assert body["contact"] is None
+    assert "github" not in body["error"].lower()
+
+
+# -- /reclaim (design doc §16 Decision 10, issue #600) ----------------------
+
+
+async def _reclaim_raw(server: ManagedDnsServer, *, name, credential, dynamic=False):
+    payload = {"name": name, "credential": credential, "dynamic": dynamic}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"http://127.0.0.1:{server.port}/reclaim", json=payload) as response:
+            return response.status, await response.json()
+
+
+def test_reclaim_reactivates_an_abandoned_row_with_its_own_credential(db):
+    async def scenario():
+        server = await _start_server(db, min_age_seconds=0)
+        try:
+            registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
+            mark_abandoned(db, "myboard", released_at="2026-09-04T00:00:00+00:00")
+            return await _reclaim_raw(server, name="myboard", credential=registered["credential"]), registered["credential"]
+        finally:
+            await server.stop()
+
+    (status, body), credential = asyncio.run(scenario())
+    assert status == 201
+    assert body["credential"] == credential
+    assert body["status"] == "matured"
+    assert get_registration_by_name(db, "myboard").status == "matured"
+
+
+def test_reclaim_never_registers_afresh(db):
+    """Three ways the automatic path could otherwise have minted a new
+    registration: no row at all, a row past its cooldown, and a row
+    held by a different credential. Each is refused identically and
+    leaves the table exactly as it was."""
+    async def scenario():
+        clock = {"now": datetime(2026, 9, 16, tzinfo=timezone.utc)}
+        server = await _start_server(db, cooldown_seconds=60, clock=lambda: clock["now"])
+        try:
+            fresh = await _reclaim_raw(server, name="nobody", credential="whatever")
+            registered = await _register(server, name="myboard")
+            mark_abandoned(db, "myboard", released_at=clock["now"].isoformat())
+            other = await _reclaim_raw(server, name="myboard", credential="not-mine")
+            clock["now"] += timedelta(seconds=120)
+            expired = await _reclaim_raw(server, name="myboard", credential=registered["credential"])
+            return fresh, other, expired
+        finally:
+            await server.stop()
+
+    fresh, other, expired = asyncio.run(scenario())
+    for status, body in (fresh, other, expired):
+        assert status == 409
+        assert "not held for reclaim by this credential" in body["error"]
+    assert get_registration_by_name(db, "nobody") is None
+    assert get_registration_by_name(db, "myboard").status == "abandoned"  # expired but untouched
+
+
+def test_reclaim_of_an_already_active_row_is_an_idempotent_retry(db):
+    """A reclaim whose 201 was lost on the wire leaves the node saying
+    `abandoned` and the service saying `matured`; the retry must answer
+    with the row's state, not "already registered", or the node refuses
+    every pass forever (Codex review of PR #608)."""
+    async def scenario():
+        server = await _start_server(db, min_age_seconds=0)
+        try:
+            registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
+            before = get_registration_by_name(db, "myboard")
+            result = await _reclaim_raw(server, name="myboard", credential=registered["credential"])
+            return result, before, get_registration_by_name(db, "myboard")
+        finally:
+            await server.stop()
+
+    (status, body), before, after = asyncio.run(scenario())
+    assert status == 201
+    assert body["status"] == "matured"
+    assert before == after  # nothing moved
+
+
+def test_reclaim_refuses_a_released_row_and_says_released(db):
+    """Release is the SysOp's own decision to stop (Decision 5); a node
+    restored from a backup taken before it must not undo it on its first
+    pass. The refusal carries `status: released` so the node can adopt
+    the service's word. `/register` with the same credential -- the
+    SysOp's `[R]egister` -- still reclaims it."""
+    async def scenario():
+        server = await _start_server(db, min_age_seconds=0)
+        try:
+            registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
+            await _release(server, credential=registered["credential"])
+            refused = await _reclaim_raw(server, name="myboard", credential=registered["credential"])
+            manual = await _register_raw(server, name="myboard", credential=registered["credential"])
+            return refused, manual
+        finally:
+            await server.stop()
+
+    (status, body), (manual_status, manual_body) = asyncio.run(scenario())
+    assert status == 409
+    assert body["status"] == "released"
+    assert "released at this node's own request" in body["error"]
+    assert manual_status == 201
+    assert manual_body["status"] == "matured"
+
+
+def test_reclaim_refuses_a_revoked_row_and_says_revoked(db):
+    async def scenario():
+        server = await _start_server(db, min_age_seconds=0, admin_token="s3cret")
+        try:
+            registered = await _register(server, name="badname")
+            await _heartbeat(server, credential=registered["credential"])
+            await _revoke(server, name="badname", token="s3cret")
+            return await _reclaim_raw(server, name="badname", credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 409
+    assert body["status"] == "revoked"
+    assert get_registration_by_name(db, "badname").status == "revoked"
+
+
+def test_reclaim_validates_its_body(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            return await _reclaim_raw(server, name="myboard", credential="x", dynamic="yes")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 400
+    assert "boolean dynamic" in body["error"]

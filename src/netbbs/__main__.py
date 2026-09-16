@@ -42,7 +42,7 @@ from netbbs.link.onboarding import resolve_link_enabled, set_configured_link_ena
 from netbbs.link.reliable_nodes import run_scheduled_reliable_nodes_refresh
 from netbbs.link.store import load_link_node
 from netbbs.link.trust import maintain_trust_state
-from netbbs.managed_dns.state import set_node_fingerprint, set_service_url
+from netbbs.managed_dns.state import ListenerFacts, set_local_listeners, set_node_fingerprint, set_service_url
 from netbbs.net.daybreak import run_daybreak_announcer
 from netbbs.net.login_flow import handle_session, handle_ssh_session
 from netbbs.net.maintenance import MaintenanceMode
@@ -887,6 +887,17 @@ async def run(
         # once. Nothing else in the package writes that key, so this
         # cannot clobber a choice made anywhere else.
         set_service_url(db, config.managed_dns.service_url)
+
+        # Issue #603: the SysOp console's DNS screen states design doc
+        # §16 Decision 6's standard-ports convention against this
+        # node's own listeners, and it cannot reach `config`. Written
+        # every startup so a port change is reflected on the next one.
+        set_local_listeners(db, ListenerFacts(
+            telnet_port=config.telnet.port if config.telnet.enabled else None,
+            ssh_port=config.ssh.port if config.ssh.enabled else None,
+            web_port=config.web.port if config.web.enabled else None,
+            web_public_url=config.web.public_url,
+        ))
 
         # Design doc §16, issue #219: `config.link.enabled` is tri-state
         # until here. An explicit TOML/CLI value wins; a silent config
