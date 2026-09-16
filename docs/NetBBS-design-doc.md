@@ -8766,10 +8766,27 @@ name. The voluntary release path refuses in this state and tells the
 SysOp to cancel the rename first; an operator acting on a complaint has
 nobody to ask, so revocation takes both rather than refusing.
 
+**Only the rows that are still this registrant's, and still the rows
+that were checked.** A replacement can outlive the name it replaced, so
+the same node-fingerprint check rename completion and cancellation apply
+before mutating anything through a `replaces_name` link applies here
+too: a name whose cooldown elapsed and was reissued to a different node
+is never taken by a complaint about the node that used to hold it. And
+because a fresh registration does not pass through the transition lane
+that a revocation holds, each row is re-read after the provider awaits
+and written only if its credential hash is unchanged — proof it is still
+the registration that was checked, rather than one that claimed the name
+in between.
+
 **Publication is undone before the rows move, and a provider failure
 revokes nothing** — the same rule voluntary release already follows.
 A takedown recorded in the database while the record is still resolving
-would be worse than no takedown, because it looks finished.
+would be worse than no takedown, because it looks finished. Only a row
+which can still hold a published record is worth a provider call at all:
+release and abandonment leave `last_known_address` behind on a row whose
+record they already deleted, and failing a revocation on a deletion that
+had nothing to delete would leave the credential reclaimable during
+exactly the provider outage an operator cannot wait out.
 
 **Reports arrive through the project's issue tracker**, which is a
 public channel and a real trade-off: an impersonation complaint tends to

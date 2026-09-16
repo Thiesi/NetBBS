@@ -17,7 +17,7 @@ from services.managed_dns.dns_provider import DnsProviderError, LoggingDnsProvid
 from services.managed_dns.server import ManagedDnsServer
 from services.managed_dns.store import (
     Database, get_registration_by_credential_hash, get_registration_by_name, hash_credential,
-    mark_abandoned,
+    delete_registration, insert_registration, mark_abandoned,
 )
 
 
@@ -2245,3 +2245,157 @@ def test_a_revoked_name_frees_for_a_new_registrant_after_the_cooldown(db):
     (during_status, _), (after_status, _) = asyncio.run(scenario())
     assert during_status == 409
     assert after_status == 201
+
+
+def test_revoke_leaves_a_reissued_name_alone_when_a_stale_rename_link_points_at_it(db):
+    """Codex review of PR #604. A replacement can outlive the name it
+    replaced: once that name's cooldown elapsed it may have been
+    reissued to a different node, with the stale `replaces_name` still
+    pointing at it. Rename completion and cancellation both check the
+    node fingerprint before mutating anything through that link, and so
+    must this -- otherwise a complaint about one board takes away
+    another board's name."""
+    async def scenario():
+        server = await _start_server(db, admin_token="s3cret", min_age_seconds=0)
+        try:
+            original = await _register(server, name="oldname")
+            await _mature(server, db, name="oldname", credential=original["credential"])
+            _, replacement = await _rename(
+                server, credential=original["credential"], name="newname"
+            )
+            # 'oldname' has since expired and been reissued to somebody
+            # else, while the replacement still names it.
+            delete_registration(db, "oldname")
+            insert_registration(
+                db, name="oldname", credential_hash=hash_credential("someone-elses-secret"),
+                node_fingerprint="fp-unrelated", dynamic=False,
+                created_at="2026-09-16T00:00:00+00:00",
+            )
+            revoked = await _revoke(server, name="newname", token="s3cret")
+            return revoked, replacement
+        finally:
+            await server.stop()
+
+    (status, body), _replacement = asyncio.run(scenario())
+    assert status == 200
+    assert body["revoked"] == ["newname"]
+    reissued = get_registration_by_name(db, "oldname")
+    assert reissued.status == "pending"
+    assert reissued.node_fingerprint == "fp-unrelated"
+
+
+def test_revoking_an_already_released_row_does_not_call_the_dns_provider(db):
+    """Codex review of PR #604. `mark_released` leaves
+    `last_known_address` set on a row whose record the release already
+    deleted, so a revocation that tested that column alone sent a
+    pointless deletion -- and, with the provider down, failed on it and
+    left the credential reclaimable for want of deleting something that
+    was not there."""
+    class OutageAfterRelease(LoggingDnsProvider):
+        failing = False
+
+        def delete_record(self, fqdn):
+            if self.failing:
+                raise DnsProviderError("BIND is down")
+            return super().delete_record(fqdn)
+
+    provider = OutageAfterRelease()
+
+    async def scenario():
+        server = await _start_server(
+            db, dns_provider=provider, admin_token="s3cret", min_age_seconds=0,
+        )
+        try:
+            registered = await _register(server, name="badname")
+            await _mature(server, db, name="badname", credential=registered["credential"])
+            release_status, _ = await _release(server, credential=registered["credential"])
+            assert release_status == 200
+            # The record is already gone; the provider now goes down.
+            provider.failing = True
+            return await _revoke(server, name="badname", token="s3cret")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["revoked"] == ["badname"]
+    row = get_registration_by_name(db, "badname")
+    assert row.status == "revoked"
+    # The precondition the fix turns on: release left the address behind.
+    assert row.last_known_address is not None
+
+
+def test_an_expired_revoked_name_is_admitted_as_a_rename_target_immediately(db):
+    """Codex review of PR #604. The invariant that an expired inactive
+    rename target is deleted and admitted immediately, rather than
+    waiting for the periodic sweep, has to hold for the new status
+    too."""
+    async def scenario():
+        clock = {"now": datetime(2026, 9, 5, tzinfo=timezone.utc)}
+        server = await _start_server(
+            db, admin_token="s3cret", min_age_seconds=0, clock=lambda: clock["now"],
+            cooldown_seconds=90 * 24 * 60 * 60,
+        )
+        try:
+            taken = await _register(server, name="wanted", node_fingerprint="fp-other")
+            await _revoke(server, name="wanted", token="s3cret")
+            mine = await _register(server, name="mine", node_fingerprint="fp-mine")
+            await _mature(server, db, name="mine", credential=mine["credential"])
+
+            during = await _rename(server, credential=mine["credential"], name="wanted")
+            clock["now"] = datetime(2027, 1, 5, tzinfo=timezone.utc)
+            after = await _rename(server, credential=mine["credential"], name="wanted")
+            return during, after, taken
+        finally:
+            await server.stop()
+
+    (during_status, _), (after_status, _), _taken = asyncio.run(scenario())
+    assert during_status == 409  # still inside the revoked name's cooldown
+    assert after_status == 201  # admitted without waiting for a sweep pass
+
+
+def test_revoke_skips_a_target_the_row_under_which_changed_mid_flight(db):
+    """Codex review of PR #604. A fresh registration does not pass
+    through the transition lane, so a name whose cooldown expired during
+    the provider await can already belong to somebody else by the time
+    the writes run. Revoking by name alone would take down the row that
+    replaced it; the re-read compares `credential_hash`, which is unique
+    per registration and never reissued.
+
+    The swap is driven from a wrapper around `_delete_record` rather
+    than from inside the DNS provider, because the provider runs on a
+    worker thread (`asyncio.to_thread`) and this database connection
+    belongs to the loop's own thread. The wrapper lands in the same
+    place the race would: after a provider await, before the writes."""
+    async def scenario():
+        server = await _start_server(db, admin_token="s3cret", min_age_seconds=0)
+        try:
+            original = await _register(server, name="oldname")
+            await _mature(server, db, name="oldname", credential=original["credential"])
+            await _rename(server, credential=original["credential"], name="newname")
+
+            delete_record = server._delete_record
+
+            async def delete_then_swap(name: str) -> bool:
+                deleted = await delete_record(name)
+                delete_registration(db, "newname")
+                insert_registration(
+                    db, name="newname", credential_hash=hash_credential("a-brand-new-secret"),
+                    node_fingerprint="fp-1", dynamic=False,
+                    created_at="2026-09-16T00:00:00+00:00",
+                )
+                server._delete_record = delete_record
+                return deleted
+
+            server._delete_record = delete_then_swap
+            return await _revoke(server, name="oldname", token="s3cret")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["revoked"] == ["oldname"]
+    # The row that took the name over is untouched.
+    replacement = get_registration_by_name(db, "newname")
+    assert replacement.status == "pending"
+    assert replacement.credential_hash == hash_credential("a-brand-new-secret")

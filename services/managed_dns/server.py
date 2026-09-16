@@ -398,6 +398,14 @@ class ManagedDnsServer:
         # working name. `_handle_release` refuses in this state and tells
         # the SysOp to cancel first; an operator acting on a complaint
         # has nobody to ask, so this takes both.
+        #
+        # Only while the link is still this registrant's, though: the
+        # same node-fingerprint check that rename completion and
+        # cancellation already apply before mutating anything through a
+        # `replaces_name` relationship (Codex review of PR #604). A
+        # replacement left pointing at a name whose cooldown expired and
+        # was reissued to a different node would otherwise let a
+        # complaint about one board take away another board's name.
         targets = [registration]
         partner_name = registration.replaces_name
         if partner_name is None:
@@ -405,30 +413,67 @@ class ManagedDnsServer:
             partner_name = replacement.name if replacement is not None else None
         if partner_name is not None:
             partner = get_registration_by_name(self._db, partner_name)
-            if partner is not None and partner.status != "revoked":
+            if (
+                partner is not None and partner.status != "revoked"
+                and partner.node_fingerprint == registration.node_fingerprint
+            ):
                 targets.append(partner)
 
         # Publication is undone before the rows move, and a failure
         # leaves everything untouched for a retry -- the same "release is
         # not finalized until deletion succeeds" rule the voluntary path
-        # follows. Revoking a row whose record was never published (a
-        # pending, released or abandoned one) needs no provider call.
+        # follows.
+        #
+        # Only a row that can still *have* a published record is worth a
+        # provider call (Codex review of PR #604): `mark_released` and
+        # `mark_abandoned` leave `last_known_address` set on a row whose
+        # record those paths already deleted, so testing that column
+        # alone sent a pointless deletion for an inactive row -- and
+        # during a provider outage failed the whole revocation on it,
+        # leaving the credential reclaimable for want of deleting
+        # something that was not there. A *pending* row can hold a live
+        # record, so it is not simply "matured only": a rename publishes
+        # the replacement before `complete_rename` matures it.
         for target in targets:
-            if target.status == "matured" or target.last_known_address is not None:
-                if not await self._delete_record(target.name):
-                    return web.json_response(
-                        {
-                            "error": f"DNS deletion failed for {target.name!r}; "
-                            "nothing was revoked and this may be retried"
-                        },
-                        status=503,
-                    )
+            publishable = target.status == "matured" or (
+                target.status == "pending" and target.last_known_address is not None
+            )
+            if publishable and not await self._delete_record(target.name):
+                return web.json_response(
+                    {
+                        "error": f"DNS deletion failed for {target.name!r}; "
+                        "nothing was revoked and this may be retried"
+                    },
+                    status=503,
+                )
 
         revoked_at = self._clock().isoformat()
         revoked: list[str] = []
         for target in targets:
+            # Re-read after the provider awaits above. A *fresh*
+            # registration never passes through this lane (only a reclaim
+            # does), so a name whose cooldown expired mid-await can
+            # already belong to somebody else by the time these writes
+            # run, and revoking by name alone would take down the row
+            # that replaced it (Codex review of PR #604).
+            # `credential_hash` is unique per registration and never
+            # reissued, so an unchanged one is proof this is still the
+            # row that was checked.
+            current = get_registration_by_name(self._db, target.name)
+            if current is None or current.credential_hash != target.credential_hash:
+                _logger.warning(
+                    "Managed-DNS revocation skipped %r: the registration changed while it ran",
+                    target.name,
+                )
+                continue
             if revoke_registration(self._db, target.name, released_at=revoked_at, reason=reason):
                 revoked.append(target.name)
+
+        if not revoked:
+            return web.json_response(
+                {"error": f"{name!r} changed while the revocation ran; review it and try again"},
+                status=409,
+            )
         _logger.warning(
             "Managed-DNS registration(s) %s revoked by the operator (reason: %s)",
             ", ".join(repr(revoked_name) for revoked_name in revoked), reason,
@@ -765,7 +810,13 @@ class ManagedDnsServer:
             target = get_registration_by_name(self._db, name)
             if target is not None:
                 cooldown_elapsed = (
-                    target.status in ("released", "abandoned")
+                    # 'revoked' belongs here with the other two inactive
+                    # statuses (Codex review of PR #604): a revoked name
+                    # frees on the same cooldown, and the invariant that
+                    # an expired inactive rename target is admitted
+                    # immediately rather than waiting for the sweep holds
+                    # for it too.
+                    target.status in ("released", "abandoned", "revoked")
                     and target.released_at is not None
                     and now - datetime.fromisoformat(target.released_at)
                     >= timedelta(seconds=self._cooldown_seconds)
