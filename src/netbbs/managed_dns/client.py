@@ -34,6 +34,13 @@ from netbbs.managed_dns.state import RegistrationStatus
 
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 
+# How much of a refusal body is read at all (Codex review of PR #608).
+# The service's own refusals are a sentence or two; anything longer is
+# a reverse proxy's error page or a hostile endpoint, and a node must
+# not allocate, log or persist an unbounded body on every 15-minute
+# pass. Comfortably above the longest sentence the service writes.
+_MAX_REFUSAL_BYTES = 4096
+
 
 class ManagedDnsError(Exception):
     """Raised for anything gone wrong talking to the managed-DNS
@@ -101,10 +108,15 @@ def _refusal(status: int, text: str) -> _Refusal:
     )
 
 
-def _refused(prefix: str, status: int, text: str) -> ManagedDnsError:
-    refusal = _refusal(status, text)
+async def _refused(prefix: str, response) -> ManagedDnsError:
+    """Read at most `_MAX_REFUSAL_BYTES` of the refusal and build the
+    error from it. `content.read(n)` stops at the bound; the remainder
+    is never read, so a large body costs the bound, not its length."""
+    raw = await response.content.read(_MAX_REFUSAL_BYTES)
+    text = raw.decode("utf-8", errors="replace")
+    refusal = _refusal(response.status, text)
     return ManagedDnsError(
-        f"{prefix}: {refusal.detail}", status_code=status,
+        f"{prefix}: {refusal.detail}", status_code=response.status,
         service_status=refusal.service_status, contact=refusal.contact,
     )
 
@@ -181,8 +193,7 @@ async def register(
             allow_redirects=False,
         ) as response:
             if response.status != 201:
-                text = await response.text()
-                raise _refused(f"registration of {name!r} failed", response.status, text)
+                raise await _refused(f"registration of {name!r} failed", response)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -227,8 +238,7 @@ async def reclaim(
             timeout=ClientTimeout(total=timeout), allow_redirects=False,
         ) as response:
             if response.status != 201:
-                text = await response.text()
-                raise _refused(f"reclaim of {name!r} failed", response.status, text)
+                raise await _refused(f"reclaim of {name!r} failed", response)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -261,8 +271,7 @@ async def heartbeat(
             allow_redirects=False,
         ) as response:
             if response.status != 200:
-                text = await response.text()
-                raise _refused("heartbeat failed", response.status, text)
+                raise await _refused("heartbeat failed", response)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -304,8 +313,7 @@ async def rename(
             allow_redirects=False,
         ) as response:
             if response.status != 201:
-                text = await response.text()
-                raise _refused(f"rename to {name!r} failed", response.status, text)
+                raise await _refused(f"rename to {name!r} failed", response)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -341,8 +349,7 @@ async def cancel_rename(
             allow_redirects=False,
         ) as response:
             if response.status != 200:
-                text = await response.text()
-                raise _refused("cancel rename failed", response.status, text)
+                raise await _refused("cancel rename failed", response)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -385,8 +392,7 @@ async def release(
             allow_redirects=False,
         ) as response:
             if response.status != 200:
-                text = await response.text()
-                raise _refused("release failed", response.status, text)
+                raise await _refused("release failed", response)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -448,8 +454,7 @@ async def admin_registrations(
             allow_redirects=False,
         ) as response:
             if response.status != 200:
-                text = await response.text()
-                raise _refused("listing registrations failed", response.status, text)
+                raise await _refused("listing registrations failed", response)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -500,8 +505,7 @@ async def admin_revoke(
             timeout=ClientTimeout(total=timeout), allow_redirects=False,
         ) as response:
             if response.status != 200:
-                text = await response.text()
-                raise _refused(f"revoking {name!r} failed", response.status, text)
+                raise await _refused(f"revoking {name!r} failed", response)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
