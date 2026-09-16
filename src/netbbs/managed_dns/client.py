@@ -46,6 +46,7 @@ _MAX_REFUSAL_BYTES = 4096
 # `response.json()` would otherwise read whatever a misconfigured or
 # hostile endpoint sends before anything validated it -- on every pass.
 _MAX_RESPONSE_BYTES = 64 * 1024
+_MAX_ADMIN_LISTING_BYTES = 4 * 1024 * 1024
 
 
 class ManagedDnsError(Exception):
@@ -485,7 +486,10 @@ async def admin_registrations(
         ) as response:
             if response.status != 200:
                 raise await _refused("listing registrations failed", response)
-            body = await response.json(loads=strict_json_loads)
+            # Up to the cumulative cap's worth of rows plus the inactive
+            # ones inside their cooldown: bounded by the table, not by what
+            # one node's own answer weighs.
+            body = await _json_body(response, limit=_MAX_ADMIN_LISTING_BYTES)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
     rows = body.get("registrations") if isinstance(body, dict) else None
@@ -542,7 +546,7 @@ async def admin_revoke(
         ) as response:
             if response.status != 200:
                 raise await _refused(f"revoking {name!r} failed", response)
-            body = await response.json(loads=strict_json_loads)
+            body = await _json_body(response)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
     revoked = body.get("revoked") if isinstance(body, dict) else None
