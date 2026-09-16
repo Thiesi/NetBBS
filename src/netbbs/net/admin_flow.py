@@ -5404,7 +5404,8 @@ async def _draw_managed_dns_status(
                 if status is ManagedDnsRegistrationStatus.REVOKED else None
             )
             for line in _managed_dns_state_guidance(
-                status, published, recovery_refused=note is not None, contact=contact,
+                status, published, recovery_refused=note is not None,
+                recovery_final=note is not None and note.final, contact=contact,
             ):
                 await _write_wrapped_muted(session, line)
             if status is ManagedDnsRegistrationStatus.ABANDONED:
@@ -5473,6 +5474,7 @@ async def _write_wrapped_muted(session: Session, text: str) -> None:
 
 def _managed_dns_state_guidance(
     status: ManagedDnsRegistrationStatus, published: bool, *, recovery_refused: bool = False,
+    recovery_final: bool = False,
     contact: str | None = None,
 ) -> list[str]:
     """One or two plain sentences per registration state: what it means
@@ -5494,9 +5496,13 @@ def _managed_dns_state_guidance(
             "check-in retries the publication. Nothing to do unless this persists."
         ]
     if status is ManagedDnsRegistrationStatus.ABANDONED and recovery_refused:
+        retry = (
+            "will not be retried: the service said this node cannot reclaim it"
+            if recovery_final else "is retried every 15 minutes"
+        )
         return [
             "The service stopped hearing from this node for about a week and took the record out of "
-            "DNS. The node's automatic reclaim was refused (below) and is retried every 15 minutes; "
+            f"DNS. The node's automatic reclaim was refused (below) and {retry}; "
             "[R]egister registers the name afresh if it is still free."
         ]
     if status is ManagedDnsRegistrationStatus.ABANDONED:
@@ -5506,9 +5512,14 @@ def _managed_dns_state_guidance(
             "minutes); [R]egister reclaims it now."
         ]
     if status is ManagedDnsRegistrationStatus.RELEASED:
+        # The node records no release time and never asks the service
+        # again about a released name, so it cannot know whether the
+        # cooldown (about three months by default) has run out; the
+        # wording says what it knows (Codex review of PR #608).
         return [
-            "Released by this node. The name is held for it for a while before anyone else may take it; "
-            "[R]egister reclaims it."
+            "Released by this node. The service holds a released name for its former holder for a "
+            "while (about three months by default) before anyone else may take it; [R]egister "
+            "reclaims it while that lasts, and registers it afresh afterwards if it is still free."
         ]
     if status is ManagedDnsRegistrationStatus.REVOKED:
         # Design doc §16 Decision 4: the registrant is told that, and
