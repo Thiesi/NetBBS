@@ -487,8 +487,8 @@ def mark_abandoned(db: Database, name: str, *, released_at: str) -> None:
     `pending`/`matured` registration that has gone silent past the
     abandonment threshold. Shares the exact same `released_at` column
     (and therefore Decision 5's exact same cooldown) as voluntary
-    release: "both exit paths...share one deliberately generous
-    cooldown," not two."""
+    release: "every exit path shares one deliberately generous
+    cooldown," not one timer per path."""
     db.connection.execute(
         "UPDATE registrations SET status = 'abandoned', released_at = ? "
         "WHERE name = ? AND status IN ('pending', 'matured')",

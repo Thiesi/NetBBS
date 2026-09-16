@@ -332,3 +332,63 @@ def test_a_redirect_never_carries_the_credential_to_its_target():
     received, errors = asyncio.run(scenario())
     assert received == []  # the secret never left the address it was addressed to
     assert all("307" in message for message in errors)  # and the hop is visible
+
+
+# -- what a refusal reads like to the SysOp (issue #598) --------------------
+
+
+def test_a_refusal_carries_the_services_own_sentence_not_its_json(db):
+    """Every SysOp-facing flow shows `str(exc)`; until #598 that was the
+    raw JSON body, braces and all, wrapped around the one sentence the
+    service wrote for them."""
+    async def scenario():
+        server = ManagedDnsServer("127.0.0.1", 0, db, cumulative_cap=1, contact="dns@example.org")
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await register(
+                    session, f"http://127.0.0.1:{server.port}",
+                    name="board-a", node_fingerprint="fp-1", dynamic=False,
+                )
+                with pytest.raises(ManagedDnsError) as excinfo:
+                    await register(
+                        session, f"http://127.0.0.1:{server.port}",
+                        name="board-b", node_fingerprint="fp-2", dynamic=False,
+                    )
+            return excinfo.value
+        finally:
+            await server.stop()
+
+    exc = asyncio.run(scenario())
+    assert exc.status_code == 503
+    assert "{" not in str(exc)
+    assert "contact dns@example.org" in str(exc)
+    assert str(exc).startswith("registration of 'board-b' failed: the managed-DNS service is at capacity")
+
+
+def test_a_refusal_that_is_not_the_services_shape_keeps_its_status():
+    """A reverse proxy's HTML error page, or an empty body: then the
+    status code is the information, and it stays in the message."""
+    async def handler(_request):
+        return web.Response(text="<html>Bad Gateway</html>", status=502)
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/heartbeat", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(ManagedDnsError) as excinfo:
+                    await heartbeat(session, f"http://127.0.0.1:{port}", credential="x")
+            return excinfo.value
+        finally:
+            await runner.cleanup()
+
+    exc = asyncio.run(scenario())
+    assert exc.status_code == 502
+    assert "HTTP 502" in str(exc)
+    assert "Bad Gateway" in str(exc)

@@ -50,7 +50,7 @@ from netbbs.net.nodeconfig import (
     LinkConfig, ManagedDnsConfig, NodeConfig, ShutdownConfig, TransportConfig,
 )
 from netbbs.net.session_registry import ActiveSessionRegistry
-from netbbs.managed_dns.state import get_service_url, set_node_fingerprint
+from netbbs.managed_dns.state import get_local_listeners, get_service_url, set_node_fingerprint
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_telnet import skip_initial_negotiation
@@ -1545,6 +1545,29 @@ def test_run_mirrors_a_configured_managed_dns_service_url_into_the_database(tmp_
 
     db = Database(config.db_path)
     assert get_service_url(db) == "http://127.0.0.1:8099"
+    db.close()
+
+
+def test_run_records_the_nodes_listener_ports_for_the_dns_screen(tmp_path):
+    """Issue #603: the SysOp console's DNS screen states the standard-
+    ports convention against this node's own listeners, and cannot reach
+    `config` -- so startup records them, a disabled transport as no
+    port, `[web] public_url` alongside."""
+    config = _config(
+        tmp_path,
+        telnet=TransportConfig(True, "127.0.0.1", 12443),
+        ssh=TransportConfig(False, "127.0.0.1", 2222),
+        web=TransportConfig(False, "127.0.0.1", 8080, public_url="https://board.example"),
+    )
+
+    asyncio.run(_run_until_ready_then_shut_down(config))
+
+    db = Database(config.db_path)
+    facts = get_local_listeners(db)
+    assert facts.telnet_port == 12443
+    assert facts.ssh_port is None
+    assert facts.web_port is None
+    assert facts.web_public_url == "https://board.example"
     db.close()
 
 

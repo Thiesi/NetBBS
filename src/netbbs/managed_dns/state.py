@@ -15,6 +15,8 @@ that does *not* belong here is the credential itself -- see
 from __future__ import annotations
 
 import ipaddress
+import json
+from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import urlsplit
 
@@ -65,6 +67,8 @@ PREVIOUS_STATUS_CONFIG_KEY = "managed_dns_previous_status"
 PUBLISHED_CONFIG_KEY = "managed_dns_published"
 PREVIOUS_PUBLISHED_CONFIG_KEY = "managed_dns_previous_published"
 CREDENTIAL_SERVICE_URL_CONFIG_KEY = "managed_dns_credential_service_url"
+LISTENERS_CONFIG_KEY = "managed_dns_listeners"
+RECOVERY_NOTE_CONFIG_KEY = "managed_dns_recovery_note"
 
 # The address of the project's own `services.managed_dns` instance, as
 # shipped -- what a node reaches when its operator configures nothing,
@@ -130,6 +134,7 @@ def set_registration_result_state(
         (PREVIOUS_NAME_CONFIG_KEY, ""),
         (PREVIOUS_STATUS_CONFIG_KEY, ""),
         (PREVIOUS_PUBLISHED_CONFIG_KEY, "0"),
+        (RECOVERY_NOTE_CONFIG_KEY, ""),
     ))
 
 
@@ -160,6 +165,10 @@ def set_heartbeat_reconciliation_state(
         (PREVIOUS_NAME_CONFIG_KEY, previous_name or ""),
         (PREVIOUS_STATUS_CONFIG_KEY, previous_status.value if previous_status else ""),
         (PREVIOUS_PUBLISHED_CONFIG_KEY, "1" if previous_published else "0"),
+        # A recovery note describes an automatic reclaim attempt made
+        # *after* the current abandonment; any authoritative answer from
+        # the service supersedes it (`get_recovery_note`).
+        (RECOVERY_NOTE_CONFIG_KEY, ""),
     )
     # None means preserve an absent/existing contact timestamp; inactive-only
     # reconciliation has no successful contact to record.
@@ -404,3 +413,84 @@ def get_dynamic(db: Database) -> bool:
 
 def set_dynamic(db: Database, dynamic: bool) -> None:
     set_config(db, DYNAMIC_CONFIG_KEY, "1" if dynamic else "0")
+
+
+@dataclass(frozen=True)
+class ListenerFacts:
+    """This node's own caller-facing listeners, as configured at its last
+    startup -- what design doc §16 Decision 6's standard-ports convention
+    is measured against (issue #603). A port of `None` means the
+    transport is not enabled. `web_public_url` is `[web] public_url`
+    when set: the one statement a SysOp has already made about an HTTPS
+    front for the web listener, which is what decides whether the web
+    address counts as part of the managed name's promise."""
+
+    telnet_port: int | None
+    ssh_port: int | None
+    web_port: int | None
+    web_public_url: str | None
+
+
+def set_local_listeners(db: Database, facts: ListenerFacts) -> None:
+    """Written by `netbbs.__main__.run` once per startup, the same way
+    the node fingerprint and the service address reach this module: the
+    SysOp console's DNS screen cannot reach `NodeConfig`, and the ports
+    are the one thing the node knows with certainty about how a caller
+    dialling its managed name will fare."""
+    set_config(db, LISTENERS_CONFIG_KEY, json.dumps({
+        "telnet": facts.telnet_port, "ssh": facts.ssh_port, "web": facts.web_port,
+        "web_public_url": facts.web_public_url,
+    }))
+
+
+def get_local_listeners(db: Database) -> ListenerFacts | None:
+    """`None` on a node that has not started since this was recorded;
+    the screens say so rather than guessing."""
+    raw = get_config(db, LISTENERS_CONFIG_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    def port(key: str) -> int | None:
+        value = data.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+    public_url = data.get("web_public_url")
+    return ListenerFacts(
+        telnet_port=port("telnet"), ssh_port=port("ssh"), web_port=port("web"),
+        web_public_url=public_url if isinstance(public_url, str) and public_url else None,
+    )
+
+
+@dataclass(frozen=True)
+class RecoveryNote:
+    """The most recent automatic reclaim attempt the updater made for an
+    abandoned name and how it went (design doc §16 Decision 10, issue
+    #600) -- so the SysOp console can say what is being retried every
+    pass and why it has not worked yet, instead of showing a bare
+    ABANDONED badge over a name the node is quietly trying to get back."""
+
+    at: str
+    text: str
+
+
+def set_recovery_note(db: Database, note: RecoveryNote | None) -> None:
+    set_config(db, RECOVERY_NOTE_CONFIG_KEY, json.dumps({"at": note.at, "text": note.text}) if note else "")
+
+
+def get_recovery_note(db: Database) -> RecoveryNote | None:
+    raw = get_config(db, RECOVERY_NOTE_CONFIG_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("at"), str) or not isinstance(data.get("text"), str):
+        return None
+    return RecoveryNote(at=data["at"], text=data["text"])

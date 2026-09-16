@@ -91,6 +91,9 @@ from netbbs.backup import (
     get_last_backup_summary,
 )
 from netbbs.managed_dns.state import (
+    get_local_listeners as get_managed_dns_local_listeners,
+    get_published as get_managed_dns_published,
+    get_recovery_note as get_managed_dns_recovery_note,
     OptIn as ManagedDnsOptIn,
     RegistrationStatus as ManagedDnsRegistrationStatus,
     get_last_contact_at as get_managed_dns_last_contact_at,
@@ -100,6 +103,7 @@ from netbbs.managed_dns.state import (
     get_registration_status as get_managed_dns_registration_status,
 )
 from netbbs.net.managed_dns_flow import (
+    standard_ports_lines as managed_dns_standard_ports_lines,
     cancel_registration_rename, register_via_prompt, release_registration, rename_registration,
 )
 from netbbs.boards.boards import Board, BoardError, create_board, delete_board, list_boards, update_board
@@ -5323,6 +5327,7 @@ async def _draw_managed_dns_status(
     name = await lane.run(get_managed_dns_registered_name)
     previous_name = await lane.run(get_managed_dns_previous_name)
     status = await lane.run(get_managed_dns_registration_status)
+    published = await lane.run(get_managed_dns_published)
     last_contact_at = await lane.run(get_managed_dns_last_contact_at)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
@@ -5361,10 +5366,18 @@ async def _draw_managed_dns_status(
             )
         )
     else:
-        tone = "success" if status is ManagedDnsRegistrationStatus.MATURED else "neutral"
+        # "LIVE" is a claim callers can act on, so it is made only once
+        # the service has confirmed a published record (`published`):
+        # the service matures a registration *before* its first provider
+        # upsert, and a failed upsert leaves it matured with no record
+        # (`netbbs.link.node_profiles.own_canonical_dns_name` draws the
+        # same line for what the node advertises). The badge used to say
+        # LIVE on `matured` alone.
+        live = status is ManagedDnsRegistrationStatus.MATURED and published
+        tone = "success" if live else "neutral"
         badge_text = {
             ManagedDnsRegistrationStatus.PENDING: "PENDING",
-            ManagedDnsRegistrationStatus.MATURED: "LIVE",
+            ManagedDnsRegistrationStatus.MATURED: "LIVE" if published else "NOT YET PUBLISHED",
             ManagedDnsRegistrationStatus.RELEASED: "RELEASED",
             ManagedDnsRegistrationStatus.ABANDONED: "ABANDONED",
             ManagedDnsRegistrationStatus.NONE: "NONE",
@@ -5373,6 +5386,21 @@ async def _draw_managed_dns_status(
         await session.write_line(
             colored("Name: ", fg_color=LABEL_COLOR) + colored(f"{name}.netbbs.org", fg_color=METADATA_COLOR)
         )
+        # What the state means for the SysOp and what, if anything, they
+        # need to do about it -- every state here used to be a bare badge.
+        if previous_name is None:
+            for line in _managed_dns_state_guidance(status, published):
+                await _write_wrapped_muted(session, line)
+            if status is ManagedDnsRegistrationStatus.ABANDONED:
+                note = await lane.run(get_managed_dns_recovery_note)
+                if note is not None:
+                    display_format, display_timezone = await lane.run(resolve_display_preferences)
+                    when = format_for_display(
+                        note.at, override_format=display_format, override_timezone=display_timezone
+                    )
+                    await _write_wrapped_muted(
+                        session, f"Last automatic attempt ({when}): {sanitize_text(note.text)[:240]}"
+                    )
         if previous_name is not None:
             await session.write_line(
                 colored("Current name: ", fg_color=LABEL_COLOR)
@@ -5393,6 +5421,15 @@ async def _draw_managed_dns_status(
                 last_contact_at, override_format=display_format, override_timezone=display_timezone
             )
             await session.write_line(colored("Last contact: ", fg_color=LABEL_COLOR) + colored(when, fg_color=METADATA_COLOR))
+        if status in _MANAGED_DNS_ACTIVE_STATUSES:
+            # Design doc §16 Decision 6 (issue #603): the convention
+            # that makes the name reach this board, against this node's
+            # own listeners. Stated here, where the SysOp looks after
+            # registering, not only in the editor they saw once.
+            await session.write_line("")
+            listeners = await lane.run(get_managed_dns_local_listeners)
+            for line in managed_dns_standard_ports_lines(listeners):
+                await _write_wrapped_muted(session, line)
 
     actions = [menu_key("R", "egister")]
     if previous_name is not None:
@@ -5404,6 +5441,41 @@ async def _draw_managed_dns_status(
     actions.append(menu_key("B", "ack"))
     await session.write_line("\r\n" + "    ".join(actions))
     return status
+
+
+async def _write_wrapped_muted(session: Session, text: str) -> None:
+    for wrapped in wrap_to_width(text, session.terminal_width):
+        await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
+
+
+def _managed_dns_state_guidance(status: ManagedDnsRegistrationStatus, published: bool) -> list[str]:
+    """One or two plain sentences per registration state: what it means
+    and what happens next, for a standalone (not mid-rename) name. The
+    node knows none of the service's timings for certain (they are
+    operator parameters), so the durations are the shipped defaults
+    hedged as such."""
+    if status is ManagedDnsRegistrationStatus.PENDING:
+        return [
+            "Reserved but not yet in DNS: it goes live once this node has stayed in contact with the "
+            "service for about a day (the node checks in every 15 minutes by itself). Nothing to do."
+        ]
+    if status is ManagedDnsRegistrationStatus.MATURED and not published:
+        return [
+            "The service accepted the name but has not confirmed a published DNS record yet; the next "
+            "check-in retries the publication. Nothing to do unless this persists."
+        ]
+    if status is ManagedDnsRegistrationStatus.ABANDONED:
+        return [
+            "The service stopped hearing from this node for about a week, took the record out of DNS "
+            "and is holding the name for this node. The node tries to reclaim it every 15 minutes; "
+            "[R]egister reclaims it now, or registers it afresh if the service no longer holds it."
+        ]
+    if status is ManagedDnsRegistrationStatus.RELEASED:
+        return [
+            "Released by this node. The name is held for it for a while before anyone else may take it; "
+            "[R]egister reclaims it."
+        ]
+    return []
 
 
 async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor: User) -> None:

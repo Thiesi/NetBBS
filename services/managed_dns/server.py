@@ -189,6 +189,7 @@ class ManagedDnsServer:
         rate_limit_refill_per_minute: float = _DEFAULT_RATE_LIMIT_REFILL_PER_MINUTE,
         cumulative_cap: int = _DEFAULT_CUMULATIVE_CAP,
         admin_token: str | None = None,
+        contact: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -213,6 +214,11 @@ class ManagedDnsServer:
         # instance. An empty string is treated the same, so an
         # accidentally-blank environment variable cannot open it.
         self._admin_token = admin_token or None
+        # Design doc §16 Decision 3 (issue #598): the channel a SysOp
+        # refused by a service-wide limit is told to use. Blank means
+        # "not configured" and the refusals say so in words rather than
+        # naming a project address a self-hosted copy does not answer.
+        self._contact = (contact or "").strip() or None
         # Driven off this same injectable `clock` (converted to a plain
         # float via `datetime.timestamp()`) rather than a second,
         # independent clock -- one thing for a test to control
@@ -325,6 +331,32 @@ class ManagedDnsServer:
         except DnsProviderError:
             return False
         return True
+
+    def _at_capacity_response(self) -> web.Response:
+        """Design doc §16 Decision 3 (issue #598): the cumulative cap is
+        a hard reject, and the one thing the refused SysOp needs is the
+        truth about it. The rate limiter refills, so "try again shortly"
+        is honest there; this ceiling frees a slot only when some other
+        registration is released or swept as abandoned, so a caller told
+        to wait would retry against a wall indefinitely instead of
+        getting in touch. The contact channel is the whole reason
+        Decision 3 could drop the review queue."""
+        message = (
+            "the managed-DNS service is at capacity (its ceiling on active "
+            "registrations). A slot frees only when another registration is "
+            "released or abandoned, so retrying will not help; "
+        )
+        if self._contact is not None:
+            message += f"for a legitimate exception, contact {self._contact}"
+        else:
+            message += "ask whoever runs this service about a legitimate exception"
+        return web.json_response({"error": message, "contact": self._contact}, status=503)
+
+    def _rate_limited_response(self) -> web.Response:
+        message = "too many registrations right now -- try again shortly"
+        if self._contact is not None:
+            message += f"; if this keeps happening, contact {self._contact}"
+        return web.json_response({"error": message, "contact": self._contact}, status=429)
 
     def _admin_authorized(self, request: web.Request) -> bool:
         """`Authorization: Bearer <MANAGED_DNS_ADMIN_TOKEN>`, compared
@@ -519,14 +551,16 @@ class ManagedDnsServer:
         node_fingerprint = body.get("node_fingerprint")
         dynamic = body.get("dynamic", False)
         credential = body.get("credential")
+        reclaim_only = body.get("reclaim_only", False)
         if (
             not isinstance(raw_name, str) or not isinstance(node_fingerprint, str)
             or not isinstance(dynamic, bool) or (credential is not None and not isinstance(credential, str))
+            or not isinstance(reclaim_only, bool)
         ):
             return web.json_response(
                 {
                     "error": "request must contain a string name, a string node_fingerprint, a boolean "
-                    "dynamic, and an optional string credential"
+                    "dynamic, an optional string credential, and an optional boolean reclaim_only"
                 },
                 status=400,
             )
@@ -544,6 +578,26 @@ class ManagedDnsServer:
             return web.json_response({"error": f"{name!r} is already registered"}, status=409)
 
         now = self._clock()
+        if reclaim_only:
+            # Design doc §16 Decision 10 (issue #600): the node-side
+            # updater reclaims an abandoned name on its own, and the one
+            # thing it must never do on its own is register afresh --
+            # a fresh registration is a SysOp's keystroke, because it
+            # mints a new credential, spends a rate-limit token and, for
+            # a name the service no longer holds for this node, may not
+            # be theirs any more. So the automatic path says so, and this
+            # branch refuses everything except the reclaim it asked for.
+            reclaimable = (
+                existing is not None and existing.status != "revoked"
+                and credential is not None
+                and hash_credential(credential) == existing.credential_hash
+                and now - datetime.fromisoformat(existing.released_at)
+                < timedelta(seconds=self._cooldown_seconds)
+            )
+            if not reclaimable:
+                return web.json_response(
+                    {"error": f"{name!r} is not held for reclaim by this credential"}, status=409
+                )
         if existing is not None:
             # existing.status is 'released', 'abandoned' or 'revoked'
             # here -- decide whether this is a reclaim (same credential,
@@ -573,9 +627,7 @@ class ManagedDnsServer:
                             {"error": "this node already has an active managed-DNS registration"}, status=403
                         )
                     if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
-                        return web.json_response(
-                            {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
-                        )
+                        return self._at_capacity_response()
                     if self._dns_transition_lock.locked():
                         return web.json_response(
                             {"error": "a managed-DNS transition is already in progress; retry shortly"},
@@ -611,13 +663,9 @@ class ManagedDnsServer:
         # shouldn't also spend a scarce rate-limit token), then the rate
         # limit.
         if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
-            return web.json_response(
-                {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
-            )
+            return self._at_capacity_response()
         if not self._rate_limiter.allow():
-            return web.json_response(
-                {"error": "too many registrations right now -- try again shortly"}, status=429
-            )
+            return self._rate_limited_response()
         tokens, last_refill = self._rate_limiter.snapshot()
         save_rate_limit_state(self._db, tokens=tokens, last_refill=last_refill)
 
@@ -795,9 +843,7 @@ class ManagedDnsServer:
                             status=409,
                         )
                     if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
-                        return web.json_response(
-                            {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
-                        )
+                        return self._at_capacity_response()
                     retry_at = now.isoformat()
                     reclaim(
                         self._db, existing_replacement.name, matured=False,
@@ -839,13 +885,9 @@ class ManagedDnsServer:
                         {"error": f"{name!r} is already registered or reserved"}, status=409
                     )
             if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
-                return web.json_response(
-                    {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
-                )
+                return self._at_capacity_response()
             if not self._rate_limiter.allow():
-                return web.json_response(
-                    {"error": "too many registrations right now -- try again shortly"}, status=429
-                )
+                return self._rate_limited_response()
             tokens, last_refill = self._rate_limiter.snapshot()
             save_rate_limit_state(self._db, tokens=tokens, last_refill=last_refill)
             secret = secrets.token_urlsafe(_CREDENTIAL_BYTES)
@@ -928,9 +970,7 @@ class ManagedDnsServer:
                     count_registrations(self._db, statuses=_ACTIVE_STATUSES) - replacement_active
                     >= self._cumulative_cap
                 ):
-                    return web.json_response(
-                        {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
-                    )
+                    return self._at_capacity_response()
             if not await self._delete_record(replacement.name):
                 return web.json_response(
                     {"error": "replacement DNS record could not be removed; retry shortly"}, status=503
@@ -966,9 +1006,7 @@ class ManagedDnsServer:
                     count_registrations(self._db, statuses=_ACTIVE_STATUSES) - replacement_active
                     >= self._cumulative_cap
                 ):
-                    return web.json_response(
-                        {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
-                    )
+                    return self._at_capacity_response()
             # Provider cleanup may have yielded. Record the successful
             # cancellation at the actual post-cleanup contact time.
             contact_now = self._clock()
@@ -1107,10 +1145,11 @@ class ManagedDnsServer:
         # at all once a registration goes live, regardless of whether
         # this is a "dynamic" registration) or, for a dynamic
         # registration only, whenever the observed address has actually
-        # changed -- a static-IP registration that already has a
-        # published record never calls the DNS provider again after its
-        # initial publish, matching design doc §16's "a board could
-        # plausibly want [the subdomain] without [dynamic tracking]."
+        # changed -- a static registration that already has a published
+        # record never calls the DNS provider again after its initial
+        # publish. That is all `dynamic` selects (design doc §16 Decision
+        # 10, issue #600): the heartbeat itself is the liveness signal
+        # every registration owes the service, static ones included.
         should_publish = status == "matured" and (
             newly_matured or last_known_address is None or registration.dynamic
         )

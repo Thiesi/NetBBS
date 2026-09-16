@@ -107,6 +107,13 @@ __main__.py` for the exact default values currently shipped):
   reject once exceeded, no queue).
 - `MANAGED_DNS_CUMULATIVE_CAP` -- the ceiling on total active
   registrations (Decision 3, also a hard reject).
+- `MANAGED_DNS_CONTACT` -- the channel a SysOp refused by the rate
+  limit or the cumulative cap is told to use for a legitimate exception
+  (design doc §16 Decision 3, issue #598): a URL or an address, quoted
+  verbatim in the refusal. The project's own instance names its issue
+  tracker. Unset, the refusal says the operator has not named a channel,
+  and the service warns once at startup -- a self-hosted copy must not
+  send its SysOps to this project.
 - `MANAGED_DNS_ADMIN_TOKEN` -- the bearer token for `/admin/revoke`
   (Decision 4, section 8 below). Unset by default, which leaves that
   route refusing every request: an instance whose operator has not set
@@ -199,6 +206,12 @@ Before pointing real SysOps at this instance:
 3. Release it and confirm the record is gone (`dig` returns nothing)
    but a *different* registrant's `/register` for the same name is
    still rejected until `MANAGED_DNS_COOLDOWN_SECONDS` elapses.
+   Then stop the node's heartbeats for longer than
+   `MANAGED_DNS_ABANDONMENT_SECONDS` (set it low for the check) and let
+   the sweep abandon a second test registration: on the node's next
+   pass it must reclaim the name by itself and the record must return
+   (design doc §16 Decision 10). The node's DNS screen shows the
+   attempt's outcome beside the ABANDONED badge in the meantime.
 4. Rename the test registration with `POST /rename`. Confirm the old
    record stays published while the new name is pending, then heartbeat
    the new credential after the age gate and confirm the new record is

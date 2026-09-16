@@ -23,16 +23,20 @@ import asyncio
 from aiohttp import ClientSession
 
 from netbbs.managed_dns.client import (
-    CancelRenameResult, HeartbeatResult, ManagedDnsError, cancel_rename, heartbeat,
+    CancelRenameResult, HeartbeatResult, ManagedDnsError, cancel_rename, heartbeat, register,
 )
 from netbbs.managed_dns.credential import (
     credential_path_for, delete_credential, load_credential, previous_credential_path_for,
-    managed_dns_transition_lock, recover_credential_transition, stage_credential_cancellation,
+    managed_dns_transition_lock, recover_credential_transition, save_credential,
+    stage_credential_cancellation,
 )
 from netbbs.managed_dns.state import (
     OptIn,
+    RecoveryNote,
     RegistrationStatus,
+    get_dynamic,
     get_last_contact_at,
+    get_node_fingerprint,
     get_opt_in,
     get_previous_name,
     get_previous_published,
@@ -43,6 +47,8 @@ from netbbs.managed_dns.state import (
     get_service_url,
     foreign_credential_service_url,
     set_heartbeat_reconciliation_state,
+    set_recovery_note,
+    set_registration_result_state,
 )
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -125,10 +131,9 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
     # that outstanding rename so the next successful old heartbeat
     # can restore the usable registration instead of stranding it.
     has_outstanding_rename = previous_credential is not None and get_previous_name(db) is not None
-    if (
-        name is None or base_url is None or status is RegistrationStatus.RELEASED
-        or (status is RegistrationStatus.ABANDONED and not has_outstanding_rename)
-    ):
+    if name is None or base_url is None or status is RegistrationStatus.RELEASED:
+        # Released is the SysOp's own decision to stop (design doc §16
+        # Decision 5): nothing here overrides it.
         return
     credential = load_credential(credential_path_for(db.path))
     if credential is None:
@@ -143,6 +148,18 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
         # to do about it the moment they touch the DNS screen.
         _report_foreign_credential(db.path, issuer, base_url)
         return
+    if status is RegistrationStatus.ABANDONED and not has_outstanding_rename:
+        # Design doc §16 Decision 10 (issue #600): abandonment is the
+        # service noticing this node was away, not the SysOp choosing to
+        # leave, so the node gets its name back by itself when it
+        # returns -- the same reclaim `[R]egister` would perform, made
+        # every pass until it works or the SysOp acts. Before this a
+        # node back from a fortnight's outage stayed dark until somebody
+        # happened to open the DNS screen, and lost the name for good
+        # once the cooldown purged it.
+        if not await _reclaim_abandoned_name(db, base_url, name, credential):
+            return
+        status = get_registration_status(db)
     previous_result = None
     previous_inactive = False
     if previous_credential is not None:
@@ -202,6 +219,67 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
                 previous_inactive and previous_credential is not None
             ),
         )
+
+
+# The last automatic-reclaim failure each node database was warned about
+# -- the pass runs every 15 minutes and the answer rarely changes between
+# passes, so one log line per actual change.
+_reported_reclaim_failures: dict[Path, tuple[str, str]] = {}
+
+
+async def _reclaim_abandoned_name(db: Database, base_url: str, name: str, credential: str) -> bool:
+    """One automatic reclaim attempt for an abandoned name. Returns
+    whether the registration is active again locally.
+
+    `reclaim_only` is the whole safety of this: the service performs the
+    reclaim this credential entitles the node to, or refuses. It never
+    registers afresh on the node's behalf -- a fresh registration mints
+    a credential, spends a rate-limit token and, once the cooldown has
+    purged the row, is for a name that may no longer be this node's; all
+    of that stays a SysOp's keystroke. A refusal is recorded as a
+    recovery note so the DNS screen can say what was tried and why it
+    did not work, and is retried next pass: capacity frees, services
+    come back, and the SysOp may act in between."""
+    node_fingerprint = get_node_fingerprint(db)
+    if node_fingerprint is None:
+        return False
+    try:
+        # Direct connection, as for the heartbeat: a matured reclaim
+        # republishes the record at the address this request arrives
+        # from, and through a forward proxy that would be the proxy.
+        async with ClientSession(trust_env=False) as session:
+            result = await register(
+                session, base_url, name=name, node_fingerprint=node_fingerprint,
+                dynamic=get_dynamic(db), credential=credential, reclaim_only=True,
+            )
+    except ManagedDnsError as exc:
+        _report_reclaim_failure(db, name, str(exc))
+        return False
+    if result.credential != credential:
+        # `reclaim_only` makes this unreachable against this project's
+        # service; a foreign implementation that ignored the flag and
+        # minted a fresh credential has still made this node the holder
+        # of that registration, and losing the secret would strand it.
+        save_credential(credential_path_for(db.path), result.credential)
+    set_registration_result_state(
+        db, name=result.name, status=RegistrationStatus(result.status),
+        dynamic=get_dynamic(db), service_url=base_url,
+    )
+    _reported_reclaim_failures.pop(db.path, None)
+    _logger.info("Managed-DNS registration %r reclaimed automatically after abandonment", name)
+    return True
+
+
+def _report_reclaim_failure(db: Database, name: str, detail: str) -> None:
+    set_recovery_note(db, RecoveryNote(at=utc_now_iso(), text=detail))
+    if _reported_reclaim_failures.get(db.path) == (name, detail):
+        return
+    _reported_reclaim_failures[db.path] = (name, detail)
+    _logger.warning(
+        "Managed-DNS registration %r is abandoned and could not be reclaimed automatically: %s "
+        "(retrying every pass; [R]egister on the SysOp console's DNS screen registers afresh)",
+        name, detail,
+    )
 
 
 def _apply_previous_heartbeat_result(

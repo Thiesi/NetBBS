@@ -8569,10 +8569,15 @@ an easy way to publish their board under it (e.g. `myboard.netbbs.org`)
 and, for boards on residential/dynamic IPs, keep that record pointed at
 the node's current address without manual DNS maintenance. Two
 components, not one: a one-time subdomain *registration* (name
-reservation + initial DNS record), and an optional recurring *dynamic-DNS
-updater* (the node periodically checks its own public address and pushes
-a record update when it changes) — a board could plausibly want the
-first without the second (static IP, still wants a friendly subdomain).
+reservation + initial DNS record), and a recurring *updater* that keeps
+the node in contact with the service and, for a board that asks for it,
+pushes a record update when the node's public address changes. A board
+on a static IP still wants the friendly subdomain without the address
+tracking, and that is the `dynamic` choice at registration; what it
+cannot opt out of is the contact itself, which is the liveness signal
+every managed name owes the service (Decision 10 — this paragraph used
+to call the updater optional, and issue #600 found the code had never
+agreed).
 
 **Decision 1 (locked in) — offered via a prominent prompt on first-SysOp
 bootstrap or first authenticated SysOp login, not a silent default and
@@ -8709,6 +8714,33 @@ ceiling and the one-active-name-per-node limit: reactivation consumes a
 real active slot, and release/reclaim cycling must not create more live
 rows than either bound permits.
 
+*Issue #598:* for three releases neither refusal carried a channel, and
+the cumulative-cap refusal said "try again later", which is wrong for
+that cap specifically — the rate limiter refills, but the ceiling frees a
+slot only when some other registration is released or swept as
+abandoned, so a SysOp told to wait retries against a wall instead of
+getting in touch. The channel is the operator's own setting
+(`MANAGED_DNS_CONTACT`, `services/managed_dns/README.md` §4), not a
+project address baked into a service anyone may self-host; an instance
+without one says so in words. The cap refusal now says what frees a
+slot and that retrying will not; the rate-limit refusal keeps "try again
+shortly", which is true. The node shows the service's sentence, not the
+JSON it arrived in.
+
+*Two things this decision states as flat rules that the rename workflow
+(Decision 9) deliberately bends (issue #602).* The one-name-per-node cap
+is one **except across a rename**, where a node holds two active rows —
+the live name and its maturing replacement — until the replacement
+matures; make-before-break requires exactly that, and it is bounded at
+two (the node refuses a second rename while one is pending, and the
+service treats a retry against an existing `replaces_name` link as
+recovery of the same replacement, never a third row). And a rename
+**spends a rate-limit token** where a reclaim does not: a reclaim
+reactivates a row and a record that already exist, whereas a rename
+reserves a new name and will create a new DNS record, which is precisely
+the cost the limiter exists to bound. Both were accidents of
+implementation until written here; both are now the rule.
+
 **Decision 4 (locked in) — contested-name disputes are manual and
 complaint-driven, stated as such, not implied automation; the operator's
 end of that process is a revocation which takes the name away from the
@@ -8799,10 +8831,19 @@ operational half: what to check before revoking, what separates abuse
 from an ordinary naming dispute this decision deliberately does not
 cover, the request itself, and what the former holder sees afterwards.
 
-**Decision 5 (locked in) — both exit paths, voluntary release and
-abandoned-node reclaim, share one deliberately generous cooldown before
-a name becomes assignable to a *different* registrant; this is an
-accepted, bounded residual risk, not a solved one.** §8.10 states that
+**Decision 5 (locked in) — every exit path shares one deliberately
+generous cooldown before a name becomes assignable to a *different*
+registrant; this is an accepted, bounded residual risk, not a solved
+one.** There are four ways a name stops being live, not the two this
+decision originally named (issue #601): voluntary release, abandonment
+by the sweep, completion of a rename (the old name is released the
+moment the replacement's record is published — Decision 9), and
+operator revocation (Decision 4). All four set the same `released_at`
+and start the same timer; the first three stay reclaimable by the
+credential that held the name for as long as it runs, revocation by
+nothing. A SysOp planning a rename should read that as: the old name is
+not free the moment the new one goes live, and not re-registerable by
+them either while they hold their one name under the new label. §8.10 states that
 "the remote node label, endpoint, DNS name, and TCP address are never
 identity authority" — real *Link* node identity is verified by the
 Noise XX handshake against the Ed25519-derived key, independent of how a
@@ -8879,6 +8920,27 @@ dynamic-IP-tracking half of this feature alone) but does not get a bare
 nonstandard port remains the SysOp's own responsibility to communicate,
 same as today.
 
+*The convention is advisory and unverifiable, and it is stated where the
+name is (issue #603).* Neither the node nor the service can see a
+port-forward, a proxy or a firewall in front of a listener, so nothing
+enforces this and nothing pretends to. What the node *does* know with
+certainty is its own configured ports — and NetBBS's shipped defaults
+are 2323/2222/8080 on purpose, since binding below 1024 needs privilege
+this process should not want, so the default node is exactly the one
+this decision says gets no bare caller address. Until issue #603 the
+convention lived in one help panel behind a `[W]eb behind HTTPS proxy`
+field whose answer was discarded, and the status screen showed
+`myboard.netbbs.org` with a LIVE badge and no port in sight. Now the
+registration editor and the Managed DNS status screen both state the
+convention and measure it against the listeners the node recorded at
+its last startup: "SSH: this node listens on 2222, so a caller dialling
+22 needs a port-forward or proxy in front of it", "Telnet: not enabled
+on this node", and for web whether `[web] public_url` names an HTTPS
+front — the one statement a SysOp has already made about TLS, which
+replaces the discarded question. "Cannot verify" is not "cannot
+mention". The LIVE badge itself is now made only once the service has
+confirmed a published record; `matured` alone reads "NOT YET PUBLISHED".
+
 **Decision 7 (locked in, implemented) — the managed-DNS credential is
 in scope for node backup/restore, as an addition to §13.4's contract,
 not a separate ceremony.** Code review follow-up (PR #218): §13.4
@@ -8950,6 +9012,73 @@ moment that question is naturally in front of a SysOp, and deferring it
 would mean either re-opening a settled consent question later or
 enrolling a node that had said yes to something narrower.
 
+**Decision 9 (locked in, implemented) — a SysOp may change their
+managed name, and the change is make-before-break: the old name stays
+live until the replacement has matured and published, then enters the
+ordinary cooldown.** The workflow shipped with its invariants recorded
+(the closing paragraphs below) but without the decision above them
+(issue #601), so a reader asking "can I change my board's name, and
+what happens to the old one?" found the guarantees only by knowing to
+look among implementation notes. The decision: `Change [N]ame` on the
+DNS screen reserves the replacement as a second, pending registration
+linked to the current one (`replaces_name`), holding a second bearer
+credential on disk beside the first. The node heartbeats both. While the
+replacement matures — the same age gate as any registration — the old
+name is canonical and keeps resolving; the status screen shows the
+current name and the reserved one, and `[C]ancel change` is offered the
+whole time. The heartbeat that first publishes the replacement's record
+is the one that releases the old name, in that order (publish, delete,
+then commit both rows), so callers never see a gap; the old name then
+sits in Decision 5's cooldown, reclaimable only by the credential that
+held it. Why a second credential and a transition journal rather than
+something simpler: the two rows are two registrations the service
+authenticates independently, a crash between "new credential issued"
+and "node knows about it" would otherwise strand one of them, and the
+journal is what makes the swap replayable in either direction. The
+alternative — release, then register the new name — goes dark for the
+whole age gate and forfeits the old name's reclaim window, which is why
+the SysOp handbook says not to use it as a rename shortcut.
+
+**Decision 10 (locked in, implemented) — every managed name requires
+continuous contact from the node to stay alive; `dynamic` selects only
+whether the published record follows the node's address; and a name the
+service has abandoned is reclaimed by the node itself when it returns.**
+Issue #600 found the Goal describing a "registration without the
+updater" that the code had never offered: going live requires a day of
+uninterrupted contact, staying live requires contact within every
+abandonment window, and the node has no setting that stops the pass
+while keeping the name. That is the right design, so the Goal was
+amended rather than the code: the heartbeat is the liveness signal the
+abandonment sweep uses to free squatted names, which is a Decision 3
+abuse control, not a dynamic-DNS implementation detail, and a static
+registration that never had to check in would be a name nothing could
+ever reclaim. What a static board gets instead is that its record is
+written once and never rewritten.
+
+The real cost of that rule was a node back from an outage. Take a board
+down for a fortnight's holiday: the sweep abandons the name after a
+week, the record leaves DNS, and on the node's first heartbeat back the
+service answers 401 — at which point the updater used to stop for good.
+The name was held for the node for the whole cooldown, reclaimable by
+one keystroke, but nothing said so; a SysOp who did not happen to open
+the DNS screen lost it when the cooldown purged it. Abandonment is the
+service noticing the node was away, not the SysOp choosing to leave, so
+the node now performs that keystroke itself: on every pass while its
+cached status is `abandoned` (and no rename is outstanding), it sends
+`/register` with the credential it still holds and `reclaim_only` set,
+and on success carries straight on into the ordinary heartbeat. The
+flag is the safety of it: the service performs the reclaim the
+credential entitles the node to, or refuses — it never registers afresh
+on the node's behalf. A fresh registration mints a new credential,
+spends a rate-limit token and, once the cooldown has purged the row, is
+for a name that may no longer be this node's; all of that stays the
+SysOp's own `[R]egister`. A refusal (the row purged, the service at
+capacity, unreachable) is retried next pass and recorded as a recovery
+note the DNS screen shows beside the ABANDONED badge, with the sentence
+the service gave. `released` is never reclaimed automatically — that is
+the SysOp's decision to stop (Decision 5) — and a `revoked` row refuses
+the automatic path exactly as it refuses the manual one (Decision 4).
+
 **Implemented.** Node-side client (`src/netbbs/managed_dns/`, shipped
 inside the installable `netbbs` package: opt-in prompt, credential
 storage, the periodic heartbeat/updater task, the SysOp status/register/
@@ -8974,7 +9103,8 @@ before a registration is swept as abandoned, and a 90-day cooldown
 shared by both voluntary release and abandonment (Decision 5, "on the
 order of 90 days" as locked in above). A fourth terminal status, `revoked`, and the
 token-gated `/admin/revoke` behind it carry Decision 4's manual dispute
-process (issue #599). Actually standing the backend up
+process (issue #599); `MANAGED_DNS_CONTACT` is the channel Decision 3's
+refusals name (issue #598). Actually standing the backend up
 — a host, DNS delegation, a real BIND server's `allow-update` ACL and
 matching TSIG key — is an operational step the code does not perform on
 its own; see `services/managed_dns/README.md`. Until that is done, the

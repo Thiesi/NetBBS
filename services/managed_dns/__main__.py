@@ -17,6 +17,12 @@ Decision 4, issue #599) and is unset by default, which leaves that route
 refusing every request -- an instance whose operator has not set one
 simply has no administrative surface.
 
+`MANAGED_DNS_CONTACT` is the channel a SysOp refused by the rate limit
+or the cumulative cap is told to use for a legitimate exception (design
+doc §16 Decision 3, issue #598). Unset, the refusals say the operator has
+not named one; `_build_server` warns at startup so that is a choice
+rather than an oversight.
+
 `MANAGED_DNS_DB_PATH` is the only required variable. Everything else has
 a reasoned default; `MANAGED_DNS_TSIG_KEYNAME`/`MANAGED_DNS_TSIG_SECRET`
 default to unset, in which case this falls back to `LoggingDnsProvider`
@@ -102,6 +108,12 @@ def _build_server() -> ManagedDnsServer:
     if not db_path_raw:
         raise ConfigError("MANAGED_DNS_DB_PATH is required")
     db = Database(Path(db_path_raw))
+    if not (os.environ.get("MANAGED_DNS_CONTACT") or "").strip():
+        _logger.warning(
+            "MANAGED_DNS_CONTACT not set -- a SysOp refused by the rate limit or the "
+            "cumulative cap will be told no contact channel is configured. "
+            "See services/managed_dns/README.md section 4."
+        )
 
     return ManagedDnsServer(
         os.environ.get("MANAGED_DNS_HOST", "127.0.0.1"),
@@ -116,6 +128,7 @@ def _build_server() -> ManagedDnsServer:
         rate_limit_refill_per_minute=_env_float("MANAGED_DNS_RATE_LIMIT_REFILL_PER_MINUTE", 5.0 / 60.0),
         cumulative_cap=_env_int("MANAGED_DNS_CUMULATIVE_CAP", 1000),
         admin_token=os.environ.get("MANAGED_DNS_ADMIN_TOKEN"),
+        contact=os.environ.get("MANAGED_DNS_CONTACT"),
     )
 
 

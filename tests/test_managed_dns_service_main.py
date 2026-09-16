@@ -120,3 +120,30 @@ def test_cleanup_failure_surfaces_after_a_normal_exit():
 
     with pytest.raises(RuntimeError, match="cleanup failed"):
         asyncio.run(_stop_server_preserving_primary(FailingServer(), None))
+
+
+def test_build_server_reads_the_contact_channel_and_warns_when_it_is_missing(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("MANAGED_DNS_DB_PATH", str(tmp_path / "managed_dns.db"))
+    monkeypatch.delenv("MANAGED_DNS_TSIG_KEYNAME", raising=False)
+    monkeypatch.delenv("MANAGED_DNS_TSIG_SECRET", raising=False)
+    monkeypatch.delenv("MANAGED_DNS_CONTACT", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="services.managed_dns.__main__"):
+        server = _build_server()
+    try:
+        assert server._contact is None
+        assert any("MANAGED_DNS_CONTACT not set" in r.getMessage() for r in caplog.records)
+    finally:
+        server._db.close()
+
+    caplog.clear()
+    monkeypatch.setenv("MANAGED_DNS_CONTACT", " https://example.org/dns ")
+    with caplog.at_level(logging.WARNING, logger="services.managed_dns.__main__"):
+        server = _build_server()
+    try:
+        assert server._contact == "https://example.org/dns"
+        assert not any("MANAGED_DNS_CONTACT" in r.getMessage() for r in caplog.records)
+    finally:
+        server._db.close()

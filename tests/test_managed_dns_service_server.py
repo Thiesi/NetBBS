@@ -46,11 +46,13 @@ async def _register(server: ManagedDnsServer, *, name: str, node_fingerprint: st
 
 async def _register_raw(
     server: ManagedDnsServer, *, name: str, node_fingerprint: str = "fp-1", dynamic: bool = False,
-    credential: str | None = None,
+    credential: str | None = None, reclaim_only=None,
 ):
     payload = {"name": name, "node_fingerprint": node_fingerprint, "dynamic": dynamic}
     if credential is not None:
         payload["credential"] = credential
+    if reclaim_only is not None:
+        payload["reclaim_only"] = reclaim_only
     async with aiohttp.ClientSession() as session:
         async with session.post(f"http://127.0.0.1:{server.port}/register", json=payload) as response:
             return response.status, await response.json()
@@ -2435,3 +2437,121 @@ def test_revoke_skips_a_target_the_row_under_which_changed_mid_flight(db):
     replacement = get_registration_by_name(db, "newname")
     assert replacement.status == "pending"
     assert replacement.credential_hash == hash_credential("a-brand-new-secret")
+
+
+# -- the contact channel and honest capacity wording (issue #598) ------------
+
+
+def test_the_capacity_refusal_names_the_contact_channel_and_stops_promising_that_waiting_helps(db):
+    async def scenario():
+        server = await _start_server(db, cumulative_cap=1, contact="https://example.org/managed-dns")
+        try:
+            await _register(server, name="board-a", node_fingerprint="fp-1")
+            return await _register_raw(server, name="board-b", node_fingerprint="fp-2")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 503
+    assert "retrying will not help" in body["error"]
+    assert "released or abandoned" in body["error"]
+    assert "contact https://example.org/managed-dns" in body["error"]
+    assert body["contact"] == "https://example.org/managed-dns"
+    assert "try again later" not in body["error"]
+
+
+def test_the_rate_limit_refusal_keeps_try_again_shortly_and_names_the_contact_channel(db):
+    async def scenario():
+        server = await _start_server(db, rate_limit_capacity=1, contact="dns@example.org")
+        try:
+            await _register(server, name="board-a", node_fingerprint="fp-1")
+            return await _register_raw(server, name="board-b", node_fingerprint="fp-2")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 429
+    assert "try again shortly" in body["error"]
+    assert "contact dns@example.org" in body["error"]
+
+
+def test_an_instance_without_a_contact_channel_says_so_rather_than_naming_the_projects(db):
+    """A self-hosted copy has no business telling its SysOps to write
+    to this project; blank means blank."""
+    async def scenario():
+        server = await _start_server(db, cumulative_cap=1)
+        try:
+            await _register(server, name="board-a", node_fingerprint="fp-1")
+            return await _register_raw(server, name="board-b", node_fingerprint="fp-2")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 503
+    assert "whoever runs this service" in body["error"]
+    assert body["contact"] is None
+    assert "github" not in body["error"].lower()
+
+
+# -- reclaim_only (design doc §16 Decision 10, issue #600) -------------------
+
+
+def test_reclaim_only_reclaims_a_released_row_with_its_own_credential(db):
+    async def scenario():
+        server = await _start_server(db, min_age_seconds=0)
+        try:
+            registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
+            await _release(server, credential=registered["credential"])
+            return await _register_raw(
+                server, name="myboard", credential=registered["credential"], reclaim_only=True,
+            ), registered["credential"]
+        finally:
+            await server.stop()
+
+    (status, body), credential = asyncio.run(scenario())
+    assert status == 201
+    assert body["credential"] == credential
+    assert body["status"] == "matured"
+
+
+def test_reclaim_only_never_registers_afresh(db):
+    """Three ways the automatic path could otherwise have minted a new
+    registration: no row at all, a row past its cooldown, and a row in
+    cooldown held by a different credential. Each is refused and leaves
+    the table exactly as it was."""
+    async def scenario():
+        clock = {"now": datetime(2026, 9, 16, tzinfo=timezone.utc)}
+        server = await _start_server(db, cooldown_seconds=60, clock=lambda: clock["now"])
+        try:
+            fresh = await _register_raw(server, name="nobody", credential="whatever", reclaim_only=True)
+            registered = await _register(server, name="myboard")
+            await _release(server, credential=registered["credential"])
+            other = await _register_raw(server, name="myboard", credential="not-mine", reclaim_only=True)
+            clock["now"] += timedelta(seconds=120)
+            expired = await _register_raw(
+                server, name="myboard", credential=registered["credential"], reclaim_only=True,
+            )
+            return fresh, other, expired
+        finally:
+            await server.stop()
+
+    fresh, other, expired = asyncio.run(scenario())
+    for status, body in (fresh, other, expired):
+        assert status == 409
+        assert "not held for reclaim by this credential" in body["error"]
+    assert get_registration_by_name(db, "nobody") is None
+    assert get_registration_by_name(db, "myboard").status == "released"  # expired but untouched
+
+
+def test_reclaim_only_must_be_a_boolean(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            return await _register_raw(server, name="myboard", reclaim_only="yes")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 400
+    assert "reclaim_only" in body["error"]

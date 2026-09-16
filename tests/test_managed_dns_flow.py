@@ -498,11 +498,17 @@ def test_release_registration_succeeds_end_to_end(tmp_path):
     db.close()
 
 
-def test_register_via_prompt_declining_standard_ports_shows_a_caveat(tmp_path):
-    """Design doc §16 Decision 6: declining the reverse-proxy question
-    is purely informational -- registration still succeeds, but the
-    SysOp is told plainly that a bare web address won't be part of the
-    promise."""
+def test_register_via_prompt_states_the_ports_convention_against_this_nodes_listeners(tmp_path):
+    """Design doc §16 Decision 6 (issue #603): the standard-ports
+    convention used to live in a help panel behind a `[W]eb behind
+    HTTPS proxy` field whose answer went nowhere. It is stated above the
+    fields now, measured against the listeners this node recorded at
+    startup -- the node knows its own ports with certainty, and says so
+    in the one sentence that tells a SysOp on the shipped 2222 default
+    that the address they are about to register will not reach them
+    without a port-forward."""
+    from netbbs.managed_dns.state import ListenerFacts, set_local_listeners
+
     async def scenario():
         backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
         server = ManagedDnsServer("127.0.0.1", 0, backend_db)
@@ -511,8 +517,9 @@ def test_register_via_prompt_declining_standard_ports_shows_a_caveat(tmp_path):
             db = Database(tmp_path / "node.db")
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
+            set_local_listeners(db, ListenerFacts(telnet_port=None, ssh_port=2222, web_port=None, web_public_url=None))
             lane = DatabaseLane(db.path)
-            session = FakeSession(["n", "myboard", "d", "r"])  # name, dynamic off, proxy left at no, register
+            session = FakeSession(["n", "myboard", "d", "r"])  # no [W] field any more
 
             await register_via_prompt(session, lane)
 
@@ -522,36 +529,45 @@ def test_register_via_prompt_declining_standard_ports_shows_a_caveat(tmp_path):
             await server.stop()
             backend_db.close()
 
+    from tests.test_admin_flow import _visible
+
     db, session = asyncio.run(scenario())
+    # Wrapped at the terminal width, so compare against the flattened text.
+    text = " ".join(_visible("".join(session.written)).split())
     assert get_registered_name(db) == "myboard"  # registration still succeeded
-    assert any("won't be part of the promise" in line for line in session.written)
+    assert "standard ports: SSH 22, Telnet 23, HTTPS 443" in text
+    assert "listens on 2222, so a caller dialling 22 needs a" in text
+    assert "Telnet: not enabled on this node" in text
+    assert "[W]eb" not in text
+    assert "won't be part of the promise" not in text
     db.close()
 
 
-def test_register_via_prompt_accepting_standard_ports_shows_no_caveat(tmp_path):
-    async def scenario():
-        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
-        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
-        await server.start()
-        try:
-            db = Database(tmp_path / "node.db")
-            set_service_url(db, f"http://127.0.0.1:{server.port}")
-            set_node_fingerprint(db, "fp-1")
-            lane = DatabaseLane(db.path)
-            session = FakeSession(["n", "myboard", "w", "d", "r"])  # name, proxy yes, dynamic off, register
+def test_standard_ports_lines_cover_every_listener_shape():
+    """The convention line is always first; each transport then gets
+    exactly one sentence for its own situation -- standard port, other
+    port, disabled -- and web is judged by whether an HTTPS public URL
+    has been configured, the one statement a SysOp has already made
+    about a TLS front."""
+    from netbbs.managed_dns.state import ListenerFacts
+    from netbbs.net.managed_dns_flow import standard_ports_lines
 
-            await register_via_prompt(session, lane)
+    unknown = standard_ports_lines(None)
+    assert unknown[0].startswith("Callers reach a managed name on the standard ports")
+    assert "not recorded its own listener ports yet" in unknown[1]
 
-            lane.close()
-            return db, session
-        finally:
-            await server.stop()
-            backend_db.close()
+    standard = standard_ports_lines(
+        ListenerFacts(telnet_port=23, ssh_port=22, web_port=8080, web_public_url="https://board.example")
+    )
+    assert "SSH: this node listens on 22, as callers expect." in standard
+    assert "Telnet: this node listens on 23, as callers expect." in standard
+    assert any("public URL is https://board.example" in line and "answers on 443" in line for line in standard)
 
-    db, session = asyncio.run(scenario())
-    assert get_registered_name(db) == "myboard"
-    assert not any("won't be part of the promise" in line for line in session.written)
-    db.close()
+    plain_web = standard_ports_lines(
+        ListenerFacts(telnet_port=None, ssh_port=2222, web_port=8080, web_public_url="http://10.0.0.5:8080")
+    )
+    assert any("never NetBBS's own listener on 443" in line for line in plain_web)
+    assert any("listens on 2222, so a caller dialling 22" in line for line in plain_web)
 
 
 def test_managed_name_change_and_cancel_preserve_the_old_registration(tmp_path, monkeypatch):
