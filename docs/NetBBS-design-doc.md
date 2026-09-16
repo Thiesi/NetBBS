@@ -8710,11 +8710,94 @@ real active slot, and release/reclaim cycling must not create more live
 rows than either bound permits.
 
 **Decision 4 (locked in) — contested-name disputes are manual and
-complaint-driven, stated as such, not implied automation.** At this
-project's current scale, there is no realistic alternative to a human
-(the project maintainer) reviewing a reported impersonation/abuse claim
-and revoking if warranted. Documented explicitly so this isn't mistaken
-for a more automated process than actually exists.
+complaint-driven, stated as such, not implied automation; the operator's
+end of that process is a revocation which takes the name away from the
+registrant who held it, and nothing more.** At this project's current
+scale, there is no realistic alternative to a human (the project
+maintainer) reviewing a reported impersonation/abuse claim and revoking
+if warranted. Documented explicitly so this isn't mistaken for a more
+automated process than actually exists.
+
+Issue #599: for three releases that was the whole of it. The decision
+said a human revokes, and nothing existed for a human to revoke *with* —
+no channel a complaint could arrive through, no endpoint or command, and
+no runbook step. Doing it by hand meant editing the service's SQLite and
+deleting the record out of BIND separately, with nothing to stop the
+holder's node republishing on its next heartbeat. A decision whose
+enforcement is entirely manual still has to say what the manual act is.
+
+**The act is `POST /admin/revoke`, on the running service, gated by a
+bearer token that is unset by default.** Inside the service rather than
+a separate CLI because it must share the same transition lane as the
+heartbeat, the sweep and every SysOp-driven transition — a second
+process editing the same database could commit from a snapshot the
+sweep had already moved past. Unset by default because a public-facing
+service should not carry an administrative route that merely hopes
+nobody finds it; an instance whose operator has not configured a token
+has no administrative surface at all, and the refusal is identical for
+"no token configured", "wrong token" and "no header" so the response
+cannot be used to learn whether this instance has one.
+
+**A revoked name is a fourth terminal status, not a reuse of
+`released`.** The difference that matters is reclaim: a released or
+abandoned row is deliberately reclaimable by the credential that held
+it, for the length of the cooldown, which is Decision 5's whole point.
+Applied to a takedown that same rule would undo it — the registrant's
+node still holds the credential, and its registration draft prefills the
+name it just lost, so a reclaim is one keystroke. A revoked row is
+reclaimable by nothing.
+
+**It expires on the same cooldown as the other two exits.** Revocation
+blocks the registrant who was taken down, not the name forever: once
+`released_at` ages past the shared cooldown the name is available to a
+genuinely new registrant, including in principle the person it was taken
+from. Permanent retirement was considered and rejected for the same
+reason Decision 5 rejected it for voluntary release — an ever-growing
+set of names retired for the life of the project — and because a
+mechanism for names nobody may ever hold already exists: the
+`blocklist` module's `RESERVED_NAMES`, curated by hand and changed by a
+code change, which is where a permanently-barred name belongs.
+
+**Revoking one half of a rename takes both halves.** A rename is the one
+state in which a single registrant holds two names (see Decision 3's own
+note on the per-node cap), so revoking the live name and leaving the
+replacement to mature would hand the taken-down registrant a working
+name. The voluntary release path refuses in this state and tells the
+SysOp to cancel the rename first; an operator acting on a complaint has
+nobody to ask, so revocation takes both rather than refusing.
+
+**Only the rows that are still this registrant's, and still the rows
+that were checked.** A replacement can outlive the name it replaced, so
+the same node-fingerprint check rename completion and cancellation apply
+before mutating anything through a `replaces_name` link applies here
+too: a name whose cooldown elapsed and was reissued to a different node
+is never taken by a complaint about the node that used to hold it. And
+because a fresh registration does not pass through the transition lane
+that a revocation holds, each row is re-read after the provider awaits
+and written only if its credential hash is unchanged — proof it is still
+the registration that was checked, rather than one that claimed the name
+in between.
+
+**Publication is undone before the rows move, and a provider failure
+revokes nothing** — the same rule voluntary release already follows.
+A takedown recorded in the database while the record is still resolving
+would be worse than no takedown, because it looks finished. Only a row
+which can still hold a published record is worth a provider call at all:
+release and abandonment leave `last_known_address` behind on a row whose
+record they already deleted, and failing a revocation on a deletion that
+had nothing to delete would leave the credential reclaimable during
+exactly the provider outage an operator cannot wait out.
+
+**Reports arrive through the project's issue tracker**, which is a
+public channel and a real trade-off: an impersonation complaint tends to
+name the impersonated party. The alternative considered was a dedicated
+address, which is better suited to the content but is infrastructure
+this project does not otherwise run, and an unmonitored one would be
+worse than the tracker. Nothing in the mechanism assumes a report
+arrived there. `services/managed_dns/README.md` §8 carries the
+operational half: what to check before revoking, what separates abuse
+from an ordinary naming dispute this decision deliberately does not
+cover, the request itself, and what the former holder sees afterwards.
 
 **Decision 5 (locked in) — both exit paths, voluntary release and
 abandoned-node reclaim, share one deliberately generous cooldown before
@@ -8889,7 +8972,9 @@ registration rate limit (Decision 3), a cumulative cap of 1000 active
 registrations (Decision 3), a 7-day no-contact abandonment threshold
 before a registration is swept as abandoned, and a 90-day cooldown
 shared by both voluntary release and abandonment (Decision 5, "on the
-order of 90 days" as locked in above). Actually standing the backend up
+order of 90 days" as locked in above). A fourth terminal status, `revoked`, and the
+token-gated `/admin/revoke` behind it carry Decision 4's manual dispute
+process (issue #599). Actually standing the backend up
 — a host, DNS delegation, a real BIND server's `allow-update` ACL and
 matching TSIG key — is an operational step the code does not perform on
 its own; see `services/managed_dns/README.md`. Until that is done, the

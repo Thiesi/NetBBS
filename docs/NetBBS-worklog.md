@@ -3716,6 +3716,19 @@ HTTP, never imports it.
   with it. The lesson: a setter whose only callers are tests is not
   "configurable", and a domain layer reading a value nothing writes
   fails at the far end of a user-visible flow instead of at startup.
+- **A revoked registration is not a released one, and the difference is
+  reclaim.** Release and abandonment are deliberately reclaimable by the
+  credential that held the name, for the cooldown's length (Decision 5).
+  A takedown that reused either status would therefore be undone by the
+  registrant pressing `[R]egister` -- their node still holds the
+  credential and the draft prefills the name. `revoked` is its own
+  terminal status for that one reason; it shares `released_at`, and so
+  the cooldown and the purge, with the other two. Revoking either half
+  of a rename takes both, since that is the only state in which one
+  registrant holds two names. The status column's `CHECK` constraint
+  meant adding it was a table rebuild, not an `ALTER` -- SQLite cannot
+  alter a constraint in place, and the partial unique index guarding
+  one-pending-replacement has to be recreated with the table.
 - **A managed-DNS credential is bound to the service that issued it.**
   That address is written in the same transaction as the registration
   (`set_registration_result_state`), and `foreign_credential_service_url`
