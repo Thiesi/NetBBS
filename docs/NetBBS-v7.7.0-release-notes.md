@@ -387,7 +387,19 @@ What this release does **not** establish:
   validation pass over a door's history, and both would restore a node
   tidier than the one backed up.
 
-Gate for this release: full suite **9,550 passed / 56 skipped** in
-28:30, `PYTEST_EXIT=0`, on this tree. Clean on the first pass, which
-has not been true of a release for a while -- the three pre-existing
-failures 7.6.0's own gate had to clean up were fixed in it.
+Gate for this release: full suite **9,550 passed / 56 skipped**,
+`PYTEST_EXIT=0`, on the tagged tree. Clean, which has not been true of a
+release for a while — the three pre-existing failures 7.6.0's own gate
+had to clean up were fixed in it. Run twice at the same count: once when
+the branch was cut, and again after review changed the attestation
+consent text, because a gate measured on a tree that is not the one being
+tagged is not a gate.
+
+What review did find, all of it in the notes rather than the code, was
+four wrong claims — two of them corrections to an earlier correction in
+this same document. The attestation consent text was wrong twice over
+(#596), the rollback order was backwards in a way that would have
+defeated the rollback, and the managed-DNS section contradicted itself
+two paragraphs apart. None of that changes what ships; it changes what a
+SysOp is told about it, which for a release carrying a privacy-relevant
+feature is most of the point.
