@@ -386,20 +386,30 @@ def _rewind_anchor(door: pathlib.Path, state: pathlib.Path, back) -> None:
     `seed_war_dialer` does to archive one. Keys remain the first resort: this is
     only for what a clock decides.
 
-    The anchor is set `back` from *now*, not from the anchor the fixture already
-    holds. A cached fixture is created once and reused for every later build
-    (module docstring), so measuring from its stored anchor made these panels
-    depend on the fixture's age: a day after it was made, "one day from reset"
-    had already rolled over, and the season-closing panel failed its own
-    `SHOWS` check in every size and preset (found on issue #519's rebuild).
+    The anchor is set from *now* and from the season the world is actually in,
+    never from the anchor the fixture already holds. A cached fixture is created
+    once and reused for every later build (module docstring), so measuring from
+    its stored anchor made these panels depend on the fixture's age: a day after
+    it was made, "one day from reset" had already rolled over, and the
+    season-closing panel failed its own `SHOWS` check in every size and preset
+    (found on issue #519's rebuild). And the fixture is not in season one:
+    `seed_war_dialer` closes a season, so its player and exchanges live in the
+    next one, and an anchor placed `back` from now alone would put the clock in
+    a season the world has already archived (Codex review, PR #615). The
+    world's own recorded season -- the exchanges' latest sweep and the
+    `active_season` marker, the same two `current_world_season` consults --
+    says how many whole seasons the anchor must sit behind now.
     """
     game = load_door(door)
     conn = game.connect(state / "war-dialer.db")
     try:
+        stored = conn.execute("SELECT MAX(season_number) FROM exchanges").fetchone()[0]
+        marker = conn.execute("SELECT value FROM meta WHERE key='active_season'").fetchone()
+        season = max(stored or 1, int(marker["value"]) if marker else 1)
         with conn:
             conn.execute("INSERT INTO meta(key,value) VALUES ('season_anchor',?) "
                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                         (game.to_iso(game.now_utc() - back(game)),))
+                         (game.to_iso(game.now_utc() - (season - 1) * game.SEASON - back(game)),))
     finally:
         conn.close()
 
