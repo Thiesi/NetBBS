@@ -39,7 +39,7 @@ from netbbs.attestation import (
     set_location_visible,
     set_verified_badge_visible,
 )
-from netbbs.auth.users import SYSOP_LEVEL, User, get_user_by_id, list_ssh_keys, list_users
+from netbbs.auth.users import SYSOP_LEVEL, User, get_user_by_id, has_password, list_ssh_keys, list_users
 from netbbs.boards.categories import get_category_by_id as get_board_category_by_id
 from netbbs.chat.categories import get_category_by_id as get_channel_category_by_id
 from netbbs.communities import Community, get_community
@@ -78,6 +78,7 @@ from netbbs.net.redraw_preference import redraw_in_place_enabled, set_redraw_in_
 from netbbs.net.resource_editor import Draft, FieldSpec, edit_resource_draft, live_choice_field
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.sort_ui import SORT_MODE_LABELS
+from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.mrc_color_preference import mrc_colors_enabled, set_mrc_colors_enabled
 from netbbs.net.mrc_nick_color_preference import mrc_nick_color, set_mrc_nick_color
@@ -917,6 +918,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "breadcrumb_collapsed": collapsed,
         "sort_preference_count": len(await lane.run(list_sort_preferences, user)),
         "ssh_key_count": len(await lane.run(list_ssh_keys, user)),
+        "password_set": await lane.run(has_password, user),
     }
 
     async def _bio_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
@@ -953,6 +955,19 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         different key."""
         nonlocal user
         user = await manage_ssh_keys_screen(session, lane, user, changed_by=user)
+        draft["ssh_key_count"] = len(await lane.run(list_ssh_keys, user))
+        draft["password_set"] = await lane.run(has_password, user)
+
+    async def _password_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
+        """Issue #611: until this field existed a password was written
+        once, at account creation, and could never be changed by anyone.
+        Same shared-screen shape as `[K]` above (`netbbs.net.
+        password_screen`); `changed_by=user` records the account acting
+        on itself, which is also what makes the screen demand the
+        current password first."""
+        nonlocal user
+        user = await manage_password_screen(session, lane, user, changed_by=user)
+        draft["password_set"] = await lane.run(has_password, user)
         draft["ssh_key_count"] = len(await lane.run(list_ssh_keys, user))
 
     def _color_depth_render(d: Draft) -> str:
@@ -1305,6 +1320,22 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "base64, or a full 'ssh-ed25519 ...' line, and never revokes any other key "
                 "already on the account. Removing your last key is only offered if you have a "
                 "password set, since an account needs at least one way to log in."
+            ),
+            section="Account",
+        ),
+        FieldSpec(
+            key="password", hotkey="a", menu_text=menu_key("A", "ccount password"),
+            label="Password",
+            render=lambda d: "set" if d["password_set"] else "(none -- key login only)",
+            prompt=_password_prompt,
+            brief="Change your sign-in password",
+            help=(
+                "Opens a screen where you can change the password you sign in with. You are "
+                "asked for your current password first, then the new one twice; nothing is "
+                "echoed. If your account signs in by SSH key only, this is where you add a "
+                "password, and if it has both, this is where you can remove the password to "
+                "keep key login as the only way in. If you have forgotten your password, ask "
+                "your SysOp to set a new one for you."
             ),
             section="Account",
         ),

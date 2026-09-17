@@ -180,9 +180,11 @@ The standing principle is:
   must reject raises the editor's `error_type` so the draft survives (a
   bare `return None` closes the editor). The only exceptions are once-only
   first-run decisions (Link participation, node name, managed-DNS opt-in,
-  the Unicode-style probe) and type-the-name confirmations before
-  deletes. Never add a prompt chain, and never hide one behind an extra
-  hotkey instead of converting it.
+  the Unicode-style probe), type-the-name confirmations before
+  deletes, and masked credential entry (a password typed twice, after the
+  current one where the account acts on itself -- a draft editor would
+  have to hold the plaintext across redraws). Never add a prompt chain,
+  and never hide one behind an extra hotkey instead of converting it.
 - **Fail clearly.** Administrative lockout, identity ambiguity, incompatible
   databases, protocol rejection, and resource exhaustion should not degrade
   silently.

@@ -27,7 +27,11 @@ from netbbs.auth.users import (
     create_user,
     delete_user,
     generate_challenge,
+    get_user_by_username,
+    has_password,
     list_users,
+    password_matches,
+    set_password,
     set_user_disabled,
     set_user_level,
 )
@@ -336,3 +340,91 @@ def test_reenabled_account_can_log_in_again(db, sysop):
     set_user_disabled(db, alice, False, changed_by=sysop)
     user = authenticate_password(db, "alice", "hunter2")
     assert user.username == "alice"
+
+
+# -- password lifecycle (issue #611) --------------------------------------
+#
+# Until #611 `users.password_hash` was written once, at creation, and had
+# no UPDATE anywhere. These prove the domain half; the screens that call
+# it are driven end to end in tests/test_password_screen.py.
+
+
+def test_set_password_replaces_the_password_for_the_next_login(db, sysop):
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    set_password(db, alice, "n3w-pass", changed_by=alice)
+    assert authenticate_password(db, "alice", "n3w-pass").username == "alice"
+    with pytest.raises(AuthError):
+        authenticate_password(db, "alice", "hunter2")
+
+
+def test_set_password_records_who_changed_it_and_nothing_else(db, sysop):
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    set_password(db, alice, "n3w-pass", changed_by=sysop)
+    entry = list_actions_for_target_user(db, alice.id)[-1]
+    assert entry.action == "set_password"
+    assert entry.actor_user_id == sysop.id
+    assert entry.detail is None
+
+
+def test_set_password_refuses_a_blank_password(db, sysop):
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    with pytest.raises(AuthError, match="cannot be blank"):
+        set_password(db, alice, "", changed_by=alice)
+    assert authenticate_password(db, "alice", "hunter2").username == "alice"
+    assert list_actions_for_target_user(db, alice.id) == []
+
+
+def test_clearing_the_password_is_refused_without_a_key(db, sysop):
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    with pytest.raises(AuthError, match="no SSH/public key"):
+        set_password(db, alice, None, changed_by=sysop)
+    assert has_password(db, alice)
+    assert authenticate_password(db, "alice", "hunter2").username == "alice"
+
+
+def test_clearing_the_password_makes_the_account_key_only(db, sysop):
+    signing_key = nacl.signing.SigningKey.generate()
+    alice = create_user(db, "alice", password="hunter2", verify_key=signing_key.verify_key, user_level=10)
+    set_password(db, alice, None, changed_by=alice)
+    assert not has_password(db, alice)
+    with pytest.raises(AuthError):
+        authenticate_password(db, "alice", "hunter2")
+    challenge = generate_challenge()
+    assert authenticate_keypair(db, "alice", challenge, signing_key.sign(challenge).signature).username == "alice"
+    assert list_actions_for_target_user(db, alice.id)[-1].action == "clear_password"
+
+
+def test_a_key_only_account_can_be_given_a_password(db, sysop):
+    signing_key = nacl.signing.SigningKey.generate()
+    alice = create_user(db, "alice", verify_key=signing_key.verify_key, user_level=10)
+    assert not has_password(db, alice)
+    set_password(db, alice, "first", changed_by=sysop)
+    assert has_password(db, alice)
+    assert authenticate_password(db, "alice", "first").username == "alice"
+
+
+def test_password_matches_answers_without_logging_in(db, sysop):
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    assert password_matches(db, alice, "hunter2") is True
+    assert password_matches(db, alice, "wrong") is False
+    # Not a login: nothing recorded, disabled state irrelevant.
+    assert get_user_by_username(db, "alice").last_login_at is None
+    alice = set_user_disabled(db, alice, True, changed_by=sysop)
+    assert password_matches(db, alice, "hunter2") is True
+
+
+def test_password_matches_is_false_for_a_key_only_account(db, sysop):
+    signing_key = nacl.signing.SigningKey.generate()
+    alice = create_user(db, "alice", verify_key=signing_key.verify_key, user_level=10)
+    assert password_matches(db, alice, "") is False
+    assert password_matches(db, alice, "anything") is False
+
+
+def test_set_password_survives_a_stale_target_reference(db, sysop):
+    # `User` is frozen and callers hold snapshots; the function acts on
+    # the current row, same as every other setter in this module.
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    set_user_level(db, alice, 20, changed_by=sysop)
+    updated = set_password(db, alice, "n3w-pass", changed_by=sysop)
+    assert updated.user_level == 20
+    assert authenticate_password(db, "alice", "n3w-pass").user_level == 20

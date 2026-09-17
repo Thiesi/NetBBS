@@ -428,6 +428,7 @@ async def _run_authenticated_session(
     await run_authenticated_session(
         session, db, hub, presence, mailbox, login_result,
         node_controls=node_controls, lane=lane, link_context=link_context, direct_invites=direct_invites,
+        throttle=throttle,
     )
 
 
@@ -544,6 +545,7 @@ async def run_authenticated_session(
     lane: DatabaseLane | None = None,
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
+    throttle: LoginThrottle | None = None,
 ) -> None:
     """
     The authenticated-through-logoff body of a connection (GitHub issue
@@ -589,6 +591,11 @@ async def run_authenticated_session(
     # node-name-gradient section docstring for why).
     session.node_display_name = get_node_display_name(db)
     session.node_name_gradient = effective_node_name_gradient(db)
+    # Issue #611: the self-service password change re-verifies the
+    # current password from inside this session, and that check charges
+    # the node's login throttle rather than opening a second, unbounded
+    # place to guess (`netbbs.net.session.Session.login_throttle`).
+    session.login_throttle = throttle
 
     if (
         node_controls is not None
@@ -850,6 +857,12 @@ async def handle_ssh_session(
     # no Zmodem a browser link instead.
     transfers: object | None = None,
     door_services: object | None = None,
+    # Issue #611: the same node-wide `LoginThrottle` `handle_session`
+    # takes, so a password re-check inside an SSH session charges the
+    # same budgets. SSH's own password login already charges them from
+    # `netbbs.net.ssh` (its `validate_password`); this is the post-login
+    # half.
+    throttle: LoginThrottle | None = None,
 ) -> None:
     """
     SSH-specific top-level entry point (GitHub issue #25) — the
@@ -934,6 +947,7 @@ async def handle_ssh_session(
         await run_authenticated_session(
             session, db, hub, presence, mailbox, result,
             node_controls=node_controls, lane=lane, link_context=link_context, direct_invites=direct_invites,
+            throttle=throttle,
         )
     finally:
         session_registry.leave(session)

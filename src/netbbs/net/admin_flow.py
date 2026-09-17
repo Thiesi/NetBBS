@@ -76,6 +76,7 @@ from netbbs.auth.users import (
     delete_user,
     get_user_by_id,
     get_user_by_username,
+    has_password,
     list_users,
     set_can_verify_identity,
     set_user_disabled,
@@ -351,6 +352,7 @@ from netbbs.net.shutdown import (
     run_drain_sequence,
     run_shutdown_sequence,
 )
+from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.redraw_preference import (
@@ -4313,6 +4315,16 @@ async def _draw_user_detail(
             target.fingerprint if target.fingerprint else "(none)", selected=selected, accent=accent,
         )
     )
+    # Issue #611: whether a password exists, never the password. Beside
+    # the key line because the two together are "how this account gets
+    # in", and a SysOp resetting one wants to see the other.
+    await session.write_line(
+        _user_detail_field_line(
+            "p", "Password",
+            "set" if await lane.run(has_password, target) else "(none -- key login only)",
+            selected=selected, accent=accent,
+        )
+    )
     # Dogfood follow-up (`netbbs.moderation.blocklist`): the local
     # blocklist enforcement path was real and already wired into login
     # (`netbbs.net.login_flow`'s own distinct "Your access to this
@@ -4365,6 +4377,7 @@ async def _draw_user_detail(
     options.append(MenuEntry(label=menu_key("T", "oggle enable/disabled"), brief="Enable or disable this account"))
     options.append(MenuEntry(label=menu_key("I", "dentity verification"), brief="Grant/revoke attestation rights"))
     options.append(MenuEntry(label=menu_key("K", "ey"), brief="View/replace this user's SSH key"))
+    options.append(MenuEntry(label=menu_key("P", "assword"), brief="Set or clear this user's password"))
     options.append(MenuEntry(label=menu_key("R", "estrict login"), brief="Block or unblock this account"))
     options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the picker"))
@@ -4377,7 +4390,7 @@ async def _draw_user_detail(
     return blocked
 
 
-_USER_DETAIL_FIELD_ORDER = ("l", "t", "i", "k", "r")
+_USER_DETAIL_FIELD_ORDER = ("l", "t", "i", "k", "p", "r")
 
 
 async def _read_user_detail_key(session: Session) -> EditorKey:
@@ -4437,6 +4450,13 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
         "Public key",
         "This account's SSH/Link public key. Setting or replacing it here lets them log "
         "in over SSH with key-based authentication.",
+    ),
+    "p": (
+        "Password",
+        "Whether this account has a password. Opens a screen to set a new one (the old "
+        "one is never shown or recovered) or, if the account also has an SSH key, to "
+        "remove the password so it signs in by key only. Every change is audit-logged "
+        "with your name.",
     ),
     "r": (
         "Blocked",
@@ -4627,6 +4647,16 @@ async def _user_detail_screen(
             # `[K]` field (`netbbs.net.login_flow`'s own `_edit_profile`)
             # -- both now open the same shared `manage_ssh_keys_screen`.
             target = await manage_ssh_keys_screen(session, lane, target, changed_by=actor)
+            blocked = await _draw_user_detail(
+                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
+            )
+        elif choice == "p":
+            # Issue #611: the SysOp-assisted counterpart to the Profile
+            # `[A]ccount password` field -- the same shared
+            # `manage_password_screen`. `changed_by=actor` is what makes
+            # it skip the current-password proof for someone else's
+            # account, and what the audit row names.
+            target = await manage_password_screen(session, lane, target, changed_by=actor)
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
