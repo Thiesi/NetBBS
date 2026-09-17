@@ -29,6 +29,20 @@ set_password`:
 - **Blank and mismatch cancel.** An empty new password, or a
   confirmation that differs, leaves the account exactly as it was; the
   screen says which, and never which character was wrong.
+- **A caller's own choice meets the registration floor.** Self-service
+  applies `MIN_REGISTRATION_PASSWORD_LENGTH`, the same floor the
+  registration prompts apply to a password a remote caller picks. A
+  SysOp setting someone's password keeps the latitude the create-user
+  screen already gives them.
+- **Argon2 never runs on the database lane.** The hash and the
+  current-password verification go through the bounded password worker
+  (`hash_password_off_loop`/`verify_password_off_loop`), the same one
+  login uses; only the short transaction runs on the lane.
+
+The prompts themselves are the one deliberate exception §3.5 makes for
+masked credential entry: a password is typed twice because the caller
+cannot see it, and a draft editor would have to hold the plaintext across
+redraws to offer anything more.
 
 Clearing the password (making the account key-only) is offered only
 while the account has both a password and at least one key;
@@ -38,7 +52,17 @@ here is a courtesy, not the guard.
 
 from __future__ import annotations
 
-from netbbs.auth.users import AuthError, User, has_password, list_ssh_keys, password_matches, set_password
+from netbbs.auth.users import (
+    MIN_REGISTRATION_PASSWORD_LENGTH,
+    AuthError,
+    User,
+    has_password,
+    hash_password_off_loop,
+    list_ssh_keys,
+    load_password_hash,
+    set_password_hash,
+    verify_password_off_loop,
+)
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import ERROR_COLOR, LABEL_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
@@ -117,7 +141,8 @@ async def _current_password_verified(session: Session, lane: DatabaseLane, targe
         return False
     await write_prompt(session, "Current password: ")
     current = await session.read_line(echo=False)
-    if not await lane.run(password_matches, target, current):
+    stored_hash = await lane.run(load_password_hash, target)
+    if not await verify_password_off_loop(current, stored_hash):
         await session.write_line(colored("That is not the current password.", fg_color=ERROR_COLOR))
         return False
     return True
@@ -131,18 +156,28 @@ async def _change_password(
     if self_service and password_set:
         if not await _current_password_verified(session, lane, target):
             return target
-    await write_prompt(session, "New password (blank to cancel): ")
+    floor = f"min {MIN_REGISTRATION_PASSWORD_LENGTH} characters, " if self_service else ""
+    await write_prompt(session, f"New password ({floor}blank to cancel): ")
     first = await session.read_line(echo=False)
     if not first:
         await session.write_line(colored("Cancelled -- nothing changed.", fg_color=MUTED_COLOR))
+        return target
+    if self_service and len(first) < MIN_REGISTRATION_PASSWORD_LENGTH:
+        await session.write_line(
+            colored(
+                f"Password must be at least {MIN_REGISTRATION_PASSWORD_LENGTH} characters -- nothing changed.",
+                fg_color=ERROR_COLOR,
+            )
+        )
         return target
     await write_prompt(session, "Confirm new password: ")
     second = await session.read_line(echo=False)
     if first != second:
         await session.write_line(colored("The two entries did not match -- nothing changed.", fg_color=ERROR_COLOR))
         return target
+    new_hash = await hash_password_off_loop(first)
     try:
-        target = await lane.run(set_password, target, first, changed_by=changed_by)
+        target = await lane.run(set_password_hash, target, new_hash, changed_by=changed_by)
     except AuthError as exc:
         await session.write_line(colored(str(exc), fg_color=ERROR_COLOR))
         return target
@@ -169,7 +204,7 @@ async def _remove_password(
     ):
         return target
     try:
-        target = await lane.run(set_password, target, None, changed_by=changed_by)
+        target = await lane.run(set_password_hash, target, None, changed_by=changed_by)
     except AuthError as exc:
         await session.write_line(colored(str(exc), fg_color=ERROR_COLOR))
         return target

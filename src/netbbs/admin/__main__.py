@@ -49,8 +49,9 @@ from netbbs.auth.users import (
     User,
     create_user,
     get_user_by_username,
+    hash_password_off_loop,
     list_users,
-    set_password,
+    set_password_hash,
 )
 from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.moderation.log import record_action
@@ -124,8 +125,11 @@ async def run_reset_password(session: Session, db: Database, as_username: str | 
         if first != second:
             await session.write_line("The two entries did not match -- nothing changed.")
             return 1
+        # Off-loop hash then a short lane transaction -- the same split
+        # the in-BBS screen uses, so there is one shape rather than two.
+        new_hash = await hash_password_off_loop(first)
         try:
-            await lane.run(set_password, target, first, changed_by=actor)
+            await lane.run(set_password_hash, target, new_hash, changed_by=actor)
         except AuthError as exc:
             await session.write_line(str(exc))
             return 1

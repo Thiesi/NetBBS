@@ -550,7 +550,12 @@ laying out the new dimensions.
 Anything gathering more than two values goes through the draft field editor or
 a picker and persists nothing before `[S]ave`. The deliberate exceptions are
 once-only first-run decisions (Link participation, node name, managed DNS,
-the Unicode-style probe) and type-the-name confirmations before deletes.
+the Unicode-style probe), type-the-name confirmations before deletes, and
+masked credential entry (issue #611): a password is typed twice because the
+caller cannot see it, preceded by the current one where the account acts on
+itself, and a draft editor would have to hold the plaintext across redraws to
+offer anything more. Each prompt cancels on a blank line and nothing is
+written before the last one.
 
 ### 3.6 Resource lists (issue #528)
 
@@ -9435,6 +9440,39 @@ budget with its own limits to explain.
 The session that reached the screen authenticated by key. Rejected: refusing
 until a SysOp intervenes, which would make the only self-service route out of
 key-only depend on someone else.
+
+**Decision 5 — masked entry is a documented exception to §3.5, not a draft
+editor.** Current password, new password, confirmation: three masked
+prompts, each cancelling on a blank line, nothing written before the last.
+Rejected: a draft editor, which would have to hold the plaintext password in
+the draft across redraws so that `[S]ave` had something to save, and whose
+"inspect before saving" value is nil for a value the caller cannot see. §3.5
+and `AGENTS.md` both list the exception.
+
+**Decision 6 — a caller's own choice meets the registration floor.**
+Self-service applies `MIN_REGISTRATION_PASSWORD_LENGTH`, as both
+registration prompts do for a password a remote caller picks; otherwise
+Profile would be a way around the floor one screen after registration. A
+SysOp setting someone's password keeps the latitude the create-user screen
+already gives them.
+
+**Decision 7 — Argon2 stays off the database lane.** The foreground
+`DatabaseLane` has one worker; a hash or verification there stalls every
+other interactive database operation for its duration and bypasses the
+bounded password worker login uses. Both screens and the CLI therefore hash
+and verify through that worker (`hash_password_off_loop`,
+`verify_password_off_loop`) and run only the short transaction
+(`set_password_hash`, `load_password_hash`) on the lane. The synchronous
+`set_password`/`password_matches` remain for tests and for callers that own
+their thread.
+
+**Declined — guarding this setter against SQLite rowid reuse.** A target
+deleted and another account created while the screen waits for input could
+inherit the id and receive the update. Every setter in `netbbs.auth.users`
+re-fetches by id the same way, and the case needs the highest-id account
+deleted and re-created under an open SysOp screen, which is past the
+single-operator boundary this project calibrates against. The identity-reuse
+question is issue #594's, and its answer applies to all the setters at once.
 
 **Not done, deliberately.** A password change does not end the account's
 other live sessions; a caller who suspects a compromise asks the SysOp to

@@ -861,6 +861,14 @@ def has_password(db: Database, target: User) -> bool:
     return row is not None and row["password_hash"] is not None
 
 
+def load_password_hash(db: Database, target: User) -> str | None:
+    """`target`'s stored hash, or `None` for a key-only account -- the
+    short database half of a current-password check, so the expensive
+    half (`verify_password_off_loop`) can run off the database lane."""
+    row = db.connection.execute("SELECT password_hash FROM users WHERE id = ?", (target.id,)).fetchone()
+    return row["password_hash"] if row is not None else None
+
+
 def password_matches(db: Database, target: User, password: str) -> bool:
     """
     Verify `password` against `target`'s stored hash without logging
@@ -875,49 +883,89 @@ def password_matches(db: Database, target: User, password: str) -> bool:
     password, so the cost is the same either way (the same timing
     shape `_password_login_row` gives the login prompt) and the answer
     is always False.
+
+    Synchronous, so it hashes on whatever thread calls it. A network-
+    facing screen must not run it on the foreground `DatabaseLane`
+    (Codex review, PR #613): that lane has one worker, and an Argon2
+    verification there stalls every other interactive database
+    operation for its duration. Those callers split it --
+    `load_password_hash` on the lane, `verify_password_off_loop` on the
+    bounded password worker -- which is what `netbbs.net.password_screen`
+    does. This convenience is for the local CLI and tests.
     """
-    row = db.connection.execute("SELECT password_hash FROM users WHERE id = ?", (target.id,)).fetchone()
-    stored_hash = (
-        row["password_hash"] if row is not None and row["password_hash"] is not None else _DUMMY_PASSWORD_HASH
+    stored_hash = load_password_hash(db, target)
+    matches = verify_password(password, stored_hash if stored_hash is not None else _DUMMY_PASSWORD_HASH)
+    return matches and stored_hash is not None
+
+
+async def verify_password_off_loop(password: str, stored_hash: str | None) -> bool:
+    """`verify_password` on the bounded password worker (the same
+    `_run_password_work` login uses, so the concurrency cap covers this
+    path too). `None` verifies against the dummy hash and is always
+    False -- the key-only account pays the same cost as a wrong guess."""
+    matches = await _run_password_work(
+        verify_password, password, stored_hash if stored_hash is not None else _DUMMY_PASSWORD_HASH
     )
-    matches = verify_password(password, stored_hash)
-    return matches and row is not None and row["password_hash"] is not None
+    return matches and stored_hash is not None
+
+
+async def hash_password_off_loop(password: str) -> str:
+    """`hash_password` on the bounded password worker -- for a screen
+    that then persists the result through `set_password_hash` on the
+    database lane, keeping only the short transaction there."""
+    return await _run_password_work(hash_password, password)
 
 
 def set_password(db: Database, target: User, password: str | None, *, changed_by: User) -> User:
     """
     Replace `target`'s password (issue #611), or clear it with `None`
-    to make the account key-only.
+    to make the account key-only. Hashes synchronously, then delegates
+    to `set_password_hash`; the local CLI and tests use this, a network-
+    facing screen hashes off-loop first (see `password_matches`'s
+    docstring) and calls `set_password_hash` itself.
+
+    A blank password is refused rather than stored -- `None` is the one
+    spelling of "no password", and it means key-only, not "empty string
+    logs in".
+    """
+    if password == "":
+        raise AuthError("a password cannot be blank -- clear it explicitly to make the account key-only")
+    return set_password_hash(
+        db, target, hash_password(password) if password is not None else None, changed_by=changed_by
+    )
+
+
+def set_password_hash(db: Database, target: User, password_hash: str | None, *, changed_by: User) -> User:
+    """
+    Persist an already-computed hash as `target`'s password, or `None`
+    to clear it.
 
     Whoever is allowed to call this has already been decided by the
     caller: the account itself after proving its current password
     (`netbbs.net.password_screen`), a SysOp from the user detail screen,
     or the local admin CLI, for which filesystem access to the database
     is the trust boundary. This function only enforces what must hold
-    regardless of who asks:
+    regardless of who asks: clearing is refused while the account has no
+    SSH/public key, the same "never leave an account with no way back
+    in" rule `remove_ssh_key` applies from the other direction. The
+    check runs inside `BEGIN IMMEDIATE`, against the current row, for
+    the same reason that function's docstring gives: two concurrent
+    removals each reading "the other credential still exists" is how a
+    CHECK constraint gets defeated without ever firing.
 
-    - a blank password is refused rather than stored -- `None` is the
-      one spelling of "no password", and it means key-only, not "empty
-      string logs in";
-    - clearing is refused while the account has no SSH/public key, the
-      same "never leave an account with no way back in" rule
-      `remove_ssh_key` applies from the other direction. The check runs
-      inside `BEGIN IMMEDIATE`, against the current row, for the same
-      reason that function's docstring gives: two concurrent removals
-      each reading "the other credential still exists" is how a CHECK
-      constraint gets defeated without ever firing.
+    Re-fetches by `target.id`, as every setter in this module does. A
+    deleted-and-recreated account can in principle inherit a SQLite
+    rowid; that is the identity-reuse question issue #594 owns for all
+    of them at once, not something this one setter guards on its own
+    (Codex review, PR #613).
 
-    The Argon2 hash is computed *before* the write lock is taken, so
-    the node's one database connection is never held for the duration
-    of the hash. The audit row says that the password changed and by
-    whom; it carries no detail, because there is nothing about a
-    password worth writing down.
+    The audit row says that the password changed and by whom; it
+    carries no detail, because there is nothing about a password worth
+    writing down.
     """
     from netbbs.moderation.log import record_action_without_commit
 
-    if password == "":
-        raise AuthError("a password cannot be blank -- clear it explicitly to make the account key-only")
-    new_hash = hash_password(password) if password is not None else None
+    new_hash = password_hash
 
     db.connection.execute("BEGIN IMMEDIATE")
     try:

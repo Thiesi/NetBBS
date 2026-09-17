@@ -21,6 +21,7 @@ import pytest
 
 from netbbs.admin.__main__ import build_parser, run_reset_password
 from netbbs.auth.users import (
+    MIN_REGISTRATION_PASSWORD_LENGTH,
     SYSOP_LEVEL,
     AuthError,
     authenticate_password,
@@ -84,10 +85,10 @@ def _tight_throttle() -> LoginThrottle:
 
 
 def test_self_service_change_requires_the_current_password_and_applies_to_the_next_login(db, lane, alice):
-    session = FakeSession(["c", "hunter2", "n3w-pass", "n3w-pass", "b"])
+    session = FakeSession(["c", "hunter2", "n3w-pass!", "n3w-pass!", "b"])
     asyncio.run(manage_password_screen(session, lane, alice, changed_by=alice))
 
-    assert _logs_in(db, "alice", "n3w-pass")
+    assert _logs_in(db, "alice", "n3w-pass!")
     assert not _logs_in(db, "alice", "hunter2")
     assert "Password changed" in _written_text(session)
     entry = list_actions_for_target_user(db, alice.id)[-1]
@@ -106,11 +107,31 @@ def test_a_wrong_current_password_changes_nothing_and_says_so(db, lane, alice):
 
 
 def test_a_mismatched_confirmation_changes_nothing(db, lane, alice):
-    session = FakeSession(["c", "hunter2", "n3w-pass", "n3w-pass-typo", "b"])
+    session = FakeSession(["c", "hunter2", "n3w-pass!", "n3w-pass-typo", "b"])
     asyncio.run(manage_password_screen(session, lane, alice, changed_by=alice))
 
     assert _logs_in(db, "alice", "hunter2")
     assert "did not match" in _written_text(session)
+
+
+def test_a_self_chosen_password_must_meet_the_registration_floor(db, lane, alice):
+    # Codex review (PR #613): Profile would otherwise be a way around
+    # the floor one screen after registration. Refused before the
+    # confirmation prompt is even read -- the next scripted key is [B]ack.
+    session = FakeSession(["c", "hunter2", "short", "b"])
+    asyncio.run(manage_password_screen(session, lane, alice, changed_by=alice))
+
+    assert _logs_in(db, "alice", "hunter2")
+    text = _written_text(session)
+    assert f"at least {MIN_REGISTRATION_PASSWORD_LENGTH} characters" in text
+    assert "Confirm new password" not in text
+
+
+def test_a_sysop_keeps_the_create_user_screens_latitude_on_length(db, lane, sysop, alice):
+    session = FakeSession(["c", "short", "short", "b"])
+    asyncio.run(manage_password_screen(session, lane, alice, changed_by=sysop))
+
+    assert _logs_in(db, "alice", "short")
 
 
 def test_a_blank_new_password_cancels(db, lane, alice):
@@ -152,11 +173,11 @@ def test_the_current_password_check_charges_the_login_throttle(db, lane, alice):
 
 def test_a_correct_current_password_also_charges_the_throttle(db, lane, alice):
     throttle = _tight_throttle()
-    session = FakeSession(["c", "hunter2", "n3w-pass", "n3w-pass", "b"])
+    session = FakeSession(["c", "hunter2", "n3w-pass!", "n3w-pass!", "b"])
     session.login_throttle = throttle
     asyncio.run(manage_password_screen(session, lane, alice, changed_by=alice))
 
-    assert _logs_in(db, "alice", "n3w-pass")
+    assert _logs_in(db, "alice", "n3w-pass!")
     assert throttle.allow_attempt(source="unknown", username="alice") is False
 
 
@@ -224,10 +245,10 @@ def test_a_sysop_sets_another_accounts_password_without_the_current_one(db, lane
 
 
 def test_a_sysop_on_their_own_account_still_proves_the_current_password(db, lane, sysop):
-    session = FakeSession(["c", "hunter2", "own-pass", "own-pass", "b"])
+    session = FakeSession(["c", "hunter2", "own-pass!", "own-pass!", "b"])
     asyncio.run(manage_password_screen(session, lane, sysop, changed_by=sysop))
 
-    assert _logs_in(db, "sysop", "own-pass")
+    assert _logs_in(db, "sysop", "own-pass!")
     assert "Current password" in _written_text(session)
 
 
