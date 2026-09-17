@@ -5262,7 +5262,14 @@ here since #172 is self-contained):
 - terminal size is followed for the duration of a run (issue #468),
   without interleaving anything into that passthrough stream. A PTY
   door's own terminal is resized and its group signalled with
-  `SIGWINCH`, exactly as any full-screen program already expects. A
+  `SIGWINCH`, exactly as any full-screen program already expects. That
+  signal may arrive more than once per resize (issue #586): the kernel's
+  own delivery to the terminal's foreground group and NetBBS's explicit
+  one to the process group, kept because a door which never made the PTY
+  its controlling terminal hears only the second. Detecting which case
+  applies is racy, and a spurious extra `SIGWINCH` is something every
+  full-screen program already tolerates from a real terminal, so the
+  documented contract is an idempotent handler, not exactly one signal. A
   stdio or socket door is notified only if its profile opts in, by
   republishing the same static metadata file with the new geometry and
   signalling the door leader with `SIGUSR1`; opt-in because that
@@ -6598,8 +6605,19 @@ dedicated adversarial test that actually exercises a door hitting the
 CPU/memory/process-count ceilings themselves (as opposed to the
 watchdog's own wall-time path) — those three `setrlimit` calls are
 implemented but currently rely on the OS enforcing them correctly, not
-on a test proving it. This design explicitly does not attempt
-filesystem/network isolation regardless.
+on a test proving it. What the CPU ceiling does when reached was observed
+directly on NetBSD (issues #509 and #585, not through a test): the launcher
+sets the soft and hard `RLIMIT_CPU` equal, so the kernel delivers `SIGKILL`
+with no preceding `SIGXCPU`, and a door cannot checkpoint at the ceiling.
+That is the documented contract (door guide, "CPU seconds"), chosen over a
+soft-below-hard split: an unprivileged process cannot raise the hard limit
+above the one it inherited, so the headroom may not exist at all under a
+login class that pins `cputime`; the kernel re-sends `SIGXCPU` about once a
+second after the soft limit, which a door handling it badly spins on; and a
+split either moves the effective ceiling above what the SysOp typed or
+quietly shortens every existing profile. `0` remains the supported answer
+for a door which must never be cut that way. This design explicitly does not
+attempt filesystem/network isolation regardless.
 
 ---
 

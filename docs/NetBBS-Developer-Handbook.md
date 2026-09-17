@@ -130,7 +130,12 @@ Use absolute interpreter and data paths rather than depending on a login shell.
 Default resource limits include 300 CPU seconds, 256 MiB address space,
 a 3,600-second wall-clock limit, and a five-second stop grace. Profile settings
 may change them; a zero CPU/wall limit removes that particular ceiling subject
-to the host's hard limits. CPU time is not elapsed session time.
+to the host's hard limits. CPU time is not elapsed session time. The two
+ceilings end a run differently: the wall-clock limit sends `SIGTERM` and waits
+out the stop grace, while the CPU limit is `SIGKILL` with no warning, because
+the soft and hard limits are set equal and no `SIGXCPU` precedes it. A door
+cannot save at the CPU ceiling; a door that must never be cut that way runs
+with the ceiling raised or removed.
 The POSIX process-count limit applies to the real UID, not just one door.
 On shutdown/disconnect/timeout, NetBBS terminates and reaps owned processes,
 escalating after the grace period. Save important progress during play, not
@@ -165,9 +170,13 @@ for their maintenance and backup boundaries.
 ### Resize and browser behavior
 
 For a native profile following the caller's geometry, PTYs receive terminal
-size changes. Native stdio/socket profiles opt in with `resize_signal`;
-NetBBS republishes the JSON dimensions atomically and sends SIGWINCH on POSIX.
-Read the file again after notification and redraw. A fixed-width profile,
+size changes as `SIGWINCH`, and a single resize may deliver it more than once
+(the kernel's own signal to the foreground group plus NetBBS's explicit one to
+the process group), so a handler must be idempotent: read the current size and
+redraw rather than count signals. Native stdio/socket profiles opt in with
+`resize_signal`; NetBBS republishes the JSON dimensions atomically and sends
+`SIGUSR1` on POSIX. Read the file again after notification and redraw. A
+fixed-width profile,
 a DOS profile, or an unprofiled launch does not acquire dynamic resizing
 merely because the JSON contains dimensions.
 
