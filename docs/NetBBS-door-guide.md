@@ -481,7 +481,11 @@ the emulator, game and NetBBS itself must not run as root.
    ends a run through `SIGTERM` and the stop grace; the CPU limit ends it
    with nothing. If a door's players would lose an evening's progress at the
    ceiling, raise the ceiling or set it to `0` rather than expecting the door
-   to react to it.
+   to react to it — and remember the paragraph above: `0` only lifts the
+   door to the hard limit your service inherited, so a login class or unit
+   file which pins CPU time still kills the door, just as silently, at that
+   value. Raise or remove that limit on the host too if the door must never
+   be cut.
 
    **Stop grace** is how long a door gets to exit after `SIGTERM` before it is
    killed, and it is reached far more often than the name suggests: on every

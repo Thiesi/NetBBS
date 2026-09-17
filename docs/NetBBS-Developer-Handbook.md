@@ -135,7 +135,9 @@ ceilings end a run differently: the wall-clock limit sends `SIGTERM` and waits
 out the stop grace, while the CPU limit is `SIGKILL` with no warning, because
 the soft and hard limits are set equal and no `SIGXCPU` precedes it. A door
 cannot save at the CPU ceiling; a door that must never be cut that way runs
-with the ceiling raised or removed.
+with the ceiling raised or removed, and with no hard CPU limit on the service
+itself, since a zero profile value only lifts the door to whatever hard limit
+the service inherited.
 The POSIX process-count limit applies to the real UID, not just one door.
 On shutdown/disconnect/timeout, NetBBS terminates and reaps owned processes,
 escalating after the grace period. Save important progress during play, not

@@ -6615,8 +6615,13 @@ above the one it inherited, so the headroom may not exist at all under a
 login class that pins `cputime`; the kernel re-sends `SIGXCPU` about once a
 second after the soft limit, which a door handling it badly spins on; and a
 split either moves the effective ceiling above what the SysOp typed or
-quietly shortens every existing profile. `0` remains the supported answer
-for a door which must never be cut that way. This design explicitly does not
+quietly shortens every existing profile. `0` is the supported answer for a
+door which should not be cut that way, with the limit `0` has: it raises
+the door to the hard limit the service inherited, so under a login class or
+unit file which pins `cputime` the door is still killed, without warning,
+at that inherited value. Making a door truly uncuttable means removing the
+service's own hard limit as well, which is a host decision outside NetBBS.
+This design explicitly does not
 attempt filesystem/network isolation regardless.
 
 ---
