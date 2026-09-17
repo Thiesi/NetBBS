@@ -637,6 +637,21 @@ Local users may authenticate with:
 The server never needs a personal user private key. Password-only users are
 expected to remain the majority and must not be treated as second-class users.
 
+A password has a lifecycle after creation (issue #611). An account changes
+its own password from the Profile screen after proving the current one; an
+account with no password (key-only) sets its first one without that proof,
+on the strength of the login that reached the screen. A SysOp sets a new
+password on any account from that account's detail screen, or from
+`python -m netbbs.admin reset-password USERNAME` when locked out of the
+console; neither route asks for or reveals the old password. A password may
+be cleared only while the account keeps at least one public key, the same
+"never leave an account with no way in" rule key removal already applies.
+Every change is audit-logged with the actor and carries no other detail. A
+guest session (§4.6) cannot change the guest account's password, because it
+proved no credential. The current-password proof inside a session charges the
+same login throttle as the login prompt, so an unattended session is not an
+unthrottled place to guess.
+
 ### 4.2 Registration modes
 
 A node has one registration mode:
@@ -9383,6 +9398,49 @@ nodes -- a separate step, roughly the size of the direct-message vertical.
 All frame additions (`via_relay`, `hops`, `for_fingerprint`) ride real-time
 protocol v3, unreleased at the time, so no further bump was needed.
 Normative description: §8.10.3.
+
+### Issue #611 — password change and reset — closed
+
+Until this issue shipped, `users.password_hash` was written once, at account
+creation, and had no update path anywhere: no Profile field, no user-detail action, no admin
+CLI command. A forgotten password meant delete-and-recreate, which loses the
+account's history and, per #594, frees its Link identity for the next
+registrant. Normative description: §4.1.
+
+**Decision 1 — one domain function, three surfaces.** `set_password` is the
+only writer, in the same transactional shape as the other account setters;
+the Profile field, the user-detail `[P]assword` action and the CLI subcommand
+all go through it, and the two screens share one implementation
+(`netbbs.net.password_screen`), the same shape the SSH-key screen already
+has. Who may call it is the caller's decision; what must hold regardless
+(no blank password, no clearing without a key) is the function's.
+
+**Decision 2 — the proof depends on who acts, not on the target's level.**
+An account acting on itself proves the current password first; a SysOp
+acting on another account does not, since they cannot know it, and the audit
+row names them. A SysOp may reset another SysOp's password, matching what the
+key screen already allows a SysOp to do to any account; the usable-SysOp
+invariant (§4.3) is unaffected because a reset never removes a way in. The
+local CLI never asks for a current password: filesystem access to the
+database is its trust boundary, as for the rest of that tool, and its
+purpose is the locked-out SysOp.
+
+**Decision 3 — the in-session proof is throttled by the login throttle.**
+`Session.login_throttle` is set once at login and the current-password
+prompt charges it before verifying, in the same order as the login prompt.
+Rejected: a separate per-session counter, which would have been a second
+budget with its own limits to explain.
+
+**Decision 4 — a key-only account sets its first password without proof.**
+The session that reached the screen authenticated by key. Rejected: refusing
+until a SysOp intervenes, which would make the only self-service route out of
+key-only depend on someone else.
+
+**Not done, deliberately.** A password change does not end the account's
+other live sessions; a caller who suspects a compromise asks the SysOp to
+disable the account, which does. No self-service recovery exists: there is no
+email or other out-of-band channel to send anything through, so "forgot my
+password" is a SysOp action, and the Profile help text says so.
 
 ### SFTP over the SSH transport — declined
 

@@ -302,6 +302,15 @@ account change that would leave no enabled, approved SysOp. Disabling an account
 revokes its access; deletion is permanent and requires its exact name. Existing
 content retains its recorded author label.
 
+A caller who forgot their password cannot recover it themselves: NetBBS has no
+e-mail or other out-of-band channel. Open the account's detail screen and
+choose **Password** to set a new one; the old password is neither shown nor
+needed. If you are locked out of your own SysOp account, run
+`python -m netbbs.admin reset-password YOURNAME --db /path/to/netbbs.db` on
+the host. Both routes are audit-logged with your name. An account that also
+has an SSH key can have its password removed from the same screen, which
+leaves key login as its only way in.
+
 Access can also depend on resource-specific grants, verified age, and verified
 name. Raising a level does not replace identity verification. When access looks
 wrong, inspect both the account and the resource's effective settings, including
@@ -698,6 +707,7 @@ DNS registration, or backups is a separate, deliberate operator action.
 | Symptom | Check and next action |
 | --- | --- |
 | Service will not start | Read service output; check config paths, file permissions, selected interpreter, extras, and port conflicts. Do not treat a zero exit status alone as a working listener. |
+| A caller forgot their password, or you are locked out | Set a new password from the account's detail screen (**Password**), or run `python -m netbbs.admin reset-password USERNAME` on the host. Nothing recovers the old one. |
 | SSH import fails on NetBSD | Check pkgsrc libraries and `LD_LIBRARY_PATH`; see installation above. |
 | Caller cannot log in | Check maintenance mode, pending approval, disabled account, and login throttling before resetting credentials. |
 | Caller can read but cannot contribute | Check write/join gates, age/name attestations, moderator grants, and inherited Community settings. |

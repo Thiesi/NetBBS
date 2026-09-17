@@ -849,6 +849,102 @@ def approve_pending_user(db: Database, target: User, *, approved_by: User) -> Us
     return _get_user_by_id(db, target.id)
 
 
+# -- password lifecycle (issue #611) ---------------------------------------
+
+
+def has_password(db: Database, target: User) -> bool:
+    """Whether `target` currently has a password set at all -- a
+    key-only account (design doc §4.1) has none. Not a field on `User`
+    itself: the hash is never carried around in memory beyond the one
+    login or change that needs it."""
+    row = db.connection.execute("SELECT password_hash FROM users WHERE id = ?", (target.id,)).fetchone()
+    return row is not None and row["password_hash"] is not None
+
+
+def password_matches(db: Database, target: User, password: str) -> bool:
+    """
+    Verify `password` against `target`'s stored hash without logging
+    the account in -- the "prove you know the current one" half of a
+    self-service password change (issue #611). Unlike
+    `authenticate_password` this never touches `last_login_at` and
+    never raises for a disabled or pending account: the caller is
+    already inside an authenticated session, and the only question is
+    whether the typed password is the account's.
+
+    Verifies against the shared dummy hash when the account has no
+    password, so the cost is the same either way (the same timing
+    shape `_password_login_row` gives the login prompt) and the answer
+    is always False.
+    """
+    row = db.connection.execute("SELECT password_hash FROM users WHERE id = ?", (target.id,)).fetchone()
+    stored_hash = (
+        row["password_hash"] if row is not None and row["password_hash"] is not None else _DUMMY_PASSWORD_HASH
+    )
+    matches = verify_password(password, stored_hash)
+    return matches and row is not None and row["password_hash"] is not None
+
+
+def set_password(db: Database, target: User, password: str | None, *, changed_by: User) -> User:
+    """
+    Replace `target`'s password (issue #611), or clear it with `None`
+    to make the account key-only.
+
+    Whoever is allowed to call this has already been decided by the
+    caller: the account itself after proving its current password
+    (`netbbs.net.password_screen`), a SysOp from the user detail screen,
+    or the local admin CLI, for which filesystem access to the database
+    is the trust boundary. This function only enforces what must hold
+    regardless of who asks:
+
+    - a blank password is refused rather than stored -- `None` is the
+      one spelling of "no password", and it means key-only, not "empty
+      string logs in";
+    - clearing is refused while the account has no SSH/public key, the
+      same "never leave an account with no way back in" rule
+      `remove_ssh_key` applies from the other direction. The check runs
+      inside `BEGIN IMMEDIATE`, against the current row, for the same
+      reason that function's docstring gives: two concurrent removals
+      each reading "the other credential still exists" is how a CHECK
+      constraint gets defeated without ever firing.
+
+    The Argon2 hash is computed *before* the write lock is taken, so
+    the node's one database connection is never held for the duration
+    of the hash. The audit row says that the password changed and by
+    whom; it carries no detail, because there is nothing about a
+    password worth writing down.
+    """
+    from netbbs.moderation.log import record_action_without_commit
+
+    if password == "":
+        raise AuthError("a password cannot be blank -- clear it explicitly to make the account key-only")
+    new_hash = hash_password(password) if password is not None else None
+
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _get_user_by_id(db, target.id)
+        if new_hash is None:
+            key_count = db.connection.execute(
+                "SELECT COUNT(*) FROM user_ssh_keys WHERE user_id = ?", (current.id,)
+            ).fetchone()[0]
+            if key_count == 0 and current.fingerprint is None:
+                raise AuthError(
+                    f"cannot clear {current.username!r}'s password -- this account has no SSH/public "
+                    "key and would be locked out of the node entirely. Add a key first."
+                )
+        db.connection.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, current.id))
+        record_action_without_commit(
+            db, actor=changed_by,
+            action="set_password" if new_hash is not None else "clear_password",
+            target_user_id=current.id,
+        )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
+    return _get_user_by_id(db, target.id)
+
+
 @dataclass(frozen=True)
 class SshKey:
     id: int

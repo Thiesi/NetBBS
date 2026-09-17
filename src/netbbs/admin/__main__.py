@@ -43,7 +43,15 @@ from pathlib import Path
 
 import nacl.signing
 
-from netbbs.auth.users import SYSOP_LEVEL, User, create_user, list_users
+from netbbs.auth.users import (
+    SYSOP_LEVEL,
+    AuthError,
+    User,
+    create_user,
+    get_user_by_username,
+    list_users,
+    set_password,
+)
 from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.moderation.log import record_action
 from netbbs.net.admin_flow import admin_menu
@@ -73,6 +81,56 @@ async def run_admin_session(session: Session, db: Database, as_username: str | N
         actor = await _resolve_actor(session, lane, as_username)
         await session.write_line(f"Attributed to {actor.username!r} for this session's audit log.")
         await admin_menu(session, lane, actor)
+    finally:
+        lane.close()
+
+
+async def run_reset_password(session: Session, db: Database, as_username: str | None, username: str) -> int:
+    """
+    `python -m netbbs.admin reset-password USERNAME` (issue #611): set a
+    new password on `username` from the local shell, without opening the
+    admin menu. Returns the process exit status.
+
+    This is the locked-out case -- a SysOp who cannot sign in to reach
+    the user detail screen's own `[P]assword` action, most often because
+    it is their own account. No current password is asked for and none
+    is needed: exactly as for the rest of this tool, local filesystem
+    access to the database is the trust boundary (module docstring),
+    and the acting SysOp is resolved only so the audit row names
+    someone. A SysOp resetting their own password therefore gets a
+    self-attributed audit entry, which is the honest record of what
+    happened.
+
+    Blank input cancels; a mismatched confirmation cancels; the failure
+    `set_password` raises (a blank password) is printed rather than
+    traced.
+    """
+    lane = DatabaseLane(db.path)
+    try:
+        actor = await _resolve_actor(session, lane, as_username)
+        try:
+            target = await lane.run(get_user_by_username, username)
+        except AuthError:
+            await session.write_line(f"No account named {username!r} exists on this node.")
+            return 1
+        await session.write_line(f"Setting a new password for {target.username!r} (attributed to {actor.username!r}).")
+        await write_prompt(session, "New password (blank to cancel): ")
+        first = await session.read_line(echo=False)
+        if not first:
+            await session.write_line("Cancelled -- nothing changed.")
+            return 1
+        await write_prompt(session, "Confirm new password: ")
+        second = await session.read_line(echo=False)
+        if first != second:
+            await session.write_line("The two entries did not match -- nothing changed.")
+            return 1
+        try:
+            await lane.run(set_password, target, first, changed_by=actor)
+        except AuthError as exc:
+            await session.write_line(str(exc))
+            return 1
+        await session.write_line(f"Password set for {target.username!r}. It applies to their next sign-in.")
+        return 0
     finally:
         lane.close()
 
@@ -211,19 +269,48 @@ async def _prompt_pubkey(session: Session) -> nacl.signing.VerifyKey | None:
         return None
 
 
-def main(argv: list[str] | None = None) -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """The tool's argument parser, separate from `main()` so its shape
+    can be tested without a terminal. With no subcommand the tool opens
+    the interactive admin menu, as it always has; `reset-password` is
+    the one non-interactive-menu command (issue #611)."""
+    def _add_common(target: argparse.ArgumentParser, *, defaults: bool) -> None:
+        # The same two options before or after the subcommand, so both
+        # `--db x.db reset-password bob` and `reset-password bob --db
+        # x.db` work. A subparser's own defaults would otherwise
+        # overwrite a value given before the subcommand (argparse
+        # applies them last), hence SUPPRESS on the subcommand's copy.
+        target.add_argument(
+            "--db", type=Path, default=_DEFAULT_DB_PATH if defaults else argparse.SUPPRESS,
+            help=f"path to the node's database file (default: {_DEFAULT_DB_PATH})",
+        )
+        target.add_argument(
+            "--as", dest="as_username", default=None if defaults else argparse.SUPPRESS,
+            help="attribute this session's actions to this SysOp account (skips the picker)",
+        )
+
     parser = argparse.ArgumentParser(
         prog="python -m netbbs.admin", description="Local SysOp administration tool."
     )
-    parser.add_argument(
-        "--db", type=Path, default=_DEFAULT_DB_PATH,
-        help=f"path to the node's database file (default: {_DEFAULT_DB_PATH})",
+    _add_common(parser, defaults=True)
+    subcommands = parser.add_subparsers(dest="command")
+    reset = subcommands.add_parser(
+        "reset-password",
+        help="set a new password on an account without opening the admin menu",
+        description=(
+            "Set a new password on an account. Prompts for the new password twice, without "
+            "echo; the old password is neither asked for nor recoverable. Use this when a "
+            "SysOp is locked out of their own account -- otherwise the same action is on the "
+            "user's detail screen in the admin menu."
+        ),
     )
-    parser.add_argument(
-        "--as", dest="as_username", default=None,
-        help="attribute this session's actions to this SysOp account (skips the picker)",
-    )
-    args = parser.parse_args(argv)
+    reset.add_argument("username", help="the account to set a new password on")
+    _add_common(reset, defaults=False)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
 
     try:
         db = Database(args.db)
@@ -244,9 +331,15 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         with raw_terminal():
-            asyncio.run(run_admin_session(LocalCLISession(), db, args.as_username))
+            if args.command == "reset-password":
+                status = asyncio.run(run_reset_password(LocalCLISession(), db, args.as_username, args.username))
+            else:
+                asyncio.run(run_admin_session(LocalCLISession(), db, args.as_username))
+                status = 0
     finally:
         db.close()
+    if status:
+        raise SystemExit(status)
 
 
 if __name__ == "__main__":

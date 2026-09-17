@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     # string at runtime; this block exists only so type checkers/IDEs
     # can resolve `InputHistory` by name.
     from netbbs.net.char_input import CandidateListPrinter, Completer, EditorKey, InputHistory, LiveInputBuffer
+    from netbbs.net.throttle import LoginThrottle
 
 
 # Same numbers as netbbs.rendering.screen_buffer.ScreenBuffer's own
@@ -188,6 +189,18 @@ class Session(ABC):
     #: `netbbs.net.throttle.LoginThrottle`) — not meant for any identity
     #: or trust decision, since it's trivially spoofable/shared (NAT).
     peer_address: str | None = None
+
+    #: The node's shared `netbbs.net.throttle.LoginThrottle`, or `None`
+    #: for a session that never went through a real entry point (a
+    #: direct test call, the local admin CLI). Set once by
+    #: `netbbs.net.login_flow.run_authenticated_session`, the same
+    #: resolve-at-login lifecycle as `node_display_name` above, so that
+    #: a password check made *inside* an authenticated session -- the
+    #: "current password" prompt of a self-service password change
+    #: (issue #611) -- charges the same per-source/per-username budgets
+    #: the login prompt does, rather than being a second, unthrottled
+    #: place to try passwords.
+    login_throttle: LoginThrottle | None = None
 
     #: Hook a screen can install so an out-of-band system notice (a
     #: node-shutdown broadcast, `netbbs.net.session_registry.

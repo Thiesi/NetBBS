@@ -17,6 +17,10 @@ Log in with your account. If registration is offered, follow the on-screen
 steps; some nodes require approval before you can log in. If registration
 is closed, contact the SysOp. Accounts and access rules belong to each node.
 
+Change your password under **Profile → Account password**: you type the
+current one, then the new one twice, and nothing is echoed. If you have
+forgotten it, ask the SysOp to set a new one; nobody can recover the old one.
+
 ## Find your way around
 
 Press a highlighted letter such as **[J]** for **Jump to**. Most menus react
@@ -119,9 +123,9 @@ Your SysOp controls the time allowed and can help with a missing or locked save.
 
 ## Preferences and help
 
-Use **Profile** for display, editor, and chat preferences. If characters look
-wrong, try the Unicode-style preference; if colors are poor, change the color
-preference. **Ctrl+L** redraws ordinary NetBBS screens after a display problem.
+Use **Profile** for display, editor, and chat preferences, your SSH keys, and
+your password. If characters look wrong, try the Unicode-style preference; if
+colors are poor, change the color preference. **Ctrl+L** redraws ordinary NetBBS screens after a display problem.
 Games may use different controls.
 
 Some resources require an account level, verified age, or verified name.

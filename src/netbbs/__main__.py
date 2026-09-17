@@ -799,6 +799,7 @@ async def run(
         # entirely rather than asking again.
         await handle_ssh_session(
             session, db, hub, presence, mailbox, session_registry, maintenance,
+            throttle=throttle,
             shutdown_event=shutdown_event,
             graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
             drain_scheduler=drain_scheduler,
