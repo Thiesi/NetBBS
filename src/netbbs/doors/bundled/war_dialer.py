@@ -192,15 +192,24 @@ class Palette:
 
     Nine roles, each with a deliberate 256-colour fallback rather than whatever
     a converter would pick, degrading again to monochrome and then to plain
-    ASCII. Chrome never shares a colour with content: `phosphor`/`phosphor_dim`
-    draw frames and gauge tracks, and everything a caller reads is `ink`,
-    `grey`, `amber`, `cyan`, `magenta`, `alarm` or `mint`.
+    ASCII. Chrome never shares a colour with content: `phosphor_dim` draws
+    the frame, the ring links and every gauge track, and everything a caller
+    reads is `phosphor`, `ink`, `grey`, `amber`, `cyan`, `magenta`, `alarm` or
+    `mint`.
     """
 
     #: role -> (truecolour RGB, 256-colour index)
     ROLES = {
         "phosphor": ((0x39, 0xFF, 0x14), 82),
-        "phosphor_dim": ((0x1F, 0x7A, 0x3F), 29),
+        # The chrome role (issue #519, the chrome half). The frame used to be
+        # drawn in `phosphor` itself, so the brightest green on the screen was
+        # 36.7% of the switchboard's visible characters and most of it was
+        # border -- chrome sharing a colour with content, which the contract
+        # forbids, and outshouting it. The frame now wears this role, retuned
+        # from `#1f7a3f` (a dark, fully saturated green) to a desaturated
+        # mid green so a border is legible but recedes, and `phosphor` is
+        # left to mean what a caller reads: their holdings and their gains.
+        "phosphor_dim": ((0x4E, 0x8A, 0x62), 65),
         "mint": ((0x7D, 0xFF, 0xB0), 121),
         "amber": ((0xFF, 0xB0, 0x00), 214),
         "cyan": ((0x38, 0xD6, 0xFF), 81),
@@ -239,12 +248,12 @@ class Palette:
 
     @property
     def phosphor(self) -> str:
-        """Frames, your own holdings, positive deltas."""
+        """Your own holdings, positive deltas, the scanline's glow."""
         return self.role("phosphor")
 
     @property
     def phosphor_dim(self) -> str:
-        """Frame shadow, ring links, the empty half of every gauge."""
+        """The frame, ring links, the empty half of every gauge: all chrome."""
         return self.role("phosphor_dim")
 
     @property
@@ -312,7 +321,7 @@ class Palette:
 
     @property
     def border(self) -> str:
-        return self.phosphor
+        return self.phosphor_dim
 
     @property
     def dark_border(self) -> str:
@@ -3123,15 +3132,17 @@ def _panel_width(p: "Palette", width: int) -> int:
 def _frame_rule(p: Palette, left: str, right: str, label: str, trailing, inner: int) -> str:
     """One border row, with an optional heading on the left and notes on the right.
 
-    Chrome is phosphor; a heading is mint and a note is grey, so the frame never
-    shares a colour with what it is labelling. `trailing` may be several notes in
+    Chrome is phosphor-dim (issue #519: it was phosphor, the same colour as a
+    holding or a gain, and the brightest thing on the screen); a heading is
+    mint and a note is grey, so the frame never shares a colour with what it is
+    labelling. `trailing` may be several notes in
     priority order: the first one is always drawn, truncated if it has to be,
     and the rest are added only while they fit whole. That is what keeps a page
     counter on a forty-column screen without spending the screen's own name on
     it -- a counter cut in half tells a caller nothing, and neither does a title
     reduced to an ellipsis.
     """
-    chrome = p.phosphor + BOLD
+    chrome = p.phosphor_dim + BOLD
     rule = gl("h")
     notes = [note for note in ([trailing] if isinstance(trailing, str) else list(trailing)) if note]
     label = _fit(label, max(0, inner - 10)) if label else ""
@@ -3173,7 +3184,7 @@ def _frame_row(p: Palette, row: str, inner: int) -> str:
     room = max(1, inner - 2)
     if _dlen(row) > room:
         body = _wrap_output(body, room).split("\r\n")[0]
-    edge = sty(p.phosphor + BOLD, gl("v"))
+    edge = sty(p.phosphor_dim + BOLD, gl("v"))
     return edge + "  " + body + " " * max(0, room - _dlen(body)) + edge
 
 
