@@ -385,22 +385,30 @@ def _rewind_anchor(door: pathlib.Path, state: pathlib.Path, back) -> None:
     there -- so the anchor is moved through the door's own helpers, exactly as
     `seed_war_dialer` does to archive one. Keys remain the first resort: this is
     only for what a clock decides.
+
+    The anchor is set `back` from *now*, not from the anchor the fixture already
+    holds. A cached fixture is created once and reused for every later build
+    (module docstring), so measuring from its stored anchor made these panels
+    depend on the fixture's age: a day after it was made, "one day from reset"
+    had already rolled over, and the season-closing panel failed its own
+    `SHOWS` check in every size and preset (found on issue #519's rebuild).
     """
     game = load_door(door)
     conn = game.connect(state / "war-dialer.db")
     try:
-        anchor = game.get_or_create_season_anchor(conn, game.now_utc())
         with conn:
             conn.execute("INSERT INTO meta(key,value) VALUES ('season_anchor',?) "
                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                         (game.to_iso(anchor - back(game)),))
+                         (game.to_iso(game.now_utc() - back(game)),))
     finally:
         conn.close()
 
 
 def past_the_rollover(door: pathlib.Path, state: pathlib.Path) -> None:
-    """A season has closed since the caller was last here."""
-    _rewind_anchor(door, state, lambda game: game.SEASON)
+    """A season has closed since the caller was last here: a full season plus
+    a day back, so the rollover is comfortably behind the clock rather than
+    on it."""
+    _rewind_anchor(door, state, lambda game: game.SEASON + game.DAY)
 
 
 def one_day_from_reset(door: pathlib.Path, state: pathlib.Path) -> None:

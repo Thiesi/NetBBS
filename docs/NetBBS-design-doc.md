@@ -6152,7 +6152,7 @@ columns, on the deck, market, yard, record, board, chart, crew, display,
 customs and combat screens.
 
 **Nine roles, not nine colours.** What a token *is* decides its colour.
-`hull` `#5fd7ff` frames, section headers and station names; `deep` `#1d3b57`
+`hull` `#7fa3bf` frames, section headers and station names; `deep` `#2f3844`
 frame shadow, gauge tracks and separators; `plasma` `#ff5abe` the brand, the
 rank and the cursor; `gold` `#ffc83c` hotkeys and credits and nothing else;
 `ink` `#e8f0ff` values -- the thing the caller reads off the row; `slate`
@@ -6171,6 +6171,17 @@ were 78.7% of visible characters in one band. Warm rather than neutral because a
 label has to separate, not merely differ, and desaturated so it cannot be
 mistaken for `gold` or `amber`, which mean money and hotkeys. War Dialer's own
 label role made the same mistake in green and was moved the same way.
+
+Chrome recedes (issue #519, the second half). Moving the label role changed
+8-11% of the screen; the remaining mass was the frame. `hull` was `#5fd7ff`, a
+saturated cyan, and `deep` was `#1d3b57`, a saturated dark blue; together they
+were 49.7% of the command deck's visible characters, 85% and 99% of them
+box-drawing. Chrome that bright competes with the values drawn on it. `hull`
+is now steel -- the same hue at half the saturation and a step down in
+brightness -- and `deep` is a near-neutral dark, so a gauge's filled half is
+the only coloured thing on its row. Both remain distinct from every content
+role; the sixteen-colour preset reads them as dark cyan and bright black. The
+before/after is judged from `scripts/door_gallery.py`, not from the hex.
 
 A preview count inside a label is a *value*, not part of the label: the service
 menu writes `Board: 4 offers` with the count in `ink` between two `slate`
@@ -8181,8 +8192,8 @@ slice 9 wording).** The door is a phosphor terminal, not a page of sentences.
 
 *Palette.* Nine roles, truecolour as the design target, each with a deliberate
 256-colour index beside it rather than whatever a converter would pick:
-`phosphor` `#39ff14` (frames, your holdings, positive deltas), `phosphor-dim`
-`#1f7a3f` (frame shadow, ring links, gauge tracks), `mint` `#7dffb0` (headings,
+`phosphor` `#39ff14` (your holdings, positive deltas, the scanline's glow),
+`phosphor-dim` `#4e8a62` (the frame, ring links, gauge tracks), `mint` `#7dffb0` (headings,
 your handle, the cursor), `amber` `#ffb000` (money and hotkeys), `cyan`
 `#38d6ff` (NPC operators and neutral data), `magenta` `#ff3caa` (rival crews and
 raids against you), `alarm` `#ff4d4d` (losses and bust risk), `ink` `#d7ffe9`
@@ -8197,6 +8208,16 @@ into it: measured on the switchboard, phosphor, phosphor-dim, mint, ink and
 that label colour were 78.5% of visible characters in one narrow band. A cool
 slate is off-hue from every green and clear of the established meanings of
 amber, cyan, magenta and alarm.
+
+The frame is chrome, and chrome wears `phosphor-dim` (issue #519, the second
+half). It was drawn in `phosphor` -- the same colour as a holding or a gain,
+and the brightest green on the screen -- so the border was 36.7% of the
+switchboard's visible characters and the rule that chrome never shares a colour
+with content did not hold for the frame itself. `phosphor-dim` was retuned from
+`#1f7a3f`, a dark fully-saturated green, to a desaturated mid green so a border
+is legible but recedes; `phosphor` now means only what a caller reads. The
+scanline still fades mint to phosphor to phosphor-dim, and the ring's links and
+every gauge's empty half stay in the chrome role they always had.
 
 *Glyph vocabulary.* Frames `┌─┐ │ └─┘ ├─┤`; owner nodes `◆ ◈ ◉ ◇`; crew `●○`;
 turns `▮▯`; meters `█░`; the scanline's ramp `▓▒░`; sparklines `▁▂▃`; insignia
