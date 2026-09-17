@@ -6181,7 +6181,10 @@ is now steel -- the same hue at half the saturation and a step down in
 brightness -- and `deep` is a near-neutral dark, so a gauge's filled half is
 the only coloured thing on its row. Both remain distinct from every content
 role; the sixteen-colour preset reads them as dark cyan and bright black. The
-before/after is judged from `scripts/door_gallery.py`, not from the hex.
+before/after is judged from `scripts/door_gallery.py`, not from the hex; the
+command deck and the market, before above and after below, are kept as
+`docs/images/door-chrome-519-voidrunner-deck.png` and
+`door-chrome-519-voidrunner-market.png`.
 
 A preview count inside a label is a *value*, not part of the label: the service
 menu writes `Board: 4 offers` with the count in `ink` between two `slate`
@@ -8217,7 +8220,10 @@ with content did not hold for the frame itself. `phosphor-dim` was retuned from
 `#1f7a3f`, a dark fully-saturated green, to a desaturated mid green so a border
 is legible but recedes; `phosphor` now means only what a caller reads. The
 scanline still fades mint to phosphor to phosphor-dim, and the ring's links and
-every gauge's empty half stay in the chrome role they always had.
+every gauge's empty half stay in the chrome role they always had. The
+switchboard before and after is kept as
+`docs/images/door-chrome-519-war-dialer-switchboard.png`, and the four chrome
+colours side by side as `door-chrome-519-swatch.png`.
 
 *Glyph vocabulary.* Frames `┌─┐ │ └─┘ ├─┤`; owner nodes `◆ ◈ ◉ ◇`; crew `●○`;
 turns `▮▯`; meters `█░`; the scanline's ramp `▓▒░`; sparklines `▁▂▃`; insignia
