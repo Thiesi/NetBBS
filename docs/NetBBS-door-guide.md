@@ -471,6 +471,22 @@ the emulator, game and NetBBS itself must not run as root.
    service account is permitted, rather than simply leaving NetBBS's own. If
    your service runs under a login class or unit file which sets a hard CPU
    limit, that hard limit still applies and `0` cannot exceed it.
+
+   Reaching the CPU ceiling is not like reaching the time limit. A door which
+   uses up its CPU seconds is killed outright by the operating system
+   (`SIGKILL`): it gets no warning signal first, stop grace does not apply
+   because no `SIGTERM` is ever sent, and it cannot save. NetBBS sets the
+   soft and hard CPU limits to the same number on purpose, so there is no
+   `SIGXCPU` window in which a door could checkpoint. The wall-clock limit
+   ends a run through `SIGTERM` and the stop grace; the CPU limit ends it
+   with nothing. If a door's players would lose an evening's progress at the
+   ceiling, raise the ceiling or set it to `0` rather than expecting the door
+   to react to it — and remember the paragraph above: `0` only lifts the
+   door to the hard limit your service inherited, so a login class or unit
+   file which pins CPU time still kills the door, just as silently, at that
+   value. Raise or remove that limit on the host too if the door must never
+   be cut.
+
    **Stop grace** is how long a door gets to exit after `SIGTERM` before it is
    killed, and it is reached far more often than the name suggests: on every
    caller disconnect and every timeout, not only at node shutdown. The default
@@ -547,7 +563,13 @@ resize Telnet/SSH windows.
 A caller who resizes their terminal mid-game is followed, on POSIX hosts,
 for native doors whose profile leaves columns and rows at 0. A PTY door's
 own terminal is resized and its process group gets `SIGWINCH`, which is what
-a full-screen program already expects. A stdio or socket door is told only if
+a full-screen program already expects. One resize may deliver `SIGWINCH` more
+than once: the kernel signals the terminal's foreground group when the size
+changes, and NetBBS also signals the door's process group explicitly so a door
+which never made the PTY its controlling terminal still hears it. A handler
+should read the current size and redraw, never count signals or do anything
+with a side effect per signal; a handler that only repaints sees at worst one
+extra repaint. A stdio or socket door is told only if
 its profile enables **Signal door on terminal resize**: NetBBS then rewrites
 `door_info.json` with the new `terminal_width`/`terminal_height` and sends
 `SIGUSR1`. Leave that off unless the door's own documentation says it handles
