@@ -27,10 +27,10 @@ A remote attestation is this node asserting, under its own key, that one
 of its callers is over 18 or that a display name is theirs. Since the
 feature shipped, the pull that serves those assertions admitted any
 completed peer the trust policy allowed, and the query behind it took no
-requester at all. Every federated node this one ever spoke to could read
-every birthdate and real name it had ever signed — including values whose
-subject had since opted out, because opting out stopped *future*
-disclosure and retracted nothing.
+requester at all. Every peer the policy admitted could therefore read
+every birthdate and real name this node had ever signed — including
+values whose subject had since opted out, because opting out stopped
+*future* disclosure and retracted nothing.
 
 **There is now a recipient list.** It is a SysOp-configured list of
 nodes, per node and not per attribute, empty on a fresh install and
@@ -41,9 +41,9 @@ well-formed cursor to probe for content IDs. Every change to the list is
 audited.
 
 **Per node, not per attribute**, because the caller already scopes per
-attribute from the other side, and a per-attribute grant would make a
-requester's stream depend on its own grant history — which a
-subscriber-owned position cursor cannot express.
+attribute with two toggles of their own in Profile, and a per-attribute
+grant would make a requester's stream depend on its own grant history —
+which a subscriber-owned position cursor cannot express.
 
 **A refusal is visible, not a thinned stream.** HTTP 403 with
 `reason_code` `not_an_attestation_recipient`. Serving revocations only,
@@ -59,17 +59,23 @@ attestation keeps its row — a cursor naming it still resolves — and its
 value, envelope and signature are emptied, on the issuer and again on
 every receiver that ingests the revocation. Each sync pass sweeps
 expiries. The migration blanks rows already revoked when you upgrade.
-This is removal from the live database, not forensic erasure: the WAL,
-freed pages and any backup you already took can still hold the bytes.
+The page itself now serves every revocation plus the attestations that
+are live *at read time*, where before it served the store whole,
+expired and revoked objects included. This is removal from the live
+database, not forensic erasure: the WAL, freed pages and any backup you
+already took can still hold the bytes.
 
 **What the two surfaces say.** Settings → Policy trust → Published
 identity carries the recipient count, warns when it is zero, and opens
 `[R]ecipients` — the listing, add and update as a draft editor, and
 removal behind one confirm that states plainly what removal does *not*
 do. The caller's sharing toggle in Profile now reads `on (reaches N
-nodes)` rather than an unbounded promise, and the consent text describes
-both what is enforced and the one thing that cannot be: a node that
-already copied a value.
+nodes)` rather than an unbounded promise, and says outright when the
+count is zero that their SysOp shares with no node yet; the consent text
+describes both what is enforced and the one thing that cannot be: a node
+that already copied a value. The Identity authorities screen, on the
+subscribing side, now warns that nothing arrives until the other node's
+SysOp has named this one.
 
 **The accepted cost, written into the design document.** A node removed
 from the list receives no further revocations for what it already holds;
@@ -81,11 +87,11 @@ On the Link an account *is* its username: `local_user_id` on the wire is
 `users.username`, and that column was unique only among live rows.
 Deleting an account handed the next registrant of that name the previous
 holder's Link mail (delivery resolves a recipient by username), the
-authorship of their carried posts (labelled `username@home-node-
-fingerprint`, retained forever), whatever trust state peers had recorded
-against them, and any live age or name attestation until its revocation
-propagated. Account deletion is ordinary operator behaviour, so this had
-to be closed before a multi-node run, not after.
+authorship of their carried posts (labelled
+`username@home-node-fingerprint`, retained forever), whatever trust state
+peers had recorded against them, and any live age or name attestation
+until its revocation propagated. Account deletion is ordinary operator
+behaviour, so this had to be closed before a multi-node run, not after.
 
 **The name is retired, not rewritten.** `delete_user` records it in
 `retired_usernames` inside its own write transaction, and account
@@ -151,13 +157,15 @@ lifting the restriction restores the vouch.
 fingerprint, which is exactly what the existing pull already serves: no
 new endpoint, no new wire type. An own vouch never counts in this node's
 own trust arithmetic, because local counting admits only configured
-reporters. Not vouchable: an identity this node has never met, the node
-itself, and the node's own users.
+reporters. Not vouchable: an identity this node has never met, one it
+has quarantined or blocked itself, the node itself, and the node's own
+users.
 
 ### The receiving side nothing could reach until something was issued
 
-One real issuer reaches all of these on the first pass, and each of them
-wedged a subscriber permanently.
+One real issuer reaches all of these on the first pass. Each of the first
+five wedged or misled a subscriber for good; the last two are faults the
+same work exposed next door.
 
 - **Per-object skips.** An object outside a reporter's grant, a
   revocation for an object the subscriber does not hold or has already
@@ -179,10 +187,23 @@ wedged a subscriber permanently.
   forgets the cursor and re-reads from the start rather than stalling.
 - **A widened grant re-reads the stream.** A skipped object is not
   stored, so changing a reporter's grant resets that reporter's cursor.
-- **Pages come back in storage order.** Ordered by receipt time, a
+- **The issuer serves in storage order.** Ordered by receipt time, a
   revocation signed while the issuer's clock was behind sorted ahead of
   the vouch it retires, and a fresh subscriber skipped the revocation and
-  then admitted the vouch.
+  then admitted the vouch. The page is now ordered by row, which is the
+  order things actually arrived in.
+- **A signature is checked before anything else about an object.**
+  Protocol version, object type and payload shape are judged only after
+  the envelope verifies, which is what makes "authentic but not for me"
+  distinguishable from "refuse the page". It also fixes the wire's
+  forward compatibility: a 7.9.0 subscriber skips an authentic object of
+  a type it does not know instead of wedging its cursor on it, so a
+  future object type does not strand every node on this release.
+- **One unusable key no longer costs the whole sync task.** A reporter or
+  authority whose signing key cannot be resolved — a key chain ending in
+  a bare revoke, say — used to raise out of the pull loop and end the
+  background sync task for every other peer with it. It now costs that
+  one pull and a warning.
 
 **One thing a SysOp has to know**, now in the handbook and the dogfood
 plan: a running node enforces trust policy, and under it a reporter that
@@ -193,10 +214,12 @@ graduates.
 ## Upgrade and rollback
 
 Replace the wheel and restart. **The node database migrates 67 → 70**:
-migration 68 adds the attestation recipient list and blanks
-already-revoked attestations, 69 adds the retired-username table, 70 adds
-the vouch intent table. Nothing existing is rebuilt and no data is
-discarded beyond the revoked attestation values described above.
+migration 68 adds the attestation recipient list, marks both attestation
+tables with a redaction column and blanks already-revoked rows; 69 adds
+the retired-username table and seeds, once, the marker that says this
+node has ever run Link; 70 adds the vouch intent table. Nothing existing
+is rebuilt and no data is discarded beyond the revoked attestation values
+described above.
 
 **Rolling back needs a restore.** `_apply_migrations` refuses a database
 whose `user_version` is newer than the build understands, so a 7.8.x
@@ -236,8 +259,9 @@ What this release does **not** establish:
 - **#589 stays open.** Only vouches are issued. Trust *signals* — what a
   node says when it accuses another, which observations become a signed
   signal, and whether any of that is automatic — remain undesigned, and
-  six builder names stay on the production-caller allowlist in
-  `tests/test_link_production_callers.py`.
+  six names under #589 stay on the production-caller allowlist in
+  `tests/test_link_production_callers.py` — the signal builder among
+  them, still called by nothing in `src/`.
 - **A key rotation still orphans attestation revocations (#623).** The
   vouch side re-signs them; the attestation side does not, so a
   subscriber that missed a revocation issued just before a rotation will
