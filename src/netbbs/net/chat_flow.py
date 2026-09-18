@@ -773,6 +773,20 @@ class _JoinByNameEntry:
 _JOIN_BY_NAME_STABLE_ID = -1
 
 
+def _reading_age(seconds: float) -> str:
+    """How old a room's listed count is, once it is no longer current:
+    "(5 min ago)", "(3 h ago)", "(2 d ago)". A reading kept across a
+    restart can be days old, and "stale" alone does not say which."""
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "(stale)"
+    if minutes < 60:
+        return f"({minutes} min ago)"
+    if minutes < 48 * 60:
+        return f"({minutes // 60} h ago)"
+    return f"({minutes // (24 * 60)} d ago)"
+
+
 def _mrc_section_description(status: MrcStatus) -> str:
     if not status.connected:
         return f"rooms on the MRC network -- hub link {status.state.value}"
@@ -939,8 +953,8 @@ async def _pick_mrc_room(
         if isinstance(item, _ObservedRoomEntry):
             details = mrc_bridge.directory_details(item.room)
             if details is not None:
-                users, topic, fresh = details
-                return f"{users} on MRC{' (stale)' if not fresh else ''} | {topic}"
+                users, topic, fresh, age = details
+                return f"{users} on MRC{'' if fresh else ' ' + _reading_age(age)} | {topic}"
             if item.room.lower() == "lobby":
                 return "start here; entering loads the network room directory"
             return "seen on the network -- nobody here is in it"
@@ -4719,7 +4733,19 @@ async def _chat_loop(
             await _announce_mrc_bridge(session, mrc_bridge, channel, user)
             await mrc_bridge.local_join(channel, user.username)
             if mrc_bridge.open_rooms_enabled:
-                mrc_bridge.refresh_directory(channel, user.username)
+                # The first room of a session says, in one line, that there
+                # are others and how to reach them -- from the listing this
+                # entry asks for, or from the one already in hand.
+                owed = mrc_session_state is not None and not mrc_session_state.get("rooms_hinted")
+                asked = mrc_bridge.refresh_directory(channel, user.username, hint=owed)
+                if owed and mrc_bridge.status().connected:
+                    assert mrc_session_state is not None
+                    mrc_session_state["rooms_hinted"] = True
+                    summary = None if asked else mrc_bridge.directory_hint(channel)
+                    if summary is not None:
+                        await session.write_line(
+                            await lane.run(_render_mrc_notice, user, MrcNotice(summary, utc_now_iso()))
+                        )
             if mrc_session_state is not None and not mrc_session_state.get("welcomed"):
                 # Issue #304: the hub's welcome, once per session -- its
                 # banner as remembered by the bridge, then MOTD asked for

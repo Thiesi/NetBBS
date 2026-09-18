@@ -38,6 +38,7 @@ from netbbs.mrc.protocol import (
     DEFAULT_PORT_TLS,
     MAX_NAME,
     MAX_ROOM,
+    MAX_TOPIC,
     room_name_error,
     sanitize_body,
     sanitize_name,
@@ -289,6 +290,7 @@ MAX_OPEN_ROOM_CAP = 500
 DEFAULT_OPEN_ROOM_RETENTION_DAYS = 7
 MAX_OPEN_ROOM_RETENTION_DAYS = 365
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+DIRECTORY_TIMESTAMP_FORMAT = _TIMESTAMP_FORMAT
 
 
 @dataclass(frozen=True)
@@ -593,3 +595,85 @@ def set_open_room_topic(db: Database, channel: Channel, topic: str | None) -> bo
     )
     db.connection.commit()
     return cursor.rowcount > 0
+
+
+# --- the room directory, kept across restarts ---------------------------------
+#
+# The hub only lists rooms to a caller who is already in one (`LIST` is a
+# session-context verb; a request with no announced user behind it is not
+# answered), so the bridge's directory starts empty and the Multi Relay
+# Chat section has nothing to show until someone has entered a room. The
+# last complete listing is therefore kept here and shown, with its age,
+# until a caller's entry refreshes it. Bound to the hub it came from: a
+# reading from another hub must never describe this one.
+
+DIRECTORY_SNAPSHOT_KEY = "mrc_directory_snapshot"
+DIRECTORY_SNAPSHOT_MAX_AGE_DAYS = 7
+MAX_DIRECTORY_SNAPSHOT_ROOMS = 200
+
+
+@dataclass(frozen=True)
+class DirectoryEntry:
+    room: str
+    users: int
+    topic: str
+    seen_at: str
+
+
+def hub_identity(settings: MrcSettings) -> str:
+    return f"{settings.host.lower()}:{settings.port}"
+
+
+def save_directory_snapshot(db: Database, hub: str, entries: list[DirectoryEntry]) -> None:
+    newest = sorted(entries, key=lambda entry: entry.seen_at, reverse=True)[:MAX_DIRECTORY_SNAPSHOT_ROOMS]
+    set_config(db, DIRECTORY_SNAPSHOT_KEY, json.dumps({
+        "hub": hub,
+        "rooms": [[entry.room, entry.users, entry.topic, entry.seen_at] for entry in newest],
+    }))
+
+
+def clear_directory_snapshot(db: Database) -> None:
+    set_config(db, DIRECTORY_SNAPSHOT_KEY, "")
+
+
+def load_directory_snapshot(
+    db: Database, hub: str, *, now: datetime.datetime | None = None,
+) -> list[DirectoryEntry]:
+    """The rooms last listed by `hub`, newest first. Every field is
+    checked again on the way in -- the value is shown to callers, and a
+    hand-edited or half-written one must read as "nothing known", never
+    as a room. Readings older than `DIRECTORY_SNAPSHOT_MAX_AGE_DAYS`, or
+    from another hub, are not returned."""
+    raw = get_config(db, DIRECTORY_SNAPSHOT_KEY) or ""
+    if not raw:
+        return []
+    try:
+        stored = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(stored, dict) or stored.get("hub") != hub or not isinstance(stored.get("rooms"), list):
+        return []
+    moment = now or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = (moment - datetime.timedelta(days=DIRECTORY_SNAPSHOT_MAX_AGE_DAYS)).strftime(_TIMESTAMP_FORMAT)
+    latest = moment.strftime(_TIMESTAMP_FORMAT)
+    entries: list[DirectoryEntry] = []
+    seen: set[str] = set()
+    for row in stored["rooms"][:MAX_DIRECTORY_SNAPSHOT_ROOMS]:
+        if not isinstance(row, list) or len(row) != 4:
+            continue
+        room, users, topic, seen_at = row
+        if not isinstance(room, str) or room_name_error(room) is not None or sanitize_room(room) != room:
+            continue
+        if isinstance(users, bool) or not isinstance(users, int) or not (0 <= users <= 999999):
+            continue
+        if not isinstance(topic, str) or not isinstance(seen_at, str):
+            continue
+        try:
+            datetime.datetime.strptime(seen_at, _TIMESTAMP_FORMAT)
+        except ValueError:
+            continue
+        if not (cutoff <= seen_at <= latest) or room.lower() in seen:
+            continue
+        seen.add(room.lower())
+        entries.append(DirectoryEntry(room, users, sanitize_body(topic)[:MAX_TOPIC], seen_at))
+    return sorted(entries, key=lambda entry: entry.seen_at, reverse=True)
