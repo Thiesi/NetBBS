@@ -3261,13 +3261,20 @@ def test_the_trust_deposit_endpoint_takes_a_relayed_nodes_own_objects_and_nobody
                 base_url = f"http://127.0.0.1:{server.port}"
                 await dial_hello(issuer_node, session, base_url, _hello_for(issuer_node), issuer.lane)
                 with pytest.raises(LinkTransportError, match="HTTP 403") as refused:
-                    await deposit_trust_objects(issuer_node, session, base_url, authorization(), [vouch("v1")])
+                    await deposit_trust_objects(
+                        issuer_node, session, base_url, authorization(), [vouch("v1")], after_content_id=None,
+                    )
                 assert refused.value.status == 403
 
                 relay_node.relaying_for[issuer_identity.fingerprint] = "2026-09-18T12:00:00+00:00"
                 taken = await deposit_trust_objects(
-                    issuer_node, session, base_url, authorization(), [vouch("v1")]
+                    issuer_node, session, base_url, authorization(), [vouch("v1")], after_content_id=None,
                 )
+                with pytest.raises(LinkTransportError, match="HTTP 409"):
+                    await deposit_trust_objects(
+                        issuer_node, session, base_url, authorization(), [vouch("v9")],
+                        after_content_id="c" * 64,
+                    )
                 async with session.post(
                     f"{base_url}/link/v1/trust-deposit/{issuer_identity.fingerprint}", json={"objects": []}
                 ) as malformed:
@@ -3275,7 +3282,9 @@ def test_the_trust_deposit_endpoint_takes_a_relayed_nodes_own_objects_and_nobody
 
                 monkeypatch.setattr(trust_carriage, "MAX_CARRIED_TRUST_OBJECTS_PER_ISSUER", 1)
                 with pytest.raises(LinkTransportError, match="HTTP 507"):
-                    await deposit_trust_objects(issuer_node, session, base_url, authorization(), [vouch("v2")])
+                    await deposit_trust_objects(
+                        issuer_node, session, base_url, authorization(), [vouch("v2")], after_content_id=None,
+                    )
                 return taken
         finally:
             await server.stop()

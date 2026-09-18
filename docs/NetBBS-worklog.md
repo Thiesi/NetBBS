@@ -2690,7 +2690,11 @@ gets it from `load_link_node`, and a harness should too.
 there means "already applied": `ingest_trust_objects` reports it as replayed.
 What a relay holds for a node nobody can dial lives in
 `link_trust_carried_objects` for that reason (issue #627), and
-`load_trust_page_for_pull` serves an issuer from exactly one of the two.
+`load_trust_page_for_pull` serves an issuer from exactly one of the two. A
+relay admits what it carries by pulling from itself in its own pass
+(`_OWN_CARRIAGE` in `_pull_one_trust_reporter`), never in the deposit
+handler, which sees one request and has no cursor. `store_issued_trust_object`
+does not commit; its production caller does.
 `resolve_known_signing_key` verifies something a third party delivered and
 accepts an introduced identity; `resolve_peer_signing_key` authenticates a
 wire peer and must not. The Profile and Published identity screens have a

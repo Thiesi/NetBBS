@@ -236,11 +236,15 @@ from netbbs.link.transport import (
     request_trust_objects,
 )
 from netbbs.link.trust_carriage import (
+    carries_trust_objects_for,
     clear_trust_deposit_position,
     load_own_trust_objects_to_deposit,
+    load_trust_page_for_pull,
+    record_trust_deposit_refusal,
     save_trust_deposit_position,
 )
 from netbbs.link.trust_wire import (
+    UnknownTrustPullCursor,
     SignedTrustObject,
     TrustPayloadError,
     TrustSignatureError,
@@ -1013,12 +1017,21 @@ async def _pull_trust_subscriptions(
     """Pull configured reporters explicitly; trust objects are never flood-gossiped."""
     reporters = await lane.run(list_trusted_reporter_fingerprints)
     for issuer in reporters:
+        # Before the state is consulted. A reporter named by fingerprint alone
+        # is no trust subject yet, reads as probationary and is skipped below;
+        # learning who it is is what lists it, so that it can be established.
+        # And again for one known only by introduction, which nobody else will
+        # ever refresh: it may have published no relay when it was learned, or
+        # have moved to another since. The memo in `_introduce_identities`
+        # makes that an hourly question, not one per pass.
+        if issuer not in node.peers:
+            await _ask_peers_who_a_reporter_is(
+                node, session, lane, issuer, refresh=issuer in node.introduced,
+            )
         state = await lane.run(node_transport_state, issuer) if enforce_trust_policy else TrustState.ESTABLISHED
         if state == TrustState.BLOCKED or state == TrustState.PROBATIONARY:
             continue
         revocations_only = state == TrustState.QUARANTINED
-        if node.known_identity(issuer) is None:
-            await _ask_peers_who_a_reporter_is(node, session, lane, issuer)
         record = node.known_identity(issuer)
         if record is None:
             _logger.warning(
@@ -1031,6 +1044,14 @@ async def _pull_trust_subscriptions(
         if direct:
             await _pull_one_trust_reporter(
                 node, session, lane, issuer, direct, revocations_only=revocations_only,
+            )
+            continue
+        if await lane.run(carries_trust_objects_for, issuer):
+            # This node is the reporter's relay: what it would pull is already
+            # here, and it reads it the way a subscriber reads a carrier.
+            await _pull_one_trust_reporter(
+                node, session, lane, issuer, [_OWN_CARRIAGE],
+                responder_fingerprint=node.identity.fingerprint, revocations_only=revocations_only,
             )
             continue
         # Issue #627: a reporter nobody can dial deposits what it signs at the
@@ -1051,6 +1072,8 @@ async def _pull_trust_subscriptions(
                 # An object under a key this node has not learned: the
                 # reporter rotated, and a node known by introduction only
                 # has nobody but a carrier to learn that from (§8.11).
+                # Forget that this relay had nothing new an hour ago: it has now.
+                node.unanswered_identities.pop((relay_fingerprint, issuer), None)
                 if await _introduce_identities(
                     node, session, addresses[0], relay_fingerprint, lane, [issuer], refresh=True
                 ):
@@ -1064,27 +1087,35 @@ async def _pull_trust_subscriptions(
 
 _PULL_COMPLETED, _PULL_STALLED, _PULL_FAILED = "completed", "stalled", "failed"
 
+# In place of an address, for the pull a relay makes of what it carries itself.
+_OWN_CARRIAGE = "local:carried"
+
 # Peers asked, per pass, who an unknown reporter is. A SysOp can name a reporter
 # by fingerprint alone, so this is remotely uninfluenced but still bounded.
 _MAX_PEERS_ASKED_ABOUT_A_REPORTER = 3
 
 
 async def _ask_peers_who_a_reporter_is(
-    node: LinkNode, session: ClientSession, lane: DatabaseLane, issuer: str
+    node: LinkNode, session: ClientSession, lane: DatabaseLane, issuer: str, *, refresh: bool = False
 ) -> None:
-    """Learn a configured reporter's identity from a node that relays for it (issue #627).
+    """Learn, or learn afresh, a configured reporter's identity from a node that
+    relays for it (issue #627).
 
     A carrier answers an identity request for the nodes it relays for. Which
     node that is cannot be known before the reporter's descriptor is, so the
-    first few dialable peers are asked; `_introduce_identities` remembers for
-    an hour who could not say.
+    first few dialable peers are asked. A peer that could not say within the
+    last hour is passed over without counting, or the first three would be
+    all that is ever asked.
     """
     asked = 0
+    now = time.time()
     for fingerprint, peer in list(node.peers.items()):
         addresses = _dialable_addresses(peer.descriptor)
-        if not addresses:
+        if not addresses or node.unanswered_identities.get((fingerprint, issuer), 0) > now:
             continue
-        if await _introduce_identities(node, session, addresses[0], fingerprint, lane, [issuer]):
+        if await _introduce_identities(
+            node, session, addresses[0], fingerprint, lane, [issuer], refresh=refresh
+        ):
             return
         asked += 1
         if asked >= _MAX_PEERS_ASKED_ABOUT_A_REPORTER:
@@ -1116,6 +1147,35 @@ async def _trust_carriers_for(
 _MAX_TRUST_DEPOSIT_PAGES_PER_PASS = 5
 
 
+async def _deposit_at_one_relay(
+    node: LinkNode, session: ClientSession, lane: DatabaseLane, relay_fingerprint: str,
+    base_urls: list[str], objects: list[dict], continues_from: str | None,
+) -> dict:
+    """One deposit, at the first of the relay's addresses that can be reached.
+
+    An answer, even a refusal, is the relay's answer and ends the attempt; only
+    a failure to reach it moves on to the next address. A fresh authorization
+    each time, since its nonce is spent by whoever receives it.
+    """
+    last_error: LinkTransportError | None = None
+    for base_url in base_urls:
+        authorization = await lane.run(
+            build_inventory_request,
+            signing_identity=node.identity.signing_key,
+            requester_fingerprint=node.identity.fingerprint,
+            responder_fingerprint=relay_fingerprint, include_inventory=False,
+        )
+        try:
+            return await deposit_trust_objects(
+                node, session, base_url, authorization, objects, after_content_id=continues_from,
+            )
+        except LinkTransportError as exc:
+            if getattr(exc, "status", None) is not None:
+                raise
+            last_error = exc
+    raise last_error or LinkTransportError("no addresses to try")
+
+
 async def _deposit_own_trust_objects(
     node: LinkNode, session: ClientSession, lane: DatabaseLane, *, enforce_trust_policy: bool = False
 ) -> None:
@@ -1137,18 +1197,15 @@ async def _deposit_own_trust_objects(
             if not base_urls:
                 continue
             for _page in range(_MAX_TRUST_DEPOSIT_PAGES_PER_PASS):
-                objects, position = await lane.run(
+                objects, position, continues_from = await lane.run(
                     load_own_trust_objects_to_deposit,
                     own_fingerprint=own, relay_fingerprint=relay_fingerprint,
                 )
                 if not objects or position is None:
                     break
-                authorization = await lane.run(
-                    build_inventory_request,
-                    signing_identity=node.identity.signing_key, requester_fingerprint=own,
-                    responder_fingerprint=relay_fingerprint, include_inventory=False,
+                result = await _deposit_at_one_relay(
+                    node, session, lane, relay_fingerprint, base_urls, objects, continues_from
                 )
-                result = await deposit_trust_objects(node, session, base_urls[0], authorization, objects)
                 await lane.run(save_trust_deposit_position, relay_fingerprint, position)
                 _logger.info(
                     "Link trust deposit: relay %s now carries %s more of this node's trust objects "
@@ -1157,9 +1214,22 @@ async def _deposit_own_trust_objects(
                     result.get("unverifiable"),
                 )
         except LinkTransportError as exc:
+            if getattr(exc, "status", None) == 409:
+                # The relay has lost something this node handed it, to a
+                # restored backup for instance. Everything again, next pass:
+                # what it still holds keeps its place, the rest follows.
+                await lane.run(clear_trust_deposit_position, relay_fingerprint)
+                _logger.warning(
+                    "Link trust deposit: relay %s no longer holds what this node last handed it; "
+                    "starting over there on the next pass.", relay_fingerprint,
+                )
+                continue
             # A relay that predates the route answers 404, and says so every
             # pass until it is upgraded; one that has stopped relaying for
-            # this node answers 403 until relay selection notices.
+            # this node answers 403 until relay selection notices. Recorded as
+            # well as logged: the vouch screen says where vouches go.
+            if getattr(exc, "status", None) is not None:
+                await lane.run(record_trust_deposit_refusal, relay_fingerprint, str(exc))
             _logger.warning(
                 "Link trust deposit: relay %s did not take this node's trust objects: %s",
                 relay_fingerprint, exc,
@@ -1319,7 +1389,17 @@ async def _pull_one_trust_reporter(
                     after_content_id=cursor,
                     revocations_only=revocations_only,
                 )
-                raw_objects, more = await request_trust_objects(node, session, base_url, pull)
+                if base_url == _OWN_CARRIAGE:
+                    try:
+                        raw_objects, more = await lane.run(
+                            load_trust_page_for_pull,
+                            own_fingerprint=node.identity.fingerprint, issuer_fingerprint=issuer,
+                            after_content_id=cursor, revocations_only=revocations_only,
+                        )
+                    except UnknownTrustPullCursor as exc:
+                        raise PullCursorUnknown(_OWN_CARRIAGE) from exc
+                else:
+                    raw_objects, more = await request_trust_objects(node, session, base_url, pull)
                 parsed, last_served, stalled = _parse_trust_page(
                     raw_objects, verify_key, superseded_keys, issuer
                 )

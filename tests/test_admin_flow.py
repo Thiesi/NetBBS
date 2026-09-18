@@ -9656,3 +9656,19 @@ def test_published_identity_does_not_imply_delivery_on_a_node_nobody_can_dial(db
     text = screen()
     assert "Given to 1 recipient node." in text
     assert "Nobody can dial this node" in text and "no recipient receives any of this yet" in text
+
+
+def test_the_vouch_screen_says_when_a_relay_did_not_take_this_nodes_vouches(db, lane, sysop):
+    from netbbs.link.onboarding import record_link_reachability
+    from netbbs.link.trust_carriage import record_trust_deposit_refusal
+
+    record_link_reachability(db, outgoing_only=True)
+    link_context = _link_context()
+    for relay in ("a-relay", "another-relay"):
+        link_context.link_node.relays_serving_me[relay] = "2026-09-18T12:00:00+00:00"
+    record_trust_deposit_refusal(db, "a-relay", "trust deposit failed: HTTP 404")
+
+    text = _vouch_screen_text(db, lane, sysop, link_context=link_context)
+
+    assert "handed to the 2 nodes that relay for it" in text
+    assert "1 of them did not take them at the last attempt; the Link log says why." in text

@@ -255,6 +255,7 @@ from netbbs.link.remote_attestation import (
     set_remote_attestation_override,
 )
 from netbbs.link.store import introduced_by
+from netbbs.link.trust_carriage import relays_refusing_trust_deposits
 from netbbs.link.onboarding import (
     Participation,
     get_configured_link_enabled,
@@ -2375,18 +2376,28 @@ async def _how_vouches_leave_this_node(
     """
     if not await lane.run(link_is_outgoing_only):
         return None
-    relays = len(link_context.link_node.relays_serving_me) if link_context is not None else 0
+    serving = list(link_context.link_node.relays_serving_me) if link_context is not None else []
+    relays = len(serving)
     if relays:
-        return (
+        refusing = len(await lane.run(relays_refusing_trust_deposits, serving))
+        text = (
             f"Nobody can dial this node, so what it vouches for is handed to the "
             f"{relays} node{'s' if relays != 1 else ''} that relay{'s' if relays == 1 else ''} "
-            "for it, and fetched from there.",
-            MUTED_COLOR,
+            "for it, and fetched from there."
         )
+        if refusing:
+            # Fail clearly: a relay that predates this, is full, or has stopped
+            # relaying says so to the sync pass, and only the log heard it.
+            return (
+                f"{text} {refusing} of them did not take them at the last attempt; "
+                "the Link log says why.",
+                WARNING_COLOR,
+            )
+        return (text, MUTED_COLOR)
     if link_context is None:
         return (
             "Nobody can dial this node, so what it vouches for is handed to the nodes that relay "
-            "for it once it is running.",
+            "for it, by the running node.",
             MUTED_COLOR,
         )
     return (

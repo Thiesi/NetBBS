@@ -261,27 +261,67 @@ def test_each_relay_is_brought_up_to_date_from_its_own_position(db, cast):
     first, second = vouch(a, "v1"), vouch(a, "v2")
     store_issued_trust_object(db, first, issued_at=ISSUED)
 
-    objects, position = load_own_trust_objects_to_deposit(
+    objects, position, continues_from = load_own_trust_objects_to_deposit(
         db, own_fingerprint=a.identity.fingerprint, relay_fingerprint=r.identity.fingerprint,
     )
-    assert [o["envelope"]["payload"]["vouch_id"] for o in objects] == ["v1"]
+    assert [o["envelope"]["payload"]["vouch_id"] for o in objects] == ["v1"] and continues_from is None
     save_trust_deposit_position(db, r.identity.fingerprint, position)
     store_issued_trust_object(db, second, issued_at=ISSUED)
 
-    objects, position = load_own_trust_objects_to_deposit(
+    objects, position, continues_from = load_own_trust_objects_to_deposit(
         db, own_fingerprint=a.identity.fingerprint, relay_fingerprint=r.identity.fingerprint,
     )
     assert [o["envelope"]["payload"]["vouch_id"] for o in objects] == ["v2"]
+    assert continues_from == first.content_id
     # Another relay, or this one selected afresh, starts from the beginning.
     clear_trust_deposit_position(db, r.identity.fingerprint)
-    objects, _position = load_own_trust_objects_to_deposit(
+    objects, _position, continues_from = load_own_trust_objects_to_deposit(
         db, own_fingerprint=a.identity.fingerprint, relay_fingerprint=r.identity.fingerprint,
     )
-    assert len(objects) == 2
+    assert len(objects) == 2 and continues_from is None
     save_trust_deposit_position(db, r.identity.fingerprint, position)
     assert load_own_trust_objects_to_deposit(
         db, own_fingerprint=a.identity.fingerprint, relay_fingerprint=r.identity.fingerprint,
-    ) == ([], None)
+    ) == ([], None, second.content_id)
+
+
+def test_a_relay_that_has_lost_what_it_was_handed_says_so_and_gets_it_all_again(db, cast):
+    """A depositor sends only what is new, so a relay restored from a backup
+    would never get back what it lost, and could be left serving a vouch
+    without the revocation that followed it."""
+    from netbbs.link.trust_carriage import TrustCarriageOutOfStep
+
+    a = cast["A"]
+    first = vouch(a)
+    second = revocation(a, first)
+    store_deposited_trust_objects(db, a.identity.fingerprint, [first])
+    # The relay is restored to a time before the second deposit; the depositor
+    # believes the revocation arrived and continues from it.
+    with pytest.raises(TrustCarriageOutOfStep):
+        store_deposited_trust_objects(
+            db, a.identity.fingerprint, [vouch(a, "v3")], after_content_id=second.content_id,
+        )
+    assert db.connection.execute("SELECT COUNT(*) FROM link_trust_carried_objects").fetchone()[0] == 1
+
+    # Starting over is always accepted, and what is still held keeps its place.
+    stored, not_stored = store_deposited_trust_objects(db, a.identity.fingerprint, [first, second])
+    assert stored == [second.content_id] and not_stored == [first.content_id]
+    # And from then on the two are in step again.
+    store_deposited_trust_objects(
+        db, a.identity.fingerprint, [vouch(a, "v3")], after_content_id=second.content_id,
+    )
+
+
+def test_an_object_that_has_already_expired_is_not_taken_into_carriage(db, cast):
+    """A depositor starting over sends its whole history, and its own store is never pruned."""
+    a = cast["A"]
+
+    stored, not_stored = store_deposited_trust_objects(
+        db, a.identity.fingerprint, [vouch(a, "old")], now_iso="2027-01-01T00:00:00+00:00",
+    )
+
+    assert stored == [] and len(not_stored) == 1
+    assert not carries_trust_objects_for(db, a.identity.fingerprint)
 
 
 # -- verification against an identity known only by introduction -----------------------------------------------

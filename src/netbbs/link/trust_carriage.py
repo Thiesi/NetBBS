@@ -48,22 +48,45 @@ class TrustCarriageFull(TrustWireError):
     """A depositor has reached what this node will carry for it."""
 
 
+class TrustCarriageOutOfStep(TrustWireError):
+    """A depositor continues from an object this node does not remember being handed."""
+
+
 def store_deposited_trust_objects(
-    db: Database, issuer_fingerprint: str, objects: list[SignedTrustObject], *, now_iso: str | None = None
+    db: Database, issuer_fingerprint: str, objects: list[SignedTrustObject], *,
+    after_content_id: str | None = None, now_iso: str | None = None,
 ) -> tuple[list[str], list[str]]:
     """Keep `objects`, already verified as `issuer_fingerprint`'s own, for carriage.
 
-    Returns `(stored, already_held)` content IDs. Idempotent by content ID, so
-    a depositor that lost its cursor simply deposits again. Objects whose own
-    expiry has passed are dropped first, the depositor's and everybody else's:
-    nothing else ever removes a row here. All or nothing past a limit, so that
-    a revocation is never stored without the object before it in the same
-    deposit.
+    Returns `(stored, not_stored)` content IDs; the second holds what was
+    already here and what had already expired. Idempotent by content ID, so a
+    depositor that starts over simply deposits again, and what is still held
+    keeps its place in the order. Objects whose own expiry has passed are
+    dropped first, the depositor's and everybody else's: nothing else ever
+    removes a row here. All or nothing past a limit, so that a revocation is
+    never stored without the object before it in the same deposit.
+
+    `after_content_id` is the last object the depositor handed over before
+    these. A depositor keeps its place per relay and sends only what is new,
+    so a relay that has lost something, to a restored backup above all, would
+    otherwise never get it back, and could be left serving a vouch without
+    the revocation that followed it. If it does not match what this node
+    remembers, nothing is stored and the depositor is told to start over.
+    `None` is a depositor starting over, which is always accepted.
     """
     now = now_iso or utc_now_iso()
     stored: list[str] = []
     held: list[str] = []
     with db.connection:
+        if after_content_id is not None:
+            mark = db.connection.execute(
+                "SELECT last_content_id FROM link_trust_carriage_marks WHERE issuer_fingerprint = ?",
+                (issuer_fingerprint,),
+            ).fetchone()
+            if mark is None or mark[0] != after_content_id:
+                raise TrustCarriageOutOfStep(
+                    "this node does not remember the object this deposit continues from"
+                )
         db.connection.execute(
             "DELETE FROM link_trust_carried_objects WHERE expires_at IS NOT NULL AND expires_at <= ?", (now,)
         )
@@ -78,6 +101,12 @@ def store_deposited_trust_objects(
             if db.connection.execute(
                 "SELECT 1 FROM link_trust_carried_objects WHERE content_id = ?", (obj.content_id,)
             ).fetchone() is not None:
+                held.append(obj.content_id)
+                continue
+            expires_at = obj.payload.get("expires_at")
+            if isinstance(expires_at, str) and expires_at <= now:
+                # A depositor starting over sends its whole history, and its
+                # own store is never pruned. Nobody can use this any more.
                 held.append(obj.content_id)
                 continue
             envelope_json = json.dumps(obj.envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -98,11 +127,19 @@ def store_deposited_trust_objects(
                     # An object this release does not understand is carried all
                     # the same (see `LinkNode.handle_trust_deposit`), so its
                     # payload is read defensively.
-                    expires_at if isinstance(expires_at := obj.payload.get("expires_at"), str) else None,
+                    expires_at if isinstance(expires_at, str) else None,
                     now,
                 ),
             )
             stored.append(obj.content_id)
+        if objects:
+            db.connection.execute(
+                """INSERT INTO link_trust_carriage_marks (issuer_fingerprint, last_content_id, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(issuer_fingerprint) DO UPDATE SET
+                       last_content_id = excluded.last_content_id, updated_at = excluded.updated_at""",
+                (issuer_fingerprint, objects[-1].content_id, now),
+            )
     return stored, held
 
 
@@ -173,11 +210,12 @@ def load_trust_page_for_pull(
 def load_own_trust_objects_to_deposit(
     db: Database, *, own_fingerprint: str, relay_fingerprint: str,
     limit: int = MAX_TRUST_OBJECTS_PER_RESPONSE,
-) -> tuple[list[dict[str, Any]], int | None]:
+) -> tuple[list[dict[str, Any]], int | None, str | None]:
     """This node's own signed objects not yet deposited at `relay_fingerprint`, oldest first.
 
-    Returns the wire objects and the position to record once the relay has
-    taken them, or `([], None)` when there is nothing new. By `rowid`, like the
+    Returns the wire objects, the position to record once the relay has taken
+    them, and the content ID of the last object deposited there before them
+    (`None` when starting over); `([], None, ...)` when there is nothing new. By `rowid`, like the
     page this node serves: a revocation is always inserted after the object it
     retires, whatever the clock says, and must arrive after it too. Bounded in
     bytes as a response is, since the relay's request limit is no larger.
@@ -187,6 +225,15 @@ def load_own_trust_objects_to_deposit(
         (relay_fingerprint,),
     ).fetchone()
     after_rowid = row[0] if row is not None else 0
+    before = db.connection.execute(
+        "SELECT content_id FROM link_trust_wire_objects WHERE issuer_fingerprint = ? AND rowid = ?",
+        (own_fingerprint, after_rowid),
+    ).fetchone()
+    # A position whose object is gone, to a restore of *this* node, means
+    # starting over as well; the relay keeps what it has.
+    continues_from = before[0] if before is not None else None
+    if after_rowid and continues_from is None:
+        after_rowid = 0
     rows = db.connection.execute(
         """SELECT rowid, envelope_json, signature_b64 FROM link_trust_wire_objects
            WHERE issuer_fingerprint = ? AND rowid > ? ORDER BY rowid LIMIT ?""",
@@ -203,18 +250,46 @@ def load_own_trust_objects_to_deposit(
         objects.append(item)
         total += item_size
         position = rowid
-    return objects, position
+    return objects, position, continues_from
 
 
 def save_trust_deposit_position(db: Database, relay_fingerprint: str, position: int) -> None:
+    """Record how far this node has got at a relay that took a deposit, and that it did."""
     with db.connection:
         db.connection.execute(
-            """INSERT INTO link_trust_deposit_cursors (relay_fingerprint, last_rowid, updated_at)
-               VALUES (?, ?, ?)
+            """INSERT INTO link_trust_deposit_cursors (relay_fingerprint, last_rowid, last_refusal, updated_at)
+               VALUES (?, ?, NULL, ?)
                ON CONFLICT(relay_fingerprint) DO UPDATE SET
-                   last_rowid = excluded.last_rowid, updated_at = excluded.updated_at""",
+                   last_rowid = excluded.last_rowid, last_refusal = NULL,
+                   updated_at = excluded.updated_at""",
             (relay_fingerprint, position, utc_now_iso()),
         )
+
+
+def record_trust_deposit_refusal(db: Database, relay_fingerprint: str, refusal: str) -> None:
+    """Remember that a relay did not take a deposit, for the screen that says where vouches go."""
+    with db.connection:
+        db.connection.execute(
+            """INSERT INTO link_trust_deposit_cursors (relay_fingerprint, last_rowid, last_refusal, updated_at)
+               VALUES (?, 0, ?, ?)
+               ON CONFLICT(relay_fingerprint) DO UPDATE SET
+                   last_refusal = excluded.last_refusal, updated_at = excluded.updated_at""",
+            (relay_fingerprint, refusal[:500], utc_now_iso()),
+        )
+
+
+def relays_refusing_trust_deposits(db: Database, relay_fingerprints: list[str]) -> list[str]:
+    """Which of `relay_fingerprints` refused this node's last deposit."""
+    if not relay_fingerprints:
+        return []
+    marks = ",".join("?" for _ in relay_fingerprints)
+    return [
+        row[0] for row in db.connection.execute(
+            f"""SELECT relay_fingerprint FROM link_trust_deposit_cursors
+                WHERE last_refusal IS NOT NULL AND relay_fingerprint IN ({marks})""",
+            relay_fingerprints,
+        )
+    ]
 
 
 def clear_trust_deposit_position(db: Database, relay_fingerprint: str) -> None:

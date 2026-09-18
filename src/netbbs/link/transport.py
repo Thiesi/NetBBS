@@ -196,6 +196,7 @@ from netbbs.link.remote_attestation import (
 )
 from netbbs.link.trust_carriage import (
     TrustCarriageFull,
+    TrustCarriageOutOfStep,
     load_trust_page_for_pull,
     store_deposited_trust_objects,
 )
@@ -205,8 +206,6 @@ from netbbs.link.trust_wire import (
     TrustPullRequest,
     TrustWireError,
     UnknownTrustPullCursor,
-    ingest_trust_objects,
-    list_trusted_reporter_fingerprints,
     verify_evidence_bytes,
 )
 from netbbs.net.throttle import LinkRequestThrottle
@@ -1961,16 +1960,24 @@ class LinkServer:
         For an issuer nobody can dial, which is most of them. Accepted only
         from a node this one relays for, authenticated as that node, and kept
         apart from everything this node has admitted for itself: see
-        `netbbs.link.trust_carriage`. If this node's own SysOp has named the
-        depositor a trusted reporter, the same objects are also offered to the
-        ordinary admission path, since this node cannot pull from the
-        depositor any more than anyone else can.
+        `netbbs.link.trust_carriage`. Nothing is admitted here even if this
+        node's own SysOp has named the depositor a trusted reporter. That
+        happens in this node's own sync pass, which reads what it carries the
+        way a subscriber reads a carrier: it is the one path that also works
+        when the depositor is named, or its grant widened, *after* the
+        deposit, and the one path with a cursor that a rejected batch does
+        not move.
         """
         fingerprint = request.match_info["fingerprint"]
         try:
             body = await request.json(loads=strict_json_loads)
-            if not isinstance(body, dict) or set(body) != {"authorization", "objects"}:
-                raise ValueError("a trust deposit carries exactly an authorization and objects")
+            if not isinstance(body, dict) or set(body) != {"authorization", "objects", "after_content_id"}:
+                raise ValueError(
+                    "a trust deposit carries exactly an authorization, objects and after_content_id"
+                )
+            after_content_id = body["after_content_id"]
+            if after_content_id is not None and not isinstance(after_content_id, str):
+                raise ValueError("after_content_id must be a content ID or null")
             authorization = InventoryRequest.from_dict(body["authorization"])
         except (KeyError, TypeError, ValueError) as exc:
             return web.json_response({"error": f"malformed trust deposit: {exc}"}, status=400)
@@ -1984,21 +1991,15 @@ class LinkServer:
         if decision is not None and not decision.allowed:
             return self._policy_rejection(decision)
         try:
-            stored, held = await self._lane.run(store_deposited_trust_objects, fingerprint, verified)
+            stored, held = await self._lane.run(
+                store_deposited_trust_objects, fingerprint, verified, after_content_id=after_content_id,
+            )
         except TrustCarriageFull as exc:
             return web.json_response({"error": str(exc)}, status=507)
+        except TrustCarriageOutOfStep as exc:
+            return web.json_response({"error": str(exc)}, status=409)
         except TrustWireError as exc:
             return web.json_response({"error": str(exc)}, status=403)
-        if verified and fingerprint in await self._lane.run(list_trusted_reporter_fingerprints):
-            try:
-                await self._lane.run(ingest_trust_objects, verified)
-            except TrustWireError as exc:
-                # Carried all the same: what this node will not act on it can
-                # still hand to those who will.
-                _logger.warning(
-                    "Link trust deposit: %s's objects are carried but were not admitted here: %s",
-                    fingerprint, exc,
-                )
         return web.json_response(
             {"stored": len(stored), "already_held": len(held), "unverifiable": unverifiable}
         )
@@ -2591,19 +2592,24 @@ async def deposit_trust_objects(
     authorization: InventoryRequest,
     objects: list[dict],
     *,
+    after_content_id: str | None,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> dict:
     """Hand this node's own signed trust objects to a node that relays for it (issue #627).
 
-    Returns the relay's own count of what it stored, already held and could
-    not verify. `LinkTransportError.status` is set for a refusal, so that the
-    caller can tell a relay that has stopped serving this node, or never had
-    the route, from one worth trying again.
+    Returns the relay's own count of what it stored, did not need and could
+    not verify. `LinkTransportError.status` is set for a refusal: 409 means
+    the relay does not remember `after_content_id`, the last object handed
+    over before these, and the caller starts over there.
     """
     url = f"{base_url}{LINK_PATH_PREFIX}/trust-deposit/{node.identity.fingerprint}"
     try:
         async with session.post(
-            url, json={"authorization": authorization.to_dict(), "objects": objects},
+            url,
+            json={
+                "authorization": authorization.to_dict(), "objects": objects,
+                "after_content_id": after_content_id,
+            },
             timeout=ClientTimeout(total=timeout),
         ) as response:
             text = await _read_bounded(response, _MAX_ERROR_BODY_BYTES)
