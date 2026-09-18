@@ -1289,6 +1289,17 @@ def configure_trusted_reporter(
                (reporter_fingerprint, dimension, category) VALUES (?, ?, ?)""",
             [(fingerprint, dimension, category) for dimension, category in normalized_scopes],
         )
+        # `trust_wire.ingest_trust_objects` skips, and does not store, an object
+        # outside this grant. The subscription cursor has moved past it all the
+        # same, so a grant that now covers it would never see it again: the
+        # cursor is the subscriber's, and it names a position. Dropping it makes
+        # the next pass re-read this reporter from the start, where everything
+        # already held is a replay and costs only the bytes, bounded by the
+        # pull's page budget. (The table is `trust_wire`'s; that module imports
+        # this one, so the statement lives here.)
+        db.connection.execute(
+            "DELETE FROM link_trust_pull_cursors WHERE issuer_fingerprint = ?", (fingerprint,)
+        )
         details = {
             "domain_id": domain_id, "scopes": normalized_scopes,
             "can_vouch_nodes": can_vouch_nodes, "can_vouch_users": can_vouch_users,

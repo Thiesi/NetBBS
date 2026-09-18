@@ -3606,6 +3606,28 @@ audited SysOp safety deviation. Vouches are signed, scoped, expire after at
 most 180 days, and may be renewed or revoked. Revocation removes current
 support but neither erases history nor accuses the subject of abuse.
 
+A node issues a vouch only because its SysOp chose to (issue #589). The SysOp
+records an intent to vouch for an identity the node has met, with a reason
+that is published inside the signed object; a reconcile then keeps the node's
+signed vouches in line with its standing intents. It runs on every sync pass,
+and at once from the SysOp console when that console is running inside a Link
+node; the offline admin console has no node identity, so there an intent waits
+for Link. The reconcile signs a vouch for an intent that has none, renews one
+with 30 of its 90 issued days left or signed by a key the node has since
+rotated away from, and signs a revocation when the intent is withdrawn, its
+reason replaced, or the identity becomes quarantined or blocked on the issuing
+node: a node does not tell the network it stands behind an identity it refuses
+to deal with. The intent survives such a restriction, so lifting it restores
+the vouch. A renewal overlaps the vouch it replaces rather than revoking it,
+which adds no weight because receivers count domains, never vouches.
+
+An issued vouch has no effect on the issuing node's own policy. Local counting
+admits a vouch only from a configured reporter, and a node is not its own
+reporter; establishing an identity locally is an override. A node does not
+vouch for itself or for its own users: the home node is the one party that
+cannot be independent of them, and what such a statement should mean is not
+decided.
+
 ### 12.5 Evidence classes and attribution
 
 “Objective” has two classes because not every receiver measurement is
@@ -3700,8 +3722,13 @@ flag under the requester's current
 operational signing key. The responder requires a completed hello, matching
 requester/responder identities, a valid signature, a five-minute freshness
 window, and a bounded nonce replay cache. Responses contain only unchanged
-stored objects for the requested issuer, ordered by receipt time and content
-ID, plus `more_available`. A carrier therefore gains no authority: the request
+stored objects for the requested issuer, in the order the responder stored
+them, plus `more_available`. Storage order rather than receipt time, because
+a revocation is always stored after the object it retires whatever the wall
+clock said, and a subscriber that met them the other way round would skip the
+revocation and then admit what it revoked. A node's own signed objects are
+stored with the ones it carries, under its own fingerprint, so the same pull
+serves them. A carrier therefore gains no authority: the request
 is addressed to the carrier, while every returned object's independent issuer
 signature and local reporter configuration still control admission.
 When a configured reporter is quarantined, ordinary subscription sync stops;
@@ -3727,6 +3754,48 @@ active signals per issuer, 10 active signals per issuer/subject/category, 256
 KiB embedded evidence per signal, and a separate ingestion budget in addition
 to the ordinary request throttle. Over-limit input is rejected or deferred
 visibly, never converted into evidence.
+
+A subscriber distinguishes an object it cannot use from a response it must
+not trust, and both from an object it cannot use *yet*. A rejection that time
+or state can undo, such as an issue time in the future or a full quota,
+rejects the batch, which is retried from the same cursor. An object outside
+what the subscriber configured its reporter for, a revocation naming an object
+the subscriber does not hold or one already revoked, and an object signed by a
+key the issuer has since replaced, which is what an issuer's stream holds
+after it rotates, are each skipped while the rest is admitted and the cursor
+moves on. Treating those as fatal would wedge the subscription: the batch is
+abandoned, the cursor stays, and every later pass meets the same object first.
+A skipped object is not stored, so changing a reporter's grant resets that
+reporter's cursor and the next pass re-reads its stream, where everything
+already held is a replay.
+
+An object that verifies under no key the subscriber knows for its issuer is
+different. The ordinary cause is that the subscriber is the stale party: the
+issuer rotated and re-signed everything, and the subscriber has not completed
+a hello with it since. Skipping would move the cursor past every re-issued
+vouch and every revocation. The subscriber therefore tells the two apart by
+the issuer's own transition chain. A superseded key's signature is skipped for
+good; an unknown key's stops the page there, with the cursor left on the last
+settled object, and the next pass retries after the next hello.
+
+A cursor the responder cannot resolve is its own case (issue #621). A
+responder restored from an older backup, or recreated, will never again hold
+the object a subscriber's cursor names. It answers HTTP 400 with `reason_code`
+`unknown_pull_cursor`, and the subscriber forgets the cursor and re-reads that
+issuer from the start, where everything it holds is a replay and the page
+budget bounds the cost. The attestation pull of §5.5 does the same. This also
+means a cursor saved from something a responder never stored cannot wedge a
+subscription for longer than one pass. The subscriber's cursor in any case
+moves only past objects it could authenticate: one signed by the issuer's
+current key, or by a key the issuer has replaced. A served entry whose shape
+does not allow a signature check rejects the page.
+
+A reporter has to be established before any of this happens. Under the policy
+a running node enforces, a probationary, quarantined or blocked reporter is not
+pulled in the ordinary way, and a vouch from a reporter that is not established
+in identity integrity and resource behavior does not count. Naming a reporter
+is the grant of authority; establishing it is a separate act, by override or by
+graduation.
 
 ### 12.8 Quarantine effects
 
@@ -9796,6 +9865,97 @@ name. Names already freed stay freed.
 for a name reused before this ships. Nothing in the codebase renames an
 account; a rename, if one is ever built, frees a name the same way a deletion
 does and has to retire it the same way.
+
+### Issue #589 — trust-object issuance — slice 1 decided and built; signals open
+
+Until this slice no node could issue a trust object. `trust_wire` verified,
+stored, re-served and enforced on a peer's signed objects, and nothing in
+`src/` called a builder, so the carrier store was empty on every node and
+§12.7's pull served nothing. No dogfood run, however long, could have shown
+trust propagating. Normative description: §12.4 and §12.7.
+
+**Decision 1 — slice 1 is the vouch, and only by a SysOp's act.** A vouch is
+the one trust object whose trigger needs no judgment about evidence: a person
+decides to stand behind an identity. When a node *accuses* another, which
+observations become a signed signal, and whether any of that is automatic,
+stays open in the issue. `build_trust_signal`, the digest-evidence path and
+the local-observation lifecycle remain without a production caller, and the
+ratchet in `tests/test_link_production_callers.py` still lists them.
+
+**Decision 2 — an intent, and one reconcile that signs.** The screen records
+an intent; `reconcile_issued_vouches` decides what should exist and signs it.
+This is the shape remote attestation already has, for its reasons. The offline
+admin console has no node identity, so a screen that signed would not work
+there. And two code paths that each decide when a signed object should exist
+eventually disagree, so the sync pass and the SysOp console call the same
+function, and the listing derives its status from the same predicate.
+Rejected: signing in the screen, with the sync pass only renewing.
+
+**Decision 3 — own objects live in the carrier store.** A vouch this node
+signs is stored in `link_trust_wire_objects` under its own fingerprint, which
+is exactly what the existing pull serves for a requested issuer. No new
+endpoint, no new wire type, no separate issued-objects table. It is not
+recorded in `link_trust_vouches`: that is what local policy counts, and it
+counts only configured reporters.
+
+**Decision 4 — the reason is mandatory, bounded and published.** It is inside
+the signed payload, so every subscriber stores it, and the screen says so
+before asking for it. Replacing it retires the old vouch and signs a new one,
+since signed bytes cannot be edited. 280 characters, because nothing on the
+receiving side bounds it short of the response's byte limit.
+
+**Decision 5 — 90 days issued, renewed at 30, reissued on key rotation.** The
+180-day ceiling is what a receiver tolerates; a node that goes dark cannot
+withdraw, so the issued lifetime is the window in which an unseen withdrawal
+still leaves support standing. The same numbers as an issued attestation, so
+there is one pair to remember. Rotation is detected by verifying the stored
+signature under the current key rather than by remembering which key signed,
+which needs no column and cannot drift.
+
+**Decision 6 — a restriction here suspends the vouch, and the intent
+survives it.** Vouching for an identity the issuing node has quarantined or
+blocked says something the node does not act on, so the reconcile revokes it
+and the screen refuses to record one. §12.4 makes that safe: a revocation
+accuses nobody. The intent is kept so that lifting the restriction restores
+the vouch without anyone having to remember it.
+
+A rotation also re-signs what it would otherwise orphan. A subscriber that has
+learned the new key can verify nothing the old one signed. For a vouch the
+reissue covers that. A revocation is reissued by nothing, so one signed shortly
+before a rotation and not yet pulled would be skipped as an old-key object,
+and the vouch it retires would stay live at that subscriber until it ran out.
+The reconcile therefore signs such a revocation again under the current key
+while its target has not expired; a subscriber that already holds the first
+one skips the second as a repeat.
+
+**Decision 7 — the receiving side stops treating an unusable object as a
+hostile response.** Three rejections that were fatal to a whole batch became
+per-object skips, and changing a reporter's grant now resets its cursor
+(§12.7). None of this could be reached while nothing was ever issued. With one
+real issuer and one subscriber that has established it, it is reached as soon
+as the issuer's SysOp vouches for a caller and the subscriber only granted it
+node vouches: the batch is abandoned and that subscription never moves again.
+The same goes for the first operational-key rotation, which the Phase 4
+recovery exercise includes. A slice that let nodes issue vouches and left
+their subscribers wedged would not have made the subsystem real.
+
+The same decision covers a responder that no longer knows a subscriber's
+cursor, filed as #621 while this slice was in review and fixed with it for
+both pulls, because it is the same wedge by another route and the recovery
+exercise restores a node on purpose.
+
+An object signed by a key the subscriber does not know is the one case that is
+*not* skipped, because there the subscriber may be the stale party, and a
+skip would lose every object the issuer re-signed. The first cut of this slice
+skipped it; review caught that it turned a rotation into permanent loss.
+
+**Decision 8 — pages in storage order.** See §12.7. The attestation page made
+the same change for the same reason.
+
+**Not done, deliberately.** No vouch for the node's own users and none for
+itself. No trust signals. No carrier pulls in the sync loop, which still asks
+each reporter directly. A subscriber told nothing about *why* an object was
+skipped beyond its diagnostics log.
 
 ### SFTP over the SSH transport — declined
 

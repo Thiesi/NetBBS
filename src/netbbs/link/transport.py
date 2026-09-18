@@ -186,12 +186,15 @@ from netbbs.link.remote_attestation import (
     NOT_AN_ATTESTATION_RECIPIENT_REASON_CODE,
     AttestationPullRequest,
     NotAnAttestationRecipient,
+    UnknownAttestationPullCursor,
     load_issued_attestation_page,
 )
 from netbbs.link.trust_wire import (
     MAX_EMBEDDED_EVIDENCE_BYTES,
+    UNKNOWN_PULL_CURSOR_REASON_CODE,
     TrustPullRequest,
     TrustWireError,
+    UnknownTrustPullCursor,
     load_trust_object_page,
     verify_evidence_bytes,
 )
@@ -508,6 +511,15 @@ async def persist_accepted_events(
                 )
             except FileAreaCarryLimitError as exc:
                 _logger.warning("Link sync: %s", exc)
+
+
+class PullCursorUnknown(Exception):
+    """A subscription pull's responder no longer knows the cursor it was sent (issue #621).
+
+    Its own type rather than a `LinkTransportError`: nothing failed in transit,
+    another address would answer the same, and the right response is not to
+    retry but to forget the cursor.
+    """
 
 
 class AttestationRecipientRefused(Exception):
@@ -1685,6 +1697,16 @@ class LinkServer:
             await self._runner.cleanup()
 
     @staticmethod
+    def _unknown_cursor(exc: Exception) -> web.Response:
+        """Issue #621. Still HTTP 400, as it always was, but now told apart from
+        a malformed request: a subscriber that gets this drops its cursor and
+        re-reads, instead of sending the same cursor on every pass for good."""
+        return web.json_response(
+            {"error": f"malformed pull: {exc}", "reason_code": UNKNOWN_PULL_CURSOR_REASON_CODE},
+            status=400,
+        )
+
+    @staticmethod
     def _policy_rejection(decision: LinkPolicyDecision) -> web.Response:
         return web.json_response(
             {"error": "Link policy rejected this request", "reason_code": decision.reason_code},
@@ -1900,6 +1922,8 @@ class LinkServer:
                 limit=pull.limit,
                 revocations_only=pull.revocations_only,
             )
+        except UnknownTrustPullCursor as exc:
+            return self._unknown_cursor(exc)
         except (KeyError, TypeError, ValueError, TrustWireError) as exc:
             return web.json_response({"error": f"malformed trust pull: {exc}"}, status=400)
         except LinkProtocolError as exc:
@@ -1937,6 +1961,8 @@ class LinkServer:
                 after_content_id=pull.after_content_id,
                 limit=pull.limit,
             )
+        except UnknownAttestationPullCursor as exc:
+            return self._unknown_cursor(exc)
         except NotAnAttestationRecipient as exc:
             # Visible, in the shape a policy rejection already has: what it
             # discloses is a relationship between two nodes that the other
@@ -2433,7 +2459,9 @@ async def request_trust_objects(
             url, json=pull_request.to_dict(), timeout=ClientTimeout(total=timeout)
         ) as response:
             if response.status != 200:
-                text = await response.text()
+                text = await _read_bounded(response, _MAX_ERROR_BODY_BYTES)
+                if _refusal_reason_code(text) == UNKNOWN_PULL_CURSOR_REASON_CODE:
+                    raise PullCursorUnknown(url)
                 raise LinkTransportError(
                     f"trust pull from {url} failed: HTTP {response.status}: {text}"
                 )
@@ -2476,16 +2504,19 @@ async def _read_bounded(response, limit: int, *, label: str = "response body") -
     return bytes(buffered).decode("utf-8", errors="replace")
 
 
-def _is_recipient_refusal(text: str | bytes) -> bool:
-    """Whether a 403 body is the issuer-side recipient refusal (issue #596)."""
+def _refusal_reason_code(text: str | bytes) -> str | None:
+    """The `reason_code` of a refusal body, if it has one."""
     try:
         body = strict_json_loads(text)
     except ValueError:
-        return False
-    return (
-        isinstance(body, dict)
-        and body.get("reason_code") == NOT_AN_ATTESTATION_RECIPIENT_REASON_CODE
-    )
+        return None
+    code = body.get("reason_code") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None
+
+
+def _is_recipient_refusal(text: str | bytes) -> bool:
+    """Whether a 403 body is the issuer-side recipient refusal (issue #596)."""
+    return _refusal_reason_code(text) == NOT_AN_ATTESTATION_RECIPIENT_REASON_CODE
 
 
 async def request_remote_attestations(
@@ -2506,6 +2537,8 @@ async def request_remote_attestations(
                 text = await _read_bounded(response, _MAX_ERROR_BODY_BYTES)
                 if response.status == 403 and _is_recipient_refusal(text):
                     raise AttestationRecipientRefused(url)
+                if _refusal_reason_code(text) == UNKNOWN_PULL_CURSOR_REASON_CODE:
+                    raise PullCursorUnknown(url)
                 raise LinkTransportError(
                     f"attestation pull from {url} failed: HTTP {response.status}: {text}"
                 )

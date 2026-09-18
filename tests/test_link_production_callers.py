@@ -44,13 +44,11 @@ LINK = SRC / "netbbs" / "link"
 # subsystem shipped with no production caller, which is the thing the check
 # exists to stop.
 ALLOWED: dict[str, str] = {
-    # Issue #589 -- the trust wire is receive-only.  A node can verify, store,
-    # re-serve and enforce on a peer's signed trust objects; it can never
-    # issue one, so `link_trust_wire_objects` is empty on every node in
-    # production and §12.7's pull protocol correctly returns nothing.
+    # Issue #589 -- a node can issue a vouch (slice 1, `trust_issuance`), which
+    # took `build_trust_vouch` and `build_trust_revocation` off this list.  It
+    # still cannot issue a trust *signal*: when a node accuses another node is
+    # the open design question, and everything below waits on it.
     "build_trust_signal": "#589",
-    "build_trust_vouch": "#589",
-    "build_trust_revocation": "#589",
     "activate_reproduced_digest_signal": "#589",
     "fetch_trust_evidence": "#589",
     "record_activity": "#589",

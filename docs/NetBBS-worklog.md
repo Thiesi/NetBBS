@@ -2677,6 +2677,59 @@ the way every schema has stored one. "Has this node ever run Link" is a sticky
 leaves behind, because stored peers alone miss a node that originated a linked
 board without ever storing one.
 
+**A node's own trust objects are stored with the ones it carries (issue
+#589).** `trust_issuance.reconcile_issued_vouches` signs a vouch and writes it
+to `link_trust_wire_objects` under the node's own fingerprint through
+`store_issued_trust_object`, which deliberately bypasses
+`ingest_trust_objects`: that is admission control for a peer's objects, and a
+node is not its own reporter. For the same reason an own vouch is never in
+`link_trust_vouches` and never counts locally. "Which own vouches are live" is
+therefore a query on the carrier store by issuer, and key rotation is detected
+by verifying the stored signature under the current key, not by a stored key
+fingerprint. `link_trust_config_audit` constrains `object_kind` to anchor,
+domain and reporter, so vouch intents keep their own history as withdrawn
+rows instead of auditing there.
+
+`ingest_trust_objects` has two kinds of refusal and the difference is the
+cursor. `TrustWireError` aborts the batch; the subscriber does not save its
+cursor and retries, which is right when time or state can change the answer.
+`TrustObjectOutOfScope` skips one object and the batch continues, which is
+right when only local configuration could change it, because aborting there
+wedges the subscription for good. Skipped objects are not stored, so
+`configure_trusted_reporter` deletes that issuer's pull cursor. The sync loop
+likewise parses a served page per object and takes its cursor from the last
+object with a *settled* outcome, computed from the envelope, so that skipping
+the last object of a page still advances past it. One outcome is deliberately
+not settled: a signature that verifies under no key this node knows for the
+issuer. Whether an unverifiable object is permanent depends on which key
+signed it, so `LinkNode.resolve_peer_superseded_signing_keys` supplies the
+issuer's replaced keys from its transition chain; a superseded key's object is
+skipped, an unknown key's stops the page, because the usual cause is this
+node's own stale copy of the issuer's key and skipping would lose everything
+re-signed after a rotation. `event_content_id` on a served envelope is
+guarded, since `ContentIdError` is a bare `Exception` that the pull's handler
+does not catch. `SignedTrustObject.from_dict` raises three distinguishable
+refusals for that reason: a plain `TrustWireError` before the signature could
+be checked (the page is refused), `TrustSignatureError`, and
+`TrustPayloadError` for an authentic object this node does not accept (skipped,
+and the cursor may pass it). The signature is checked *before* the protocol
+version and object type, which therefore raise `TrustPayloadError`: those are
+what a newer issuer will one day send, and refusing the page on them would
+stop every subscriber on this release at the first new object type. A
+rotation re-issues live vouches, and `_resign_orphaned_revocations` re-signs
+revocations whose targets are still running, because a subscriber on the new
+key skips anything the old key signed and nothing else would ever revoke
+those vouches there. `resolve_peer_superseded_signing_keys` is the first code
+to decode a *historical* chain key, so it tolerates an entry that is not a key,
+and the pull calls it where a failure cannot escape the sync task. Both subscription pulls answer an unresolvable
+cursor with `reason_code` `unknown_pull_cursor`, still HTTP 400, and the
+subscriber clears the cursor (issue #621); a pass reaches a reporter that is
+also a seed twice, so recovery can complete within the pass that discovers it.
+And the loop tests run with `enforce_trust_policy` off unless
+they say otherwise; production runs with it on, where an unestablished
+reporter is neither pulled nor counted. `ingest_trust_objects` still returns a
+two-tuple for every existing caller; `.skipped` rides on it.
+
 **Remote attestations do not turn Link identities into local users.** The
 signed carrier and local acceptance projection use the stable
 `TrustSubject.user(home_node_fingerprint, opaque_user_id)` identity throughout.

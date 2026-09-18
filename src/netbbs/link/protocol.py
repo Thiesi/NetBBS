@@ -130,7 +130,12 @@ from netbbs.link.events import (
     verify_relay_consent_response,
     strict_json_loads,
 )
-from netbbs.link.node_identity import NodeIdentity, NodeIdentityError, resolve_current_operational_key
+from netbbs.link.node_identity import (
+    NodeIdentity,
+    NodeIdentityError,
+    resolve_current_operational_key,
+    superseded_operational_keys,
+)
 from netbbs.link.remote_attestation import AttestationPullRequest
 from netbbs.link.trust_wire import TrustPullRequest
 from netbbs.timeutil import utc_now_iso
@@ -2263,6 +2268,32 @@ class LinkNode:
         if fingerprint not in self.peers:
             raise LinkProtocolError(f"unknown issuer {fingerprint}")
         return self._resolve_sender_signing_key(self.peers[fingerprint], fingerprint, kind)
+
+    def resolve_peer_superseded_signing_keys(self, fingerprint: str) -> list[nacl.signing.VerifyKey]:
+        """The signing keys a completed peer used before its current one.
+
+        For the trust pull (issue #589): an issuer's stream keeps what its
+        previous keys signed, and a subscriber has to be able to recognize
+        such an object as permanently unverifiable rather than as one signed
+        by a key it has not learned yet.
+        """
+        if fingerprint not in self.peers:
+            raise LinkProtocolError(f"unknown issuer {fingerprint}")
+        peer = self.peers[fingerprint]
+        keys: list[nacl.signing.VerifyKey] = []
+        for key in superseded_operational_keys(
+            peer.transitions, root_verify_key=peer.root_verify_key,
+            subject_fingerprint=fingerprint, purpose="signing",
+        ):
+            # Nothing before this ever decoded a *historical* key: hello and
+            # gossiped transitions only decode the current one. A root-signed
+            # chain may therefore carry an old entry that is not a key at all,
+            # and such an entry simply cannot have signed anything.
+            try:
+                keys.append(nacl.signing.VerifyKey(base64.b64decode(key, validate=True)))
+            except Exception:  # noqa: BLE001 -- binascii.Error, nacl's ValueError/TypeError
+                continue
+        return keys
 
     def _check_protocol_version(self, envelope: dict, *, kind: str, sender_fingerprint: str | None = None) -> None:
         """

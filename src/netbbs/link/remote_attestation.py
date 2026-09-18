@@ -45,6 +45,15 @@ class UnknownAttestationSubject(ValueError):
     """
 
 
+class UnknownAttestationPullCursor(ValueError):
+    """The requester's cursor names an object this node does not hold (issue #621).
+
+    A `ValueError` so that every existing caller that treats an unknown cursor
+    as a malformed request still does; its own type so the pull endpoint can
+    say which, and a subscriber can recover.
+    """
+
+
 class NotAnAttestationRecipient(Exception):
     """The requester is not on this node's attestation recipient list.
 
@@ -1343,7 +1352,7 @@ def load_issued_attestation_page(
             (after_content_id,),
         ).fetchone()
         if row is None:
-            raise ValueError("unknown attestation pull cursor")
+            raise UnknownAttestationPullCursor("unknown attestation pull cursor")
         after_rowid = row[0]
     rows = db.connection.execute(
         """SELECT content_id, envelope_json, signature_b64
@@ -1379,6 +1388,18 @@ def load_attestation_pull_cursor(
         (responder_fingerprint, issuer_fingerprint),
     ).fetchone()
     return row[0] if row is not None else None
+
+
+def clear_attestation_pull_cursor(
+    db: Database, responder_fingerprint: str, issuer_fingerprint: str
+) -> None:
+    """Forget where this node was in one authority's stream (issue #621)."""
+    with db.connection:
+        db.connection.execute(
+            """DELETE FROM link_attestation_pull_cursors
+               WHERE responder_fingerprint = ? AND issuer_fingerprint = ?""",
+            (responder_fingerprint, issuer_fingerprint),
+        )
 
 
 def save_attestation_pull_cursor(

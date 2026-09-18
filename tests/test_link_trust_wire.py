@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,8 @@ from netbbs.link.trust_wire import (
     build_trust_vouch,
     ingest_trust_objects,
     load_trust_object_page,
+    load_trust_pull_cursor,
+    save_trust_pull_cursor,
     verify_evidence_bytes,
 )
 from netbbs.storage.database import Database
@@ -116,7 +119,7 @@ def test_configured_reporter_ingestion_is_deduplicated_and_carrier_safe(db, repo
     assert not more
 
 
-def test_unconfigured_issuer_and_unconfigured_scope_are_rejected(db, reporter):
+def test_an_unconfigured_issuer_is_rejected_and_an_unconfigured_scope_is_skipped(db, reporter):
     with pytest.raises(TrustWireError, match="not a configured reporter"):
         ingest_trust_objects(db, [signal(reporter)], now_iso=stamp(NOW))
 
@@ -134,8 +137,16 @@ def test_unconfigured_issuer_and_unconfigured_scope_are_rejected(db, reporter):
         issued_at=stamp(NOW - timedelta(hours=1)),
         expires_at=stamp(NOW + timedelta(days=1)),
     )
-    with pytest.raises(TrustWireError, match="not configured"):
-        ingest_trust_objects(db, [wrong_scope], now_iso=stamp(NOW))
+    # Skipped, not fatal (issue #589). Aborting rolled the whole batch back
+    # and left the cursor where it was, so the same object was met first on
+    # every later pass and the subscription never moved again.
+    in_scope = signal(reporter)
+    result = ingest_trust_objects(db, [wrong_scope, in_scope], now_iso=stamp(NOW))
+    accepted, replayed = result
+    assert accepted == [in_scope.content_id] and replayed == []
+    assert result.skipped == [wrong_scope.content_id]
+    stored = [row[0] for row in db.connection.execute("SELECT content_id FROM link_trust_wire_objects")]
+    assert stored == [in_scope.content_id]
 
 
 def test_vouch_and_revocations_preserve_original_wire_objects(db, reporter):
@@ -260,3 +271,149 @@ def test_containment_pull_returns_only_revocations(db, reporter):
     )
     assert page == [revocation.to_dict()]
     assert not more
+
+
+# -- one object this node has no use for must not stop the rest (issue #589) --
+
+
+def _vouch_for(reporter, subject, vouch_id="vouch"):
+    return build_trust_vouch(
+        signing_identity=reporter, issuer_fingerprint=reporter.fingerprint, vouch_id=vouch_id,
+        subject=subject, issued_at=stamp(NOW - timedelta(hours=1)),
+        expires_at=stamp(NOW + timedelta(days=90)),
+    )
+
+
+def test_a_vouch_for_a_kind_the_reporter_was_not_granted_is_skipped_with_its_revocation(db, reporter):
+    """The first real issuer reaches this at once: its SysOp vouches for a
+    caller, and one subscriber only ever granted it node vouches."""
+    configure_reporter(db, reporter.fingerprint)  # nodes only
+    user_vouch = _vouch_for(reporter, TrustSubject.user("home-node", "carol"), "user-vouch")
+    node_vouch = _vouch_for(reporter, TrustSubject.node("subject-node"), "node-vouch")
+    revocation = build_trust_revocation(
+        signing_identity=reporter, issuer_fingerprint=reporter.fingerprint,
+        revocation_id="revoke-user-vouch", revoked_content_id=user_vouch.content_id,
+        issued_at=stamp(NOW), vouch=True,
+    )
+
+    result = ingest_trust_objects(db, [user_vouch, node_vouch, revocation], now_iso=stamp(NOW))
+
+    assert result[0] == [node_vouch.content_id]
+    assert result.skipped == [user_vouch.content_id, revocation.content_id]
+    assert db.connection.execute("SELECT COUNT(*) FROM link_trust_vouches").fetchone()[0] == 1
+
+
+def test_a_revocation_for_another_issuers_object_still_rejects_the_batch(db, reporter):
+    """Skipping is for what local configuration has no use for. An object that
+    lies about what it may revoke is not that."""
+    configure_reporter(db, reporter.fingerprint)
+    other = Identity.generate(IdentityKind.NODE, "other")
+    configure_trusted_reporter(
+        db, other.fingerprint, domain_id="independent-a", scopes=[], can_vouch_nodes=True,
+        now_iso=stamp(NOW),
+    )
+    theirs = _vouch_for(other, TrustSubject.node("subject-node"))
+    ingest_trust_objects(db, [theirs], now_iso=stamp(NOW))
+    forged = build_trust_revocation(
+        signing_identity=reporter, issuer_fingerprint=reporter.fingerprint,
+        revocation_id="not-mine", revoked_content_id=theirs.content_id,
+        issued_at=stamp(NOW), vouch=True,
+    )
+
+    with pytest.raises(TrustWireError, match="another issuer"):
+        ingest_trust_objects(db, [forged], now_iso=stamp(NOW))
+
+
+def test_widening_a_reporters_grant_lets_the_next_pull_reach_what_was_skipped(db, reporter):
+    """A skipped object is not stored, and the subscription cursor has moved
+    past it all the same. The cursor names a position, so a grant that now
+    covers the object would never see it again unless the cursor goes."""
+    configure_reporter(db, reporter.fingerprint)
+    save_trust_pull_cursor(db, reporter.fingerprint, reporter.fingerprint, "a" * 64, now_iso=stamp(NOW))
+    other = "another-reporter-fingerprint"
+    save_trust_pull_cursor(db, other, other, "b" * 64, now_iso=stamp(NOW))
+
+    configure_trusted_reporter(
+        db, reporter.fingerprint, domain_id="independent-a", scopes=[],
+        can_vouch_nodes=True, can_vouch_users=True, now_iso=stamp(NOW),
+    )
+
+    assert load_trust_pull_cursor(db, reporter.fingerprint, reporter.fingerprint) is None
+    assert load_trust_pull_cursor(db, other, other) == "b" * 64
+
+
+def test_the_page_is_ordered_by_insertion_not_by_the_receipt_clock(db, reporter):
+    """A revocation is always inserted after the object it retires, whatever
+    the wall clock said at the time."""
+    configure_reporter(db, reporter.fingerprint)
+    vouch = _vouch_for(reporter, TrustSubject.node("subject-node"))
+    ingest_trust_objects(db, [vouch], now_iso=stamp(NOW))
+    revocation = build_trust_revocation(
+        signing_identity=reporter, issuer_fingerprint=reporter.fingerprint,
+        revocation_id="revoke", revoked_content_id=vouch.content_id,
+        issued_at=stamp(NOW - timedelta(hours=2)), vouch=True,
+    )
+    ingest_trust_objects(db, [revocation], now_iso=stamp(NOW - timedelta(hours=1)))
+
+    page, _ = load_trust_object_page(db, issuer_fingerprint=reporter.fingerprint)
+    assert page == [vouch.to_dict(), revocation.to_dict()]
+    after_vouch, _ = load_trust_object_page(
+        db, issuer_fingerprint=reporter.fingerprint, after_content_id=vouch.content_id
+    )
+    assert after_vouch == [revocation.to_dict()]
+
+
+def test_a_second_revocation_of_the_same_object_is_skipped_not_fatal(db, reporter):
+    """An issuer restored from a backup taken before a withdrawal signs the
+    revocation again. Every subscriber already holding the first one used to
+    reject the batch on it, on every pass, for good."""
+    configure_reporter(db, reporter.fingerprint)
+    vouch = _vouch_for(reporter, TrustSubject.node("subject-node"))
+    first, second = (
+        build_trust_revocation(
+            signing_identity=reporter, issuer_fingerprint=reporter.fingerprint,
+            revocation_id=revocation_id, revoked_content_id=vouch.content_id,
+            issued_at=stamp(NOW), vouch=True,
+        )
+        for revocation_id in ("first", "second")
+    )
+    ingest_trust_objects(db, [vouch, first], now_iso=stamp(NOW))
+    later = _vouch_for(reporter, TrustSubject.node("another-node"), "later")
+
+    result = ingest_trust_objects(db, [second, later], now_iso=stamp(NOW))
+
+    assert result.skipped == [second.content_id]
+    assert result[0] == [later.content_id]
+
+
+def test_an_authentic_object_of_an_unknown_type_is_a_payload_refusal_a_forged_one_a_signature_refusal(reporter):
+    """The signature is checked before the protocol version and object type.
+    Those two are what a newer issuer will one day send; a subscriber may move
+    its cursor past an authentic object it cannot use, and must not move it
+    past anything it could not authenticate. Checked the other way round, the
+    first new object type stopped every subscriber on this release for good."""
+    from netbbs.link.events import build_envelope, canonical_bytes
+    from netbbs.link.trust_wire import TrustPayloadError, TrustSignatureError
+
+    future = build_envelope("trust_something_new", {"issuer_fingerprint": reporter.fingerprint})
+    authentic = {
+        "envelope": future,
+        "signature": base64.b64encode(reporter.sign(canonical_bytes(future))).decode("ascii"),
+    }
+    forged = {"envelope": future, "signature": base64.b64encode(b"x" * 64).decode("ascii")}
+
+    with pytest.raises(TrustPayloadError, match="unsupported trust object type"):
+        SignedTrustObject.from_dict(authentic, issuer_verify_key=reporter.verify_key)
+    with pytest.raises(TrustSignatureError):
+        SignedTrustObject.from_dict(forged, issuer_verify_key=reporter.verify_key)
+
+
+def test_an_envelope_that_cannot_be_canonicalized_is_a_wire_error_not_an_escape(reporter):
+    from netbbs.link.events import build_envelope
+
+    envelope = build_envelope("trust_vouch", {"issuer_fingerprint": reporter.fingerprint, "weight": 1.5})
+    with pytest.raises(TrustWireError, match="canonicalized"):
+        SignedTrustObject.from_dict(
+            {"envelope": envelope, "signature": base64.b64encode(b"x" * 64).decode("ascii")},
+            issuer_verify_key=reporter.verify_key,
+        )

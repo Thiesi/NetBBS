@@ -82,6 +82,34 @@ _REVOCATION_KEYS = frozenset(
 )
 
 
+class TrustObjectOutOfScope(Exception):
+    """A valid object from a configured reporter that this node has no use for.
+
+    Deliberately not a `TrustWireError`. That one aborts the whole batch, which
+    is right for a rejection time or state can undo -- a clock ahead of ours, a
+    quota that is full today -- because the batch is retried from the same
+    cursor next pass. This one is a statement about local configuration: the
+    reporter may vouch for nodes and sent a vouch for a user, or reports a
+    category it was not given, or revokes an object this node skipped for one
+    of those reasons. Aborting on it wedged the subscription for good: the
+    batch rolled back, the cursor never moved, and every later pass met the
+    same object first. Nothing reached it while no node could issue a trust
+    object (issue #589); the first real issuer does, as soon as its SysOp
+    vouches for a kind of subject one subscriber did not grant it.
+    """
+
+
+class TrustIngestResult(tuple):
+    """`(accepted, replayed)`, as before, plus what was skipped as out of scope."""
+
+    skipped: list[str]
+
+    def __new__(cls, accepted: list[str], replayed: list[str], skipped: list[str]):
+        instance = super().__new__(cls, (accepted, replayed))
+        instance.skipped = skipped
+        return instance
+
+
 class TrustWireError(ValueError):
     """A signed trust object is malformed, unauthorized, or over quota."""
 
@@ -177,6 +205,36 @@ def build_trust_pull_request(
     TrustPullRequest.from_dict({**unsigned.to_dict(), "signature": base64.b64encode(b"x").decode()})
     envelope = build_envelope(TRUST_PULL_REQUEST_OBJECT_TYPE, unsigned.payload)
     return TrustPullRequest(**unsigned.payload, signature=signing_identity.sign(canonical_bytes(envelope)))
+
+
+# What either subscription pull answers when the cursor it was sent names
+# nothing it holds. Wire-visible, in the `reason_code` field a policy rejection
+# already carries, so a subscriber can tell this apart from a malformed request
+# and recover from it (issue #621).
+UNKNOWN_PULL_CURSOR_REASON_CODE = "unknown_pull_cursor"
+
+
+class UnknownTrustPullCursor(TrustWireError):
+    """The requester's cursor names an object this node does not hold for that issuer.
+
+    Not the requester's fault and not something retrying fixes: the responder
+    was restored from an older backup, or recreated, or the cursor was saved
+    from something it never stored. The subscriber drops the cursor and
+    re-reads from the start, where everything it holds is a replay.
+    """
+
+
+class TrustPayloadError(TrustWireError):
+    """The signature verified; the payload is not one this node accepts."""
+
+
+class TrustSignatureError(TrustWireError):
+    """The object is well formed and its signature does not verify under the key tried.
+
+    Its own type because a subscriber has to treat this one refusal
+    differently from every other: whether it is permanent depends on *which*
+    key would have verified it, which only the caller can find out.
+    """
 
 
 def _timestamp(value: Any, name: str) -> datetime:
@@ -278,20 +336,41 @@ class SignedTrustObject:
         envelope = data["envelope"]
         if not isinstance(envelope, dict) or set(envelope) != {"netbbs_protocol", "object_type", "payload"}:
             raise TrustWireError("invalid trust envelope shape")
-        if envelope["netbbs_protocol"] != NETBBS_PROTOCOL_VERSION:
-            raise TrustWireError("unsupported trust protocol version")
-        if envelope["object_type"] not in TRUST_OBJECT_TYPES:
-            raise TrustWireError("unsupported trust object type")
-        if not isinstance(envelope["payload"], dict):
-            raise TrustWireError("trust payload must be an object")
         try:
             signature = base64.b64decode(data["signature"], validate=True)
         except (TypeError, ValueError) as exc:
             raise TrustWireError("invalid trust signature encoding") from exc
-        if not verify_signature(issuer_verify_key, canonical_bytes(envelope), signature):
-            raise TrustWireError("trust signature does not verify")
-        obj = cls(envelope=envelope, signature=signature)
-        _validate_payload(obj.object_type, obj.payload)
+        try:
+            signed_bytes = canonical_bytes(envelope)
+        except Exception as exc:  # noqa: BLE001 -- `ContentIdError` is a bare `Exception`
+            raise TrustWireError(f"trust envelope cannot be canonicalized: {exc}") from exc
+        if not verify_signature(issuer_verify_key, signed_bytes, signature):
+            raise TrustSignatureError("trust signature does not verify")
+        # Everything from here on is about an object the issuer really signed.
+        # (The envelope's own three keys are still checked above, before the
+        # signature: a future object that changes the *envelope* shape, rather
+        # than its type, version or payload, is refused rather than skipped.
+        # That is a constraint on how the wire format may evolve.)
+        # The signature is checked *before* the protocol version and object
+        # type on purpose: those two are exactly what a newer issuer will one
+        # day send that this release does not understand, and a subscriber may
+        # move its cursor past an authentic object it cannot use, but not past
+        # anything it could not authenticate. Checked the other way round, the
+        # first new object type would have stopped every subscriber running
+        # this release at that object, for good.
+        try:
+            if envelope["netbbs_protocol"] != NETBBS_PROTOCOL_VERSION:
+                raise TrustWireError("unsupported trust protocol version")
+            # `isinstance` first: an unhashable value makes `in` raise
+            # `TypeError`, which no pull handler catches.
+            if not isinstance(envelope["object_type"], str) or envelope["object_type"] not in TRUST_OBJECT_TYPES:
+                raise TrustWireError("unsupported trust object type")
+            if not isinstance(envelope["payload"], dict):
+                raise TrustWireError("trust payload must be an object")
+            obj = cls(envelope=envelope, signature=signature)
+            _validate_payload(obj.object_type, obj.payload)
+        except TrustWireError as exc:
+            raise TrustPayloadError(str(exc)) from exc
         return obj
 
 
@@ -426,13 +505,33 @@ def _store_wire_object(db: Database, obj: SignedTrustObject, received_at: str) -
     )
 
 
+def store_issued_trust_object(db: Database, obj: SignedTrustObject, *, issued_at: str) -> None:
+    """Store an object this node signed itself, where the pull already serves from.
+
+    `load_trust_object_page` serves whatever this table holds for the issuer a
+    subscriber names, so an own object stored here is served with no further
+    wiring. It bypasses `ingest_trust_objects` on purpose: that is admission
+    control for a *peer's* objects -- is the issuer a configured reporter, is
+    it within quota -- and a node is not its own reporter.
+    """
+    _store_wire_object(db, obj, issued_at)
+
+
 def ingest_trust_objects(
     db: Database, objects: Iterable[SignedTrustObject], *, now_iso: str | None = None
-) -> tuple[list[str], list[str]]:
-    """Admit verified objects from configured issuers; return accepted/replayed IDs."""
+) -> TrustIngestResult:
+    """Admit verified objects from configured issuers; return accepted/replayed IDs.
+
+    An object outside what this node configured its issuer for is skipped and
+    named in `.skipped`, and the rest of the batch is admitted: see
+    `TrustObjectOutOfScope`. A skipped object is not stored, so widening the
+    reporter's grant later has to be able to reach it again, which is why
+    `configure_trusted_reporter` resets that issuer's pull cursor.
+    """
     now = now_iso or utc_now_iso()
     accepted: list[str] = []
     replayed: list[str] = []
+    skipped: list[str] = []
     batch = list(objects)
     if len(batch) > MAX_TRUST_OBJECTS_PER_RESPONSE:
         raise TrustWireError("trust response exceeds 100 objects")
@@ -471,72 +570,85 @@ def ingest_trust_objects(
             if obj.object_type == TRUST_VOUCH_OBJECT_TYPE and active_vouches >= MAX_ACTIVE_VOUCHES_PER_ISSUER:
                 raise TrustWireError("issuer active-vouch quota exceeded")
             payload = obj.payload
-            if obj.object_type == TRUST_SIGNAL_OBJECT_TYPE:
-                subject = _subject_from_dict(payload["subject"])
-                if not _reporter_scope_allows(db, issuer, payload["dimension"], payload["category"]):
-                    raise TrustWireError("reporter is not configured for this dimension/category")
-                per_subject = db.connection.execute(
-                    """SELECT COUNT(*) FROM link_trust_wire_objects
-                       WHERE issuer_fingerprint = ? AND object_type = 'trust_signal'
-                         AND subject_id = ? AND category = ? AND revoked_at IS NULL
-                         AND expires_at > ?""",
-                    (issuer, subject.subject_id, payload["category"], now),
-                ).fetchone()[0]
-                if per_subject >= MAX_ACTIVE_SIGNALS_PER_ISSUER_SUBJECT_CATEGORY:
-                    raise TrustWireError("issuer/subject/category active-signal quota exceeded")
-                evidence = payload["evidence"]
-                if evidence["mode"] == "embedded":
+            try:
+                if obj.object_type == TRUST_SIGNAL_OBJECT_TYPE:
+                    subject = _subject_from_dict(payload["subject"])
+                    if not _reporter_scope_allows(db, issuer, payload["dimension"], payload["category"]):
+                        raise TrustObjectOutOfScope("reporter is not configured for this dimension/category")
+                    per_subject = db.connection.execute(
+                        """SELECT COUNT(*) FROM link_trust_wire_objects
+                           WHERE issuer_fingerprint = ? AND object_type = 'trust_signal'
+                             AND subject_id = ? AND category = ? AND revoked_at IS NULL
+                             AND expires_at > ?""",
+                        (issuer, subject.subject_id, payload["category"], now),
+                    ).fetchone()[0]
+                    if per_subject >= MAX_ACTIVE_SIGNALS_PER_ISSUER_SUBJECT_CATEGORY:
+                        raise TrustWireError("issuer/subject/category active-signal quota exceeded")
+                    evidence = payload["evidence"]
+                    if evidence["mode"] == "embedded":
+                        register_subject(db, subject, first_accepted_at=now, now_iso=now)
+                        record_trust_signal(
+                            db, content_id=obj.content_id, issuer_fingerprint=issuer, subject=subject,
+                            dimension=payload["dimension"], category=payload["category"],
+                            evidence_class=payload["evidence_class"], observed_at=payload["observed_at"],
+                            issued_at=payload["issued_at"], expires_at=payload["expires_at"],
+                            evidence=evidence, explanation=payload["explanation"], now_iso=now,
+                        )
+                elif obj.object_type == TRUST_VOUCH_OBJECT_TYPE:
+                    subject = _subject_from_dict(payload["subject"])
+                    allowed = bool(reporter[0] if subject.kind == "node" else reporter[1])
+                    if not allowed:
+                        raise TrustObjectOutOfScope(f"reporter may not vouch for {subject.kind} subjects")
                     register_subject(db, subject, first_accepted_at=now, now_iso=now)
-                    record_trust_signal(
+                    record_vouch(
                         db, content_id=obj.content_id, issuer_fingerprint=issuer, subject=subject,
-                        dimension=payload["dimension"], category=payload["category"],
-                        evidence_class=payload["evidence_class"], observed_at=payload["observed_at"],
                         issued_at=payload["issued_at"], expires_at=payload["expires_at"],
-                        evidence=evidence, explanation=payload["explanation"], now_iso=now,
+                        explanation=payload["explanation"], now_iso=now,
                     )
-            elif obj.object_type == TRUST_VOUCH_OBJECT_TYPE:
-                subject = _subject_from_dict(payload["subject"])
-                allowed = bool(reporter[0] if subject.kind == "node" else reporter[1])
-                if not allowed:
-                    raise TrustWireError(f"reporter may not vouch for {subject.kind} subjects")
-                register_subject(db, subject, first_accepted_at=now, now_iso=now)
-                record_vouch(
-                    db, content_id=obj.content_id, issuer_fingerprint=issuer, subject=subject,
-                    issued_at=payload["issued_at"], expires_at=payload["expires_at"],
-                    explanation=payload["explanation"], now_iso=now,
-                )
-            else:
-                target = payload["revoked_content_id"]
-                row = db.connection.execute(
-                    """SELECT issuer_fingerprint, object_type, revoked_by_content_id
-                       FROM link_trust_wire_objects WHERE content_id = ?""",
-                    (target,),
-                ).fetchone()
-                if row is None or row[0] != issuer:
-                    raise TrustWireError("revocation target is unknown or belongs to another issuer")
-                expected_type = (
-                    TRUST_VOUCH_OBJECT_TYPE
-                    if obj.object_type == TRUST_VOUCH_REVOCATION_OBJECT_TYPE
-                    else TRUST_SIGNAL_OBJECT_TYPE
-                )
-                if row[1] != expected_type:
-                    raise TrustWireError("revocation target belongs to another object family")
-                if row[2] is not None:
-                    raise TrustWireError("revocation target is already revoked")
-                if obj.object_type == TRUST_VOUCH_REVOCATION_OBJECT_TYPE:
-                    revoke_vouch(db, target, revocation_content_id=obj.content_id, now_iso=now)
-                elif db.connection.execute(
-                    "SELECT 1 FROM link_trust_signals WHERE content_id = ?", (target,)
-                ).fetchone():
-                    revoke_trust_signal(db, target, revocation_content_id=obj.content_id, now_iso=now)
-                db.connection.execute(
-                    """UPDATE link_trust_wire_objects
-                       SET revoked_by_content_id = ?, revoked_at = ? WHERE content_id = ?""",
-                    (obj.content_id, now, target),
-                )
+                else:
+                    target = payload["revoked_content_id"]
+                    row = db.connection.execute(
+                        """SELECT issuer_fingerprint, object_type, revoked_by_content_id
+                           FROM link_trust_wire_objects WHERE content_id = ?""",
+                        (target,),
+                    ).fetchone()
+                    if row is None:
+                        # Not held here: skipped as out of scope, or retired before
+                        # this node subscribed. Nothing to revoke either way.
+                        raise TrustObjectOutOfScope("revocation target is not held by this node")
+                    if row[0] != issuer:
+                        raise TrustWireError("revocation target belongs to another issuer")
+                    expected_type = (
+                        TRUST_VOUCH_OBJECT_TYPE
+                        if obj.object_type == TRUST_VOUCH_REVOCATION_OBJECT_TYPE
+                        else TRUST_SIGNAL_OBJECT_TYPE
+                    )
+                    if row[1] != expected_type:
+                        raise TrustWireError("revocation target belongs to another object family")
+                    if row[2] is not None:
+                        # A second revocation of something already retired
+                        # changes nothing here. An issuer restored from a
+                        # backup taken before a withdrawal signs exactly this,
+                        # and treating it as fatal wedged every subscriber
+                        # that already held the first one.
+                        raise TrustObjectOutOfScope("revocation target is already revoked")
+                    if obj.object_type == TRUST_VOUCH_REVOCATION_OBJECT_TYPE:
+                        revoke_vouch(db, target, revocation_content_id=obj.content_id, now_iso=now)
+                    elif db.connection.execute(
+                        "SELECT 1 FROM link_trust_signals WHERE content_id = ?", (target,)
+                    ).fetchone():
+                        revoke_trust_signal(db, target, revocation_content_id=obj.content_id, now_iso=now)
+                    db.connection.execute(
+                        """UPDATE link_trust_wire_objects
+                           SET revoked_by_content_id = ?, revoked_at = ? WHERE content_id = ?""",
+                        (obj.content_id, now, target),
+                    )
+            except TrustObjectOutOfScope:
+                skipped.append(obj.content_id)
+                continue
             _store_wire_object(db, obj, now)
             accepted.append(obj.content_id)
-    return accepted, replayed
+    return TrustIngestResult(accepted, replayed, skipped)
 
 
 def load_trust_object_page(
@@ -544,17 +656,28 @@ def load_trust_object_page(
     limit: int = MAX_TRUST_OBJECTS_PER_RESPONSE,
     revocations_only: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Return one stable, byte-bounded issuer page suitable for direct or carrier pull."""
+    """Return one stable, byte-bounded issuer page suitable for direct or carrier pull.
+
+    Ordered by insertion (`rowid`), not by `received_at`. While this table only
+    ever held objects received from peers the two agreed closely enough. Now
+    that a node stores its own vouches and their revocations here, a wall-clock
+    order has a failure that matters: if the clock steps back between signing a
+    vouch and revoking it, the revocation sorts *before* its target, a
+    subscriber meets a revocation for an object it does not hold and skips it,
+    then admits the vouch, and a withdrawn vouch stays live until it expires.
+    A revocation is always inserted after the object it retires, whatever the
+    clock says. The attestation page made the same change for the same reason.
+    """
     limit = max(1, min(limit, MAX_TRUST_OBJECTS_PER_RESPONSE))
-    after_received = ""
+    after_rowid = 0
     if after_content_id:
         row = db.connection.execute(
-            "SELECT received_at FROM link_trust_wire_objects WHERE content_id = ? AND issuer_fingerprint = ?",
+            "SELECT rowid FROM link_trust_wire_objects WHERE content_id = ? AND issuer_fingerprint = ?",
             (after_content_id, issuer_fingerprint),
         ).fetchone()
         if row is None:
-            raise TrustWireError("unknown trust pull cursor")
-        after_received = row[0]
+            raise UnknownTrustPullCursor("unknown trust pull cursor")
+        after_rowid = row[0]
     type_filter = (
         "AND object_type IN ('trust_revocation', 'trust_vouch_revocation')"
         if revocations_only else ""
@@ -563,9 +686,9 @@ def load_trust_object_page(
         """SELECT content_id, envelope_json, signature_b64 FROM link_trust_wire_objects
            WHERE issuer_fingerprint = ?
              {type_filter}
-             AND (? IS NULL OR received_at > ? OR (received_at = ? AND content_id > ?))
-           ORDER BY received_at, content_id LIMIT ?""".format(type_filter=type_filter),
-        (issuer_fingerprint, after_content_id, after_received, after_received, after_content_id, limit + 1),
+             AND rowid > ?
+           ORDER BY rowid LIMIT ?""".format(type_filter=type_filter),
+        (issuer_fingerprint, after_rowid, limit + 1),
     ).fetchall()
     more = len(rows) > limit
     result: list[dict[str, Any]] = []
@@ -602,6 +725,16 @@ def load_trust_pull_cursor(
         (responder_fingerprint, issuer_fingerprint),
     ).fetchone()
     return row[0] if row else None
+
+
+def clear_trust_pull_cursor(db: Database, responder_fingerprint: str, issuer_fingerprint: str) -> None:
+    """Forget where this node was in one responder's stream for one issuer (issue #621)."""
+    with db.connection:
+        db.connection.execute(
+            """DELETE FROM link_trust_pull_cursors
+               WHERE responder_fingerprint = ? AND issuer_fingerprint = ?""",
+            (responder_fingerprint, issuer_fingerprint),
+        )
 
 
 def save_trust_pull_cursor(
