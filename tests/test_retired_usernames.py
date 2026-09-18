@@ -197,20 +197,67 @@ def test_a_node_whose_last_startup_resolved_link_on_counts_without_the_marker(db
     assert link_has_ever_run(db)
 
 
-def test_a_node_that_ran_link_before_the_marker_existed_is_given_away_by_its_peers(db, sysop):
-    set_configured_link_enabled(db, False)
-    assert not link_has_ever_run(db)
+_LINK_ARTIFACTS = {
+    "a stored peer": """INSERT INTO link_peers
+        (fingerprint, root_public_key, transitions_json, descriptor_json, updated_at)
+        VALUES ('peer-fingerprint', 'AA==', '[]', '{}', '2026-01-01T00:00:00.000000Z')""",
+    # Codex review of #620: a node can originate a linked board and republish
+    # it on a later sync without ever having stored a peer.
+    "a linked board and no peer": "BOARD",
+    "a recorded decision to run link": """INSERT INTO node_config (key, value)
+        VALUES ('link_onboarding_participation', 'accepted')""",
+    "an explicit setting at the last startup": """INSERT INTO node_config (key, value)
+        VALUES ('link_configured_enabled', 'true')""",
+}
 
-    db.connection.execute(
-        """INSERT INTO link_peers
-           (fingerprint, root_public_key, transitions_json, descriptor_json, updated_at)
-           VALUES ('peer-fingerprint', 'AA==', '[]', '{}', '2026-01-01T00:00:00.000000Z')"""
-    )
-    db.connection.commit()
 
-    assert link_has_ever_run(db)
-    _delete(db, sysop)
-    assert is_username_retired(db, "alice")
+def _upgrade_from_before_594(tmp_path, monkeypatch, artifact_sql: str | None) -> Database:
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if m.description.startswith("Issue #594:"))
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    path = tmp_path / "pre-594.db"
+    old = Database(path)
+    if artifact_sql == "BOARD":
+        from netbbs.boards.boards import create_board
+        from tests.legacy_schema import insert_user_on_old_schema
+
+        board = create_board(old, "linked", creator=insert_user_on_old_schema(old, "founder", user_level=255))
+        old.connection.execute("UPDATE boards SET link_genesis_json = '{}' WHERE id = ?", (board.id,))
+    elif artifact_sql is not None:
+        old.connection.execute(artifact_sql)
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+    return Database(path)
+
+
+@pytest.mark.parametrize("artifact", sorted(_LINK_ARTIFACTS))
+def test_the_upgrade_remembers_a_node_that_ran_link_before_the_marker_existed(
+    tmp_path, monkeypatch, artifact
+):
+    upgraded = _upgrade_from_before_594(tmp_path, monkeypatch, _LINK_ARTIFACTS[artifact])
+    try:
+        # Link is off by every current measure, so nothing but the marker the
+        # upgrade seeded can remember that this node once ran it.
+        set_configured_link_enabled(upgraded, False)
+        set_participation(upgraded, Participation.DECLINED)
+        assert link_has_ever_run(upgraded), artifact
+
+        sysop = create_user(upgraded, "sysop", password="password", user_level=SYSOP_LEVEL)
+        _delete(upgraded, sysop)
+        assert is_username_retired(upgraded, "alice")
+    finally:
+        upgraded.close()
+
+
+def test_the_upgrade_marks_nothing_on_a_node_with_no_trace_of_link(tmp_path, monkeypatch):
+    upgraded = _upgrade_from_before_594(tmp_path, monkeypatch, None)
+    try:
+        assert not link_has_ever_run(upgraded)
+    finally:
+        upgraded.close()
 
 
 def test_marking_twice_is_idempotent(db):

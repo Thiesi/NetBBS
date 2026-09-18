@@ -2789,13 +2789,37 @@ MIGRATIONS = [
             "`idx_users_username_nocase`, so 'Bob' is held exactly as 'bob' is unique. "
             "Starts empty: past deletions are named only in the moderation log's free "
             "text, and reconstructing reservations from a log line would retire the "
-            "wrong names."
+            "wrong names. "
+            "The second statement seeds `link_has_run`, the sticky marker that says this "
+            "node has ever run Link, for a node that did so before the marker existed. It "
+            "has to be inferred once, here, from what Link leaves behind, because after "
+            "this migration the marker is only ever set by a startup with Link on, and a "
+            "node upgraded with Link switched off would otherwise read as never having "
+            "run it. Any one artifact is enough: a stored peer, a retained event, a "
+            "board, channel or file area with a Link genesis, a piece of Link mail, or a "
+            "recorded decision to run Link. Stored peers alone are not, since a node can "
+            "originate a linked board and republish it later without ever having stored "
+            "one (Codex review of #620). Over-inclusion is harmless: the cost is a held "
+            "name a SysOp can release."
         ),
         sql="""
         CREATE TABLE retired_usernames (
             username    TEXT PRIMARY KEY COLLATE NOCASE,
             retired_at  TEXT NOT NULL
         );
+
+        INSERT OR IGNORE INTO node_config (key, value)
+        SELECT 'link_has_run', 'true'
+         WHERE EXISTS (SELECT 1 FROM link_peers)
+            OR EXISTS (SELECT 1 FROM link_events)
+            OR EXISTS (SELECT 1 FROM boards WHERE link_genesis_json IS NOT NULL)
+            OR EXISTS (SELECT 1 FROM channels WHERE link_genesis_json IS NOT NULL)
+            OR EXISTS (SELECT 1 FROM file_areas WHERE link_genesis_json IS NOT NULL)
+            OR EXISTS (SELECT 1 FROM mail_messages WHERE link_event_json IS NOT NULL)
+            OR EXISTS (SELECT 1 FROM node_config
+                        WHERE key = 'link_configured_enabled' AND value = 'true')
+            OR EXISTS (SELECT 1 FROM node_config
+                        WHERE key = 'link_onboarding_participation' AND value = 'accepted');
         """,
     ),
 ]

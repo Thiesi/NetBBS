@@ -699,8 +699,8 @@ from it, and a remote attestation names it. A freed name would hand all of
 that to the next registrant. The name is recorded in the deleting transaction
 and refused at registration, case-insensitively, whatever the Link setting
 does afterwards; "ever" is a sticky marker set when the node first starts with
-Link effectively on, with stored peers standing in for it on a node that ran
-Link before the marker existed. A node that has never run Link records nothing
+Link effectively on, and seeded at upgrade, on a node that ran Link before the
+marker existed, from any artifact Link leaves behind. A node that has never run Link records nothing
 and its names stay reusable. Nor is the name of an account that never logged
 in retired: it has never acted, so it has no Link identity to inherit. A SysOp can release a retired name, as a
 confirmed and audited action. Self-service registration refuses a retired
@@ -9733,8 +9733,12 @@ every answer needs, so it is the part built.
 `delete_user` writes the retired name in the transaction that deletes the
 account, when the node runs Link now or has at any time before. "Ever" is a
 sticky marker the node sets the first time it starts with Link effectively
-on, with stored peers standing in for the marker on a node that ran Link
-before the marker existed. A node that has never run Link records nothing and
+on. The migration that introduces it seeds it on a node that ran Link before
+the marker existed, from any artifact Link leaves behind: a stored peer, a
+retained event, a linked board, channel or file area, a piece of Link mail,
+or a recorded decision to run Link. Stored peers alone would not do, since a
+node can originate a linked board and republish it later without ever having
+stored one. A node that has never run Link records nothing and
 its names stay reusable, which is both BBS tradition and the cost the issue
 names: a small board should not lose names forever to a network it is not on.
 A recorded name stays retired whatever the Link setting does afterwards.

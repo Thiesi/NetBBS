@@ -112,19 +112,18 @@ def mark_link_has_run(db: Database) -> None:
 def link_has_ever_run(db: Database) -> bool:
     """Whether any username on this node may be known to a Link peer.
 
-    The marker answers for every start since it existed. Two fallbacks cover
-    what it cannot: a node whose last startup resolved Link on (so a deletion
-    made from `netbbs.admin` before the daemon next starts still counts), and a
-    node that ran Link only before the marker existed and has it off now, which
-    its stored peers give away. Reads only, so it is safe inside a caller's
-    open transaction.
+    The marker answers for every start since it existed, and the migration
+    that introduced it seeded it for a node that had run Link before then,
+    from every kind of artifact Link leaves behind. One fallback covers what
+    the marker cannot yet know: a node whose Link setting currently resolves
+    on but which has not started since, so that a deletion made from
+    `netbbs.admin` in that window still counts. Reads only, so it is safe
+    inside a caller's open transaction.
     """
     if get_config(db, LINK_HAS_RUN_CONFIG_KEY) == "true":
         return True
     configured = get_configured_link_enabled(db)
-    if resolve_link_enabled(None if configured == "unknown" else configured, db):
-        return True
-    return db.connection.execute("SELECT 1 FROM link_peers LIMIT 1").fetchone() is not None
+    return resolve_link_enabled(None if configured == "unknown" else configured, db)
 
 
 def set_configured_link_enabled(db: Database, configured: bool | None) -> None:

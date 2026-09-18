@@ -2664,7 +2664,13 @@ a SysOp surface has to reach for `sysop_detail` and, in a draft editor,
 re-raise it as the editor's `error_type` so the draft survives. A rename, if
 one is ever built, frees a name the same way a deletion does and must retire
 it the same way. Any new path that inserts into `users` without going through
-`_create_user_with_password_hash` bypasses the hold.
+`_create_user_with_password_hash` bypasses the hold. Because `create_user` now
+reads `retired_usernames`, a migration test that opens a schema truncated
+before that table cannot call it; `tests/legacy_schema.py` inserts the account
+the way every schema has stored one. "Has this node ever run Link" is a sticky
+`node_config` marker, seeded once by the migration from every artifact Link
+leaves behind, because stored peers alone miss a node that originated a linked
+board without ever storing one.
 
 **Remote attestations do not turn Link identities into local users.** The
 signed carrier and local acceptance projection use the stable

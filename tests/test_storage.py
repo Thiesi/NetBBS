@@ -239,15 +239,15 @@ def test_check_integrity_raises_for_a_corrupted_database(tmp_path):
 def test_mrc_color_migration_preserves_existing_scrollback(tmp_path, monkeypatch):
     from netbbs.storage import database as database_module
     from netbbs.storage.migrations import MIGRATIONS
-    from netbbs.auth.users import create_user
     from netbbs.chat.channels import create_channel
+    from tests.legacy_schema import insert_user_on_old_schema
     from netbbs.chat.scrollback import get_scrollback, record_message
 
     path = tmp_path / "upgrade.db"
     with monkeypatch.context() as old_schema:
         old_schema.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
         with Database(path) as db:
-            user = create_user(db, "alice", password="test-only", user_level=255)
+            user = insert_user_on_old_schema(db, "alice", user_level=255)
             channel = create_channel(db, "lobby", creator=user)
             record_message(db, channel, kind="message", author_label="alice", body="local text")
             previous = record_message(db, channel, kind="message", author_label="bob@Other (MRC)",
