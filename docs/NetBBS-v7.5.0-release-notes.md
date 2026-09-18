@@ -50,7 +50,7 @@ Two consequences came with it. Seven horizontal rules had been spelling
 "the dimmest value this palette has" as `MUTED_COLOR`, and a rule drawn
 at 248 is a bar across the screen — including the masthead rule, which is
 on every screen in the product. They now use a constant named for what
-they are. And chat message bodies turn out never to have had a colour at
+they are. And chat message bodies turn out never to have had a color at
 all: they inherited whatever the caller's terminal defaults to, which is
 the one shade the palette never got to choose. Raising the greys alone
 would have narrowed the gap between a system notice and a person talking
@@ -58,18 +58,18 @@ rather than widening it.
 
 ## The file listing
 
-*"The cursor is small, and the colour change highlighting the selected
-row barely noticeable, not least because it uses the same colour as some
+*"The cursor is small, and the color change highlighting the selected
+row barely noticeable, not least because it uses the same color as some
 elements of the line do."*
 
-Exactly so: the highlight was the accent colour the filename already
+Exactly so: the highlight was the accent color the filename already
 carried, leaving bold as the only real signal. A highlighted row is now
 one reverse-video bar — and the same in the shared picker, because two
 different-looking cursors in one product is its own bug.
 
 The five columns stop being three shades of one grey. The size takes the
 brightest step, since it is the figure you compare down the column; the
-date and the uploader get hues of their own. The uploader had **no colour
+date and the uploader get hues of their own. The uploader had **no color
 at all**, which is how a five-field row came to read as one run of text.
 Descriptions move up to the shade the sizes and uploaders used to have.
 
@@ -189,7 +189,7 @@ What this release does **not** establish:
   part of this release most worth exercising deliberately before a node
   designates a guest account.
 - **The website's terminal captures still show the previous palette.**
-  The colour work changed what NetBBS looks like; the embedded captures
+  The color work changed what NetBBS looks like; the embedded captures
   predate it and are being redone.
 - **The DoorParty and BBSLink templates remain unverified** against live
   provider accounts (#566, #565).

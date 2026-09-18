@@ -103,7 +103,7 @@ class FakeMrcHub:
 
     def reply_lines(self, command: str, params: str) -> list[str]:
         """What the hub says back to a user-level informational command
-        (overridable per test). Two lines by default, coloured the way
+        (overridable per test). Two lines by default, colored the way
         the real hub decorates its replies."""
         return [f"|10{command} reply line 1", f"|07{command} reply line 2 {params}".rstrip()]
 

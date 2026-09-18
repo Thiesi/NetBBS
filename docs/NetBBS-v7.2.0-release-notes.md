@@ -5,7 +5,7 @@ Voidrunner and War Dialer were each rebuilt into deep, well-modelled games and
 each shipped as a wall of grey sentences — and in both cases for the same
 structural reason, found independently: the function every screen's rows passed
 through on the way to the terminal stripped ANSI by construction, so no screen
-could be coloured even when it tried. The frame restored in v7.1.0 was the only
+could be colored even when it tried. The frame restored in v7.1.0 was the only
 styled thing on a page, because it is drawn afterwards. Both wrappers are fixed,
 and both games' screens were rebuilt on top of them.
 
@@ -22,7 +22,7 @@ than paid for (see *For the project*).
 
 Captures below are real, taken from the same career on both sides — v7.1.1 for
 *before*, this release for *after* — both at 80x24 in the monochrome preset so
-the shapes show without colour.
+the shapes show without color.
 
 Before, the station deck was a title, a `Day | Economy | Danger` line, one row of
 telemetry and five rows of `[K] Label | [K] Label`:
@@ -181,9 +181,9 @@ Same method, same career: one world, both builds, 80x24, monochrome.
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ```
 
-In colour, the feed row is magenta where a rival moved against you and phosphor
+In color, the feed row is magenta where a rival moved against you and phosphor
 where you moved, money is amber, the gauge tracks are dim, and the hotkeys are
-amber. The same exchange is the same colour on the ring, in the table and in the
+amber. The same exchange is the same color on the ring, in the table and in the
 feed, because one function decides who owns it.
 
 The ring is not decoration either: it is the ten exchanges with their real
@@ -261,7 +261,7 @@ that handles SIGTERM; one that ignores it is killed at the deadline either way.
 ## For the project
 
 Both games now have a written presentation contract in the design document — a
-palette of nine named roles with a deliberate 256-colour index each, a glyph
+palette of nine named roles with a deliberate 256-color index each, a glyph
 vocabulary with an ASCII substitute for every glyph, the component library every
 screen is built from, what a table does when it will not fit, and a motion
 policy that replaces the old "there are no animation delays" rule. The door
@@ -272,9 +272,9 @@ More to the point, there are now tests that can fail because a screen is grey.
 The old suites could assert that a screen *fits* — row counts, border widths,
 "every term survives the page break" — all of which stayed true of a wall of
 unstyled text, which is how two visual designs were lost with every slice
-passing review. The new ones assert that colour reaches every body row at every
+passing review. The new ones assert that color reaches every body row at every
 supported width, that the hotkey, label, value and frame roles are four
-different colours and all four appear, that a table's columns line up measured
+different colors and all four appear, that a table's columns line up measured
 on the rendered rows, that the ASCII preset lets *none* of the Unicode
 vocabulary through, that monochrome emits no SGR at all, and that the screen
 left behind is identical whether motion played, was skipped, or was never
@@ -331,12 +331,12 @@ particular the two door data breaks described there.
 
 Full test suite on Windows: **8,640 passed, 36 skipped** in 19:18. Both games are
 exercised at 40x12, 64x20 and 80x24 across every display preset, with the
-colour, role, alignment, preset and motion assertions described above, and both
+color, role, alignment, preset and motion assertions described above, and both
 galleries were rendered and read back panel by panel.
 
 What that does not establish: how either game looks on a specific caller's
 client. Every capture above is the door's own output, driven as a subprocess and
-stripped of colour so the shapes show in a text file; the gallery paints the
+stripped of color so the shapes show in a text file; the gallery paints the
 same screens through a terminal emulator written for this project. Both are
 faithful models and neither is a real client — the presentation regressions this
 release fixes were found by playing the games, not by the suite. Three Voidrunner gallery panels — Hall of

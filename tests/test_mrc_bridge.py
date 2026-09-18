@@ -203,7 +203,7 @@ def test_inbound_room_message_is_recorded_as_external_author(db, lane, lobby, al
             assert delivered.kind == "message"
             assert delivered.author_label == "bob@Other (MRC)"
             assert delivered.author_fingerprint is None
-            # Colour codes survive (issue #298); the escape sequence does not.
+            # Color codes survive (issue #298); the escape sequence does not.
             assert delivered.body == "|07hi from |12MRC"
             assert [m.body for m in get_scrollback(db, lobby) if m.kind == "message"] == ["|07hi from |12MRC"]
 

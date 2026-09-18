@@ -602,7 +602,8 @@ account.
 
 Check pending registrations/posts/files, backup recency, free disk space,
 and recent errors. Choose welcome/masthead/banner presets through Settings;
-preview before applying. Timestamp format and display timezone are node-wide.
+preview before applying, or place your own files as described under
+[Custom banners and mastheads](#custom-banners-and-mastheads). Timestamp format and display timezone are node-wide.
 
 Under **Operations → Node and sessions**:
 
@@ -615,6 +616,42 @@ These controls require a live node session. For a stopped node, use the host's
 service controls. Use **Audit log** to see administrative and moderation
 activity. Storage garbage collection and draft pruning show the proposed work
 before confirmation; review it instead of deleting files directly.
+
+### Custom banners and mastheads
+
+**Settings → Mastheads & banners** holds eight optional pieces of caller-facing
+art. **Banners** are the welcome greeting, the log-off screen, and the screens
+shown before and after self-service signup. **Mastheads** sit above the main
+menu, the message-board list, the file-area list, and the chat channel picker.
+Each has a gallery of bundled samples, and **From disk** loads a file you have
+already put on the node. You can also put your own `.ans` file where the node
+looks for it.
+
+The file goes beside the database and is named after the database file, minus
+`.db`, plus a suffix for the piece. A node whose `[database] path` is
+`EmptinessMachine.db` uses:
+
+| Piece | File |
+| --- | --- |
+| Welcome banner | `EmptinessMachine_welcome_banner.ans` |
+| Log-off banner | `EmptinessMachine_logoff_banner.ans` |
+| Before-signup banner | `EmptinessMachine_new_account_banner_before.ans` |
+| After-signup banner | `EmptinessMachine_new_account_banner_after.ans` |
+| Main-menu masthead | `EmptinessMachine_main_menu_banner.ans` |
+| Message-board masthead | `EmptinessMachine_board_list_banner.ans` |
+| File-area masthead | `EmptinessMachine_file_area_banner.ans` |
+| Chat-channel masthead | `EmptinessMachine_chat_channel_picker_banner.ans` |
+
+For the `netbbs.db` in this handbook's examples, the prefix is `netbbs_`. Press
+**Ctrl-H** on a piece's own screen to see the exact path for your node.
+
+Placing the file does not turn it on. Each piece has its own switch, off by
+default, and callers keep seeing the built-in default until you open that
+piece's screen under **Settings → Mastheads & banners** and choose **Enable**.
+Its status line shows `disabled -- file: <name> (N bytes)` until you do, and
+**Preview** shows what callers will see. Enable refuses a missing file or one
+over 256 KiB. If a file that was enabled later goes missing or grows past that
+limit, callers get the default silently and the node logs a warning.
 
 ## State, backup, and recovery
 
@@ -629,7 +666,7 @@ Files, keys, and game saves also live outside it. For `/var/lib/netbbs/netbbs.db
 | Uploaded content | `/var/lib/netbbs/netbbs_files/` |
 | Node identity | Configured `identity_dir` |
 | Managed-DNS state and credentials | Database plus credential files beside it |
-| SSH host key and custom banners | Files beginning `netbbs_` beside the database |
+| SSH host key and custom banners | Files beside the database that begin with its file name minus `.db`, e.g. `netbbs_ssh_host_key` and `netbbs_welcome_banner.ans` (see [Custom banners and mastheads](#custom-banners-and-mastheads)) |
 | War Dialer world | `/var/lib/netbbs/netbbs.db.doors/war-dialer.db`, unless overridden |
 | Voidrunner careers | Service account's `~/.netbbs/voidrunner_saves/`, unless `VOIDRUNNER_SAVE_DIR` overrides it |
 | Third-party games | Each door's installation directory and any author-documented external state |

@@ -15,9 +15,35 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.picker import pick_item
 from netbbs.net.resource_editor import FieldSpec, bool_field, choice_field, edit_resource_draft, text_field
 from netbbs.net.session import write_prompt
-from netbbs.rendering import menu_key, sanitize_text
+from netbbs.rendering import (
+    ERROR_COLOR, LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, SUCCESS_COLOR, VALUE_COLOR, WARNING_COLOR,
+    colored, menu_key, sanitize_text,
+)
 
 _PRESETS = Path(__file__).resolve().parent.parent / "doors" / "presets"
+
+
+async def _heading(session, text):
+    """A result block's own heading, so a check or a test reads as a report
+    rather than as loose lines under the draft it was run from."""
+    await session.write_line("")
+    await session.write_line(colored(sanitize_text(text).upper(), fg_color=METADATA_COLOR, bold=True))
+
+
+async def _labelled(session, label, value, *, color=VALUE_COLOR):
+    await session.write_line(
+        colored(f"  {label}: ", fg_color=LABEL_COLOR) + colored(sanitize_text(value), fg_color=color)
+    )
+
+
+async def _problem(session, text):
+    await session.write_line(colored("  " + sanitize_text(text), fg_color=ERROR_COLOR))
+
+
+async def _pause(session, text="Press any key to return to the draft."):
+    await session.write_line("")
+    await session.write_line(colored(text, fg_color=MUTED_COLOR))
+    await session.read_any_key()
 
 
 def _candidate(door, draft):
@@ -88,33 +114,44 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
             candidate = replace(door, profile=profile, executable_path=executable, args=tuple(args))
             draft.update(_draft(candidate))
         except (OSError, ValueError, TypeError) as exc:
-            await session.write_line(sanitize_text(str(exc)))
+            # Held until a key: the editor's next redraw would wipe it unread.
+            await _heading(session, "Import failed")
+            await _problem(session, str(exc))
+            await _pause(session)
 
     async def check_prompt(session, lane, draft):
+        await _heading(session, "Setup check")
         try:
             candidate = _candidate(door, draft)
             problems = await asyncio.to_thread(preflight, candidate, session)
             world_path = await lane.run(war_dialer_world_path, candidate)
             if world_path is not None:
-                await session.write_line(sanitize_text(f"War Dialer world: {world_path}"))
+                await _labelled(session, "War Dialer world", str(world_path), color=METADATA_COLOR)
                 if problem := await asyncio.to_thread(war_dialer_path_problem, candidate, world_path):
                     problems.append(problem)
-            for line in problems or ["Static checks passed. Use Test to verify the actual runtime and game."]:
-                await session.write_line(sanitize_text(line))
+            if problems:
+                for line in problems:
+                    await _problem(session, line)
+            else:
+                await session.write_line(colored(
+                    "  Static checks passed. Use Test to verify the actual runtime and game.",
+                    fg_color=SUCCESS_COLOR,
+                ))
             # Consequences of ceilings the SysOp raised or removed. Reported
             # after the verdict because they never make a profile invalid.
             for line in profile_advisories(candidate.profile):
-                await session.write_line(sanitize_text("Note: " + line))
+                await _labelled(session, "Note", line, color=WARNING_COLOR)
         except (ProfileError, ValueError, OSError) as exc:
-            await session.write_line(sanitize_text(str(exc)))
-        await session.write_line("Press any key to return to the draft.")
-        await session.read_any_key()
+            await _problem(session, str(exc))
+        await _pause(session)
 
     async def test_prompt(session, lane, draft):
         try:
             candidate = _candidate(door, draft)
         except ProfileError as exc:
-            await session.write_line(sanitize_text(str(exc)))
+            await _heading(session, "Test not started")
+            await _problem(session, str(exc))
+            await _pause(session)
             return
         # A door with a companion service is only meaningfully testable against
         # the service its own draft describes. The supervised one belongs to the
@@ -126,21 +163,25 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
             ready = running is not None and running.identity == launch_identity(
                 candidate, service_spec(candidate.profile)) and await running.wait_until_running(2)
             if not ready:
-                await session.write_line(
-                    "This draft's companion service is not the one running. Save, then start or restart "
-                    "the service from the door detail screen before testing.")
-                await session.write_line("Press any key to return to the draft.")
-                await session.read_any_key()
+                await _heading(session, "Test not started")
+                await session.write_line(colored(
+                    "  This draft's companion service is not the one running. Save, then start or restart "
+                    "the service from the door detail screen before testing.", fg_color=WARNING_COLOR))
+                await _pause(session)
                 return
-        await session.write_line("A test runs the configured program/service and can change its game data.")
+        await session.write_line(colored(
+            "A test runs the configured program/service and can change its game data.", fg_color=WARNING_COLOR))
         if not await prompt_yes_no(session, "Launch this test now?", default=False):
             return
         result = await run_door(session, lane, candidate, actor, rehearsal=True)
-        await session.write_line(f"Test result: {result.reason}; exit code: {result.exit_code}")
+        await _heading(session, "Test result")
+        passed = result.exit_code == 0
+        await _labelled(session, "Outcome", str(result.reason), color=SUCCESS_COLOR if passed else ERROR_COLOR)
+        await _labelled(session, "Exit code", str(result.exit_code), color=VALUE_COLOR if passed else ERROR_COLOR)
         if result.diagnostic:
-            await session.write_line(sanitize_text(result.diagnostic))
-        await session.write_line("Press any key to return to the draft.")
-        await session.read_any_key()
+            await session.write_line(colored("  Diagnostic:", fg_color=LABEL_COLOR))
+            await session.write_line(colored(sanitize_text(result.diagnostic), fg_color=METADATA_COLOR))
+        await _pause(session)
 
     async def probe_prompt(session, lane, draft):
         try:
@@ -150,16 +191,23 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
             problems = await asyncio.to_thread(preflight, candidate, session)
             if problems:
                 raise ProfileError("\n".join(problems))
-            await session.write_line("This executes the configured emulator and optional FOSSIL with NetBBS's own serial fixture, not the game.")
+            await session.write_line(colored(
+                "This executes the configured emulator and optional FOSSIL with NetBBS's own serial fixture, "
+                "not the game.", fg_color=MUTED_COLOR))
             if await prompt_yes_no(session, "Run the emulator capability probe?", default=False):
                 from netbbs.doors.probe import probe_dosbox
                 result = await probe_dosbox(lane, candidate, actor)
-                await session.write_line(f"Capability probe: {result.reason}; exit code: {result.exit_code}")
-                await session.write_line(sanitize_text(result.diagnostic))
+                await _heading(session, "Capability probe")
+                passed = result.exit_code == 0
+                await _labelled(session, "Outcome", str(result.reason), color=SUCCESS_COLOR if passed else ERROR_COLOR)
+                await _labelled(session, "Exit code", str(result.exit_code), color=VALUE_COLOR if passed else ERROR_COLOR)
+                if result.diagnostic:
+                    await session.write_line(colored("  Diagnostic:", fg_color=LABEL_COLOR))
+                    await session.write_line(colored(sanitize_text(result.diagnostic), fg_color=METADATA_COLOR))
         except (ProfileError, OSError) as exc:
-            await session.write_line(sanitize_text(str(exc)))
-        await session.write_line("Press any key to return to the draft.")
-        await session.read_any_key()
+            await _heading(session, "Capability probe")
+            await _problem(session, str(exc))
+        await _pause(session)
 
     fields = []
     def add(key, hotkey, label, section, prompt=None, help=""):
@@ -220,14 +268,21 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
         except DoorError as exc:
             raise ProfileError(str(exc)) from exc
 
-    await session.write_line("External installs are manual. See docs/NetBBS-door-guide.md. Templates need local paths and game setup.")
+    # As the editor's own preamble: written before it, the editor's first
+    # clear-and-draw wiped the line before it was ever on screen.
     return await edit_resource_draft(session, lane, title="Door compatibility", fields=fields,
+                                     preamble=colored(
+                                         "External installs are manual. See docs/NetBBS-door-guide.md. "
+                                         "Templates need local paths and game setup.", fg_color=MUTED_COLOR),
                                      draft=draft, save=save, error_type=ProfileError,
                                      save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"))
 
 
 async def show_door_diagnostic(session, lane, door):
     text = await lane.run(lambda db: db.connection.execute("SELECT last_diagnostic FROM doors WHERE id = ?", (door.id,)).fetchone()[0])
-    await session.write_line(sanitize_text(text or "No diagnostic output from the last run."))
-    await session.write_line("Press any key to return.")
-    await session.read_any_key()
+    await _heading(session, f"Last diagnostic -- {door.name}")
+    if text:
+        await session.write_line(colored(sanitize_text(text), fg_color=VALUE_COLOR))
+    else:
+        await session.write_line(colored("  No diagnostic output from the last run.", fg_color=MUTED_COLOR))
+    await _pause(session, "Press any key to return.")

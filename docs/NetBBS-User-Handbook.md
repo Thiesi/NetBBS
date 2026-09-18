@@ -90,8 +90,8 @@ you choose another room or go back.
 
 The status bar separates people **here** (including their away count) from
 people on **MRC**. Remote away counts are unavailable; `?` means the roster
-has not arrived, and stale readings are labeled. Profile's MRC colour switch
-controls incoming body and nickname colours, including scrollback.
+has not arrived, and stale readings are labeled. Profile's MRC color switch
+controls incoming body and nickname colors, including scrollback.
 
 Ordinary NetBBS Link mail is protected between nodes but does
 not hide its contents from the home-node operators.

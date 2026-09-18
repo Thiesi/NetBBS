@@ -1,7 +1,7 @@
 """
 Issue #298 from the caller's side, on the same rig as
 `tests/test_chat_flow_mrc.py` (whose fixtures and helpers this reuses):
-MRC colours rendered or stripped per viewer, live and on replay, and
+MRC colors rendered or stripped per viewer, live and on replay, and
 `/mrc <subcommand>` replies shown to the asker alone.
 """
 
@@ -34,8 +34,8 @@ from tests.test_chat_flow_mrc import (  # noqa: F401 -- fixtures
 )
 
 
-def test_mrc_colours_are_rendered_or_stripped_per_viewer(db, lane, hub, presence, channel, alice):
-    async def scenario(expect_colour: bool):
+def test_mrc_colors_are_rendered_or_stripped_per_viewer(db, lane, hub, presence, channel, alice):
+    async def scenario(expect_color: bool):
         rig = await _rig(db, lane, hub, channel)
         try:
             async def push(session):
@@ -62,9 +62,9 @@ def test_mrc_colours_are_rendered_or_stripped_per_viewer(db, lane, hub, presence
             assert "[MRC] room topic: be excellent" in text
             assert "<bob>" not in text and "|12" not in text and "|14" not in text
             # CGA |12 light red, |09 light blue, |14 yellow -> xterm 9, 12, 11.
-            assert (fg(cga_to_xterm(12)) in raw) is expect_colour
-            assert (fg(cga_to_xterm(9)) in raw) is expect_colour
-            assert (fg(cga_to_xterm(14)) in raw) is expect_colour
+            assert (fg(cga_to_xterm(12)) in raw) is expect_color
+            assert (fg(cga_to_xterm(9)) in raw) is expect_color
+            assert (fg(cga_to_xterm(14)) in raw) is expect_color
         finally:
             await rig.close()
 
@@ -73,7 +73,7 @@ def test_mrc_colours_are_rendered_or_stripped_per_viewer(db, lane, hub, presence
     asyncio.run(scenario(False))
 
 
-def test_scrollback_replay_renders_mrc_colours_the_same_way(db, lane, hub, presence, channel, alice):
+def test_scrollback_replay_renders_mrc_colors_the_same_way(db, lane, hub, presence, channel, alice):
     record_message(
         db, channel, kind="message", author_label="bob@Other (MRC)", author_fingerprint=None,
         body="|12earlier|07 words", external_source="mrc", index_body="earlier words",

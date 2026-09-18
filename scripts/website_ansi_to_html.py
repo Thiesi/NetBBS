@@ -37,7 +37,7 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-# --- xterm 256-colour palette -------------------------------------------
+# --- xterm 256-color palette -------------------------------------------
 
 _BASE16 = [
     (0, 0, 0), (205, 0, 0), (0, 205, 0), (205, 205, 0),
@@ -58,9 +58,9 @@ def xterm256(index: int) -> tuple[int, int, int]:
     return (grey, grey, grey)
 
 
-#: What the embedded terminal's own CSS paints when a cell names no colour
+#: What the embedded terminal's own CSS paints when a cell names no color
 #: of its own -- `.term{background:#0a0c10}` and `pre.term-body{color:#c7cad4}`
-#: in both pages. Reverse video swaps *effective* colours, so an inverted
+#: in both pages. Reverse video swaps *effective* colors, so an inverted
 #: cell that set neither has to be given these explicitly: there is no
 #: "unset" for the swap to exchange.
 DEFAULT_FG = (0xC7, 0xCA, 0xD4)

@@ -26,6 +26,6 @@ ask for the password separately, with echo off, and send it once. NetBBS
 stores no MRC credentials, and the password reaches no scrollback, log or
 input history.
 
-Each caller can pick the colour their handle wears on MRC under
-`[P]rofile` → `[Y]our MRC nick colour`, one of the sixteen CGA colours MRC
+Each caller can pick the color their handle wears on MRC under
+`[P]rofile` → `[Y]our MRC nick color`, one of the sixteen CGA colors MRC
 clients understand; the default stays the house yellow.

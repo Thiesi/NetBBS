@@ -4,10 +4,10 @@ A SysOp resource list used to render as
 
     02. (#1) Test - read 100/write 100, open
 
-— one flat string in one flat colour, with nothing aligned down the
+— one flat string in one flat color, with nothing aligned down the
 page and nowhere to put the age and name gates, so a gated area looked
 exactly like an open one. These tests hold the table's three promises:
-the columns line up, the fields are separately coloured, and the gates
+the columns line up, the fields are separately colored, and the gates
 are visible.
 """
 
@@ -222,11 +222,11 @@ def test_a_cjk_name_does_not_shift_the_columns_after_it():
     )
 
 
-# -- Colour -----------------------------------------------------------
+# -- Color -----------------------------------------------------------
 
 
-def test_fields_are_coloured_independently():
-    """Item 7 of the report: levels should not be the same colour as
+def test_fields_are_colored_independently():
+    """Item 7 of the report: levels should not be the same color as
     the labels above them."""
     output = _table().output
     assert fg(VALUE_COLOR) in output  # the level/status cells
@@ -290,9 +290,9 @@ def test_the_header_row_is_paid_for_out_of_the_page_size():
     assert with_header == without - 1
 
 
-def test_a_highlighted_row_overrides_every_column_colour():
+def test_a_highlighted_row_overrides_every_column_color():
     """`pick_item`'s standing rule, applied to columns too: selection
-    state wins over field identity. Distinguishable per-field colours
+    state wins over field identity. Distinguishable per-field colors
     are a normal-row affordance; a row under the cursor is already
     unambiguous and should read as one highlighted run."""
     from netbbs.net.char_input import EditorKey, EditorKeyKind
@@ -316,8 +316,8 @@ def test_a_highlighted_row_overrides_every_column_colour():
     )
     highlighted = [line for line in session.lines() if line.startswith("> ")]
     assert highlighted, "expected the cursor to land on a row"
-    # The gate colour belongs to a normal row's gates cell; under the
-    # cursor the whole row is the highlight colour instead.
+    # The gate color belongs to a normal row's gates cell; under the
+    # cursor the whole row is the highlight color instead.
     row_start = session.output.index("> 01.")
     row_end = session.output.index("\n", row_start)
     assert fg(GATE_COLOR) not in session.output[row_start:row_end]

@@ -99,17 +99,17 @@ class CaptureSession(FakeSession):
 def mrc(nick: str, site: str, body: str, action: bool = False) -> str:
     """One MRC room line on the wire:
     `nick~site~room~to_user~to_site~to_room~body~`, the body carrying the
-    sender's own coloured handle the way every MRC client writes it."""
-    coloured = (f"|15* |13{nick} {body}" if action
+    sender's own colored handle the way every MRC client writes it."""
+    colored = (f"|15* |13{nick} {body}" if action
                 else f"|03<|11{nick}|03>|16|07 {body}")
-    return f"{nick}~{site}~lobby~~~lobby~{coloured}~"
+    return f"{nick}~{site}~lobby~~~lobby~{colored}~"
 
 
 def extract_body(wire: str) -> str:
     """The message text of a wire line, for confirming it reached the screen.
 
     Only the text is a reliable thing to look for. NetBBS re-renders the
-    sender as `nick@site (MRC)` and supplies its own colours, so neither the
+    sender as `nick@site (MRC)` and supplies its own colors, so neither the
     wire's `|NN` codes nor its embedded `<nick>` survives to the screen.
     """
     nick, *_ = wire.split("~")
