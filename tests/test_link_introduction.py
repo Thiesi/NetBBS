@@ -229,6 +229,60 @@ def test_an_introduced_identity_gone_stale_is_set_aside_and_named_for_a_fresh_bu
     assert b.handle_events_tolerantly(r.identity.fingerprint, [post])[0] == [signed.content_id]
 
 
+def test_an_event_that_builds_on_one_set_aside_is_set_aside_with_it(cast):
+    """The second edit in a chain does not fail as "unknown predecessor" but as
+    "does not extend the current head", which is a plain refusal. It used to end
+    the response, and with it the refresh the first edit was waiting for, on
+    every pass."""
+    from netbbs.link.events import build_board_post_moderator_edit
+
+    r, a, b = cast["R"], cast["A"], cast["B"]
+    b.handle_introduction(hello(a))
+    post = post_by(r)
+    b.handle_events(r.identity.fingerprint, [genesis_by(a).to_dict(), post.to_dict()])
+    rotated = rotate_operational_key(a.identity, purpose="signing")
+
+    def edit(previous: str, subject: str):
+        return build_board_post_moderator_edit(
+            signing_identity=rotated.signing_key, board_id=BOARD, root_post_id=post.content_id,
+            previous_event_id=previous, subject=subject, body="edited", created_at=WHEN,
+        )
+
+    first = edit(post.content_id, "first edit")
+    second = edit(first.content_id, "second edit")
+    unrelated = post_by(r, "still arrives")
+
+    accepted, deferred, refusal = b.handle_events_tolerantly(
+        r.identity.fingerprint, [first.to_dict(), second.to_dict(), unrelated.to_dict()]
+    )
+
+    assert refusal is None and accepted == [unrelated.content_id]
+    assert [exc.missing_identity for _raw, exc in deferred] == [a.identity.fingerprint] * 2
+
+    # And on a later pass, when the first edit is declared as seen and only the
+    # second is offered: it still waits with its predecessor.
+    b.deferred_events.defer(first.to_dict(), waiting_for=a.identity.fingerprint, now=0.0)
+    accepted, deferred, refusal = b.handle_events_tolerantly(r.identity.fingerprint, [second.to_dict()])
+    assert refusal is None and accepted == [] and len(deferred) == 1
+
+
+def test_an_event_that_cannot_even_be_parsed_ends_the_response_and_nothing_more(cast):
+    """`handle_events` parses before it validates, and a parse can fail in ways
+    that are not a protocol refusal. An escape would end the sync task and lose
+    what the response had already had accepted."""
+    r, b = cast["R"], cast["B"]
+    genesis = genesis_by(r)
+    junk = post_by(r).to_dict()
+    junk["envelope"]["netbbs_protocol"] = 1.0
+
+    accepted, deferred, refusal = b.handle_events_tolerantly(
+        r.identity.fingerprint, [genesis.to_dict(), junk, {"envelope": []}]
+    )
+
+    assert accepted == [genesis.content_id] and deferred == []
+    assert isinstance(refusal, LinkProtocolError)
+
+
 def test_what_an_event_builds_on_being_missing_is_also_a_deferral(cast):
     r, b = cast["R"], cast["B"]
 

@@ -547,6 +547,11 @@ class LinkTransportError(Exception):
     differently (e.g. log-and-drop a hostile peer vs. retry a flaky
     connection)."""
 
+    # The HTTP status, where the failure was a response with one and a caller
+    # has to tell "this peer does not have that route" from a failure worth
+    # retrying. `None` everywhere else.
+    status: int | None = None
+
 
 _NOISE_PROTOCOL_NAME = b"Noise_XX_25519_ChaChaPoly_BLAKE2s"
 _NOISE_HASHLEN = 32
@@ -2501,9 +2506,11 @@ async def request_identities(
         ) as response:
             if response.status != 200:
                 text = await _read_bounded(response, _MAX_ERROR_BODY_BYTES)
-                raise LinkTransportError(
+                failure = LinkTransportError(
                     f"identity request to {url} failed: HTTP {response.status}: {text}"
                 )
+                failure.status = response.status
+                raise failure
             raw = await _read_bounded(
                 response, MAX_IDENTITY_RESPONSE_BYTES, label="identity response"
             )

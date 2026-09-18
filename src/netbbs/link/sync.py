@@ -791,16 +791,20 @@ async def _sync_one_seed(
                     seed_peer.fingerprint, allowed_events
                 )
                 needed = [exc.missing_identity for _raw, exc in deferred if exc.missing_identity]
-                if refusal is None and needed and await _introduce_identities(
+                # Whether or not a refusal ended the response: what was set
+                # aside before it still needs its identities, and would
+                # otherwise wait on a refusal that may recur every pass.
+                if needed and await _introduce_identities(
                     node, session, seed_url, seed_peer.fingerprint, lane, needed, refresh=True
                 ):
                     # In order, once: an event set aside for want of its
                     # signer may be what a later one in the same response
                     # builds on.
-                    retried, deferred, refusal = node.handle_events_tolerantly(
+                    retried, deferred, retry_refusal = node.handle_events_tolerantly(
                         seed_peer.fingerprint, [raw for raw, _exc in deferred]
                     )
                     accepted.extend(retried)
+                    refusal = refusal or retry_refusal
                 for raw, exc in deferred:
                     node.deferred_events.defer(raw, waiting_for=exc.missing_identity, now=time.time())
                 if deferred:
@@ -920,10 +924,14 @@ async def _introduce_identities(
                 node, session, base_url, carrier_fingerprint, lane, asked
             )
         except (LinkTransportError, ValueError) as exc:
-            # A carrier that predates the route answers 404 to every request.
-            # Marked unanswered like any other, or this line is logged twice a
-            # pass for as long as that carrier stays on its version.
             _logger.warning("Link sync: could not ask %s who its content is from: %s", base_url, exc)
+            if getattr(exc, "status", None) not in (404, 405):
+                # A timeout, a 429, a 5xx: worth asking again on the next
+                # occasion, so nothing is marked.
+                break
+            # A carrier that predates the route answers 404 to every request.
+            # Marked unanswered like any other, or that line is logged twice
+            # a pass for as long as the carrier stays on its version.
             learned_now = set()
             gave_up = True
         except Exception:  # noqa: BLE001 -- an escape here ends the whole background sync task

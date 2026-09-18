@@ -3168,8 +3168,13 @@ def test_a_carrier_that_cannot_introduce_an_author_costs_that_post_and_nothing_e
     from netbbs.link import sync as sync_module
     from netbbs.link.transport import LinkTransportError
 
+    asked: list[int] = []
+
     async def _refuses(*args, **kwargs):
-        raise LinkTransportError("identity request failed: HTTP 404")
+        asked.append(1)
+        failure = LinkTransportError("identity request failed: HTTP 404")
+        failure.status = 404
+        raise failure
 
     monkeypatch.setattr(sync_module, "request_identities", _refuses)
     net = _ThreeNodes(tmp_path, enforce=False)
@@ -3192,6 +3197,9 @@ def test_a_carrier_that_cannot_introduce_an_author_costs_that_post_and_nothing_e
         asyncio.run(scenario())
         assert net.subjects_on("B") == ["hello from R"]
         assert len(net.nodes["B"].deferred_events.entries) == 1
+        # A carrier without the route is asked once, not on every pass. One
+        # that merely failed to answer is another matter; see the next test.
+        assert len(asked) == 1
     finally:
         net.close()
 
@@ -3310,5 +3318,43 @@ def test_a_wrong_event_ends_a_response_without_losing_what_was_accepted_before_i
         first = asyncio.run(scenario())
         assert len(first) == 1, "the pass with the forgery keeps what came before it"
         assert sorted(net.subjects_on("B")) == ["one", "two"]
+    finally:
+        net.close()
+
+
+def test_a_request_that_merely_failed_is_repeated_on_the_next_occasion(tmp_path, monkeypatch):
+    """A timeout, a 429 or a 5xx says nothing about what the carrier knows. Only
+    a carrier without the route, or one that answered without the identity, is
+    left alone for the hour."""
+    from netbbs.link import sync as sync_module
+    from netbbs.link.transport import LinkTransportError
+
+    asked: list[int] = []
+
+    async def _times_out(*args, **kwargs):
+        asked.append(1)
+        raise LinkTransportError("could not reach the carrier: timed out")
+
+    monkeypatch.setattr(sync_module, "request_identities", _times_out)
+    net = _ThreeNodes(tmp_path, enforce=False)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                for name in ("A", "B"):
+                    await net.dial(name, session)
+                net.post("A", "hello from A")
+                await net.dial("A", session)
+                for _ in range(2):
+                    await net.dial("B", session)
+                    net.nodes["B"].deferred_events.entries.clear()
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert net.nodes["B"].unanswered_identities == {}
+        assert len(asked) >= 2
     finally:
         net.close()

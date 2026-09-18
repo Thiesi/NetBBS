@@ -2686,6 +2686,10 @@ describing it.
 A bare `LinkNode` also does not know its own board genesis; a started node
 gets it from `load_link_node`, and a harness should too.
 
+`link_known_identities` is the first view over `link_peers`. SQLite refuses
+to rename or rebuild a table a view depends on, so a migration that rebuilds
+`link_peers` has to drop the view first and recreate it after.
+
 **On the Link an account is its username, so a deleted account's name is
 retired (issue #594).** `local_user_id` on the wire is `users.username`, and
 that column is unique only among live rows. `delete_user` therefore writes

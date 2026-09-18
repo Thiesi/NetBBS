@@ -2765,9 +2765,11 @@ named in it. Answering for any fingerprint a peer names would let a peer on
 probation, which is refused the peer list (§8.3), read the carrier's peer set
 one guess at a time, addresses included. A page of events can name more nodes
 than one request may, so a requester sends up to four requests at a time,
-once before policy is consulted and once more for bundles that turned out
-stale. An identity a carrier did not supply, for whatever reason, is not
-asked of it again for an hour. A carrier serves the identities of its peers and of nodes it was itself
+once before policy is consulted and once more for signers that only handling
+the events revealed: a bundle gone stale, or an origin its event does not
+name. An identity a carrier answered without, or could not be asked for
+because it lacks the route, is not asked of it again for an hour; a request
+that merely failed is repeated on the next occasion. A carrier serves the identities of its peers and of nodes it was itself
 introduced to: the peer list shares only first-hand knowledge because a
 secondhand address is a weaker claim the further it travels, but a bundle is
 not a claim, and refusing to pass one on would break a board carried across
@@ -2814,8 +2816,11 @@ same reason.
 transition is accepted only from its own subject. After such a node rotates,
 the bundle on file no longer verifies what it signs. The requester knows
 which identity the failed check was made against, whether or not the event
-names it, and asks the carrier for a fresher bundle, which replaces the one on file unless its chain is shorter or its
-descriptor older.
+names it, and asks the carrier for a fresher bundle. An event that builds on
+one set aside is set aside with it, whatever its own check reports: the second
+edit in a chain fails as not extending the current head, which is otherwise a
+refusal. The fresher bundle replaces the one on file unless its chain is
+shorter or its descriptor older.
 
 **Events that cannot be used yet.** The inventory is a diff (§8.8): a node
 declares what it holds and is sent the rest, one page of 200 events per pass.

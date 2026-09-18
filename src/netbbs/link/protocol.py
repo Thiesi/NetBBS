@@ -2115,13 +2115,33 @@ class LinkNode:
             )
         accepted: list[str] = []
         deferred: list[tuple[dict, MissingDependency]] = []
+        # Content IDs set aside in this call, with the identity each waits for.
+        set_aside_here: dict[str, str | None] = {}
+
+        def _set_aside(raw: dict, exc: MissingDependency) -> None:
+            deferred.append((raw, exc))
+            try:
+                set_aside_here[event_content_id(raw["envelope"])] = exc.missing_identity
+            except Exception:  # noqa: BLE001 -- unvalidated input
+                pass
+
         for raw in raw_events:
             self._last_key_resolved_for = None
             try:
                 accepted.extend(self.handle_events(sender_fingerprint, [raw]))
             except MissingDependency as exc:
-                deferred.append((raw, exc))
+                _set_aside(raw, exc)
             except LinkProtocolError as exc:
+                # An event that builds on one set aside, in this response or
+                # an earlier one, fails in whatever way its branch checks a
+                # chain: "does not extend the current head", say, and not
+                # "unknown predecessor". It waits for the same thing its
+                # predecessor does. Without this it would end every response
+                # it appears in, the refresh its predecessor needs included.
+                waits_with = self._set_aside_predecessor(raw, set_aside_here)
+                if waits_with is not None:
+                    _set_aside(raw, MissingDependency(str(exc), missing_identity=waits_with[0]))
+                    continue
                 # An event checked against an *introduced* identity that does
                 # not verify is, in the ordinary case, this node holding a
                 # bundle from before that node rotated its key: a third node's
@@ -2138,8 +2158,34 @@ class LinkNode:
                 ]
                 if not stale:
                     return TolerantOutcome(accepted, deferred, exc)
-                deferred.append((raw, MissingDependency(str(exc), missing_identity=stale[0])))
+                _set_aside(raw, MissingDependency(str(exc), missing_identity=stale[0]))
+            except Exception as exc:  # noqa: BLE001 -- unvalidated input, e.g. a float that cannot be canonicalized
+                # `handle_events` parses before it validates, and a parse can
+                # fail in ways that are not a protocol refusal. Pushed events
+                # get a 400 for it; here an escape would end the sync task
+                # and lose what this response had already had accepted.
+                return TolerantOutcome(accepted, deferred, LinkProtocolError(f"malformed event: {exc}"))
         return TolerantOutcome(accepted, deferred, None)
+
+    def _set_aside_predecessor(
+        self, raw: dict, set_aside_here: dict[str, str | None]
+    ) -> tuple[str | None] | None:
+        """Whether `raw` names, anywhere at the top of its payload, the content
+        ID of an event that is set aside; returns a 1-tuple of the identity that
+        one waits for (which may be `None`), or `None` if it names no such event."""
+        envelope = raw.get("envelope") if isinstance(raw, dict) else None
+        payload = envelope.get("payload") if isinstance(envelope, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        for value in payload.values():
+            if not isinstance(value, str):
+                continue
+            if value in set_aside_here:
+                return (set_aside_here[value],)
+            entry = self.deferred_events.entries.get(value)
+            if entry is not None:
+                return (entry[2],)
+        return None
 
     def note_served_signers(self, raw_events: list[dict]) -> None:
         """Remember whose content this node just served (issue #630).
