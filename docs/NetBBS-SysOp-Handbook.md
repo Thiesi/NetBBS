@@ -303,9 +303,9 @@ revokes its access; deletion is permanent and requires its exact name. Existing
 content retains its recorded author label.
 
 Once your node has run NetBBS Link, deleting an account that has ever logged
-in also retires its username: nobody can register it again. Declining a
-pending registration, or deleting an account nobody ever used, retires
-nothing. On the Link a username is the
+in, or that was ever sent Link mail, also retires its username: nobody can
+register it again. Declining a pending registration, or deleting an account
+nobody ever used or wrote to, retires nothing. On the Link a username is the
 account's identity, so whoever took a freed name would receive Link mail
 written to the previous holder and inherit the authorship of their carried
 posts and whatever other nodes had recorded about them. Callers who try a

@@ -2815,7 +2815,8 @@ MIGRATIONS = [
             OR EXISTS (SELECT 1 FROM boards WHERE link_genesis_json IS NOT NULL)
             OR EXISTS (SELECT 1 FROM channels WHERE link_genesis_json IS NOT NULL)
             OR EXISTS (SELECT 1 FROM file_areas WHERE link_genesis_json IS NOT NULL)
-            OR EXISTS (SELECT 1 FROM mail_messages WHERE link_event_json IS NOT NULL)
+            OR EXISTS (SELECT 1 FROM mail_messages
+                        WHERE link_event_json IS NOT NULL OR link_source_event_id IS NOT NULL)
             OR EXISTS (SELECT 1 FROM node_config
                         WHERE key = 'link_configured_enabled' AND value = 'true')
             OR EXISTS (SELECT 1 FROM node_config

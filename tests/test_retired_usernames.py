@@ -146,6 +146,47 @@ def test_an_account_that_never_logged_in_is_not_retired(db, sysop):
     assert create_user(db, "alice", password="password").username == "alice"
 
 
+def test_a_never_used_account_that_was_sent_link_mail_is_retired(db, sysop):
+    """Claude review of #620. Link mail reaches an account by name without the
+    account doing anything, and a pending account can never have logged in:
+    every login path refuses it before stamping `last_login_at`. Freed, the
+    name would hand the next registrant mail a remote sender addressed to the
+    previous holder, which that sender was told had been accepted."""
+    mark_link_has_run(db)
+    pending = create_user(db, "alice", password="password", pending_approval=True)
+    assert pending.last_login_at is None
+    db.connection.execute(
+        """INSERT INTO mail_messages
+           (sender_user_id, sender_label, recipient_user_id, subject, body, created_at,
+            link_source_event_id)
+           VALUES (NULL, 'bob@remote-node', ?, 'hello', 'are you there?',
+                   '2026-09-18T00:00:00.000000Z', 'event-content-id')""",
+        (pending.id,),
+    )
+    db.connection.commit()
+
+    delete_user(db, pending, deleted_by=sysop)
+
+    assert is_username_retired(db, "alice")
+
+
+def test_local_mail_alone_does_not_retire_a_never_used_account(db, sysop):
+    """Mail from a caller on this node says nothing to any peer."""
+    mark_link_has_run(db)
+    unused = create_user(db, "alice", password="password")
+    db.connection.execute(
+        """INSERT INTO mail_messages
+           (sender_user_id, sender_label, recipient_user_id, subject, body, created_at)
+           VALUES (?, 'sysop', ?, 'welcome', 'hello', '2026-09-18T00:00:00.000000Z')""",
+        (sysop.id, unused.id),
+    )
+    db.connection.commit()
+
+    delete_user(db, unused, deleted_by=sysop)
+
+    assert list_retired_usernames(db) == []
+
+
 def test_the_hold_is_decided_on_the_fresh_row_not_the_callers_stale_copy(db, sysop):
     """The caller's `User` was read before the account logged in; the delete
     re-reads inside its transaction and must ask the predicate of that."""

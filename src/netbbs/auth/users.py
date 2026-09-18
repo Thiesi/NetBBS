@@ -1318,19 +1318,37 @@ def deletion_retires_username(db: Database, user: User) -> bool:
     One predicate for `delete_user` and for the screen that warns about it,
     so the warning cannot promise something the deletion does not do.
 
-    Two conditions. The node has ever run Link, because only then can a peer
-    know the name. And the account has logged in at least once: an account
-    that never has -- a registration the SysOp declined, a test account, a
-    typo -- has never posted, sent, or been vouched for, so there is no Link
-    identity for a successor to inherit, and holding its name would make
-    routine housekeeping on an approval-required node permanently consume
-    whatever names strangers happened to ask for. Reads only, so it is safe
-    inside `delete_user`'s open transaction. Imported here: the Link package
-    imports from this module.
+    The node must have ever run Link, because only then can a peer know the
+    name. And the account must have left a trace a peer could hold: it has
+    logged in at least once, or it has been sent Link mail. An account with
+    neither -- a registration the SysOp declined, a test account, a typo --
+    has never posted, sent, or been vouched for, so there is no Link identity
+    for a successor to inherit, and holding its name would make routine
+    housekeeping on an approval-required node permanently consume whatever
+    names strangers happened to ask for.
+
+    Link mail is the one thing that reaches an account *by name* without the
+    account doing anything: `deliver_link_message` resolves the recipient by
+    username alone, stores the mail and acknowledges it, pending approval or
+    not. A pending account can never have a `last_login_at` -- every login
+    path refuses it before stamping one -- so "never logged in" on its own
+    would free exactly the name a remote sender has already been told is live
+    (Claude review of #620).
+
+    Reads only, so it is safe inside `delete_user`'s open transaction.
+    Imported here: the Link package imports from this module.
     """
     from netbbs.link.onboarding import link_has_ever_run
 
-    return user.last_login_at is not None and link_has_ever_run(db)
+    if not link_has_ever_run(db):
+        return False
+    if user.last_login_at is not None:
+        return True
+    return db.connection.execute(
+        """SELECT 1 FROM mail_messages
+           WHERE recipient_user_id = ? AND link_source_event_id IS NOT NULL LIMIT 1""",
+        (user.id,),
+    ).fetchone() is not None
 
 
 def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
