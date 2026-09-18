@@ -2213,14 +2213,21 @@ class MrcBridge:
                 "Rooms on MRC  |  users  |  topic" if header else
                 "Pick a discovered room in Chat > Multi Relay Chat, or /join <room>."
             )
+        # Snapshot before anything awaits: `requests` may be the live table,
+        # and a request registered while the listing is being kept belongs
+        # to the hub's *next* reply, not to this footer.
+        pending = list(requests.items())
         if footer:
-            await self._complete_directory_pass(min(sent for sent, _explicit, _hint in requests.values()))
-        for nick, (_sent, explicit, hint) in list(requests.items()):
+            await self._complete_directory_pass(min(sent for _nick, (sent, _explicit, _hint) in pending))
+        for nick, (_sent, explicit, hint) in pending:
             addressed = self._caller_for_nick(nick)
             if explicit and addressed is not None:
                 await self._deliver_reply(addressed[1], text)
             if footer:
-                self._directory_requests.pop(nick, None)
+                # The same request, even if `/rooms` promoted it meanwhile;
+                # never one registered since, which the next reply answers.
+                if self._directory_requests.get(nick, (None,))[0] == _sent:
+                    del self._directory_requests[nick]
                 if hint and not explicit and addressed is not None:
                     mapping = self._by_channel.get(addressed[0])
                     summary = self.directory_hint(mapping.channel) if mapping is not None else None

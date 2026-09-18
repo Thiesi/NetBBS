@@ -4738,14 +4738,18 @@ async def _chat_loop(
                 # entry asks for, or from the one already in hand.
                 owed = mrc_session_state is not None and not mrc_session_state.get("rooms_hinted")
                 asked = mrc_bridge.refresh_directory(channel, user.username, hint=owed)
-                if owed and mrc_bridge.status().connected:
+                summary = None if asked or not owed else mrc_bridge.directory_hint(channel)
+                if summary is not None:
+                    await session.write_line(
+                        await lane.run(_render_mrc_notice, user, MrcNotice(summary, utc_now_iso()))
+                    )
+                if owed and (asked or summary is not None):
+                    # Spent only once the line is shown or owed by a listing
+                    # on its way: an entry that could do neither (the
+                    # request suppressed, nothing current in hand) leaves it
+                    # for the session's next room.
                     assert mrc_session_state is not None
                     mrc_session_state["rooms_hinted"] = True
-                    summary = None if asked else mrc_bridge.directory_hint(channel)
-                    if summary is not None:
-                        await session.write_line(
-                            await lane.run(_render_mrc_notice, user, MrcNotice(summary, utc_now_iso()))
-                        )
             if mrc_session_state is not None and not mrc_session_state.get("welcomed"):
                 # Issue #304: the hub's welcome, once per session -- its
                 # banner as remembered by the bridge, then MOTD asked for

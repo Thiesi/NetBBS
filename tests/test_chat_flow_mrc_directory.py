@@ -238,3 +238,28 @@ def test_the_first_room_of_a_session_says_there_are_others(db, lane, hub, presen
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_the_note_is_not_spent_by_an_entry_that_could_not_show_it(db, lane, hub, presence, alice):
+    """Review of #637: the first room's request can be suppressed by the
+    shared five-minute floor while nothing current is in hand. That entry
+    shows nothing and queues nothing, so it must not use the session's
+    one note up -- the next room, entered once a listing exists, shows it."""
+    async def scenario():
+        fake, bridge = await _bridge_on(db, lane, hub)
+        _listing_hub(fake, _LISTING)
+        try:
+            bridge._last_directory_request = bridge._clock()  # another caller asked a moment ago
+            session = await _browse_until(
+                lane, hub, presence, alice, ["0", "1", "0", "2", "/rooms"], ["/join mrc:chess", "/quit"],
+                mrc_bridge=bridge,
+                until=lambda s: "#quiet" in _flat(s), what="the listing /rooms asked for",
+            )
+            text = _flat(session)
+            assert text.count("Joined") == 2
+            # In #chess the others are #lobby and #quiet.
+            assert text.count("2 more rooms on MRC: /rooms lists them, /join <room> moves.") == 1
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
