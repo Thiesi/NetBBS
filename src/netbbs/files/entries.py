@@ -239,13 +239,21 @@ def get_file_by_name(
 ) -> FileEntry | None:
     """
     Look up a file in `area` by its exact stored `filename` — added
-    alongside `list_files_page` specifically so
-    `/download <filename>` (see `netbbs.net.file_flow._handle_download`)
-    keeps working for a file that isn't on the *currently displayed*
-    page. Pagination bounds what's fetched for browsing; it was never
-    meant to bound what can be *referenced by name*, and the previous,
-    unbounded `list_files` happened to make that distinction invisible
-    since the full listing was always in memory anyway.
+    alongside `list_files_page` so a file that isn't on the *currently
+    displayed* page can still be referenced by name. Pagination bounds
+    what's fetched for browsing; it was never meant to bound what can be
+    *referenced by name*, and the previous, unbounded `list_files`
+    happened to make that distinction invisible since the full listing
+    was always in memory anyway.
+
+    No terminal screen reaches this any more: it existed for the file
+    area's `/download <filename>` command, and that screen is now
+    keystrokes only (design doc §3.5), resolving a file from the cursor,
+    the page or a picker and reaching another page's file through
+    `[F]ind`. The by-name lookup and its pending rule stay as this
+    module's answer to "which file is called this", which
+    `netbbs.net.file_transfer._may_see_pending` still cites as
+    canonical.
 
     `filename` is not unique within an area (unlike `file_id`) — two
     uploads can share a name (e.g. re-uploads/versions). Returns the

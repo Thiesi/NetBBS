@@ -15,7 +15,9 @@
 
   [[1m[38;5;46mB[0m]ack
 [38;5;248m    Return to the previous menu[0m
-  [[1m[38;5;46m1-4[0m] or /download <name|#> — receive via Zmodem
+  [[1m[38;5;46m1-4[0m] — receive via Zmodem
+  [[1m[38;5;46mD[0m]ownload
+[38;5;248m    Receive the highlighted file via Zmodem[0m
   [[1m[38;5;46mU[0m]pload
 [38;5;248m    Send a file via Zmodem[0m
-Choice or command: 
+Choice: 

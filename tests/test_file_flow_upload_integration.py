@@ -1,6 +1,6 @@
 """
 End-to-end regression test for GitHub issue #34, reopened a second
-time: the real `/upload` path (`netbbs.net.file_flow._handle_upload`)
+time: the real `[U]pload` path (`netbbs.net.file_flow._handle_upload`)
 now streams received Zmodem content to a temp file
 (`netbbs.files.storage.new_incoming_temp_path`) and moves it into
 permanent storage (`netbbs.files.entries.upload_file_from_temp`) rather
@@ -60,14 +60,14 @@ class _BytePipe:
 
 
 class _ServerSession(Session):
-    """The NetBBS-side session: `read_line`/`write`/`write_line` drive
+    """The NetBBS-side session: `read_key`/`write`/`write_line` drive
     _show_area's ordinary menu text, `read_byte`/`write_raw` (backed by
-    a real duplex byte pipe) carry the Zmodem exchange once /upload
+    a real duplex byte pipe) carry the Zmodem exchange once `[U]pload`
     switches the session into raw mode -- both live on the same session
     object, matching a real transport."""
 
-    def __init__(self, lines: list[str], read_pipe: _BytePipe, write_pipe: _BytePipe):
-        self._lines = list(lines)
+    def __init__(self, keys: list[str], read_pipe: _BytePipe, write_pipe: _BytePipe):
+        self._keys = iter(keys)
         self._read_pipe = read_pipe
         self._write_pipe = write_pipe
         self.written: list[str] = []
@@ -83,10 +83,17 @@ class _ServerSession(Session):
         self.written.append(text + "\n")
 
     async def read_line(self, echo: bool = True, **kwargs) -> str:
-        return self._lines.pop(0) if self._lines else ""
+        raise NotImplementedError
 
     async def read_key(self, echo: bool = True) -> str:
-        raise NotImplementedError
+        # Raises rather than returning a filler key: the file area is a
+        # loop that bells and re-renders on anything it does not know,
+        # so a mis-scripted fake would otherwise spin here forever
+        # instead of failing.
+        key = next(self._keys, None)
+        if key is None:
+            raise AssertionError("_ServerSession.read_key() called with no more scripted keys")
+        return key
 
     async def read_editor_key(self):
         raise NotImplementedError
@@ -173,7 +180,7 @@ def test_upload_via_show_area_streams_to_storage_with_no_leftover_temp_file(db, 
     payload = b"hello from a real zmodem upload" * 100  # spans multiple subpackets
 
     client_to_server, server_to_client = _BytePipe(), _BytePipe()
-    server_session = _ServerSession(["/upload"], read_pipe=client_to_server, write_pipe=server_to_client)
+    server_session = _ServerSession(["u"], read_pipe=client_to_server, write_pipe=server_to_client)
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():
@@ -209,7 +216,7 @@ def test_upload_exceeding_the_node_limit_leaves_no_temp_file_and_no_entry(db, la
     payload = b"x" * 1000
 
     client_to_server, server_to_client = _BytePipe(), _BytePipe()
-    server_session = _ServerSession(["/upload"], read_pipe=client_to_server, write_pipe=server_to_client)
+    server_session = _ServerSession(["u"], read_pipe=client_to_server, write_pipe=server_to_client)
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():
@@ -242,7 +249,7 @@ def test_uploading_a_zip_with_file_id_diz_describes_it(db, lane, alice):
     payload = buffer.getvalue()
 
     client_to_server, server_to_client = _BytePipe(), _BytePipe()
-    server_session = _ServerSession(["/upload"], read_pipe=client_to_server, write_pipe=server_to_client)
+    server_session = _ServerSession(["u"], read_pipe=client_to_server, write_pipe=server_to_client)
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():
@@ -268,7 +275,7 @@ def test_uploading_a_file_with_no_diz_says_so_and_points_at_the_editor(db, lane,
     payload = b"just a text file, no archive at all"
 
     client_to_server, server_to_client = _BytePipe(), _BytePipe()
-    server_session = _ServerSession(["/upload"], read_pipe=client_to_server, write_pipe=server_to_client)
+    server_session = _ServerSession(["u"], read_pipe=client_to_server, write_pipe=server_to_client)
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():
@@ -297,7 +304,7 @@ def _link_context():
 
 def _upload(db, lane, area, user, filename, payload, *, link_context=None):
     client_to_server, server_to_client = _BytePipe(), _BytePipe()
-    server_session = _ServerSession(["/upload"], read_pipe=client_to_server, write_pipe=server_to_client)
+    server_session = _ServerSession(["u"], read_pipe=client_to_server, write_pipe=server_to_client)
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():

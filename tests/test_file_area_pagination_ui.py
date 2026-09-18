@@ -2,9 +2,19 @@
 Integration tests for the interactive file-area post-pagination
 navigation in netbbs.net.file_flow._show_area (issue #10's file-area
 follow-up) -- mirrors tests/test_board_pagination_ui.py's structure
-and coverage, plus a test specific to file areas: /download working
-for a file that isn't on the currently displayed page (get_file_by_name,
-the fix that pagination itself made necessary).
+and coverage, plus a test specific to file areas: downloading a file
+from deep history, which now means paging back to it and pressing its
+number rather than naming it.
+
+This screen used to read whole typed *lines* and carry `/download`,
+`/upload`, `/describe`, `/weblink` and `/remote` command forms -- the
+only screen in NetBBS that did. It is keystroke-only now (design doc
+§3.5), so every script here is `keys=`, not `lines=`. `/download
+<filename>`'s area-wide name lookup was the one form that reached a
+file on another page; `[F]ind` (netbbs.net.scan_and_find) reaches it
+instead, entering this area with that file as row 1 of its page. What
+stays covered here is the pagination half of that reach -- paging back
+into history and downloading from an older page.
 
 `netbbs.net.file_flow` is the second module migrated onto the two-lane
 database execution model (issue #57) -- `_show_area` now takes a
@@ -32,7 +42,8 @@ _PAGE_SIZE = entries_module._DEFAULT_PAGE_SIZE
 
 
 class FakeSession:
-    def __init__(self, lines=None):
+    def __init__(self, keys=None, lines=None):
+        self._keys = iter(keys or [])
         self._lines = iter(lines or [])
         self.written: list[str] = []
         self.terminal_width = 80
@@ -47,15 +58,31 @@ class FakeSession:
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
 
+    async def read_key(self, echo: bool = True) -> str:
+        # Deliberately raises rather than falling back to "" once the
+        # scripted keys run out (the same house pattern as
+        # tests/test_board_pagination_ui.py): a key this screen does
+        # not handle bells and changes nothing, so a silent "" forever
+        # would spin _show_area in an infinite loop and hang the test
+        # instead of failing it. A test that needs the loop to end must
+        # script an explicit "b".
+        key = next(self._keys, None)
+        if key is None:
+            raise AssertionError("FakeSession.read_key() called with no more scripted keys")
+        return key
+
+    # Kept for the sub-screens this one opens -- the description editor,
+    # pick_item and confirmations still read whole lines; only the file
+    # listing itself is keystroke-only.
     async def read_line(self, echo: bool = True, **kwargs) -> str:
         return next(self._lines, "")
 
     async def write_raw(self, data: bytes) -> None:
         # Real transports implement this for Zmodem transfer; this fake
-        # only cares about download *dispatch* (finding the right file
-        # by name), not the actual transfer mechanics, so it fails the
-        # same deliberate way netbbs.net.web.WebSession does for a
-        # transport that can't carry raw bytes.
+        # only cares about download *dispatch* (the keystroke reaching
+        # the right entry), not the actual transfer mechanics, so it
+        # fails the same deliberate way netbbs.net.web.WebSession does
+        # for a transport that can't carry raw bytes.
         raise NotImplementedError("write_raw not supported by FakeSession")
 
     async def read_byte(self):
@@ -85,7 +112,7 @@ def test_opening_a_multi_page_area_shows_only_the_newest_page(tmp_path, monkeypa
     db = Database(db_path)
     total = _PAGE_SIZE * 3 + 2
     area, user = _make_area_with_files(db, total, monkeypatch)
-    session = FakeSession(lines=["b"])  # view the newest page, then back out
+    session = FakeSession(keys=["b"])  # view the newest page, then back out
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -109,7 +136,7 @@ def test_older_command_navigates_to_the_previous_page(tmp_path, monkeypatch):
     db = Database(db_path)
     total = _PAGE_SIZE * 2
     area, user = _make_area_with_files(db, total, monkeypatch)
-    session = FakeSession(lines=["o", "b"])  # newest page, then older, then back out
+    session = FakeSession(keys=["o", "b"])  # newest page, then older, then back out
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -125,7 +152,7 @@ def test_recent_command_jumps_straight_back_to_the_newest_page(tmp_path, monkeyp
     db = Database(db_path)
     total = _PAGE_SIZE * 3
     area, user = _make_area_with_files(db, total, monkeypatch)
-    session = FakeSession(lines=["o", "o", "r", "b"])
+    session = FakeSession(keys=["o", "o", "r", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -142,7 +169,7 @@ def test_single_page_area_offers_no_older_newer_recent_options(tmp_path, monkeyp
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _make_area_with_files(db, count=2, monkeypatch=monkeypatch)
-    session = FakeSession(lines=["b"])
+    session = FakeSession(keys=["b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -160,7 +187,9 @@ def test_empty_area_has_a_guided_empty_state(tmp_path):
     db = Database(db_path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
     area = create_file_area(db, "docs", creator=user)
-    session = FakeSession(lines=[""])
+    # The empty state's action bar is keystrokes too: `b` leaves it,
+    # where an empty typed line used to.
+    session = FakeSession(keys=["b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -172,42 +201,29 @@ def test_empty_area_has_a_guided_empty_state(tmp_path):
     db.close()
 
 
-def test_download_works_for_a_file_not_on_the_currently_displayed_page(tmp_path, monkeypatch):
-    """The specific regression pagination would otherwise introduce:
-    /download must still find a file from deep history, not just
-    whatever happens to be on the newest page currently in memory."""
+def test_download_works_for_a_file_reached_by_paging_back_into_history(tmp_path, monkeypatch):
+    """A file from deep history is still downloadable from this screen,
+    which is what pagination itself put at risk -- but the way there is
+    now `[O]lder` until the file is on the page and then its number,
+    not a `/download <filename>` lookup across the whole area. (The
+    one-step reach that lookup gave is `[F]ind`'s job now, and belongs
+    to its own tests.)"""
     db_path = tmp_path / "node.db"
     db = Database(db_path)
-    total = _PAGE_SIZE * 3
+    total = _PAGE_SIZE * 2
     area, user = _make_area_with_files(db, total, monkeypatch)
-    # Never navigate to an older page -- straight from the newest page,
-    # /download the very first (oldest) uploaded file by name.
-    session = FakeSession(lines=["/download file0.txt"])
+    # `o` pages back to the oldest page, where file0.txt is entry 1.
+    session = FakeSession(keys=["o", "1"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
 
-    # _handle_download already catches the FakeSession's NotImplementedError
+    # send_file_to_caller already catches the FakeSession's NotImplementedError
     # (real transports don't raise it -- see FakeSession.write_raw) and
     # reports it as a normal "Download failed" message rather than
-    # propagating -- this test only cares that the file was actually
-    # *found* by name (no "No file named" error) before that point.
-    assert "No file named" not in session.output
+    # propagating -- this test only cares that the keystroke reached the
+    # right entry before that point.
     assert "Starting Zmodem send of 'file0.txt'" in session.output
-    lane.close()
-    db.close()
-
-
-def test_download_reports_a_clear_error_for_a_truly_nonexistent_file(tmp_path, monkeypatch):
-    db_path = tmp_path / "node.db"
-    db = Database(db_path)
-    area, user = _make_area_with_files(db, count=2, monkeypatch=monkeypatch)
-    session = FakeSession(lines=["/download does-not-exist.txt"])
-    lane = DatabaseLane(db_path)
-
-    asyncio.run(_show_area(session, lane, area, user))
-
-    assert "No file named 'does-not-exist.txt' in this file area." in session.output
     lane.close()
     db.close()
 
@@ -227,7 +243,7 @@ def test_file_listing_shows_verified_and_displayed_real_name(tmp_path):
     upload_file(db, area, alice, "file.txt", b"hello")
     attest_name(db, alice, "Alice Smith", verifier=sysop)
 
-    session = FakeSession(lines=["b"])
+    session = FakeSession(keys=["b"])
     lane = DatabaseLane(db_path)
     asyncio.run(_show_area(session, lane, area, alice))
 
@@ -246,7 +262,7 @@ def test_file_listing_does_not_leak_current_display_name_for_ungated_area(tmp_pa
     upload_file(db, area, alice, "file.txt", b"hello")
     set_display_name(db, alice, "New Display Name")
 
-    session = FakeSession(lines=["b"])
+    session = FakeSession(keys=["b"])
     lane = DatabaseLane(db_path)
     asyncio.run(_show_area(session, lane, area, alice))
 
@@ -262,7 +278,7 @@ def test_min_age_gate_hides_the_upload_hint_when_unmet(tmp_path):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     area = create_file_area(db, "adults", creator=alice, min_age=18)
     upload_file(db, area, alice, "file.txt", b"hello")
-    session = FakeSession(lines=["b"])
+    session = FakeSession(keys=["b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, alice))
@@ -283,7 +299,7 @@ def test_min_age_gate_allows_upload_hint_once_met(tmp_path):
     set_birthdate(db, alice, date(1990, 1, 1))
     area = create_file_area(db, "adults", creator=alice, min_age=18)
     upload_file(db, area, alice, "file.txt", b"hello")
-    session = FakeSession(lines=["b"])
+    session = FakeSession(keys=["b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, alice))
@@ -299,7 +315,7 @@ def test_name_requirement_hides_the_upload_hint_when_unmet(tmp_path):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     area = create_file_area(db, "verified-only", creator=alice, name_requirement="verified")
     upload_file(db, area, alice, "file.txt", b"hello")
-    session = FakeSession(lines=["b"])
+    session = FakeSession(keys=["b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, alice))
@@ -320,7 +336,7 @@ def test_opening_an_area_advances_the_viewers_read_cursor(tmp_path, monkeypatch)
     assert unread_file_count(db, bob, area) is None
     lane = DatabaseLane(db_path)
 
-    session = FakeSession(lines=["b"])
+    session = FakeSession(keys=["b"])
     asyncio.run(_show_area(session, lane, area, bob))
 
     assert unread_file_count(db, bob, area) == 0
@@ -338,7 +354,7 @@ def test_paging_to_an_older_page_does_not_regress_the_cursor(tmp_path, monkeypat
     record_file_area_seen(db, bob, area, newest_page.entries[-1])
     lane = DatabaseLane(db_path)
 
-    session = FakeSession(lines=["o", "b"])  # newest page already recorded above, then page backward
+    session = FakeSession(keys=["o", "b"])  # newest page already recorded above, then page backward
     asyncio.run(_show_area(session, lane, area, bob))
 
     assert unread_file_count(db, bob, area) == 0  # still caught up, not regressed
@@ -355,7 +371,7 @@ def test_jump_to_first_unread_opens_on_the_file_right_after_the_cursor(tmp_path,
     cursor = (files[0]["created_at"], files[0]["file_id"])
     lane = DatabaseLane(db_path)
 
-    session = FakeSession(lines=["b"])
+    session = FakeSession(keys=["b"])
     asyncio.run(_show_area(session, lane, area, bob, initial_cursor=cursor))
 
     assert "file0.txt" not in session.output
@@ -375,7 +391,7 @@ def test_jump_to_first_unread_falls_back_to_the_newest_page_once_caught_up(tmp_p
     cursor = (newest["created_at"], newest["file_id"])
     lane = DatabaseLane(db_path)
 
-    session = FakeSession(lines=["b"])
+    session = FakeSession(keys=["b"])
     asyncio.run(_show_area(session, lane, area, bob, initial_cursor=cursor))
 
     assert "has no files yet" not in session.output

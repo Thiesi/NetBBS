@@ -134,7 +134,8 @@ def test_zero_byte_file_is_fetched_rather_than_declared_complete(
     the moment its transfer row was created -- no round trip, and
     crucially no `_finalize_transfer`, so no `files` row and no
     `fetched_file_id`. The caller was told the file had been fetched and
-    verified and was available via /download, and none of that was true.
+    verified and was in the area's listing ready for `[D]ownload`, and
+    none of that was true.
 
     It now takes the ordinary path for its one empty chunk, which is what
     produces real local state -- and what lets an origin deliver a

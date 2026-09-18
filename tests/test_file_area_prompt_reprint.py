@@ -3,13 +3,18 @@
 
 A caller leaning on Enter in a file area used to get
 
-    Choice or command: Choice or command: Choice or command: ...
+    Choice: Choice: Choice: ...
 
 marching across the line, because the key reader wrote the prompt
 itself and the loop called it once per keystroke. These tests hold the
 two halves of the rule apart: a key that changes nothing leaves the
 screen exactly as it was, and an action whose own echo consumed the
 prompt line puts it back.
+
+Both halves are checked on both of the screen's input paths: the
+editor-key path (arrows and a cursor) and the plain `read_key()`
+fallback a transport without editor keys gets. The screen no longer
+reads typed lines at all, so there is no third dialect to check.
 """
 
 from __future__ import annotations
@@ -28,7 +33,8 @@ from netbbs.storage.execution import DatabaseLane
 
 
 class FakeSession:
-    def __init__(self, lines=None, width=80, height=24):
+    def __init__(self, keys=None, lines=None, width=80, height=24):
+        self._keys = iter(keys or [])
         self._lines = iter(lines or [])
         self.written: list[str] = []
         self.terminal_width = width
@@ -43,6 +49,15 @@ class FakeSession:
 
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
+
+    async def read_key(self, echo: bool = True) -> str:
+        # Raises rather than returning "" forever: an unhandled key
+        # leaves this screen unchanged, so a fake that never runs out
+        # would spin the loop belling instead of failing the test.
+        key = next(self._keys, None)
+        if key is None:
+            raise AssertionError("FakeSession.read_key() called with no more scripted keys")
+        return key
 
     async def read_line(self, echo: bool = True, **kwargs) -> str:
         return next(self._lines, "")
@@ -59,13 +74,13 @@ class FakeSession:
 
 
 class FakeInteractiveSession(FakeSession):
-    def __init__(self, editor_keys=None, lines=None, width=80, height=24):
-        super().__init__(lines=lines, width=width, height=height)
-        self._keys = iter(editor_keys or [])
+    def __init__(self, editor_keys=None, keys=None, lines=None, width=80, height=24):
+        super().__init__(keys=keys, lines=lines, width=width, height=height)
+        self._editor_keys = iter(editor_keys or [])
 
     async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
         try:
-            return next(self._keys)
+            return next(self._editor_keys)
         except StopIteration:
             # Leave the screen rather than spinning, however the test ends.
             return EditorKey(EditorKeyKind.CHAR, char="b")
@@ -160,21 +175,50 @@ def test_nav_key_refused_at_the_edge_reprints_the_prompt(tmp_path, monkeypatch):
     db.close()
 
 
-def test_unknown_typed_command_reprints_the_prompt(tmp_path, monkeypatch):
-    """A typed line is a deliberate act that failed on its own terms,
-    not a stray keystroke: Enter consumed the prompt line, so the
-    caller is owed a fresh one to type the next thing at."""
+def test_unhandled_key_without_editor_support_leaves_the_prompt_alone(tmp_path, monkeypatch):
+    """The same rule on the other input path. A transport with no
+    editor keys reads through `read_key()`, which echoes the character
+    itself -- so a key this screen does not handle erases that echo and
+    bells, leaving the prompt it was typed at exactly where it was."""
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, monkeypatch=monkeypatch)
 
-    # No editor-key support at all: the read_line() fallback path.
-    session = FakeSession(lines=["frobnicate", "b"])
+    # No editor-key support at all: the read_key() fallback path.
+    session = FakeSession(keys=["z", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
 
+    assert _prompt_count(session) == 1
+    assert "\a" in session.output
+
+    lane.close()
+    db.close()
+
+
+def test_refused_hotkey_without_editor_support_reprints_the_prompt(tmp_path, monkeypatch):
+    """The other half, again without editor keys: `o` is a key this
+    screen does handle, so it echoes a newline before the screen
+    discovers there is no older page. That scrolled the prompt away,
+    so the refusal puts it back.
+
+    This pair is what the old `/frobnicate`-style "unknown command
+    reprints the prompt" test was proving before the screen stopped
+    reading typed lines: a deliberate act that failed on its own terms
+    owes the caller a fresh prompt, a stray keystroke does not."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    area, user = _setup_area(db, monkeypatch=monkeypatch)
+
+    session = FakeSession(keys=["o", "b"])
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(_show_area(session, lane, area, user))
+
+    # One from the initial render, one put back after the refusal.
     assert _prompt_count(session) == 2
+    assert "\a" in session.output
 
     lane.close()
     db.close()

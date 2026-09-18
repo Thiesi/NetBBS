@@ -96,12 +96,19 @@ class FakeSession:
         return next(self._lines, "")
 
     async def read_key(self, echo: bool = True) -> str:
-        # Falls back to "" once scripted keys run out. Note this is *not*
-        # treated as "b" (back) by production code (real transports never
-        # return "" from read_key() at all) -- tests using this fake must
-        # script an explicit trailing "b" to actually exit a choice loop,
-        # or risk an infinite loop of unrecognized-key bells.
-        return next(self._keys, "")
+        # Raises rather than falling back to "" once scripted keys run
+        # out. This comment used to warn that a test must script its own
+        # trailing "b" "or risk an infinite loop of unrecognized-key
+        # bells", and then the file area became keystroke-only and this
+        # file's own listing test did exactly that: pytest hung instead
+        # of failing, which CI reports as a stall rather than a red
+        # test. Real transports never return "" from read_key() anyway
+        # (CR/LF are discarded, not returned as a key), so nothing is
+        # lost by making the exhausted script say so.
+        key = next(self._keys, None)
+        if key is None:
+            raise AssertionError("FakeSession.read_key() called with no more scripted keys")
+        return key
 
     @property
     def output(self) -> str:
@@ -297,7 +304,7 @@ def test_file_area_listing_sanitizes_filename_description_and_uploader(tmp_path)
     area = create_file_area(db, "downloads", creator=user)
     upload_file(db, area, user, HOSTILE, b"file contents", description=HOSTILE)
 
-    session = FakeSession(lines=["b"])  # back out of the one-page listing
+    session = FakeSession(keys=["b"])  # back out of the one-page listing
 
     lane = DatabaseLane(db_path)
     asyncio.run(_show_area(session, lane, area, user))

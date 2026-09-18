@@ -3689,6 +3689,39 @@ def test_pending_file_review_shows_a_diz_description_line_by_line(db, lane, syso
     assert "Cool Game v1.0By Someone" not in text
 
 
+def test_a_moderator_can_download_a_pending_file_before_deciding(db, lane, sysop):
+    """A pending upload is invisible in the file area's own listing
+    (`list_files_page` carries approved rows only), so while the file
+    screens had `/download <filename>` a moderator inspected one by
+    typing its name there. With the slash forms gone this screen is the
+    only place that can, and approving a file sight-unseen is the
+    decision it exists to ask for.
+
+    The fake transport has no `write_raw`, so the Zmodem send fails --
+    what this proves is that the key reaches the transfer path at all,
+    and that the screen is still standing afterwards."""
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import get_file, upload_file
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "Docs", creator=sysop, moderated=True)
+    entry = upload_file(db, area, alice, "readme.txt", b"hello")
+
+    # Same walk as the approval test above, with [D] in place of [A]:
+    # the download leaves the file still pending and the action bar
+    # redrawn, so [B] backs out of a decision not yet made.
+    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "d", "b", "b", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "[D]ownload" in text
+    assert "readme.txt" in text
+    # Reached the send path rather than being refused as an unknown key.
+    assert "Starting Zmodem send of 'readme.txt'" in text
+    assert get_file(db, entry.file_id).status == "pending"
+
+
 def test_create_and_delete_board_category_flow(db, lane, sysop):
     from netbbs.boards.categories import list_top_level_categories
 

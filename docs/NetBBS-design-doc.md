@@ -552,6 +552,44 @@ a picker and persists nothing before `[S]ave`. The deliberate exceptions are
 once-only first-run decisions (Link participation, node name, managed DNS,
 the Unicode-style probe) and type-the-name confirmations before deletes.
 
+No *menu* has a typed command language. A caller's options are the keys the
+action bar shows, and a prompt reading `Choice: ` accepts exactly those. The
+file-area listing was the last menu that read whole *lines* instead: it
+predated its own keystroke support and carried `/download <name|#>`,
+`/upload`, `/describe <file>`, `/weblink` and `/remote` alongside the keys,
+a dialect nothing else in NetBBS spoke and nothing on screen taught. Those
+are removed. `[D]ownload` and `[E]dit description` act on the file under the
+cursor, on the only file on the page, or on whichever one a picker returns —
+one shared resolution, so two hotkeys on the same screen cannot disagree
+about what "this file" means.
+
+A free-text field is not a menu and is the one place a `/`-command belongs:
+its ordinary content is prose, so a command needs a sigil to be
+distinguishable at all. Chat's `/msg`, `/private` and friends stay, as do
+the editors' `/done`, `/exit` and `/help`.
+
+What a typed filename could reach and a keystroke cannot, recorded because
+it was a deliberate trade and not an oversight:
+
+- **A file on another page.** `[F]ind` covers it: searching enters the area
+  with that file at the top of its page, where its number or `[D]` takes it.
+  (It is the first row, not a preselected cursor — `_show_area` starts with
+  no highlight.)
+- **A file awaiting approval.** The listing carries approved rows only, so a
+  pending upload was reachable only by name. Two keys replace that: `[E]` on
+  the listing offers the caller's own waiting uploads for description, and
+  the SysOp's pending-file review screen gained `[D]ownload`, which is where
+  inspecting an upload before approving it belongs anyway — a moderator
+  reading its `FILE_ID.DIZ` and then approving the bytes unseen was the
+  weaker half of that screen all along. It is offered only when the
+  transport can carry a Zmodem send or the node can mint a browser link,
+  the same rule the caller-facing screens follow (issue #475).
+- **An expired file.** Expiry is a delisting rather than an access
+  restriction (§11), and `get_file_by_name` still honours that, but no
+  terminal path now reaches an expired file: the listing and `[F]ind` are
+  both approved-and-current only. This only bites areas that set a maximum
+  file age.
+
 ### 3.6 Resource lists (issue #528)
 
 A list row's secondary text is either prose or a record, and the two render
@@ -5045,9 +5083,9 @@ Implemented or substantially working:
   remains out of scope.
 - linked-channel messages wired into the live interactive chat send path
   (issue #91, closed) — closes the gap issue #87 left open.
-- interactive browse/fetch UI for remote file catalogues: a `/remote`
-  command reachable from file areas, both paginated and empty (§11,
-  issue #92, closed) — closes the gap issue #89 left open.
+- interactive browse/fetch UI for remote file catalogues: a
+  `[L]ink catalogue` hotkey reachable from file areas, both paginated and
+  empty (§11, issue #92, closed) — closes the gap issue #89 left open.
 - inventory/pull catch-up extended to file-area catalogues (§11.4,
   issue #93, closed) — closes the gap issue #89 left open; content
   bytes still require an explicit fetch, only catalogue metadata is
@@ -6951,12 +6989,12 @@ specifically, per the issue's own acceptance criterion.
 ### Issue #92 — interactive browse/fetch UI for remote file catalogues — closed
 
 Closes the UI gap issue #89 left open: `netbbs.net.file_flow._show_area`
-gains a `/remote` command (reachable from both the ordinary paginated file
-listing and the "has no files yet" fallback prompt, since a Linked area can
+gains a remote-catalogue screen (reachable from both the ordinary paginated
+file listing and the "has no files yet" action bar, since a Linked area can
 have remote catalogue entries with zero *local* uploads of its own),
 offered whenever an optional `link_context` is given — threaded down from
 `enter_file_area`/`browse_file_areas` the same way `netbbs.net.login_flow`'s
-board/channel paths already thread it. `/remote` lists every catalogued
+board/channel paths already thread it. It lists every catalogued
 `RemoteFile` for the area via `netbbs.link.files.list_remote_files`
 (fetched and not-yet-fetched alike, clearly labeled, so a user can tell
 "catalogued and I already have it" from "catalogued and I don't" at a
@@ -6969,10 +7007,10 @@ new — chunk transfer is never relayed, so an origin with no advertised
 direct address is reported clearly rather than attempted). Success is
 reported once the transfer's own existing verification/promotion path
 (unchanged by this issue) has already placed the content in the ordinary
-local `files` table; the file is then reachable through the pre-existing
-`/download` command like any other, no new download path introduced.
+local `files` table; the file is then reachable through the listing's
+pre-existing download keys like any other, no new download path introduced.
 
-No per-file access check inside `/remote` beyond what already gated
+No per-file access check inside the catalogue screen beyond what already gated
 entering `_show_area` in the first place (design doc's own "merely knowing
 a descriptor exists must not bypass local policy" acceptance criterion) —
 a `RemoteFile` carries no independent moderation state of its own the way
@@ -6986,9 +7024,10 @@ file_flow` is loaded unconditionally by every node, including one with
 `netbbs.__main__`'s own Link-server startup already established.
 
 A full interactive-flow regression test (`tests/test_link_end_to_end.py`)
-drives `_show_area` itself against a real second node — `/remote` command,
-`pick_item` selection, the fetch confirmation prompt — proving browse ->
-fetch -> verify/promote -> ordinary `/download` visibility end to end, per
+drives `_show_area` itself against a real second node — the
+`[L]ink catalogue` key, `pick_item` selection, the fetch confirmation prompt
+— proving browse -> fetch -> verify/promote -> ordinary download visibility
+end to end, per
 the issue's own acceptance criterion; `tests/test_file_flow_remote.py`
 covers the UI-level edge cases that don't need a real second node (no
 catalogue entries, an already-fetched entry, a declined fetch, an

@@ -58,7 +58,7 @@ import sqlite3
 import sys
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 from zoneinfo import available_timezones
 
 import nacl.signing
@@ -790,6 +790,7 @@ async def admin_menu(
                 mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
                 chat_hub=node_controls.chat_hub if node_controls is not None else None,
                 door_services=node_controls.door_services if node_controls is not None else None,
+                transfers=node_controls.transfers if node_controls is not None else None,
             )
             dashboard_state = await _draw_admin_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
@@ -10684,6 +10685,7 @@ async def _content_menu(
     mrc_bridge: MrcBridge | None = None,
     chat_hub: ChatHub | None = None,
     door_services: Any = None,
+    transfers: Any = None,
 ) -> None:
     def _load_stats(db: Database) -> dict[str, Any]:
         all_boards = list_boards(db)
@@ -10727,7 +10729,7 @@ async def _content_menu(
             await _draw_content_menu(session, stats=stats)
         elif choice == "f":
             await session.write_line("")
-            await _area_menu(session, lane, actor, link_context=link_context)
+            await _area_menu(session, lane, actor, link_context=link_context, transfers=transfers)
             stats = await lane.run(_load_stats)
             await _draw_content_menu(session, stats=stats)
         elif choice == "d":
@@ -13038,7 +13040,8 @@ async def _post_action_screen(
 
 
 async def _area_menu(
-    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None,
+    transfers: Any = None,
 ) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
@@ -13060,7 +13063,7 @@ async def _area_menu(
             await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "l":
             await session.write_line("")
-            await _list_areas_screen(session, lane, actor, link_context=link_context)
+            await _list_areas_screen(session, lane, actor, link_context=link_context, transfers=transfers)
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "g":
@@ -13374,7 +13377,8 @@ async def _area_screen(
 
 
 async def _list_areas_screen(
-    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None,
+    transfers: Any = None,
 ) -> None:
     def _load_areas(db: Database):
         areas = list_file_areas(db, order_by="alphabetical")
@@ -13397,7 +13401,9 @@ async def _list_areas_screen(
         header_color=await lane.run(effective_header_color_256),
     )
     if selected is not None:
-        await _area_detail_screen(session, lane, actor, selected, link_context=link_context)
+        await _area_detail_screen(
+            session, lane, actor, selected, link_context=link_context, transfers=transfers,
+        )
 
 
 def _area_description(area: FileArea, effective: _Effective) -> str:
@@ -13407,7 +13413,8 @@ def _area_description(area: FileArea, effective: _Effective) -> str:
 
 
 async def _area_detail_screen(
-    session: Session, lane: DatabaseLane, actor: User, area: FileArea, *, link_context: LinkContext | None = None
+    session: Session, lane: DatabaseLane, actor: User, area: FileArea, *,
+    link_context: LinkContext | None = None, transfers: Any = None,
 ) -> None:
     linked = await lane.run(is_area_linked, area) if link_context is not None else False
     description_level = await lane.run(menu_description_level, actor)
@@ -13435,7 +13442,9 @@ async def _area_detail_screen(
             await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
         elif choice == "p":
             await session.write_line("")
-            await _pending_files_screen(session, lane, actor, area, link_context=link_context)
+            await _pending_files_screen(
+                session, lane, actor, area, link_context=link_context, transfers=transfers,
+            )
             await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
         elif choice == "l" and link_context is not None and not linked:
             await session.write_line("")
@@ -13642,7 +13651,7 @@ async def _delete_area_screen(session: Session, lane: DatabaseLane, actor: User,
 
 async def _pending_files_screen(
     session: Session, lane: DatabaseLane, actor: User, area: FileArea, *,
-    link_context: LinkContext | None = None,
+    link_context: LinkContext | None = None, transfers: Any = None,
 ) -> None:
     while True:
         files = await lane.run(list_pending_files, area, requesting_user=actor)
@@ -13661,7 +13670,9 @@ async def _pending_files_screen(
         )
         if selected is None:
             return
-        await _file_action_screen(session, lane, actor, selected, area, link_context=link_context)
+        await _file_action_screen(
+            session, lane, actor, selected, area, link_context=link_context, transfers=transfers,
+        )
 
 
 async def _draw_file_action(
@@ -13671,6 +13682,7 @@ async def _draw_file_action(
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     *,
     status_line: str,
+    can_download: bool = False,
 ) -> None:
     await session.write_line(
         "\r\n" + screen_title(sanitize_text(entry.filename),
@@ -13686,14 +13698,27 @@ async def _draw_file_action(
     for description_line in (entry.description or "").splitlines()[:MAX_DESCRIPTION_LINES]:
         await session.write_line(sanitize_text(description_line))
     await session.write_line(f"Size: {entry.size_bytes} bytes")
+    entries = [
+        MenuEntry(label=menu_key("A", "pprove"), brief="Publish this pending file"),
+        MenuEntry(label=menu_key("R", "eject"), brief="Delete this pending file"),
+    ]
+    if can_download:
+        # A moderator can read the upload's FILE_ID.DIZ above, but
+        # this screen asks them to approve the *bytes*. The file
+        # area's own listing carries approved rows only, so while
+        # `/download <filename>` existed a pending upload was
+        # inspected by typing its name there; nothing else reaches
+        # one.
+        entries.append(
+            MenuEntry(label=menu_key("D", "ownload"), brief="Fetch it before deciding")
+        )
+    entries += [
+        MenuEntry(label=menu_key("P", "in toggle"), brief="Toggle showing at the top"),
+        MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from auto-purge"),
+        MenuEntry(label=menu_key("B", "ack"), brief="Return to the pending list"),
+    ]
     options = _menu_row(
-        [
-            MenuEntry(label=menu_key("A", "pprove"), brief="Publish this pending file"),
-            MenuEntry(label=menu_key("R", "eject"), brief="Delete this pending file"),
-            MenuEntry(label=menu_key("P", "in toggle"), brief="Toggle showing at the top"),
-            MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from auto-purge"),
-            MenuEntry(label=menu_key("B", "ack"), brief="Return to the pending list"),
-        ],
+        entries,
         description_level,
         width=session.terminal_width,
         height=session.terminal_height,
@@ -13704,7 +13729,7 @@ async def _draw_file_action(
 
 async def _file_action_screen(
     session: Session, lane: DatabaseLane, actor: User, entry: FileEntry, area: FileArea, *,
-    link_context: LinkContext | None = None,
+    link_context: LinkContext | None = None, transfers: Any = None,
 ) -> None:
     """Act on one pending upload. Approving it is where a Linked area's
     catalogue entry is signed and queued (issue #464) -- the file-area
@@ -13718,13 +13743,36 @@ async def _file_action_screen(
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
     status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_file_action(session, entry, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    # Imported here rather than at module scope: this is the only
+    # place `admin_flow` reaches into the caller-facing file screens,
+    # and `door_profile_flow` above sets the same local-import
+    # precedent for exactly that reason.
+    from netbbs.net.file_flow import send_file_to_caller, supports_zmodem
+
+    # Either the terminal can carry a Zmodem send, or the node can mint
+    # a browser link -- `send_file_to_caller` picks between them exactly
+    # as the caller-facing screen does (issue #475), so the key is
+    # offered only when one of the two can actually happen.
+    can_download = supports_zmodem(session) or transfers is not None
+    await _draw_file_action(
+        session, entry, description_level, redraw_in_place, unicode_style, collapsed, header_color,
+        status_line=status_line, can_download=can_download,
+    )
     while True:
         choice = (await session.read_key()).lower()
 
         if choice == "b":
             await session.write_line("")
             return
+        elif choice == "d" and can_download:
+            await session.write_line("")
+            await send_file_to_caller(
+                session, lane, area, entry, actor, transfers=transfers,
+            )
+            await _draw_file_action(
+                session, entry, description_level, redraw_in_place, unicode_style, collapsed,
+                header_color, status_line=status_line, can_download=can_download,
+            )
         elif choice == "a":
             await session.write_line("")
             approved = await lane.run(approve_file, entry, approved_by=actor)
@@ -13743,11 +13791,17 @@ async def _file_action_screen(
         elif choice == "p":
             await session.write_line("")
             entry = await lane.run(set_file_pinned, entry, not entry.pinned, changed_by=actor)
-            await _draw_file_action(session, entry, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_file_action(
+                session, entry, description_level, redraw_in_place, unicode_style, collapsed,
+                header_color, status_line=status_line, can_download=can_download,
+            )
         elif choice == "x":
             await session.write_line("")
             entry = await lane.run(set_file_exempt, entry, not entry.exempt_from_expiry, changed_by=actor)
-            await _draw_file_action(session, entry, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_file_action(
+                session, entry, description_level, redraw_in_place, unicode_style, collapsed,
+                header_color, status_line=status_line, can_download=can_download,
+            )
         else:
             await session.write(reject_unhandled_key(choice))
 
