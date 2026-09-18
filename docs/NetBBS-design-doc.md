@@ -3861,16 +3861,16 @@ serving a vouch without the revocation that followed it; it answers 409 and
 stores nothing, and the depositor starts over there, where what the relay
 still holds keeps its place in the order. A relay that refuses for any other
 reason (it does not relay for the depositor, lacks the route, or is full) is
-logged, and the vouch screen of the depositing node says that a relay did
-not take its vouches at the last attempt.
+logged, left alone for an hour, and named on the vouch screen of the
+depositing node as not having taken its vouches at the last attempt.
 
 What is deposited is *carried*, and kept apart from what the relay has
 admitted. Admission is application: an object already in the admitted store
 counts as replayed and is never applied, and a vouch the relay merely carries
 must not look like one it counts. A relay whose own SysOp names the depositor
 a reporter cannot pull from it any more than anyone else can, so in its own
-sync pass, for as long as it relays for that node, it reads what it carries
-exactly as a subscriber reads a carrier:
+sync pass, for as long as that node's own descriptor names it as a relay, it
+reads what it carries exactly as a subscriber reads a carrier:
 under a cursor, object by object, with the same skips and the same stall.
 That works whether the depositor was named before the deposit or after it,
 follows a widened grant, and leaves a rejected batch to be retried. Nothing is
@@ -3895,7 +3895,7 @@ by fingerprint
 alone so that it becomes a trust subject the SysOp can establish at all, and
 one known by introduction so that its descriptor is refreshed, since it may
 have published no relay when it was learned or have moved to another since.
-That happens before the reporter's state is consulted. None of this relaxes
+That happens before probation ends the matter. None of this relaxes
 what §12.4 requires of a reporter: it has to be established here before it
 is pulled, which for a node never met means by override.
 
@@ -10260,9 +10260,12 @@ Published identity screen and the Profile toggle of an outgoing-only node say
 that nothing is delivered, and the vouch screen says how a vouch travels, or
 that it does not yet.
 
-**Not done, deliberately.** A relay does not forget what it carries when it
-stops relaying for a node; expiry and the per-depositor bound are what limit
-it, and revocations, which do not expire, count against that bound. A
+**Not done, deliberately.** A node that drops a relay tells nobody, it only
+stops naming it, so a relay does not forget what it carried for it; expiry and
+the per-depositor bound are what limit that, and revocations, which do not
+expire, count against the bound. For the same reason a relay decides whether
+to read its own copy by the depositor's descriptor and not by its own record
+of whom it agreed to relay for. A
 subscriber does not try relays it has not met. SysOp-written trust signals
 remain #589's next slice.
 

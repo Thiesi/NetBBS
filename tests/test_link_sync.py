@@ -3610,6 +3610,14 @@ def test_a_relays_refusal_is_remembered_for_the_vouch_screen_until_it_takes_a_de
                 assert refusing() == [r]
                 net.nodes["R"].relaying_for[a] = agreed
                 await net.dial("A", session)
+                # Left alone for an hour after a refusal, not asked every pass.
+                assert refusing() == [r]
+                connection = net.dbs["A"].db.connection
+                connection.execute(
+                    "UPDATE link_trust_deposit_cursors SET updated_at = '2026-01-01T00:00:00.000000Z'"
+                )
+                connection.commit()
+                await net.dial("A", session)
         finally:
             await server.stop()
 
@@ -3620,10 +3628,12 @@ def test_a_relays_refusal_is_remembered_for_the_vouch_screen_until_it_takes_a_de
         net.close()
 
 
-def test_a_relay_stops_reading_its_own_copy_once_it_no_longer_relays_for_the_reporter(tmp_path, caplog):
-    """What it carried for a node that has moved on is never added to, so
-    reading it would mean never seeing a later revocation. It looks for the
-    reporter's relays like any other subscriber, and says so when it finds none."""
+def test_a_relay_stops_reading_its_own_copy_once_the_reporter_no_longer_names_it(tmp_path, caplog):
+    """A node that drops a relay tells nobody; it just stops naming it. What
+    the relay carried is never added to again, so reading it would mean never
+    seeing a later revocation. The relay goes by the reporter's descriptor,
+    looks for its relays like any other subscriber, and says so when it finds
+    none. Its own record of whom it relays for never shrinks and is no guide."""
     net, subject, held_on, pass_on_r = _vouching_three_nodes(tmp_path)
     a = net.ids["A"].fingerprint
     configure_trust_domain(net.dbs["R"].db, "friends", display_name="Friends")
@@ -3636,7 +3646,15 @@ def test_a_relay_stops_reading_its_own_copy_once_it_no_longer_relays_for_the_rep
                 await net.dial("A", session)
                 await pass_on_r(session)
                 assert [row[0] for row in held_on("R")] == [None]
-                net.nodes["R"].relaying_for.pop(a)
+                # A drops R. Nothing tells R; A's next hello names no relay.
+                from netbbs.link.transport import dial_hello
+
+                net.nodes["A"].relays_serving_me.clear()
+                await dial_hello(
+                    net.nodes["A"], session, net.seeds[0],
+                    _hello_for(net.nodes["A"], created_at="2026-02-01T00:00:00+00:00"), net.dbs["A"].lane,
+                )
+                assert a in net.nodes["R"].relaying_for
                 with caplog.at_level(logging.WARNING, logger="netbbs.link.sync"):
                     await pass_on_r(session)
         finally:
@@ -3645,5 +3663,45 @@ def test_a_relay_stops_reading_its_own_copy_once_it_no_longer_relays_for_the_rep
     try:
         asyncio.run(scenario())
         assert any("names no relay" in r.getMessage() for r in caplog.records)
+    finally:
+        net.close()
+
+
+def test_a_blocked_reporter_is_not_asked_about(tmp_path, monkeypatch):
+    from netbbs.link import sync as sync_module
+    from netbbs.link.trust import TrustDimension, TrustState, set_trust_override
+
+    asked: list[tuple[str, ...]] = []
+
+    async def _counting(node, session, base_url, identity_request):
+        asked.append(identity_request.subjects)
+        return []
+
+    monkeypatch.setattr(sync_module, "request_identities", _counting)
+    net, _subject, _held_on, _pass_on_r = _vouching_three_nodes(tmp_path)
+    a = net.ids["A"].fingerprint
+    configure_trust_domain(net.dbs["B"].db, "friends", display_name="Friends")
+    configure_trusted_reporter(net.dbs["B"].db, a, domain_id="friends", scopes=[], can_vouch_nodes=True)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.dial("B", session)
+                assert asked == [(a,)]
+                subject = TrustSubject.node(a)
+                register_subject(net.dbs["B"].db, subject, first_accepted_at="2026-08-01T00:00:00+00:00")
+                set_trust_override(
+                    net.dbs["B"].db, subject, TrustDimension.IDENTITY_INTEGRITY, TrustState.BLOCKED,
+                    reason="known bad", actor_user_id=None,
+                )
+                net.nodes["B"].unanswered_identities.clear()
+                await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert asked == [(a,)]
     finally:
         net.close()

@@ -285,6 +285,29 @@ def record_trust_deposit_refusal(db: Database, relay_fingerprint: str, refusal: 
         )
 
 
+# How long a relay that refused a deposit is left alone. A relay on an earlier
+# release lacks the route and will lack it until it is upgraded; asking it on
+# every pass buys a log line and a write each time and nothing else.
+TRUST_DEPOSIT_REFUSAL_BACKOFF_SECONDS = 3600
+
+
+def trust_deposit_refused_recently(db: Database, relay_fingerprint: str, *, now_iso: str | None = None) -> bool:
+    row = db.connection.execute(
+        """SELECT updated_at FROM link_trust_deposit_cursors
+           WHERE relay_fingerprint = ? AND last_refusal IS NOT NULL""",
+        (relay_fingerprint,),
+    ).fetchone()
+    if row is None:
+        return False
+    from datetime import datetime
+
+    def parsed(value: str) -> datetime:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    elapsed = (parsed(now_iso or utc_now_iso()) - parsed(row[0])).total_seconds()
+    return 0 <= elapsed < TRUST_DEPOSIT_REFUSAL_BACKOFF_SECONDS
+
+
 def clear_trust_deposit_refusal(db: Database, relay_fingerprint: str) -> None:
     """A relay answered, so whatever it refused last time is over."""
     with db.connection:

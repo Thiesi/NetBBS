@@ -243,6 +243,7 @@ from netbbs.link.trust_carriage import (
     load_trust_page_for_pull,
     record_trust_deposit_refusal,
     save_trust_deposit_position,
+    trust_deposit_refused_recently,
 )
 from netbbs.link.trust_wire import (
     UnknownTrustPullCursor,
@@ -1049,12 +1050,18 @@ async def _pull_trust_subscriptions(
                 node, session, lane, issuer, direct, revocations_only=revocations_only,
             )
             continue
-        if issuer in node.relaying_for and await lane.run(carries_trust_objects_for, issuer):
-            # This node is the reporter's relay: what it would pull is already
-            # here, and it reads it the way a subscriber reads a carrier. Only
-            # while it still relays for it. What it carried for a node that
-            # has since moved to another relay is never added to, and reading
-            # that would mean never seeing a later revocation.
+        published = record.descriptor.payload.get("relays") or []
+        if isinstance(published, list) and node.identity.fingerprint in published:
+            # This node is the reporter's relay, by the reporter's own latest
+            # descriptor: what it would pull is already here, and it reads it
+            # the way a subscriber reads a carrier. By the descriptor and not
+            # by `relaying_for`, which only ever grows: a node that drops a
+            # relay tells nobody, it just stops naming it, and what this node
+            # carried for it is never added to again. Reading that would mean
+            # never seeing a later revocation.
+            if not await lane.run(carries_trust_objects_for, issuer):
+                continue  # it has deposited nothing yet
+
             await _pull_one_trust_reporter(
                 node, session, lane, issuer, [_OWN_CARRIAGE],
                 responder_fingerprint=node.identity.fingerprint, revocations_only=revocations_only,
@@ -1228,6 +1235,8 @@ async def _deposit_own_trust_objects(
                 continue
             base_urls = _candidate_dialable_addresses(node, relay_fingerprint)
             if not base_urls:
+                continue
+            if await lane.run(trust_deposit_refused_recently, relay_fingerprint):
                 continue
             for _page in range(_MAX_TRUST_DEPOSIT_PAGES_PER_PASS):
                 objects, position, continues_from = await lane.run(
