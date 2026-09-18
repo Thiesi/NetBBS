@@ -56,6 +56,7 @@ from netbbs.auth.users import (
 from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.moderation.log import record_action
 from netbbs.net.admin_flow import admin_menu
+from netbbs.net.managed_dns_flow import offer_deferred_registration
 from netbbs.net.onboarding_flow import offer_onboarding
 from netbbs.net.local_cli import LocalCLISession
 from netbbs.net.local_terminal import raw_terminal
@@ -81,6 +82,13 @@ async def run_admin_session(session: Session, db: Database, as_username: str | N
     try:
         actor = await _resolve_actor(session, lane, as_username)
         await session.write_line(f"Attributed to {actor.username!r} for this session's audit log.")
+        # Issue #634: a managed-DNS opt-in accepted at bootstrap cannot
+        # register until the node has started once. The deployment that
+        # bootstrap anchor exists for never signs in over the network, so
+        # running this tool again is where it picks the name. A no-op in
+        # the bootstrap session itself (the node still has not started)
+        # and on every node that owes no such registration.
+        await offer_deferred_registration(session, lane)
         await admin_menu(session, lane, actor)
     finally:
         lane.close()

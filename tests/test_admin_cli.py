@@ -24,7 +24,7 @@ from netbbs.auth.users import SYSOP_LEVEL, create_user, list_users
 from netbbs.moderation.log import list_actions_for_target_user
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
-from tests.test_admin_flow import FakeSession, _written_text
+from tests.test_admin_flow import FakeSession, _visible, _written_text
 
 
 @pytest.fixture
@@ -76,6 +76,46 @@ def test_run_admin_session_bootstraps_then_opens_the_menu(db):
     asyncio.run(run_admin_session(session, db, None))
     assert any(u.username == "sysop" and u.user_level == SYSOP_LEVEL for u in list_users(db))
     assert "Attributed to 'sysop'" in _written_text(session)
+
+
+def test_bootstrap_accepting_managed_dns_on_a_node_that_never_started_defers_the_name(db):
+    """Issue #634. The accept used to dead-end on "identity isn't ready
+    yet -- try again after a restart" at the one moment this tool exists
+    to serve. It is recorded, the SysOp is told what happens next, and
+    the console opens as usual."""
+    from netbbs.managed_dns.state import OptIn, get_opt_in, get_registration_deferred
+
+    # decline Link, accept managed DNS (no editor can open), [B]ack out of the console
+    session = FakeSession(["sysop", "p", "hunter2", "hunter2", "n", "y", "b"])
+    asyncio.run(run_admin_session(session, db, None))
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert get_opt_in(db) is OptIn.ACCEPTED
+    assert get_registration_deferred(db)
+    assert "once this node has started for the first time" in text
+    assert "restart" not in text
+
+
+def test_running_the_tool_again_after_the_first_start_offers_the_deferred_name(db):
+    """The headless deployment the bootstrap anchor exists for never
+    signs in over the network; this tool is its only interactive
+    surface, so it is where the owed registration is offered."""
+    from netbbs.managed_dns.state import (
+        OptIn, get_registration_deferred, set_node_fingerprint, set_opt_in, set_registration_deferred,
+        set_service_url,
+    )
+
+    create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registration_deferred(db, True)
+    set_service_url(db, "http://127.0.0.1:1")
+    set_node_fingerprint(db, "fp-1")  # cached by the node's first start
+
+    session = FakeSession(["b", "b"])  # back out of the editor, then of the console
+    asyncio.run(run_admin_session(session, db, None))
+
+    assert "Managed DNS registration" in _written_text(session)
+    assert not get_registration_deferred(db)
 
 
 def test_bootstrap_rejects_an_unknown_credential_choice_and_retries(db, lane):

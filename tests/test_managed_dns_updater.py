@@ -37,7 +37,7 @@ from netbbs.managed_dns.state import (
     set_registration_status,
     set_service_url,
 )
-from netbbs.managed_dns.updater import run_scheduled_managed_dns_updater
+from netbbs.managed_dns.updater import _run_managed_dns_update_pass, run_scheduled_managed_dns_updater
 from netbbs.storage.database import Database
 from services.managed_dns.server import ManagedDnsServer
 from services.managed_dns.store import Database as ManagedDnsServerDatabase
@@ -344,8 +344,10 @@ def test_updater_rolls_back_both_inactive_credential_updates_together(tmp_path, 
     monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", both_inactive)
 
     async def scenario():
+        # The pass itself, not the task: the task outlives a failed pass
+        # (issue #640), so the failure is only observable from here.
         with pytest.raises(sqlite3.IntegrityError, match="simulated reconciliation failure"):
-            await run_scheduled_managed_dns_updater(db)
+            await _run_managed_dns_update_pass(db)
 
     asyncio.run(scenario())
 
@@ -555,7 +557,7 @@ def test_updater_commits_promoted_state_before_journaling_credential_swap(tmp_pa
 
     async def scenario():
         with pytest.raises(RuntimeError, match="before credential journal"):
-            await run_scheduled_managed_dns_updater(db)
+            await _run_managed_dns_update_pass(db)
 
     asyncio.run(scenario())
 
@@ -1332,4 +1334,189 @@ def test_updater_adopts_a_revocation_answered_to_the_automatic_cancellation(tmp_
     assert get_service_contact(db) == "abuse@example.org"
     # Both credentials stay on disk: nothing was swapped or deleted.
     assert load_credential(previous_credential_path_for(db.path)) == "old-credential"
+    db.close()
+
+
+# -- issue #640: a registered name that is not being kept alive says so ------
+
+
+def _registered_node(tmp_path, *, base_url="https://dns.example"):
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_service_url(db, base_url)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    save_credential(credential_path_for(db.path), "secret")
+    return db
+
+
+def test_updater_outlives_an_unreadable_credential_and_recovers_without_a_restart(tmp_path, monkeypatch):
+    """Issue #640, OutBound's half: the credential is a 0600 file, and
+    `netbbs.admin` run as root writes one the node's own account cannot
+    read. `load_credential` raised, the task died with one log line, and
+    no heartbeat was sent for the rest of the node's uptime -- not even
+    after the file was chowned back. The pass now records why and the
+    task lives to see the repair."""
+    import netbbs.managed_dns.updater as updater_module
+    from netbbs.managed_dns.client import HeartbeatResult
+    from netbbs.managed_dns.state import get_contact_problem
+
+    db = _registered_node(tmp_path)
+    real_load = updater_module.load_credential
+    unreadable = {"now": True}
+
+    def load(path):
+        if unreadable["now"] and path == credential_path_for(db.path):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_load(path)
+
+    async def answered(_base_url, _credential):
+        return HeartbeatResult("myboard", "pending", None), False
+
+    monkeypatch.setattr(updater_module, "load_credential", load)
+    monkeypatch.setattr(updater_module, "_send_heartbeat", answered)
+    seen: list = []
+
+    async def sleep(_seconds):
+        seen.append(get_contact_problem(db))
+        if len(seen) == 1:
+            unreadable["now"] = False  # the SysOp chowns the file back
+            return
+        raise asyncio.CancelledError
+
+    async def scenario():
+        with pytest.raises(asyncio.CancelledError):
+            await run_scheduled_managed_dns_updater(db, sleep=sleep)
+
+    asyncio.run(scenario())
+
+    assert seen[0] is not None
+    assert "could not be read" in seen[0].text and "Permission denied" in seen[0].text
+    assert "netbbs.admin" in seen[0].text
+    assert seen[1] is None  # the answered heartbeat cleared it
+    assert get_last_contact_at(db) is not None
+    db.close()
+
+
+def test_updater_outlives_a_pass_that_raises(tmp_path, monkeypatch):
+    import netbbs.managed_dns.updater as updater_module
+    from netbbs.managed_dns.state import get_contact_problem
+
+    db = _registered_node(tmp_path)
+    passes: list[int] = []
+
+    async def failing_pass(_db):
+        passes.append(1)
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(updater_module, "_run_managed_dns_update_pass", failing_pass)
+    monkeypatch.setattr(updater_module, "_reported_failed_passes", {})
+
+    async def sleep(_seconds):
+        if len(passes) >= 2:
+            raise asyncio.CancelledError
+
+    async def scenario():
+        with pytest.raises(asyncio.CancelledError):
+            await run_scheduled_managed_dns_updater(db, sleep=sleep)
+
+    asyncio.run(scenario())
+
+    assert len(passes) == 2
+    problem = get_contact_problem(db)
+    assert problem is not None and "database is locked" in problem.text
+    db.close()
+
+
+def test_updater_records_a_service_it_cannot_reach_and_names_the_direct_connection_rule(tmp_path, monkeypatch):
+    """Issue #640, The Emptiness Machine's half: `/register` goes out
+    through `HTTPS_PROXY`, the heartbeat never does, so a node whose only
+    way out is a proxy registered and then failed every check-in -- into
+    the log, while the DNS screen said "nothing to do"."""
+    from netbbs.managed_dns.client import ManagedDnsError
+    from netbbs.managed_dns.state import get_contact_problem
+
+    db = _registered_node(tmp_path)
+
+    async def unreachable(_session, base_url, *, credential):
+        raise ManagedDnsError(f"could not reach {base_url}/heartbeat: Connection refused")
+
+    monkeypatch.setattr("netbbs.managed_dns.updater.heartbeat", unreachable)
+    sleep_calls = _fake_sleep_recorder()
+    asyncio.run(_run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1])))
+
+    problem = get_contact_problem(db)
+    assert problem is not None
+    assert "Connection refused" in problem.text
+    assert "never through an HTTP proxy" in problem.text
+    assert get_registration_status(db) is RegistrationStatus.PENDING
+    db.close()
+
+
+def test_a_refusal_the_service_did_send_is_not_blamed_on_the_network(tmp_path, monkeypatch):
+    from netbbs.managed_dns.client import ManagedDnsError
+    from netbbs.managed_dns.state import get_contact_problem
+
+    db = _registered_node(tmp_path)
+
+    async def refused(_session, _base_url, *, credential):
+        raise ManagedDnsError("heartbeat failed: HTTP 502: Bad Gateway", status_code=502)
+
+    monkeypatch.setattr("netbbs.managed_dns.updater.heartbeat", refused)
+    sleep_calls = _fake_sleep_recorder()
+    asyncio.run(_run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1])))
+
+    problem = get_contact_problem(db)
+    assert problem is not None and "502" in problem.text
+    assert "proxy" not in problem.text
+    db.close()
+
+
+def test_a_missing_credential_file_is_reported_once_a_name_is_registered(tmp_path):
+    from netbbs.managed_dns.credential import delete_credential
+    from netbbs.managed_dns.state import get_contact_problem
+
+    db = _registered_node(tmp_path)
+    delete_credential(credential_path_for(db.path))
+    sleep_calls = _fake_sleep_recorder()
+    asyncio.run(_run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1])))
+
+    problem = get_contact_problem(db)
+    assert problem is not None and "is missing" in problem.text
+    assert "node_managed_dns_credential" in problem.text
+    db.close()
+
+
+def test_a_registered_name_without_the_opt_in_is_reported_not_skipped_silently(tmp_path):
+    """The pairing issue #640 was filed as. Registering sets the opt-in
+    in the same transaction, so only a restored or edited database gets
+    here -- and it used to be the most silent no-op of all."""
+    from netbbs.managed_dns.state import get_contact_problem
+
+    db = _registered_node(tmp_path)
+    set_opt_in(db, OptIn.DECLINED)
+    sleep_calls = _fake_sleep_recorder()
+    asyncio.run(_run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1])))
+
+    problem = get_contact_problem(db)
+    assert problem is not None and "not opted in" in problem.text
+    db.close()
+
+
+def test_a_node_that_never_registered_has_no_contact_problem(tmp_path):
+    from netbbs.managed_dns.state import get_contact_problem
+
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_service_url(db, "https://dns.example")
+    sleep_calls = _fake_sleep_recorder()
+    asyncio.run(_run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1])))
+    assert get_contact_problem(db) is None
+
+    # Nor does one the SysOp released: not checking in is the point.
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.RELEASED)
+    sleep_calls = _fake_sleep_recorder()
+    asyncio.run(_run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1])))
+    assert get_contact_problem(db) is None
     db.close()

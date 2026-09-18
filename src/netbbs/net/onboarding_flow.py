@@ -57,7 +57,7 @@ from netbbs.link.onboarding import (
 from netbbs.link.reliable_nodes import effective_reliable_nodes
 from netbbs.managed_dns.state import OptIn, get_opt_in
 from netbbs.net.confirm import prompt_yes_no
-from netbbs.net.managed_dns_flow import offer_managed_dns_opt_in
+from netbbs.net.managed_dns_flow import offer_deferred_registration, offer_managed_dns_opt_in
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import MUTED_COLOR, colored, sanitize_text, wrap_to_width
 from netbbs.storage.execution import DatabaseLane
@@ -102,8 +102,6 @@ async def offer_onboarding(session: Session, lane: DatabaseLane) -> None:
     SysOp login: returns immediately once both choices are decided."""
     participation_pending = await lane.run(get_participation) is Participation.UNDECIDED
     dns_pending = await lane.run(get_opt_in) is OptIn.UNDECIDED
-    if not participation_pending and not dns_pending:
-        return
 
     if participation_pending:
         await _offer_participation(session, lane)
@@ -112,6 +110,11 @@ async def offer_onboarding(session: Session, lane: DatabaseLane) -> None:
         # Owns its own once-only lock, blurb, and inline registration;
         # writes its own leading blank line.
         await offer_managed_dns_opt_in(session, lane)
+    else:
+        # Issue #634: the opt-in was accepted at first-SysOp bootstrap,
+        # before the node had started and could register. A no-op unless
+        # exactly that is on record and the node can register now.
+        await offer_deferred_registration(session, lane)
 
 
 async def _offer_participation(session: Session, lane: DatabaseLane) -> None:

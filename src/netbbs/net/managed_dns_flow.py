@@ -47,6 +47,8 @@ from netbbs.managed_dns.state import (
     set_cancelled_rename_state,
     set_opt_in,
     get_published,
+    get_registration_deferred,
+    set_registration_deferred,
     set_registration_status,
     set_registration_result_state,
     set_pending_rename_state,
@@ -107,6 +109,36 @@ _SERVICE_UNAVAILABLE_SYSOP_NOTE = (
     "right away if you run an instance of it yourself and point this "
     "node at it with service_url under [managed_dns] in netbbs.toml.)"
 )
+
+# Issue #634. A node that has never started has no fingerprint cached
+# for the service to know it by, and first-SysOp bootstrap -- the
+# earlier of the opt-in's two anchors -- is by design before that. The
+# old message ("isn't ready yet -- try again after a restart") told a
+# SysOp who had started nothing to restart it, and left the deployment
+# that anchor exists for with no route back to the registration.
+_IDENTITY_PENDING_FIRST_RUN_NOTE = (
+    "(Noted. The name itself is picked once this node has started for the "
+    "first time -- that is when it gets the identity the service knows it "
+    "by. Start the node; you'll be asked for the name the next time you "
+    "sign in as SysOp or run this tool.)"
+)
+
+_IDENTITY_PENDING_SYSOP_NOTE = (
+    "(This node has never been started, so it does not yet have the "
+    "identity the managed netbbs.org service knows a node by. Start the "
+    "node once, then [R]egister here.)"
+)
+
+_DEFERRED_REGISTRATION_BLURB = (
+    "You chose managed netbbs.org hosting when this node was set up, before "
+    "it had started and could register a name. It can now."
+)
+
+_DEFERRED_REGISTRATION_DECLINED_NOTE = (
+    "(Nothing registered. [R]egister on the SysOp console's DNS screen "
+    "does this whenever you like.)"
+)
+
 
 def _foreign_credential_line(action: str, issuer: str, base_url: str) -> str:
     """Codex review of PR #587. A managed-DNS credential is a bearer
@@ -258,7 +290,48 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
             # name editor over a service that cannot answer it.
             await _write_note(session, _SERVICE_UNAVAILABLE_FIRST_RUN_NOTE)
             return
+        if not await lane.run(get_node_fingerprint):
+            # Issue #634: the earlier of this prompt's two anchors,
+            # `netbbs.admin`'s first-SysOp bootstrap, runs before the node
+            # has ever started, and the fingerprint the service knows a
+            # node by is cached by `netbbs.__main__.run`. The accept
+            # stands; the registration that goes with it is owed, and
+            # `offer_deferred_registration` pays it at the first surface
+            # that can.
+            await lane.run(set_registration_deferred, True)
+            await _write_note(session, _IDENTITY_PENDING_FIRST_RUN_NOTE)
+            return
         await register_via_prompt(session, lane)
+
+
+async def offer_deferred_registration(session: Session, lane: DatabaseLane) -> None:
+    """The inline registration design doc §16 Decision 1 attaches to
+    accepting the opt-in, for a node that accepted before it could
+    register (issue #634). Called from both interactive surfaces a SysOp
+    has -- an authenticated login, and `netbbs.admin` run again once the
+    node has started, which is the only one a headless deployment uses --
+    and a no-op unless that accept is on record and the node now has its
+    fingerprint.
+
+    Offered once, like the prompt it completes: the marker is cleared
+    before the editor opens, under the same lock the opt-in claims, so a
+    second SysOp arriving meanwhile is not asked too and `[B]ack` is a
+    final answer. The DNS screen's `[R]egister` is the same editor from
+    then on, and the closing note says so."""
+    lock = _opt_in_locks.setdefault(lane.path.resolve(), asyncio.Lock())
+    async with lock:
+        if not await lane.run(get_registration_deferred):
+            return
+        if not await lane.run(get_node_fingerprint) or not await lane.run(get_service_url):
+            return
+        await lane.run(set_registration_deferred, False)
+        if await lane.run(get_registered_name) is not None:
+            return
+
+    await session.write_line("")
+    await _write_note(session, _DEFERRED_REGISTRATION_BLURB)
+    if not await register_via_prompt(session, lane):
+        await _write_note(session, _DEFERRED_REGISTRATION_DECLINED_NOTE)
 
 
 async def register_via_prompt(
@@ -305,11 +378,10 @@ async def register_via_prompt(
     if not node_fingerprint:
         # Only possible if this node has genuinely never completed a
         # normal startup (set in netbbs.__main__.run, unconditionally,
-        # every boot) -- not a realistic path for a session that's live
-        # right now, but handled rather than assumed impossible.
-        await session.write_line(
-            colored("(This node's identity isn't ready yet -- try again after a restart.)", fg_color=MUTED_COLOR)
-        )
+        # every boot) -- which a live network session rules out, and the
+        # standalone console on a freshly bootstrapped node does not
+        # (issue #634).
+        await _write_note(session, _IDENTITY_PENDING_SYSOP_NOTE)
         return True
 
     previous_name = await lane.run(get_registered_name)
@@ -397,6 +469,7 @@ async def register_via_prompt(
         # module's own docstring.
         try:
             from netbbs.managed_dns.client import ManagedDnsError, outbound_session, register
+            from netbbs.managed_dns.updater import check_in_now, record_check_in
         except ModuleNotFoundError:
             return "Registration requires NetBBS's optional HTTP support."
 
@@ -442,6 +515,22 @@ async def register_via_prompt(
             )
             delete_credential(previous_credential_path_for(lane.path))
 
+            # Issue #640: the first check-in, now, while the SysOp is
+            # still looking -- every sentence below promises contact, and
+            # a node that cannot make it (no direct route to the service,
+            # typically) used to find out from a name that never went
+            # live. Still under the lock, so the scheduled pass cannot
+            # interleave with the state this writes.
+            checked_in, problem = await check_in_now(base_url, result.credential)
+            await lane.run(record_check_in, checked_in, problem)
+
+        if problem is not None:
+            return (
+                f"{'Reclaimed' if was_reclaim else 'Registered'} {result.name}.netbbs.org, but this node's "
+                f"first check-in with the service failed: {sanitize_text(problem)}. The name goes live, and "
+                "stays live, only while the service hears from this node; the node retries every 15 "
+                "minutes while it runs, and the SysOp console's DNS screen shows the latest attempt."
+            )
         if was_reclaim:
             if result.status == "matured":
                 return f"Reclaimed {result.name}.netbbs.org -- it's live again."
