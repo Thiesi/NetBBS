@@ -136,6 +136,9 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # for a key before it draws the fight (issue #641).
         ("Journey Resumed", b"", "combat"),
         ("Combat", b" ", "combat"),
+        # The same fight against a raider the ship cannot beat (issue #647): the
+        # OUTCLASSED row, and a Dump priced at half the hold.
+        ("Combat, outclassed", b" ", "outclassed"),
         # The first deck of a session carries a returning pilot's welcome and
         # recap above its gauges (issue #641), which at forty columns is most of
         # page one. It is reviewed as itself; the deck a pilot sees for the rest
@@ -994,7 +997,33 @@ def _entry_key(rows: list[str], pattern: str, follower: str | None = None) -> st
     return None
 
 
-def build_voidrunner_combat(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+def build_voidrunner_outclassed(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """The combat fixture, with cargo aboard, against a raider two tiers too strong.
+
+    The fight is played into like the combat fixture's, with a hold bought first so
+    that Dump is on offer. What play cannot arrange is the opponent: an opening
+    board never posts a tier-4 bounty next door, and a tier-4 random contact needs
+    a danger-4 system the opening neighbourhood may not have. So the opponent of
+    the fight the door saved is raised to tier 4 in the save, and nothing else --
+    the hull, the hold, the credits and the ruleset are what play left.
+    """
+    build_voidrunner_combat(door_name, door, state, stock_hold=True)
+    for save in (state / "saves").glob("*.json"):
+        if ".previous" in save.name or "recovery" in save.name:
+            continue
+        data = json.loads(save.read_text(encoding="utf-8"))
+        travel = data.get("pending_travel") or {}
+        combat = (travel.get("encounter") or {}).get("combat")
+        if combat is None:
+            raise SystemExit("the combat fixture did not leave a fight to raise")
+        # The opponent of the saved fight, and only that. The journey's copy of the
+        # bounty has to stay equal to the contract on the books, or the door refuses
+        # the career as inconsistent -- which it did, the first time this was built.
+        combat["pirate"].update(tier=4, hp=80, hp_max=80)
+        save.write_text(json.dumps(data), encoding="utf-8")
+
+
+def build_voidrunner_combat(door_name: str, door: pathlib.Path, state: pathlib.Path, *, stock_hold: bool = False) -> None:
     """A career left in the middle of a fight, so combat gets a panel too.
 
     Combat is only reachable through a jump, and a random encounter is a chance
@@ -1017,6 +1046,10 @@ def build_voidrunner_combat(door_name: str, door: pathlib.Path, state: pathlib.P
         running = Door(door, state, 80, 24, {})
         try:
             running.settle()
+            if stock_hold:
+                # Market, the first commodity, Purchase, a dozen units, back out.
+                for key in (b"M", b"A", b"P", b"1", b"2", b"\r", b"B"):
+                    running.press(key, expect=False)
             running.press(b"B")  # the contract board
             rows = _screen_rows(running)
             # A bounty card says BOUNTY on its first row and "1 jumps" on its
@@ -1087,6 +1120,7 @@ def build_voidrunner_played(door_name: str, door: pathlib.Path, state: pathlib.P
 FIXTURE_BUILDERS = {
     ("voidrunner", "combat"): build_voidrunner_combat,
     ("voidrunner", "played"): build_voidrunner_played,
+    ("voidrunner", "outclassed"): build_voidrunner_outclassed,
 }
 
 
