@@ -94,7 +94,7 @@ and `AGENTS.md`, because a draft editor for a value the caller cannot
 see would have to hold the plaintext password across redraws to have
 anything to save.
 
-## The managed name service gains its operator side (#598–#603, #599)
+## The managed name service gains its operator side (#598–#603, PR #609)
 
 The managed netbbs.org subdomain workflow shipped in v5.6.0 and grew a
 route into the node in v7.7.0, always as a registrant's workflow. An
