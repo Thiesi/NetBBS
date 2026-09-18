@@ -126,7 +126,8 @@ def _report_failed_pass(db: Database, exc: Exception) -> None:
         _reported_failed_passes[db.path] = detail
         _logger.error("managed-DNS updater pass failed; retrying next pass", exc_info=exc)
     try:
-        _note_contact_problem(db, f"this node's check-in failed before it was sent ({detail})", log=False)
+        # Not "was never sent": a pass can raise while applying an answer.
+        _note_contact_problem(db, f"this node's check-in did not complete ({detail})", log=False)
     except Exception:
         # The database itself may be what failed; the log line above is
         # then the whole of what can be said, and the task still lives.
