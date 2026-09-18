@@ -592,8 +592,9 @@ it was a deliberate trade and not an oversight:
 - **An expired file.** Nothing, and that is now the decided answer rather
   than a loss: expiry ends a file's reach to callers entirely (§5.3, issue
   #639). The listing and `[F]ind` are approved-and-current only, and a caller
-  who knows a name has no way to spend it. A SysOp reaches an expired file
-  from the file area's admin detail screen while the grace period lasts.
+  who knows a name has no way to spend it. A SysOp is to reach an expired
+  file from the file area's admin detail screen while the grace period lasts;
+  that screen is decided but not yet built (issue #639).
   Only areas that set a maximum file age have expired files at all.
 
 ### 3.6 Resource lists (issue #528)
@@ -1078,15 +1079,18 @@ caller-facing surface:
   reply to a thread that expired mid-conversation still finds its parent
   (§6.1's edit chains depend on the same lookup).
 - **SysOp recovery.** A file's bytes survive in content-addressed storage
-  until the grace period ends. The file area's admin detail screen lists its
-  expired files with `[D]ownload`, the same action the pending-file review
-  screen carries, so recovering an upload does not need shell access. Posts
+  until the grace period ends. The file area's admin detail screen is to list
+  its expired files with `[D]ownload`, the same action the pending-file review
+  screen carries, so recovering an upload does not need shell access. The
+  screen is decided but not yet built (issue #639). Posts
   have no equivalent screen: a post's content is its text, and the recovery
   case that justifies the file screen does not arise.
 
 A domain function returning an expired row is therefore a statement about
 the domain, not a promise to callers, and the contracts of `list_files_page`,
-`get_file_by_name`, `list_posts_page` and `get_post` say so in those terms.
+`get_file_by_name`, `list_posts_page` and `get_post` are to say so in those
+terms. Today `get_post` and `list_files_page` still describe expired content as
+"individually reachable"; issue #639 carries that edit.
 
 ### 5.4 Channel visibility and membership
 
