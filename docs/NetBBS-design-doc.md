@@ -6169,7 +6169,12 @@ over. Thus the chosen conclusion determines a concrete starting advantage.
 Retirement retains a compact dossier in the same atomic career checkpoint as the
 new run: sequence number, original seed/dates, conclusion, rank, ship, days,
 credits, chart count, victories, missions, known market margin and retained
-highlights. The record's Dossiers view includes every retained dossier. Old
+highlights. A confirmed retirement ends on a held Career Complete screen (issue
+#644), drawn only after that checkpoint is on disk: the ending's name and
+closing text, the portrait of the ship that flew the career, the career in
+numbers and its last highlights as the archived dossier records them, and what
+the next pilot starts with. Any key but a paging key leaves it, Enter, Space and
+Escape included. The record's Dossiers view includes every retained dossier. Old
 retirement counts do not fabricate missing dossiers. Storage permits 128 dossiers
 and refuses further retirement visibly at capacity; it never evicts an older
 record. Existing careers remain playable at the cap. The Retire action preflights

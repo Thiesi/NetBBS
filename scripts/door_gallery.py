@@ -156,6 +156,9 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Pilot Record, log", b"SH", "played"),
         ("Career Dossiers", b"SD", "played"),
         ("Career Finale", b"SR", "played"),
+        # The ending a retirement is shown (issue #644): Status, Finale, Retire,
+        # yes. It needs a career that *may* retire, which is its own fixture.
+        ("Career Complete", b"SRSY", "retiring"),
         ("Hall of Fame", b"H", "played"),
         # The Hall's five views are five different tables, not one paged table.
         ("Hall of Fame, trading", b"H2", "played"),
@@ -1084,9 +1087,31 @@ def build_voidrunner_played(door_name: str, door: pathlib.Path, state: pathlib.P
     running.kill()  # the career on disk is what the panels copy
 
 
+def build_voidrunner_retiring(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """The played career, allowed to retire.
+
+    Every other fixture here is built by playing the door and nothing else, and
+    that stays the rule. This is the one state play cannot reach inside a build:
+    the cheapest ending asks for the top career rank, which is 150,000 credits of
+    trading. So the career is played as far as `played` goes -- a fight, a kill, a
+    record -- and then one field is raised in its save: the rank it has *retained*.
+    Credits, ship, log and everything the ending screen prints are what play left
+    there, which is the point of photographing it.
+    """
+    build_voidrunner_played(door_name, door, state)
+    game = load_door(door)
+    for save in (state / "saves").glob("*.json"):
+        if ".previous" in save.name or "recovery" in save.name or save.parent.name == "scores":
+            continue
+        data = json.loads(save.read_text(encoding="utf-8"))
+        data["pilot"]["highest_rank_seen"] = len(game.RANKS) - 1
+        save.write_text(json.dumps(data), encoding="utf-8")
+
+
 FIXTURE_BUILDERS = {
     ("voidrunner", "combat"): build_voidrunner_combat,
     ("voidrunner", "played"): build_voidrunner_played,
+    ("voidrunner", "retiring"): build_voidrunner_retiring,
 }
 
 
