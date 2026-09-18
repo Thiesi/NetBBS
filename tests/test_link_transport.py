@@ -3165,3 +3165,58 @@ def test_an_oversized_body_is_refused_before_it_is_parsed(tmp_path):
 
     with pytest.raises(LinkTransportError, match="exceeds"):
         asyncio.run(scenario())
+
+
+def test_the_identity_endpoint_serves_a_peer_and_refuses_everyone_else(tmp_path):
+    """Issue #630, over a real server. What it serves is public-key material a
+    requester verifies for itself, but who may ask is still someone this node
+    has met, like every other pull."""
+    from netbbs.link.introduction import build_identity_request
+    from netbbs.link.transport import request_identities
+
+    carrier_identity = bootstrap_node_identity("identity-carrier")
+    asker_identity = bootstrap_node_identity("identity-asker")
+    author_identity = bootstrap_node_identity("identity-author")
+    carrier_node = LinkNode(identity=carrier_identity)
+    asker_node = LinkNode(identity=asker_identity)
+    carrier = _NodeDb(tmp_path, "identity-carrier")
+    asker = _NodeDb(tmp_path, "identity-asker")
+    carrier_node.handle_hello(_hello_for(LinkNode(identity=author_identity)))
+
+    def _ask(node, identity, subjects):
+        return build_identity_request(
+            signing_identity=identity.signing_key, requester_fingerprint=identity.fingerprint,
+            responder_fingerprint=carrier_identity.fingerprint, subjects=subjects,
+        )
+
+    async def scenario():
+        server = await _run_server(carrier_node, lambda: _hello_for(carrier_node), carrier.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                base_url = f"http://127.0.0.1:{server.port}"
+                with pytest.raises(LinkTransportError, match="HTTP 403"):
+                    await request_identities(
+                        asker_node, session, base_url,
+                        _ask(asker_node, asker_identity, [author_identity.fingerprint]),
+                    )
+                await dial_hello(asker_node, session, base_url, _hello_for(asker_node), asker.lane)
+                bundles = await request_identities(
+                    asker_node, session, base_url,
+                    _ask(asker_node, asker_identity, [author_identity.fingerprint, "nobody-known"]),
+                )
+                async with session.post(
+                    f"{base_url}/link/v1/identities/{asker_identity.fingerprint}", json={"subjects": []}
+                ) as malformed:
+                    assert malformed.status == 400
+                return bundles
+        finally:
+            await server.stop()
+
+    try:
+        bundles = asyncio.run(scenario())
+        assert len(bundles) == 1
+        record = asker_node.handle_introduction(bundles[0])
+        assert record.fingerprint == author_identity.fingerprint
+    finally:
+        carrier.close()
+        asker.close()

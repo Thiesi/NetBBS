@@ -203,7 +203,7 @@ def _recheck_stored_peers_against_local_claims(db: Database) -> None:
     descriptor once per local-claim change; unchanged, non-colliding peers
     are a no-op and an identical already-recorded collision is deduplicated."""
     rows = db.connection.execute(
-        "SELECT fingerprint, descriptor_json FROM link_peers"
+        "SELECT fingerprint, descriptor_json FROM link_known_identities"
     ).fetchall()
     for row in rows:
         _record_identity_observation(
@@ -240,7 +240,7 @@ def _identity_from_descriptor_json(fingerprint: str, raw: str) -> NodeDisplayIde
 
 def identity_for_fingerprint(db: Database, fingerprint: str) -> NodeDisplayIdentity:
     row = db.connection.execute(
-        "SELECT descriptor_json FROM link_peers WHERE fingerprint = ?", (fingerprint,)
+        "SELECT descriptor_json FROM link_known_identities WHERE fingerprint = ?", (fingerprint,)
     ).fetchone()
     if row is None:
         return NodeDisplayIdentity(fingerprint, UNKNOWN_NODE_NAME, None)
@@ -276,7 +276,7 @@ def resolve_stored_peer_reference(db: Database, reference: str) -> str | list[st
     dns_needle = name_needle.rstrip(".")
     identities = [
         _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
-        for row in db.connection.execute("SELECT fingerprint, descriptor_json FROM link_peers")
+        for row in db.connection.execute("SELECT fingerprint, descriptor_json FROM link_known_identities")
     ]
     exact_fingerprint = [item.fingerprint for item in identities if item.fingerprint.lower() == name_needle]
     if exact_fingerprint:
@@ -296,7 +296,7 @@ def record_peer_identity_observation(db: Database, peer) -> None:
 
 def _record_identity_observation(db: Database, current: NodeDisplayIdentity) -> None:
     existing_row = db.connection.execute(
-        "SELECT descriptor_json FROM link_peers WHERE fingerprint = ?", (current.fingerprint,)
+        "SELECT descriptor_json FROM link_known_identities WHERE fingerprint = ?", (current.fingerprint,)
     ).fetchone()
     previous = (
         _identity_from_descriptor_json(current.fingerprint, existing_row["descriptor_json"])
@@ -339,7 +339,7 @@ def _record_identity_observation(db: Database, current: NodeDisplayIdentity) -> 
             normalize_dns_name(get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY)),
         )
     for row in db.connection.execute(
-        "SELECT fingerprint, descriptor_json FROM link_peers WHERE fingerprint <> ?",
+        "SELECT fingerprint, descriptor_json FROM link_known_identities WHERE fingerprint <> ?",
         (current.fingerprint,),
     ):
         known = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])

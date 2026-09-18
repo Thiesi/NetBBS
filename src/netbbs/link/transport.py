@@ -180,6 +180,11 @@ from netbbs.link.store import (
     save_peer,
     save_relay_consent,
 )
+from netbbs.link.introduction import (
+    MAX_IDENTITY_RESPONSE_BYTES,
+    IdentityRequest,
+    IdentityRequestError,
+)
 from netbbs.link.remote_attestation import (
     MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
     MAX_ATTESTATION_RESPONSE_BYTES,
@@ -1685,6 +1690,9 @@ class LinkServer:
         app.router.add_post(
             f"{LINK_PATH_PREFIX}/attestation-pull/{{fingerprint}}", self._handle_attestation_pull
         )
+        app.router.add_post(
+            f"{LINK_PATH_PREFIX}/identities/{{fingerprint}}", self._handle_identity_request
+        )
         app.router.add_post(f"{LINK_PATH_PREFIX}/file-chunk/{{fingerprint}}", self._handle_file_chunk_request)
 
         self._runner = web.AppRunner(app)
@@ -1929,6 +1937,32 @@ class LinkServer:
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=403)
         return web.json_response({"objects": objects, "more_available": more})
+
+    async def _handle_identity_request(self, request: web.Request) -> web.Response:
+        """Serve the hello bundles this node holds for the fingerprints named (issue #630).
+
+        What lets a node verify content carried here from a node it has never
+        met, which for two outgoing-only nodes is the only way it ever can.
+        Authenticated like every other pull and gated by the same policy action
+        as the inventory it accompanies. Nothing served is trusted on this
+        node's word: a bundle verifies against itself at the requester.
+        """
+        fingerprint = request.match_info["fingerprint"]
+        try:
+            body = await request.json(loads=strict_json_loads)
+            identity_request = IdentityRequest.from_dict(body)
+        except (KeyError, TypeError, ValueError, IdentityRequestError) as exc:
+            return web.json_response({"error": f"malformed identity request: {exc}"}, status=400)
+        try:
+            self._node.handle_identity_request(fingerprint, identity_request)
+        except LinkProtocolError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        decision = await self._decide(fingerprint, LinkPolicyAction.INVENTORY)
+        if decision is not None and not decision.allowed:
+            return self._policy_rejection(decision)
+        return web.json_response(
+            {"identities": self._node.build_identity_response(identity_request.subjects)}
+        )
 
     async def _handle_attestation_pull(self, request: web.Request) -> web.Response:
         """Serve one authenticated page of this node's own signed attestations.
@@ -2442,6 +2476,45 @@ async def request_inventory(
         return body["events"], bool(body["more_available"]), wanted
     except (KeyError, TypeError, AttributeError) as exc:
         raise LinkTransportError(f"malformed inventory response from {url}: {exc}") from exc
+
+
+async def request_identities(
+    node: LinkNode,
+    session: ClientSession,
+    base_url: str,
+    identity_request: IdentityRequest,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> list[HelloMessage]:
+    """Ask a carrier for the hello bundles of nodes this one has never met (issue #630).
+
+    Returns parsed, **unverified** bundles. Verification is
+    `LinkNode.handle_introduction`'s, which treats them exactly as it treats a
+    hello received directly; nothing about the carrier vouches for them.
+    """
+    url = f"{base_url}{LINK_PATH_PREFIX}/identities/{node.identity.fingerprint}"
+    try:
+        async with session.post(
+            url, json=identity_request.to_dict(), timeout=ClientTimeout(total=timeout)
+        ) as response:
+            if response.status != 200:
+                text = await _read_bounded(response, _MAX_ERROR_BODY_BYTES)
+                raise LinkTransportError(
+                    f"identity request to {url} failed: HTTP {response.status}: {text}"
+                )
+            raw = await _read_bounded(
+                response, MAX_IDENTITY_RESPONSE_BYTES, label="identity response"
+            )
+            body = strict_json_loads(raw)
+    except (ClientError, TimeoutError, ValueError) as exc:
+        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
+    try:
+        entries = body["identities"]
+        if not isinstance(entries, list) or len(entries) > len(identity_request.subjects):
+            raise TypeError("identities is not a list of at most the subjects asked for")
+        return [HelloMessage.from_dict(entry) for entry in entries]
+    except Exception as exc:  # noqa: BLE001 -- unvalidated peer input; from_dict raises many kinds
+        raise LinkTransportError(f"malformed identity response from {url}: {exc}") from exc
 
 
 async def request_trust_objects(

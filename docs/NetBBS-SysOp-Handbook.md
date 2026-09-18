@@ -487,6 +487,18 @@ independent votes. Quarantine restricts exchange; it does not erase previously
 accepted content. A sole-authority exception deliberately weakens the usual
 multi-source policy and is marked as a safety deviation.
 
+Your node will carry content from nodes it has never spoken to. Two nodes
+that share a board through the same seed usually never contact each other, and
+two outgoing-only nodes cannot. Your node learns who such an author's node is
+from the node that carried the post, checks that identity for itself, and
+lists it under **Settings → Policy trust → Subjects**, where its screen says
+which node it was learned from. Like every new identity it starts on
+probation, so its content is withheld until you establish it with
+**Override**. If a board looks quieter than you expect, look there first.
+Such a node never leaves probation by itself, because your node has no direct
+dealings with it to judge. A name you recognise under a different technical
+identity is flagged exactly as it would be for a node you had met.
+
 To stand behind an identity for the benefit of other nodes, open it under
 **Settings → Policy trust → Subjects** and choose **Vouch**. You give a reason,
 which is published with the vouch, and confirm once. Your node signs the vouch

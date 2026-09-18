@@ -72,6 +72,7 @@ from netbbs.boards.limits import MAX_SUBJECT_BYTES as _MAX_BOARD_POST_SUBJECT_BY
 from netbbs.identity.keys import fingerprint_from_verify_key
 from netbbs.identity.encryption import derive_encryption_public_key
 from netbbs.link.events import (
+    event_content_id,
     BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_GENESIS_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
@@ -136,6 +137,7 @@ from netbbs.link.node_identity import (
     resolve_current_operational_key,
     superseded_operational_keys,
 )
+from netbbs.link.introduction import IdentityRequest, referenced_identities
 from netbbs.link.remote_attestation import AttestationPullRequest
 from netbbs.link.trust_wire import TrustPullRequest
 from netbbs.timeutil import utc_now_iso
@@ -161,6 +163,12 @@ requests of this size, since a peer refuses an oversized one outright
 and a node that keeps resending the same too-large list never pushes
 anything again."""
 _MAX_EVENTS_PER_REQUEST = MAX_EVENTS_PER_REQUEST
+
+# Identities learned from a carrier rather than from a hello (issue #630).
+# Bounded like every other remotely influenced collection here. Generous beside
+# any real network this project expects, and cheap to exceed: an identity
+# displaced at the cap is asked for again the next time it is needed.
+_MAX_INTRODUCED_IDENTITIES = 1024
 
 # Issue #124: inventory is a potentially expensive enumeration route,
 # so a captured signed request must not remain reusable. Five minutes
@@ -1351,6 +1359,102 @@ class FileChunkRequest:
         )
 
 
+# How long an event this node could not use is kept out of its inventory
+# requests before it is asked for again (issue #630). Learning the identity an
+# event was waiting for ends the wait at once; this is the bound for everything
+# else, most of all an event refused by trust policy, which becomes acceptable
+# when the SysOp establishes its author and gives no signal when that happens.
+DEFERRED_EVENT_RETRY_SECONDS = 3600
+
+# Remotely influenced, so bounded. At the cap the oldest entry goes, which only
+# means that event is offered, and set aside, once more. Each entry adds one
+# content ID to every inventory request, which has a body limit of its own.
+_MAX_DEFERRED_EVENTS = 2000
+
+
+@dataclass
+class DeferredEvents:
+    """Events a carrier offered that this node cannot use yet (issue #630).
+
+    The inventory is a diff: a node declares what it holds and is sent the
+    rest. An event it could not accept was therefore sent again on every pass,
+    and a pass reads one page, so two hundred such events were the last thing a
+    node ever received from that carrier. Declaring a set-aside event as seen
+    stops both. It is not a claim to hold the event, and costs nothing if it is
+    read as one: a responder that lacks it would ask for it back, and a node
+    only ever pushes what it originated.
+
+    In memory on purpose. After a restart each entry is offered once more and
+    set aside again, which is cheaper than persisting state whose only job is
+    to suppress a retry.
+    """
+
+    # content_id -> (resource kind, resource id, waiting-for fingerprint or None, retry-at)
+    entries: dict[str, tuple[str, str, str | None, float]] = field(default_factory=dict)
+
+    def defer(self, raw: dict, *, waiting_for: str | None, now: float) -> None:
+        resource = _event_resource(raw)
+        if resource is None:
+            return
+        content_id = event_content_id(raw["envelope"])
+        self.entries.pop(content_id, None)
+        while len(self.entries) >= _MAX_DEFERRED_EVENTS:
+            self.entries.pop(next(iter(self.entries)))
+        self.entries[content_id] = (resource[0], resource[1], waiting_for, now + DEFERRED_EVENT_RETRY_SECONDS)
+
+    def release_identity(self, fingerprint: str) -> None:
+        """An identity became known: retry what waited for it, and whatever
+        waited for nothing nameable, since that is usually an event built on
+        one of those."""
+        for content_id, (_kind, _resource, waiting_for, _retry) in list(self.entries.items()):
+            if waiting_for == fingerprint or waiting_for is None:
+                del self.entries[content_id]
+
+    def expire(self, now: float) -> None:
+        for content_id, (_kind, _resource, _waiting, retry_at) in list(self.entries.items()):
+            if retry_at <= now:
+                del self.entries[content_id]
+
+    def declared(self, now: float) -> dict[str, dict[str, set[str]]]:
+        """What to add to an inventory request: `{kind: {resource_id: {content_id}}}`."""
+        self.expire(now)
+        result: dict[str, dict[str, set[str]]] = {}
+        for content_id, (kind, resource, _waiting, _retry) in self.entries.items():
+            result.setdefault(kind, {}).setdefault(resource, set()).add(content_id)
+        return result
+
+
+def _event_resource(raw: dict) -> tuple[str, str] | None:
+    """Which carried resource an event belongs to, as the inventory names it."""
+    envelope = raw.get("envelope") if isinstance(raw, dict) else None
+    payload = envelope.get("payload") if isinstance(envelope, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    for kind, key in (("boards", "board_id"), ("channels", "channel_id"), ("file_areas", "area_id")):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return kind, value
+    return None
+
+
+class MissingDependency(LinkProtocolError):
+    """An event this node cannot use *yet*: it has not learned who signed it, or
+    has not received what it builds on (issue #630).
+
+    A `LinkProtocolError`, so every caller that refuses on one still refuses.
+    Its own type because the difference matters to exactly one caller: an
+    inventory response is a batch from a carrier, and one event by a node this
+    one has never met used to cost the whole batch, on every pass, since the
+    inventory is a diff and offers the same event again. Nothing about such an
+    event is wrong. `missing_identity` names the node whose keys are needed,
+    where that is the reason.
+    """
+
+    def __init__(self, message: str, *, missing_identity: str | None = None) -> None:
+        super().__init__(message)
+        self.missing_identity = missing_identity
+
+
 @dataclass
 class PeerRecord:
     """What this node has learned about one peer via a completed hello
@@ -1389,13 +1493,44 @@ class PeerDirectory:
     # actually completes. See `handle_peer_list`'s own docstring for why
     # nothing here is ever cryptographically checked at receipt time.
     candidate_descriptors: dict[str, EndpointDescriptor] = field(default_factory=dict)
+    # fingerprint -> an identity learned from a carrier rather than from a
+    # hello (issue #630). Cryptographically as good as a peer's record -- a
+    # hello bundle authenticates itself -- and deliberately kept apart from
+    # `peers`, because membership of `peers` is what every route checks to
+    # decide who may push, pull, relay or be mailed. An introduced identity
+    # may only ever be used to *verify* what it signed.
+    introduced: dict[str, "PeerRecord"] = field(default_factory=dict)
 
     def admit(self, record: "PeerRecord") -> None:
         """Record a newly (or freshly re-)verified peer. Clears any
         unverified candidate entry for the same fingerprint -- now
-        superseded by the real thing, never left sitting alongside it."""
+        superseded by the real thing, never left sitting alongside it --
+        and any introduced record, for the same reason."""
         self.peers[record.fingerprint] = record
         self.candidate_descriptors.pop(record.fingerprint, None)
+        self.introduced.pop(record.fingerprint, None)
+
+    def introduce(self, record: "PeerRecord", *, max_introduced: int) -> bool:
+        """Record an identity learned from a carrier. Returns whether it was kept.
+
+        Never over a real peer's record. A newer bundle replaces an older one
+        for the same fingerprint even at the cap, since that is how a rotated
+        key is learned; a brand-new fingerprint at the cap displaces the
+        oldest, because an identity dropped here is simply asked for again
+        when next needed, which a refused one would be on every pass.
+        """
+        if record.fingerprint in self.peers:
+            return False
+        existing = self.introduced.get(record.fingerprint)
+        if existing is not None:
+            older = record.descriptor.payload.get("created_at", "") < existing.descriptor.payload.get("created_at", "")
+            if older or len(record.transitions) < len(existing.transitions):
+                return False
+        elif len(self.introduced) >= max_introduced:
+            self.introduced.pop(next(iter(self.introduced)))
+        self.introduced.pop(record.fingerprint, None)
+        self.introduced[record.fingerprint] = record
+        return True
 
     def record_candidate(self, fingerprint: str, descriptor: EndpointDescriptor, *, max_candidates: int) -> bool:
         """Record a secondhand, unverified descriptor. Returns whether it
@@ -1688,6 +1823,8 @@ class LinkNode:
     inventory_requests: InventoryRequestState = field(default_factory=InventoryRequestState)
     trust_pull_requests: InventoryRequestState = field(default_factory=InventoryRequestState)
     attestation_pull_requests: InventoryRequestState = field(default_factory=InventoryRequestState)
+    identity_requests: InventoryRequestState = field(default_factory=InventoryRequestState)
+    deferred_events: DeferredEvents = field(default_factory=DeferredEvents)
     # Design doc §9.6, issue #87.
     channel_events: ChannelEventState = field(default_factory=ChannelEventState)
     # Design doc §11, issue #89.
@@ -1696,6 +1833,18 @@ class LinkNode:
     @property
     def peers(self) -> dict[str, "PeerRecord"]:
         return self.peer_directory.peers
+
+    @property
+    def introduced(self) -> dict[str, "PeerRecord"]:
+        return self.peer_directory.introduced
+
+    def known_identity(self, fingerprint: str) -> "PeerRecord | None":
+        """Whoever this node can verify a signature for: a peer, or an introduced identity.
+
+        For verification only. Anything that decides who may *do* something --
+        push events, pull, relay, receive mail -- keeps asking `peers`.
+        """
+        return self.peers.get(fingerprint) or self.introduced.get(fingerprint)
 
     @property
     def candidate_descriptors(self) -> dict[str, EndpointDescriptor]:
@@ -1812,6 +1961,31 @@ class LinkNode:
         open admission surface a stranger controls the way inbound
         hellos are.
         """
+        record = self._verify_hello_bundle(message, what="hello")
+        claimed_fingerprint = record.fingerprint
+
+        existing = self.peers.get(claimed_fingerprint)
+        if existing is not None and message.descriptor.payload["created_at"] < existing.descriptor.payload["created_at"]:
+            return existing  # stale hello -- keep what's on file, not an error
+
+        if existing is None and max_peers is not None and len(self.peers) >= max_peers:
+            raise LinkProtocolError(
+                f"hello from {claimed_fingerprint} refused: already at this node's own "
+                f"max_peers limit ({max_peers})"
+            )
+
+        self.peer_directory.admit(record)
+        return record
+
+    def _verify_hello_bundle(self, message: HelloMessage, *, what: str) -> PeerRecord:
+        """Check a hello bundle against nothing but itself, and return its record.
+
+        The bundle authenticates itself: only the holder of the root key could
+        produce a transition chain that verifies against it and whose current
+        signing key signed the descriptor. That is why the same check serves a
+        hello received directly and one handed over by a carrier (issue #630):
+        who delivered it never entered into it.
+        """
         root_verify_key = nacl.signing.VerifyKey(message.root_public_key)
         claimed_fingerprint = fingerprint_from_verify_key(root_verify_key)
 
@@ -1846,26 +2020,78 @@ class LinkNode:
         from netbbs.link.node_profiles import profile_claims_are_canonical
 
         if not profile_claims_are_canonical(message.descriptor.payload):
-            raise LinkProtocolError(f"hello from {claimed_fingerprint} carries invalid profile claims")
+            raise LinkProtocolError(f"{what} from {claimed_fingerprint} carries invalid profile claims")
 
-        existing = self.peers.get(claimed_fingerprint)
-        if existing is not None and message.descriptor.payload["created_at"] < existing.descriptor.payload["created_at"]:
-            return existing  # stale hello -- keep what's on file, not an error
-
-        if existing is None and max_peers is not None and len(self.peers) >= max_peers:
-            raise LinkProtocolError(
-                f"hello from {claimed_fingerprint} refused: already at this node's own "
-                f"max_peers limit ({max_peers})"
-            )
-
-        record = PeerRecord(
+        return PeerRecord(
             fingerprint=claimed_fingerprint,
             root_public_key=message.root_public_key,
             transitions=message.transitions,
             descriptor=message.descriptor,
         )
-        self.peer_directory.admit(record)
+
+    def handle_introduction(self, message: HelloMessage) -> PeerRecord | None:
+        """Learn a third node's identity from a carrier (issue #630, design doc §10.6).
+
+        Verified exactly as a direct hello is. Returns the record if it was
+        kept, `None` if this node already knows the identity better (a real
+        peer, or a newer introduced bundle) or the bundle is this node's own.
+        Raises `LinkProtocolError` for a bundle that does not verify.
+
+        What this grants is narrow on purpose. The identity can be used to
+        verify carried content and signed objects, and appears to the SysOp
+        as a probationary trust subject. It is not a peer: it cannot push
+        events, pull, relay, or be mailed, all of which still require a
+        completed hello.
+        """
+        record = self._verify_hello_bundle(message, what="introduction")
+        if record.fingerprint == self.identity.fingerprint:
+            return None
+        if not self.peer_directory.introduce(record, max_introduced=_MAX_INTRODUCED_IDENTITIES):
+            return None
         return record
+
+    def handle_events_tolerantly(
+        self, sender_fingerprint: str, raw_events: list[dict]
+    ) -> tuple[list[str], list[tuple[dict, MissingDependency]]]:
+        """`handle_events`, for a batch a carrier assembled (issue #630).
+
+        Events are handled one at a time, in order. One this node cannot use
+        *yet* -- its signer unknown, or what it builds on not received -- is
+        set aside and returned with the reason, and the rest are handled. Any
+        other refusal still propagates: an event that is *wrong* rejects the
+        response, as before.
+
+        Handling them singly also closes a quieter loss. A batch that raised
+        half-way had already put its earlier events into this node's memory,
+        the caller then persisted none of them, and since they now counted as
+        known they were never accepted, and so never persisted, again.
+        """
+        if len(raw_events) > _MAX_EVENTS_PER_REQUEST:
+            raise LinkProtocolError(
+                f"{sender_fingerprint} sent {len(raw_events)} events in one request, more than "
+                f"the {_MAX_EVENTS_PER_REQUEST} this node accepts in one request -- refusing"
+            )
+        accepted: list[str] = []
+        deferred: list[tuple[dict, MissingDependency]] = []
+        for raw in raw_events:
+            try:
+                accepted.extend(self.handle_events(sender_fingerprint, [raw]))
+            except MissingDependency as exc:
+                deferred.append((raw, exc))
+            except LinkProtocolError as exc:
+                # An event signed by an *introduced* identity that does not
+                # verify is, in the ordinary case, this node holding a bundle
+                # from before that node rotated its key: a third node's
+                # transitions are never gossiped, so a fresher bundle is the
+                # only way to learn them. Set aside and named, so the caller
+                # asks for one. It also means an identity this node merely
+                # heard of can never cost it a carrier's whole response, which
+                # a peer it has actually met still can.
+                stale = [fp for fp in referenced_identities(raw) if fp in self.introduced]
+                if not stale:
+                    raise
+                deferred.append((raw, MissingDependency(str(exc), missing_identity=stale[0])))
+        return accepted, deferred
 
     def build_peer_list(self) -> PeerListMessage:
         """This node's own currently-verified peers' endpoint
@@ -1984,7 +2210,7 @@ class LinkNode:
         directly once this method returns without raising.
         """
         if sender_fingerprint not in self.peers:
-            raise LinkProtocolError(
+            raise MissingDependency(
                 f"received a relay_consent_request from {sender_fingerprint}, which has no "
                 "completed hello -- refusing (no relay from a stranger yet)"
             )
@@ -2029,7 +2255,7 @@ class LinkNode:
         after this returns without raising.
         """
         if sender_fingerprint not in self.peers:
-            raise LinkProtocolError(
+            raise MissingDependency(
                 f"received a relay_consent_response from {sender_fingerprint}, which has no "
                 "completed hello -- refusing (no relay from a stranger yet)"
             )
@@ -2205,6 +2431,80 @@ class LinkNode:
         while len(seen) >= _MAX_SEEN_TRUST_PULL_NONCES:
             seen.pop(next(iter(seen)))
         seen[replay_key] = received_at
+
+    def handle_identity_request(
+        self,
+        sender_fingerprint: str,
+        request: IdentityRequest,
+        *,
+        now_iso: str | None = None,
+    ) -> None:
+        """Authenticate one request for third nodes' hello bundles (issue #630).
+
+        The same checks every other pull makes, for the same reasons: a
+        completed hello with the requester, the signed requester matching the
+        wire peer, this node named as responder, a signature under the
+        requester's current key, a five-minute freshness window, and a bounded
+        nonce cache. What is being asked for is public-key material and a
+        descriptor this node already shares in its peer list, but who may ask
+        is still "someone this node has met", like everything else.
+        """
+        if sender_fingerprint not in self.peers:
+            raise LinkProtocolError(
+                "refusing an identity request from a peer without a completed hello"
+            )
+        if request.requester_fingerprint != sender_fingerprint:
+            raise LinkProtocolError("identity request requester does not match the wire peer")
+        if request.responder_fingerprint != self.identity.fingerprint:
+            raise LinkProtocolError("identity request is addressed to a different responder")
+        verify_key = self._resolve_sender_signing_key(
+            self.peers[sender_fingerprint], sender_fingerprint, "identity_request"
+        )
+        if not request.verifies(verify_key):
+            raise LinkProtocolError("identity request signature does not verify")
+        received_at = _parse_aware_timestamp(now_iso or utc_now_iso(), field_name="current time")
+        created_at = _parse_aware_timestamp(
+            request.created_at, field_name="identity_request.created_at"
+        )
+        if abs((received_at - created_at).total_seconds()) > _TRUST_PULL_FRESHNESS_SECONDS:
+            raise LinkProtocolError(
+                "identity request is outside the five-minute freshness window"
+            )
+        cutoff = received_at.timestamp() - _TRUST_PULL_FRESHNESS_SECONDS
+        seen = self.identity_requests.seen_nonces
+        for key, seen_at in list(seen.items()):
+            if seen_at.timestamp() < cutoff:
+                seen.pop(key, None)
+        replay_key = (sender_fingerprint, request.nonce)
+        if replay_key in seen:
+            raise LinkProtocolError("identity request reuses a recent nonce")
+        while len(seen) >= _MAX_SEEN_TRUST_PULL_NONCES:
+            seen.pop(next(iter(seen)))
+        seen[replay_key] = received_at
+
+    def build_identity_response(self, subjects: tuple[str, ...]) -> list[dict]:
+        """The hello bundles this node holds for `subjects`; unknown ones are simply absent.
+
+        Peers and introduced identities alike. The peer list shares only what
+        this node learned first-hand, because a secondhand *address* is a
+        weaker claim the further it travels. A bundle is not a claim: it
+        verifies against itself or it does not, so how this node came by it
+        changes nothing for the requester, and refusing to pass on an
+        introduced one would only break a board carried across two hops.
+        """
+        bundles: list[dict] = []
+        for fingerprint in subjects:
+            record = self.known_identity(fingerprint)
+            if record is None:
+                continue
+            bundles.append(
+                HelloMessage(
+                    root_public_key=record.root_public_key,
+                    transitions=_signing_transitions(record.transitions, record.fingerprint),
+                    descriptor=record.descriptor,
+                ).to_dict()
+            )
+        return bundles
 
     def handle_attestation_pull_request(
         self,
@@ -2584,11 +2884,12 @@ class LinkNode:
                 # stranger" now means the *origin*, not the *carrier*,
                 # must already be known.
                 origin_fingerprint = genesis.payload.get("origin_fingerprint")
-                origin_peer = self.peers.get(origin_fingerprint)
+                origin_peer = self.known_identity(origin_fingerprint)
                 if origin_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_genesis originated by {origin_fingerprint}, which has "
-                        "no completed hello with this node -- refusing (no relay from a stranger)"
+                        "no completed hello with this node -- refusing (no relay from a stranger)",
+                        missing_identity=origin_fingerprint,
                     )
 
                 board_id = genesis.payload["board_id"]
@@ -2617,7 +2918,7 @@ class LinkNode:
 
                 board_id = post.payload.get("board_id")
                 if self.board_events.genesis_for(board_id) is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_post for board_id {board_id!r}, which has no verified "
                         "board_genesis on file -- refusing (no relay from a stranger yet)"
                     )
@@ -2635,11 +2936,12 @@ class LinkNode:
                 # must independently be a known peer, not required to
                 # equal sender_fingerprint.
                 home_node_fingerprint = author.get("home_node_fingerprint")
-                author_peer = self.peers.get(home_node_fingerprint)
+                author_peer = self.known_identity(home_node_fingerprint)
                 if author_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_post vouched for by {home_node_fingerprint}, which has "
-                        "no completed hello with this node -- refusing (no relay from a stranger)"
+                        "no completed hello with this node -- refusing (no relay from a stranger)",
+                        missing_identity=home_node_fingerprint,
                     )
 
                 signing_verify_key = self._resolve_sender_signing_key(author_peer, home_node_fingerprint, "board_post")
@@ -2661,7 +2963,7 @@ class LinkNode:
                 root_post_id = edit.payload.get("root_post_id")
                 root_raw = self.events.get(root_post_id)
                 if root_raw is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_post_edit for root post {root_post_id!r}, which is "
                         "unknown -- refusing (no relay from a stranger yet)"
                     )
@@ -2677,12 +2979,13 @@ class LinkNode:
                     )
                 # Issue #85: same relaxation as board_post above.
                 home_node_fingerprint = edit_author.get("home_node_fingerprint")
-                edit_author_peer = self.peers.get(home_node_fingerprint)
+                edit_author_peer = self.known_identity(home_node_fingerprint)
                 if edit_author_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_post_edit vouched for by {home_node_fingerprint}, "
                         "which has no completed hello with this node -- refusing (no relay "
-                        "from a stranger)"
+                        "from a stranger)",
+                        missing_identity=home_node_fingerprint,
                     )
 
                 existing_chain = self.board_events.edit_chain(root_post_id)
@@ -2735,13 +3038,13 @@ class LinkNode:
 
                 root_post_id = mod_edit.payload.get("root_post_id")
                 if root_post_id not in self.events:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_post_moderator_edit for root post {root_post_id!r}, "
                         "which is unknown -- refusing (no relay from a stranger yet)"
                     )
                 board_id = mod_edit.payload.get("board_id")
                 if self.board_events.genesis_for(board_id) is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_post_moderator_edit for board_id {board_id!r}, which "
                         "has no verified board_genesis on file -- refusing (no relay from a "
                         "stranger yet)"
@@ -2771,12 +3074,13 @@ class LinkNode:
                 # must independently be a known peer, regardless of who
                 # relayed this edit.
                 current_origin = self.current_board_origin(board_id)
-                origin_peer = self.peers.get(current_origin)
+                origin_peer = self.known_identity(current_origin)
                 if origin_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_post_moderator_edit for board_id {board_id!r} whose "
                         f"current origin ({current_origin!r}) has no completed hello with this "
-                        "node -- refusing (no relay from a stranger)"
+                        "node -- refusing (no relay from a stranger)",
+                        missing_identity=current_origin,
                     )
 
                 signing_verify_key = self._resolve_sender_signing_key(
@@ -2803,13 +3107,13 @@ class LinkNode:
 
                 root_post_id = tombstone.payload.get("root_post_id")
                 if root_post_id not in self.events:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_post_tombstone for root post {root_post_id!r}, which "
                         "is unknown -- refusing (no relay from a stranger yet)"
                     )
                 board_id = tombstone.payload.get("board_id")
                 if self.board_events.genesis_for(board_id) is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_post_tombstone for board_id {board_id!r}, which has "
                         "no verified board_genesis on file -- refusing (no relay from a stranger "
                         "yet)"
@@ -2835,12 +3139,13 @@ class LinkNode:
                     )
 
                 current_origin = self.current_board_origin(board_id)
-                origin_peer = self.peers.get(current_origin)
+                origin_peer = self.known_identity(current_origin)
                 if origin_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_post_tombstone for board_id {board_id!r} whose "
                         f"current origin ({current_origin!r}) has no completed hello with this "
-                        "node -- refusing (no relay from a stranger)"
+                        "node -- refusing (no relay from a stranger)",
+                        missing_identity=current_origin,
                     )
 
                 signing_verify_key = self._resolve_sender_signing_key(
@@ -2868,11 +3173,12 @@ class LinkNode:
                     continue
 
                 origin_fingerprint = channel_genesis.payload.get("origin_fingerprint")
-                origin_peer = self.peers.get(origin_fingerprint)
+                origin_peer = self.known_identity(origin_fingerprint)
                 if origin_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a channel_genesis originated by {origin_fingerprint}, which has "
-                        "no completed hello with this node -- refusing (no relay from a stranger)"
+                        "no completed hello with this node -- refusing (no relay from a stranger)",
+                        missing_identity=origin_fingerprint,
                     )
 
                 channel_id = channel_genesis.payload["channel_id"]
@@ -2905,7 +3211,7 @@ class LinkNode:
 
                 channel_id = channel_message.payload.get("channel_id")
                 if self.channel_events.genesis_for(channel_id) is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a channel_message for channel_id {channel_id!r}, which has no "
                         "verified channel_genesis on file -- refusing (no relay from a stranger yet)"
                     )
@@ -2940,11 +3246,12 @@ class LinkNode:
                         "(only node_vouched_user is built)"
                     )
                 home_node_fingerprint = author.get("home_node_fingerprint")
-                author_peer = self.peers.get(home_node_fingerprint)
+                author_peer = self.known_identity(home_node_fingerprint)
                 if author_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a channel_message vouched for by {home_node_fingerprint}, which "
-                        "has no completed hello with this node -- refusing (no relay from a stranger)"
+                        "has no completed hello with this node -- refusing (no relay from a stranger)",
+                        missing_identity=home_node_fingerprint,
                     )
 
                 signing_verify_key = self._resolve_sender_signing_key(
@@ -2968,12 +3275,13 @@ class LinkNode:
                     continue
 
                 origin_fingerprint = file_area_genesis.payload.get("origin_fingerprint")
-                origin_peer = self.peers.get(origin_fingerprint)
+                origin_peer = self.known_identity(origin_fingerprint)
                 if origin_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a file_area_genesis originated by {origin_fingerprint}, which "
                         "has no completed hello with this node -- refusing (no relay from a "
-                        "stranger)"
+                        "stranger)",
+                        missing_identity=origin_fingerprint,
                     )
 
                 area_id = file_area_genesis.payload["area_id"]
@@ -3012,7 +3320,7 @@ class LinkNode:
                 area_id = descriptor.payload.get("area_id")
                 genesis = self.file_area_events.genesis_for(area_id)
                 if genesis is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a file_descriptor for area_id {area_id!r}, which has no "
                         "verified file_area_genesis on file -- refusing (no relay from a "
                         "stranger yet)"
@@ -3020,12 +3328,13 @@ class LinkNode:
                 self._check_file_descriptor_content_size(descriptor.payload, sender_fingerprint)
 
                 origin_fingerprint = genesis.payload["origin_fingerprint"]
-                origin_peer = self.peers.get(origin_fingerprint)
+                origin_peer = self.known_identity(origin_fingerprint)
                 if origin_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a file_descriptor for area_id {area_id!r} whose origin "
                         f"({origin_fingerprint!r}) has no completed hello with this node -- "
-                        "refusing (no relay from a stranger)"
+                        "refusing (no relay from a stranger)",
+                        missing_identity=origin_fingerprint,
                     )
 
                 signing_verify_key = self._resolve_sender_signing_key(
@@ -3048,7 +3357,7 @@ class LinkNode:
 
                 board_id = offer.payload.get("board_id")
                 if self.board_events.genesis_for(board_id) is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_origin_transfer_offer for board_id {board_id!r}, "
                         "which has no verified board_genesis on file -- refusing (no relay "
                         "from a stranger yet)"
@@ -3065,12 +3374,13 @@ class LinkNode:
                 # the board's current origin must independently be a
                 # known peer, regardless of who relayed this offer.
                 current_origin = self.current_board_origin(board_id)
-                origin_peer = self.peers.get(current_origin)
+                origin_peer = self.known_identity(current_origin)
                 if origin_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_origin_transfer_offer for board_id {board_id!r} whose "
                         f"current origin ({current_origin!r}) has no completed hello with this "
-                        "node -- refusing (no relay from a stranger)"
+                        "node -- refusing (no relay from a stranger)",
+                        missing_identity=current_origin,
                     )
                 old_origin_fingerprint = offer.payload.get("old_origin_fingerprint")
                 if old_origin_fingerprint != current_origin:
@@ -3146,7 +3456,7 @@ class LinkNode:
 
                 offer = self.board_lifecycle.pending_offer(board_id)
                 if offer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_origin_transfer_accepted for board_id {board_id!r}, "
                         "which has no outstanding offer on file -- refusing (no relay from a "
                         "stranger yet)"
@@ -3166,12 +3476,13 @@ class LinkNode:
                 # Issue #85: same relaxation as the offer branch above --
                 # the offer's named new origin must independently be a
                 # known peer, regardless of who relayed this acceptance.
-                new_origin_peer = self.peers.get(new_origin_fingerprint)
+                new_origin_peer = self.known_identity(new_origin_fingerprint)
                 if new_origin_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_origin_transfer_accepted for board_id {board_id!r} "
                         f"whose named new origin ({new_origin_fingerprint!r}) has no completed "
-                        "hello with this node -- refusing (no relay from a stranger)"
+                        "hello with this node -- refusing (no relay from a stranger)",
+                        missing_identity=new_origin_fingerprint,
                     )
 
                 signing_verify_key = self._resolve_sender_signing_key(
@@ -3204,7 +3515,7 @@ class LinkNode:
 
                 board_id = closure.payload.get("board_id")
                 if self.board_events.genesis_for(board_id) is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_closure for board_id {board_id!r}, which has no "
                         "verified board_genesis on file -- refusing (no relay from a stranger "
                         "yet)"
@@ -3225,12 +3536,13 @@ class LinkNode:
                     )
 
                 current_origin = self.current_board_origin(board_id)
-                origin_peer = self.peers.get(current_origin)
+                origin_peer = self.known_identity(current_origin)
                 if origin_peer is None:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"received a board_closure for board_id {board_id!r} whose current "
                         f"origin ({current_origin!r}) has no completed hello with this node -- "
-                        "refusing (no relay from a stranger)"
+                        "refusing (no relay from a stranger)",
+                        missing_identity=current_origin,
                     )
 
                 current_head = self.current_board_lifecycle_head(board_id)
@@ -3275,7 +3587,7 @@ class LinkNode:
                     )
                 home_node_fingerprint = sender_info.get("home_node_fingerprint")
                 if home_node_fingerprint != sender_fingerprint:
-                    raise LinkProtocolError(
+                    raise MissingDependency(
                         f"{sender_fingerprint} sent a link_message vouching for a different "
                         f"home node ({home_node_fingerprint!r}) -- refusing (no relay from a "
                         "stranger yet)"

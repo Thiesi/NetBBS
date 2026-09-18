@@ -2849,4 +2849,35 @@ MIGRATIONS = [
             ON link_trust_vouch_intents(subject_id) WHERE withdrawn_at IS NULL;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #630: identities learned from a carrier rather than from a hello. Same "
+            "columns as `link_peers`, and deliberately a separate table: a row in "
+            "`link_peers` means a completed hello, which is what mail, relay and every "
+            "pull route check, and a flag column would have made every present and future "
+            "reader of that table responsible for remembering it. `introduced_by` is the "
+            "carrier that served the bundle, kept for the SysOp's benefit only; the bundle "
+            "verifies against itself, so nothing is trusted on the carrier's word. "
+            "`link_known_identities` is the union the display layer reads, so that a "
+            "friendly name and, more to the point, the warning about a familiar name under "
+            "a different key apply to an introduced node exactly as to a peer. A peer's row "
+            "wins where both exist."
+        ),
+        sql="""
+        CREATE TABLE link_introduced_identities (
+            fingerprint       TEXT PRIMARY KEY,
+            root_public_key   TEXT NOT NULL,
+            transitions_json  TEXT NOT NULL,
+            descriptor_json   TEXT NOT NULL,
+            introduced_by     TEXT NOT NULL,
+            updated_at        TEXT NOT NULL
+        );
+
+        CREATE VIEW link_known_identities AS
+            SELECT fingerprint, descriptor_json FROM link_peers
+            UNION ALL
+            SELECT fingerprint, descriptor_json FROM link_introduced_identities
+             WHERE fingerprint NOT IN (SELECT fingerprint FROM link_peers);
+        """,
+    ),
 ]
