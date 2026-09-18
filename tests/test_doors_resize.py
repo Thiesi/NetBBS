@@ -338,7 +338,7 @@ def _signal_real_door(script, tmp_path, env, first_marker, prelude=(), wait=20.0
         data = json.loads(info.read_text(encoding="utf-8"))
         _republish_terminal_size(info, data, 40, 12)
         os.kill(proc.pid, signal.SIGUSR1)
-        assert drain_until(b"\\x1b[2J", start=mark), "the door never redrew"
+        assert drain_until(b"\x1b[2J", start=mark), "the door never redrew"
         time.sleep(0.6)
         seen.extend(proc.stdout.read() or b"")
         assert proc.poll() is None, "SIGUSR1 ended the door"
@@ -358,7 +358,7 @@ def test_the_real_voidrunner_survives_the_signal_and_redraws_forty_columns_wide(
     (tmp_path / "door_info.json").write_text(json.dumps(
         {"user_id": 77, "handle": "Tester", "terminal_width": 80, "terminal_height": 24}), encoding="utf-8")
     after = _signal_real_door(_VOIDRUNNER_PATH, tmp_path, {"VOIDRUNNER_SAVE_DIR": str(tmp_path)}, b"STATION SERVICES")
-    rows = plain_bytes(after.rsplit(b"\\x1b[2J", 1)[-1]).decode("utf-8", "replace").splitlines()
+    rows = plain_bytes(after.rsplit(b"\x1b[2J", 1)[-1]).decode("utf-8", "replace").splitlines()
     assert any("Command Deck" in row for row in rows)
     assert max(len(row) for row in rows) <= 40, rows
 
@@ -374,6 +374,81 @@ def test_the_real_war_dialer_survives_the_signal_and_redraws_its_switchboard(tmp
     # Past the first-visit primer, whose "press any key" is not an action bar.
     after = _signal_real_door(script, tmp_path, {"WAR_DIALER_DB_PATH": str(world)}, b"Press any key",
                               prelude=[(b" ", b"SWITCHBOARD")])
-    rows = wd._strip_ansi(after.rsplit(b"[2J", 1)[-1].decode("utf-8", "replace")).splitlines()
+    rows = wd._strip_ansi(after.rsplit(b"\x1b[2J", 1)[-1].decode("utf-8", "replace")).splitlines()
     assert any("SWITCHBOARD" in row for row in rows)
     assert max(len(row) for row in rows) <= 40, rows
+
+
+def test_the_guard_is_not_claimed_where_there_is_no_such_signal(monkeypatch):
+    from netbbs.doors import runtime
+
+    monkeypatch.setattr(runtime, "_CHILDREN_IGNORE_RESIZE_SIGNAL", False)
+    if not hasattr(runtime.signal, "SIGUSR1"):
+        assert runtime.children_start_ignoring_resize_signal() is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
+def test_a_child_spawned_after_the_guard_survives_a_signal_it_has_no_handler_for(monkeypatch):
+    """The window the guard exists for: a process that has not yet said what to
+    do with SIGUSR1, signalled the moment it exists (issue #645 review)."""
+    import signal
+    import subprocess
+
+    from netbbs.doors import runtime
+
+    before = signal.getsignal(signal.SIGUSR1)
+    monkeypatch.setattr(runtime, "_CHILDREN_IGNORE_RESIZE_SIGNAL", False)
+    try:
+        assert runtime.children_start_ignoring_resize_signal() is True
+        # Through an exec, as the launcher does it, and with no handler anywhere.
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import os,sys; os.execv(sys.executable,[sys.executable,'-c','import time; time.sleep(3)'])"])
+        try:
+            os.kill(child.pid, signal.SIGUSR1)
+            import time
+            time.sleep(1.0)
+            os.kill(child.pid, signal.SIGUSR1)
+            time.sleep(0.3)
+            assert child.poll() is None, "SIGUSR1 ended a child that had no handler"
+        finally:
+            child.kill(); child.wait(timeout=5)
+    finally:
+        signal.signal(signal.SIGUSR1, before)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
+def test_something_else_owning_the_signal_is_left_alone(monkeypatch):
+    import signal
+
+    from netbbs.doors import runtime
+
+    before = signal.getsignal(signal.SIGUSR1)
+    monkeypatch.setattr(runtime, "_CHILDREN_IGNORE_RESIZE_SIGNAL", False)
+    mine = lambda signum, frame: None
+    try:
+        signal.signal(signal.SIGUSR1, mine)
+        assert runtime.children_start_ignoring_resize_signal() is False
+        assert signal.getsignal(signal.SIGUSR1) is mine
+    finally:
+        signal.signal(signal.SIGUSR1, before)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the idle wait only exists on POSIX")
+def test_a_key_the_decoder_already_holds_is_not_waited_for(monkeypatch):
+    """Escape, then a hotkey a moment later: the hotkey is read off the pipe while
+    deciding what the Escape was and kept in `pending`. The kernel has nothing
+    left to report, so a wait on the descriptor would hold that key until the
+    next one arrived (issue #645 review)."""
+    vr = _voidrunner()
+    read_end, write_end = os.pipe()
+    try:
+        reader = vr._DoorInput(vr._StdioBytes(os.fdopen(read_end, "rb", buffering=0, closefd=False)))
+        reader.pending = b"M"
+        monkeypatch.setattr(vr, "_INPUT_READER", reader)
+        monkeypatch.setattr(vr, "_RESIZE_PENDING", False)
+        import time
+        started = time.monotonic()
+        assert vr._resized_while_idle() is False
+        assert time.monotonic() - started < 0.2, "waited on an empty pipe with a key in hand"
+    finally:
+        os.close(read_end); os.close(write_end)

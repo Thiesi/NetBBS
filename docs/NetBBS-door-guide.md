@@ -585,9 +585,14 @@ NetBBS's own Voidrunner and War Dialer need no setting: both handle the signal,
 and NetBBS signals them whenever the script a registration launches is this
 install's own copy (or `-m netbbs.doors.bundled.<name>`), profile or no profile.
 A copy of either script kept somewhere else is treated like any other door and
-follows the profile switch. Voidrunner redraws the screen the caller is on at its
-next action bar; War Dialer takes the new size at its switchboard, so a screen
-opened before the resize keeps its size until the caller leaves it. Neither
+follows the profile switch. Voidrunner takes the new size at its next action bar
+and redraws; a few of its list screens cut their pages once on entry and keep
+them until the caller leaves the screen. War Dialer takes the new size at its
+switchboard, so a screen opened before the resize keeps its size until the caller
+leaves it. A profile that gives either door a PTY works the same way through
+`SIGWINCH`. NetBBS ignores `SIGUSR1` in its own process so that everything it
+launches starts out ignoring it too: a door cannot install a handler before its
+interpreter is up, and a resize in that first second would otherwise end it. Neither
 refuses a terminal that shrinks below 40 by 12 mid-visit; they keep drawing for
 that floor. Retro Trivia does not follow a resize.
 

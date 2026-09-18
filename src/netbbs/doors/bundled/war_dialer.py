@@ -4582,6 +4582,11 @@ def install_resize_handler() -> bool:
     if not hasattr(signal, "SIGUSR1"):
         return False
     signal.signal(signal.SIGUSR1, _note_resize)
+    # A profile that gives the door a PTY is told with SIGWINCH instead, after the
+    # same drop-file rewrite. Its default action is to be ignored, which is what
+    # the door did with it.
+    if hasattr(signal, "SIGWINCH"):
+        signal.signal(signal.SIGWINCH, _note_resize)
     return True
 
 
