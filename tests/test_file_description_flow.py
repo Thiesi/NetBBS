@@ -545,6 +545,48 @@ def test_e_describes_a_pending_upload_from_a_listing_that_is_not_empty(db, lane,
     assert "game.zip" not in session.visible_output.split("Describe a file in")[0]
 
 
+def test_describing_a_pending_upload_twice_in_one_visit_sees_the_first_edit(db, lane, alice, bob, monkeypatch):
+    """Claude review of PR #638: `[E]`'s candidate list holds the page's
+    rows *plus* the caller's pending uploads, and only the page half was
+    being amended after a save. A second `[E]` in the same visit then
+    offered the pre-edit row — the picker said "(no description yet)"
+    and the editor reopened on the old text, inviting the caller to
+    overwrite work they had just saved."""
+    from netbbs.files import entries as entries_module
+    from netbbs.files.entries import approve_file
+
+    timestamps = iter(f"2026-01-01T00:00:0{i}.000000Z" for i in range(3))
+    monkeypatch.setattr(entries_module, "utc_now_iso", lambda: next(timestamps))
+    area = create_file_area(db, "downloads", creator=bob, moderated=True)
+    grant_permissions(
+        db, bob, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.APPROVE, granted_by=bob,
+    )
+    theirs = upload_file(db, area, bob, "bobs.zip", b"his own")
+    approve_file(db, theirs, approved_by=bob)
+    mine = upload_file(db, area, alice, "game.zip", b"payload")
+
+    # Describe row 02 (the pending upload), then do it again.
+    session = FakeSession(
+        editor_keys=[_key("e"), _key("0"), _key("2"), _key("e"), _key("0"), _key("2")],
+        lines=["first wording", "", "second wording", ""],
+    )
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    # The second editor opened *on the saved text* and appended to it,
+    # which is what proves the candidate row was refreshed. With the
+    # stale row this read "second wording" alone: the editor started
+    # from the pre-edit `None` and the first save was overwritten.
+    assert get_file(db, mine.file_id).description == "first wording\nsecond wording"
+    # And the picker row for it: "no description yet" the first time,
+    # the saved wording the second, rather than claiming twice over that
+    # the file has none.
+    output = session.visible_output
+    assert "game.zip - awaiting approval — (no description yet)" in output
+    assert "game.zip - awaiting approval — first wording" in output
+
+
 def test_the_empty_screen_offers_nothing_to_describe_when_nothing_is_waiting(db, lane, alice):
     """And `e` there bells without dropping the caller out of the area —
     the empty line that used to mean "back" is `[B]ack` now.

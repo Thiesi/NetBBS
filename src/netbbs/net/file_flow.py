@@ -1001,8 +1001,19 @@ async def _show_area(
                 # not part of the listing, and rendering it as a row
                 # would show everyone's approved-only page a file that
                 # is not in it.
+                #
+                # The pending half is amended in place instead (Claude
+                # review). `_describe_candidates` closes over this list,
+                # so leaving it alone made a second `[E]` in the same
+                # visit offer the pre-edit `FileEntry`: the picker still
+                # said "(no description yet)" and the editor reopened on
+                # the old text, inviting the caller to overwrite what
+                # they had just saved. Neither half is re-queried --
+                # this screen's cursor is positional, which is why
+                # `_handle_describe` hands the amended row back at all.
                 amended = {entry.file_id: entry for entry in described.entries}
                 page = replace(page, entries=[amended.get(e.file_id, e) for e in page.entries])
+                describable_pending = [amended.get(e.file_id, e) for e in describable_pending]
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "remote":
