@@ -238,6 +238,7 @@ from netbbs.link.transport import (
 from netbbs.link.trust_carriage import (
     carries_trust_objects_for,
     clear_trust_deposit_position,
+    clear_trust_deposit_refusal,
     load_own_trust_objects_to_deposit,
     load_trust_page_for_pull,
     record_trust_deposit_refusal,
@@ -1017,19 +1018,21 @@ async def _pull_trust_subscriptions(
     """Pull configured reporters explicitly; trust objects are never flood-gossiped."""
     reporters = await lane.run(list_trusted_reporter_fingerprints)
     for issuer in reporters:
-        # Before the state is consulted. A reporter named by fingerprint alone
+        # Before probation ends the matter. A reporter named by fingerprint alone
         # is no trust subject yet, reads as probationary and is skipped below;
         # learning who it is is what lists it, so that it can be established.
         # And again for one known only by introduction, which nobody else will
         # ever refresh: it may have published no relay when it was learned, or
         # have moved to another since. The memo in `_introduce_identities`
         # makes that an hourly question, not one per pass.
+        state = await lane.run(node_transport_state, issuer) if enforce_trust_policy else TrustState.ESTABLISHED
+        if state == TrustState.BLOCKED:
+            continue
         if issuer not in node.peers:
             await _ask_peers_who_a_reporter_is(
                 node, session, lane, issuer, refresh=issuer in node.introduced,
             )
-        state = await lane.run(node_transport_state, issuer) if enforce_trust_policy else TrustState.ESTABLISHED
-        if state == TrustState.BLOCKED or state == TrustState.PROBATIONARY:
+        if state == TrustState.PROBATIONARY:
             continue
         revocations_only = state == TrustState.QUARANTINED
         record = node.known_identity(issuer)
@@ -1046,9 +1049,12 @@ async def _pull_trust_subscriptions(
                 node, session, lane, issuer, direct, revocations_only=revocations_only,
             )
             continue
-        if await lane.run(carries_trust_objects_for, issuer):
+        if issuer in node.relaying_for and await lane.run(carries_trust_objects_for, issuer):
             # This node is the reporter's relay: what it would pull is already
-            # here, and it reads it the way a subscriber reads a carrier.
+            # here, and it reads it the way a subscriber reads a carrier. Only
+            # while it still relays for it. What it carried for a node that
+            # has since moved to another relay is never added to, and reading
+            # that would mean never seeing a later revocation.
             await _pull_one_trust_reporter(
                 node, session, lane, issuer, [_OWN_CARRIAGE],
                 responder_fingerprint=node.identity.fingerprint, revocations_only=revocations_only,
@@ -1087,6 +1093,9 @@ async def _pull_trust_subscriptions(
 
 _PULL_COMPLETED, _PULL_STALLED, _PULL_FAILED = "completed", "stalled", "failed"
 
+# In place of a carrier's fingerprint in `LinkNode.unanswered_identities`.
+_REPORTER_REFRESH = "reporter-refresh"
+
 # In place of an address, for the pull a relay makes of what it carries itself.
 _OWN_CARRIAGE = "local:carried"
 
@@ -1109,13 +1118,32 @@ async def _ask_peers_who_a_reporter_is(
     """
     asked = 0
     now = time.time()
-    for fingerprint, peer in list(node.peers.items()):
+    if refresh:
+        # Hourly, under a key of its own. The per-carrier memo is shared with
+        # the path that refreshes an identity because an event needs it now,
+        # and "nothing new for the reporter refresh" must not silence that.
+        if node.unanswered_identities.get((_REPORTER_REFRESH, issuer), 0) > now:
+            return
+        while len(node.unanswered_identities) >= _MAX_UNANSWERED_IDENTITIES:
+            node.unanswered_identities.pop(next(iter(node.unanswered_identities)))
+        node.unanswered_identities[(_REPORTER_REFRESH, issuer)] = now + DEFERRED_EVENT_RETRY_SECONDS
+    candidates = list(node.peers.items())
+    known = node.known_identity(issuer)
+    published = (known.descriptor.payload.get("relays") or []) if known is not None else []
+    if isinstance(published, list) and any(fp in node.peers for fp in published):
+        # A node that relays for it is who can say; the rest of the peer set
+        # would each be asked once an hour to no purpose.
+        candidates = [(fp, node.peers[fp]) for fp in published if fp in node.peers]
+    for fingerprint, peer in candidates:
         addresses = _dialable_addresses(peer.descriptor)
         if not addresses or node.unanswered_identities.get((fingerprint, issuer), 0) > now:
             continue
-        if await _introduce_identities(
+        learned = await _introduce_identities(
             node, session, addresses[0], fingerprint, lane, [issuer], refresh=refresh
-        ):
+        )
+        if refresh:
+            node.unanswered_identities.pop((fingerprint, issuer), None)
+        if learned:
             return
         asked += 1
         if asked >= _MAX_PEERS_ASKED_ABOUT_A_REPORTER:
@@ -1145,6 +1173,11 @@ async def _trust_carriers_for(
 
 # Pages of this node's own objects handed to one relay in one pass.
 _MAX_TRUST_DEPOSIT_PAGES_PER_PASS = 5
+
+# What a relay itself says when it will not take a deposit: not relaying for
+# this node (403), no such route (404, 405), full (507). A 502 is a proxy's
+# answer and says nothing about the relay.
+_TRUST_DEPOSIT_REFUSALS = (403, 404, 405, 507)
 
 
 async def _deposit_at_one_relay(
@@ -1202,6 +1235,16 @@ async def _deposit_own_trust_objects(
                     own_fingerprint=own, relay_fingerprint=relay_fingerprint,
                 )
                 if not objects or position is None:
+                    if _page == 0 and continues_from is not None:
+                        # Nothing new, and still worth one request: it names
+                        # what this node last handed over, and a relay that
+                        # no longer remembers it has lost something. Waiting
+                        # for the next vouch to find that out could leave a
+                        # withdrawn one served without its revocation.
+                        await _deposit_at_one_relay(
+                            node, session, lane, relay_fingerprint, base_urls, [], continues_from
+                        )
+                        await lane.run(clear_trust_deposit_refusal, relay_fingerprint)
                     break
                 result = await _deposit_at_one_relay(
                     node, session, lane, relay_fingerprint, base_urls, objects, continues_from
@@ -1228,7 +1271,7 @@ async def _deposit_own_trust_objects(
             # pass until it is upgraded; one that has stopped relaying for
             # this node answers 403 until relay selection notices. Recorded as
             # well as logged: the vouch screen says where vouches go.
-            if getattr(exc, "status", None) is not None:
+            if getattr(exc, "status", None) in _TRUST_DEPOSIT_REFUSALS:
                 await lane.run(record_trust_deposit_refusal, relay_fingerprint, str(exc))
             _logger.warning(
                 "Link trust deposit: relay %s did not take this node's trust objects: %s",

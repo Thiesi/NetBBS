@@ -3274,9 +3274,9 @@ verification itself actually needs.
 receiving node verify content signed by a node it has never met, by
 fetching that node's self-certifying bundle from the carrier. Neither
 reaches mail. An introduced identity is kept apart from peers precisely so
-that it cannot be addressed, pushed to or pulled from, and the carrier
-answers only for nodes whose content it has just served, which a mail
-recipient need not be.
+that it cannot be addressed, pushed to or pulled from, and a carrier
+answers only for nodes whose content it has just served or that it relays
+for (§8.11), which a mail recipient need not be.
 
 **What a real tier-2 design would require, concretely.** The bundle
 exchange exists (§8.11) and verifies a bundle exactly as if its subject had
@@ -3853,20 +3853,24 @@ order they are stored in is the order subscribers read them in, and a third
 party replaying a withdrawn vouch ahead of its revocation would revive it.
 The depositor keeps a position per relay, sends only what is new, and starts
 over at a relay it selects afresh. Each deposit names the last object handed
-over before it. A relay that does not remember that object has lost
+over before it, kept by the relay or not, and with nothing new to send the
+depositor still makes one such request a pass. A relay that does not
+remember that object has lost
 something, to a restored backup above all, and could otherwise be left
 serving a vouch without the revocation that followed it; it answers 409 and
 stores nothing, and the depositor starts over there, where what the relay
 still holds keeps its place in the order. A relay that refuses for any other
-reason is logged, and the vouch screen of the depositing node says that a
-relay did not take its vouches at the last attempt.
+reason (it does not relay for the depositor, lacks the route, or is full) is
+logged, and the vouch screen of the depositing node says that a relay did
+not take its vouches at the last attempt.
 
 What is deposited is *carried*, and kept apart from what the relay has
 admitted. Admission is application: an object already in the admitted store
 counts as replayed and is never applied, and a vouch the relay merely carries
 must not look like one it counts. A relay whose own SysOp names the depositor
 a reporter cannot pull from it any more than anyone else can, so in its own
-sync pass it reads what it carries exactly as a subscriber reads a carrier:
+sync pass, for as long as it relays for that node, it reads what it carries
+exactly as a subscriber reads a carrier:
 under a cursor, object by object, with the same skips and the same stall.
 That works whether the depositor was named before the deposit or after it,
 follows a widened grant, and leaves a rejected batch to be retried. Nothing is
@@ -3884,8 +3888,10 @@ comes back against the reporter's identity however it learned it, by hello or
 by introduction (§8.11); a relay answers an identity request for a node it
 relays for, and a page that stops at a key the subscriber has not learned
 makes it ask that relay for a fresher bundle at once. A reporter this node has
-not met is asked about at up to three dialable peers that have not already
-said, within the hour, that they have nothing new: one named by fingerprint
+not met, and has not blocked, is asked about at the relays it publishes that
+this node has met, or failing those at up to three dialable peers, and for
+a reporter already known by introduction no more than once an hour: one named
+by fingerprint
 alone so that it becomes a trust subject the SysOp can establish at all, and
 one known by introduction so that its descriptor is refreshed, since it may
 have published no relay when it was learned or have moved to another since.
@@ -3986,9 +3992,10 @@ and policy configuration undisclosed.
 
 The Link HTTP enforcement point runs only after enough cryptographic parsing to
 attribute a request, but before remotely influenced persistence or service work.
-The normal runtime enables this gate for hello, events, inventory, trust pulls,
-file chunks, relay consent/mailboxes, and peer introduction. Peer-list exchange
-and file-chunk pulls use authenticated POSTs from completed peers; Link v1
+The normal runtime enables this gate for hello, events, inventory, trust pulls
+and deposits, file chunks, relay consent/mailboxes, and peer introduction.
+Peer-list exchange, file-chunk pulls and trust deposits use authenticated
+POSTs from completed peers; Link v1
 reuses an empty, signed inventory-request authorization envelope so requester,
 responder, freshness, nonce replay protection, and current operational-key
 verification have one existing definition rather than a second near-identical
@@ -10121,9 +10128,9 @@ skipped it; review caught that it turned a rotation into permanent loss.
 the same change for the same reason.
 
 **Not done, deliberately.** No vouch for the node's own users and none for
-itself. No trust signals. No carrier pulls in the sync loop, which still asks
-each reporter directly. A subscriber told nothing about *why* an object was
-skipped beyond its diagnostics log.
+itself. No trust signals. A subscriber told nothing about *why* an object was
+skipped beyond its diagnostics log. (Carrier pulls in the sync loop, also
+left out of this slice, followed in issue #627.)
 
 ### Issue #630 — content from a node this one has never met — closed
 

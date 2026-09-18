@@ -86,11 +86,12 @@ def test_a_relay_takes_the_objects_of_a_node_it_relays_for(db, cast):
     r, a = cast["R"], cast["A"]
     signed = vouch(a)
 
-    verified, unverifiable = r.handle_trust_deposit(
+    verified, unverifiable, last_sent = r.handle_trust_deposit(
         a.identity.fingerprint, authorization(db, a, r), [signed.to_dict()]
     )
 
     assert [obj.content_id for obj in verified] == [signed.content_id] and unverifiable == 0
+    assert last_sent == signed.content_id
 
 
 def test_a_node_this_one_does_not_relay_for_is_refused(db, cast):
@@ -114,7 +115,7 @@ def test_only_the_issuer_may_deposit_because_only_the_issuer_may_order(db, cast)
 
     # Signed by A, deposited by another node R relays for: A's key does not
     # verify under the depositor's, so it is left out...
-    verified, unverifiable = r.handle_trust_deposit(
+    verified, unverifiable, _last_sent = r.handle_trust_deposit(
         other.identity.fingerprint, authorization(db, other, r), [vouch(a).to_dict()]
     )
     assert verified == [] and unverifiable == 1
@@ -145,11 +146,40 @@ def test_what_an_earlier_key_signed_is_left_out_and_the_rest_is_taken(db, cast):
     current = vouch(a, "current")
     stale = vouch(a, "stale", identity=bootstrap_node_identity("not-a's-key"))
 
-    verified, unverifiable = r.handle_trust_deposit(
+    verified, unverifiable, _last_sent = r.handle_trust_deposit(
         a.identity.fingerprint, authorization(db, a, r), [stale.to_dict(), current.to_dict()]
     )
 
     assert [obj.content_id for obj in verified] == [current.content_id] and unverifiable == 1
+
+
+def test_a_page_that_ends_in_an_object_the_relay_left_out_does_not_read_as_lost(db, cast):
+    """The depositor counts in what it sent. If the relay remembered only what
+    it kept, a page ending in an object an earlier key signed would make the
+    next deposit look out of step, the depositor would start over, send the
+    same page, and do so on every pass for good."""
+    r, a = cast["R"], cast["A"]
+    current = vouch(a, "current")
+    stale = vouch(a, "stale", identity=bootstrap_node_identity("not-a's-key"))
+
+    verified, _unverifiable, last_sent = r.handle_trust_deposit(
+        a.identity.fingerprint, authorization(db, a, r), [current.to_dict(), stale.to_dict()]
+    )
+    store_deposited_trust_objects(db, a.identity.fingerprint, verified, last_sent_content_id=last_sent)
+
+    assert last_sent == stale.content_id
+    # The next deposit continues from the stale object, and is in step.
+    store_deposited_trust_objects(
+        db, a.identity.fingerprint, [vouch(a, "next")], after_content_id=stale.content_id,
+    )
+    # A page of nothing but left-out objects moves the mark too.
+    verified, _unverifiable, last_sent = r.handle_trust_deposit(
+        a.identity.fingerprint, authorization(db, a, r), [stale.to_dict()]
+    )
+    store_deposited_trust_objects(db, a.identity.fingerprint, verified, last_sent_content_id=last_sent)
+    store_deposited_trust_objects(
+        db, a.identity.fingerprint, [vouch(a, "after that")], after_content_id=stale.content_id,
+    )
 
 
 def test_an_authentic_object_this_release_does_not_understand_is_carried_all_the_same(db, cast):
@@ -167,7 +197,7 @@ def test_an_authentic_object_this_release_does_not_understand_is_carried_all_the
         "signature": base64.b64encode(a.identity.signing_key.sign(canonical_bytes(envelope))).decode("ascii"),
     }
 
-    verified, unverifiable = r.handle_trust_deposit(
+    verified, unverifiable, _last_sent = r.handle_trust_deposit(
         a.identity.fingerprint, authorization(db, a, r), [novel, vouch(a).to_dict()]
     )
     stored, _held = store_deposited_trust_objects(db, a.identity.fingerprint, verified)

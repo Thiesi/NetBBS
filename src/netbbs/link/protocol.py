@@ -2553,10 +2553,14 @@ class LinkNode:
 
     def handle_trust_deposit(
         self, sender_fingerprint: str, authorization: "InventoryRequest", raw_objects: object
-    ) -> tuple[list, int]:
+    ) -> tuple[list, int, str | None]:
         """Authenticate a deposit of a node's own trust objects (issue #627).
 
-        Returns the objects that verify and the number that do not. The
+        Returns the objects that verify, the number that do not, and the
+        content ID of the last object *sent*, kept or not: that is what the
+        depositor will say its next deposit continues from, so it is what this
+        node has to remember, or a page ending in an object an earlier key
+        signed would read as lost on every pass. The
         sender must be a completed peer this node has agreed to relay for:
         relay consent (§8.5) is the existing opt-in and the existing cap on
         whom this node holds things for. `authorization` is the signed, fresh,
@@ -2591,6 +2595,12 @@ class LinkNode:
         verify_key = self.resolve_peer_signing_key(sender_fingerprint, "trust deposit")
         verified = []
         unverifiable = 0
+        last_sent: str | None = None
+        if raw_objects:
+            try:
+                last_sent = event_content_id(raw_objects[-1]["envelope"])
+            except Exception as exc:  # noqa: BLE001 -- unvalidated input; `ContentIdError` is a bare Exception
+                raise LinkProtocolError(f"malformed trust object in deposit: {exc}") from exc
         for raw in raw_objects:
             try:
                 obj = SignedTrustObject.from_dict(raw, issuer_verify_key=verify_key)
@@ -2613,7 +2623,7 @@ class LinkNode:
             if not isinstance(payload, dict) or payload.get("issuer_fingerprint") != sender_fingerprint:
                 raise LinkProtocolError("a node may deposit only the trust objects it issued itself")
             verified.append(obj)
-        return verified, unverifiable
+        return verified, unverifiable, last_sent
 
     def handle_identity_request(
         self,

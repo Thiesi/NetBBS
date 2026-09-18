@@ -2388,9 +2388,9 @@ async def _how_vouches_leave_this_node(
         if refusing:
             # Fail clearly: a relay that predates this, is full, or has stopped
             # relaying says so to the sync pass, and only the log heard it.
+            who = "It" if relays == 1 else f"{refusing} of them"
             return (
-                f"{text} {refusing} of them did not take them at the last attempt; "
-                "the Link log says why.",
+                f"{text} {who} did not take them at the last attempt; the Link log says why.",
                 WARNING_COLOR,
             )
         return (text, MUTED_COLOR)

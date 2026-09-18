@@ -3532,8 +3532,8 @@ def test_a_subscriber_learns_an_unmet_reporters_new_key_from_the_relay_and_reads
             async with aiohttp.ClientSession() as session:
                 for name in ("A", "A", "B", "B"):
                     await net.dial(name, session)
-                # B has now asked R once more and been told nothing changed.
-                assert (net.ids["R"].fingerprint, a) in net.nodes["B"].unanswered_identities
+                # B has refreshed what it knows of A within the hour.
+                assert ("reporter-refresh", a) in net.nodes["B"].unanswered_identities
 
                 net.ids["A"] = rotate_operational_key(net.ids["A"], purpose="signing")
                 net.nodes["A"].identity = net.ids["A"]
@@ -3547,5 +3547,103 @@ def test_a_subscriber_learns_an_unmet_reporters_new_key_from_the_relay_and_reads
         asyncio.run(scenario())
         assert held_for_second() == 1
         assert len(net.nodes["B"].introduced[a].transitions) > 2
+    finally:
+        net.close()
+
+
+def test_a_quiet_depositor_still_notices_a_relay_that_lost_what_it_was_handed(tmp_path, caplog):
+    """A depositor sends only what is new, so with nothing new it would never
+    find out, and the relay could go on serving a vouch without the revocation
+    that followed it. One request a pass names what was last handed over."""
+    net, _subject, _held_on, _pass_on_r = _vouching_three_nodes(tmp_path)
+    a = net.ids["A"].fingerprint
+
+    def carried():
+        return net.dbs["R"].db.connection.execute(
+            "SELECT COUNT(*) FROM link_trust_carried_objects WHERE issuer_fingerprint = ?", (a,)
+        ).fetchone()[0]
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.dial("A", session)
+                assert carried() == 1
+                # R is restored to a backup from before the deposit.
+                connection = net.dbs["R"].db.connection
+                connection.execute("DELETE FROM link_trust_carried_objects")
+                connection.execute("DELETE FROM link_trust_carriage_marks")
+                connection.commit()
+
+                with caplog.at_level(logging.WARNING, logger="netbbs.link.sync"):
+                    await net.dial("A", session)  # nothing new to send; told it is out of step
+                assert carried() == 0
+                await net.dial("A", session)      # everything again
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert carried() == 1
+        assert any("no longer holds what this node last handed it" in r.getMessage() for r in caplog.records)
+    finally:
+        net.close()
+
+
+def test_a_relays_refusal_is_remembered_for_the_vouch_screen_until_it_takes_a_deposit_again(tmp_path):
+    from netbbs.link.trust_carriage import relays_refusing_trust_deposits
+
+    net, _subject, _held_on, _pass_on_r = _vouching_three_nodes(tmp_path)
+    a, r = net.ids["A"].fingerprint, net.ids["R"].fingerprint
+
+    def refusing():
+        return relays_refusing_trust_deposits(net.dbs["A"].db, [r])
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.dial("A", session)
+                assert refusing() == []
+                agreed = net.nodes["R"].relaying_for.pop(a)
+                await net.dial("A", session)
+                assert refusing() == [r]
+                net.nodes["R"].relaying_for[a] = agreed
+                await net.dial("A", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert refusing() == []
+    finally:
+        net.close()
+
+
+def test_a_relay_stops_reading_its_own_copy_once_it_no_longer_relays_for_the_reporter(tmp_path, caplog):
+    """What it carried for a node that has moved on is never added to, so
+    reading it would mean never seeing a later revocation. It looks for the
+    reporter's relays like any other subscriber, and says so when it finds none."""
+    net, subject, held_on, pass_on_r = _vouching_three_nodes(tmp_path)
+    a = net.ids["A"].fingerprint
+    configure_trust_domain(net.dbs["R"].db, "friends", display_name="Friends")
+    configure_trusted_reporter(net.dbs["R"].db, a, domain_id="friends", scopes=[], can_vouch_nodes=True)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.dial("A", session)
+                await pass_on_r(session)
+                assert [row[0] for row in held_on("R")] == [None]
+                net.nodes["R"].relaying_for.pop(a)
+                with caplog.at_level(logging.WARNING, logger="netbbs.link.sync"):
+                    await pass_on_r(session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert any("names no relay" in r.getMessage() for r in caplog.records)
     finally:
         net.close()

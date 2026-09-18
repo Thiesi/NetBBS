@@ -1982,7 +1982,7 @@ class LinkServer:
         except (KeyError, TypeError, ValueError) as exc:
             return web.json_response({"error": f"malformed trust deposit: {exc}"}, status=400)
         try:
-            verified, unverifiable = self._node.handle_trust_deposit(
+            verified, unverifiable, last_sent = self._node.handle_trust_deposit(
                 fingerprint, authorization, body["objects"]
             )
         except LinkProtocolError as exc:
@@ -1992,7 +1992,8 @@ class LinkServer:
             return self._policy_rejection(decision)
         try:
             stored, held = await self._lane.run(
-                store_deposited_trust_objects, fingerprint, verified, after_content_id=after_content_id,
+                store_deposited_trust_objects, fingerprint, verified,
+                after_content_id=after_content_id, last_sent_content_id=last_sent,
             )
         except TrustCarriageFull as exc:
             return web.json_response({"error": str(exc)}, status=507)

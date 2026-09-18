@@ -54,7 +54,8 @@ class TrustCarriageOutOfStep(TrustWireError):
 
 def store_deposited_trust_objects(
     db: Database, issuer_fingerprint: str, objects: list[SignedTrustObject], *,
-    after_content_id: str | None = None, now_iso: str | None = None,
+    after_content_id: str | None = None, last_sent_content_id: str | None = None,
+    now_iso: str | None = None,
 ) -> tuple[list[str], list[str]]:
     """Keep `objects`, already verified as `issuer_fingerprint`'s own, for carriage.
 
@@ -73,6 +74,11 @@ def store_deposited_trust_objects(
     the revocation that followed it. If it does not match what this node
     remembers, nothing is stored and the depositor is told to start over.
     `None` is a depositor starting over, which is always accepted.
+
+    `last_sent_content_id` is what to remember for next time: the last object
+    of the request as it was sent, which need not be one of `objects`. A
+    depositor counts in what it sent, and what this node left out, because an
+    earlier key signed it or it had expired, was handed over all the same.
     """
     now = now_iso or utc_now_iso()
     stored: list[str] = []
@@ -132,13 +138,14 @@ def store_deposited_trust_objects(
                 ),
             )
             stored.append(obj.content_id)
-        if objects:
+        handed_over = last_sent_content_id or (objects[-1].content_id if objects else None)
+        if handed_over is not None:
             db.connection.execute(
                 """INSERT INTO link_trust_carriage_marks (issuer_fingerprint, last_content_id, updated_at)
                    VALUES (?, ?, ?)
                    ON CONFLICT(issuer_fingerprint) DO UPDATE SET
                        last_content_id = excluded.last_content_id, updated_at = excluded.updated_at""",
-                (issuer_fingerprint, objects[-1].content_id, now),
+                (issuer_fingerprint, handed_over, now),
             )
     return stored, held
 
@@ -275,6 +282,16 @@ def record_trust_deposit_refusal(db: Database, relay_fingerprint: str, refusal: 
                ON CONFLICT(relay_fingerprint) DO UPDATE SET
                    last_refusal = excluded.last_refusal, updated_at = excluded.updated_at""",
             (relay_fingerprint, refusal[:500], utc_now_iso()),
+        )
+
+
+def clear_trust_deposit_refusal(db: Database, relay_fingerprint: str) -> None:
+    """A relay answered, so whatever it refused last time is over."""
+    with db.connection:
+        db.connection.execute(
+            "UPDATE link_trust_deposit_cursors SET last_refusal = NULL WHERE relay_fingerprint = ? "
+            "AND last_refusal IS NOT NULL",
+            (relay_fingerprint,),
         )
 
 
