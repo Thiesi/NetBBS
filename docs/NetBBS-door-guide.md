@@ -576,6 +576,16 @@ its profile enables **Signal door on terminal resize**: NetBBS then rewrites
 `SIGUSR1` — the default action for that signal is to terminate the process,
 so enabling it for a door which ignores it kills the caller's game.
 
+NetBBS's own Voidrunner and War Dialer need no setting: both handle the signal,
+and NetBBS signals them whenever the script a registration launches is this
+install's own copy (or `-m netbbs.doors.bundled.<name>`), profile or no profile.
+A copy of either script kept somewhere else is treated like any other door and
+follows the profile switch. Voidrunner redraws the screen the caller is on at its
+next action bar; War Dialer takes the new size at its switchboard, so a screen
+opened before the resize keeps its size until the caller leaves it. Neither
+refuses a terminal that shrinks below 40 by 12 mid-visit; they keep drawing for
+that floor. Retro Trivia does not follow a resize.
+
 A profile which pins columns and rows asked for a fixed screen and is never
 resized; neither are DOS doors, whose geometry is fixed by design, nor remote
 services, which negotiate their own window size. Resizes are followed within

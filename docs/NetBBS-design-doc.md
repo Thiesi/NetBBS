@@ -5605,7 +5605,18 @@ here since #172 is self-contained):
   republishing the same static metadata file with the new geometry and
   signalling the door leader with `SIGUSR1`; opt-in because that
   signal's default action terminates a process which does not handle
-  it. A profile which pins width/height, a DOS door and a remote
+  it. The one exception is NetBBS's own doors (issue #645): the bundled
+  catalogue records which of them handle the signal, and the runtime
+  signals such a door without any opt-in when the script a registration
+  launches resolves to this install's own copy, or names it as a module.
+  Host and door ship in one wheel, so the handler is there by
+  construction; a copy of the script elsewhere may be any version and
+  follows the profile like anybody's door. This was chosen over setting
+  the profile flag from the door gallery because a bundled door is
+  usually registered with no profile at all, and because it needs no
+  migration for doors already registered on running nodes. The doors'
+  handlers only set a flag, which an action bar notices within a quarter
+  of a second. A profile which pins width/height, a DOS door and a remote
   service are each left alone. This supersedes v1's original "no live
   terminal-resize propagation" rule, which matched every classic door's
   static 80x24-era assumption; the metadata itself stays a file rather

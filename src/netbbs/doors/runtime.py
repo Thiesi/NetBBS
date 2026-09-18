@@ -333,21 +333,39 @@ async def _relay(session, endpoint, proc=None, stop_grace=DOOR_STOP_GRACE_SECOND
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def resize_mode(profile, endpoint_kind):
+def resize_mode(profile, endpoint_kind, *, bundled_follows_resize=False):
     """How a running door is told the caller resized, or None for not at all.
 
     Policy only, so it can be checked without a POSIX host; the caller adds
     the platform gate. A profile which pins width/height asked for a fixed
     screen, and DOS geometry is fixed by design, so only a native door
     following the caller's own terminal is ever notified.
+
+    `bundled_follows_resize` is NetBBS vouching for its own door: the script
+    being launched is this install's copy and the catalogue says it handles the
+    signal. That needs no opt-in from the SysOp, and it is what lets a bundled
+    door registered with no profile at all -- the gallery's default -- follow
+    a resize (issue #645). For anybody else's door the profile still decides.
     """
-    if profile is None or profile.adapter != "native" or profile.width:
+    if profile is None:
+        return "signal" if bundled_follows_resize and endpoint_kind in ("stdio", "socketpair") else None
+    if profile.adapter != "native" or profile.width:
         return None
     if endpoint_kind == "pty":
         return "pty"
-    if profile.resize_signal and endpoint_kind in ("stdio", "socketpair"):
+    if (profile.resize_signal or bundled_follows_resize) and endpoint_kind in ("stdio", "socketpair"):
         return "signal"
     return None
+
+
+def bundled_follows_resize(door) -> bool:
+    """Whether `door` launches this install's own copy of a door that handles
+    the resize signal."""
+    from netbbs.doors.bundled import launched_bundled_door
+
+    install_dir = door.profile.install_dir if door.profile else None
+    entry = launched_bundled_door(door.executable_path, tuple(door.args), install_dir)
+    return bool(entry and entry.follows_resize)
 
 
 def _republish_terminal_size(info_path, info, width, height):
@@ -599,7 +617,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             elif kind == "socketpair":
                 diagnostic_tasks.append(asyncio.create_task(_diagnostics(proc.stdout, tail)))
             diagnostic_tasks.append(asyncio.create_task(_diagnostics(proc.stderr, tail)))
-            mode = resize_mode(profile, kind)
+            mode = resize_mode(profile, kind, bundled_follows_resize=bundled_follows_resize(door))
             if os.name == "posix" and mode is not None:
                 resize_task = asyncio.create_task(_forward_resize(
                     session, proc, info_path, info, published=(width, height),

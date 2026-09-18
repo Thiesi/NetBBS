@@ -832,7 +832,7 @@ def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
     clock = [now]
     choices = iter(("C", "Q"))
 
-    def choose(valid):
+    def choose(valid, **_):  # the switchboard also passes follow_resize (#645)
         choice = next(choices)
         if choice == "C":
             clock[0] += wd.DAY
@@ -930,7 +930,7 @@ def test_open_session_can_continue_after_season_refresh(tmp_path, monkeypatch):
     clock = [now]
     choices = iter(('C', 'C', 'Q'))
 
-    def choose(valid):
+    def choose(valid, **_):  # the switchboard also passes follow_resize (#645)
         choice = next(choices)
         assert choice in valid
         return choice
@@ -998,7 +998,7 @@ def test_history_pages_fit_terminal_and_preserve_long_unicode_records(tmp_path, 
     if unseen_only:
         monkeypatch.setattr(wd, "read_input_key", lambda: " ")
     else:
-        def choose(valid):
+        def choose(valid, **_):  # the switchboard also passes follow_resize (#645)
             if "END" in _last_screen(written):
                 return "B"
             return "N"
@@ -1034,7 +1034,7 @@ def test_history_ack_skips_partial_records_and_new_arrivals(tmp_path, monkeypatc
         wd.record_event(conn, 1, None, f"Receipt {index}", now)
     ids = [e.id for e in wd.history_events(conn, 1)]
     choices = iter(["A", "B"])
-    def choose(valid):
+    def choose(valid, **_):  # the switchboard also passes follow_resize (#645)
         key = next(choices)
         if key == "A":
             wd.record_event(conn, 1, None, "Arrived while reading", now)
@@ -1252,7 +1252,7 @@ def test_text_screen_pages_preserve_content_with_clear_back_path(monkeypatch, wi
     written = []
     monkeypatch.setattr(wd, "out", written.append)
     monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
-    def choose(valid):
+    def choose(valid, **_):  # the switchboard also passes follow_resize (#645)
         assert "B" in valid
         screen = _last_screen(written)
         return "B" if "LAST RECORD" in screen else "N"
@@ -1350,7 +1350,7 @@ def test_preview_requires_reading_to_last_page_before_act(monkeypatch):
     written = []
     monkeypatch.setattr(wd, "out", written.append)
     states = []
-    def choose(valid):
+    def choose(valid, **_):  # the switchboard also passes follow_resize (#645)
         states.append(valid)
         return "A" if "A" in valid else "N"
     monkeypatch.setattr(wd, "read_menu_choice", choose)
@@ -1366,7 +1366,7 @@ def test_picker_pages_fit_and_only_select_complete_visible_records(monkeypatch, 
     monkeypatch.setattr(wd, "out", written.append)
     monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
     states = []
-    def choose(valid):
+    def choose(valid, **_):  # the switchboard also passes follow_resize (#645)
         states.append(valid)
         return "2" if "2" in valid else "N"
     monkeypatch.setattr(wd, "read_menu_choice", choose)
@@ -1615,7 +1615,7 @@ def test_rival_shield_expiry_is_public_and_private_resources_stay_hidden(tmp_pat
     monkeypatch.setattr(wd, '_OUTPUT_WIDTH', width)
     written = []
     monkeypatch.setattr(wd, 'out', written.append)
-    def choose(valid):
+    def choose(valid, **_):  # the switchboard also passes follow_resize (#645)
         page = re.search(r'page (\d+)/(\d+)', _last_screen(written))
         return 'N' if page and page.group(1) != page.group(2) else 'B'
     monkeypatch.setattr(wd, 'read_menu_choice', choose)
@@ -4183,7 +4183,7 @@ def test_a_selectable_key_always_arrives_with_its_entry(width, height, monkeypat
     monkeypatch.setattr(wd, "_OUTPUT_WIDTH", width)
     seen: list[str] = []
 
-    def choose(valid):
+    def choose(valid, **_):  # the switchboard also passes follow_resize (#645)
         seen.append(valid)
         return "B" if len(seen) > 12 else "N"
 
