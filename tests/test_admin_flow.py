@@ -1793,9 +1793,22 @@ def test_who_screen_explains_what_selecting_a_session_does(db, lane, sysop):
     """Design doc -- node management, Thiesi's own dogfood-testing
     report: previously the screen never said anywhere that selecting a
     session disconnects it -- a SysOp only found out by doing it."""
-    session = FakeSession(["n", "w", "b", "b", "b"])
-    asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
-    assert "Select a session below to disconnect it." in _written_text(session)
+    async def scenario():
+        node_controls = _node_controls()
+        session = FakeSession(["n", "w", "b", "b", "b"])
+        # With a session to select: over an empty list the line would be an
+        # instruction about nothing, and the picker says "No active sessions."
+        node_controls.session_registry.enter(session)
+        try:
+            await admin_menu(session, lane, sysop, node_controls=node_controls)
+        finally:
+            node_controls.session_registry.leave(session)
+        text = _visible(_written_text(session))
+        # Shown by the picker itself, above its list -- written before it, the
+        # picker's own clear erased it under redraw-in-place.
+        assert text.index("Select a session below to disconnect it.") < text.index("page 1/1, 1 total")
+
+    asyncio.run(scenario())
 
 
 def test_who_screen_delivers_a_custom_message_to_the_target_before_disconnecting(db, lane, sysop):

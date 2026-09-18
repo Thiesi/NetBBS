@@ -1934,8 +1934,20 @@ everyone but me" -- and a stand-in is not the session. That is why the ~160
 console outcome sites were converted to `_announce_line` at the write, by an
 AST pass (a `write_line` that is the last output before `return`, `continue`,
 the end of the function, or an `await _draw_*()`), rather than by wrapping the
-calls in a recorder. `Shutdown sequence started.` is deliberately still a
-direct write: the session may not live to see another prompt.
+calls in a recorder. An *immediate* `Shutdown sequence started.` is
+deliberately still a direct write: the session may not live to see another
+prompt. Two things that pass missed, both found in review: an outcome followed
+by statements that were themselves not yet converted (their awaits made it look
+non-final -- re-run the pass over its own output until it finds nothing), and
+outcomes written through `_write_wrapped_subtitle` rather than `write_line`
+(the banner menus' "No banner file found", the maintenance toggle).
+
+Not everything a `_TrailingOutput` still holds is an outcome. A flow that draws
+a title and a progress line before its first raw byte (`send_file_to_caller`)
+still holds both when it fails early, and announcing a title announces its
+clear -- which erased the screen the console had just redrawn. `announce_rest`
+queues only the last paragraph (these flows open their outcome with a blank
+row) and never a line that clears the terminal.
 
 A test for this class has to
 turn the preference on and look at what is on the terminal *after the last

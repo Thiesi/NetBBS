@@ -149,3 +149,82 @@ def test_an_outcome_never_reaches_another_sessions_console(db, lane, sysop):
     assert admin_flow._take_notices(second) == []
     assert len(admin_flow._take_notices(first)) == 1
     assert admin_flow._take_notices(first) == []
+
+
+# -- found by review of the first cut --------------------------------------------
+
+
+def _node_controls():
+    from netbbs.net.maintenance import MaintenanceMode
+    from netbbs.net.session_registry import ActiveSessionRegistry
+    from netbbs.net.shutdown import NodeControls
+
+    return NodeControls(
+        session_registry=ActiveSessionRegistry(), maintenance=MaintenanceMode(),
+        shutdown_event=asyncio.Event(), graceful_delay_seconds=60.0, backup_identity_dir=None,
+    )
+
+
+def test_a_captured_flow_announces_its_outcome_not_the_screen_it_drew_on_the_way():
+    """`send_file_to_caller` writes a title (with its clear) and a progress line
+    before it touches the terminal in raw bytes. When it failed before the first
+    of them, all of that was still held -- and announcing the title's clear
+    erased the screen the console had just redrawn."""
+    from netbbs.net import admin_flow
+    from netbbs.rendering import ERROR_COLOR, clear_screen, colored
+
+    session = ScriptedSession([])
+    flow = admin_flow._TrailingOutput(session)
+
+    async def failing_download():
+        await flow.write_line("\r\n" + clear_screen() + "Node / Files / Uploads / Download")
+        await flow.write_line("Starting Zmodem send of 'a.zip' -- accept the transfer in your terminal.")
+        await flow.write_line(colored("\r\nDownload failed: blob is missing", fg_color=ERROR_COLOR))
+
+    asyncio.run(failing_download())
+    flow.announce_rest()
+    notices = admin_flow._take_notices(session)
+    assert len(notices) == 1 and "Download failed: blob is missing" in notices[0]
+    assert clear_screen() not in "".join(notices)
+    assert session.written == []  # nothing was written behind the console's back either
+
+
+def test_a_captured_flow_still_writes_what_it_said_before_asking_something():
+    from netbbs.net import admin_flow
+
+    session = ScriptedSession(["y"])
+    flow = admin_flow._TrailingOutput(session)
+
+    async def asks():
+        await flow.write_line("Releasing a name starts a cooldown.")
+        answer = await flow.read_key()
+        await flow.write_line(f"Released ({answer}).")
+
+    asyncio.run(asks())
+    assert "Releasing a name starts a cooldown." in "".join(session.written)
+    flow.announce_rest()
+    (notice,) = admin_flow._take_notices(session)
+    assert "Released (y)." in notice
+
+
+def test_enabling_a_banner_with_no_file_says_why_on_the_menu(db, lane, sysop):
+    rows = _screen(lane, sysop, ["s", "m", "n", "w", "e"])
+    assert rows[0].endswith("Welcome banner")
+    assert any("No banner file found at" in row for row in rows)
+    assert any("[E]nable" in row for row in rows)  # the menu is still there under it
+
+
+def test_browsing_an_empty_banner_directory_explains_itself_without_a_keypress(db, lane, sysop):
+    rows = _screen(lane, sysop, ["s", "m", "n", "w", "f"])
+    assert rows[0].endswith("Welcome banner")  # back on the menu, not held on a pause
+    assert any("No other .ans files found in" in row for row in rows)
+    assert not any("Press any key" in row for row in rows)
+
+
+def test_toggling_maintenance_mode_confirms_on_the_redrawn_node_menu(db, lane, sysop):
+    session = ScriptedSession(["n", "m"])
+    with pytest.raises(_Exhausted):
+        asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
+    screen = " ".join(" ".join(session.on_terminal()).split())
+    assert "Maintenance mode: ON" in screen  # the panel's own state
+    assert "Maintenance mode is now ON. New non-SysOp logins are blocked" in screen  # and the outcome

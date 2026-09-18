@@ -757,6 +757,7 @@ def _announce(session: Session, text: str, *, error: bool = False, color: int | 
     _pending_notices.setdefault(session, []).append(colored(sanitize_text(text), fg_color=color))
 
 
+_CLEAR_SEQUENCE = "\x1b[2J"
 _LEADING_BREAK = re.compile(r"^((?:\x1b\[[0-9;]*m)*)(?:\r\n)+")
 # An outcome that changed nothing reads muted, not as a green success.
 _NEUTRAL_OUTCOMES = ("Cancelled", "No change", "Already ", "No ", "Nothing ")
@@ -862,9 +863,24 @@ class _TrailingOutput:
         return await self._session.read_byte()
 
     def announce_rest(self) -> None:
+        """Queue the flow's outcome: the last paragraph of what is still held.
+
+        Not everything still held is an outcome. `send_file_to_caller` writes a
+        screen title (with its clear) and "Starting Zmodem send..." and only
+        then touches the terminal in raw bytes -- so when it fails before the
+        first of them (the blob is gone from disk), all three lines are still
+        here. Announced, that title's clear erased the screen the console had
+        just redrawn, leaving the error over a bare prompt. These flows open
+        their outcome with a blank row (a leading CR LF on the line), so the
+        outcome is what follows the last such break; and a line that clears
+        the terminal is never one."""
         held, self._held = self._held, []
-        for text in held:
-            if text.strip():
+        start = 0
+        for index, text in enumerate(held):
+            if not text.strip() or _LEADING_BREAK.match(text):
+                start = index
+        for text in held[start:]:
+            if text.strip() and _CLEAR_SEQUENCE not in text:
                 _announce_line(self._session, text)
 
 
@@ -7916,6 +7932,7 @@ async def _diagnostic_log_screen(session: Session, lane: DatabaseLane, actor: Us
     # One entry's detail is a screen of its own, and leaving it comes back to
     # the list: it used to be four lines printed after the picker closed, which
     # the Operations menu's redraw wiped before they could be read.
+    reopen_at: int | None = None
     while True:
         selected = await pick_item(
             session, list(reversed(newest_first)) if order["ascending"] else newest_first,
@@ -7924,6 +7941,7 @@ async def _diagnostic_log_screen(session: Session, lane: DatabaseLane, actor: Us
             description_of=lambda entry: sanitize_text(entry.message),
             title="Diagnostic log",
             empty_message="Nothing logged yet.",
+            start_stable_id=reopen_at,
             on_sort=_flip_order,
             sort_label=lambda: "oldest first" if order["ascending"] else "newest first",
             redraw_in_place=chrome.redraw_in_place,
@@ -7934,6 +7952,7 @@ async def _diagnostic_log_screen(session: Session, lane: DatabaseLane, actor: Us
         )
         if selected is None:
             return
+        reopen_at = selected.id
 
         when = format_for_display(
             selected.created_at, override_format=display_format, override_timezone=display_timezone
@@ -8047,6 +8066,7 @@ async def _audit_log_screen(session: Session, lane: DatabaseLane, actor: User) -
     # One entry's detail is a screen of its own, and leaving it comes back to
     # the list: printed after the picker closed, it was wiped by the
     # Operations menu's redraw before it could be read.
+    reopen_at: int | None = None
     while True:
         selected = await pick_item(
             session, list(reversed(newest_first)) if order["ascending"] else newest_first,
@@ -8056,6 +8076,7 @@ async def _audit_log_screen(session: Session, lane: DatabaseLane, actor: User) -
             name_segments_of=_row_name_segments,
             title="Audit log",
             empty_message="Nothing logged yet.",
+            start_stable_id=reopen_at,
             on_sort=_flip_order,
             sort_label=lambda: "oldest first" if order["ascending"] else "newest first",
             redraw_in_place=chrome.redraw_in_place,
@@ -8066,6 +8087,7 @@ async def _audit_log_screen(session: Session, lane: DatabaseLane, actor: User) -
         )
         if selected is None:
             return
+        reopen_at = selected.id
 
         rows = [
             Field("When", _when(selected), color=DATE_COLOR),
@@ -8438,9 +8460,10 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
     # resolved once via the lane *before* the picker, same shape
     # established for format_for_display generally.
     display_format, display_timezone = await lane.run(resolve_display_preferences)
-    await session.write_line(
-        colored("\r\nSelect a session below to disconnect it.", fg_color=MUTED_COLOR)
-    )
+    if entries:
+        # Shown by the picker itself, above the list: written before it, the
+        # picker's clear erased the one line that says what selecting does.
+        _announce(session, "Select a session below to disconnect it.", color=MUTED_COLOR)
     selected = await pick_item(
         session, entries,
         name_of=_session_name,
@@ -8663,12 +8686,12 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
         remaining = node_controls.shutdown_scheduler.remaining_seconds()
         if not node_controls.shutdown_scheduler.is_cancellable():
             source_label = _shutdown_source_label(node_controls.shutdown_scheduler.source())
-            await _write_wrapped_subtitle(
+            _announce(
                 session,
-                f"\r\nA shutdown was triggered externally ({source_label}) and is already "
+                f"A shutdown was triggered externally ({source_label}) and is already "
                 f"in progress -- going down in {format_remaining_seconds(remaining)}. It "
                 "cannot be cancelled or replaced from here.",
-                color=ALERT_COLOR, bold=True,
+                color=ALERT_COLOR,
             )
             return
         choice = await _scheduled_action_prelude(
@@ -8737,7 +8760,12 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
         node_controls.shutdown_scheduler.schedule(
             task, deadline=loop.time() + (delay_seconds if graceful else 0.0), message=message
         )
-        await session.write_line("Shutdown sequence started.")
+        if graceful:
+            _announce(session, "Shutdown sequence started.", color=ALERT_COLOR)
+        else:
+            # An immediate shutdown may end this session before another prompt
+            # is ever drawn: written now, it at least reaches the terminal.
+            await session.write_line("Shutdown sequence started.")
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -8786,11 +8814,9 @@ async def _toggle_maintenance_mode(session: Session, lane: DatabaseLane, actor: 
     await lane.run(record_action, actor=actor, action="set_maintenance_mode", detail=f"enabled={not currently_on}")
     _logger.info("maintenance mode set to %s by %s", "ON" if not currently_on else "off", actor.username)
     if currently_on:
-        await _write_wrapped_subtitle(
-            session, "Maintenance mode is now off. New non-SysOp logins are allowed again.", color=SUCCESS_COLOR,
-        )
+        _announce(session, "Maintenance mode is now off. New non-SysOp logins are allowed again.")
     else:
-        await _write_wrapped_subtitle(
+        _announce(
             session,
             "Maintenance mode is now ON. New non-SysOp logins are blocked; already-connected "
             "sessions are unaffected -- use [D]rain to disconnect them.",
@@ -9313,10 +9339,7 @@ async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, a
 async def _enable_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(welcome_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No banner file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_BANNER_SIZE_BYTES:
         _announce_line(session,
@@ -9556,20 +9579,13 @@ async def _welcome_banner_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        # Dogfood report: this message used to fall straight through to
-        # the menu's own immediate redraw, which -- with redraw_in_place
-        # on (the default for new accounts) -- cleared it before it could
-        # actually be read, making the whole screen look like a no-op.
-        # Same present-then-wait fix `_preview_welcome_banner_screen`
-        # already established for the identical reason.
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -9753,10 +9769,7 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
 async def _enable_main_menu_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(main_menu_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No masthead file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_MASTHEAD_SIZE_BYTES:
         _announce_line(session,
@@ -9874,14 +9887,13 @@ async def _main_menu_banner_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -10121,10 +10133,7 @@ async def _preview_logoff_banner_screen(session: Session, lane: DatabaseLane) ->
 async def _enable_logoff_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(logoff_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No banner file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_LOGOFF_BANNER_SIZE_BYTES:
         _announce_line(session,
@@ -10232,14 +10241,13 @@ async def _logoff_banner_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -10400,10 +10408,7 @@ async def _preview_new_account_banner_before_screen(session: Session, lane: Data
 async def _enable_new_account_banner_before_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(new_account_banner_before_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No banner file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_NEW_ACCOUNT_BANNER_BEFORE_SIZE_BYTES:
         _announce_line(session,
@@ -10513,14 +10518,13 @@ async def _new_account_banner_before_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -10683,10 +10687,7 @@ async def _preview_new_account_banner_after_screen(session: Session, lane: Datab
 async def _enable_new_account_banner_after_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(new_account_banner_after_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No banner file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_NEW_ACCOUNT_BANNER_AFTER_SIZE_BYTES:
         _announce_line(session,
@@ -10796,14 +10797,13 @@ async def _new_account_banner_after_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -11038,10 +11038,7 @@ async def _preview_board_list_masthead_screen(session: Session, lane: DatabaseLa
 async def _enable_board_list_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(board_list_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No masthead file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_BOARD_LIST_BANNER_SIZE_BYTES:
         _announce_line(session,
@@ -11151,14 +11148,13 @@ async def _board_list_masthead_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -11313,10 +11309,7 @@ async def _preview_file_area_masthead_screen(session: Session, lane: DatabaseLan
 async def _enable_file_area_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(file_area_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No masthead file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_FILE_AREA_BANNER_SIZE_BYTES:
         _announce_line(session,
@@ -11424,14 +11417,13 @@ async def _file_area_masthead_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -11590,10 +11582,7 @@ async def _preview_chat_channel_picker_masthead_screen(session: Session, lane: D
 async def _enable_chat_channel_picker_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(chat_channel_picker_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No masthead file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_CHAT_CHANNEL_PICKER_BANNER_SIZE_BYTES:
         _announce_line(session,
@@ -11703,14 +11692,13 @@ async def _chat_channel_picker_masthead_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -15804,7 +15792,7 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
         await session.write_line("Press any key to return.")
         await session.read_any_key()
         return
-    message = ""
+    message, message_failed = "", False
     while True:
         config = await lane.run(outbound_config, door.id)
         allowed = await lane.run(outbound_targets, door.id) if config is not None else []
@@ -15851,8 +15839,10 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
         await _write_sections(session, [Section("Outbound hook", hook)], unicode_style=unicode_style)
         if message:
             await session.write_line("")
-            await session.write_line(colored(sanitize_text(message), fg_color=SUCCESS_COLOR))
-            message = ""
+            await session.write_line(
+                colored(sanitize_text(message), fg_color=ERROR_COLOR if message_failed else SUCCESS_COLOR)
+            )
+            message, message_failed = "", False
         options = [MenuEntry(label=menu_key("T", "urn " + ("off" if config else "on")),
                              brief="Whether this door may post at all")]
         if config is not None and config.enabled_by_user_id is None:
@@ -15927,6 +15917,7 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                     config = await lane.run(set_rate_ceiling, door, int(raw), changed_by=actor)
                     message = f"Ceiling is now {config.posts_per_hour} posts per hour."
                 except (ValueError, OutboundError) as exc:
+                    message_failed = True
                     message = (str(exc) if isinstance(exc, OutboundError)
                                else "That is not a whole number.")
         else:
