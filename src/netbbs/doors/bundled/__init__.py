@@ -46,6 +46,12 @@ class BundledDoor:
     description: str
     resource: str  # filename within this package
     suggested_min_play_level: int = 0
+    #: The door re-reads its geometry from `NETBBS_DOOR_INFO` on `SIGUSR1`.
+    #: `netbbs.doors.runtime` signals a door on the strength of this only when
+    #: the script it launched *is* this install's copy, so the handler is there
+    #: by construction -- the signal's default action would otherwise end the
+    #: caller's game (issue #645).
+    follows_resize: bool = False
 
 
 BUNDLED_DOORS: tuple[BundledDoor, ...] = (
@@ -67,6 +73,7 @@ BUNDLED_DOORS: tuple[BundledDoor, ...] = (
             "faction reputation, and shipyard upgrades. Saves progress per caller."
         ),
         resource="voidrunner.py",
+        follows_resize=True,
     ),
     BundledDoor(
         key="war_dialer",
@@ -77,6 +84,7 @@ BUNDLED_DOORS: tuple[BundledDoor, ...] = (
             "out what happened to you while you were away on your next login. Four-week seasons."
         ),
         resource="war_dialer.py",
+        follows_resize=True,
     ),
 )
 
@@ -89,6 +97,40 @@ def resolve_bundled_door_path(door: BundledDoor) -> Path | None:
     a wheel install missing the file was expected, not exceptional)."""
     path = Path(str(resources.files(__package__) / door.resource))
     return path if path.is_file() else None
+
+
+def launched_bundled_door(executable_path: str, args: tuple[str, ...], install_dir: str | None = None) -> BundledDoor | None:
+    """The catalogue entry a registration actually launches, or `None`.
+
+    A door is ours when one of its arguments resolves to this install's own copy
+    of the script, or names it as a module. A copy of the script somewhere else
+    is somebody's fork and is not matched: it may be any version.
+    """
+    install = Path(install_dir).resolve() if install_dir else None
+    argv = (executable_path, *args)
+    for door in BUNDLED_DOORS:
+        module = __package__ + "." + door.resource.removesuffix(".py")
+        if any(argv[i:i + 2] == ("-m", module) for i in range(len(argv) - 1)):
+            return door
+        bundled = resolve_bundled_door_path(door)
+        if bundled is None:
+            continue
+        for index, arg in enumerate(argv):
+            if index and install is not None:
+                arg = arg.replace("{install_dir}", str(install))
+            candidate = Path(arg)
+            if candidate.name != door.resource:
+                continue
+            if not candidate.is_absolute():
+                if install is None:
+                    continue
+                candidate = install / candidate
+            try:
+                if candidate.resolve() == bundled.resolve():
+                    return door
+            except OSError:
+                continue
+    return None
 
 
 def available_bundled_doors() -> list[tuple[BundledDoor, Path]]:

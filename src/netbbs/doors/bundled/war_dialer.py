@@ -4552,15 +4552,106 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
                 index = max(0, index - 1)
 
 
-def read_menu_choice(valid: str) -> str:
+# ---------------------------------------------------------------------------
+# Following the caller's terminal (issue #645).
+#
+# NetBBS rewrites the drop file and sends SIGUSR1 when a caller resizes. The
+# handler only sets a flag: nothing is drawn, read or written to the world from
+# inside it, and it may run twice for one resize. The switchboard is where the
+# flag is acted on. It is the screen every visit returns to, it redraws from the
+# database on every pass anyway, and it is the one place where `w` and `height`
+# live. A screen opened before the resize keeps the size it was opened at until
+# the caller leaves it, which is one keypress away.
+#
+# POSIX only, like the host's half: Windows has no SIGUSR1 and is never sent one.
+# ---------------------------------------------------------------------------
+
+RESIZED = ""  # what the switchboard's reader returns instead of a key
+_RESIZE_PENDING = False
+_RESIZE_POLL_SECONDS = 0.25
+
+
+def _note_resize(signum=None, frame=None) -> None:
+    global _RESIZE_PENDING
+    _RESIZE_PENDING = True
+
+
+def install_resize_handler() -> bool:
+    import signal
+
+    if not hasattr(signal, "SIGUSR1"):
+        return False
+    signal.signal(signal.SIGUSR1, _note_resize)
+    # A profile that gives the door a PTY is told with SIGWINCH instead, after the
+    # same drop-file rewrite. Its default action is to be ignored, which is what
+    # the door did with it.
+    if hasattr(signal, "SIGWINCH"):
+        signal.signal(signal.SIGWINCH, _note_resize)
+    return True
+
+
+def terminal_size(info: dict) -> tuple[int, int]:
+    """The caller's terminal as the host reports it, made safe to draw for."""
+    try:
+        width = max(1, int(info.get("terminal_width", 80)))
+    except (TypeError, ValueError):
+        width = 80
+    try:
+        height = max(1, min(200, int(info.get("terminal_height", 24))))
+    except (TypeError, ValueError):
+        height = 24
+    return width, height
+
+
+def take_resize() -> tuple[int, int] | None:
+    """The new size if one is pending and readable, never below the floor: there
+    is nobody to refuse mid-visit, so the door keeps drawing for forty by twelve."""
+    global _RESIZE_PENDING
+    if not _RESIZE_PENDING:
+        return None
+    _RESIZE_PENDING = False
+    try:
+        width, height = terminal_size(_load_door_info())
+    except WorldStateError:
+        return None  # a drop file caught mid-rewrite or gone: keep the size we have
+    return max(MINIMUM_WIDTH, width), max(MINIMUM_HEIGHT, height)
+
+
+def _resized_while_idle() -> bool:
+    """Wait for a key or a resize, whichever comes first; True for a resize.
+
+    A blocking read sleeps through the signal, because Python restarts it after
+    the handler returns. So the wait is a short select and the read that follows
+    a False only happens once a byte is there. Scripted input and Windows never
+    wait here."""
+    if _PENDING_INPUT or os.name != "posix":
+        return _RESIZE_PENDING
+    try:
+        fd = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        return _RESIZE_PENDING
+    while True:
+        if _RESIZE_PENDING:
+            return True
+        if select.select([fd], [], [], _RESIZE_POLL_SECONDS)[0]:
+            return False
+
+
+def read_menu_choice(valid: str, *, follow_resize: bool = False) -> str:
     """Read one key at an action bar, echoing it so the bar's row is ended.
 
     A bar is written with `out_prompt`, which leaves the row unterminated on
     purpose so the cursor waits on it. Every reader of a bar has to close that
     row before the next screen draws; this one does it by echoing the key, and
     a screen that reads its own key has to do it itself (issue #487).
+
+    With `follow_resize`, a resize that arrives while the bar waits returns
+    `RESIZED` instead of a key, with the row ended the same way.
     """
     while True:
+        if follow_resize and _resized_while_idle():
+            out_line()
+            return RESIZED
         key = read_input_key().upper()
         if key and key in valid:
             out_line(key)
@@ -5528,6 +5619,9 @@ def main() -> int:
     global _OUTPUT_WIDTH
 
     sys.stdout.reconfigure(encoding="utf-8")
+    # Before anything else: the host may signal at any moment after the spawn,
+    # and SIGUSR1 ends a process that has not said what to do with it.
+    install_resize_handler()
     try:
         info = _load_door_info()
     except WorldStateError as exc:
@@ -5538,15 +5632,8 @@ def main() -> int:
     palette.default_ascii = info.get("unicode_style", True) is False
     # Node-wide, per the drop-file contract: NetBBS has no per-caller timezone.
     apply_timezone(info.get("timezone"))
-    try:
-        _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
-    except (TypeError, ValueError):
-        _OUTPUT_WIDTH = 80
+    _OUTPUT_WIDTH, height = terminal_size(info)
     w = min(78, _OUTPUT_WIDTH)
-    try:
-        height = max(1, min(200, int(info.get("terminal_height", 24))))
-    except (TypeError, ValueError):
-        height = 24
 
     if _OUTPUT_WIDTH < MINIMUM_WIDTH or height < MINIMUM_HEIGHT:
         # The reason has to survive the screen it is about, in both directions:
@@ -5626,11 +5713,17 @@ def main() -> int:
             apply_display(palette, read_display(conn, user_id))
             if player.season_number != previous_season:
                 draw_season_change(palette, player.season_number, w, height)
+            if (size := take_resize()) is not None:
+                # Also a resize that arrived while another screen was open.
+                _OUTPUT_WIDTH, height = size
+                w, page_index = min(78, _OUTPUT_WIDTH), 0
             page_index, page_count = draw_dashboard(palette, state, screen_now, w, height, page_index)
             # Always recognize action keys: a displayed zero-turn snapshot
             # may sit idle past its refill. The transaction decides allowance.
             valid = "BEVHQ?TCJRXGSONPI"
-            choice = read_menu_choice(valid)
+            choice = read_menu_choice(valid, follow_resize=True)
+            if choice == RESIZED:
+                continue  # the top of the loop takes the new size and redraws
             action_now = now_utc()
             try:
                 if choice == "Q":

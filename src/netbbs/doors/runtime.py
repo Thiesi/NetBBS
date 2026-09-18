@@ -333,21 +333,76 @@ async def _relay(session, endpoint, proc=None, stop_grace=DOOR_STOP_GRACE_SECOND
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def resize_mode(profile, endpoint_kind):
+def resize_mode(profile, endpoint_kind, *, bundled_follows_resize=False):
     """How a running door is told the caller resized, or None for not at all.
 
     Policy only, so it can be checked without a POSIX host; the caller adds
     the platform gate. A profile which pins width/height asked for a fixed
     screen, and DOS geometry is fixed by design, so only a native door
     following the caller's own terminal is ever notified.
+
+    `bundled_follows_resize` is NetBBS vouching for its own door: the script
+    being launched is this install's copy and the catalogue says it handles the
+    signal. That needs no opt-in from the SysOp, and it is what lets a bundled
+    door registered with no profile at all -- the gallery's default -- follow
+    a resize (issue #645). For anybody else's door the profile still decides.
     """
-    if profile is None or profile.adapter != "native" or profile.width:
+    if profile is None:
+        return "signal" if bundled_follows_resize and endpoint_kind in ("stdio", "socketpair") else None
+    if profile.adapter != "native" or profile.width:
         return None
     if endpoint_kind == "pty":
         return "pty"
-    if profile.resize_signal and endpoint_kind in ("stdio", "socketpair"):
+    if (profile.resize_signal or bundled_follows_resize) and endpoint_kind in ("stdio", "socketpair"):
         return "signal"
     return None
+
+
+_CHILDREN_IGNORE_RESIZE_SIGNAL = False
+
+
+def children_start_ignoring_resize_signal() -> bool:
+    """Make every process this node spawns begin life ignoring `SIGUSR1`.
+
+    The signal's default action ends a process, and a door cannot install its
+    handler before its interpreter has started and its script has been compiled:
+    most of a second on a small host, during which a caller who is still dragging
+    a window, or a phone that rotates, would have the host signal a process with
+    nothing to catch it (issue #645 review). An *ignored* disposition is inherited
+    across `fork` and `exec`, so ignoring the signal here closes that window for
+    the launcher and the door alike; a door that handles the signal replaces the
+    disposition when it says so, and one that never does simply never hears it.
+    That also covers a wrapper which does not `exec`, and a bundled door run as a
+    module by an interpreter holding an older copy.
+
+    The node itself has no use for `SIGUSR1`. If something else in this process
+    has claimed it, or this is not the main thread, nothing is changed and the
+    caller must not signal on NetBBS's own say-so.
+    """
+    global _CHILDREN_IGNORE_RESIZE_SIGNAL
+    if _CHILDREN_IGNORE_RESIZE_SIGNAL:
+        return True
+    if not hasattr(signal, "SIGUSR1"):
+        return False
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    if signal.getsignal(signal.SIGUSR1) not in (signal.SIG_DFL, signal.SIG_IGN):
+        return False
+    signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+    _CHILDREN_IGNORE_RESIZE_SIGNAL = True
+    return True
+
+
+def bundled_follows_resize(door) -> bool:
+    """Whether `door` launches this install's own copy of a door that handles
+    the resize signal."""
+    from netbbs.doors.bundled import launched_bundled_door
+
+    install_dir = door.profile.install_dir if door.profile else None
+    entry = launched_bundled_door(door.executable_path, tuple(door.args), install_dir)
+    return bool(entry and entry.follows_resize)
 
 
 def _republish_terminal_size(info_path, info, width, height):
@@ -525,6 +580,10 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
         width = profile.width if profile and profile.width else session.terminal_width
         height = profile.height if profile and profile.height else session.terminal_height
         env = _door_environment(info_path, world_path)
+        # Decided before the spawn, because the guard has to be in place before
+        # there is a child to inherit it.
+        vouched = (os.name == "posix" and bundled_follows_resize(door)
+                   and children_start_ignoring_resize_signal())
         encoding = profile.encoding if profile else "utf-8"
         terminal = DoorTerminal(session, encoding)
         mode_entered = True
@@ -599,7 +658,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             elif kind == "socketpair":
                 diagnostic_tasks.append(asyncio.create_task(_diagnostics(proc.stdout, tail)))
             diagnostic_tasks.append(asyncio.create_task(_diagnostics(proc.stderr, tail)))
-            mode = resize_mode(profile, kind)
+            mode = resize_mode(profile, kind, bundled_follows_resize=vouched)
             if os.name == "posix" and mode is not None:
                 resize_task = asyncio.create_task(_forward_resize(
                     session, proc, info_path, info, published=(width, height),
