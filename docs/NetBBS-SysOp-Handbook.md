@@ -302,6 +302,13 @@ account change that would leave no enabled, approved SysOp. Disabling an account
 revokes its access; deletion is permanent and requires its exact name. Existing
 content retains its recorded author label.
 
+A level change, or a granted or revoked identity-verifier permission, reaches
+a caller who is already logged in without them reconnecting. This also applies
+to a change made with `python -m netbbs.admin`, within a few seconds. A raised
+level shows on their main menu. A lowered one takes them out of whatever they
+were doing, a door game included, and back to the main menu with a line naming
+their new level. Text they were composing is kept as a draft.
+
 Once your node has run NetBBS Link, deleting an account also retires its
 username: nobody can register it again. The one exception is a registration
 you decline while it is still awaiting approval, unless someone on another

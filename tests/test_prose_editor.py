@@ -582,3 +582,27 @@ def test_repeated_disconnects_never_leave_autosave_tasks_pending(tmp_path):
 
     asyncio.run(scenario())
     assert not draft.exists()
+
+
+def test_a_cancelled_edit_keeps_what_was_typed_since_the_last_autosave(tmp_path):
+    """Issue #659: a session unwound to the main menu (or disconnected)
+    while composing keeps its text, not only what the last autosave tick
+    caught."""
+    draft = tmp_path / "d.draft"
+
+    async def scenario():
+        session = FakeSession(["h", "i"])  # then waits for a key forever
+        task = asyncio.create_task(
+            edit_prose(session, initial_text=None, draft_path=draft, max_bytes=100_000,
+                       autosave_interval_seconds=9999)
+        )
+        while session._inputs:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return task
+
+    task = asyncio.run(scenario())
+    assert task.cancelled()
+    assert draft.read_text(encoding="utf-8") == "hi"

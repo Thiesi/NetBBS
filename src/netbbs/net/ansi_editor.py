@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -301,6 +302,12 @@ async def edit_ansi_art(
         # dead session. Task cleanup now always runs; the screen clear
         # is best-effort and simply skipped for a transport that's
         # already gone (there's no terminal left to clean up).
+        #
+        # Issue #659: a cancelled edit -- a disconnect, or the session
+        # being unwound to the main menu after a SysOp reduced its
+        # access -- keeps what was drawn since the last autosave tick.
+        if isinstance(sys.exc_info()[1], asyncio.CancelledError) and state.dirty:
+            _write_draft(state, draft_path)
         try:
             await session.write(clear_screen())
         except SessionClosedError:
@@ -309,7 +316,12 @@ async def edit_ansi_art(
         try:
             await autosave_task
         except asyncio.CancelledError:
-            pass
+            # The autosave task's own cancellation is expected; one aimed
+            # at this session's task, landing on this await, is not and
+            # must keep propagating.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
 
 
 def _dispatch(state: _EditorState, key: EditorKey) -> None:
@@ -486,10 +498,14 @@ async def _autosave_loop(state: _EditorState, draft_path: Path, interval_seconds
         await asyncio.sleep(interval_seconds)
         if not state.dirty:
             continue
-        try:
-            draft_path.write_bytes(encode_ansi_bytes(state.buffer))
-        except OSError:
-            _logger.warning("could not write ANSI editor autosave draft to %s", draft_path, exc_info=True)
+        _write_draft(state, draft_path)
+
+
+def _write_draft(state: _EditorState, draft_path: Path) -> None:
+    try:
+        draft_path.write_bytes(encode_ansi_bytes(state.buffer))
+    except OSError:
+        _logger.warning("could not write ANSI editor autosave draft to %s", draft_path, exc_info=True)
 
 
 def _delete_draft(draft_path: Path) -> None:

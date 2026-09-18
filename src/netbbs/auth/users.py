@@ -419,6 +419,21 @@ def account_still_active(db: Database, user: User) -> bool:
     return current.disabled_at is None
 
 
+def current_account(db: Database, user: User) -> User | None:
+    """
+    `user`'s row as stored now, or `None` once the account is disabled
+    or deleted -- `account_still_active` for a caller that also needs
+    the fresh level and permissions (issue #659: a SysOp's level change
+    reaches a live session without a re-login). Looked up by id, not by
+    username, so a deleted account's name taken over by a new one can
+    never hand this session the newcomer's access.
+    """
+    current = get_user_by_id(db, user.id)
+    if current is None or current.disabled_at is not None:
+        return None
+    return current
+
+
 def list_users(db: Database, *, order_by: str = "alphabetical") -> list[User]:
     """
     Every registered account — the user directory's underlying listing
