@@ -1574,13 +1574,40 @@ def test_world_in_maintenance_returns_clear_message_without_player_creation(tmp_
     env.pop("NETBBS_DOOR_INFO", None)
     result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
                             env=env, timeout=PROC_WAIT)
-    assert result.returncode == 1
+    # Status 0: the host reports anything else as "exited unexpectedly", which
+    # contradicted the door's own notice one line above it (issue #646).
+    assert result.returncode == 0
     assert b"closed for SysOp maintenance" in result.stdout
+    assert b"Traceback" not in result.stderr
+    # One unbroken line at the default width, so the host's epilogue follows a
+    # sentence and not the tail of one.
+    notice = wd._strip_ansi(result.stdout.decode("utf-8")).strip().splitlines()
+    assert notice == ["War Dialer is closed for SysOp maintenance. Try again later."]
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("SELECT COUNT(*) FROM players").fetchone()[0] == 0
     finally:
         conn.close()
+
+
+def test_a_caller_who_meets_the_sysops_lock_is_turned_away_not_crashed(tmp_path):
+    """The season command and the backup hold the world exclusively while they
+    work. A caller arriving then is closed out the same way as by the flag, and
+    the SysOp's own command meeting callers inside still gets the error."""
+    path = tmp_path / "held.db"
+    wd.connect(path).close()
+    env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), PYTHONIOENCODING="utf-8")
+    env.pop("NETBBS_DOOR_INFO", None)
+    with wd.world_session(path, maintenance=True):
+        result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
+                                env=env, timeout=PROC_WAIT)
+    assert result.returncode == 0, result.stdout
+    assert b"busy with active sessions or maintenance" in result.stdout
+    with wd.world_session(path):
+        with pytest.raises(wd.WorldStateError) as refused:
+            with wd.world_session(path, maintenance=True):
+                pytest.fail("maintenance entered a live session")
+    assert not isinstance(refused.value, wd.WorldClosed)
 
 
 @pytest.mark.parametrize("owner", [None, "invalid"])

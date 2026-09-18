@@ -1362,7 +1362,11 @@ def world_session(db_path: Path, *, maintenance: bool = False):
         yield
     except sqlite3.OperationalError as exc:
         if "locked" in str(exc).lower() or "busy" in str(exc).lower():
-            raise WorldStateError("War Dialer is busy with active sessions or maintenance. Try again later.") from exc
+            # A caller meets this lock only while the SysOp holds the world for a
+            # season change or a backup; the SysOp's own command meets it because
+            # callers are inside. The first is a closure, the second a refusal.
+            kind = WorldStateError if maintenance else WorldClosed
+            raise kind("War Dialer is busy with active sessions or maintenance. Try again later.") from exc
         raise
     finally:
         lease.close()
@@ -1784,6 +1788,18 @@ def current_world_season(conn: sqlite3.Connection, now: datetime) -> int:
 
 class WorldStateError(Exception):
     """Preserve an inconsistent world for explicit operator repair."""
+
+
+class WorldClosed(WorldStateError):
+    """The SysOp has closed the world on purpose; the caller is turned away.
+
+    An outcome, not a fault, so the door ends with status 0 exactly as the size
+    refusal does: the host reports any other status as "exited unexpectedly",
+    which told every caller who dialled in during a season change that the game
+    had crashed, one line under the game saying it was closed (issue #646). It
+    stays a `WorldStateError` for the SysOp tooling, which treats "the world is
+    not available to me" the same way whatever the reason.
+    """
 
 
 class ActionRejected(Exception):
@@ -5575,7 +5591,7 @@ def main() -> int:
         bind_world_owner(conn, info.get("war_dialer_owner"))
         maintenance = conn.execute("SELECT value FROM meta WHERE key='maintenance'").fetchone()
         if maintenance is not None and maintenance[0] == "on":
-            raise WorldStateError("War Dialer is closed for SysOp maintenance. Return to NetBBS and try again later.")
+            raise WorldClosed("War Dialer is closed for SysOp maintenance. Try again later.")
         ensure_schema(conn)
         now = now_utc()
         season_number = current_world_season(conn, now)
@@ -5657,6 +5673,9 @@ def main() -> int:
     except (EOFError, BrokenPipeError):
         # Actions are already committed. A disconnect never writes a snapshot.
         pass
+    except WorldClosed as exc:
+        out_line(f"{palette.gold}{exc}{RESET}")
+        return 0  # turned away on purpose; nonzero would be reported as a crash
     except (InputSequenceError, WorldStateError) as exc:
         out_line(f"  {palette.bad}{exc}{RESET}")
         return 1

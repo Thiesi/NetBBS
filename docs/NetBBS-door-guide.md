@@ -115,7 +115,10 @@ create a missing world or acquire a session guard. Errors are bounded diagnostic
 Replace `status` with `maintenance on` to close the world to new callers. Active
 sessions must be closed first; an idle session also blocks the change. The flag
 persists across restart. Use `maintenance off` to reopen the world after checking
-it. A caller arriving during maintenance receives a clear return/retry message.
+it. A caller arriving during maintenance, or while a season change or a backup
+holds the world, is told it is closed and to try again later. The game then ends
+normally: door-session history records an ordinary exit, not a crash, so the
+crashes listed there are real ones.
 No operator command starts, stops or redeploys the BBS service for you.
 
 **MANUAL — outside NetBBS, season advance or reset:**
