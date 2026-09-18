@@ -1,5 +1,5 @@
 """Tests for netbbs.net.mrc_color_preference (issue #298), the per-user
-"show the colours MRC users put in their lines" setting -- mirrors
+"show the colors MRC users put in their lines" setting -- mirrors
 tests/test_unicode_style_preference.py's shape."""
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ def bob(db):
 
 
 def test_defaults_to_on(db, alice):
-    # Colour is part of how the MRC rooms talk, and the text is sanitized
-    # before any code becomes a colour, so the rich default is safe.
+    # Color is part of how the MRC rooms talk, and the text is sanitized
+    # before any code becomes a color, so the rich default is safe.
     assert mrc_colors_enabled(db, alice) is True
 
 

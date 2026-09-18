@@ -185,7 +185,7 @@ def test_the_note_rides_with_the_name(db, sysop):
     # behind an unbounded channel name can be cut away entirely, and a
     # 42-character name takes a 40-column row by itself.
     assert _NOTE in segments[0][0]
-    assert segments[0][1] is not None, "and carries its own colour"
+    assert segments[0][1] is not None, "and carries its own color"
     assert segments[-1][0] == "verified-only"
 
 
@@ -237,8 +237,8 @@ def test_even_a_name_wider_than_the_row_cannot_hide_the_note(db, sysop):
 
 
 def test_the_name_keeps_the_accent_a_plain_name_would_have(db, sysop):
-    """`pick_item` colours a plain `name_of` row with the node's accent
-    and takes a segment list verbatim -- so leaving the colour `None`
+    """`pick_item` colors a plain `name_of` row with the node's accent
+    and takes a segment list verbatim -- so leaving the color `None`
     quietly stripped the accent off every channel name the moment this
     callback existed (Codex review)."""
     from netbbs.net.chat_flow import channel_name_segments
@@ -249,4 +249,4 @@ def test_the_name_keeps_the_accent_a_plain_name_would_have(db, sysop):
     gated = create_channel(db, "verified-only", creator=sysop, name_requirement="verified")
     segments = channel_name_segments(gated, {gated.id}, name_color=51)
     assert segments[-1] == ("verified-only", 51), "the name keeps the accent"
-    assert segments[0][1] != 51, "and the gate keeps its own colour"
+    assert segments[0][1] != 51, "and the gate keeps its own color"

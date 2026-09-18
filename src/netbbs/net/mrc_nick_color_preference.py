@@ -1,5 +1,5 @@
 """
-Per-user MRC nick colour (issue #304): the CGA colour a caller's handle
+Per-user MRC nick color (issue #304): the CGA color a caller's handle
 wears in the house-style body every relayed line carries
 (`netbbs.mrc.protocol.format_room_body`). A thin typed wrapper over
 `netbbs.user_preferences`, the same shape `netbbs.net.
@@ -31,7 +31,7 @@ def mrc_nick_color(db: Database, user: User) -> int:
 
 def set_mrc_nick_color(db: Database, user: User, color: int) -> None:
     if not 0 <= color <= 15:
-        raise ValueError(f"MRC nick colour must be a CGA colour 0-15, got {color!r}")
+        raise ValueError(f"MRC nick color must be a CGA color 0-15, got {color!r}")
     set_user_preference(db, user, _PREFERENCE_KEY, str(color))
 
 

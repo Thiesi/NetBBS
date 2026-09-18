@@ -47,10 +47,10 @@ Bounds (§16 Decision 5, "bound remotely influenced resources"):
   session.
 
 Body convention and per-caller traffic (issue #298): every MRC client
-embeds the sender's own coloured handle in the body and shows an inbound
+embeds the sender's own colored handle in the body and shows an inbound
 body verbatim, so outbound chunks wear `protocol.format_room_body`'s
 house style and an inbound prefix naming `from_user` is peeled off
-before recording; colour codes stay in the stored body for the renderer.
+before recording; color codes stay in the stored body for the renderer.
 A `SERVER` packet addressed to an announced nick is that caller's reply
 (`LIST`, `MOTD`, `INFO`, ...), delivered to their sessions alone as an
 `MrcNotice` under a per-caller allowance; `USERROOM`/`USERNICK` keep the
@@ -128,8 +128,8 @@ class MrcNotice:
     """An ephemeral MRC line for a caller's screen (issue #298): a hub
     notice or room chatter (`kind="notice"`), a network-wide broadcast
     (`"broadcast"`), or the hub's reply to something the caller asked
-    (`"reply"`). `text` is sanitized and keeps its `|NN` colour codes;
-    `netbbs.net.chat_flow` renders it per viewer (colours on or off,
+    (`"reply"`). `text` is sanitized and keeps its `|NN` color codes;
+    `netbbs.net.chat_flow` renders it per viewer (colors on or off,
     timestamp preference), the same way `_TimestampedNotice` defers
     rendering there. Never recorded."""
 
@@ -304,7 +304,7 @@ def _script_hash() -> str:
 
 
 _SCRIPT_HASH = _script_hash()
-# The capabilities this bridge really has (issue #377): pipe-code colour,
+# The capabilities this bridge really has (issue #377): pipe-code color,
 # CTCP replies, hub-directed room moves, and the graceful GOODBYE.
 CAPABILITIES = ("MCI", "CTCP", "USERROOM", "GOODBYE")
 MAX_CALLER_FACTS = 500
@@ -424,7 +424,7 @@ class MrcBridge:
         # (channel id, username) already told that their identity is held
         # elsewhere -- said once per conflict, not once per keepalive tick.
         self._identity_notified: set[tuple[int, str]] = set()
-        # Issue #304: per-caller nick colour (read once per announcement),
+        # Issue #304: per-caller nick color (read once per announcement),
         # away state to mirror (username -> message, present = away),
         # the hub's banner lines, the last STATS reading, and who asked
         # for STATS themselves (their reply is shown, the bridge's own
@@ -432,7 +432,7 @@ class MrcBridge:
         self._nick_colors: dict[str, int] = {}
         self._banner: list[str] = []
         # Issue #305: the private-message opt-in per announced caller
-        # (read with the nick colour), the site each remote nick was last
+        # (read with the nick color), the site each remote nick was last
         # seen at (so an outbound private line carries `to_site`), the
         # last private sender per caller (for `/mrc r`), and the
         # per-remote-sender allowance.
@@ -1343,7 +1343,7 @@ class MrcBridge:
 
     async def _ensure_nick_color(self, username: str) -> None:
         """Read the caller's Profile choices the bridge needs (nick
-        colour, private-message opt-in) once per announcement. Both
+        color, private-message opt-in) once per announcement. Both
         caches hold only announced callers (`_prune_caller_caches` runs
         wherever an announcement is removed), so they are bounded by
         live sessions, never wiped wholesale. A
@@ -1487,7 +1487,7 @@ class MrcBridge:
 
     def banner_lines(self) -> list[str]:
         """What the hub said in its `BANNER:` lines on connect, sanitized
-        with colour codes kept -- the welcome a caller sees once per
+        with color codes kept -- the welcome a caller sees once per
         session on their first MRC room (issue #304)."""
         return list(self._banner)
 
@@ -1671,9 +1671,9 @@ class MrcBridge:
             await self._broadcast_notice(mapping, packet.body.strip())
             self._request_userlist(mapping, self._any_nick(mapping) or "NetBBS")
             return
-        # Issue #298: the body carries the sender's own coloured handle
+        # Issue #298: the body carries the sender's own colored handle
         # in every reference client's convention; peel it so the caller
-        # sees one name, and keep the colour codes for the renderer.
+        # sees one name, and keep the color codes for the renderer.
         kind, text = protocol.split_sender_prefix(packet.body, packet.from_user)
         text = text.strip()
         plain_text = strip_pipe_codes(text).strip()
@@ -2461,7 +2461,7 @@ class MrcBridge:
     async def _broadcast_notice(self, mapping: MrcChannelMapping, text: str) -> None:
         """Ephemeral, never recorded: an `MrcNotice` the receive loop in
         `netbbs.net.chat_flow` renders per viewer. `text` is already
-        sanitized by `parse_line` and keeps its colour codes."""
+        sanitized by `parse_line` and keeps its color codes."""
         await self._hub.broadcast(mapping.channel.name, MrcNotice(text, utc_now_iso()))
 
     async def _notify_private_message(self, packet: MrcPacket) -> None:
@@ -2498,7 +2498,7 @@ class MrcBridge:
         """A private line for a caller who opted in (issue #305): shown to
         their sessions as an `MrcNotice` of kind `private`, never
         recorded; the sender's embedded handle is peeled like a room
-        line's and the colour codes kept. Bounded per remote sender
+        line's and the color codes kept. Bounded per remote sender
         (`PRIVATE_BURST`) ahead of the per-caller allowance
         `_deliver_reply` already applies."""
         sender_key = (packet.from_site.lower(), packet.from_user.lower())

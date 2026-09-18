@@ -146,16 +146,16 @@ It used to read `Board 3 offers`, which parses as a sentence — subject "Board
 3", verb "offers" — and `Chart 1 links`, which parses as neither. Counts agree
 with their noun now.
 
-### Both games' labels stop hiding in their own colour
+### Both games' labels stop hiding in their own color
 
 Each door had specified its label role in the very hue it most needed to
 separate from: War Dialer's was sage **green** on a green screen, Voidrunner's a
 desaturated **blue** on a blue cockpit. Measured, that is 78.5% of the visible
 characters on War Dialer's switchboard sitting in one narrow green band, and
 78.7% on Voidrunner's command deck sitting in one narrow blue one — the label
-colour included, in both cases. Labels are off-hue now: cool slate on the
+color included, in both cases. Labels are off-hue now: cool slate on the
 phosphor terminal, warm sand on the cockpit, each chosen to stay clear of the
-colours that already mean money, hotkeys and alarm. That takes the command deck
+colors that already mean money, hotkeys and alarm. That takes the command deck
 to 66.7%.
 
 ### War Dialer's frame renders as a frame
@@ -165,7 +165,7 @@ visible gaps at the cell seams in many monospace fonts, so the border read as a
 failed render rather than a box. Frames are light now. The masthead's scanline
 was the same character as the border, inset two columns and joined to nothing,
 which is why it looked like a border that had failed to draw; it is a fading
-block ramp, and because it fades in *density* as well as colour it still reads
+block ramp, and because it fades in *density* as well as color it still reads
 as a decay under the monochrome preset, where the old one was perfectly flat.
 
 The ring of ten exchanges closes: its verticals stood two columns past the last
@@ -268,7 +268,7 @@ Both games' presentation is verified by the suite plus the rendered galleries �
 405 Voidrunner panels and 1,073 War Dialer panels across every supported size
 and preset — and by reading those pages. Neither is a real caller's terminal,
 which is where the frame and scanline defects this release fixes were found in
-the first place. The label colours in particular are a judgement that wants a
+the first place. The label colors in particular are a judgement that wants a
 real screen: the remaining bulk of each door's single hue is chrome, measured
 and left deliberately for a later pass.
 

@@ -211,8 +211,8 @@ _opt_in_locks: dict[Path, asyncio.Lock] = {}
 
 
 async def _write_note(session: Session, text: str) -> None:
-    """Word-wrapped to the real terminal width before colouring, one
-    physical line at a time -- colouring the whole paragraph as one
+    """Word-wrapped to the real terminal width before coloring, one
+    physical line at a time -- coloring the whole paragraph as one
     string and relying on the terminal's own soft-wrap runs past the
     right edge unpredictably on anything narrower than the text itself
     (the same bug `netbbs.net.admin_flow._write_wrapped_subtitle`'s own

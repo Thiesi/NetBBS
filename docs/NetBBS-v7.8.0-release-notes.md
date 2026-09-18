@@ -175,33 +175,33 @@ in source, deployed with the site rather than with this wheel.
 ## Both doors' chrome recedes (#519)
 
 The label half of #519 shipped in v7.3.0: each door had specified its
-label colour in the hue it most needed to separate from. That moved
+label color in the hue it most needed to separate from. That moved
 8–11% of each screen. The frame was the rest of the mass, and it was
-drawn in the most saturated colour on the screen.
+drawn in the most saturated color on the screen.
 
 **Voidrunner** frames, section headers and station names move from a
 saturated cyan (`#5fd7ff`) to steel (`#7fa3bf`): the same hue at half
 the saturation and a step down in brightness. Gauge tracks, separators
 and the frame shadow move from a saturated dark blue to a near-neutral
-dark, so a gauge's filled half is the only coloured thing on its row.
-Measured on the command deck at 80x24 truecolour, saturated characters
+dark, so a gauge's filled half is the only colored thing on its row.
+Measured on the command deck at 80x24 truecolor, saturated characters
 in the dominant hue band fall from 51.9% to 8.0%, and what remains
 saturated is the gold hotkeys.
 
-**War Dialer** frames were drawn in `phosphor`, the same colour as a
+**War Dialer** frames were drawn in `phosphor`, the same color as a
 caller's own holdings and gains and the brightest green on the screen,
-so the contract's rule that chrome never shares a colour with content
+so the contract's rule that chrome never shares a color with content
 did not hold for the frame itself. The frame now wears `phosphor-dim`,
 retuned from a dark, fully saturated green to a desaturated mid green
 (`#4e8a62`) so a border is legible but recedes; `phosphor` is left to
 mean what a caller reads.
 
 Nothing else moves: the nine roles in each palette stay pairwise
-distinct, the sixteen-colour preset reads the new chrome as dark cyan
+distinct, the sixteen-color preset reads the new chrome as dark cyan
 and bright black, and the monochrome and plain presets are unaffected
 because a role returns no styling there at all. Before/after images of
 the Voidrunner deck and market, the War Dialer switchboard and the four
-chrome colours are in `docs/images/door-chrome-519-*.png`, and both
+chrome colors are in `docs/images/door-chrome-519-*.png`, and both
 presentation contracts in the design doc say what was measured. No
 saved career or world changes shape.
 
@@ -311,7 +311,7 @@ What this release does **not** establish:
   caller has changed a password over a real transport yet.
 - **The door chrome was judged from the rendered gallery and painted
   panels, not from a real terminal.** The measurements are of the
-  gallery's own output at 80x24 truecolour; a phosphor-dim frame that
+  gallery's own output at 80x24 truecolor; a phosphor-dim frame that
   reads as receding on a rendered PNG may read differently on a
   particular terminal's font and gamma. The galleries live under
   `build/gallery/` on the development host, not in the wheel.

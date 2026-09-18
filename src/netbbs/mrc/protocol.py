@@ -83,9 +83,9 @@ RESERVED_NAMES = frozenset({SERVER, CLIENT, NOTME, ALL})
 # room" rather than one specific user.
 BROADCAST_TARGETS = frozenset({"", NOTME, ALL, CLIENT})
 
-# Mystic pipe codes (`|00`-`|23` colours plus two-character MCI codes
+# Mystic pipe codes (`|00`-`|23` colors plus two-character MCI codes
 # such as `|UN`) are `netbbs.rendering.pipe_codes`' grammar; the
-# identity fields strip all of them, a body keeps the colour subset.
+# identity fields strip all of them, a body keeps the color subset.
 _WHITESPACE_RE = re.compile(r"\s+")
 
 # The room in which CTCP requests and replies travel (issue #298) --
@@ -96,7 +96,7 @@ CTCP_REPLY = "[CTCP-REPLY]"
 CTCP_COMMANDS = ("VERSION", "TIME", "PING", "CLIENTINFO")
 
 # The house style a NetBBS caller's line wears on the wire (issue
-# #298): every reference client embeds the sender's own coloured handle
+# #298): every reference client embeds the sender's own colored handle
 # in the body and shows an inbound body verbatim, so a bare body would
 # reach other boards with no name attached. Grey brackets, a yellow
 # name (the nearest CGA reading of NetBBS's gold accent), then the
@@ -104,13 +104,13 @@ CTCP_COMMANDS = ("VERSION", "TIME", "PING", "CLIENTINFO")
 # the words. Actions use the template every client shares.
 ROOM_BODY_TEMPLATE = "|08<|{color}{nick}|08>|16|07 {text}"
 ACTION_BODY_TEMPLATE = "|15* |13{nick} {text}"
-# The house nick colour: CGA 14, yellow -- the nearest reading of
-# NetBBS's gold accent. A caller may pick another CGA colour (issue
-# #304); the brackets and the text colour stay the house's.
+# The house nick color: CGA 14, yellow -- the nearest reading of
+# NetBBS's gold accent. A caller may pick another CGA color (issue
+# #304); the brackets and the text color stay the house's.
 DEFAULT_NICK_COLOR = 14
 
 # A body's leading sender prefix as the reference clients write it,
-# anchored, with colour codes allowed between the tokens:
+# anchored, with color codes allowed between the tokens:
 #   `|03<|11Alice|03>|16|07 text`   Mystic / ENiGMA (bracketed)
 #   `Alice |07text`                 Synchronet / ANetBBS (bare)
 #   `|15* |13Alice waves`           every client's /me
@@ -244,7 +244,7 @@ def room_name_error(room: str) -> str | None:
 def sanitize_body(body: str) -> str:
     """A chat body as it may appear on the wire: printable ASCII 32-125,
     no tildes, pipe codes stripped (NetBBS never emits them, and one
-    typed literally by a caller would otherwise colour the remote
+    typed literally by a caller would otherwise color the remote
     display), surrounding whitespace trimmed. Length is *not* enforced
     here -- `split_body` decides how one local line becomes wire
     chunks."""
@@ -342,7 +342,7 @@ def parse_line(line: str) -> MrcPacket | None:
     # Pipe codes are stripped from every *identity* field here: a remote
     # `|04bob` is `bob` wherever it is later shown or compared, the same
     # normalization outbound names already get. The body keeps its
-    # colour codes (`|00`-`|23`, issue #298) -- printable ASCII, safe to
+    # color codes (`|00`-`|23`, issue #298) -- printable ASCII, safe to
     # store, rendered or stripped per viewer -- and loses every other
     # pipe token (Mystic MCI variables) right here.
     cleaned = [sanitize_text(strip_ansi(field)).strip() for field in fields]
@@ -370,7 +370,7 @@ def parse_server_command(body: str) -> tuple[str, str]:
 
 def parse_userlist(params: str) -> list[str]:
     """`USERLIST:alice,bob@othersite,carol` → the names as sent (each
-    already sanitized by `parse_line`; a colour code around a name is
+    already sanitized by `parse_line`; a color code around a name is
     decoration, not identity, and is dropped), empty entries dropped."""
     entries = (strip_pipe_codes(entry).strip() for entry in params.split(","))
     return [entry for entry in entries if entry]
@@ -516,7 +516,7 @@ def shutdown(site: str) -> MrcPacket:
 def split_sender_prefix(body: str, from_user: str) -> tuple[str, str]:
     """Peel the sender's own embedded handle off an inbound room body.
     Returns `(kind, text)`: `kind` is `"action"` for the shared `/me`
-    template, else `"message"`; `text` keeps its colour codes. A body
+    template, else `"message"`; `text` keeps its color codes. A body
     that does not start with `from_user` in one of the reference
     clients' shapes comes back whole -- the equality with `from_user`
     is what makes this safe, nothing is guessed."""

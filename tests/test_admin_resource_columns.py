@@ -58,7 +58,7 @@ def test_an_ungated_resource_shows_a_quiet_dash():
     assert _gate_cell(None, None) == ("-", MUTED_COLOR)
 
 
-def test_each_gate_gets_a_tag_and_the_colour():
+def test_each_gate_gets_a_tag_and_the_color():
     assert _gate_cell(18, None) == ("18+", GATE_COLOR)
     assert _gate_cell(None, "verified") == ("name", GATE_COLOR)
     assert _gate_cell(21, "verified") == ("21+ name", GATE_COLOR)

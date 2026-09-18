@@ -607,7 +607,7 @@ string, muted, exactly as they always have.
 A *record* — a row whose secondary text is several independent fields — is a
 table. `pick_item` takes `columns` and `column_values_of`, and renders a
 `LABEL_COLOR` heading row above fixed columns, each column separately
-coloured. This covers the SysOp's board, file-area, chat-channel and
+colored. This covers the SysOp's board, file-area, chat-channel and
 Community listers. The distinction is whether the fields can be compared down
 a page: levels, status and gates can, and a sentence stapling them together
 prevents it.
@@ -617,7 +617,7 @@ Two rules follow from that, and are normative for any future list:
 - **A resource's access gates appear wherever a SysOp lists that resource.**
   A minimum age or a name requirement changes who may enter, and a list that
   omits them shows a gated resource as identical to an open one. A gate is
-  coloured (`GATE_COLOR`) only when present, so an ungated row stays quiet
+  colored (`GATE_COLOR`) only when present, so an ungated row stays quiet
   and a gated one is visible while scanning. This holds in the narrow
   fallback too: a long name is bounded there rather than allowed to push the
   gates off the end of the row.
@@ -6421,10 +6421,10 @@ The title splash and the registration box follow the portraits' rule (issue
 negotiated width; otherwise a complete compact composition (wordmark, wrapped
 subtitle, stacked node/pilot/galaxy fields) is shown, and every box row has one
 display width, including for callsigns with wide characters. The registration
-greeting is drawn in one colour for the whole of its text, with the callsign the
-only part picked out: a sentence that wraps must not change colour between its
+greeting is drawn in one color for the whole of its text, with the callsign the
+only part picked out: a sentence that wraps must not change color between its
 rows, and body text inside a box is never left in the terminal's default
-foreground, which on a caller's client can be the colour the box border itself
+foreground, which on a caller's client can be the color the box border itself
 is drawn in.
 
 Every paged screen draws inside the tactical HUD's box (issue #486). Making the
@@ -6472,17 +6472,17 @@ Voidrunner is the showcase for what a NetBBS door can look like, and after the
 presentation half of that overhaul is this contract. It is normative for the
 door; Retro Trivia is the floor it must clear, not the target.
 
-**Colour reaches the body.** Every body row of every paged screen carries
-styling. The single mechanism that deleted the game's colour was the shared
+**Color reaches the body.** Every body row of every paged screen carries
+styling. The single mechanism that deleted the game's color was the shared
 paginator: `wrapped_group` wrapped each row through an ANSI-stripping helper
 before it was printed, so the frame was the only styled thing a page could
-have. It now wraps styled text, carrying the active colour across a break, and
-`draw_page` colours by role anything that still reaches it plain -- a screen
+have. It now wraps styled text, carrying the active color across a break, and
+`draw_page` colors by role anything that still reaches it plain -- a screen
 that builds its own rows cannot opt out. This is asserted, at 80 and at 40
 columns, on the deck, market, yard, record, board, chart, crew, display,
 customs and combat screens.
 
-**Nine roles, not nine colours.** What a token *is* decides its colour.
+**Nine roles, not nine colors.** What a token *is* decides its color.
 `hull` `#7fa3bf` frames, section headers and station names; `deep` `#2f3844`
 frame shadow, gauge tracks and separators; `plasma` `#ff5abe` the brand, the
 rank and the cursor; `gold` `#ffc83c` hotkeys and credits and nothing else;
@@ -6490,14 +6490,14 @@ rank and the cursor; `gold` `#ffc83c` hotkeys and credits and nothing else;
 `#b39b7d` labels, hints and units; and `mint` `#6cf2a0` / `amber` `#ffb347` /
 `alarm` `#ff5c6c` for good, caution and danger on gauges and severity glyphs.
 A hotkey is always gold and bold; a value is always ink; a label is always
-slate; chrome is never the colour of content; one accent carries the eye per
-screen. That the hotkey, label, value and frame colours differ, and that all
+slate; chrome is never the color of content; one accent carries the eye per
+screen. That the hotkey, label, value and frame colors differ, and that all
 four appear on a drawn screen, is asserted rather than eyeballed.
 
 The label role is deliberately the one drawn from outside the cockpit's own hue
 (issue #519). It was `#7f8fae` -- a desaturated *blue* on a blue screen -- so a
-label read as the same colour one shade down rather than as a different kind of
-thing: measured on the command deck, `deep`, `hull`, `ink` and that label colour
+label read as the same color one shade down rather than as a different kind of
+thing: measured on the command deck, `deep`, `hull`, `ink` and that label color
 were 78.7% of visible characters in one band. Warm rather than neutral because a
 label has to separate, not merely differ, and desaturated so it cannot be
 mistaken for `gold` or `amber`, which mean money and hotkeys. War Dialer's own
@@ -6510,8 +6510,8 @@ were 49.7% of the command deck's visible characters, 85% and 99% of them
 box-drawing. Chrome that bright competes with the values drawn on it. `hull`
 is now steel -- the same hue at half the saturation and a step down in
 brightness -- and `deep` is a near-neutral dark, so a gauge's filled half is
-the only coloured thing on its row. Both remain distinct from every content
-role; the sixteen-colour preset reads them as dark cyan and bright black. The
+the only colored thing on its row. Both remain distinct from every content
+role; the sixteen-color preset reads them as dark cyan and bright black. The
 before/after is judged from `scripts/door_gallery.py`, not from the hex; the
 command deck and the market, before above and after below, are kept as
 `docs/images/door-chrome-519-voidrunner-deck.png` and
@@ -6526,10 +6526,10 @@ with their noun.
 
 **A value is a value whether or not it is a number** (issue #532). The rule
 above is the shape of a recurring mistake, and the count in a menu label was
-only its first instance. `style_body_line` assigns colour by token *shape* --
+only its first instance. `style_body_line` assigns color by token *shape* --
 digits, credit figures, gauges, severity words, `[K]` -- and anything it does
 not recognise falls to the prose role. So a value that happens to be a word had
-nothing to match and came out the colour of its own label: `HULL ... 60/60
+nothing to match and came out the color of its own label: `HULL ... 60/60
 Intact`, `Concord Navy ... +0 Neutral Not joined`, `Crew none`. Two style lists
 made it worse by declaring those columns `label` outright. A column that holds
 what the caller reads off the row is a value column, whatever its cells look
@@ -6538,7 +6538,7 @@ same absence stays chrome.
 
 **A table's headings are structure, not labels.** They take the `heading` tone,
 which is `hull` -- the role that already means section headers -- so a table
-announces itself as one instead of being the colour of the sentence above it and
+announces itself as one instead of being the color of the sentence above it and
 the footnote below it.
 
 **The action bar wears the roles of the menu it mirrors.** A footer is a row of
@@ -6573,7 +6573,7 @@ printing underneath its predecessor: a session was one long scroll, and a
 caller's terminal history filled with superseded copies of the command deck.
 The clear lives in `draw_page`, the single path every paged screen already goes
 through, not sprinkled per screen -- a per-screen rule applied to most screens
-and not the rest is how the colour was lost one slice at a time. It is
+and not the rest is how the color was lost one slice at a time. It is
 unconditional rather than following the host's `redraw_in_place` preference,
 which is opt-in because clearing a *menu* costs scrollback a caller may still
 want; a door's own screens are not that, and War Dialer has always cleared.
@@ -6585,10 +6585,10 @@ alerts -- except a futures order that has come due, which was the one thing on
 it a caller had to act on. That is an alert row now, where the contract says
 something a caller must answer belongs.
 
-**Truecolour is the design target**, degrading to 256, to 16 (`basic`), to
+**Truecolor is the design target**, degrading to 256, to 16 (`basic`), to
 monochrome, to plain ASCII, in that order, each deliberate rather than
-accidental. The only effect that truecolour buys outright is the title splash's
-gradient rule, which degrades to a single role colour rather than being
+accidental. The only effect that truecolor buys outright is the title splash's
+gradient rule, which degrades to a single role color rather than being
 approximated.
 
 **One glyph vocabulary, every glyph with an ASCII substitute.** `╭─╮ │ ╰─╯
@@ -7563,7 +7563,7 @@ and logged, never allowed to crash the local channel. Every outbound
 field is sanitized to MRC's own documented charset/length limits before
 it's sent. Inbound Mystic `|NN` pipe codes are untrusted text, never
 raw ANSI: identity fields lose all of them, a body keeps only the
-colour subset (`|00`-`|23`), and those become NetBBS's own SGR solely
+color subset (`|00`-`|23`), and those become NetBBS's own SGR solely
 through `netbbs.rendering.pipe_codes`, after sanitization and per
 viewer (issue #298, below) — "sanitize before styling" holds exactly.
 
@@ -7626,9 +7626,9 @@ page is not publicly reachable:
   rejected session. Bridge warnings land in the same bounded
   diagnostic log Link already uses.
 
-**Issue #298 (body convention, colours, CTCP, per-caller hub replies)**
+**Issue #298 (body convention, colors, CTCP, per-caller hub replies)**
 corrected one shipped assumption and added what falls out of it. Every
-reference client embeds the sender's own coloured handle *inside* the
+reference client embeds the sender's own colored handle *inside* the
 message body (Mystic `|03<|11Alice|03>|16|07 text`, ENiGMA½
 `|00|10<|02Alice|10>|00 |03text`, Synchronet `Alice |07text`, ANetBBS
 `|07Alice|07 text`; actions `|15* |13Alice text`) and displays an
@@ -7639,14 +7639,14 @@ inbound prefix only when the embedded name equals `from_user` -- an
 unmatched body is recorded whole, nothing is guessed. Decisions taken
 with it:
 
-- **Colour codes are content, not markup.** `|00`-`|23` survive in a
+- **Color codes are content, not markup.** `|00`-`|23` survive in a
   stored MRC body (printable ASCII, safe to store) and are turned into
   SGR by `netbbs.rendering.pipe_codes` only after sanitization, per
   viewer, under a Profile toggle that defaults to on; every other pipe
   token is stripped at the parse boundary, identity fields lose all of
   them, and the search index receives the plain words. The recognized sender
   prefix's foreground is stored separately as `mrc_nick_color` and applied
-  to the author on live display and replay under the same colour toggle.
+  to the author on live display and replay under the same color toggle.
   Old rows keep their text and default author styling. A caller's own
   typed codes are still stripped: letting them through would put codes
   into local scrollback and Link-signed exports of mapped channels.
@@ -7824,9 +7824,9 @@ through, without teaching native chat anything about MRC:
   once as the caller's nick; the secret reaches no scrollback, log or
   input history (decision 5 stands: the node stores no credentials that
   are not its own).
-- **A personal nick colour.** The house-style body's handle colour is a
-  per-caller choice among the sixteen CGA colours (Profile, default
-  yellow), read when the caller is announced; brackets and text colour
+- **A personal nick color.** The house-style body's handle color is a
+  per-caller choice among the sixteen CGA colors (Profile, default
+  yellow), read when the caller is announced; brackets and text color
   stay the house's, and typed pipe codes stay stripped (#298).
 
 **Issue #305 (private messages, opt-in)** amends Decision 3 as the
@@ -7834,7 +7834,7 @@ planning pass intended:
 
 - **One switch, off by default, both directions.** `[P]rofile` →
   `[P]rivate MRC messages` (Communication section). The bridge reads it
-  when it announces the caller, alongside the nick colour, and forgets
+  when it announces the caller, alongside the nick color, and forgets
   it with their last announcement; switching it on applies the next
   time they enter an MRC room. Sending requires the same switch:
   starting conversations while refusing replies is not offered.
@@ -7844,7 +7844,7 @@ planning pass intended:
   sessions only, through the per-caller path of #298 and bounded per
   remote sender ahead of it (a flood from one nick must not evict
   chat). The sender's embedded handle is peeled exactly like a room
-  line's and the colour codes kept. It is never recorded: no scrollback,
+  line's and the color codes kept. It is never recorded: no scrollback,
   no search index, no log body.
 - **Sent as the caller's nick, in the house style.** `/mrc msg <nick>
   <text>` and `/mrc r <text>` (to whoever last messaged them this
@@ -8550,29 +8550,29 @@ renewed by rollover. These cues change no payout, protection, award or reset rul
 **The War Dialer presentation contract (issue #494; supersedes the issue #362
 slice 9 wording).** The door is a phosphor terminal, not a page of sentences.
 
-*Palette.* Nine roles, truecolour as the design target, each with a deliberate
-256-colour index beside it rather than whatever a converter would pick:
+*Palette.* Nine roles, truecolor as the design target, each with a deliberate
+256-color index beside it rather than whatever a converter would pick:
 `phosphor` `#39ff14` (your holdings, positive deltas, the scanline's glow),
 `phosphor-dim` `#4e8a62` (the frame, ring links, gauge tracks), `mint` `#7dffb0` (headings,
 your handle, the cursor), `amber` `#ffb000` (money and hotkeys), `cyan`
 `#38d6ff` (NPC operators and neutral data), `magenta` `#ff3caa` (rival crews and
 raids against you), `alarm` `#ff4d4d` (losses and bust risk), `ink` `#d7ffe9`
 (values) and `grey` `#8a8fc4` (labels). A hotkey is always amber and bold. An
-exchange's owner colour is the same on the ring, in the table and in the feed.
-Chrome never shares a colour with content.
+exchange's owner color is the same on the ring, in the table and in the feed.
+Chrome never shares a color with content.
 
 The label role is the one that must not be drawn from the screen's own hue
 (issue #519). It was `#7f9a8c` -- 256-index 108, which is `#87af87`, sage green
 -- so labels were specified as a green to sit on a green screen and vanished
 into it: measured on the switchboard, phosphor, phosphor-dim, mint, ink and
-that label colour were 78.5% of visible characters in one narrow band. A cool
+that label color were 78.5% of visible characters in one narrow band. A cool
 slate is off-hue from every green and clear of the established meanings of
 amber, cyan, magenta and alarm.
 
 The frame is chrome, and chrome wears `phosphor-dim` (issue #519, the second
-half). It was drawn in `phosphor` -- the same colour as a holding or a gain,
+half). It was drawn in `phosphor` -- the same color as a holding or a gain,
 and the brightest green on the screen -- so the border was 36.7% of the
-switchboard's visible characters and the rule that chrome never shares a colour
+switchboard's visible characters and the rule that chrome never shares a color
 with content did not hold for the frame itself. `phosphor-dim` was retuned from
 `#1f7a3f`, a dark fully-saturated green, to a desaturated mid green so a border
 is legible but recedes; `phosphor` now means only what a caller reads. The
@@ -8580,7 +8580,7 @@ scanline still fades mint to phosphor to phosphor-dim, and the ring's links and
 every gauge's empty half stay in the chrome role they always had. The
 switchboard before and after is kept as
 `docs/images/door-chrome-519-war-dialer-switchboard.png`, and the four chrome
-colours side by side as `door-chrome-519-swatch.png`.
+colors side by side as `door-chrome-519-swatch.png`.
 
 *Glyph vocabulary.* Frames `┌─┐ │ └─┘ ├─┤`; owner nodes `◆ ◈ ◉ ◇`; crew `●○`;
 turns `▮▯`; meters `█░`; the scanline's ramp `▓▒░`; sparklines `▁▂▃`; insignia
@@ -8595,7 +8595,7 @@ light frame is clean. The scanline draws the ramp above rather than the frame's
 own glyph: it used to be a run of `━` inset two columns and joined to nothing
 between two borders made of the same character, which read as a border that had
 failed to draw. Block elements are full-cell by construction, so they cannot
-show those seams, and a ramp fades in density as well as colour -- which is the
+show those seams, and a ramp fades in density as well as color -- which is the
 only fade that survives the monochrome preset, where a role returns no SGR at
 all and the old three-band version was perfectly flat.
 
@@ -8610,7 +8610,7 @@ self-contained file: `meter`, `pips`, `dots`, `sparkline`, `label_value`/`chip`,
 `badge`, `progress_chain`, `owner_node`, `scene_map`, `table`, `feed`, `key_bar`,
 `compose` and `prose_rows`. Each returns *styled* rows. The frame leaves a row
 that already carries SGR exactly as its component built it; wrapping every row
-through a plain-text flattener and colouring the whole line from outside is what
+through a plain-text flattener and coloring the whole line from outside is what
 turned the game into one grey block inside a green box. Rows are composed at the
 frame's own inner width, because the rows a card produces are the rows its page
 budget is computed from.
@@ -8650,9 +8650,9 @@ monochrome and Fast-mode toggles. Back writes nothing. Store one bounded boolean
 preference object per caller in world metadata; preserve it across season and
 competition resets and include it in the world backup. No competitive state or
 archive row is modified. ASCII mode substitutes for every glyph in the vocabulary
-while preserving caller names; monochrome removes colour at the source -- a role
+while preserving caller names; monochrome removes color at the source -- a role
 returns no SGR at all -- while retaining the screen controls the terminal UI
-needs. Every status, stake and outcome is readable without colour. Fast mode is
+needs. Every status, stake and outcome is readable without color. Fast mode is
 the one deliberately unframed layout: it omits optional art, flavour and motion
 and keeps every stake and net delta, and its title row carries the page counter
 the border would otherwise hold. Normal action results may add a short fictional
@@ -8666,8 +8666,8 @@ supervision are otherwise unchanged.
 *Review.* A screen is reviewed by looking at it. `scripts/door_gallery.py
 war_dialer` renders every screen at 80x24, 64x20 and 40x12 in every preset, and
 a change to a screen comes with that page attached. The suite can assert that
-colour reaches every body row, that hotkey, label, value and frame are four
-different colours, that an exchange reads the same colour everywhere, and that a
+color reaches every body row, that hotkey, label, value and frame are four
+different colors, that an exchange reads the same color everywhere, and that a
 table's columns do not wander -- what it can never assert is that a screen is
 worth looking at, which is why the pictures are required.
 

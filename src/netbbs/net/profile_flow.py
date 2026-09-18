@@ -1246,34 +1246,34 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Display",
         ),
         FieldSpec(
-            key="mrc_colors", hotkey="i", menu_text=menu_key("I", "nter-BBS chat colours"),
-            label="Inter-BBS chat (MRC) colours",
+            key="mrc_colors", hotkey="i", menu_text=menu_key("I", "nter-BBS chat colors"),
+            label="Inter-BBS chat (MRC) colors",
             render=lambda d: "on" if d["mrc_colors"] else "off",
             prompt=live_choice_field(
                 "mrc_colors", [False, True],
                 persist=lambda lane, v: lane.run(set_mrc_colors_enabled, user, v),
             ),
-            brief="Show the colours MRC users put in their lines",
+            brief="Show the colors MRC users put in their lines",
             help=(
-                "Users on the Multi Relay Chat network colour their lines with Mystic-style "
-                "codes. On: those colours are shown in a channel bridged to MRC. Off: the same "
+                "Users on the Multi Relay Chat network color their lines with Mystic-style "
+                "codes. On: those colors are shown in a channel bridged to MRC. Off: the same "
                 "lines appear as plain text. Either way the text is sanitized first."
             ),
             section="Display",
         ),
         FieldSpec(
-            key="mrc_nick_color", hotkey="y", menu_text=menu_key("Y", "our MRC nick colour"),
-            label="MRC nick colour",
+            key="mrc_nick_color", hotkey="y", menu_text=menu_key("Y", "our MRC nick color"),
+            label="MRC nick color",
             render=lambda d: f"{CGA_COLOR_NAMES[d['mrc_nick_color']]} (|{d['mrc_nick_color']:02d})",
             prompt=live_choice_field(
                 "mrc_nick_color", list(range(16)),
                 persist=lambda lane, v: lane.run(set_mrc_nick_color, user, v),
             ),
-            brief="The colour your handle wears on MRC",
+            brief="The color your handle wears on MRC",
             help=(
                 "Every line you send to the Multi Relay Chat network carries your handle in front "
-                "of it, in this colour -- one of the sixteen CGA colours MRC clients understand. "
-                "Each press moves to the next colour. Applies the next time you enter an MRC room."
+                "of it, in this color -- one of the sixteen CGA colors MRC clients understand. "
+                "Each press moves to the next color. Applies the next time you enter an MRC room."
             ),
             section="Display",
         ),

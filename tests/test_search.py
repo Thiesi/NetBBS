@@ -537,7 +537,7 @@ def test_find_goto_jumps_directly_to_a_result_by_its_shown_number(db, lane, alic
 # -- check_index_integrity / rebuild_indexes (issue #74) -------------------
 
 
-def test_mrc_bodies_are_indexed_and_rebuilt_without_their_colour_codes(db, alice):
+def test_mrc_bodies_are_indexed_and_rebuilt_without_their_color_codes(db, alice):
     """Issue #298: an MRC row keeps its `|NN` codes in `channel_messages`
     but the index holds the words; the integrity check must agree with
     that, and a rebuild must not put the codes back."""

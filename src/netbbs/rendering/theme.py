@@ -94,9 +94,9 @@ AUTHOR_COLOR = 79  # aquamarine — a person credited in their own column of a
                    # caller scans down rather than a navigable item (ACCENT_COLOR)
                    # or a speaker in a conversation (SELF_COLOR/NICK_COLOR).
                    # Deliberately not green: VERIFIED_COLOR already means
-                   # "this name was checked", and an uncoloured column of
+                   # "this name was checked", and an uncolored column of
                    # uploaders is how attribution came to be the one field on a
-                   # file row with no colour at all
+                   # file row with no color at all
 DATE_COLOR = 110  # soft steel blue — a date or time occupying its own column in a
                   # listing, where it is a field being compared down the column
                   # rather than chrome attached to something else (that is

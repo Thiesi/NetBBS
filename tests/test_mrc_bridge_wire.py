@@ -31,7 +31,7 @@ from tests.test_mrc_bridge import (  # noqa: F401 -- fixtures
 
 
 def test_inbound_bodies_lose_the_senders_own_embedded_handle(db, lane, lobby, alice):
-    """Every reference client puts the sender's coloured handle inside
+    """Every reference client puts the sender's colored handle inside
     the body; the caller must see one name, and an action must land
     as an action. A body that names someone else is recorded whole."""
     async def scenario():

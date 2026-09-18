@@ -66,8 +66,8 @@ border; where it will not fit, the page draws a plain border and puts the whole
 header in its first row, and the one screen that overflows a 40-column border
 names itself more briefly instead.
 
-The registration greeting is one colour again, with the callsign picked out in
-gold — it used to change colour mid-sentence, and on some clients the second half
+The registration greeting is one color again, with the callsign picked out in
+gold — it used to change color mid-sentence, and on some clients the second half
 was indistinguishable from the box border.
 
 ### War Dialer's screens are framed, and its hotkeys read one way

@@ -14,7 +14,7 @@ they enter an MRC room and covers both directions.
 
 With the switch on, a private line from an MRC user rings the bell and
 appears as `[MRC private] bob@Other: text`, to that caller alone, with the
-network's colours. `/mrc msg <nick> <text>` answers anyone on the network
+network's colors. `/mrc msg <nick> <text>` answers anyone on the network
 and `/mrc r <text>` answers whoever wrote last. Outbound lines carry the
 caller's handle in the house style so the other board shows who wrote
 them, and are routed to the board the recipient was last seen on.
