@@ -76,6 +76,7 @@ from netbbs.auth.users import (
     approve_pending_user,
     count_sysops,
     create_user,
+    current_account,
     delete_user,
     deletion_retires_username,
     get_user_by_id,
@@ -1166,6 +1167,12 @@ async def admin_menu(
     while True:
         choice = (await session.read_key()).lower()
 
+        if await _operator_lost_sysop(session, lane, user, node_controls):
+            await session.write_line(
+                colored("\r\nYour account no longer has SysOp access.", fg_color=ALERT_COLOR)
+            )
+            return
+
         if choice == "b":
             await session.write_line("")
             return
@@ -1232,6 +1239,33 @@ async def admin_menu(
                                    link_context=link_context, state=dashboard_state)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+async def _operator_lost_sysop(
+    session: Session, lane: DatabaseLane, user: User, node_controls: NodeControls | None
+) -> bool:
+    """
+    Whether the console's operator has been demoted, disabled or deleted
+    since it opened (issue #659) -- by another SysOp, by themselves, or
+    from another process.
+
+    In a live session the account watcher unwinds the console anyway, and
+    keeps the registry's baseline current, so this reads that baseline
+    rather than adding a database round trip to every key -- an await
+    here shifts the timing of the drain/shutdown screens' cancellation.
+    The standalone CLI has no watcher and asks the database.
+    """
+    if user.user_level < SYSOP_LEVEL:
+        return False
+    if node_controls is not None:
+        baseline = node_controls.session_registry.account_baseline(session)
+        return baseline is not None and baseline[0] < SYSOP_LEVEL
+    return not await lane.run(_still_sysop, user)
+
+
+def _still_sysop(db: Database, user: User) -> bool:
+    current = current_account(db, user)
+    return current is not None and current.user_level >= SYSOP_LEVEL
 
 
 async def _draw_admin_menu(
@@ -5772,6 +5806,7 @@ async def _user_detail_screen(
                         _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
                     else:
                         _announce_line(session, f"{target.username!r} is now level {target.user_level}.")
+                        _request_live_access_recheck(node_controls, target)
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
@@ -5807,6 +5842,7 @@ async def _user_detail_screen(
                     f"{target.username!r} can now verify identity: "
                     f"{'yes' if target.can_verify_identity else 'no'}."
                 )
+                _request_live_access_recheck(node_controls, target)
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
@@ -8302,6 +8338,18 @@ async def _revoke_live_sessions(
         _announce_line(session,
             colored(f"Disconnected {disconnected} live {plural}.", fg_color=MUTED_COLOR)
         )
+
+
+def _request_live_access_recheck(node_controls: NodeControls | None, target: User) -> None:
+    """
+    Wake the account watcher of every live session `target` holds, so a
+    level or verify-identity change applies now rather than at the
+    watcher's next poll (issue #659; `netbbs.net.login_flow.
+    _watch_for_account_revocation`). A no-op in the standalone CLI, whose
+    changes the running node's poll picks up instead.
+    """
+    if node_controls is not None:
+        node_controls.session_registry.request_account_recheck(target.username)
 
 
 # -- node management (design doc) -------------------------------------------

@@ -2264,6 +2264,27 @@ cleanup then cancels and gathers the watcher. A SysOp-triggered shutdown runs
 as an independent task so the issuing session is not awaiting its own
 cancellation.
 
+A session's task is not only cancelled to end it (issue #659). A reduced
+level cancels it once with `unwind_pending` set in `ActiveSessionRegistry`,
+and `netbbs.net.main_menu` absorbs that one cancellation with
+`Task.uncancel()`. It is absorbed only when it is the task's sole pending
+cancellation, so a disconnect arriving during the unwind still ends the
+session. Consequences for every screen below the main menu:
+
+- A screen must let a `CancelledError` aimed at the session task propagate.
+  Awaiting a subtask you just cancelled and swallowing its `CancelledError`
+  also swallows one aimed at the session if it lands on that await. Re-raise
+  when `asyncio.current_task().cancelling()` is non-zero, as the editors'
+  autosave cleanup does, or gather with `return_exceptions=True`. A swallowed
+  unwind is retired at the next main-menu redraw rather than leaking a
+  cancellation count into a later `asyncio.timeout`.
+- Cleanup in `finally` must leave the terminal usable for the next screen.
+  Chat already resets its scroll region and pinned-notice hook there. A
+  disconnect never needed this, because nothing was drawn afterwards.
+- Only the main menu arms the unwind, for exactly the span in which it
+  catches it; the handler itself must not await before the loop is back
+  inside its `try`.
+
 Ancillary background tasks use an explicit policy. A cosmetic task may
 gracefully degrade after logging its exception, but its failure must never
 prevent listener shutdown or database closure.

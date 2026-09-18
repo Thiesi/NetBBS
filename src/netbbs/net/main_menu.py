@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.auth.users import SYSOP_LEVEL, User, account_still_active, get_user_by_id
+from netbbs.auth.users import SYSOP_LEVEL, User, current_account
 from netbbs.chat import (
     ChatHub,
     DirectChatInvites,
@@ -59,6 +59,7 @@ from netbbs.net.profile_flow import (
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.scan_and_find import _find_screen, _new_scan_screen
 from netbbs.net.session import Session, write_preformatted_line, write_prompt
+from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
@@ -85,7 +86,7 @@ from netbbs.timeutil import format_for_display, utc_now_iso
 
 async def _draw_main_menu(
     session: Session, db: Database, mailbox: MessageMailbox, user: User,
-    *, node_controls: NodeControls | None = None,
+    *, node_controls: NodeControls | None = None, notice: str | None = None,
 ) -> None:
     """
     Shows any private messages that arrived while away from this menu,
@@ -183,6 +184,9 @@ async def _draw_main_menu(
     above everything below -- `""` (no masthead, the default) reproduces
     this function's output byte-for-byte as it was before that module
     existed.
+
+    `notice`, if given, is a result line carried into this redraw (issue
+    #659's access-change line) and shown just above the prompt.
     """
     for text, created_at in mailbox.flush(session):
         await session.write_line(format_with_preference(db, user, text, created_at))
@@ -302,6 +306,8 @@ async def _draw_main_menu(
         # issue #161, unconditionally -- no existing node's output
         # changes just because this module now exists.
         await session.write_line(f"\r\n{title}\r\n{options}\r\n")
+    if notice:
+        await session.write_line(notice)
     await write_prompt(session, _main_menu_prompt(db, user, node_controls))
 
 
@@ -441,233 +447,372 @@ async def _main_menu(
     elsewhere (the Who screen's own picker, admin screens, etc.) -- every
     other screen simply falls under "shown once back here."
     """
-    await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
+    registry = node_controls.session_registry if node_controls is not None else None
+    if registry is not None:
+        registry.arm_level_unwind(session, True)
+    try:
+        return await _main_menu_loop(
+            session, db, hub, presence, mailbox, history, user, registry,
+            node_controls=node_controls, lane=lane, link_context=link_context,
+            direct_invites=direct_invites, current_history_id=current_history_id,
+        )
+    finally:
+        if registry is not None:
+            registry.arm_level_unwind(session, False)
+
+
+async def _main_menu_loop(
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    history: InputHistory,
+    user: User,
+    registry: ActiveSessionRegistry | None,
+    *,
+    node_controls: NodeControls | None,
+    lane: DatabaseLane | None,
+    link_context: LinkContext | None,
+    direct_invites: DirectChatInvites | None,
+    current_history_id: int | None,
+) -> bool:
+    """`_main_menu`'s loop, run while the level unwind is armed.
+
+    Issue #659: the account is re-read whenever the menu is drawn and on
+    every key, so a promotion shows on the next redraw (at once when the
+    menu is idle -- the account watcher's `account_changed` event is
+    raced against the key read). A reduction arrives as a cancellation
+    of this task from the watcher; the `except` below absorbs exactly
+    that one and redraws with the fresh account.
+    """
+    changed = registry.account_changed_event(session) if registry is not None else None
+    notice: str | None = None
+    redraw = True
+    discard_typeahead = False
     while True:
-        key_task = asyncio.create_task(session.read_key())
-        if direct_invites is not None:
-            # Always races, every iteration -- not only when something
-            # already happens to be pending. `arrival_event` is a
-            # persistent per-session event a waiter can start waiting on
-            # before any invite has ever arrived at all; without that,
-            # an invite landing while this exact await is already in
-            # flight (idle, nothing racing it yet) would only be noticed
-            # on the *next* keystroke instead of interrupting immediately
-            # -- see that method's own docstring.
-            invite_task = asyncio.create_task(direct_invites.arrival_event(session).wait())
-            try:
-                done, _pending = await asyncio.wait({key_task, invite_task}, return_when=asyncio.FIRST_COMPLETED)
-            except asyncio.CancelledError:
-                # This session's own task was cancelled from outside
-                # (deliberate node shutdown/drain, an abrupt client
-                # disconnect noticed elsewhere -- design doc's
-                # ActiveSessionRegistry.disconnect_all()) while racing
-                # key_task against invite_task -- same gap
-                # netbbs.net.chat_flow's _chat_loop/_direct_chat_loop
-                # already hit and fixed: asyncio.wait() being cancelled
-                # does NOT cancel the tasks it was waiting on, so
-                # without this, key_task/invite_task are left orphaned
-                # and whichever one later finishes with an exception
-                # (e.g. SessionClosedError once the socket actually
-                # closes) has no one left to retrieve it, and asyncio
-                # logs "Task exception was never retrieved."
-                key_task.cancel()
-                invite_task.cancel()
-                await asyncio.gather(key_task, invite_task, return_exceptions=True)
+        try:
+            if discard_typeahead:
+                # Whatever the caller had typed into the interrupted
+                # screen must not be read as main-menu keys.
+                discard_typeahead = False
+                discard_buffered_input = getattr(session, "discard_buffered_input", None)
+                if discard_buffered_input is not None:
+                    await discard_buffered_input()
+            if redraw:
+                if registry is not None:
+                    # A screen that swallowed the unwind's CancelledError
+                    # leaves it pending; retire it before carrying on.
+                    registry.finish_level_unwind(session)
+                if changed is not None:
+                    # Cleared before the read, not only on adoption: an
+                    # account that can no longer be read would otherwise
+                    # leave it set, and the race below would redraw
+                    # forever without ever reading the key that reaches
+                    # the "no longer active" exit.
+                    changed.clear()
+                fresh = current_account(db, user)
+                if fresh is not None:
+                    notice = _access_change_notice(user, fresh) or notice
+                    user = _adopt_account(session, registry, fresh)
+                await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls, notice=notice)
+                notice = None
+                redraw = False
+            key_task = asyncio.create_task(session.read_key())
+            side_tasks: dict[str, asyncio.Task] = {}
+            if direct_invites is not None:
+                # Always races, every iteration -- not only when something
+                # already happens to be pending. `arrival_event` is a
+                # persistent per-session event a waiter can start waiting on
+                # before any invite has ever arrived at all; without that,
+                # an invite landing while this exact await is already in
+                # flight (idle, nothing racing it yet) would only be noticed
+                # on the *next* keystroke instead of interrupting immediately
+                # -- see that method's own docstring.
+                side_tasks["invite"] = asyncio.create_task(direct_invites.arrival_event(session).wait())
+            if changed is not None:
+                # Issue #659: a promotion redraws an idle menu at once, so
+                # the new options appear without a keypress.
+                side_tasks["access"] = asyncio.create_task(changed.wait())
+            if side_tasks:
+                try:
+                    done, _pending = await asyncio.wait(
+                        {key_task, *side_tasks.values()}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                except asyncio.CancelledError:
+                    # This session's own task was cancelled from outside
+                    # (deliberate node shutdown/drain, an abrupt client
+                    # disconnect noticed elsewhere -- design doc's
+                    # ActiveSessionRegistry.disconnect_all(), or issue
+                    # #659's level unwind) while racing key_task against
+                    # the side tasks -- same gap netbbs.net.chat_flow's
+                    # _chat_loop/_direct_chat_loop already hit and fixed:
+                    # asyncio.wait() being cancelled does NOT cancel the
+                    # tasks it was waiting on, so without this they are left
+                    # orphaned and whichever one later finishes with an
+                    # exception (e.g. SessionClosedError once the socket
+                    # actually closes) has no one left to retrieve it, and
+                    # asyncio logs "Task exception was never retrieved."
+                    for task in (key_task, *side_tasks.values()):
+                        task.cancel()
+                    await asyncio.gather(key_task, *side_tasks.values(), return_exceptions=True)
+                    raise
+                invite_task = side_tasks.get("invite")
+                access_task = side_tasks.get("access")
+                if invite_task is not None and invite_task in done:
+                    side_tasks.pop("invite")
+                    stragglers = [key_task, *side_tasks.values()]
+                    for task in stragglers:
+                        task.cancel()
+                    await asyncio.gather(*stragglers, return_exceptions=True)
+                    direct_invites.clear_arrival(session)
+                    await _handle_incoming_invite(session, db, direct_invites, hub, presence, user)
+                    continue
+                if access_task is not None and access_task in done and key_task not in done:
+                    for task in (key_task, *side_tasks.values()):
+                        task.cancel()
+                    await asyncio.gather(key_task, *side_tasks.values(), return_exceptions=True)
+                    redraw = True
+                    continue
+                for task in side_tasks.values():
+                    task.cancel()
+                await asyncio.gather(*side_tasks.values(), return_exceptions=True)
+            choice = (await key_task).lower()
+
+            fresh = current_account(db, user)
+            if fresh is None:
+                # GitHub issue #29: the cross-process revalidation
+                # boundary. In-process disable/delete already disconnects
+                # a live session directly (see
+                # netbbs.net.admin_flow._revoke_live_sessions), but the
+                # standalone `python -m netbbs.admin` CLI can also change
+                # `disabled_at`/delete the row from a completely separate
+                # process with no in-memory notification path at all --
+                # this re-check, at one natural choke point every
+                # main-menu action passes through, is an authoritative
+                # fallback regardless of which process made the change.
+                # `netbbs.net.chat_flow`'s send loop has the identical
+                # check at its own equivalent boundary (GitHub issue #29,
+                # reopened) -- a session that never returns to this menu
+                # (e.g. staying in chat) still gets revalidated there.
+                await session.write_line(
+                    colored("\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR)
+                )
+                return False
+            if _access_change_notice(user, fresh) is not None:
+                # Issue #659: the key was pressed against a menu drawn for
+                # the old access -- redraw rather than act on it.
+                redraw = True
+                continue
+
+            if choice == REDRAW_KEY:
+                # Issue #102: redraws in place, no state change -- the same
+                # "not a real action" shape an unrecognized key already has
+                # (design doc), just without the bell, since Ctrl-L is a
+                # deliberate request, not a mistyped one.
+                redraw = True
+                continue
+
+            if choice == "l":
+                await session.write_line("")
+                if not await prompt_yes_no(session, "Log off?", default=False):
+                    redraw = True
+                    continue
+                return True
+            elif choice == "c" and _has_visible_communities(db, user):
+                await session.write_line("")
+                await _enter_communities(
+                    session, db, hub, presence, mailbox, history, user,
+                    node_controls=node_controls, lane=lane, link_context=link_context,
+                    direct_invites=direct_invites,
+                )
+                redraw = True
+            elif choice == "u" and _has_uncategorized_resources(db, user):
+                await session.write_line("")
+                await _enter_uncategorized(
+                    session, db, hub, presence, mailbox, history, user,
+                    node_controls=node_controls, lane=lane, link_context=link_context,
+                    direct_invites=direct_invites,
+                )
+                redraw = True
+            elif choice == "j":
+                await session.write_line("")
+                await _jump_to(
+                    session, db, hub, presence, mailbox, history, user,
+                    node_controls=node_controls, lane=lane, link_context=link_context,
+                    direct_invites=direct_invites,
+                )
+                redraw = True
+            elif choice == "n":
+                await session.write_line("")
+                # Issue #56: same lane-is-None degrade-gracefully reasoning
+                # as "e"/"s" above -- a direct test call site without a real
+                # lane simply can't reach the new-scan screen's own
+                # unread-count queries.
+                if lane is not None:
+                    await _new_scan_screen(
+                        session, db, lane, hub, presence, mailbox, history, user, link_context=link_context,
+                        mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
+                        transfers=node_controls.transfers if node_controls is not None else None,
+                    )
+                else:
+                    await session.write_line(
+                        colored("New scan is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
+            elif choice == "f":
+                await session.write_line("")
+                if lane is not None:
+                    await _find_screen(
+                        session, db, lane, hub, presence, mailbox, history, user, link_context=link_context,
+                        mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
+                        transfers=node_controls.transfers if node_controls is not None else None,
+                    )
+                else:
+                    await session.write_line(
+                        colored("Find is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
+            elif choice == "d":
+                await session.write_line("")
+                await _browse_directory(session, db, user)
+                redraw = True
+            elif choice == "p":
+                await session.write_line("")
+                # Issue #160's cursor-nav follow-up: the profile screen is
+                # now built on edit_resource_draft, which needs a real
+                # DatabaseLane -- see the "e" (mail) branch above for the
+                # identical lane-is-None degrade-gracefully reasoning.
+                if lane is not None:
+                    await _edit_profile(session, lane, user)
+                    # Code review follow-up (PR #213): the profile screen's
+                    # own draft only ever received the updated fingerprint
+                    # for its own "Add"/"Replace"/"Clear" verb -- this loop's
+                    # own `user` was never refreshed, so every later branch
+                    # this session reaches (posting, uploading, chatting)
+                    # kept attributing to the pre-edit key even after it was
+                    # replaced or removed. `User` is frozen -- re-fetch
+                    # rather than mutate. Falls back to the pre-edit `user`
+                    # in the extreme, unlikely case a concurrent session
+                    # deleted this same account mid-edit -- `_main_menu`'s
+                    # own loop has no other path for "the account I'm
+                    # logged in as no longer exists" to unwind through here.
+                    #
+                    # Code review follow-up (PR #221): this ran get_user_by_id
+                    # directly against `db` on the interactive event-loop
+                    # coroutine instead of through `lane`, like every other
+                    # SQLite access this async UI flow performs -- under
+                    # contention or slow storage that blocks every other
+                    # Telnet/SSH/web session sharing this node's one
+                    # connection, not just this one.
+                    #
+                    # Issue #659: a level change made while the caller was
+                    # in here would otherwise be adopted silently -- the
+                    # redraw below compares against this refreshed `user`.
+                    refreshed = await lane.run(current_account, user) or user
+                    notice = _access_change_notice(user, refreshed)
+                    user = refreshed
+                else:
+                    await session.write_line(
+                        colored("Your profile is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
+            elif choice == "e":
+                await session.write_line("")
+                # design doc, issue #57: mail is one of the features
+                # migrated onto the two-lane database execution model --
+                # `lane` is None only for a direct test call site that
+                # doesn't supply one (same degrade-gracefully-in-tests
+                # shape `node_controls` already uses above), never for a
+                # real connection, since netbbs.__main__.run() always
+                # passes a real foreground lane.
+                if lane is not None:
+                    await browse_mail(session, lane, user, link_context=link_context)
+                else:
+                    await session.write_line(
+                        colored("Mail is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
+            elif choice == "h":
+                await session.write_line("")
+                await _last_sessions_screen(session, db, user)
+                redraw = True
+            elif choice == "r":
+                await session.write_line("")
+                await _previous_callers_screen(
+                    session, db, user, current_history_id=current_history_id
+                )
+                redraw = True
+            elif choice == "w" and node_controls is not None:
+                await session.write_line("")
+                await _caller_who_screen(
+                    session, db, node_controls, user, hub, presence, direct_invites, lane, link_context=link_context
+                )
+                redraw = True
+            elif choice == "i" and list_pending_invitations_for_user(db, user):
+                await session.write_line("")
+                await _show_pending_invitations(session, db, user)
+                redraw = True
+            elif choice == "v" and (user.can_verify_identity or meets_level(user, SYSOP_LEVEL)):
+                await session.write_line("")
+                await _verify_identity_menu(session, db, user)
+                redraw = True
+            elif choice == "s" and meets_level(user, SYSOP_LEVEL):
+                await session.write_line("")
+                # design doc: admin is one of the features
+                # migrated onto the two-lane database execution model -- see
+                # the "e" (mail) branch above for the identical lane-is-None
+                # degrade-gracefully reasoning. Keystroke is "s" (BBS
+                # convention: the "SysOp" menu), not "a" -- Thiesi's own
+                # explicit request, more in line with traditional BBS lingo
+                # than a generic "Admin" label/letter.
+                if lane is not None:
+                    await admin_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
+                else:
+                    await session.write_line(
+                        colored("SysOp menu is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
+            else:
+                await session.write(reject_unhandled_key(choice))
+        except asyncio.CancelledError:
+            # Issue #659: the one cancellation this menu absorbs -- the
+            # account watcher unwinding a session whose access was reduced
+            # back to here. Anything else (disconnect, shutdown, drain)
+            # keeps propagating. Nothing in here awaits: until the loop is
+            # back inside the `try`, a second unwind would escape and end
+            # the session.
+            if registry is None or not registry.finish_level_unwind(session):
                 raise
-            if invite_task in done:
-                key_task.cancel()
-                await asyncio.gather(key_task, return_exceptions=True)
-                direct_invites.clear_arrival(session)
-                await _handle_incoming_invite(session, db, direct_invites, hub, presence, user)
-                continue
-            invite_task.cancel()
-            await asyncio.gather(invite_task, return_exceptions=True)
-        choice = (await key_task).lower()
+            discard_typeahead = True
+            redraw = True
 
-        if not account_still_active(db, user):
-            # GitHub issue #29: the cross-process revalidation
-            # boundary. In-process disable/delete already disconnects
-            # a live session directly (see
-            # netbbs.net.admin_flow._revoke_live_sessions), but the
-            # standalone `python -m netbbs.admin` CLI can also change
-            # `disabled_at`/delete the row from a completely separate
-            # process with no in-memory notification path at all --
-            # this re-check, at one natural choke point every
-            # main-menu action passes through, is an authoritative
-            # fallback regardless of which process made the change.
-            # `netbbs.net.chat_flow`'s send loop has the identical
-            # check at its own equivalent boundary (GitHub issue #29,
-            # reopened) -- a session that never returns to this menu
-            # (e.g. staying in chat) still gets revalidated there.
-            await session.write_line(
-                colored("\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR)
-            )
-            return False
 
-        if choice == REDRAW_KEY:
-            # Issue #102: redraws in place, no state change -- the same
-            # "not a real action" shape an unrecognized key already has
-            # (design doc), just without the bell, since Ctrl-L is a
-            # deliberate request, not a mistyped one.
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-            continue
-
-        if choice == "l":
-            await session.write_line("")
-            if not await prompt_yes_no(session, "Log off?", default=False):
-                await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-                continue
-            return True
-        elif choice == "c" and _has_visible_communities(db, user):
-            await session.write_line("")
-            await _enter_communities(
-                session, db, hub, presence, mailbox, history, user,
-                node_controls=node_controls, lane=lane, link_context=link_context,
-                direct_invites=direct_invites,
-            )
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "u" and _has_uncategorized_resources(db, user):
-            await session.write_line("")
-            await _enter_uncategorized(
-                session, db, hub, presence, mailbox, history, user,
-                node_controls=node_controls, lane=lane, link_context=link_context,
-                direct_invites=direct_invites,
-            )
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "j":
-            await session.write_line("")
-            await _jump_to(
-                session, db, hub, presence, mailbox, history, user,
-                node_controls=node_controls, lane=lane, link_context=link_context,
-                direct_invites=direct_invites,
-            )
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "n":
-            await session.write_line("")
-            # Issue #56: same lane-is-None degrade-gracefully reasoning
-            # as "e"/"s" above -- a direct test call site without a real
-            # lane simply can't reach the new-scan screen's own
-            # unread-count queries.
-            if lane is not None:
-                await _new_scan_screen(
-                    session, db, lane, hub, presence, mailbox, history, user, link_context=link_context,
-                    mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
-                    transfers=node_controls.transfers if node_controls is not None else None,
-                )
-            else:
-                await session.write_line(
-                    colored("New scan is not available in this context.", fg_color=MUTED_COLOR)
-                )
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "f":
-            await session.write_line("")
-            if lane is not None:
-                await _find_screen(
-                    session, db, lane, hub, presence, mailbox, history, user, link_context=link_context,
-                    mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
-                    transfers=node_controls.transfers if node_controls is not None else None,
-                )
-            else:
-                await session.write_line(
-                    colored("Find is not available in this context.", fg_color=MUTED_COLOR)
-                )
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "d":
-            await session.write_line("")
-            await _browse_directory(session, db, user)
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "p":
-            await session.write_line("")
-            # Issue #160's cursor-nav follow-up: the profile screen is
-            # now built on edit_resource_draft, which needs a real
-            # DatabaseLane -- see the "e" (mail) branch above for the
-            # identical lane-is-None degrade-gracefully reasoning.
-            if lane is not None:
-                await _edit_profile(session, lane, user)
-                # Code review follow-up (PR #213): the profile screen's
-                # own draft only ever received the updated fingerprint
-                # for its own "Add"/"Replace"/"Clear" verb -- this loop's
-                # own `user` was never refreshed, so every later branch
-                # this session reaches (posting, uploading, chatting)
-                # kept attributing to the pre-edit key even after it was
-                # replaced or removed. `User` is frozen -- re-fetch
-                # rather than mutate. Falls back to the pre-edit `user`
-                # in the extreme, unlikely case a concurrent session
-                # deleted this same account mid-edit -- `_main_menu`'s
-                # own loop has no other path for "the account I'm
-                # logged in as no longer exists" to unwind through here.
-                #
-                # Code review follow-up (PR #221): this ran get_user_by_id
-                # directly against `db` on the interactive event-loop
-                # coroutine instead of through `lane`, like every other
-                # SQLite access this async UI flow performs -- under
-                # contention or slow storage that blocks every other
-                # Telnet/SSH/web session sharing this node's one
-                # connection, not just this one.
-                user = await lane.run(get_user_by_id, user.id) or user
-            else:
-                await session.write_line(
-                    colored("Your profile is not available in this context.", fg_color=MUTED_COLOR)
-                )
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "e":
-            await session.write_line("")
-            # design doc, issue #57: mail is one of the features
-            # migrated onto the two-lane database execution model --
-            # `lane` is None only for a direct test call site that
-            # doesn't supply one (same degrade-gracefully-in-tests
-            # shape `node_controls` already uses above), never for a
-            # real connection, since netbbs.__main__.run() always
-            # passes a real foreground lane.
-            if lane is not None:
-                await browse_mail(session, lane, user, link_context=link_context)
-            else:
-                await session.write_line(
-                    colored("Mail is not available in this context.", fg_color=MUTED_COLOR)
-                )
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "h":
-            await session.write_line("")
-            await _last_sessions_screen(session, db, user)
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "r":
-            await session.write_line("")
-            await _previous_callers_screen(
-                session, db, user, current_history_id=current_history_id
-            )
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "w" and node_controls is not None:
-            await session.write_line("")
-            await _caller_who_screen(
-                session, db, node_controls, user, hub, presence, direct_invites, lane, link_context=link_context
-            )
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "i" and list_pending_invitations_for_user(db, user):
-            await session.write_line("")
-            await _show_pending_invitations(session, db, user)
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "v" and (user.can_verify_identity or meets_level(user, SYSOP_LEVEL)):
-            await session.write_line("")
-            await _verify_identity_menu(session, db, user)
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
-        elif choice == "s" and meets_level(user, SYSOP_LEVEL):
-            await session.write_line("")
-            # design doc: admin is one of the features
-            # migrated onto the two-lane database execution model -- see
-            # the "e" (mail) branch above for the identical lane-is-None
-            # degrade-gracefully reasoning. Keystroke is "s" (BBS
-            # convention: the "SysOp" menu), not "a" -- Thiesi's own
-            # explicit request, more in line with traditional BBS lingo
-            # than a generic "Admin" label/letter.
-            if lane is not None:
-                await admin_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
-            else:
-                await session.write_line(
-                    colored("SysOp menu is not available in this context.", fg_color=MUTED_COLOR)
-                )
-            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
+def _access_change_notice(before: User, after: User) -> str | None:
+    """The line shown above the redrawn menu when a SysOp changed this
+    account's level or verify-identity permission (issue #659), or `None`
+    when neither changed."""
+    lines = []
+    if after.user_level != before.user_level:
+        color = SUCCESS_COLOR if after.user_level > before.user_level else ALERT_COLOR
+        lines.append(colored(f"Your access level is now {after.user_level}.", fg_color=color))
+    if after.can_verify_identity != before.can_verify_identity:
+        if after.can_verify_identity:
+            lines.append(colored("You can now verify callers' identities.", fg_color=SUCCESS_COLOR))
         else:
-            await session.write(reject_unhandled_key(choice))
+            lines.append(colored("You can no longer verify callers' identities.", fg_color=ALERT_COLOR))
+    return "\r\n".join(lines) if lines else None
+
+
+def _adopt_account(session: Session, registry: ActiveSessionRegistry | None, fresh: User) -> User:
+    """Make `fresh` the account this menu runs with, and record it as the
+    session's baseline so the account watcher does not act a second time
+    on a change the menu has already applied (issue #659)."""
+    if registry is not None:
+        registry.record_account(
+            session, user_level=fresh.user_level, can_verify_identity=fresh.can_verify_identity
+        )
+    return fresh
 
 
 async def _handle_incoming_invite(

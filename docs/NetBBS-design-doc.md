@@ -777,6 +777,20 @@ leave the node with zero **usable SysOps**. A usable SysOp:
 The invariant is enforced transactionally against fresh database state, not
 against a stale object supplied by a caller.
 
+A change to an account's level or its verify-identity permission applies to
+that account's live sessions without a re-login (issue #659), whichever
+process made it. Each session's account watcher re-reads the account every
+few seconds, and an in-node change wakes it at once. A gain is picked up the
+next time the main menu is drawn, straight away if the caller is sitting on
+the menu, and nothing is interrupted. A loss interrupts the caller's current
+screen and returns them to the main menu, redrawn for the new level with a
+line saying what changed. Every screen was entered under the old access, the
+SysOp console above all, and interrupting is the only way to reach a screen
+that is waiting for a key. The interruption ends whatever the caller was
+doing, a running door included. An editor keeps its text as a recoverable
+draft. The SysOp console also re-checks its operator at its own menu, which
+is what stops a demoted operator in the standalone CLI.
+
 Hard deletion preserves content provenance through denormalized display labels
 or nullable author/uploader references. Personal access rows and private state
 which cannot meaningfully outlive the account are deleted according to explicit

@@ -670,3 +670,26 @@ def test_repeated_disconnects_never_leave_autosave_tasks_pending(tmp_path):
         assert leaked == []
 
     asyncio.run(scenario())
+
+
+def test_a_cancelled_edit_keeps_what_was_drawn_since_the_last_autosave(tmp_path):
+    """Issue #659: a session unwound to the main menu (or disconnected)
+    while drawing keeps its canvas, not only what the last autosave tick
+    caught."""
+    draft = tmp_path / "d.draft"
+
+    async def scenario():
+        session = FakeSession(["A"])  # then waits for a key forever
+        task = asyncio.create_task(
+            edit_ansi_art(session, initial_bytes=None, draft_path=draft, autosave_interval_seconds=9999)
+        )
+        while session._inputs:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return task
+
+    task = asyncio.run(scenario())
+    assert task.cancelled()
+    assert _buffer_from(draft.read_bytes()).get_cell(0, 0).char == "A"

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 
+from netbbs.auth.users import SYSOP_LEVEL
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.timeutil import utc_now_iso
 
@@ -44,6 +45,14 @@ class _Entry:
     username: str | None = None
     is_sysop: bool = False
     connected_at: str = field(default_factory=utc_now_iso)
+    # Issue #659: the access this session's screens are currently running
+    # with -- see `record_account`.
+    user_level: int | None = None
+    can_verify_identity: bool = False
+    recheck: asyncio.Event = field(default_factory=asyncio.Event)
+    account_changed: asyncio.Event = field(default_factory=asyncio.Event)
+    unwind_armed: bool = False
+    unwind_pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -132,6 +141,99 @@ class ActiveSessionRegistry:
         if entry is not None:
             entry.username = username
             entry.is_sysop = is_sysop
+
+    # -- live access changes (issue #659) ------------------------------------
+    #
+    # A session's screens run on the `User` read at login. When a SysOp
+    # changes that account's level (or its verify-identity permission),
+    # `netbbs.net.login_flow`'s account watcher compares the stored row
+    # with the baseline recorded here. A gain sets `account_changed`, and
+    # the main menu re-reads the account the next time it is shown. A
+    # loss must not wait for that: a demoted SysOp could keep using the
+    # console they are sitting in. The watcher then cancels the session's
+    # task with `unwind_pending` set, and the main menu -- the only frame
+    # that arms the unwind -- catches that one cancellation, uncancels
+    # the task and redraws with the fresh account. Every screen in
+    # between unwinds through the same `finally` cleanup a disconnect
+    # already relies on.
+
+    def record_account(self, session: Session, *, user_level: int, can_verify_identity: bool) -> None:
+        """Record the access `session`'s screens are now running with,
+        and keep `is_sysop` (drain's `exclude_sysops`) in step with it."""
+        entry = self._sessions.get(session)
+        if entry is not None:
+            entry.user_level = user_level
+            entry.can_verify_identity = can_verify_identity
+            entry.is_sysop = user_level >= SYSOP_LEVEL
+
+    def account_baseline(self, session: Session) -> tuple[int, bool] | None:
+        """`(user_level, can_verify_identity)` as last recorded, or `None`
+        for a session that is unregistered or has no account recorded."""
+        entry = self._sessions.get(session)
+        if entry is None or entry.user_level is None:
+            return None
+        return entry.user_level, entry.can_verify_identity
+
+    def recheck_event(self, session: Session) -> asyncio.Event | None:
+        """Set to wake `session`'s account watcher before its next poll."""
+        entry = self._sessions.get(session)
+        return entry.recheck if entry is not None else None
+
+    def account_changed_event(self, session: Session) -> asyncio.Event | None:
+        """Set by the account watcher when `session`'s access changed; the
+        main menu races it against its key read and clears it when it
+        re-reads the account."""
+        entry = self._sessions.get(session)
+        return entry.account_changed if entry is not None else None
+
+    def request_account_recheck(self, username: str) -> None:
+        """Wake the account watcher of every session signed in as
+        `username`, so an in-process level change applies now rather than
+        at the next poll. The poll still covers changes made by another
+        process (`python -m netbbs.admin`)."""
+        for entry in self._sessions.values():
+            if entry.username == username:
+                entry.recheck.set()
+
+    def arm_level_unwind(self, session: Session, armed: bool) -> None:
+        """Only the main menu arms the unwind, for exactly the span in
+        which it catches it. Outside that span -- the post-login prompts,
+        the logoff path -- a cancellation would end the session instead
+        of returning it to the menu, so `request_level_unwind` refuses."""
+        entry = self._sessions.get(session)
+        if entry is not None:
+            entry.unwind_armed = armed
+
+    def request_level_unwind(self, session: Session) -> bool:
+        """Cancel `session`'s task so it unwinds to the main menu. Does
+        nothing when the main menu is not armed or an unwind is already
+        pending -- a second cancel would count as a real one and
+        disconnect the session."""
+        entry = self._sessions.get(session)
+        if entry is None or not entry.unwind_armed or entry.unwind_pending:
+            return False
+        entry.unwind_pending = True
+        entry.task.cancel()
+        return True
+
+    def finish_level_unwind(self, session: Session) -> bool:
+        """Retire a pending unwind from inside `session`'s own task.
+
+        Returns `True` when the unwind was the only cancellation of the
+        task, so the caller may carry on. Returns `False` when nothing was
+        pending, or when a real cancellation (disconnect, shutdown, drain)
+        arrived as well; that one must keep propagating.
+
+        Also called on the main menu's ordinary path: if a screen
+        swallowed the unwind's `CancelledError`, the request is still
+        pending and the task still counts the cancellation, which would
+        confuse any later `asyncio.timeout`.
+        """
+        entry = self._sessions.get(session)
+        if entry is None or not entry.unwind_pending:
+            return False
+        entry.unwind_pending = False
+        return entry.task.uncancel() == 0
 
     def list_entries(self) -> list[SessionSummary]:
         """A snapshot of every currently connected session, for the

@@ -33,9 +33,9 @@ from netbbs.auth.users import (
     SYSOP_LEVEL,
     AuthError,
     User,
-    account_still_active,
     authenticate_password_async,
     create_user_async,
+    current_account,
     get_user_by_username,
     touch_last_login,
 )
@@ -474,24 +474,71 @@ async def _watch_for_account_revocation(
     and must not depend on this presentation detail succeeding, so
     `cancel_one` runs from a `finally`, guaranteed to fire whether the
     write finishes, fails, or times out.
+
+    Issue #659: the same poll carries a SysOp's level or verify-identity
+    change into the live session -- see `_apply_access_change`. The
+    registry's `recheck` event wakes it early when the change was made
+    in this process, so an in-node demotion applies at once rather than
+    at the next tick.
     """
+    recheck = session_registry.recheck_event(session)
     while True:
-        await asyncio.sleep(_REVOCATION_CHECK_INTERVAL_SECONDS)
-        if not account_still_active(db, user):
+        if recheck is None:
+            await asyncio.sleep(_REVOCATION_CHECK_INTERVAL_SECONDS)
+        else:
             try:
-                await asyncio.wait_for(
-                    session.write_line(
-                        colored(
-                            "\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR
-                        )
-                    ),
-                    timeout=_REVOCATION_NOTICE_TIMEOUT_SECONDS,
-                )
-            except (asyncio.TimeoutError, SessionClosedError):
+                await asyncio.wait_for(recheck.wait(), timeout=_REVOCATION_CHECK_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
                 pass
-            finally:
-                session_registry.cancel_one(session)
-            return
+            recheck.clear()
+        current = current_account(db, user)
+        if current is not None:
+            _apply_access_change(session, current, session_registry)
+            continue
+        try:
+            await asyncio.wait_for(
+                session.write_line(
+                    colored(
+                        "\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR
+                    )
+                ),
+                timeout=_REVOCATION_NOTICE_TIMEOUT_SECONDS,
+            )
+        except (asyncio.TimeoutError, SessionClosedError):
+            pass
+        finally:
+            session_registry.cancel_one(session)
+        return
+
+
+def _apply_access_change(session: Session, current: User, session_registry: ActiveSessionRegistry) -> None:
+    """
+    Carry a changed level or verify-identity permission into `session`
+    (issue #659). A gain only signals the main menu, which re-reads the
+    account when it is next shown. A loss also unwinds the session back
+    to the main menu, because whatever screen it is on was entered with
+    the old access -- the SysOp console above all.
+
+    The baseline is updated even when the unwind is refused (the session
+    is still in its post-login prompts, or already logging off): the main
+    menu re-reads the account on entry, so nothing is lost, and a later
+    tick must not unwind for a change that has already been applied.
+    """
+    baseline = session_registry.account_baseline(session)
+    if baseline is None:
+        return
+    level, can_verify = baseline
+    if (current.user_level, current.can_verify_identity) == (level, can_verify):
+        return
+    lost = current.user_level < level or (can_verify and not current.can_verify_identity)
+    session_registry.record_account(
+        session, user_level=current.user_level, can_verify_identity=current.can_verify_identity
+    )
+    if lost:
+        session_registry.request_level_unwind(session)
+    changed = session_registry.account_changed_event(session)
+    if changed is not None:
+        changed.set()
 
 
 async def _confirm_unicode_style(session: Session, db: Database, user: User) -> None:
@@ -703,6 +750,9 @@ async def run_authenticated_session(
     if node_controls is not None:
         node_controls.session_registry.mark_authenticated(
             session, user.username, is_sysop=meets_level(user, SYSOP_LEVEL)
+        )
+        node_controls.session_registry.record_account(
+            session, user_level=user.user_level, can_verify_identity=user.can_verify_identity
         )
         watcher_task = asyncio.create_task(
             _watch_for_account_revocation(session, db, user, node_controls.session_registry)

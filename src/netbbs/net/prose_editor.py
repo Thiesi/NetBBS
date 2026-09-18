@@ -28,6 +28,7 @@ uses (design doc) rather than inventing a fixed default.
 from __future__ import annotations
 
 import asyncio
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -245,6 +246,12 @@ async def edit_prose(
         # dead session. Task cleanup now always runs; the screen clear
         # is best-effort and simply skipped for a transport that's
         # already gone (there's no terminal left to clean up).
+        #
+        # Issue #659: a cancelled edit -- a disconnect, or the session
+        # being unwound to the main menu after a SysOp reduced its
+        # access -- keeps what was typed since the last autosave tick.
+        if isinstance(sys.exc_info()[1], asyncio.CancelledError) and state.dirty:
+            save_draft(draft_path, state.buffer.to_text())
         try:
             await session.write(clear_screen())
         except SessionClosedError:
@@ -253,7 +260,12 @@ async def edit_prose(
         try:
             await autosave_task
         except asyncio.CancelledError:
-            pass
+            # The autosave task's own cancellation is expected; one aimed
+            # at this session's task, landing on this await, is not and
+            # must keep propagating.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
 
 
 def _dispatch(state: _EditorState, key: EditorKey, width: int, height: int) -> bool:
