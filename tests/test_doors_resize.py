@@ -452,3 +452,41 @@ def test_a_key_the_decoder_already_holds_is_not_waited_for(monkeypatch):
         assert time.monotonic() - started < 0.2, "waited on an empty pipe with a key in hand"
     finally:
         os.close(read_end); os.close(write_end)
+
+
+def test_pages_cut_once_on_entry_are_cut_again_when_the_terminal_changes(monkeypatch, tmp_path):
+    """A dozen Voidrunner screens paginate before their loop. They kept drawing
+    rows wrapped and counted for the old terminal until the caller left; two were
+    fixed by hand before both reviewers named the rest (issue #645 review)."""
+    vr = _voidrunner()
+    info = tmp_path / "door_info.json"
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 40, "terminal_height": 12}), encoding="utf-8")
+    monkeypatch.setenv("NETBBS_DOOR_INFO", str(info))
+    monkeypatch.setattr(vr, "_OUTPUT_WIDTH", 80)
+    monkeypatch.setattr(vr, "_OUTPUT_HEIGHT", 24)
+    lines = [f"Line {index}: " + "a fairly long sentence about trade " * 2 for index in range(30)]
+    paged = {
+        "service": vr._service_pages(lines, "Trading Ledger", "[N] Next [P] Prev [B] Back: "),
+        "trade": vr._trade_pages(lines, "Opportunities", "[N] Next [P] Prev [B] Back: "),
+        "text": vr._mission_text_pages(lines, overhead=6),
+    }
+    before = {name: len(pages) for name, pages in paged.items()}
+    last = {name: len(pages) - 1 for name, pages in paged.items()}
+    vr._note_resize()
+    assert vr.take_resize()
+    for name, pages in paged.items():
+        assert len(pages) > before[name], name                      # shorter terminal, more pages
+        assert all(vr._visible_width(row) <= 40 for page in pages for row in page), name
+        assert all(len(page) <= 12 for page in pages), name
+    # And back up: a page number that no longer exists reads as the last page.
+    info.write_text(json.dumps({"user_id": 77, "handle": "Tester", "terminal_width": 120, "terminal_height": 50}), encoding="utf-8")
+    stale = {name: len(pages) - 1 for name, pages in paged.items()}
+    vr._note_resize()
+    assert vr.take_resize()
+    for name, pages in paged.items():
+        assert len(pages) <= before[name] and pages[stale[name]] == pages[len(pages) - 1], name
+    # A list nobody holds any more is not kept alive by the registry.
+    import gc
+    paged.clear(); del pages; gc.collect()
+    vr._service_pages(["x"], "T", "[B] Back: ")
+    assert sum(1 for ref in vr._LIVE_PAGES if ref() is not None) <= 1

@@ -586,8 +586,9 @@ and NetBBS signals them whenever the script a registration launches is this
 install's own copy (or `-m netbbs.doors.bundled.<name>`), profile or no profile.
 A copy of either script kept somewhere else is treated like any other door and
 follows the profile switch. Voidrunner takes the new size at its next action bar
-and redraws; a few of its list screens cut their pages once on entry and keep
-them until the caller leaves the screen. War Dialer takes the new size at its
+and redraws, re-cutting the pages of whatever screen the caller is on; only the
+numbered list pickers keep the pages they were opened with until the caller
+leaves them. War Dialer takes the new size at its
 switchboard, so a screen opened before the resize keeps its size until the caller
 leaves it. A profile that gives either door a PTY works the same way through
 `SIGWINCH`. NetBBS ignores `SIGUSR1` in its own process so that everything it
