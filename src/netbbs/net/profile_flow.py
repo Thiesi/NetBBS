@@ -53,6 +53,7 @@ from netbbs.directory import (
     set_bio_visible,
 )
 from netbbs.files.categories import get_category_by_id as get_file_area_category_by_id
+from netbbs.link.onboarding import link_is_outgoing_only
 from netbbs.link.remote_attestation import count_attestation_recipients
 from netbbs.messaging_preferences import accepts_direct_messages, set_accepts_direct_messages
 from netbbs.net.char_input import reject_unhandled_key
@@ -1524,6 +1525,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         # Issue #596: how many nodes a shared attestation can reach right now.
         # The caller is told how many; which ones is the SysOp's screen.
         "recipient_count": await lane.run(count_attestation_recipients),
+        "undialable": await lane.run(link_is_outgoing_only),
     }
 
     async def _display_name_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
@@ -1650,6 +1652,10 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             count = d.get("recipient_count", 0)
             if count == 0:
                 return "on (your SysOp shares with no node yet)"
+            if d.get("undialable"):
+                # Issue #627: an attestation is fetched from this node, which
+                # nobody can dial. "Reaches" would be a promise nothing keeps.
+                return "on (not delivered: node is unreachable)"
             return f"on (reaches {count} node{'s' if count != 1 else ''})"
 
         return render

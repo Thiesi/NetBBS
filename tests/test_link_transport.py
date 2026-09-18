@@ -3221,3 +3221,82 @@ def test_the_identity_endpoint_serves_a_peer_and_refuses_everyone_else(tmp_path)
     finally:
         carrier.close()
         asker.close()
+
+
+def test_the_trust_deposit_endpoint_takes_a_relayed_nodes_own_objects_and_nobody_elses(tmp_path, monkeypatch):
+    """Issue #627, over a real server: relay consent is the gate, the depositor
+    is authenticated, what it deposits is carried and not admitted, and the
+    bound is refused in a way the depositor can read."""
+    from netbbs.link import trust_carriage
+    from netbbs.link.store import build_inventory_request
+    from netbbs.link.transport import deposit_trust_objects
+    from netbbs.link.trust import TrustSubject
+    from netbbs.link.trust_wire import build_trust_vouch
+
+    relay_identity = bootstrap_node_identity("deposit-relay")
+    issuer_identity = bootstrap_node_identity("deposit-issuer")
+    relay_node = LinkNode(identity=relay_identity)
+    issuer_node = LinkNode(identity=issuer_identity)
+    relay = _NodeDb(tmp_path, "deposit-relay")
+    issuer = _NodeDb(tmp_path, "deposit-issuer")
+
+    def vouch(vouch_id):
+        return build_trust_vouch(
+            signing_identity=issuer_identity.signing_key, issuer_fingerprint=issuer_identity.fingerprint,
+            vouch_id=vouch_id, subject=TrustSubject.node("a-third-node"),
+            issued_at="2026-09-18T12:00:00+00:00", expires_at="2026-12-17T12:00:00+00:00",
+        ).to_dict()
+
+    def authorization():
+        return build_inventory_request(
+            issuer.db, signing_identity=issuer_identity.signing_key,
+            requester_fingerprint=issuer_identity.fingerprint,
+            responder_fingerprint=relay_identity.fingerprint, include_inventory=False,
+        )
+
+    async def scenario():
+        server = await _run_server(relay_node, lambda: _hello_for(relay_node), relay.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                base_url = f"http://127.0.0.1:{server.port}"
+                await dial_hello(issuer_node, session, base_url, _hello_for(issuer_node), issuer.lane)
+                with pytest.raises(LinkTransportError, match="HTTP 403") as refused:
+                    await deposit_trust_objects(
+                        issuer_node, session, base_url, authorization(), [vouch("v1")], after_content_id=None,
+                    )
+                assert refused.value.status == 403
+
+                relay_node.relaying_for[issuer_identity.fingerprint] = "2026-09-18T12:00:00+00:00"
+                taken = await deposit_trust_objects(
+                    issuer_node, session, base_url, authorization(), [vouch("v1")], after_content_id=None,
+                )
+                with pytest.raises(LinkTransportError, match="HTTP 409"):
+                    await deposit_trust_objects(
+                        issuer_node, session, base_url, authorization(), [vouch("v9")],
+                        after_content_id="c" * 64,
+                    )
+                async with session.post(
+                    f"{base_url}/link/v1/trust-deposit/{issuer_identity.fingerprint}", json={"objects": []}
+                ) as malformed:
+                    assert malformed.status == 400
+
+                monkeypatch.setattr(trust_carriage, "MAX_CARRIED_TRUST_OBJECTS_PER_ISSUER", 1)
+                with pytest.raises(LinkTransportError, match="HTTP 507"):
+                    await deposit_trust_objects(
+                        issuer_node, session, base_url, authorization(), [vouch("v2")], after_content_id=None,
+                    )
+                return taken
+        finally:
+            await server.stop()
+
+    try:
+        taken = asyncio.run(scenario())
+        assert taken == {"stored": 1, "already_held": 0, "unverifiable": 0}
+        counts = {
+            table: relay.db.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("link_trust_carried_objects", "link_trust_wire_objects", "link_trust_vouches")
+        }
+        assert counts == {"link_trust_carried_objects": 1, "link_trust_wire_objects": 0, "link_trust_vouches": 0}
+    finally:
+        relay.close()
+        issuer.close()

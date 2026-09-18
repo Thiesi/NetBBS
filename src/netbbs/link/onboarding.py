@@ -109,6 +109,24 @@ def mark_link_has_run(db: Database) -> None:
         set_config(db, LINK_HAS_RUN_CONFIG_KEY, "true")
 
 
+# Whether this node advertises an address other nodes can dial, as of its last
+# start with Link on (issue #627). The screens that tell a SysOp or a caller
+# where something they publish goes have a database and no node configuration,
+# and what they have to say differs completely between the two cases.
+LINK_OUTGOING_ONLY_CONFIG_KEY = "link_outgoing_only"
+
+
+def record_link_reachability(db: Database, *, outgoing_only: bool) -> None:
+    value = "true" if outgoing_only else "false"
+    if get_config(db, LINK_OUTGOING_ONLY_CONFIG_KEY) != value:
+        set_config(db, LINK_OUTGOING_ONLY_CONFIG_KEY, value)
+
+
+def link_is_outgoing_only(db: Database) -> bool:
+    """Whether nobody can dial this node. False for a node that has never started Link."""
+    return get_config(db, LINK_OUTGOING_ONLY_CONFIG_KEY) == "true"
+
+
 def link_has_ever_run(db: Database) -> bool:
     """Whether any username on this node may be known to a Link peer.
 

@@ -502,6 +502,16 @@ itself, because your node has no direct dealings with it to judge. A name you
 recognise under a different technical identity is flagged, and when the name
 belongs to a node yours has met, the warning falls on the other one.
 
+If nobody can dial your node, which is the ordinary case behind a home
+connection, what it vouches for is handed to the nodes that relay for it and
+fetched from there; the vouch screen says how many those are, warns when
+there are none, in which case a vouch reaches nobody yet, and warns when one
+of them did not take your vouches at the last attempt, which the Link log
+explains. A node that names
+yours a trusted reporter needs to have met one of your relays. Verified ages
+and names are not carried this way: on a node nobody can dial, **Published
+identity** and each caller's Profile say that nothing is delivered.
+
 To stand behind an identity for the benefit of other nodes, open it under
 **Settings → Policy trust → Subjects** and choose **Vouch**. You give a reason,
 which is published with the vouch, and confirm once. Your node signs the vouch

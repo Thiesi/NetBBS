@@ -226,6 +226,16 @@ Use test identities and non-sensitive evidence.
       board's approval queue because its author is a probationary remote
       user. Check B's log over several passes before establishing A: the
       refusal is recorded once an hour, not on every pass.
+- [ ] Propagate a vouch from an outgoing-only node. On A, vouch for an
+      identity; confirm the vouch screen says it is handed to the node that
+      relays for A. On B, name A a trusted reporter for node vouches by its
+      technical identity; after B's next pass A is listed under `[S]ubjects`,
+      where you establish it. A's first hello precedes R's consent to relay and
+      names no relay, so B needs a pass after A's second one; if B asked in
+      between and was told nothing had changed, it asks again an hour later.
+      Confirm
+      B holds the vouch and that R's own trust state does not. Withdraw it on
+      A and confirm B records the revocation.
 - [ ] Propagate a vouch end to end, which needs nothing outside the product.
       On node A, open the test subject under `[P]olicy trust` → `[S]ubjects`,
       choose `[V]ouch`, give a reason and confirm. On node B, name A a trusted

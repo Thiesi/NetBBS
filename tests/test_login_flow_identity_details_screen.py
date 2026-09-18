@@ -369,3 +369,22 @@ def test_remote_sharing_shows_how_many_nodes_it_reaches(db, lane, alice):
     session = FakeSession(["b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert "Share verified name over Link: on (reaches 2 nodes)" in squeezed(_visible(session))
+
+
+def test_remote_sharing_does_not_say_reaches_on_a_node_nobody_can_dial(db, lane, alice):
+    """Issue #627: an attestation is fetched from this node, and relays do not
+    carry them. "Reaches 1 node" would be a promise nothing keeps."""
+    from netbbs.link.onboarding import record_link_reachability
+    from netbbs.link.remote_attestation import configure_attestation_recipient
+
+    verifier = create_user(db, "sysop", password="hunter2", user_level=255)
+    attest_name(db, alice, "Alice Wonderland", verifier=verifier)
+    configure_attestation_recipient(db, "a" * 32, reason="first")
+    record_link_reachability(db, outgoing_only=True)
+
+    session = FakeSession(["h", "b"])
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
+
+    text = squeezed(_visible(session))
+    assert "Share verified name over Link: on (not delivered: node is unreachable)" in text
+    assert "reaches" not in text

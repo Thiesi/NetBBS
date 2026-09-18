@@ -2757,11 +2757,13 @@ requester matching the wire peer, this node named as responder, a signature
 under the requester's current key, a five-minute freshness window, a bounded
 nonce cache) and is gated by the same policy action as the inventory it
 accompanies. The response carries the bundles the carrier holds and omits the
-rest. A carrier answers only for nodes behind content it has recently served
-(a bounded, in-memory set of 4,096): the authors and origins its events name,
+rest. A carrier answers for nodes behind content it has recently served (a
+bounded, in-memory set of 4,096): the authors and origins its events name,
 and the current origin of each event's resource, which is who signs a
 closure, a tombstone, a moderator's edit or a file descriptor without being
-named in it. Answering for any fingerprint a peer names would let a peer on
+named in it. It also answers for a node it relays for (§8.5), whose trust
+objects it may be carrying (§12.7) and which names this relay in its own
+descriptor anyway. It answers for nobody else. Answering for any fingerprint a peer names would let a peer on
 probation, which is refused the peer list (§8.3), read the carrier's peer set
 one guess at a time, addresses included. A page of events can name more nodes
 than one request may, so a requester sends up to four requests at a time,
@@ -2776,8 +2778,9 @@ not a claim, and refusing to pass one on would break a board carried across
 two hops. The requester accepts only bundles it asked for, and verifies each
 exactly as it verifies a hello received directly.
 
-**What an introduced identity is.** It can be used to verify the carried
-board, channel and file-area events it signed. It is not a peer. Membership of the peer set is what every route checks
+**What an introduced identity is.** It can be used to verify what it signed
+and a third party delivered: carried board, channel and file-area events, and
+trust objects fetched from a carrier (§12.7). It is not a peer. Membership of the peer set is what every route checks
 to decide who may push events, pull, serve as a relay or be sent Link mail,
 and an introduction grants none of that; all of it still requires a completed
 hello. Introduced identities are stored apart from peers for that reason. A
@@ -3271,9 +3274,9 @@ verification itself actually needs.
 receiving node verify content signed by a node it has never met, by
 fetching that node's self-certifying bundle from the carrier. Neither
 reaches mail. An introduced identity is kept apart from peers precisely so
-that it cannot be addressed, pushed to or pulled from, and the carrier
-answers only for nodes whose content it has just served, which a mail
-recipient need not be.
+that it cannot be addressed, pushed to or pulled from, and a carrier
+answers only for nodes whose content it has just served or that it relays
+for (§8.11), which a mail recipient need not be.
 
 **What a real tier-2 design would require, concretely.** The bundle
 exchange exists (§8.11) and verifies a bundle exactly as if its subject had
@@ -3825,14 +3828,82 @@ them, plus `more_available`. Storage order rather than receipt time, because
 a revocation is always stored after the object it retires whatever the wall
 clock said, and a subscriber that met them the other way round would skip the
 revocation and then admit what it revoked. A node's own signed objects are
-stored with the ones it carries, under its own fingerprint, so the same pull
-serves them. A carrier therefore gains no authority: the request
+stored with the ones it has admitted, under its own fingerprint, so the same
+pull serves them. A carrier gains no authority: the request
 is addressed to the carrier, while every returned object's independent issuer
 signature and local reporter configuration still control admission.
 When a configured reporter is quarantined, ordinary subscription sync stops;
 the receiver may use only `revocations_only=true`, which serves unchanged
 signal/vouch revocation objects and never advances the ordinary subscription
 cursor. A manually blocked reporter receives no containment exchange.
+
+**An issuer nobody can dial (issue #627).** A pull needs an address, and an
+outgoing-only node (§8.4) advertises none, which is the ordinary case for a
+node behind a home connection. Such a node deposits what it signs at the
+nodes that relay for it (§8.5): `POST /link/v1/trust-deposit/{fingerprint}`,
+carrying the node's own objects in the order it signed them and the signed,
+fresh, replay-bounded authorization the file route also uses. A relay accepts
+a deposit only from a node it has agreed to relay for, which is the existing
+opt-in and the existing cap on whom it holds things for; only objects the
+depositor issued itself; and only those that verify under the depositor's
+current key, counting the rest and leaving them out, since an issuer's store
+keeps what its earlier keys signed and re-signs what still matters. Only the
+issuer may deposit, although the objects would verify whoever sent them: the
+order they are stored in is the order subscribers read them in, and a third
+party replaying a withdrawn vouch ahead of its revocation would revive it.
+The depositor keeps a position per relay, sends only what is new, and starts
+over at a relay it selects afresh. Each deposit names the last object handed
+over before it, kept by the relay or not, and with nothing new to send the
+depositor still makes one such request a pass. A relay that does not
+remember that object has lost
+something, to a restored backup above all, and could otherwise be left
+serving a vouch without the revocation that followed it; it answers 409 and
+stores nothing, and the depositor starts over there, where what the relay
+still holds keeps its place in the order. A relay that refuses for any other
+reason (it does not relay for the depositor, lacks the route, or is full) is
+logged, left alone for an hour, and named on the vouch screen of the
+depositing node as not having taken its vouches at the last attempt.
+
+What is deposited is *carried*, and kept apart from what the relay has
+admitted. Admission is application: an object already in the admitted store
+counts as replayed and is never applied, and a vouch the relay merely carries
+must not look like one it counts. A relay whose own SysOp names the depositor
+a reporter cannot pull from it any more than anyone else can, so in its own
+sync pass, for as long as that node's own descriptor names it as a relay, it
+reads what it carries exactly as a subscriber reads a carrier:
+under a cursor, object by object, with the same skips and the same stall.
+That works whether the depositor was named before the deposit or after it,
+follows a widened grant, and leaves a rejected batch to be retried. Nothing is
+admitted when the deposit arrives. Carriage is bounded per depositor at 4,000
+objects and 32 MiB, refused beyond that; an object already expired is not
+taken, and one that expires is dropped the next time anything is deposited.
+An issuer's stream is served from exactly one store, the carried one while
+it holds anything of that issuer's, because a cursor is a position in one; a
+cursor from the other reads as unknown and the subscriber starts over.
+
+A subscriber whose reporter cannot be dialed reads the relays that reporter
+publishes in its own descriptor, and pulls the carrier form of the request
+from one it has itself completed a hello with and can dial. It verifies what
+comes back against the reporter's identity however it learned it, by hello or
+by introduction (§8.11); a relay answers an identity request for a node it
+relays for, and a page that stops at a key the subscriber has not learned
+makes it ask that relay for a fresher bundle at once. A reporter this node has
+not met, and has not blocked, is asked about at the relays it publishes that
+this node has met, or failing those at up to three dialable peers, and for
+a reporter already known by introduction no more than once an hour: one named
+by fingerprint
+alone so that it becomes a trust subject the SysOp can establish at all, and
+one known by introduction so that its descriptor is refreshed, since it may
+have published no relay when it was learned or have moved to another since.
+That happens before probation ends the matter. None of this relaxes
+what §12.4 requires of a reporter: it has to be established here before it
+is pulled, which for a node never met means by override.
+
+Remote attestations (§5.5) are not carried this way. They hold a caller's
+birthdate or real name, their recipient list is enforced by the issuer when it
+is pulled, and a carrier would either read them or enforce the list on the
+issuer's behalf. Until that is decided (issue #632), the screens of an
+outgoing-only node say that an attestation it publishes is not delivered.
 
 Distinct fingerprints do not prove independence. Automatic policy counts
 locally assigned trust domains:
@@ -3921,9 +3992,10 @@ and policy configuration undisclosed.
 
 The Link HTTP enforcement point runs only after enough cryptographic parsing to
 attribute a request, but before remotely influenced persistence or service work.
-The normal runtime enables this gate for hello, events, inventory, trust pulls,
-file chunks, relay consent/mailboxes, and peer introduction. Peer-list exchange
-and file-chunk pulls use authenticated POSTs from completed peers; Link v1
+The normal runtime enables this gate for hello, events, inventory, trust pulls
+and deposits, file chunks, relay consent/mailboxes, and peer introduction.
+Peer-list exchange, file-chunk pulls and trust deposits use authenticated
+POSTs from completed peers; Link v1
 reuses an empty, signed inventory-request authorization envelope so requester,
 responder, freshness, nonce replay protection, and current operational-key
 verification have one existing definition rather than a second near-identical
@@ -10081,9 +10153,9 @@ skipped it; review caught that it turned a rotation into permanent loss.
 the same change for the same reason.
 
 **Not done, deliberately.** No vouch for the node's own users and none for
-itself. No trust signals. No carrier pulls in the sync loop, which still asks
-each reporter directly. A subscriber told nothing about *why* an object was
-skipped beyond its diagnostics log.
+itself. No trust signals. A subscriber told nothing about *why* an object was
+skipped beyond its diagnostics log. (Carrier pulls in the sync loop, also
+left out of this slice, followed in issue #627.)
 
 ### Issue #630 — content from a node this one has never met — closed
 
@@ -10152,14 +10224,75 @@ Rejected: gating the route like the peer list, which a peer on probation is
 refused. A new node is on probation at its seed for its first month, so that
 would have withheld introductions from exactly the nodes that need them.
 
-**Not done, deliberately.** Verifying §12 trust objects and §5.5 attestations
-against an introduced identity, which is issue #627's subject. Link mail to
+**Not done, deliberately.** Verifying §5.5 attestations against an introduced
+identity; trust objects followed in issue #627. Link mail to
 an introduced node (§10.6 stays deferred). Automatic graduation for nodes
 never met. Any way for an introduced node to be dialled, which includes
 fetching its files. Persistence of the set-aside list, which is rebuilt at
 the cost of one repeat per event after a restart. A way for a requester to
 tell a responder which signers to leave out, which is what would lift the
 10,000-event bound.
+
+### Issue #627 — what a node nobody can dial issues — trust objects closed, attestations open
+
+Found while working out how the Phase 4 exercise could run on the three live
+nodes, two of which are outgoing-only. Trust objects and attestations are both
+pulled from their issuer, and an outgoing-only node has no address, so a vouch
+its SysOp issued was signed, stored and served to nobody, and said nothing
+about that. Normative description: §12.7.
+
+**Decision 1 — the issuer deposits at its relays; subscribers pull the
+carrier form.** The wire already defined a pull whose responder is not the
+issuer, and the cursor was already kept per responder and issuer. Rejected:
+flooding trust objects with content, which §12.7 rules out for the reason it
+always did, and having subscribers wait to be dialed, which an outgoing-only
+subscriber never is.
+
+**Decision 2 — deposited objects are stored apart from admitted ones.**
+Carriage and authority are different facts about an object, as "introduced"
+and "met" are about a node (#630). Rejected: a flag in the admitted store,
+where an object present counts as replayed and would never be applied after a
+later reporter grant.
+
+**Decision 2a — a relay admits what it carries in its own pass, never on
+arrival.** Rejected: admitting inside the deposit handler, which only ever
+sees one request's objects. A depositor named a reporter afterwards, a
+widened grant and a batch rejected for a reason time undoes would each have
+left objects that are never offered again.
+
+**Decision 2b — a deposit names the object it continues from.** A depositor
+sends only what is new, so nothing else would ever tell it that a relay has
+lost something. Rejected: depositing everything on every pass, and trusting
+the relay's count.
+
+**Decision 3 — relay consent is the gate.** A relay already decides whom it
+holds mail for and how many; the same decision covers trust objects. Rejected:
+accepting deposits from any established peer, which would make every full
+node a store for every node it knows.
+
+**Decision 4 — only the issuer deposits.** The objects authenticate
+themselves; their order does not.
+
+**Decision 5 — verification accepts an introduced issuer; authentication of a
+wire peer does not.** `resolve_known_signing_key` is for checking something a
+third party delivered. Every route that authenticates its caller keeps
+`resolve_peer_signing_key`.
+
+**Decision 6 — attestations wait for their own decision (issue #632).** The likely shape is
+sealing each attestation to its recipient node's key and delivering it through
+the relay mailbox, which already carries sealed envelopes. Until then the
+Published identity screen and the Profile toggle of an outgoing-only node say
+that nothing is delivered, and the vouch screen says how a vouch travels, or
+that it does not yet.
+
+**Not done, deliberately.** A node that drops a relay tells nobody, it only
+stops naming it, so a relay does not forget what it carried for it; expiry and
+the per-depositor bound are what limit that, and revocations, which do not
+expire, count against the bound. For the same reason a relay decides whether
+to read its own copy by the depositor's descriptor and not by its own record
+of whom it agreed to relay for. A
+subscriber does not try relays it has not met. SysOp-written trust signals
+remain #589's next slice.
 
 ### SFTP over the SSH transport — declined
 
