@@ -43,6 +43,7 @@ from netbbs.link.trust_wire import (
     TRUST_VOUCH_OBJECT_TYPE,
     TRUST_VOUCH_REVOCATION_OBJECT_TYPE,
     SignedTrustObject,
+    TrustWireError,
     ingest_trust_objects,
     load_trust_object_page,
 )
@@ -407,3 +408,62 @@ def test_withdrawing_during_a_renewal_overlap_revokes_both_live_vouches(db, issu
 
     assert [(c.action, c.reason) for c in changes] == [("revoked", "intent_withdrawn")] * 2
     assert [row["revoked_at"] is None for row in held_vouches(subscriber, FRIEND)] == [False, False]
+
+
+# -- what a key rotation would otherwise orphan --------------------------------------------------
+
+
+def test_a_revocation_signed_just_before_a_rotation_is_signed_again_under_the_new_key(db, issuer, subscriber):
+    """A subscriber that has learned the new key skips whatever the old one
+    signed. The reconcile re-issues a vouch; nothing re-issued a *revocation*,
+    so one not yet pulled at the moment of rotation was lost, and the vouch it
+    retires stayed live at that subscriber until it ran out."""
+    record_vouch_intent(db, FRIEND, explanation="known operator", now_iso=stamp(NOW))
+    reconcile(db, issuer)
+    deliver(db, issuer, subscriber)
+    withdraw_vouch_intent(db, FRIEND, now_iso=stamp(NOW + timedelta(hours=1)))
+    reconcile(db, issuer, at=NOW + timedelta(hours=1))  # revocation signed by the old key
+
+    rotated = Identity.generate(IdentityKind.NODE, "issuer-rotated")
+    changes = reconcile(db, issuer, at=NOW + timedelta(hours=2), identity=rotated)
+
+    assert [(c.action, c.reason, c.subject) for c in changes] == [("revoked", "signing_key_rotated", None)]
+    # The subscriber now holds only the new key: the old revocation does not
+    # verify, the re-signed one does, and it is the one that takes effect.
+    usable = []
+    for item in served(db, issuer):
+        try:
+            usable.append(SignedTrustObject.from_dict(item, issuer_verify_key=rotated.verify_key))
+        except TrustWireError:
+            continue
+    assert [obj.object_type for obj in usable] == [TRUST_VOUCH_REVOCATION_OBJECT_TYPE]
+    ingest_trust_objects(subscriber, usable, now_iso=stamp(NOW + timedelta(hours=2)))
+    [row] = held_vouches(subscriber, FRIEND)
+    assert row["revoked_at"] is not None
+    # Once per target per rotation, not once per pass.
+    assert reconcile(db, issuer, at=NOW + timedelta(hours=3), identity=rotated) == []
+
+
+def test_a_revocation_is_not_signed_again_once_its_target_has_run_out(db, issuer):
+    record_vouch_intent(db, FRIEND, explanation="known operator", now_iso=stamp(NOW))
+    reconcile(db, issuer)
+    withdraw_vouch_intent(db, FRIEND, now_iso=stamp(NOW + timedelta(hours=1)))
+    reconcile(db, issuer, at=NOW + timedelta(hours=1))
+    rotated = Identity.generate(IdentityKind.NODE, "issuer-rotated")
+
+    assert reconcile(db, issuer, at=NOW + timedelta(days=200), identity=rotated) == []
+
+
+def test_an_intent_for_this_nodes_own_user_is_never_signed_even_if_it_was_recorded(db, issuer):
+    """`record_vouch_intent` can only refuse this where its caller knew the
+    node's fingerprint, and the offline console on a node that has not started
+    since the fingerprint cache existed does not. The reconcile always knows,
+    and it is where an intent becomes a published object."""
+    own_user = TrustSubject.user(issuer.fingerprint, "alice")
+    register_subject(db, own_user, first_accepted_at=stamp(NOW), now_iso=stamp(NOW))
+    record_vouch_intent(db, own_user, explanation="my caller", now_iso=stamp(NOW))  # no fingerprint known
+
+    assert reconcile(db, issuer) == []
+    assert served(db, issuer) == []
+    [intent] = list_vouch_intents(db, home_node_fingerprint=issuer.fingerprint, now_iso=stamp(NOW))
+    assert intent.status == "refused"

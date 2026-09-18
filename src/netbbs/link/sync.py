@@ -201,6 +201,7 @@ from netbbs.link.remote_attestation import (
     reconcile_issued_attestations,
     save_attestation_pull_cursor,
 )
+from netbbs.link.node_identity import NodeIdentityError
 from netbbs.link.trust_issuance import reconcile_issued_vouches
 from netbbs.link.transport import (
     AttestationRecipientRefused,
@@ -845,6 +846,9 @@ async def _reconcile_own_vouches(node: LinkNode, lane: DatabaseLane) -> None:
         _logger.warning("Link trust: could not reconcile this node's own vouches: %s", exc)
         return
     for change in changes:
+        if change.subject is None:
+            _logger.info("Link trust: re-signed a vouch revocation (%s)", change.reason)
+            continue
         _logger.info(
             "Link trust: %s a vouch for %s %s (%s)",
             change.action, change.subject.kind, change.subject.node_fingerprint, change.reason,
@@ -944,8 +948,21 @@ async def _pull_one_trust_reporter(
     revocations_only: bool = False,
 ) -> None:
     responder = responder_fingerprint or issuer
-    verify_key = node.resolve_peer_signing_key(issuer, "trust object")
-    superseded_keys = node.resolve_peer_superseded_signing_keys(issuer)
+    # Both lookups sit outside the per-address handler below, so neither may
+    # raise: an escape here ends the whole background sync task, not one
+    # reporter's pull.
+    try:
+        verify_key = node.resolve_peer_signing_key(issuer, "trust object")
+    except (LinkProtocolError, NodeIdentityError, ValueError) as exc:
+        _logger.warning("Link trust pull: reporter %s has no usable signing key: %s", issuer, exc)
+        return
+    try:
+        superseded_keys = node.resolve_peer_superseded_signing_keys(issuer)
+    except (LinkProtocolError, NodeIdentityError, ValueError) as exc:
+        # Without the list an old-key object stops the page rather than being
+        # skipped, which is the safe direction.
+        _logger.warning("Link trust pull: could not read %s's earlier signing keys: %s", issuer, exc)
+        superseded_keys = []
     completed = False
     for base_url in addresses:
         cursor = None if revocations_only else await lane.run(load_trust_pull_cursor, responder, issuer)

@@ -9487,4 +9487,23 @@ def test_withdrawing_a_vouch_that_was_never_signed_does_not_claim_a_signature(db
     asyncio.run(admin_menu(session, lane, sysop, node_controls=None, link_context=_link_context()))
 
     text = " ".join(_visible(_written_text(session)).split())
-    assert "Vouch withdrawn. Nothing had been published, so nothing needed signing." in text
+    assert "Vouch withdrawn. Nothing needed signing." in text
+
+
+def test_recording_the_reason_a_published_vouch_already_carries_does_not_claim_a_signature(db, lane, sysop):
+    from netbbs.link.trust_issuance import reconcile_issued_vouches, record_vouch_intent
+
+    subject = _vouchable_subject(db)
+    link_context = _link_context()
+    record_vouch_intent(db, subject, explanation="known operator")
+    reconcile_issued_vouches(
+        db, link_context.node_identity.signing_key,
+        home_node_fingerprint=link_context.node_identity.fingerprint,
+    )
+    session = FakeSession(["s", "p", "s", "0", "1", "v", "i", "known operator", "y", "b", "b", "b", "b", "b"])
+
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=None, link_context=link_context))
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Vouch recorded. Nothing needed signing." in text
+    assert "Vouch recorded. Signed" not in text

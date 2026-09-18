@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -383,3 +384,36 @@ def test_a_second_revocation_of_the_same_object_is_skipped_not_fatal(db, reporte
 
     assert result.skipped == [second.content_id]
     assert result[0] == [later.content_id]
+
+
+def test_an_authentic_object_of_an_unknown_type_is_a_payload_refusal_a_forged_one_a_signature_refusal(reporter):
+    """The signature is checked before the protocol version and object type.
+    Those two are what a newer issuer will one day send; a subscriber may move
+    its cursor past an authentic object it cannot use, and must not move it
+    past anything it could not authenticate. Checked the other way round, the
+    first new object type stopped every subscriber on this release for good."""
+    from netbbs.link.events import build_envelope, canonical_bytes
+    from netbbs.link.trust_wire import TrustPayloadError, TrustSignatureError
+
+    future = build_envelope("trust_something_new", {"issuer_fingerprint": reporter.fingerprint})
+    authentic = {
+        "envelope": future,
+        "signature": base64.b64encode(reporter.sign(canonical_bytes(future))).decode("ascii"),
+    }
+    forged = {"envelope": future, "signature": base64.b64encode(b"x" * 64).decode("ascii")}
+
+    with pytest.raises(TrustPayloadError, match="unsupported trust object type"):
+        SignedTrustObject.from_dict(authentic, issuer_verify_key=reporter.verify_key)
+    with pytest.raises(TrustSignatureError):
+        SignedTrustObject.from_dict(forged, issuer_verify_key=reporter.verify_key)
+
+
+def test_an_envelope_that_cannot_be_canonicalized_is_a_wire_error_not_an_escape(reporter):
+    from netbbs.link.events import build_envelope
+
+    envelope = build_envelope("trust_vouch", {"issuer_fingerprint": reporter.fingerprint, "weight": 1.5})
+    with pytest.raises(TrustWireError, match="canonicalized"):
+        SignedTrustObject.from_dict(
+            {"envelope": envelope, "signature": base64.b64encode(b"x" * 64).decode("ascii")},
+            issuer_verify_key=reporter.verify_key,
+        )

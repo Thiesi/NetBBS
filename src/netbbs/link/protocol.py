@@ -2280,13 +2280,20 @@ class LinkNode:
         if fingerprint not in self.peers:
             raise LinkProtocolError(f"unknown issuer {fingerprint}")
         peer = self.peers[fingerprint]
-        return [
-            nacl.signing.VerifyKey(base64.b64decode(key))
-            for key in superseded_operational_keys(
-                peer.transitions, root_verify_key=peer.root_verify_key,
-                subject_fingerprint=fingerprint, purpose="signing",
-            )
-        ]
+        keys: list[nacl.signing.VerifyKey] = []
+        for key in superseded_operational_keys(
+            peer.transitions, root_verify_key=peer.root_verify_key,
+            subject_fingerprint=fingerprint, purpose="signing",
+        ):
+            # Nothing before this ever decoded a *historical* key: hello and
+            # gossiped transitions only decode the current one. A root-signed
+            # chain may therefore carry an old entry that is not a key at all,
+            # and such an entry simply cannot have signed anything.
+            try:
+                keys.append(nacl.signing.VerifyKey(base64.b64decode(key, validate=True)))
+            except Exception:  # noqa: BLE001 -- binascii.Error, nacl's ValueError/TypeError
+                continue
+        return keys
 
     def _check_protocol_version(self, envelope: dict, *, kind: str, sender_fingerprint: str | None = None) -> None:
         """

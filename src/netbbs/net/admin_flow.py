@@ -2388,7 +2388,8 @@ def _vouch_status_line(intent, *, unicode_style: bool) -> str:
 
 
 async def _reconcile_vouches_now(
-    session: Session, lane: DatabaseLane, link_context: LinkContext | None, *, done: str
+    session: Session, lane: DatabaseLane, link_context: LinkContext | None, subject: TrustSubject,
+    *, done: str,
 ) -> None:
     """Run the sync pass's own reconcile, if this console can sign; say which happened.
 
@@ -2414,10 +2415,13 @@ async def _reconcile_vouches_now(
             colored(f"{done} It was not signed ({exc}); the next Link sync pass retries it.", fg_color=WARNING_COLOR)
         )
         return
-    if not changes:
-        # Withdrawing an intent that was never signed, for one: there is
-        # nothing to revoke, and saying "signed" would claim otherwise.
-        await session.write_line(colored(f"{done} Nothing had been published, so nothing needed signing.", fg_color=SUCCESS_COLOR))
+    if not any(change.subject == subject for change in changes):
+        # About *this* identity, not the pass as a whole: an unrelated renewal
+        # must not read as a signature here. Nothing to sign is ordinary --
+        # withdrawing an intent that was never signed, or recording again the
+        # reason an already published vouch carries -- and saying "signed"
+        # would claim otherwise.
+        await session.write_line(colored(f"{done} Nothing needed signing.", fg_color=SUCCESS_COLOR))
         return
     await session.write_line(
         colored(f"{done} Signed; subscribers pick it up on their next pull.", fg_color=SUCCESS_COLOR)
@@ -2471,7 +2475,7 @@ async def _vouch_screen(
             ):
                 continue
             await lane.run(withdraw_vouch_intent, subject, actor_user_id=actor.id)
-            await _reconcile_vouches_now(session, lane, link_context, done="Vouch withdrawn.")
+            await _reconcile_vouches_now(session, lane, link_context, subject, done="Vouch withdrawn.")
             continue
         if choice != "i":
             await session.write(reject_unhandled_key(choice))
@@ -2499,7 +2503,7 @@ async def _vouch_screen(
         except VouchIntentError as exc:
             await session.write_line(colored(f"Not recorded: {exc}", fg_color=ERROR_COLOR))
             continue
-        await _reconcile_vouches_now(session, lane, link_context, done="Vouch recorded.")
+        await _reconcile_vouches_now(session, lane, link_context, subject, done="Vouch recorded.")
 
 
 async def _published_vouches_screen(
@@ -2588,7 +2592,7 @@ async def _published_vouches_screen(
         ):
             continue
         await lane.run(withdraw_vouch_intent, selected.subject, actor_user_id=actor.id)
-        await _reconcile_vouches_now(session, lane, link_context, done="Vouch withdrawn.")
+        await _reconcile_vouches_now(session, lane, link_context, selected.subject, done="Vouch withdrawn.")
 
 
 async def _trust_subjects_screen(

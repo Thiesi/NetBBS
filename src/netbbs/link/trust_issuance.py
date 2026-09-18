@@ -45,6 +45,7 @@ from netbbs.link.events import canonical_bytes
 from netbbs.link.trust import TrustSubject
 from netbbs.link.trust_wire import (
     TRUST_VOUCH_OBJECT_TYPE,
+    TRUST_VOUCH_REVOCATION_OBJECT_TYPE,
     SignedTrustObject,
     build_trust_revocation,
     build_trust_vouch,
@@ -83,7 +84,7 @@ class IssuedVouchChange:
 
     action: str  # "issued" | "renewed" | "revoked"
     content_id: str
-    subject: TrustSubject
+    subject: TrustSubject | None  # None: a revocation re-signed after a key rotation
     reason: str
 
 
@@ -285,6 +286,54 @@ def _revoke(
     return revocation
 
 
+def _resign_orphaned_revocations(
+    db: Database, identity: Identity, *, home_node_fingerprint: str, now_value: str
+) -> list[str]:
+    """Re-sign, under the current key, revocations a previous key signed for vouches still running.
+
+    A subscriber that learns this node's new key can no longer verify what the
+    old one signed. For a vouch that is harmless: the reconcile re-issues it.
+    A *revocation* is not re-issued by anything, so one signed shortly before a
+    rotation, and not yet pulled, would be skipped by that subscriber as an
+    old-key object, and the vouch it retires would stay live there until it
+    ran out. Signed again, it reaches that subscriber; one that already holds
+    the first revocation skips the second as a repeat.
+
+    Only while the target has not expired, since after that nobody can be
+    relying on it, and only when no revocation of that target verifies under
+    the current key, so this signs once per target per rotation.
+    """
+    rows = db.connection.execute(
+        """SELECT r.envelope_json, r.signature_b64, t.content_id AS target_id
+           FROM link_trust_wire_objects AS r
+           JOIN link_trust_wire_objects AS t
+             ON t.content_id = json_extract(r.envelope_json, '$.payload.revoked_content_id')
+           WHERE r.issuer_fingerprint = ? AND r.object_type = ?
+             AND t.issuer_fingerprint = ? AND t.expires_at > ?
+           ORDER BY r.rowid""",
+        (home_node_fingerprint, TRUST_VOUCH_REVOCATION_OBJECT_TYPE, home_node_fingerprint, now_value),
+    ).fetchall()
+    covered: set[str] = set()
+    targets: list[str] = []
+    for row in rows:
+        if row["target_id"] not in targets:
+            targets.append(row["target_id"])
+        if _signed_by(row, identity):
+            covered.add(row["target_id"])
+    resigned: list[str] = []
+    for target_id in targets:
+        if target_id in covered:
+            continue
+        revocation = build_trust_revocation(
+            signing_identity=identity, issuer_fingerprint=home_node_fingerprint,
+            revocation_id=secrets.token_hex(16), revoked_content_id=target_id,
+            issued_at=now_value, vouch=True,
+        )
+        store_issued_trust_object(db, revocation, issued_at=now_value)
+        resigned.append(revocation.content_id)
+    return resigned
+
+
 def reconcile_issued_vouches(
     db: Database,
     signing_identity: Identity,
@@ -323,6 +372,8 @@ def reconcile_issued_vouches(
             payload = json.loads(row["envelope_json"])["payload"]
             if subject_id not in intents:
                 reason = "intent_withdrawn"
+            elif intents[subject_id][1].node_fingerprint == home_node_fingerprint:
+                reason = "own_identity"
             elif subject_id in restricted:
                 reason = "subject_restricted_here"
             elif payload["explanation"] != intents[subject_id][0]:
@@ -367,6 +418,10 @@ def reconcile_issued_vouches(
             )
             store_issued_trust_object(db, vouch, issued_at=now_value)
             changes.append(IssuedVouchChange(action, vouch.content_id, subject, reason))
+        for content_id in _resign_orphaned_revocations(
+            db, signing_identity, home_node_fingerprint=home_node_fingerprint, now_value=now_value
+        ):
+            changes.append(IssuedVouchChange("revoked", content_id, None, "signing_key_rotated"))
     return changes
 
 

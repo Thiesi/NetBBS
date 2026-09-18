@@ -336,25 +336,34 @@ class SignedTrustObject:
         envelope = data["envelope"]
         if not isinstance(envelope, dict) or set(envelope) != {"netbbs_protocol", "object_type", "payload"}:
             raise TrustWireError("invalid trust envelope shape")
-        if envelope["netbbs_protocol"] != NETBBS_PROTOCOL_VERSION:
-            raise TrustWireError("unsupported trust protocol version")
-        if envelope["object_type"] not in TRUST_OBJECT_TYPES:
-            raise TrustWireError("unsupported trust object type")
-        if not isinstance(envelope["payload"], dict):
-            raise TrustWireError("trust payload must be an object")
         try:
             signature = base64.b64decode(data["signature"], validate=True)
         except (TypeError, ValueError) as exc:
             raise TrustWireError("invalid trust signature encoding") from exc
-        if not verify_signature(issuer_verify_key, canonical_bytes(envelope), signature):
-            raise TrustSignatureError("trust signature does not verify")
-        obj = cls(envelope=envelope, signature=signature)
         try:
+            signed_bytes = canonical_bytes(envelope)
+        except Exception as exc:  # noqa: BLE001 -- `ContentIdError` is a bare `Exception`
+            raise TrustWireError(f"trust envelope cannot be canonicalized: {exc}") from exc
+        if not verify_signature(issuer_verify_key, signed_bytes, signature):
+            raise TrustSignatureError("trust signature does not verify")
+        # Everything from here on is about an object the issuer really signed.
+        # The signature is checked *before* the protocol version and object
+        # type on purpose: those two are exactly what a newer issuer will one
+        # day send that this release does not understand, and a subscriber may
+        # move its cursor past an authentic object it cannot use, but not past
+        # anything it could not authenticate. Checked the other way round, the
+        # first new object type would have stopped every subscriber running
+        # this release at that object, for good.
+        try:
+            if envelope["netbbs_protocol"] != NETBBS_PROTOCOL_VERSION:
+                raise TrustWireError("unsupported trust protocol version")
+            if envelope["object_type"] not in TRUST_OBJECT_TYPES:
+                raise TrustWireError("unsupported trust object type")
+            if not isinstance(envelope["payload"], dict):
+                raise TrustWireError("trust payload must be an object")
+            obj = cls(envelope=envelope, signature=signature)
             _validate_payload(obj.object_type, obj.payload)
         except TrustWireError as exc:
-            # Genuinely the issuer's -- the signature verified -- and not an
-            # object this node can use. A subscriber may move its cursor past
-            # this; it may not move it past anything it could not authenticate.
             raise TrustPayloadError(str(exc)) from exc
         return obj
 

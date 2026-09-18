@@ -9919,6 +9919,15 @@ and the screen refuses to record one. §12.4 makes that safe: a revocation
 accuses nobody. The intent is kept so that lifting the restriction restores
 the vouch without anyone having to remember it.
 
+A rotation also re-signs what it would otherwise orphan. A subscriber that has
+learned the new key can verify nothing the old one signed. For a vouch the
+reissue covers that. A revocation is reissued by nothing, so one signed shortly
+before a rotation and not yet pulled would be skipped as an old-key object,
+and the vouch it retires would stay live at that subscriber until it ran out.
+The reconcile therefore signs such a revocation again under the current key
+while its target has not expired; a subscriber that already holds the first
+one skips the second as a repeat.
+
 **Decision 7 — the receiving side stops treating an unusable object as a
 hostile response.** Three rejections that were fatal to a whole batch became
 per-object skips, and changing a reporter's grant now resets its cursor

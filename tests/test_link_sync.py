@@ -2856,3 +2856,85 @@ def test_an_attestation_subscription_recovers_when_the_authority_no_longer_knows
         assert remote_meets_age(pair.subscriber.db, pair.subject, 18)
     finally:
         pair.close()
+
+
+def test_a_subscriber_holding_a_stale_key_keeps_what_it_can_verify_and_waits_for_the_rest(tmp_path):
+    """The stall, through the real pull and a real server. The issuer rotated
+    and re-signed; this subscriber has not completed a hello since. It must
+    ingest what its key still verifies, leave its cursor there, and get the
+    rest after its next hello -- not skip past it."""
+    from netbbs.link import sync as sync_module
+
+    pair = _VouchPair(tmp_path, "stale")
+    record_vouch_intent(pair.issuer.db, pair.NODE_SUBJECT, explanation="known operator")
+
+    async def scenario():
+        server = await pair.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await pair.issuer_pass(session)
+                await pair.subscriber_pass(session)  # hello: learns the first key
+                first_cursor = pair.cursor()
+
+                pair.issuer_identity = rotate_operational_key(pair.issuer_identity, purpose="signing")
+                pair.issuer_node.identity = pair.issuer_identity
+                record_vouch_intent(pair.issuer.db, pair.USER_SUBJECT, explanation="long-standing caller")
+                await pair.issuer_pass(session)  # re-signs one vouch, signs another, all under the new key
+
+                # A pull with no hello in between: exactly the stale subscriber.
+                await sync_module._pull_one_trust_reporter(
+                    pair.subscriber_node, session, pair.subscriber.lane,
+                    pair.issuer_identity.fingerprint, pair.seeds,
+                )
+                assert pair.cursor() == first_cursor
+                assert pair.held(pair.USER_SUBJECT) == []
+
+                await pair.subscriber_pass(session)  # the next hello teaches it the new key
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert [row[0] for row in pair.held(pair.USER_SUBJECT)] == [None]
+        assert pair.cursor() == pair.last_served()
+    finally:
+        pair.close()
+
+
+def test_two_rotations_leave_two_superseded_keys_and_never_the_current_one():
+    from netbbs.link.node_identity import resolve_current_operational_key, superseded_operational_keys
+
+    identity = bootstrap_node_identity("twice-rotated")
+    for _ in range(2):
+        identity = rotate_operational_key(identity, purpose="signing")
+    arguments = dict(
+        root_verify_key=identity.root.verify_key, subject_fingerprint=identity.fingerprint, purpose="signing",
+    )
+
+    superseded = superseded_operational_keys(identity.transitions, **arguments)
+
+    assert len(superseded) == 2 and len(set(superseded)) == 2
+    assert resolve_current_operational_key(identity.transitions, **arguments) not in superseded
+
+
+def test_a_historical_chain_entry_that_is_not_a_key_is_ignored_rather_than_fatal(monkeypatch):
+    """Nothing before the trust pull ever decoded a *historical* key, so a
+    root-signed chain may carry an old entry that is not one. Raised from
+    where the pull resolves it, that ended the whole background sync task."""
+    import base64
+
+    from netbbs.link import protocol as protocol_module
+
+    identity = rotate_operational_key(bootstrap_node_identity("odd-history"), purpose="signing")
+    node = LinkNode(identity=bootstrap_node_identity("subscriber"))
+    node.peers[identity.fingerprint] = PeerRecord(
+        fingerprint=identity.fingerprint, root_public_key=bytes(identity.root.verify_key),
+        transitions=identity.transitions, descriptor=_hello_for(LinkNode(identity=identity)).descriptor,
+    )
+    real = protocol_module.superseded_operational_keys
+    monkeypatch.setattr(
+        protocol_module, "superseded_operational_keys",
+        lambda *args, **kwargs: ["not base64 at all", base64.b64encode(b"short").decode()] + real(*args, **kwargs),
+    )
+
+    assert len(node.resolve_peer_superseded_signing_keys(identity.fingerprint)) == 1

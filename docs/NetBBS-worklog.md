@@ -2712,7 +2712,16 @@ does not catch. `SignedTrustObject.from_dict` raises three distinguishable
 refusals for that reason: a plain `TrustWireError` before the signature could
 be checked (the page is refused), `TrustSignatureError`, and
 `TrustPayloadError` for an authentic object this node does not accept (skipped,
-and the cursor may pass it). Both subscription pulls answer an unresolvable
+and the cursor may pass it). The signature is checked *before* the protocol
+version and object type, which therefore raise `TrustPayloadError`: those are
+what a newer issuer will one day send, and refusing the page on them would
+stop every subscriber on this release at the first new object type. A
+rotation re-issues live vouches, and `_resign_orphaned_revocations` re-signs
+revocations whose targets are still running, because a subscriber on the new
+key skips anything the old key signed and nothing else would ever revoke
+those vouches there. `resolve_peer_superseded_signing_keys` is the first code
+to decode a *historical* chain key, so it tolerates an entry that is not a key,
+and the pull calls it where a failure cannot escape the sync task. Both subscription pulls answer an unresolvable
 cursor with `reason_code` `unknown_pull_cursor`, still HTTP 400, and the
 subscriber clears the cursor (issue #621); a pass reaches a reporter that is
 also a seed twice, so recovery can complete within the pass that discovers it.
