@@ -70,6 +70,7 @@ from netbbs.auth.users import (
     AuthError,
     User,
     UserManagementError,
+    UsernameRetiredError,
     approve_pending_user,
     count_sysops,
     create_user,
@@ -77,7 +78,9 @@ from netbbs.auth.users import (
     get_user_by_id,
     get_user_by_username,
     has_password,
+    list_retired_usernames,
     list_users,
+    release_retired_username,
     set_can_verify_identity,
     set_user_disabled,
     set_user_level,
@@ -249,7 +252,13 @@ from netbbs.link.remote_attestation import (
     remove_attestation_recipient,
     set_remote_attestation_override,
 )
-from netbbs.link.onboarding import Participation, get_configured_link_enabled, get_participation, set_participation
+from netbbs.link.onboarding import (
+    Participation,
+    get_configured_link_enabled,
+    get_participation,
+    link_has_ever_run,
+    set_participation,
+)
 from netbbs.link.reliable_nodes import effective_reliable_nodes, reliable_nodes_source
 from netbbs.link.store import load_peer_last_contact
 from netbbs.link.trust import (
@@ -1157,6 +1166,11 @@ async def _users_menu(
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Delete which user?")
             stats = await lane.run(_load_stats)
             await _draw_users_menu(session, stats=stats)
+        elif choice == "t":
+            await session.write_line("")
+            await _retired_usernames_screen(session, lane, actor)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -1264,6 +1278,7 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
         MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
         MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
         MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
+        MenuEntry(label=menu_key("t", "ired names", prefix="Re"), brief="Usernames held for deleted accounts"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
     ]
     effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
@@ -4002,6 +4017,80 @@ async def _trust_config_history_screen(session: Session, lane: DatabaseLane) -> 
 # -- create ------------------------------------------------------------
 
 
+async def _retired_usernames_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Usernames held for deleted accounts, and the one way to free one (issue #594).
+
+    Issue #282 shape: the listing first, leavable with `[B]ack` without
+    answering or writing anything; `[R]elease` is a picker and then the one
+    yes/no this project allows, the last keystroke before an action that lets
+    one account take over another's Link identity.
+    """
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    header_color = await lane.run(effective_header_color_256)
+    while True:
+        retired = await lane.run(list_retired_usernames)
+        await session.write_line(colored("\r\nRetired usernames:", fg_color=header_color, bold=True))
+        for entry in retired:
+            await session.write_line(
+                f"{sanitize_text(entry.username)} "
+                + colored(f"-- retired {sanitize_text(entry.retired_at[:10])}", fg_color=METADATA_COLOR)
+            )
+        if not retired:
+            await session.write_line(colored("None.", fg_color=SUCCESS_COLOR))
+        await session.write_line(
+            colored(
+                "On NetBBS Link a username is the account's identity, so on a node that has run "
+                "Link the name of a deleted account is held: whoever registered it next would "
+                "inherit the old account's Link mail address, the authorship of its carried "
+                "posts, and what other nodes recorded about it."
+                if await lane.run(link_has_ever_run)
+                else "This node has never run NetBBS Link, so deleting an account frees its "
+                "username at once and nothing is held here.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        await write_prompt(
+            session,
+            action_bar([menu_key("R", "elease"), menu_key("B", "ack")], width=session.terminal_width) + ": ",
+        )
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
+        if choice == "b":
+            return
+        if choice != "r":
+            await session.write(reject_unhandled_key(choice))
+            continue
+        selected = await pick_item(
+            session, retired,
+            name_of=lambda entry: entry.username,
+            stable_id_of=lambda entry: _stable_id_for(entry.username.lower()),
+            description_of=lambda entry: f"retired {entry.retired_at[:10]}",
+            title="Release which username?", empty_message="No usernames are retired.",
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=header_color,
+        )
+        if selected is None:
+            continue
+        if not await prompt_yes_no(
+            session,
+            f"Release {sanitize_text(selected.username)!r}? Whoever registers it next takes over "
+            "the deleted account's identity on the Link.",
+            default=False,
+        ):
+            continue
+        try:
+            await lane.run(release_retired_username, selected.username, released_by=actor)
+        except UserManagementError as exc:
+            await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+            continue
+        await session.write_line(
+            colored(f"{sanitize_text(selected.username)!r} released and audited.", fg_color=SUCCESS_COLOR)
+        )
+
+
 def _create_user_password_field() -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
     """Reuses `_prompt_optional_password` as-is on every activation --
     "no" always (re)clears `draft["password"]` to `None`, "yes" always
@@ -4085,10 +4174,17 @@ async def _create_user_screen(session: Session, lane: DatabaseLane, actor: User)
         # "neither password nor key" are both rejected by create_user
         # itself (AuthError), so this closure has no validation of its
         # own to duplicate.
-        new_user = await lane.run(
-            create_user, draft["username"], password=draft["password"],
-            verify_key=draft["verify_key"], user_level=draft["level"],
-        )
+        try:
+            new_user = await lane.run(
+                create_user, draft["username"], password=draft["password"],
+                verify_key=draft["verify_key"], user_level=draft["level"],
+            )
+        except UsernameRetiredError as exc:
+            # Issue #594. The exception's own text is what a remote caller is
+            # shown, and deliberately reads as "taken". A SysOp is owed the
+            # reason and the way out, and raising the editor's `error_type`
+            # keeps the draft open so nothing typed is lost.
+            raise AuthError(exc.sysop_detail) from exc
         await lane.run(
             record_action, actor=actor, action="create_user", target_user_id=new_user.id,
             detail=f"created user {new_user.username!r} at level {draft['level']}",
@@ -4881,6 +4977,15 @@ async def _delete_user_confirm(
             fg_color=MUTED_COLOR,
         )
     )
+    if await lane.run(link_has_ever_run):
+        await session.write_line(
+            colored(
+                f"This node has run NetBBS Link, so the username {target.username!r} stays "
+                "retired afterwards: nobody can register it and inherit this account's Link "
+                "mail address, authorship and reputation. Users -> Retired names releases it.",
+                fg_color=MUTED_COLOR,
+            )
+        )
     await write_prompt(
         session, f"Type the username {target.username!r} to confirm, or anything else to cancel: "
     )

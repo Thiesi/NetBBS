@@ -38,7 +38,7 @@ from netbbs.link.onboarding import participation_accepted
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
 from netbbs.doors.runtime import record_voidrunner_save_dir
-from netbbs.link.onboarding import resolve_link_enabled, set_configured_link_enabled
+from netbbs.link.onboarding import mark_link_has_run, resolve_link_enabled, set_configured_link_enabled
 from netbbs.link.reliable_nodes import run_scheduled_reliable_nodes_refresh
 from netbbs.link.store import load_link_node
 from netbbs.link.trust import maintain_trust_state
@@ -960,6 +960,10 @@ async def run(
             )
         if config.link.enabled:
             _validate_persisted_node_display_name(db)
+            # Issue #594: from here on a deleted account's username is held,
+            # whatever the Link setting does later. After the refusals above,
+            # so a node that never got as far as starting Link is not marked.
+            mark_link_has_run(db)
 
         # Constructed here, once, rather than
         # inside _start_servers -- the background sync task below needs

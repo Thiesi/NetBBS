@@ -691,6 +691,21 @@ or nullable author/uploader references. Personal access rows and private state
 which cannot meaningfully outlive the account are deleted according to explicit
 foreign-key policy.
 
+On a node that has ever run NetBBS Link, hard deletion also retires the
+username (issue #594). The opaque local user identifier of §4.5 is the
+username, so on the Link an account is its name: mail is addressed to it, a
+carried post's author label is built from it, the trust subject is derived
+from it, and a remote attestation names it. A freed name would hand all of
+that to the next registrant. The name is recorded in the deleting transaction
+and refused at registration, case-insensitively, whatever the Link setting
+does afterwards; "ever" is a sticky marker set when the node first starts with
+Link effectively on, with stored peers standing in for it on a node that ran
+Link before the marker existed. A node that has never run Link records nothing
+and its names stay reusable. A SysOp can release a retired name, as a
+confirmed and audited action. Self-service registration refuses a retired
+name in the words it uses for a taken one; a SysOp surface says why and where
+to release it.
+
 ### 4.4 Human-facing Link addresses
 
 The normal human-facing cross-node address is:
@@ -9691,7 +9706,7 @@ narrow that further was not judged worth its write cost.
 That is the intended default, and the release notes have to say it, because a
 node that was sharing will otherwise read as broken.
 
-### Issue #594 — a deleted account's username stays retired on a Link node — decided
+### Issue #594 — a deleted account's username stays retired on a Link node — closed
 
 `local_user_id` is the username, and `users.username` is unique only among
 live rows, so deleting an account frees its Link identity for the next
@@ -9701,8 +9716,7 @@ the recipient with `get_user_by_username`), a carried post's `author_label` is
 is derived from it, and a remote identity attestation names it. A
 re-registered name inherits all of that: authorship, trust state, a live
 attestation until its revocation propagates, and mail a remote sender wrote to
-the previous holder. Decided here and not yet implemented; §4 changes when the
-code does.
+the previous holder. Normative description: §4.3.
 
 **Decision 1 — retire the name; do not change the identifier.** A stable,
 never-reissued per-account identifier was the alternative. It needs a

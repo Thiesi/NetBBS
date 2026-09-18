@@ -9195,3 +9195,102 @@ def test_recipients_screen_can_be_left_without_writing_anything(db, lane, sysop)
     _run(session, lane, sysop)
 
     assert list_attestation_recipients(db) == []
+
+
+# -- retired usernames: a deleted account's name on a Link node (issue #594) --
+
+
+def _retire(db, sysop, username="alice"):
+    from netbbs.auth.users import delete_user
+    from netbbs.link.onboarding import mark_link_has_run
+
+    mark_link_has_run(db)
+    delete_user(db, create_user(db, username, password="hunter2"), deleted_by=sysop)
+
+
+def test_delete_warning_says_the_name_stays_retired_on_a_link_node(db, lane, sysop):
+    from netbbs.link.onboarding import mark_link_has_run
+
+    mark_link_has_run(db)
+    create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "the username 'alice' stays retired afterwards" in text
+    assert "Retired names releases it" in text
+
+
+def test_delete_warning_says_nothing_about_retirement_on_a_standalone_node(db, lane, sysop):
+    create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    assert "stays retired" not in " ".join(_visible(_written_text(session)).split())
+
+
+def test_creating_a_retired_name_tells_the_sysop_why_and_keeps_the_draft(db, lane, sysop):
+    _retire(db, sysop)
+    # [U]sers -> [C]reate -> [U]sername alice -> [P]assword -> [C]reate is
+    # refused; the draft survives, so [B]ack asks before discarding it.
+    session = FakeSession(["u", "c", "u", "alice", "p", "y", "hunter2", "hunter2", "c", "b", "y", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert not any(u.username == "alice" for u in list_users(db))
+    assert "belonged to a deleted account" in text
+    assert "Retired names" in text
+    assert "Created 'alice'" not in text
+
+
+def test_retired_names_screen_lists_and_can_be_left_without_writing(db, lane, sysop):
+    from netbbs.auth.users import list_retired_usernames
+
+    _retire(db, sysop)
+    session = FakeSession(["u", "t", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Retired usernames:" in text
+    assert "alice -- retired" in text
+    assert "a username is the account's identity" in text
+    assert [entry.username for entry in list_retired_usernames(db)] == ["alice"]
+
+
+def test_retired_names_screen_says_so_on_a_node_that_never_ran_link(db, lane, sysop):
+    session = FakeSession(["u", "t", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "This node has never run NetBBS Link" in text
+
+
+def test_sysop_can_release_a_retired_name_behind_one_confirm(db, lane, sysop):
+    from netbbs.auth.users import list_retired_usernames
+
+    _retire(db, sysop)
+    session = FakeSession(["u", "t", "r", "0", "1", "y", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "takes over the deleted account's identity on the Link" in text
+    assert "'alice' released and audited." in text
+    assert list_retired_usernames(db) == []
+    assert create_user(db, "alice", password="hunter2").username == "alice"
+
+
+def test_declining_the_release_confirm_keeps_the_name_held(db, lane, sysop):
+    from netbbs.auth.users import is_username_retired
+
+    _retire(db, sysop)
+    session = FakeSession(["u", "t", "r", "0", "1", "n", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    assert is_username_retired(db, "alice")

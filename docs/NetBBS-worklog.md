@@ -2647,6 +2647,22 @@ audited, and reversible. Operator screens must catch stale mutations (for
 example, an override already cleared elsewhere) and report them as concurrent
 state changes rather than claiming success.
 
+**On the Link an account is its username, so a deleted account's name is
+retired (issue #594).** `local_user_id` on the wire is `users.username`, and
+that column is unique only among live rows. `delete_user` therefore writes
+`retired_usernames` in its own `BEGIN IMMEDIATE` transaction, and
+`_create_user_with_password_hash` checks it inside *its* transaction, so a
+deletion and a registration of the same name cannot pass each other.
+`link_has_ever_run` only reads, which is what makes it safe to call from inside
+the delete's open transaction; do not give it a `set_config`, which commits.
+`UsernameRetiredError` stringifies exactly as a taken username does, because
+both self-service registration paths print the exception to a remote caller;
+a SysOp surface has to reach for `sysop_detail` and, in a draft editor,
+re-raise it as the editor's `error_type` so the draft survives. A rename, if
+one is ever built, frees a name the same way a deletion does and must retire
+it the same way. Any new path that inserts into `users` without going through
+`_create_user_with_password_hash` bypasses the hold.
+
 **Remote attestations do not turn Link identities into local users.** The
 signed carrier and local acceptance projection use the stable
 `TrustSubject.user(home_node_fingerprint, opaque_user_id)` identity throughout.

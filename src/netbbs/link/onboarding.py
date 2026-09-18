@@ -96,6 +96,37 @@ def resolve_link_enabled(configured: bool | None, db: Database) -> bool:
     return participation_accepted(db)
 
 
+# Sticky: set the first time this node starts with Link effectively on, and
+# never cleared. Issue #594 retires a deleted account's username on a node that
+# has *ever* run Link, because what peers hold about that name does not
+# evaporate when Link is later switched off.
+LINK_HAS_RUN_CONFIG_KEY = "link_has_run"
+
+
+def mark_link_has_run(db: Database) -> None:
+    """Record that this node has started with Link effectively enabled."""
+    if get_config(db, LINK_HAS_RUN_CONFIG_KEY) != "true":
+        set_config(db, LINK_HAS_RUN_CONFIG_KEY, "true")
+
+
+def link_has_ever_run(db: Database) -> bool:
+    """Whether any username on this node may be known to a Link peer.
+
+    The marker answers for every start since it existed. Two fallbacks cover
+    what it cannot: a node whose last startup resolved Link on (so a deletion
+    made from `netbbs.admin` before the daemon next starts still counts), and a
+    node that ran Link only before the marker existed and has it off now, which
+    its stored peers give away. Reads only, so it is safe inside a caller's
+    open transaction.
+    """
+    if get_config(db, LINK_HAS_RUN_CONFIG_KEY) == "true":
+        return True
+    configured = get_configured_link_enabled(db)
+    if resolve_link_enabled(None if configured == "unknown" else configured, db):
+        return True
+    return db.connection.execute("SELECT 1 FROM link_peers LIMIT 1").fetchone() is not None
+
+
 def set_configured_link_enabled(db: Database, configured: bool | None) -> None:
     value = "unset" if configured is None else ("true" if configured else "false")
     set_config(db, CONFIGURED_LINK_ENABLED_CONFIG_KEY, value)

@@ -2777,4 +2777,25 @@ MIGRATIONS = [
          WHERE revoked_at IS NOT NULL;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #594: usernames of deleted accounts, held so the next registrant "
+            "cannot inherit the previous holder's Link identity. `local_user_id` on the "
+            "wire is the username, and `users.username` is unique only among live rows, "
+            "so a freed name carried its Link mail address, post authorship, trust state "
+            "and any live attestation to whoever took it next. Written by `delete_user` "
+            "on a node that has ever run Link; a node that never has records nothing and "
+            "keeps reusable names. `COLLATE NOCASE` on the key matches "
+            "`idx_users_username_nocase`, so 'Bob' is held exactly as 'bob' is unique. "
+            "Starts empty: past deletions are named only in the moderation log's free "
+            "text, and reconstructing reservations from a log line would retire the "
+            "wrong names."
+        ),
+        sql="""
+        CREATE TABLE retired_usernames (
+            username    TEXT PRIMARY KEY COLLATE NOCASE,
+            retired_at  TEXT NOT NULL
+        );
+        """,
+    ),
 ]
