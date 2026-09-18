@@ -172,6 +172,12 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # The chart opens as a list; its own [V] is the spatial map, which is a
         # different drawing and the one the 40x12 floor was argued over.
         ("Navigation Chart, map", b"CV"),
+        # The list picker is a screen of its own and had no panel: it is the
+        # one drawing in the game that is neither framed nor full-bleed, and it
+        # used to be printed under whatever opened it (issue #643). Two ways in,
+        # because the played career is the one with more than a row to pick.
+        ("Route planner, destination picker", b"CG", "played"),
+        ("Star map, station picker", b"CVI", "played"),
     ],
     "war_dialer": [
         # The masthead, drawn before the first screen clears: `^` keeps what a
