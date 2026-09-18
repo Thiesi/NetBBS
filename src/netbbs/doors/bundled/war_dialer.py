@@ -1362,8 +1362,8 @@ def world_session(db_path: Path, *, maintenance: bool = False):
         yield
     except sqlite3.OperationalError as exc:
         if "locked" in str(exc).lower() or "busy" in str(exc).lower():
-            # A caller meets this lock only while the SysOp holds the world for a
-            # season change or a backup; the SysOp's own command meets it because
+            # A caller meets this lock only while a live backup, or the maintenance
+            # command itself, holds the world; the SysOp's own command meets it because
             # callers are inside. The first is a closure, the second a refusal.
             kind = WorldStateError if maintenance else WorldClosed
             raise kind("War Dialer is busy with active sessions or maintenance. Try again later.") from exc

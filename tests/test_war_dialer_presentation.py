@@ -1591,7 +1591,7 @@ def test_world_in_maintenance_returns_clear_message_without_player_creation(tmp_
 
 
 def test_a_caller_who_meets_the_sysops_lock_is_turned_away_not_crashed(tmp_path):
-    """The season command and the backup hold the world exclusively while they
+    """A live backup and the maintenance command hold the world exclusively while they
     work. A caller arriving then is closed out the same way as by the flag, and
     the SysOp's own command meeting callers inside still gets the error."""
     path = tmp_path / "held.db"
