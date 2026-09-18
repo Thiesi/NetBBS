@@ -75,6 +75,7 @@ from netbbs.auth.users import (
     count_sysops,
     create_user,
     delete_user,
+    deletion_retires_username,
     get_user_by_id,
     get_user_by_username,
     has_password,
@@ -4977,7 +4978,7 @@ async def _delete_user_confirm(
             fg_color=MUTED_COLOR,
         )
     )
-    if await lane.run(link_has_ever_run):
+    if await lane.run(deletion_retires_username, target):
         await session.write_line(
             colored(
                 f"This node has run NetBBS Link, so the username {target.username!r} stays "

@@ -1312,6 +1312,27 @@ def release_retired_username(db: Database, username: str, *, released_by: User) 
         db.connection.commit()
 
 
+def deletion_retires_username(db: Database, user: User) -> bool:
+    """Whether deleting `user` holds its username afterwards (issue #594).
+
+    One predicate for `delete_user` and for the screen that warns about it,
+    so the warning cannot promise something the deletion does not do.
+
+    Two conditions. The node has ever run Link, because only then can a peer
+    know the name. And the account has logged in at least once: an account
+    that never has -- a registration the SysOp declined, a test account, a
+    typo -- has never posted, sent, or been vouched for, so there is no Link
+    identity for a successor to inherit, and holding its name would make
+    routine housekeeping on an approval-required node permanently consume
+    whatever names strangers happened to ask for. Reads only, so it is safe
+    inside `delete_user`'s open transaction. Imported here: the Link package
+    imports from this module.
+    """
+    from netbbs.link.onboarding import link_has_ever_run
+
+    return user.last_login_at is not None and link_has_ever_run(db)
+
+
 def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
     """
     Permanently remove `target`'s account, refusing to delete the last
@@ -1369,11 +1390,9 @@ def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
         # there is no moment at which the account is gone and the name is not.
         # Keyed on "ever", not on the Link setting right now: an account
         # deleted in a maintenance window with Link off is still known to
-        # peers when Link comes back. Imported here: the Link package imports
-        # from this module.
-        from netbbs.link.onboarding import link_has_ever_run
-
-        if link_has_ever_run(db):
+        # peers when Link comes back. Asked of `current`, re-read inside this
+        # transaction, not of the caller's possibly stale `target`.
+        if deletion_retires_username(db, current):
             db.connection.execute(
                 "INSERT OR REPLACE INTO retired_usernames (username, retired_at) VALUES (?, ?)",
                 (current.username, utc_now_iso()),

@@ -9200,19 +9200,27 @@ def test_recipients_screen_can_be_left_without_writing_anything(db, lane, sysop)
 # -- retired usernames: a deleted account's name on a Link node (issue #594) --
 
 
+def _used_account(db, username="alice", **kwargs):
+    """An account that has logged in, which is what makes its name holdable."""
+    from netbbs.auth.users import authenticate_password
+
+    create_user(db, username, password="hunter2", **kwargs)
+    return authenticate_password(db, username, "hunter2")
+
+
 def _retire(db, sysop, username="alice"):
     from netbbs.auth.users import delete_user
     from netbbs.link.onboarding import mark_link_has_run
 
     mark_link_has_run(db)
-    delete_user(db, create_user(db, username, password="hunter2"), deleted_by=sysop)
+    delete_user(db, _used_account(db, username), deleted_by=sysop)
 
 
 def test_delete_warning_says_the_name_stays_retired_on_a_link_node(db, lane, sysop):
     from netbbs.link.onboarding import mark_link_has_run
 
     mark_link_has_run(db)
-    create_user(db, "alice", password="hunter2", user_level=10)
+    _used_account(db, user_level=10)
     session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b"])
 
     _run(session, lane, sysop)
@@ -9220,6 +9228,23 @@ def test_delete_warning_says_the_name_stays_retired_on_a_link_node(db, lane, sys
     text = " ".join(_visible(_written_text(session)).split())
     assert "the username 'alice' stays retired afterwards" in text
     assert "Retired names releases it" in text
+
+
+def test_delete_warning_promises_no_hold_for_an_account_that_never_logged_in(db, lane, sysop):
+    """The warning and the deletion ask one predicate, so the screen cannot
+    promise a hold the deletion then does not make."""
+    from netbbs.auth.users import list_retired_usernames
+    from netbbs.link.onboarding import mark_link_has_run
+
+    mark_link_has_run(db)
+    create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["u", "d", "0", "1", "d", "alice", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    assert "stays retired" not in " ".join(_visible(_written_text(session)).split())
+    assert not any(u.username == "alice" for u in list_users(db))
+    assert list_retired_usernames(db) == []
 
 
 def test_delete_warning_says_nothing_about_retirement_on_a_standalone_node(db, lane, sysop):

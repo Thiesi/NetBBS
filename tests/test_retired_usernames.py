@@ -18,6 +18,7 @@ from netbbs.auth.users import (
     AuthError,
     UserManagementError,
     UsernameRetiredError,
+    authenticate_password,
     create_user,
     delete_user,
     get_user_by_username,
@@ -49,8 +50,13 @@ def sysop(db):
     return create_user(db, "sysop", password="password", user_level=SYSOP_LEVEL)
 
 
-def _delete(db, sysop, username="alice"):
-    delete_user(db, create_user(db, username, password="password"), deleted_by=sysop)
+def _delete(db, sysop, username="alice", *, ever_logged_in=True):
+    """Delete an account that has been used, as a deleted account usually has."""
+    user = create_user(db, username, password="password")
+    if ever_logged_in:
+        user = authenticate_password(db, username, "password")
+        assert user.last_login_at is not None
+    delete_user(db, user, deleted_by=sysop)
 
 
 # -- a node that has never run Link loses nothing -----------------------------
@@ -126,6 +132,31 @@ def test_a_refused_deletion_retires_nothing(db, sysop):
 
     assert list_retired_usernames(db) == []
     assert get_user_by_username(db, "sysop") is not None
+
+
+def test_an_account_that_never_logged_in_is_not_retired(db, sysop):
+    """A declined registration, a test account, a typo: never posted, never
+    sent, never vouched for, so there is nothing for a successor to inherit --
+    and on an approval-required node, retiring them would let strangers
+    consume names permanently just by asking for them."""
+    mark_link_has_run(db)
+    _delete(db, sysop, ever_logged_in=False)
+
+    assert list_retired_usernames(db) == []
+    assert create_user(db, "alice", password="password").username == "alice"
+
+
+def test_the_hold_is_decided_on_the_fresh_row_not_the_callers_stale_copy(db, sysop):
+    """The caller's `User` was read before the account logged in; the delete
+    re-reads inside its transaction and must ask the predicate of that."""
+    mark_link_has_run(db)
+    stale = create_user(db, "alice", password="password")
+    authenticate_password(db, "alice", "password")
+    assert stale.last_login_at is None
+
+    delete_user(db, stale, deleted_by=sysop)
+
+    assert is_username_retired(db, "alice")
 
 
 # -- "ever", not "now" ---------------------------------------------------------

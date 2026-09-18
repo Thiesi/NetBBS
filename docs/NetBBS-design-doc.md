@@ -701,7 +701,8 @@ and refused at registration, case-insensitively, whatever the Link setting
 does afterwards; "ever" is a sticky marker set when the node first starts with
 Link effectively on, with stored peers standing in for it on a node that ran
 Link before the marker existed. A node that has never run Link records nothing
-and its names stay reusable. A SysOp can release a retired name, as a
+and its names stay reusable. Nor is the name of an account that never logged
+in retired: it has never acted, so it has no Link identity to inherit. A SysOp can release a retired name, as a
 confirmed and audited action. Self-service registration refuses a retired
 name in the words it uses for a taken one; a SysOp surface says why and where
 to release it.
@@ -9739,6 +9740,14 @@ names: a small board should not lose names forever to a network it is not on.
 A recorded name stays retired whatever the Link setting does afterwards.
 Registration checks the record case-insensitively, as the uniqueness index
 does.
+
+An account that never logged in is not retired. A registration the SysOp
+declined, a test account and a mistyped name have never posted, sent mail or
+been vouched for, so a successor inherits nothing, and on an
+approval-required node retiring them would let strangers permanently consume
+names merely by asking for them. The screen that confirms a deletion and the
+deletion itself ask one shared predicate, so the warning cannot promise a hold
+that does not happen.
 
 The test is "ever", not "now", because what peers hold does not evaporate
 when Link is switched off. Keying on the setting at the moment of deletion

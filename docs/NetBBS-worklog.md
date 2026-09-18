@@ -2655,6 +2655,9 @@ that column is unique only among live rows. `delete_user` therefore writes
 deletion and a registration of the same name cannot pass each other.
 `link_has_ever_run` only reads, which is what makes it safe to call from inside
 the delete's open transaction; do not give it a `set_config`, which commits.
+The hold and the delete screen's warning about it both ask
+`deletion_retires_username`, and the delete asks it of the row it re-read
+inside the transaction, not of the caller's possibly stale `User`.
 `UsernameRetiredError` stringifies exactly as a taken username does, because
 both self-service registration paths print the exception to a remote caller;
 a SysOp surface has to reach for `sysop_detail` and, in a draft editor,

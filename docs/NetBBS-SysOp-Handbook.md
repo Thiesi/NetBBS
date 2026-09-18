@@ -302,8 +302,10 @@ account change that would leave no enabled, approved SysOp. Disabling an account
 revokes its access; deletion is permanent and requires its exact name. Existing
 content retains its recorded author label.
 
-Once your node has run NetBBS Link, deleting an account also retires its
-username: nobody can register it again. On the Link a username is the
+Once your node has run NetBBS Link, deleting an account that has ever logged
+in also retires its username: nobody can register it again. Declining a
+pending registration, or deleting an account nobody ever used, retires
+nothing. On the Link a username is the
 account's identity, so whoever took a freed name would receive Link mail
 written to the previous holder and inherit the authorship of their carried
 posts and whatever other nodes had recorded about them. Callers who try a
