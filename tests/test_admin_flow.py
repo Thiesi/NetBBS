@@ -9200,27 +9200,19 @@ def test_recipients_screen_can_be_left_without_writing_anything(db, lane, sysop)
 # -- retired usernames: a deleted account's name on a Link node (issue #594) --
 
 
-def _used_account(db, username="alice", **kwargs):
-    """An account that has logged in, which is what makes its name holdable."""
-    from netbbs.auth.users import authenticate_password
-
-    create_user(db, username, password="hunter2", **kwargs)
-    return authenticate_password(db, username, "hunter2")
-
-
 def _retire(db, sysop, username="alice"):
     from netbbs.auth.users import delete_user
     from netbbs.link.onboarding import mark_link_has_run
 
     mark_link_has_run(db)
-    delete_user(db, _used_account(db, username), deleted_by=sysop)
+    delete_user(db, create_user(db, username, password="hunter2"), deleted_by=sysop)
 
 
 def test_delete_warning_says_the_name_stays_retired_on_a_link_node(db, lane, sysop):
     from netbbs.link.onboarding import mark_link_has_run
 
     mark_link_has_run(db)
-    _used_account(db, user_level=10)
+    create_user(db, "alice", password="hunter2", user_level=10)
     session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b"])
 
     _run(session, lane, sysop)
@@ -9230,14 +9222,14 @@ def test_delete_warning_says_the_name_stays_retired_on_a_link_node(db, lane, sys
     assert "Retired names releases it" in text
 
 
-def test_delete_warning_promises_no_hold_for_an_account_that_never_logged_in(db, lane, sysop):
+def test_delete_warning_promises_no_hold_for_a_declined_registration(db, lane, sysop):
     """The warning and the deletion ask one predicate, so the screen cannot
     promise a hold the deletion then does not make."""
     from netbbs.auth.users import list_retired_usernames
     from netbbs.link.onboarding import mark_link_has_run
 
     mark_link_has_run(db)
-    create_user(db, "alice", password="hunter2", user_level=10)
+    create_user(db, "alice", password="hunter2", user_level=10, pending_approval=True)
     session = FakeSession(["u", "d", "0", "1", "d", "alice", "b", "b"])
 
     _run(session, lane, sysop)
@@ -9269,6 +9261,8 @@ def test_creating_a_retired_name_tells_the_sysop_why_and_keeps_the_draft(db, lan
     assert "belonged to a deleted account" in text
     assert "Retired names" in text
     assert "Created 'alice'" not in text
+    # The draft survived the refusal: leaving it asks before discarding.
+    assert "Discard unsaved changes?" in text
 
 
 def test_retired_names_screen_lists_and_can_be_left_without_writing(db, lane, sysop):

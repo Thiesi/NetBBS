@@ -18,7 +18,6 @@ from netbbs.auth.users import (
     AuthError,
     UserManagementError,
     UsernameRetiredError,
-    authenticate_password,
     create_user,
     delete_user,
     get_user_by_username,
@@ -50,13 +49,8 @@ def sysop(db):
     return create_user(db, "sysop", password="password", user_level=SYSOP_LEVEL)
 
 
-def _delete(db, sysop, username="alice", *, ever_logged_in=True):
-    """Delete an account that has been used, as a deleted account usually has."""
-    user = create_user(db, username, password="password")
-    if ever_logged_in:
-        user = authenticate_password(db, username, "password")
-        assert user.last_login_at is not None
-    delete_user(db, user, deleted_by=sysop)
+def _delete(db, sysop, username="alice"):
+    delete_user(db, create_user(db, username, password="password"), deleted_by=sysop)
 
 
 # -- a node that has never run Link loses nothing -----------------------------
@@ -134,24 +128,51 @@ def test_a_refused_deletion_retires_nothing(db, sysop):
     assert get_user_by_username(db, "sysop") is not None
 
 
-def test_an_account_that_never_logged_in_is_not_retired(db, sysop):
-    """A declined registration, a test account, a typo: never posted, never
-    sent, never vouched for, so there is nothing for a successor to inherit --
-    and on an approval-required node, retiring them would let strangers
+def test_a_declined_registration_is_not_retired(db, sysop):
+    """Routine housekeeping on an approval-required node. A pending account
+    has provably never had a session, and retiring these would let strangers
     consume names permanently just by asking for them."""
     mark_link_has_run(db)
-    _delete(db, sysop, ever_logged_in=False)
+    pending = create_user(db, "alice", password="password", pending_approval=True)
+
+    delete_user(db, pending, deleted_by=sysop)
 
     assert list_retired_usernames(db) == []
     assert create_user(db, "alice", password="password").username == "alice"
 
 
-def test_a_never_used_account_that_was_sent_link_mail_is_retired(db, sysop):
+def test_an_account_with_no_login_on_record_is_still_retired(db, sysop):
+    """Review of #620. Open registration drops a new caller straight into
+    their first session without stamping `last_login_at`, so the account that
+    registered, posted on a linked board and never came back -- the commonest
+    account a SysOp deletes -- has never "logged in" by that column. It must
+    not be mistaken for an account nobody used."""
+    mark_link_has_run(db)
+    drive_by = create_user(db, "alice", password="password")
+    assert drive_by.last_login_at is None
+
+    delete_user(db, drive_by, deleted_by=sysop)
+
+    assert is_username_retired(db, "alice")
+
+
+def test_an_approved_registration_is_retired_like_any_other(db, sysop):
+    from netbbs.auth.users import approve_pending_user
+
+    mark_link_has_run(db)
+    pending = create_user(db, "alice", password="password", pending_approval=True)
+    approved = approve_pending_user(db, pending, approved_by=sysop)
+
+    delete_user(db, approved, deleted_by=sysop)
+
+    assert is_username_retired(db, "alice")
+
+
+def test_a_pending_registration_that_was_sent_link_mail_is_retired(db, sysop):
     """Claude review of #620. Link mail reaches an account by name without the
-    account doing anything, and a pending account can never have logged in:
-    every login path refuses it before stamping `last_login_at`. Freed, the
-    name would hand the next registrant mail a remote sender addressed to the
-    previous holder, which that sender was told had been accepted."""
+    account doing anything. Freed, the name would hand the next registrant
+    mail a remote sender addressed to the previous holder, which that sender
+    was told had been accepted."""
     mark_link_has_run(db)
     pending = create_user(db, "alice", password="password", pending_approval=True)
     assert pending.last_login_at is None
@@ -170,10 +191,10 @@ def test_a_never_used_account_that_was_sent_link_mail_is_retired(db, sysop):
     assert is_username_retired(db, "alice")
 
 
-def test_local_mail_alone_does_not_retire_a_never_used_account(db, sysop):
+def test_local_mail_alone_does_not_retire_a_pending_registration(db, sysop):
     """Mail from a caller on this node says nothing to any peer."""
     mark_link_has_run(db)
-    unused = create_user(db, "alice", password="password")
+    unused = create_user(db, "alice", password="password", pending_approval=True)
     db.connection.execute(
         """INSERT INTO mail_messages
            (sender_user_id, sender_label, recipient_user_id, subject, body, created_at)
@@ -188,12 +209,15 @@ def test_local_mail_alone_does_not_retire_a_never_used_account(db, sysop):
 
 
 def test_the_hold_is_decided_on_the_fresh_row_not_the_callers_stale_copy(db, sysop):
-    """The caller's `User` was read before the account logged in; the delete
-    re-reads inside its transaction and must ask the predicate of that."""
+    """The caller's `User` was read while the registration was pending; it has
+    been approved since. The delete re-reads inside its transaction and must
+    ask the predicate of that row."""
+    from netbbs.auth.users import approve_pending_user
+
     mark_link_has_run(db)
-    stale = create_user(db, "alice", password="password")
-    authenticate_password(db, "alice", "password")
-    assert stale.last_login_at is None
+    stale = create_user(db, "alice", password="password", pending_approval=True)
+    approve_pending_user(db, stale, approved_by=sysop)
+    assert stale.pending_approval is True
 
     delete_user(db, stale, deleted_by=sysop)
 
@@ -245,6 +269,13 @@ _LINK_ARTIFACTS = {
     # Codex review of #620: a node can originate a linked board and republish
     # it on a later sync without ever having stored a peer.
     "a linked board and no peer": "BOARD",
+    "a linked channel": "CHANNEL",
+    "a linked file area": "FILE_AREA",
+    "a retained event": """INSERT INTO link_events
+        (content_id, sender_fingerprint, object_type, envelope_json, received_at)
+        VALUES ('event-id', 'peer-fingerprint', 'board_post', '{}', '2026-01-01T00:00:00.000000Z')""",
+    "link mail received": "MAIL_IN",
+    "link mail sent": "MAIL_OUT",
     "a recorded decision to run link": """INSERT INTO node_config (key, value)
         VALUES ('link_onboarding_participation', 'accepted')""",
     "an explicit setting at the last startup": """INSERT INTO node_config (key, value)
@@ -266,6 +297,29 @@ def _upgrade_from_before_594(tmp_path, monkeypatch, artifact_sql: str | None) ->
 
         board = create_board(old, "linked", creator=insert_user_on_old_schema(old, "founder", user_level=255))
         old.connection.execute("UPDATE boards SET link_genesis_json = '{}' WHERE id = ?", (board.id,))
+    elif artifact_sql == "CHANNEL":
+        from netbbs.chat.channels import create_channel
+        from tests.legacy_schema import insert_user_on_old_schema
+
+        channel = create_channel(old, "linked", creator=insert_user_on_old_schema(old, "founder", user_level=255))
+        old.connection.execute("UPDATE channels SET link_genesis_json = '{}' WHERE id = ?", (channel.id,))
+    elif artifact_sql == "FILE_AREA":
+        from netbbs.files.areas import create_file_area
+        from tests.legacy_schema import insert_user_on_old_schema
+
+        area = create_file_area(old, "linked", creator=insert_user_on_old_schema(old, "founder", user_level=255))
+        old.connection.execute("UPDATE file_areas SET link_genesis_json = '{}' WHERE id = ?", (area.id,))
+    elif artifact_sql in ("MAIL_IN", "MAIL_OUT"):
+        from tests.legacy_schema import insert_user_on_old_schema
+
+        founder = insert_user_on_old_schema(old, "founder", user_level=255)
+        column = "link_source_event_id" if artifact_sql == "MAIL_IN" else "link_event_json"
+        old.connection.execute(
+            f"""INSERT INTO mail_messages
+                (sender_user_id, sender_label, recipient_user_id, subject, body, created_at, {column})
+                VALUES (?, 'founder', ?, 's', 'b', '2026-01-01T00:00:00.000000Z', 'x')""",
+            (founder.id, founder.id),
+        )
     elif artifact_sql is not None:
         old.connection.execute(artifact_sql)
     old.connection.commit()

@@ -498,13 +498,12 @@ def test_registration_refuses_a_retired_username_in_the_words_it_uses_for_a_take
     """Issue #594. The name belonged to a deleted account and is held because
     this node has run Link; a remote caller is told only that it is not
     available, so registration is no oracle for who used to be here."""
-    from netbbs.auth.users import SYSOP_LEVEL, authenticate_password, delete_user, is_username_retired
+    from netbbs.auth.users import SYSOP_LEVEL, delete_user, is_username_retired
     from netbbs.link.onboarding import mark_link_has_run
 
     mark_link_has_run(db)
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
-    create_user(db, "alice", password="hunter2")
-    delete_user(db, authenticate_password(db, "alice", "hunter2"), deleted_by=sysop)
+    delete_user(db, create_user(db, "alice", password="hunter2"), deleted_by=sysop)
     session = FakeSession(
         ["new", "alice", "hunter2pw", "hunter2pw", "", "", "", ""],
     )

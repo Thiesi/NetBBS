@@ -701,9 +701,9 @@ and refused at registration, case-insensitively, whatever the Link setting
 does afterwards; "ever" is a sticky marker set when the node first starts with
 Link effectively on, and seeded at upgrade, on a node that ran Link before the
 marker existed, from any artifact Link leaves behind. A node that has never run Link records nothing
-and its names stay reusable. Nor is the name retired of an account that never
-logged in and was never sent Link mail: it has left no trace a peer could
-hold, so there is no Link identity to inherit. A SysOp can release a retired name, as a
+and its names stay reusable. Nor is the name retired of a registration that
+was still awaiting approval and was never sent Link mail: such an account has
+provably never had a session, so there is no Link identity to inherit. A SysOp can release a retired name, as a
 confirmed and audited action. Self-service registration refuses a retired
 name in the words it uses for a taken one; a SysOp surface says why and where
 to release it.
@@ -9746,16 +9746,20 @@ A recorded name stays retired whatever the Link setting does afterwards.
 Registration checks the record case-insensitively, as the uniqueness index
 does.
 
-An account that left no trace a peer could hold is not retired: one that
-never logged in and was never sent Link mail. A registration the SysOp
-declined, a test account and a mistyped name have never posted, sent mail or
-been vouched for, so a successor inherits nothing, and on an
-approval-required node retiring them would let strangers permanently consume
-names merely by asking for them. Received Link mail is part of the test
-because it is the one thing that reaches an account by name without the
-account doing anything: delivery resolves the recipient by username, pending
-approval or not, and acknowledges it, and a pending account can never have
-logged in. The screen that confirms a deletion and the
+One kind of account is not retired: a registration still awaiting approval
+that was never sent Link mail. Declining registrations is routine on an
+approval-required node, and retiring those names would let strangers
+permanently consume names merely by asking for them. The exemption rests on
+the pending state because that state proves the account never had a session:
+it is set only at registration, cleared only by approval, and refused by
+every login path. "Never logged in" was considered and rejected as the test,
+because it proves nothing: open registration hands a new caller straight into
+a first session without recording a login, so an account that registered,
+posted on a linked board and never returned has no login on record. Received
+Link mail is part of the test because it reaches an account by name without
+the account doing anything: delivery resolves the recipient by username,
+pending approval or not, and acknowledges it. An approved account that was
+never used is retired like any other; the SysOp can release it. The screen that confirms a deletion and the
 deletion itself ask one shared predicate, so the warning cannot promise a hold
 that does not happen.
 

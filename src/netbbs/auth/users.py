@@ -1319,21 +1319,26 @@ def deletion_retires_username(db: Database, user: User) -> bool:
     so the warning cannot promise something the deletion does not do.
 
     The node must have ever run Link, because only then can a peer know the
-    name. And the account must have left a trace a peer could hold: it has
-    logged in at least once, or it has been sent Link mail. An account with
-    neither -- a registration the SysOp declined, a test account, a typo --
-    has never posted, sent, or been vouched for, so there is no Link identity
-    for a successor to inherit, and holding its name would make routine
-    housekeeping on an approval-required node permanently consume whatever
-    names strangers happened to ask for.
+    name. Given that, every account's name is held except one kind: a
+    registration still awaiting approval that was never sent Link mail.
+    Declining registrations is routine housekeeping on an approval-required
+    node, and holding those names would let strangers permanently consume
+    names merely by asking for them.
 
-    Link mail is the one thing that reaches an account *by name* without the
+    The exemption rests on `pending_approval` because it is the one state that
+    *proves* an account never had a session: it is set only at registration,
+    cleared only by approval, every login path refuses it, and
+    approval-required registration does not drop the caller into a session.
+    `last_login_at IS NULL` proves nothing of the kind. Open registration
+    hands a new caller straight into their first session without stamping it,
+    so an account that registered, posted on a linked board and never came
+    back -- the commonest account a SysOp ever deletes -- has never "logged
+    in" by that column (review of #620).
+
+    Link mail is checked because it reaches an account *by name* without the
     account doing anything: `deliver_link_message` resolves the recipient by
     username alone, stores the mail and acknowledges it, pending approval or
-    not. A pending account can never have a `last_login_at` -- every login
-    path refuses it before stamping one -- so "never logged in" on its own
-    would free exactly the name a remote sender has already been told is live
-    (Claude review of #620).
+    not, so a remote sender has been told the name is live.
 
     Reads only, so it is safe inside `delete_user`'s open transaction.
     Imported here: the Link package imports from this module.
@@ -1342,7 +1347,7 @@ def deletion_retires_username(db: Database, user: User) -> bool:
 
     if not link_has_ever_run(db):
         return False
-    if user.last_login_at is not None:
+    if not user.pending_approval:
         return True
     return db.connection.execute(
         """SELECT 1 FROM mail_messages

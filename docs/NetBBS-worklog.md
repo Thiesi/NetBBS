@@ -2657,7 +2657,12 @@ deletion and a registration of the same name cannot pass each other.
 the delete's open transaction; do not give it a `set_config`, which commits.
 The hold and the delete screen's warning about it both ask
 `deletion_retires_username`, and the delete asks it of the row it re-read
-inside the transaction, not of the caller's possibly stale `User`.
+inside the transaction, not of the caller's possibly stale `User`. That
+predicate exempts only a still-pending registration with no Link mail, and
+deliberately does not look at `last_login_at`: open registration drops a new
+caller into their first session without stamping it, so NULL there does not
+mean the account was never used. `pending_approval` is the only column that
+proves an account never had a session.
 `UsernameRetiredError` stringifies exactly as a taken username does, because
 both self-service registration paths print the exception to a remote caller;
 a SysOp surface has to reach for `sysop_detail` and, in a draft editor,
