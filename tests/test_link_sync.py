@@ -2938,3 +2938,58 @@ def test_a_historical_chain_entry_that_is_not_a_key_is_ignored_rather_than_fatal
     )
 
     assert len(node.resolve_peer_superseded_signing_keys(identity.fingerprint)) == 1
+
+
+def test_a_reporter_or_authority_without_a_usable_key_costs_its_own_pull_not_the_sync_task(tmp_path):
+    """Both pulls resolve the issuer's key before their per-address handler. A
+    chain that ends in a bare revoke, or no longer verifies, raised from there
+    straight out of `run_link_sync`, and outbound Link did not resume until the
+    node was restarted."""
+    from netbbs.link import sync as sync_module
+    from netbbs.link.protocol import LinkProtocolError
+
+    pair = _VouchPair(tmp_path, "keyless")
+
+    def _no_key(fingerprint, kind="signed object"):
+        raise LinkProtocolError(f"rejected {kind} from {fingerprint}: no currently-authorized signing key")
+
+    pair.subscriber_node.resolve_peer_signing_key = _no_key
+
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            for pull in (sync_module._pull_one_trust_reporter, sync_module._pull_one_attestation_authority):
+                await pull(
+                    pair.subscriber_node, session, pair.subscriber.lane,
+                    pair.issuer_identity.fingerprint, ["http://127.0.0.1:9"],
+                )
+
+    try:
+        asyncio.run(scenario())  # returns; does not raise
+    finally:
+        pair.close()
+
+
+def test_the_sync_pass_survives_a_revocation_re_signed_after_a_rotation(tmp_path, caplog):
+    """That change carries no subject, and the pass logs every change: an
+    attribute error there would end the background sync task unnoticed."""
+    pair = _VouchPair(tmp_path, "resigned")
+    record_vouch_intent(pair.issuer.db, pair.NODE_SUBJECT, explanation="known operator")
+
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            await pair.issuer_pass(session)
+            withdraw_vouch_intent(pair.issuer.db, pair.NODE_SUBJECT)
+            await pair.issuer_pass(session)
+            pair.issuer_identity = rotate_operational_key(pair.issuer_identity, purpose="signing")
+            pair.issuer_node.identity = pair.issuer_identity
+            with caplog.at_level(logging.INFO, logger="netbbs.link.sync"):
+                await pair.issuer_pass(session)
+
+    try:
+        asyncio.run(scenario())
+        assert any("re-signed a vouch revocation" in record.getMessage() for record in caplog.records)
+        assert pair.issuer.db.connection.execute(
+            "SELECT COUNT(*) FROM link_trust_wire_objects WHERE object_type = 'trust_vouch_revocation'"
+        ).fetchone()[0] == 2
+    finally:
+        pair.close()

@@ -372,9 +372,9 @@ def reconcile_issued_vouches(
             payload = json.loads(row["envelope_json"])["payload"]
             if subject_id not in intents:
                 reason = "intent_withdrawn"
-            elif intents[subject_id][1].node_fingerprint == home_node_fingerprint:
-                reason = "own_identity"
             elif subject_id in restricted:
+                # Also where an own-identity intent lands, which in practice
+                # never has a live vouch to revoke: it was never signed.
                 reason = "subject_restricted_here"
             elif payload["explanation"] != intents[subject_id][0]:
                 reason = "explanation_replaced"

@@ -347,6 +347,10 @@ class SignedTrustObject:
         if not verify_signature(issuer_verify_key, signed_bytes, signature):
             raise TrustSignatureError("trust signature does not verify")
         # Everything from here on is about an object the issuer really signed.
+        # (The envelope's own three keys are still checked above, before the
+        # signature: a future object that changes the *envelope* shape, rather
+        # than its type, version or payload, is refused rather than skipped.
+        # That is a constraint on how the wire format may evolve.)
         # The signature is checked *before* the protocol version and object
         # type on purpose: those two are exactly what a newer issuer will one
         # day send that this release does not understand, and a subscriber may
@@ -357,7 +361,9 @@ class SignedTrustObject:
         try:
             if envelope["netbbs_protocol"] != NETBBS_PROTOCOL_VERSION:
                 raise TrustWireError("unsupported trust protocol version")
-            if envelope["object_type"] not in TRUST_OBJECT_TYPES:
+            # `isinstance` first: an unhashable value makes `in` raise
+            # `TypeError`, which no pull handler catches.
+            if not isinstance(envelope["object_type"], str) or envelope["object_type"] not in TRUST_OBJECT_TYPES:
                 raise TrustWireError("unsupported trust object type")
             if not isinstance(envelope["payload"], dict):
                 raise TrustWireError("trust payload must be an object")

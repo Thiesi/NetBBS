@@ -9507,3 +9507,33 @@ def test_recording_the_reason_a_published_vouch_already_carries_does_not_claim_a
     text = " ".join(_visible(_written_text(session)).split())
     assert "Vouch recorded. Nothing needed signing." in text
     assert "Vouch recorded. Signed" not in text
+
+
+def test_the_console_reports_on_the_identity_it_acted_on_not_on_the_whole_pass(db, lane, sysop):
+    """The reconcile brings *every* intent up to date. A vouch it signs for
+    some other identity in the same run is not a signature for this one."""
+    from netbbs.link.trust import TrustSubject, register_subject
+    from netbbs.link.trust_issuance import reconcile_issued_vouches, record_vouch_intent
+
+    subject = _vouchable_subject(db)
+    link_context = _link_context()
+    record_vouch_intent(db, subject, explanation="known operator")
+    reconcile_issued_vouches(
+        db, link_context.node_identity.signing_key,
+        home_node_fingerprint=link_context.node_identity.fingerprint,
+    )
+    other = TrustSubject.node("zyxwvutsrqponmlkjihgfedcba765432")
+    register_subject(db, other, first_accepted_at="2026-08-01T00:00:00.000000Z")
+    record_vouch_intent(db, other, explanation="still pending when the console runs")
+    # Subjects sort by fingerprint, so the published one is the first entry.
+    session = FakeSession(["s", "p", "s", "0", "1", "v", "i", "known operator", "y", "b", "b", "b", "b", "b"])
+
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=None, link_context=link_context))
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Vouch recorded. Nothing needed signing." in text
+    assert "Vouch recorded. Signed" not in text
+    # ...and the other identity's vouch was signed by that same run.
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM link_trust_wire_objects WHERE object_type = 'trust_vouch'"
+    ).fetchone()[0] == 2

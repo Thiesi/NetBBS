@@ -984,8 +984,9 @@ async def _pull_one_trust_reporter(
                     result = await lane.run(ingest_trust_objects, parsed)
                     for skipped in result.skipped:
                         _logger.info(
-                            "Link trust pull: %s sent an object outside what this node "
-                            "configured it for; skipped %s", issuer, skipped,
+                            "Link trust pull: skipped an object from %s that this node has no "
+                            "use for (outside its grant, or a revocation of something not "
+                            "held or already revoked): %s", issuer, skipped,
                         )
                 if last_served is not None:
                     cursor = last_served
@@ -1115,7 +1116,15 @@ async def _pull_one_attestation_authority(
     issuer: str,
     addresses: list[str],
 ) -> None:
-    verify_key = node.resolve_peer_signing_key(issuer, "remote attestation")
+    # Outside the per-address handler below, so it must not raise: an authority
+    # whose chain ends in a bare revoke, or no longer verifies, would otherwise
+    # end the whole background sync task rather than its own pull. The trust
+    # pull guards the same lookup for the same reason.
+    try:
+        verify_key = node.resolve_peer_signing_key(issuer, "remote attestation")
+    except (LinkProtocolError, NodeIdentityError, ValueError) as exc:
+        _logger.warning("Link attestation pull: authority %s has no usable signing key: %s", issuer, exc)
+        return
     completed = False
     for base_url in addresses:
         cursor = await lane.run(load_attestation_pull_cursor, issuer, issuer)
