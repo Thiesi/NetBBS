@@ -30,5 +30,5 @@ the sweeper has retired, also after MRC is switched off.
 
 MRC allows one identity per caller in one room, so a second session of the
 same account entering a different MRC room is refused naming the room it
-already holds. Mapped channels, the bridge's colours, hub commands and CTCP
+already holds. Mapped channels, the bridge's colors, hub commands and CTCP
 from v5.7.1 are unchanged.

@@ -472,9 +472,9 @@ def _expected_channel_message_index(db: Database) -> dict[int, tuple[int, str]]:
 
 def _indexed_channel_body(body: str, external_source: str | None) -> str:
     """What the index holds for a channel message: the stored body, or
-    for an MRC row (issue #298) the body with its `|NN` colour codes
+    for an MRC row (issue #298) the body with its `|NN` color codes
     stripped -- the same normalization `record_message(index_body=...)`
-    applies on insert, so an integrity check never reports a coloured
+    applies on insert, so an integrity check never reports a colored
     line as drift and a rebuild never puts the codes back."""
     if external_source == "mrc":
         return strip_pipe_codes(body).strip()

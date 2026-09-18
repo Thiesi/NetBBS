@@ -3,7 +3,7 @@ Issue #304 at the bridge: away state mirrored to the hub (and repeated
 on reconnect) in the documented `STATUS AFK` / `IAMHERE:AWAY|ACTIVE`
 forms (issue #373), the periodic STATS reading, the hub's banner, an
 open room's topic stored from ROOMTOPIC and asked for with NEWTOPIC,
-and the caller's own nick colour in the house-style body -- against
+and the caller's own nick color in the house-style body -- against
 the loopback fake hub, reusing `tests/test_mrc_bridge.py`'s fixtures.
 """
 
@@ -178,7 +178,7 @@ def test_open_room_topics_come_from_the_hub_and_go_to_it(db, lane, lobby, alice,
     asyncio.run(scenario())
 
 
-def test_the_callers_nick_colour_is_read_once_and_worn_on_the_wire(db, lane, lobby, alice):
+def test_the_callers_nick_color_is_read_once_and_worn_on_the_wire(db, lane, lobby, alice):
     async def scenario():
         fake = FakeMrcHub()
         await fake.start()
@@ -188,11 +188,11 @@ def test_the_callers_nick_colour_is_read_once_and_worn_on_the_wire(db, lane, lob
         hub.join(lobby.name, ParticipantId("alice", 1))
         asked: list[str] = []
 
-        def _colour(db_, username):
+        def _color(db_, username):
             asked.append(username)
             return 12 if username == "alice" else 14
 
-        bridge = await _connected_bridge(db, lane, hub, fake, load_nick_color=_colour)
+        bridge = await _connected_bridge(db, lane, hub, fake, load_nick_color=_color)
         try:
             await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
             recorded = record_message(db, lobby, kind="message", author_label="alice", author_fingerprint=None, body="hi")
@@ -206,7 +206,7 @@ def test_the_callers_nick_colour_is_read_once_and_worn_on_the_wire(db, lane, lob
     asyncio.run(scenario())
 
 
-def test_nick_colour_is_reread_after_the_caller_leaves(db, lane, lobby, alice):
+def test_nick_color_is_reread_after_the_caller_leaves(db, lane, lobby, alice):
     """Review of #306: "applies the next time you enter" means the next
     announcement after the account's last MRC room, not a bridge restart."""
     async def scenario():
@@ -215,21 +215,21 @@ def test_nick_colour_is_reread_after_the_caller_leaves(db, lane, lobby, alice):
         _enable(db, fake.port)
         set_mrc_room(db, lobby, "lobby")
         hub = ChatHub()
-        colours = {"alice": 12}
+        colors = {"alice": 12}
 
-        def _colour(db_, username):
-            return colours.get(username, 14)
+        def _color(db_, username):
+            return colors.get(username, 14)
 
-        bridge = await _connected_bridge(db, lane, hub, fake, load_nick_color=_colour)
+        bridge = await _connected_bridge(db, lane, hub, fake, load_nick_color=_color)
         try:
             hub.join(lobby.name, ParticipantId("alice", 1))
             await bridge.local_join(lobby, "alice")
             await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
-            colours["alice"] = 9  # changed on the Profile while inside
+            colors["alice"] = 9  # changed on the Profile while inside
             recorded = record_message(db, lobby, kind="message", author_label="alice", author_fingerprint=None, body="one")
             await bridge.local_message(lobby, recorded)
             first = await fake.wait_for(lambda p: p.body.endswith(" one"))
-            assert first.body.startswith("|08<|12alice")  # still the colour read at entry
+            assert first.body.startswith("|08<|12alice")  # still the color read at entry
             hub.leave(lobby.name, ParticipantId("alice", 1))
             await bridge.local_leave(lobby, "alice")
             await fake.wait_for(lambda p: p.body == "LOGOFF")

@@ -74,7 +74,7 @@ def test_packet_room_and_flags():
 
 def test_sanitize_name_rules():
     assert sanitize_name("My Board Name") == "My_Board_Name"
-    assert sanitize_name("|07Colour|15ful") == "Colourful"
+    assert sanitize_name("|07Color|15ful") == "Colorful"
     assert sanitize_name("tilde~in~name") == "tilde_in_name"
     assert sanitize_name("Grüße") == "Gre"
     assert sanitize_name("x" * 50) == "x" * MAX_NAME
@@ -205,7 +205,7 @@ def test_presence_chatter_matches_the_hub_templates_not_loose_keywords():
 
 def test_parse_line_strips_pipe_codes_from_identity_fields_and_server_bodies():
     packet = parse_line("|04bob~|12Other~lobby~~~lobby~|07hi |UNthere |99x~")
-    # Identity fields lose every pipe code; a body keeps its colour codes
+    # Identity fields lose every pipe code; a body keeps its color codes
     # (issue #298) and loses the MCI variables and out-of-range numbers.
     assert (packet.from_user, packet.from_site, packet.body) == ("bob", "Other", "|07hi there x")
     server = parse_line("SERVER~~~alice~~lobby~USERLIST:|12Carol@third,bob@|04other~")
@@ -286,7 +286,7 @@ def test_ctcp_packets_parse_and_build_both_ways():
     assert not is_ctcp_packet(parse_line("bob~Other~lobby~~~lobby~hi~"))
 
 
-def test_parse_userlist_and_server_commands_ignore_colour_decoration():
+def test_parse_userlist_and_server_commands_ignore_color_decoration():
     assert parse_userlist("|12Carol@third,bob@|04other") == ["Carol@third", "bob@other"]
     assert parse_server_command("|07USERLIST:a,b") == ("USERLIST", "a,b")
 

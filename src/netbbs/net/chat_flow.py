@@ -1242,7 +1242,7 @@ def channel_name_segments(
     a narrow row gives up is the prose, and the thing a caller has to
     act on survives.
     """
-    # `name_color` is not decoration: `pick_item` colours a plain
+    # `name_color` is not decoration: `pick_item` colors a plain
     # `name_of` row with the node's accent, and a segment list is taken
     # verbatim -- so leaving it `None` quietly stripped the accent off
     # every channel name the moment this callback existed (Codex
@@ -1465,7 +1465,7 @@ def _render_channel_message(
         bullet = "• " if unicode_style_enabled(db, viewer) else "* "
         if message.external_source == "mrc":
             # The body is its own reset-terminated span beside the muted
-            # label: SGR reset restores no outer colour, so the two are
+            # label: SGR reset restores no outer color, so the two are
             # composed independently rather than nested (issue #298).
             nick_style = cga_to_xterm(mrc_nick_color) if mrc_nick_color is not None else effective_accent_color_256(db)
             line = (
@@ -3070,10 +3070,10 @@ def _mrc_styled_author(author: str, foreground: int) -> str:
 
 def _mrc_body(db: Database, viewer: User, body: str | None) -> str:
     """An MRC-sourced body for `viewer`'s screen (issue #298): sanitized
-    first, then either its `|NN` colour codes rendered or every code
+    first, then either its `|NN` color codes rendered or every code
     stripped, per the viewer's own preference. Always a self-contained
     span -- `render_pipe_codes` resets after itself -- so it can sit
-    beside a coloured label without either bleeding into the other."""
+    beside a colored label without either bleeding into the other."""
     text = sanitize_text(body or "")
     if mrc_colors_enabled(db, viewer):
         return render_pipe_codes(text)
@@ -4835,9 +4835,9 @@ async def _chat_loop(
                     continue
                 if isinstance(message, MrcNotice):
                     # Issue #298: hub chatter, broadcasts and command replies
-                    # arrive with their colour codes intact and are styled
+                    # arrive with their color codes intact and are styled
                     # here, per viewer, after sanitization -- never as a
-                    # shared pre-coloured string.
+                    # shared pre-colored string.
                     rendered = await lane.run(_render_mrc_notice, user, message)
                     if message.kind == "private":
                         # Issue #305: a private line rings the bell, like every

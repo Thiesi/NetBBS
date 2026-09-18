@@ -12,7 +12,7 @@ replacing the wheel.
 
 Listing boards, file areas, chat channels or Communities used to produce
 one grey string per row. Now it is a table: a header row, aligned
-columns, the levels in their own colour, and — the reported gap — the
+columns, the levels in their own color, and — the reported gap — the
 **gates that were never shown at all**. A file area with a minimum level
 set *and* an age gate *and* a name requirement looked identical to one
 with only the level.
@@ -60,7 +60,7 @@ flow was audited; this was the only one out of step.
 
 The name field had no fixed width, so every row below a long name was
 shifted out of alignment. Names are now padded to a column, the
-truecolour gradient covers the name rather than the padding, and a hidden
+truecolor gradient covers the name rather than the padding, and a hidden
 name reads as `(hidden)`.
 
 ## Age gates have to be ages (#540)

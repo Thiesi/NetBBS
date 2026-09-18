@@ -1,6 +1,6 @@
 """
 Issue #305 at the bridge: private MRC lines for a caller who opted in
-(peeled, coloured, never recorded, bounded per remote sender), the
+(peeled, colored, never recorded, bounded per remote sender), the
 unchanged single notice for one who did not, the nick -> site map
 learned from inbound traffic, and `send_private` -- against the loopback
 fake hub, reusing `tests/test_mrc_bridge.py`'s fixtures.
@@ -54,7 +54,7 @@ def test_opted_in_caller_gets_private_lines_peeled_and_unrecorded(db, lane, lobb
             assert bridge.private_messages_enabled("alice") is True
             assert bridge.private_messages_enabled("nobody") is None
             # Mystic style, ENiGMA style and a bare body all arrive as the
-            # sender's text with its colours, the handle peeled once.
+            # sender's text with its colors, the handle peeled once.
             await fake.send_line("bob~Other~garden~alice~My_Board~~|03<|11bob|03>|16|07 hello |12there~")
             notice = await _next_notice(queue)
             assert (notice.kind, notice.text) == ("private", "bob@Other: hello |12there")

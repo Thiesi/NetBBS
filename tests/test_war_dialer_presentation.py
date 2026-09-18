@@ -1574,13 +1574,40 @@ def test_world_in_maintenance_returns_clear_message_without_player_creation(tmp_
     env.pop("NETBBS_DOOR_INFO", None)
     result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
                             env=env, timeout=PROC_WAIT)
-    assert result.returncode == 1
+    # Status 0: the host reports anything else as "exited unexpectedly", which
+    # contradicted the door's own notice one line above it (issue #646).
+    assert result.returncode == 0
     assert b"closed for SysOp maintenance" in result.stdout
+    assert b"Traceback" not in result.stderr
+    # One unbroken line at the default width, so the host's epilogue follows a
+    # sentence and not the tail of one.
+    notice = wd._strip_ansi(result.stdout.decode("utf-8")).strip().splitlines()
+    assert notice == ["War Dialer is closed for SysOp maintenance. Try again later."]
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("SELECT COUNT(*) FROM players").fetchone()[0] == 0
     finally:
         conn.close()
+
+
+def test_a_caller_who_meets_the_sysops_lock_is_turned_away_not_crashed(tmp_path):
+    """A live backup and the maintenance command hold the world exclusively while they
+    work. A caller arriving then is closed out the same way as by the flag, and
+    the SysOp's own command meeting callers inside still gets the error."""
+    path = tmp_path / "held.db"
+    wd.connect(path).close()
+    env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), PYTHONIOENCODING="utf-8")
+    env.pop("NETBBS_DOOR_INFO", None)
+    with wd.world_session(path, maintenance=True):
+        result = subprocess.run([sys.executable, "-u", str(_WAR_DIALER_PATH)], input=b"", capture_output=True,
+                                env=env, timeout=PROC_WAIT)
+    assert result.returncode == 0, result.stdout
+    assert b"busy with active sessions or maintenance" in result.stdout
+    with wd.world_session(path):
+        with pytest.raises(wd.WorldStateError) as refused:
+            with wd.world_session(path, maintenance=True):
+                pytest.fail("maintenance entered a live session")
+    assert not isinstance(refused.value, wd.WorldClosed)
 
 
 @pytest.mark.parametrize("owner", [None, "invalid"])
@@ -2579,7 +2606,7 @@ def test_ascii_monochrome_output_preserves_controls_names_and_noncolor_results(m
     frame = "".join(wd.gl(name) for name in ('tl', 'h', 'v', 'tr'))
     wd.out('\x1b[2J' + wd.sty(palette.phosphor, frame) + ' Caller Jos\u00e9 A\u2502B: +10 Rank')
     assert capsys.readouterr().out == '\x1b[2J+-|+ Caller Jos\u00e9 A\u2502B: +10 Rank'
-    assert palette.phosphor == ''  # monochrome removes colour at the source
+    assert palette.phosphor == ''  # monochrome removes color at the source
 
 
 def test_fast_mode_skips_only_optional_flavor_and_art(tmp_path, monkeypatch):
@@ -2916,7 +2943,7 @@ def test_fast_goodbye_retains_rank_without_a_decorative_frame(tmp_path, monkeypa
 # ---------------------------------------------------------------------------
 # The presentation contract (issue #494). These are the tests that can fail
 # because a screen is grey, because two things that mean different things are
-# the same colour, or because a table's columns wander from row to row. The
+# the same color, or because a table's columns wander from row to row. The
 # suite could only ever assert that a screen *fits* before, which is how an
 # entire visual design was lost with every slice passing review.
 # ---------------------------------------------------------------------------
@@ -2931,11 +2958,11 @@ def _unicode_glyphs() -> set[str]:
     return glyphs
 
 
-def _colour_before(raw: str, marker: str) -> str:
-    """The last colour introduced before `marker` first appears in `raw`."""
+def _color_before(raw: str, marker: str) -> str:
+    """The last color introduced before `marker` first appears in `raw`."""
     at = raw.index(marker)
-    colours = [escape for escape in _ANSI_RE.findall(raw[:at]) if "38;" in escape]
-    return colours[-1] if colours else ""
+    colors = [escape for escape in _ANSI_RE.findall(raw[:at]) if "38;" in escape]
+    return colors[-1] if colors else ""
 
 
 def _body_rows(raw_screen: str) -> list[str]:
@@ -3032,12 +3059,12 @@ def _walk_screens(conn, palette, width, height, monkeypatch, *, keys=()):
 
 
 @pytest.mark.parametrize("width,height", [(40, 12), (80, 24)])
-def test_every_screen_colours_the_rows_a_caller_reads(tmp_path, monkeypatch, width, height):
-    """Acceptance criterion 1: colour reaches the body.
+def test_every_screen_colors_the_rows_a_caller_reads(tmp_path, monkeypatch, width, height):
+    """Acceptance criterion 1: color reaches the body.
 
     This is the test that would have caught the regression. Every screen's rows
-    used to be wrapped through a plain-text flattener and then coloured one
-    colour from outside, so `p.white` on the row was the only styling that
+    used to be wrapped through a plain-text flattener and then colored one
+    color from outside, so `p.white` on the row was the only styling that
     survived and the whole game read as one grey block inside a green frame.
     """
     conn, _ = _painted_world(tmp_path)
@@ -3053,28 +3080,28 @@ def test_every_screen_colours_the_rows_a_caller_reads(tmp_path, monkeypatch, wid
     conn.close()
 
 
-def test_hotkeys_labels_values_and_the_frame_are_four_different_colours():
+def test_hotkeys_labels_values_and_the_frame_are_four_different_colors():
     """Acceptance criterion 2: roles are distinct."""
     palette = wd.Palette(True)
     roles = {name: palette.role(name) for name in wd.Palette.ROLES}
-    assert len(set(roles.values())) == len(roles), "two roles share a colour"
+    assert len(set(roles.values())) == len(roles), "two roles share a color"
     # The four roles a caller has to tell apart on every screen.
     assert len({palette.amber, palette.grey, palette.ink, palette.phosphor}) == 4
     bar = wd.key_bar(palette, (("T", "Trade", "Trade"),), 40, 1)[0]
     assert bar.startswith(palette.amber + wd.BOLD + "[T]")
-    assert _colour_before(bar, "Trade") == palette.mint
+    assert _color_before(bar, "Trade") == palette.mint
     chip = wd.label_value(palette, "CASH", "$4,820", style=palette.amber)
-    assert _colour_before(chip, "CASH") == palette.grey
-    assert _colour_before(chip, "$4,820") == palette.amber
-    # 256-colour terminals get a deliberate fallback index per role, not a guess.
+    assert _color_before(chip, "CASH") == palette.grey
+    assert _color_before(chip, "$4,820") == palette.amber
+    # 256-color terminals get a deliberate fallback index per role, not a guess.
     fallback = wd.Palette(False)
     indexes = {fallback.role(name) for name in wd.Palette.ROLES}
     assert len(indexes) == len(wd.Palette.ROLES)
     assert all("38;5;" in escape for escape in indexes)
 
 
-def test_an_exchange_reads_the_same_colour_on_the_map_the_table_and_the_feed(tmp_path, monkeypatch):
-    """Acceptance criterion 3: owner colour is consistent."""
+def test_an_exchange_reads_the_same_color_on_the_map_the_table_and_the_feed(tmp_path, monkeypatch):
+    """Acceptance criterion 3: owner color is consistent."""
     conn, now = _painted_world(tmp_path, "owner.db")
     palette = wd.Palette(True)
     player = wd.refresh_player(conn, 1, now)
@@ -3083,20 +3110,20 @@ def test_an_exchange_reads_the_same_colour_on_the_map_the_table_and_the_feed(tmp
     assert wd.owner_node(palette, mine, 1)[1] == palette.phosphor
     assert wd.owner_node(palette, rival, 1)[1] == palette.magenta
     ring = wd.scene_map(palette, exchanges, 1, 72)[0]
-    assert _colour_before(ring, f"{wd.gl('mine')}") == palette.phosphor
-    assert _colour_before(ring, f"{wd.gl('rival')}") == palette.magenta
+    assert _color_before(ring, f"{wd.gl('mine')}") == palette.phosphor
+    assert _color_before(ring, f"{wd.gl('rival')}") == palette.magenta
     # [0] is the header row; the ten exchanges follow it in world order.
     rows = wd.territory_cards(palette, exchanges, 1, player, 72)[1][1][1:]
-    assert _colour_before(rows[0], wd.gl("mine")) == palette.phosphor
-    assert _colour_before(rows[2], wd.gl("rival")) == palette.magenta
+    assert _color_before(rows[0], wd.gl("mine")) == palette.phosphor
+    assert _color_before(rows[2], wd.gl("rival")) == palette.magenta
     # A rival's own move against you is the same magenta in the feed.
     events = wd.history_events(conn, 1)
     feed = wd.feed(palette, events, 72)
     raided = next(row for row in feed if "Kilobaud" in row)
-    assert _colour_before(raided, wd.gl("bullet")) == palette.magenta
-    assert _colour_before(raided, "Kilobaud") == palette.magenta
+    assert _color_before(raided, wd.gl("bullet")) == palette.magenta
+    assert _color_before(raided, "Kilobaud") == palette.magenta
     mine_row = next(row for row in feed if "Rooted" in row)
-    assert _colour_before(mine_row, wd.gl("bullet")) == palette.phosphor
+    assert _color_before(mine_row, wd.gl("bullet")) == palette.phosphor
     conn.close()
 
 
@@ -3149,7 +3176,7 @@ def test_every_display_preset_renders_every_screen_deliberately(tmp_path, monkey
         assert not leaked, f"no ASCII substitute reached the screen for {leaked}"
     if preset == "monochrome":
         # Monochrome is removed at the source: a role returns no SGR at all, so
-        # no screen can depend on a colour it is not going to get.
+        # no screen can depend on a color it is not going to get.
         assert all(palette.role(name) == "" for name in wd.Palette.ROLES)
         assert "38;" not in text
     if preset == "fast":
@@ -3271,7 +3298,7 @@ def test_the_log_tones_your_own_receipts_the_way_the_dashboard_does(tmp_path, mo
     events = wd.history_events(conn, 1)
     feed = wd.feed(palette, events, 72)
     own_feed = next(row for row in feed if "Reinforced" in row)
-    assert _colour_before(own_feed, wd.gl("bullet")) == palette.phosphor
+    assert _color_before(own_feed, wd.gl("bullet")) == palette.phosphor
     written: list[str] = []
     monkeypatch.setattr(wd, "out", written.append)
     monkeypatch.setattr(wd, "_OUTPUT_WIDTH", 80)
@@ -3433,7 +3460,7 @@ def test_a_preview_promises_a_bust_roll_only_where_one_happens(tmp_path, action,
         assert ("⟦BUST " in stakes) is rolls, stakes
 
 
-def test_a_bracketed_word_is_never_coloured_like_a_hotkey():
+def test_a_bracketed_word_is_never_colored_like_a_hotkey():
     """Every hotkey this door has is one character.
 
     `[ON]`, `[HELD]` or `[SPECIALTY]` in amber and bold beside `[1]` reads as a
@@ -3441,10 +3468,10 @@ def test_a_bracketed_word_is_never_coloured_like_a_hotkey():
     """
     palette = wd.Palette(True)
     row = wd.prose_rows(palette, "Press [T] to trade; the slot shows [HELD] when taken.", 72)[0]
-    assert _colour_before(row, "[T]") == palette.amber
+    assert _color_before(row, "[T]") == palette.amber
     assert wd.BOLD in row.split("[T]")[0]
-    assert _colour_before(row, "[HELD]") == palette.cyan
-    assert _colour_before(row, "[HELD]") != palette.amber
+    assert _color_before(row, "[HELD]") == palette.cyan
+    assert _color_before(row, "[HELD]") != palette.amber
 
 
 def test_no_screen_prints_a_hotkey_its_own_dispatch_ignores(tmp_path):
@@ -3612,7 +3639,7 @@ def test_lay_low_previews_the_heat_it_will_leave(tmp_path):
     assert "78 -15 = 63" in text, text
     # A reduction is not an alarm.
     heat_row = next(row for row in stakes if "HEAT" in _ANSI_RE.sub("", row))
-    assert _colour_before(heat_row, "-15") == palette.phosphor
+    assert _color_before(heat_row, "-15") == palette.phosphor
     # Less Heat than the caller has, on the gauge itself.
     assert heat_row.count(wd.gl("meter_on")) < wd.meter(palette, 78, 100, 18).count(wd.gl("meter_on"))
     conn.close()
@@ -3953,7 +3980,7 @@ def test_your_own_receipts_survive_a_change_of_handle(tmp_path):
         rows = wd.feed(palette, events, 72, limit=10)
         mine = next(row for row in rows if "Reinforced" in row)
         theirs = next(row for row in rows if "raided you" in row)
-        return (_colour_before(mine, wd.gl("bullet")), _colour_before(theirs, wd.gl("bullet")))
+        return (_color_before(mine, wd.gl("bullet")), _color_before(theirs, wd.gl("bullet")))
 
     assert tones() == (palette.phosphor, palette.magenta)
     # Rename the caller, and then take the rival's old handle for good measure.
@@ -4267,7 +4294,7 @@ def test_a_season_boundary_is_reached_by_moving_the_world_not_the_keys():
 
 
 def test_no_world_is_migrated_for_a_tone(tmp_path):
-    """A receipt is a caller's history; a schema bump is not a colour correction.
+    """A receipt is a caller's history; a schema bump is not a color correction.
 
     Recording no actor for a caller's own moves fixes the tone from here. Repairing
     older rows would mean guessing what a stored actor meant from the handle its
@@ -4387,8 +4414,8 @@ def test_the_scanline_is_not_the_frames_own_glyph():
     assert set(drawn) <= set("▓▒░")
 
 
-def test_the_scanline_fades_in_density_not_only_colour():
-    """Monochrome returns no SGR at all, so a colour-only fade is flat there."""
+def test_the_scanline_fades_in_density_not_only_color():
+    """Monochrome returns no SGR at all, so a color-only fade is flat there."""
     p = wd.Palette(truecolor=True)
     p.monochrome = True
     try:
@@ -4436,9 +4463,9 @@ def test_the_label_role_is_not_another_green():
 
 
 def test_every_palette_role_stays_distinct_in_both_depths():
-    truecolour = [rgb for rgb, _ in wd.Palette.ROLES.values()]
+    truecolor = [rgb for rgb, _ in wd.Palette.ROLES.values()]
     indexed = [index for _, index in wd.Palette.ROLES.values()]
-    assert len(set(truecolour)) == len(truecolour)
+    assert len(set(truecolor)) == len(truecolor)
     assert len(set(indexed)) == len(indexed)
 
 

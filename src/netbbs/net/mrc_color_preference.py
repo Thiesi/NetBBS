@@ -1,12 +1,12 @@
 """
-Per-user "render the colour codes MRC users put in their lines"
+Per-user "render the color codes MRC users put in their lines"
 preference (issue #298). A thin typed wrapper over
 `netbbs.user_preferences`' generic per-user key-value store, the same
 shape `netbbs.net.unicode_style_preference` established.
 
 Defaults to on, this codebase's "rich default, easy opt-out" posture:
-colour is part of how the MRC rooms talk, and an inbound line is
-sanitized before any code is turned into a colour (see
+color is part of how the MRC rooms talk, and an inbound line is
+sanitized before any code is turned into a color (see
 `netbbs.rendering.pipe_codes`), so the downside of the default is taste,
 not safety. Off shows the same lines with every code stripped.
 """

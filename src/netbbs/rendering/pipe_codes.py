@@ -1,14 +1,14 @@
 """
-Mystic-style pipe colour codes (issue #298): the two-digit ``|NN``
+Mystic-style pipe color codes (issue #298): the two-digit ``|NN``
 tokens every MRC client embeds in chat bodies. ``|00``-``|15`` are the
-sixteen CGA foreground colours and ``|16``-``|23`` the eight CGA
-backgrounds. CGA numbers its colours in the IBM order (blue is 1, red
+sixteen CGA foreground colors and ``|16``-``|23`` the eight CGA
+backgrounds. CGA numbers its colors in the IBM order (blue is 1, red
 is 4, brown/yellow 6/14) while the xterm palette uses the ANSI order
 (red is 1, blue is 4, yellow 3/11), so a code is *permuted* through
 `CGA_TO_XTERM` before it becomes ``fg()``/``bg()``; passing the number
 through unchanged would paint ``|14`` yellow as bright cyan. Anything
 else after a pipe (Mystic's two-letter MCI template variables such as
-``|UN``, or a number past 23) is not colour and is dropped.
+``|UN``, or a number past 23) is not color and is dropped.
 
 Ordering matters for "sanitize before styling": a pipe code is plain
 printable ASCII, never an escape, so the caller sanitizes the untrusted
@@ -33,12 +33,12 @@ _PIPE_TOKEN_RE = re.compile(r"\|[0-9A-Za-z]{2}")
 
 FOREGROUND_CODES = range(0, 16)
 BACKGROUND_CODES = range(16, 24)
-# CGA order -> xterm/ANSI palette index, for the eight base colours:
+# CGA order -> xterm/ANSI palette index, for the eight base colors:
 # black, blue, green, cyan, red, magenta, brown, light grey. The bright
 # half (CGA 8-15) is the same permutation plus eight.
 CGA_TO_XTERM = (0, 4, 2, 6, 1, 5, 3, 7)
-# The sixteen CGA colours by name, in CGA order (issue #304: a caller
-# picks their MRC nick colour from these on the Profile screen).
+# The sixteen CGA colors by name, in CGA order (issue #304: a caller
+# picks their MRC nick color from these on the Profile screen).
 CGA_COLOR_NAMES = (
     "black", "blue", "green", "cyan", "red", "magenta", "brown", "light grey",
     "dark grey", "light blue", "light green", "light cyan", "light red", "light magenta", "yellow", "white",
@@ -51,29 +51,29 @@ _DEFAULT_BACKGROUND = f"{CSI}49m"
 
 
 def cga_to_xterm(code: int) -> int:
-    """The xterm palette index for CGA colour `code` (0-15)."""
+    """The xterm palette index for CGA color `code` (0-15)."""
     return CGA_TO_XTERM[code % 8] + (8 if code >= 8 else 0)
 
 
 def strip_pipe_codes(text: str) -> str:
-    """Remove every ``|XX`` token, colour or not -- the plain-text
+    """Remove every ``|XX`` token, color or not -- the plain-text
     reading used for search indexing, width-insensitive comparisons,
-    and callers who have colours switched off."""
+    and callers who have colors switched off."""
     return _PIPE_TOKEN_RE.sub("", text)
 
 
 def strip_non_color_pipe_codes(text: str) -> str:
-    """Remove the non-colour tokens (``|UN`` and friends, ``|99``) and
+    """Remove the non-color tokens (``|UN`` and friends, ``|99``) and
     keep ``|00``-``|23`` -- what an MRC body looks like once it has
     crossed the trust boundary but before anyone renders it."""
 
-    def _keep_colour(match: re.Match[str]) -> str:
+    def _keep_color(match: re.Match[str]) -> str:
         token = match.group(0)
         if token[1:].isdigit() and int(token[1:]) in range(0, 24):
             return token
         return ""
 
-    return _PIPE_TOKEN_RE.sub(_keep_colour, text)
+    return _PIPE_TOKEN_RE.sub(_keep_color, text)
 
 
 def render_pipe_codes(text: str) -> str:
@@ -81,8 +81,8 @@ def render_pipe_codes(text: str) -> str:
     sequences, dropping every other pipe token. A lone ``|``, a ``|``
     followed by one digit, and a ``|`` followed by a non-alphanumeric
     character are ordinary text and pass through untouched. Ends with a
-    reset whenever at least one colour was emitted, so a body can never
-    bleed its colours into whatever is printed next."""
+    reset whenever at least one color was emitted, so a body can never
+    bleed its colors into whatever is printed next."""
     emitted = False
 
     def _replace(match: re.Match[str]) -> str:

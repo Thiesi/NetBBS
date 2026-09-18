@@ -296,14 +296,14 @@ def test_a_verified_uploader_does_not_stripe_the_highlighted_bar(tmp_path, monke
     rows = [line for line in session.output.split(chr(10)) if ">[ 1]" in line]
     assert rows, "the highlighted row was never drawn"
     bar = rows[-1]
-    # One inverted run, opened once and closed once: no colour of any
+    # One inverted run, opened once and closed once: no color of any
     # kind survives inside it, so nothing can end it early.
     assert bar.count("\x1b[7m") == 1, bar
     assert "\x1b[38;5;" not in bar, bar
     assert bar.count("\x1b[0m") == 1, bar
     # The verified name is still legible under the cursor, markers and
     # all -- `set_display_name` refuses `=` at write time, so the unit is
-    # still unforgeable without its colour.
+    # still unforgeable without its color.
     assert "(=Alice Wonderland=)" in bar, bar
 
 

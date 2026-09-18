@@ -44,10 +44,10 @@ scoped to the room whose roster is being updated, so the same nickname in
 two rooms no longer confuses one for the other, and leaving a room stops
 counting a cached bare local nickname as a remote user.
 
-**Colours survive the wire.** A sender's foreground colour used to
+**Colors survive the wire.** A sender's foreground color used to
 disappear when the wire prefix was stripped. It is now preserved in live
 chat and in scrollback, with quieter network provenance, and it honours
-the existing colour preference. This is the one thing in the release that
+the existing color preference. This is the one thing in the release that
 migrates: `channel_messages` gains an `mrc_nick_color` column, additive,
 constrained so that only rows from MRC can carry one. Stored message text
 and identities are untouched.
@@ -66,7 +66,7 @@ excludes unmapped rooms when opening is disabled.
 terminal. It is now paginated inside the live chat viewport, reserving
 the pinned chat rows rather than drawing over them, with syntax and
 description in separate columns and command names, parameters,
-descriptions, headings and rules each coloured distinctly. Long syntax
+descriptions, headings and rules each colored distinctly. Long syntax
 wraps at a separator that means something.
 
 Permission-aware help is unchanged, and worth stating precisely: bare

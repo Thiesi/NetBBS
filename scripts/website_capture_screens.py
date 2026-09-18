@@ -512,7 +512,7 @@ async def capture_console(tmp: Path) -> str:
 
 
 async def capture_colors(tmp: Path) -> str:
-    """The one screen whose subject is colour, which makes it the one
+    """The one screen whose subject is color, which makes it the one
     screen where a stale capture is most obviously stale."""
     from netbbs.net.admin_flow import _theme_colors_menu
     from netbbs.net.node_theme import set_accent_color_override
