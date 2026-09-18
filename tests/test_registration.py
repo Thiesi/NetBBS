@@ -492,3 +492,25 @@ def test_disabled_new_account_banners_leave_registration_byte_for_byte_unchanged
     asyncio.run(_run_login(session, db))
 
     assert "Welcome, alice" in session.output
+
+
+def test_registration_refuses_a_retired_username_in_the_words_it_uses_for_a_taken_one(db):
+    """Issue #594. The name belonged to a deleted account and is held because
+    this node has run Link; a remote caller is told only that it is not
+    available, so registration is no oracle for who used to be here."""
+    from netbbs.auth.users import SYSOP_LEVEL, delete_user, is_username_retired
+    from netbbs.link.onboarding import mark_link_has_run
+
+    mark_link_has_run(db)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    delete_user(db, create_user(db, "alice", password="hunter2"), deleted_by=sysop)
+    session = FakeSession(
+        ["new", "alice", "hunter2pw", "hunter2pw", "", "", "", ""],
+    )
+
+    asyncio.run(_run_login(session, db, _throttle_config(max_attempts_per_connection=2)))
+
+    assert "already in use" in session.output
+    assert "deleted" not in session.output
+    assert "Retired names" not in session.output
+    assert is_username_retired(db, "alice")

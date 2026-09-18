@@ -22,6 +22,7 @@ from netbbs.activity import (
     unread_replies_to,
 )
 from netbbs.auth.users import create_user
+from tests.legacy_schema import insert_user_on_old_schema
 from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board, delete_board
 from netbbs.boards.posts import create_post, edit_post
@@ -326,7 +327,7 @@ def test_migration_backfills_arrival_id_for_a_pre_existing_board_cursor(tmp_path
     )
     monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:arrival_id_migration_index])
     db = Database(db_path)
-    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    alice = insert_user_on_old_schema(db, "alice", user_level=10)
     board = create_board(db, "general", creator=alice)
     # Write the post via a raw INSERT rather than create_post itself --
     # issue #88's board-closure check (create_post's own docstring)
@@ -403,7 +404,7 @@ def test_migration_backfills_arrival_id_for_a_pre_existing_file_area_cursor(tmp_
     )
     monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:arrival_id_migration_index])
     db = Database(db_path)
-    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    alice = insert_user_on_old_schema(db, "alice", user_level=10)
     area = create_file_area(db, "downloads", creator=alice)
     entry = upload_file(db, area, alice, "readme.txt", b"data")
     db.connection.execute(
@@ -445,7 +446,7 @@ def test_migration_backfills_arrival_id_for_a_pre_existing_channel_cursor(tmp_pa
     )
     monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:arrival_id_migration_index])
     db = Database(db_path)
-    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    alice = insert_user_on_old_schema(db, "alice", user_level=10)
     channel = create_channel(db, "lobby", creator=alice)
     message = record_message(db, channel, kind="message", author_label="alice", body="hi")
     db.connection.execute(

@@ -1,0 +1,408 @@
+"""A deleted account's username stays retired on a node that has run Link (issue #594).
+
+On the Link an account *is* its username. `local_user_id` on the wire is the
+username, and `users.username` is unique only among live rows, so before this
+a freed name handed the next registrant the previous holder's Link mail
+address, the authorship of their carried posts, the trust state peers had
+recorded, and any live attestation. These tests start from the two acts a
+SysOp and a caller actually perform -- deleting an account, registering a
+name -- and ask what the second one is allowed to do after the first.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from netbbs.auth.users import (
+    SYSOP_LEVEL,
+    AuthError,
+    UserManagementError,
+    UsernameRetiredError,
+    create_user,
+    delete_user,
+    get_user_by_username,
+    is_username_retired,
+    list_retired_usernames,
+    list_users,
+    release_retired_username,
+)
+from netbbs.link.onboarding import (
+    Participation,
+    link_has_ever_run,
+    mark_link_has_run,
+    set_configured_link_enabled,
+    set_participation,
+)
+from netbbs.moderation.log import list_recent_actions
+from netbbs.storage.database import Database
+
+
+@pytest.fixture
+def db(tmp_path):
+    database = Database(tmp_path / "node.db")
+    yield database
+    database.close()
+
+
+@pytest.fixture
+def sysop(db):
+    return create_user(db, "sysop", password="password", user_level=SYSOP_LEVEL)
+
+
+def _delete(db, sysop, username="alice"):
+    delete_user(db, create_user(db, username, password="password"), deleted_by=sysop)
+
+
+# -- a node that has never run Link loses nothing -----------------------------
+
+
+def test_a_standalone_node_frees_the_name_as_it_always_has(db, sysop):
+    assert not link_has_ever_run(db)
+    _delete(db, sysop)
+
+    assert list_retired_usernames(db) == []
+    assert create_user(db, "alice", password="password").username == "alice"
+
+
+# -- a node that has holds the name -------------------------------------------
+
+
+def test_a_link_node_holds_the_name_of_a_deleted_account(db, sysop):
+    mark_link_has_run(db)
+    _delete(db, sysop)
+
+    assert [entry.username for entry in list_retired_usernames(db)] == ["alice"]
+    with pytest.raises(UsernameRetiredError):
+        create_user(db, "alice", password="password")
+    assert [user.username for user in list_users(db)] == ["sysop"]
+
+
+def test_the_hold_is_case_insensitive_like_the_uniqueness_it_stands_in_for(db, sysop):
+    mark_link_has_run(db)
+    _delete(db, sysop, "Alice")
+
+    for spelling in ("alice", "ALICE", "Alice"):
+        assert is_username_retired(db, spelling)
+        with pytest.raises(UsernameRetiredError):
+            create_user(db, spelling, password="password")
+
+
+def test_a_remote_caller_cannot_tell_a_retired_name_from_a_taken_one(db, sysop):
+    """Both registration paths print the exception to whoever is connected, so
+    its text must not make registration an oracle for past accounts."""
+    mark_link_has_run(db)
+    create_user(db, "bob", password="password")
+    _delete(db, sysop)
+
+    with pytest.raises(AuthError) as taken:
+        create_user(db, "bob", password="password")
+    with pytest.raises(UsernameRetiredError) as retired:
+        create_user(db, "alice", password="password")
+
+    assert str(retired.value) == str(taken.value).replace("'bob'", "'alice'")
+    assert "deleted" not in str(retired.value)
+    # The SysOp's version says why, and where the way out is.
+    assert "deleted account" in retired.value.sysop_detail
+    assert "Retired names" in retired.value.sysop_detail
+
+
+def test_deleting_the_same_name_twice_is_not_an_error(db, sysop):
+    mark_link_has_run(db)
+    _delete(db, sysop)
+    release_retired_username(db, "alice", released_by=sysop)
+    _delete(db, sysop)
+
+    assert [entry.username for entry in list_retired_usernames(db)] == ["alice"]
+
+
+def test_a_refused_deletion_retires_nothing(db, sysop):
+    """One transaction: there is no moment at which the account is gone and
+    the name is not held, and none at which the name is held for an account
+    that still exists."""
+    mark_link_has_run(db)
+
+    with pytest.raises(UserManagementError):
+        delete_user(db, sysop, deleted_by=sysop)  # the last active SysOp
+
+    assert list_retired_usernames(db) == []
+    assert get_user_by_username(db, "sysop") is not None
+
+
+def test_a_declined_registration_is_not_retired(db, sysop):
+    """Routine housekeeping on an approval-required node. A pending account
+    has provably never had a session, and retiring these would let strangers
+    consume names permanently just by asking for them."""
+    mark_link_has_run(db)
+    pending = create_user(db, "alice", password="password", pending_approval=True)
+
+    delete_user(db, pending, deleted_by=sysop)
+
+    assert list_retired_usernames(db) == []
+    assert create_user(db, "alice", password="password").username == "alice"
+
+
+def test_an_account_with_no_login_on_record_is_still_retired(db, sysop):
+    """Review of #620. Open registration drops a new caller straight into
+    their first session without stamping `last_login_at`, so the account that
+    registered, posted on a linked board and never came back -- the commonest
+    account a SysOp deletes -- has never "logged in" by that column. It must
+    not be mistaken for an account nobody used."""
+    mark_link_has_run(db)
+    drive_by = create_user(db, "alice", password="password")
+    assert drive_by.last_login_at is None
+
+    delete_user(db, drive_by, deleted_by=sysop)
+
+    assert is_username_retired(db, "alice")
+
+
+def test_an_approved_registration_is_retired_like_any_other(db, sysop):
+    from netbbs.auth.users import approve_pending_user
+
+    mark_link_has_run(db)
+    pending = create_user(db, "alice", password="password", pending_approval=True)
+    approved = approve_pending_user(db, pending, approved_by=sysop)
+
+    delete_user(db, approved, deleted_by=sysop)
+
+    assert is_username_retired(db, "alice")
+
+
+def test_a_pending_registration_that_was_sent_link_mail_is_retired(db, sysop):
+    """Claude review of #620. Link mail reaches an account by name without the
+    account doing anything. Freed, the name would hand the next registrant
+    mail a remote sender addressed to the previous holder, which that sender
+    was told had been accepted."""
+    mark_link_has_run(db)
+    pending = create_user(db, "alice", password="password", pending_approval=True)
+    assert pending.last_login_at is None
+    db.connection.execute(
+        """INSERT INTO mail_messages
+           (sender_user_id, sender_label, recipient_user_id, subject, body, created_at,
+            link_source_event_id)
+           VALUES (NULL, 'bob@remote-node', ?, 'hello', 'are you there?',
+                   '2026-09-18T00:00:00.000000Z', 'event-content-id')""",
+        (pending.id,),
+    )
+    db.connection.commit()
+
+    delete_user(db, pending, deleted_by=sysop)
+
+    assert is_username_retired(db, "alice")
+
+
+def test_local_mail_alone_does_not_retire_a_pending_registration(db, sysop):
+    """Mail from a caller on this node says nothing to any peer."""
+    mark_link_has_run(db)
+    unused = create_user(db, "alice", password="password", pending_approval=True)
+    db.connection.execute(
+        """INSERT INTO mail_messages
+           (sender_user_id, sender_label, recipient_user_id, subject, body, created_at)
+           VALUES (?, 'sysop', ?, 'welcome', 'hello', '2026-09-18T00:00:00.000000Z')""",
+        (sysop.id, unused.id),
+    )
+    db.connection.commit()
+
+    delete_user(db, unused, deleted_by=sysop)
+
+    assert list_retired_usernames(db) == []
+
+
+def test_the_hold_is_decided_on_the_fresh_row_not_the_callers_stale_copy(db, sysop):
+    """The caller's `User` was read while the registration was pending; it has
+    been approved since. The delete re-reads inside its transaction and must
+    ask the predicate of that row."""
+    from netbbs.auth.users import approve_pending_user
+
+    mark_link_has_run(db)
+    stale = create_user(db, "alice", password="password", pending_approval=True)
+    approve_pending_user(db, stale, approved_by=sysop)
+    assert stale.pending_approval is True
+
+    delete_user(db, stale, deleted_by=sysop)
+
+    assert is_username_retired(db, "alice")
+
+
+# -- "ever", not "now" ---------------------------------------------------------
+
+
+def test_the_name_is_held_although_link_is_switched_off_at_the_moment_of_deletion(db, sysop):
+    """Codex review of the decision: keyed on the setting at deletion, an
+    account deleted in a maintenance window with Link off could be
+    re-registered and carried back onto the network under an identity its
+    peers already know."""
+    mark_link_has_run(db)
+    set_configured_link_enabled(db, False)
+
+    _delete(db, sysop)
+
+    with pytest.raises(UsernameRetiredError):
+        create_user(db, "alice", password="password")
+
+
+def test_a_name_stays_held_after_link_is_switched_off(db, sysop):
+    mark_link_has_run(db)
+    _delete(db, sysop)
+    set_configured_link_enabled(db, False)
+
+    with pytest.raises(UsernameRetiredError):
+        create_user(db, "alice", password="password")
+
+
+def test_a_node_whose_last_startup_resolved_link_on_counts_without_the_marker(db, sysop):
+    """`netbbs.admin` can delete an account before the daemon has started
+    again and set the marker."""
+    set_configured_link_enabled(db, True)
+    assert link_has_ever_run(db)
+
+    set_configured_link_enabled(db, None)
+    assert not link_has_ever_run(db)
+    set_participation(db, Participation.ACCEPTED)
+    assert link_has_ever_run(db)
+
+
+_LINK_ARTIFACTS = {
+    "a stored peer": """INSERT INTO link_peers
+        (fingerprint, root_public_key, transitions_json, descriptor_json, updated_at)
+        VALUES ('peer-fingerprint', 'AA==', '[]', '{}', '2026-01-01T00:00:00.000000Z')""",
+    # Codex review of #620: a node can originate a linked board and republish
+    # it on a later sync without ever having stored a peer.
+    "a linked board and no peer": "BOARD",
+    "a linked channel": "CHANNEL",
+    "a linked file area": "FILE_AREA",
+    "a retained event": """INSERT INTO link_events
+        (content_id, sender_fingerprint, object_type, envelope_json, received_at)
+        VALUES ('event-id', 'peer-fingerprint', 'board_post', '{}', '2026-01-01T00:00:00.000000Z')""",
+    "link mail received": "MAIL_IN",
+    "link mail sent": "MAIL_OUT",
+    "a recorded decision to run link": """INSERT INTO node_config (key, value)
+        VALUES ('link_onboarding_participation', 'accepted')""",
+    "an explicit setting at the last startup": """INSERT INTO node_config (key, value)
+        VALUES ('link_configured_enabled', 'true')""",
+}
+
+
+def _upgrade_from_before_594(tmp_path, monkeypatch, artifact_sql: str | None) -> Database:
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if m.description.startswith("Issue #594:"))
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    path = tmp_path / "pre-594.db"
+    old = Database(path)
+    if artifact_sql == "BOARD":
+        from netbbs.boards.boards import create_board
+        from tests.legacy_schema import insert_user_on_old_schema
+
+        board = create_board(old, "linked", creator=insert_user_on_old_schema(old, "founder", user_level=255))
+        old.connection.execute("UPDATE boards SET link_genesis_json = '{}' WHERE id = ?", (board.id,))
+    elif artifact_sql == "CHANNEL":
+        from netbbs.chat.channels import create_channel
+        from tests.legacy_schema import insert_user_on_old_schema
+
+        channel = create_channel(old, "linked", creator=insert_user_on_old_schema(old, "founder", user_level=255))
+        old.connection.execute("UPDATE channels SET link_genesis_json = '{}' WHERE id = ?", (channel.id,))
+    elif artifact_sql == "FILE_AREA":
+        from netbbs.files.areas import create_file_area
+        from tests.legacy_schema import insert_user_on_old_schema
+
+        area = create_file_area(old, "linked", creator=insert_user_on_old_schema(old, "founder", user_level=255))
+        old.connection.execute("UPDATE file_areas SET link_genesis_json = '{}' WHERE id = ?", (area.id,))
+    elif artifact_sql in ("MAIL_IN", "MAIL_OUT"):
+        from tests.legacy_schema import insert_user_on_old_schema
+
+        founder = insert_user_on_old_schema(old, "founder", user_level=255)
+        column = "link_source_event_id" if artifact_sql == "MAIL_IN" else "link_event_json"
+        old.connection.execute(
+            f"""INSERT INTO mail_messages
+                (sender_user_id, sender_label, recipient_user_id, subject, body, created_at, {column})
+                VALUES (?, 'founder', ?, 's', 'b', '2026-01-01T00:00:00.000000Z', 'x')""",
+            (founder.id, founder.id),
+        )
+    elif artifact_sql is not None:
+        old.connection.execute(artifact_sql)
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+    return Database(path)
+
+
+@pytest.mark.parametrize("artifact", sorted(_LINK_ARTIFACTS))
+def test_the_upgrade_remembers_a_node_that_ran_link_before_the_marker_existed(
+    tmp_path, monkeypatch, artifact
+):
+    upgraded = _upgrade_from_before_594(tmp_path, monkeypatch, _LINK_ARTIFACTS[artifact])
+    try:
+        # Link is off by every current measure, so nothing but the marker the
+        # upgrade seeded can remember that this node once ran it.
+        set_configured_link_enabled(upgraded, False)
+        set_participation(upgraded, Participation.DECLINED)
+        assert link_has_ever_run(upgraded), artifact
+
+        sysop = create_user(upgraded, "sysop", password="password", user_level=SYSOP_LEVEL)
+        _delete(upgraded, sysop)
+        assert is_username_retired(upgraded, "alice")
+    finally:
+        upgraded.close()
+
+
+def test_the_upgrade_marks_nothing_on_a_node_with_no_trace_of_link(tmp_path, monkeypatch):
+    upgraded = _upgrade_from_before_594(tmp_path, monkeypatch, None)
+    try:
+        assert not link_has_ever_run(upgraded)
+    finally:
+        upgraded.close()
+
+
+def test_marking_twice_is_idempotent(db):
+    mark_link_has_run(db)
+    mark_link_has_run(db)
+    assert link_has_ever_run(db)
+
+
+# -- the SysOp's way out -------------------------------------------------------
+
+
+def test_a_sysop_can_release_a_name_and_the_release_is_audited(db, sysop):
+    mark_link_has_run(db)
+    _delete(db, sysop)
+
+    release_retired_username(db, "ALICE", released_by=sysop)
+
+    assert list_retired_usernames(db) == []
+    assert create_user(db, "alice", password="password").username == "alice"
+    released = [entry for entry in list_recent_actions(db) if entry.action == "release_retired_username"]
+    assert len(released) == 1
+    assert "'alice'" in released[0].detail
+
+
+def test_releasing_a_name_that_is_not_held_is_refused(db, sysop):
+    with pytest.raises(UserManagementError, match="not a retired username"):
+        release_retired_username(db, "nobody", released_by=sysop)
+
+
+def test_a_database_upgraded_into_this_starts_with_nothing_held(tmp_path, monkeypatch):
+    """Forward only: past deletions are named in the moderation log's free
+    text, and guessing reservations out of it would retire the wrong names."""
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if m.description.startswith("Issue #594:"))
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    path = tmp_path / "pre-594.db"
+    old = Database(path)
+    old.connection.execute(
+        "INSERT INTO users (username, password_hash, user_level, created_at) "
+        "VALUES ('carol', 'x', 0, '2026-01-01T00:00:00.000000Z')"
+    )
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+
+    upgraded = Database(path)
+    try:
+        assert list_retired_usernames(upgraded) == []
+        assert get_user_by_username(upgraded, "carol") is not None
+    finally:
+        upgraded.close()

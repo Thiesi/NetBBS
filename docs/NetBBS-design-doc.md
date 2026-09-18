@@ -691,6 +691,23 @@ or nullable author/uploader references. Personal access rows and private state
 which cannot meaningfully outlive the account are deleted according to explicit
 foreign-key policy.
 
+On a node that has ever run NetBBS Link, hard deletion also retires the
+username (issue #594). The opaque local user identifier of §4.5 is the
+username, so on the Link an account is its name: mail is addressed to it, a
+carried post's author label is built from it, the trust subject is derived
+from it, and a remote attestation names it. A freed name would hand all of
+that to the next registrant. The name is recorded in the deleting transaction
+and refused at registration, case-insensitively, whatever the Link setting
+does afterwards; "ever" is a sticky marker set when the node first starts with
+Link effectively on, and seeded at upgrade, on a node that ran Link before the
+marker existed, from any artifact Link leaves behind. A node that has never run Link records nothing
+and its names stay reusable. Nor is the name retired of a registration that
+was still awaiting approval and was never sent Link mail: such an account has
+provably never had a session, so there is no Link identity to inherit. A SysOp can release a retired name, as a
+confirmed and audited action. Self-service registration refuses a retired
+name in the words it uses for a taken one; a SysOp surface says why and where
+to release it.
+
 ### 4.4 Human-facing Link addresses
 
 The normal human-facing cross-node address is:
@@ -9691,7 +9708,7 @@ narrow that further was not judged worth its write cost.
 That is the intended default, and the release notes have to say it, because a
 node that was sharing will otherwise read as broken.
 
-### Issue #594 — a deleted account's username stays retired on a Link node — decided
+### Issue #594 — a deleted account's username stays retired on a Link node — closed
 
 `local_user_id` is the username, and `users.username` is unique only among
 live rows, so deleting an account frees its Link identity for the next
@@ -9701,8 +9718,7 @@ the recipient with `get_user_by_username`), a carried post's `author_label` is
 is derived from it, and a remote identity attestation names it. A
 re-registered name inherits all of that: authorship, trust state, a live
 attestation until its revocation propagates, and mail a remote sender wrote to
-the previous holder. Decided here and not yet implemented; §4 changes when the
-code does.
+the previous holder. Normative description: §4.3.
 
 **Decision 1 — retire the name; do not change the identifier.** A stable,
 never-reissued per-account identifier was the alternative. It needs a
@@ -9718,13 +9734,34 @@ every answer needs, so it is the part built.
 `delete_user` writes the retired name in the transaction that deletes the
 account, when the node runs Link now or has at any time before. "Ever" is a
 sticky marker the node sets the first time it starts with Link effectively
-on, with stored peers standing in for the marker on a node that ran Link
-before the marker existed. A node that has never run Link records nothing and
+on. The migration that introduces it seeds it on a node that ran Link before
+the marker existed, from any artifact Link leaves behind: a stored peer, a
+retained event, a linked board, channel or file area, a piece of Link mail,
+or a recorded decision to run Link. Stored peers alone would not do, since a
+node can originate a linked board and republish it later without ever having
+stored one. A node that has never run Link records nothing and
 its names stay reusable, which is both BBS tradition and the cost the issue
 names: a small board should not lose names forever to a network it is not on.
 A recorded name stays retired whatever the Link setting does afterwards.
 Registration checks the record case-insensitively, as the uniqueness index
 does.
+
+One kind of account is not retired: a registration still awaiting approval
+that was never sent Link mail. Declining registrations is routine on an
+approval-required node, and retiring those names would let strangers
+permanently consume names merely by asking for them. The exemption rests on
+the pending state because that state proves the account never had a session:
+it is set only at registration, cleared only by approval, and refused by
+every login path. "Never logged in" was considered and rejected as the test,
+because it proves nothing: open registration hands a new caller straight into
+a first session without recording a login, so an account that registered,
+posted on a linked board and never returned has no login on record. Received
+Link mail is part of the test because it reaches an account by name without
+the account doing anything: delivery resolves the recipient by username,
+pending approval or not, and acknowledges it. An approved account that was
+never used is retired like any other; the SysOp can release it. The screen that confirms a deletion and the
+deletion itself ask one shared predicate, so the warning cannot promise a hold
+that does not happen.
 
 The test is "ever", not "now", because what peers hold does not evaporate
 when Link is switched off. Keying on the setting at the moment of deletion

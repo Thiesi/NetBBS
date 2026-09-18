@@ -2647,6 +2647,36 @@ audited, and reversible. Operator screens must catch stale mutations (for
 example, an override already cleared elsewhere) and report them as concurrent
 state changes rather than claiming success.
 
+**On the Link an account is its username, so a deleted account's name is
+retired (issue #594).** `local_user_id` on the wire is `users.username`, and
+that column is unique only among live rows. `delete_user` therefore writes
+`retired_usernames` in its own `BEGIN IMMEDIATE` transaction, and
+`_create_user_with_password_hash` checks it inside *its* transaction, so a
+deletion and a registration of the same name cannot pass each other.
+`link_has_ever_run` only reads, which is what makes it safe to call from inside
+the delete's open transaction; do not give it a `set_config`, which commits.
+The hold and the delete screen's warning about it both ask
+`deletion_retires_username`, and the delete asks it of the row it re-read
+inside the transaction, not of the caller's possibly stale `User`. That
+predicate exempts only a still-pending registration with no Link mail, and
+deliberately does not look at `last_login_at`: open registration drops a new
+caller into their first session without stamping it, so NULL there does not
+mean the account was never used. `pending_approval` is the only column that
+proves an account never had a session.
+`UsernameRetiredError` stringifies exactly as a taken username does, because
+both self-service registration paths print the exception to a remote caller;
+a SysOp surface has to reach for `sysop_detail` and, in a draft editor,
+re-raise it as the editor's `error_type` so the draft survives. A rename, if
+one is ever built, frees a name the same way a deletion does and must retire
+it the same way. Any new path that inserts into `users` without going through
+`_create_user_with_password_hash` bypasses the hold. Because `create_user` now
+reads `retired_usernames`, a migration test that opens a schema truncated
+before that table cannot call it; `tests/legacy_schema.py` inserts the account
+the way every schema has stored one. "Has this node ever run Link" is a sticky
+`node_config` marker, seeded once by the migration from every artifact Link
+leaves behind, because stored peers alone miss a node that originated a linked
+board without ever storing one.
+
 **Remote attestations do not turn Link identities into local users.** The
 signed carrier and local acceptance projection use the stable
 `TrustSubject.user(home_node_fingerprint, opaque_user_id)` identity throughout.

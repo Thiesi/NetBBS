@@ -302,6 +302,18 @@ account change that would leave no enabled, approved SysOp. Disabling an account
 revokes its access; deletion is permanent and requires its exact name. Existing
 content retains its recorded author label.
 
+Once your node has run NetBBS Link, deleting an account also retires its
+username: nobody can register it again. The one exception is a registration
+you decline while it is still awaiting approval, unless someone on another
+node had already sent it Link mail. On the Link a username is the
+account's identity, so whoever took a freed name would receive Link mail
+written to the previous holder and inherit the authorship of their carried
+posts and whatever other nodes had recorded about them. Callers who try a
+retired name are told only that it is unavailable. If you deleted a test
+account, or a caller you removed has come back, release the name under
+**Users → Retired names**; the release is audit-logged. A node that has never
+run Link keeps reusable names.
+
 A caller who forgot their password cannot recover it themselves: NetBBS has no
 e-mail or other out-of-band channel. Open the account's detail screen and
 choose **Password** to set a new one; the old password is neither shown nor

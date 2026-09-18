@@ -140,6 +140,39 @@ class User:
     can_verify_identity: bool = False
 
 
+class UsernameRetiredError(AuthError):
+    """The requested username belonged to a deleted account and is held (issue #594).
+
+    `str()` is word for word what a taken username produces, on purpose. Both
+    self-service registration paths print the exception to a remote caller, and
+    registration must not become an oracle for who used to have an account
+    here. A SysOp surface shows `sysop_detail` instead, which says why and
+    where to release the name.
+    """
+
+    def __init__(self, username: str) -> None:
+        super().__init__(
+            f"could not create account {username!r} — username or fingerprint already in use"
+        )
+        self.username = username
+
+    @property
+    def sysop_detail(self) -> str:
+        return (
+            f"{self.username!r} belonged to a deleted account. This node has run NetBBS Link, "
+            "where a username is the account's identity: whoever registers it next would "
+            "inherit the old account's Link mail address, the authorship of its carried "
+            "posts, and whatever other nodes recorded about it. Release it first under "
+            "Users -> Retired names if that is what you intend."
+        )
+
+
+@dataclass(frozen=True)
+class RetiredUsername:
+    username: str
+    retired_at: str
+
+
 def _password_work_semaphore() -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
     semaphore = _PASSWORD_WORK_SEMAPHORES.get(loop)
@@ -308,6 +341,10 @@ def _create_user_with_password_hash(
 
     db.connection.execute("BEGIN IMMEDIATE")
     try:
+        # Inside the transaction, so a deletion that retires this name and a
+        # registration that asks for it cannot pass each other (issue #594).
+        if is_username_retired(db, username):
+            raise UsernameRetiredError(username)
         db.connection.execute(
             """
             INSERT INTO users
@@ -1227,6 +1264,98 @@ def set_can_verify_identity(db: Database, target: User, can_verify: bool, *, cha
     return _get_user_by_id(db, target.id)
 
 
+def is_username_retired(db: Database, username: str) -> bool:
+    """Whether `username` is held for a deleted account, case-insensitively."""
+    return db.connection.execute(
+        "SELECT 1 FROM retired_usernames WHERE username = ? COLLATE NOCASE", (username,)
+    ).fetchone() is not None
+
+
+def list_retired_usernames(db: Database) -> list[RetiredUsername]:
+    """Every held username, most recently retired first."""
+    return [
+        RetiredUsername(row["username"], row["retired_at"])
+        for row in db.connection.execute(
+            "SELECT username, retired_at FROM retired_usernames ORDER BY retired_at DESC, username"
+        ).fetchall()
+    ]
+
+
+def release_retired_username(db: Database, username: str, *, released_by: User) -> None:
+    """Make a held username registrable again. A SysOp's deliberate act.
+
+    Design doc §16, issue #594, Decision 3: a deleted test account, or a
+    caller who asked to be removed and came back, is the SysOp's trust
+    decision to make. Audited, because what it permits is one account
+    inheriting another's Link identity.
+    """
+    from netbbs.moderation.log import record_action_without_commit
+
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = db.connection.execute(
+            "SELECT username FROM retired_usernames WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
+        if row is None:
+            raise UserManagementError(f"{username!r} is not a retired username, or was already released")
+        db.connection.execute(
+            "DELETE FROM retired_usernames WHERE username = ? COLLATE NOCASE", (username,)
+        )
+        record_action_without_commit(
+            db, actor=released_by, action="release_retired_username",
+            detail=f"released retired username {row['username']!r} for re-registration",
+        )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
+
+
+def deletion_retires_username(db: Database, user: User) -> bool:
+    """Whether deleting `user` holds its username afterwards (issue #594).
+
+    One predicate for `delete_user` and for the screen that warns about it,
+    so the warning cannot promise something the deletion does not do.
+
+    The node must have ever run Link, because only then can a peer know the
+    name. Given that, every account's name is held except one kind: a
+    registration still awaiting approval that was never sent Link mail.
+    Declining registrations is routine housekeeping on an approval-required
+    node, and holding those names would let strangers permanently consume
+    names merely by asking for them.
+
+    The exemption rests on `pending_approval` because it is the one state that
+    *proves* an account never had a session: it is set only at registration,
+    cleared only by approval, every login path refuses it, and
+    approval-required registration does not drop the caller into a session.
+    `last_login_at IS NULL` proves nothing of the kind. Open registration
+    hands a new caller straight into their first session without stamping it,
+    so an account that registered, posted on a linked board and never came
+    back -- the commonest account a SysOp ever deletes -- has never "logged
+    in" by that column (review of #620).
+
+    Link mail is checked because it reaches an account *by name* without the
+    account doing anything: `deliver_link_message` resolves the recipient by
+    username alone, stores the mail and acknowledges it, pending approval or
+    not, so a remote sender has been told the name is live.
+
+    Reads only, so it is safe inside `delete_user`'s open transaction.
+    Imported here: the Link package imports from this module.
+    """
+    from netbbs.link.onboarding import link_has_ever_run
+
+    if not link_has_ever_run(db):
+        return False
+    if not user.pending_approval:
+        return True
+    return db.connection.execute(
+        """SELECT 1 FROM mail_messages
+           WHERE recipient_user_id = ? AND link_source_event_id IS NOT NULL LIMIT 1""",
+        (user.id,),
+    ).fetchone() is not None
+
+
 def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
     """
     Permanently remove `target`'s account, refusing to delete the last
@@ -1277,6 +1406,20 @@ def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
             db, actor=deleted_by, action="delete_user", target_user_id=current.id,
             detail=f"deleted user {current.username!r} (id {current.id}, was level {current.user_level})",
         )
+        # Issue #594. On the Link an account *is* its username: mail is
+        # addressed to it, a carried post's author label is built from it, the
+        # trust subject is derived from it, an attestation names it. Freed, all
+        # of that passes to the next registrant. Held in this transaction, so
+        # there is no moment at which the account is gone and the name is not.
+        # Keyed on "ever", not on the Link setting right now: an account
+        # deleted in a maintenance window with Link off is still known to
+        # peers when Link comes back. Asked of `current`, re-read inside this
+        # transaction, not of the caller's possibly stale `target`.
+        if deletion_retires_username(db, current):
+            db.connection.execute(
+                "INSERT OR REPLACE INTO retired_usernames (username, retired_at) VALUES (?, ?)",
+                (current.username, utc_now_iso()),
+            )
         db.connection.execute("DELETE FROM users WHERE id = ?", (current.id,))
     except BaseException:
         db.connection.rollback()
