@@ -103,16 +103,26 @@ def test_offer_opt_in_declining_records_declined_and_asks_nothing_more(tmp_path)
     db.close()
 
 
-def test_offer_opt_in_accepting_with_no_service_address_records_the_decision_and_says_so(tmp_path):
+def test_offer_opt_in_accepting_with_no_service_address_records_the_decision_and_says_so(
+    tmp_path, monkeypatch
+):
     """Issue #583. The message this replaced told the SysOp to "ask your
     operator to set the service address" -- an operator who is
     themselves, for a setting no surface of the product could write. The
     replacement says what is actually true, and the acceptance is still
     recorded so the question is never asked twice.
 
+    The shipped default names a deployed instance now, so "no service
+    address" is the reverted-constant case rather than the shipped one;
+    it stays a real branch because nothing else says anything sensible
+    when there is no service to dial.
+
     `FakeSession` raises on exhausted input, so the single "y" is itself
     the assertion that no registration editor was drawn over a service
     that cannot answer it."""
+    from netbbs.managed_dns import state
+
+    monkeypatch.setattr(state, "DEFAULT_SERVICE_URL", None)
     db = Database(tmp_path / "node.db")
     lane = DatabaseLane(db.path)
     session = FakeSession(["y"])
@@ -154,12 +164,17 @@ def test_offer_opt_in_accepting_reaches_registration_through_the_shipped_default
     db.close()
 
 
-def test_registering_from_the_sysop_console_with_no_service_address_explains_why(tmp_path):
+def test_registering_from_the_sysop_console_with_no_service_address_explains_why(
+    tmp_path, monkeypatch
+):
     """The same gap reached from the other direction -- the `[R]egister`
     action on the SysOp console's DNS screen. A different message from
     the first-run one: this SysOp pressed a key on purpose and is owed a
     reason nothing happened, plus the one way out that does exist today
     (running an instance and pointing the node at it)."""
+    from netbbs.managed_dns import state
+
+    monkeypatch.setattr(state, "DEFAULT_SERVICE_URL", None)
     db = Database(tmp_path / "node.db")
     set_node_fingerprint(db, "fp-1")
     lane = DatabaseLane(db.path)

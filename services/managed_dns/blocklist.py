@@ -28,6 +28,19 @@ RESERVED_NAMES: frozenset[str] = frozenset(
         "netbbs",
         "www",
         "managed",
+        # Names the netbbs.org zone already carries as static records.
+        # `Rfc2136DnsProvider.upsert_record` *replaces* whatever A/AAAA
+        # a name has, so a registration for one of these would not
+        # collide -- it would silently overwrite the project's own
+        # record: the service's own address, and the reliable node every
+        # new node dials. Keep this in step with the zone file; the
+        # operations runbook (`README.md` §3) makes adding a static name
+        # to the zone conditional on adding it here first.
+        "dns",
+        "relink",
+        "ns",
+        "ns1",
+        "ns2",
         # Conventional infrastructure/service names that would collide
         # with likely future subdomains of netbbs.org itself, or read as
         # an official project address regardless of who actually holds it.
