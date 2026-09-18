@@ -65,6 +65,7 @@ on every exit path.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import os
 from collections import deque
@@ -89,14 +90,19 @@ from netbbs.chat.scrollback import ChannelMessage, record_message
 from netbbs.mrc import protocol
 from netbbs.mrc.protocol import MrcPacket, parse_line
 from netbbs.mrc.settings import (
+    DIRECTORY_TIMESTAMP_FORMAT,
+    DirectoryEntry,
     MrcChannelMapping,
     MrcSettings,
     MrcSettingsError,
     OpenRoomSettings,
+    hub_identity,
     list_mrc_mappings,
+    load_directory_snapshot,
     load_mrc_settings,
     load_open_room_settings,
     materialize_open_room,
+    save_directory_snapshot,
     set_open_room_topic,
     sweep_open_rooms,
     touch_open_room,
@@ -270,6 +276,12 @@ class _Connection:
 OpenConnection = Callable[..., Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
 
 
+def _wall_now() -> datetime.datetime:
+    """Wall-clock UTC, for the one thing the bridge's monotonic clock
+    cannot say: how old a reading kept across a restart is."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 def _stamp_imalive(line: str) -> str:
     """Replace the epoch in a queued IMALIVE line's field 5 with the
     moment it is written, so a PONG measures the hub, not this node's
@@ -438,7 +450,11 @@ class MrcBridge:
         self._network_stats_raw: str | None = None
         self._stats_requested: set[str] = set()
         self._directory: dict[str, tuple[int, str, float]] = {}
-        self._directory_requests: dict[str, tuple[float, bool]] = {}
+        # nick -> (sent, explicit, hint): `explicit` shows the listing to
+        # the asker (`/rooms`); `hint` owes them the one-line summary a
+        # first entry gets once the background listing is complete.
+        self._directory_requests: dict[str, tuple[float, bool, bool]] = {}
+        self._directory_pass_rows = 0
         self._last_directory_request = -1e9
 
         # Unbounded as a Queue; the bound is `_outbound_cap()`, enforced by
@@ -582,10 +598,34 @@ class MrcBridge:
         def _load(db: Database) -> tuple[MrcSettings, list[MrcChannelMapping], OpenRoomSettings]:
             return self._load_settings(db), self._load_mappings(db), self._load_open_settings(db)
 
+        def _load_snapshot(db: Database) -> list[DirectoryEntry]:
+            return load_directory_snapshot(db, hub_identity(self._load_settings(db)))
+
         settings, mappings, open_settings = await self._lane.run(_load)
         self._settings = settings
         self._open_settings = open_settings
+        try:
+            self._seed_directory(await self._lane.run(_load_snapshot))
+        except sqlite3.DatabaseError as exc:
+            _logger.warning("MRC room directory: could not read the kept listing: %s", exc)
         self._apply_mappings(mappings)
+
+    def _seed_directory(self, entries: list[DirectoryEntry]) -> None:
+        """Start from the hub's last complete listing (kept across
+        restarts, see `load_directory_snapshot`) so the Multi Relay Chat
+        section is not empty until somebody has entered a room. Each
+        reading keeps its real age: it shows as old until a caller's
+        entry refreshes it, and never overrides anything newer."""
+        now, wall = self._clock(), _wall_now()
+        for entry in reversed(entries):  # oldest first, so the cap keeps the newest
+            if entry.room.lower() in self._directory:
+                continue
+            seen_at = datetime.datetime.strptime(entry.seen_at, DIRECTORY_TIMESTAMP_FORMAT).replace(
+                tzinfo=datetime.timezone.utc)
+            received = now - max(0.0, (wall - seen_at).total_seconds())
+            self._observe_room(entry.room, seen=received)
+            if entry.room.lower() in self._observed_rooms:
+                self._directory[entry.room.lower()] = (entry.users, entry.topic, received)
 
     def _apply_mappings(self, mappings: list[MrcChannelMapping]) -> None:
         self._by_room = {mapping.room.lower(): mapping for mapping in mappings}
@@ -2079,30 +2119,57 @@ class MrcBridge:
         admitting them until the sweeper retires it."""
         return self._open_settings is not None and self._open_settings.blocks(room)
 
-    def directory_details(self, room: str) -> tuple[int, str, bool] | None:
+    def directory_details(self, room: str) -> tuple[int, str, bool, float] | None:
+        """`(users, topic, fresh, age in seconds)` as the hub last listed
+        `room`, or `None`. A reading kept from before a restart is never
+        fresh; its age says how old."""
         entry = self._directory.get(room.lower())
         if entry is None:
             return None
         users, topic, received = entry
-        return users, topic, self._state is MrcState.CONNECTED and self._clock() - received <= self._userlist_refresh
+        age = max(0.0, self._clock() - received)
+        return users, topic, self._state is MrcState.CONNECTED and age <= self._userlist_refresh, age
 
-    def refresh_directory(self, channel: Channel, username: str) -> None:
-        """A first join discovers company without flooding chat with a listing."""
+    def refresh_directory(self, channel: Channel, username: str, *, hint: bool = False) -> bool:
+        """A first join discovers company without flooding chat with a
+        listing. With `hint`, the asker gets one line once the listing is
+        complete (`directory_hint`) -- how many other rooms there are and
+        the two commands that reach them. Returns whether a request went
+        out; `False` means the last one is recent enough (or the link is
+        down), and `directory_hint` answers from what is already known."""
         now = self._clock()
         if now - self._last_directory_request < self._userlist_refresh:
-            return
+            return False
         mapping = self._by_channel.get(channel.id)
         settings = self._settings
         nick = self._announced.get(channel.id, {}).get(username)
         if (mapping is None or not mapping.active or settings is None or not settings.enabled
                 or self._state is not MrcState.CONNECTED or nick is None):
-            return
+            return False
         # The shared refresh interval bounds automatic requests. They still
         # use the bounded writer and its per-nick wire spacing, but never
         # spend this caller's interactive message/command burst allowance.
-        self._directory_requests[nick.lower()] = (now, False)
+        self._directory_requests[nick.lower()] = (now, False, hint)
+        self._directory_pass_rows = 0
         self._last_directory_request = now
         self._enqueue(protocol.user_command(nick, settings.site_wire_name, mapping.room, "LIST"))
+        return True
+
+    def directory_hint(self, channel: Channel) -> str | None:
+        """"3 more rooms on MRC: /rooms lists them, /join <room> moves.",
+        from fresh readings only, or `None` when the caller's own room is
+        the only one known."""
+        mapping = self._by_channel.get(channel.id)
+        own = mapping.room.lower() if mapping is not None else None
+        others = 0
+        for room in self._directory:
+            details = self.directory_details(room)
+            if room != own and details is not None and details[2] and not self.room_blocked(room):
+                others += 1
+        if not others:
+            return None
+        # Short enough to stay one row at 80 columns behind its "[MRC]" prefix.
+        return f"{others} more room{'s' if others != 1 else ''} on MRC: /rooms lists them, /join <room> moves."
 
     async def _handle_directory_reply(self, packet: MrcPacket) -> bool:
         # Only a reply to a recent LIST may populate this advisory directory.
@@ -2134,6 +2201,7 @@ class MrcBridge:
             text = packet.body.strip()
         elif row is not None:
             room, users, topic = row
+            self._directory_pass_rows += 1
             self._observe_room(room)
             if room.lower() not in self._directory and len(self._directory) >= MAX_OBSERVED_ROOMS:
                 oldest = min(self._directory, key=lambda key: self._directory[key][2])
@@ -2145,13 +2213,59 @@ class MrcBridge:
                 "Rooms on MRC  |  users  |  topic" if header else
                 "Pick a discovered room in Chat > Multi Relay Chat, or /join <room>."
             )
-        for nick, (_sent, explicit) in list(requests.items()):
+        # Snapshot before anything awaits: `requests` may be the live table,
+        # and a request registered while the listing is being kept belongs
+        # to the hub's *next* reply, not to this footer.
+        pending = list(requests.items())
+        if footer:
+            await self._complete_directory_pass(min(sent for _nick, (sent, _explicit, _hint) in pending))
+        for nick, (_sent, explicit, hint) in pending:
             addressed = self._caller_for_nick(nick)
             if explicit and addressed is not None:
                 await self._deliver_reply(addressed[1], text)
             if footer:
-                self._directory_requests.pop(nick, None)
+                # The same request, even if `/rooms` promoted it meanwhile;
+                # never one registered since, which the next reply answers.
+                if self._directory_requests.get(nick, (None,))[0] == _sent:
+                    del self._directory_requests[nick]
+                if hint and not explicit and addressed is not None:
+                    mapping = self._by_channel.get(addressed[0])
+                    summary = self.directory_hint(mapping.channel) if mapping is not None else None
+                    if summary is not None:
+                        await self._deliver_reply(addressed[1], summary)
         return True
+
+    async def _complete_directory_pass(self, asked_at: float) -> None:
+        """The listing's footer has arrived: the rows since `asked_at`
+        are every room the hub has right now. A room it no longer lists
+        has emptied -- an MRC room exists only while someone is in it --
+        so its reading goes, and the room with it unless something newer
+        than the listing (chatter, a caller opening it) named it. Then the
+        listing is kept for the next start. A footer with no row before
+        it proves nothing and changes nothing."""
+        if not self._directory_pass_rows:
+            return
+        self._directory_pass_rows = 0
+        for room in [room for room, entry in self._directory.items() if entry[2] < asked_at]:
+            del self._directory[room]
+            observed = self._observed_rooms.get(room)
+            if observed is not None and observed[1] < asked_at and room not in self._by_room:
+                del self._observed_rooms[room]
+        settings = self._settings
+        if settings is None:
+            return
+        now, wall = self._clock(), _wall_now()
+        entries = [
+            DirectoryEntry(
+                self._observed_rooms[room][0] if room in self._observed_rooms else room, users, topic,
+                (wall - datetime.timedelta(seconds=max(0.0, now - received))).strftime(DIRECTORY_TIMESTAMP_FORMAT),
+            )
+            for room, (users, topic, received) in self._directory.items()
+        ]
+        try:
+            await self._lane.run(save_directory_snapshot, hub_identity(settings), entries)
+        except sqlite3.DatabaseError as exc:
+            _logger.warning("MRC room directory: could not keep the listing: %s", exc)
 
     def observed_rooms(self) -> list[str]:
         """Rooms this node has heard of, most recently seen first: rooms
@@ -2161,15 +2275,17 @@ class MrcBridge:
         ordered = sorted(self._observed_rooms.values(), key=lambda entry: entry[1], reverse=True)
         return [display for display, _seen in ordered]
 
-    def _observe_room(self, room: str) -> None:
+    def _observe_room(self, room: str, *, seen: float | None = None) -> None:
         room = protocol.sanitize_room(room)
         if not room:
             return
         key = room.lower()
+        if seen is not None and key in self._observed_rooms:
+            return  # a kept reading never outranks something heard since
         if key not in self._observed_rooms and len(self._observed_rooms) >= MAX_OBSERVED_ROOMS:
             oldest = min(self._observed_rooms.items(), key=lambda item: item[1][1])[0]
             del self._observed_rooms[oldest]
-        self._observed_rooms[key] = (room, self._clock())
+        self._observed_rooms[key] = (room, self._clock() if seen is None else seen)
 
     def _observe_chatter(self, plain: str) -> None:
         match = _ROOM_CHATTER_RE.match(plain.strip())
@@ -2255,7 +2371,7 @@ class MrcBridge:
                 # Reuse the in-flight reply, promoting background discovery
                 # to visible output. Keep its original expiry: repeated asks
                 # must not extend a lost response's lifetime indefinitely.
-                self._directory_requests[nick.lower()] = (pending[0], True)
+                self._directory_requests[nick.lower()] = (pending[0], True, pending[2])
                 return None
         bucket = self._user_bucket(username)
         if not bucket.has_token():
@@ -2263,7 +2379,8 @@ class MrcBridge:
             return "you're sending faster than MRC allows"
         bucket.consume()
         if body.upper() == "LIST":
-            self._directory_requests[nick.lower()] = (self._clock(), True)
+            self._directory_requests[nick.lower()] = (self._clock(), True, False)
+            self._directory_pass_rows = 0
             self._last_directory_request = self._clock()
         if body.split(" ", 1)[0].upper() == "STATS":
             self._stats_requested.add(username)
