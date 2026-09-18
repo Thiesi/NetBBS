@@ -29,7 +29,7 @@ from netbbs.net.shutdown import NodeControls
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.mrc_fake_hub import FakeMrcHub
-from tests.test_admin_flow import FakeSession, _visible, _written_text
+from tests.test_admin_flow import FakeSession, _normalized_visible, _visible, _written_text
 
 
 @pytest.fixture
@@ -169,7 +169,9 @@ async def _open_channel_detail(session, lane, sysop, lobby, *, mrc_bridge=None):
 def test_channel_detail_maps_pauses_and_unmaps_a_room(db, lane, sysop, lobby):
     session = FakeSession(["m", "#General", "p", "p", "u", "b"])
     asyncio.run(_open_channel_detail(session, lane, sysop, lobby))
-    text = _visible(_written_text(session))
+    # The detail screen is an aligned label/value panel: fold the padding
+    # between a label and its value back to one space before comparing.
+    text = _normalized_visible(_written_text(session))
     assert "MRC room: none (not bridged)" in text
     assert "now bridged to MRC room #General" in text
     assert "MRC room: #General (bridged)" in text
@@ -224,7 +226,8 @@ def test_node_menu_status_without_a_running_bridge_says_so(db, lane, sysop):
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_controls(None)))
     text = _visible(_written_text(session))
     assert "hat bridge (MRC)" in text
-    assert "Not available here" in text
+    assert "NOT AVAILABLE HERE" in text
+    assert "the standalone admin CLI can't see it" in " ".join(text.split())
 
 
 def test_node_status_screen_reports_live_state_rooms_and_reconnects(db, lane, sysop, lobby):
@@ -237,12 +240,15 @@ def test_node_status_screen_reports_live_state_rooms_and_reconnects(db, lane, sy
         await bridge.start()
         try:
             await _wait_state(bridge, MrcState.CONNECTED)
-            session = FakeSession(["n", "c", "r", "b", "b", "b"])
+            # The status panel is taller than the 24-row terminal, so it is
+            # paged: the bridged-channel table is reached with PgDn.
+            session = FakeSession(["n", "c", "PAGE_DOWN", "r", "b", "b", "b"])
             await admin_menu(session, lane, sysop, node_controls=_controls(bridge))
-            text = _visible(_written_text(session))
+            text = _normalized_visible(_written_text(session))
             assert "CONNECTED" in text
             assert "127.0.0.1:" in text and "(plain)" in text
-            assert "lobby -> #lobby (bridged) -- 0 MRC users" in text
+            assert "Channel MRC room State Users Who" in text
+            assert "lobby #lobby bridged 0" in text
             assert "Reconnecting..." in text
             await fake.wait_for_connections(2)
             assert any(a.action == "reconnect_mrc" for a in list_recent_actions(db, limit=10))
@@ -260,7 +266,7 @@ def test_node_status_screen_when_mrc_is_off(db, lane, sysop):
             session = FakeSession(["n", "c", "b", "b", "b"])
             await admin_menu(session, lane, sysop, node_controls=_controls(bridge))
             text = _visible(_written_text(session))
-            assert "MRC is off" in text
+            assert "MRC IS OFF" in text
             assert "No channel is bridged" in text
         finally:
             await bridge.close()
@@ -286,7 +292,9 @@ def test_deleting_a_mapped_channel_refreshes_the_running_bridge(db, lane, sysop,
             await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
             session = FakeSession(["d", "lobby"])
             await _open_channel_detail(session, lane, sysop, lobby, mrc_bridge=bridge)
-            assert "'lobby' deleted." in _visible(_written_text(session))
+            # The screen was entered directly and has returned: its outcome is
+            # queued for the menu that would be drawn next, not written here.
+            assert "'lobby' deleted." in _visible("".join(admin_flow._take_notices(session)))
             assert bridge.mapping_for(lobby) is None
             await fake.wait_for(lambda p: p.body == "LOGOFF")
             assert bridge.state is MrcState.CONNECTED
