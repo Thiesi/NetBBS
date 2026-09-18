@@ -3880,8 +3880,8 @@ means by override.
 Remote attestations (§5.5) are not carried this way. They hold a caller's
 birthdate or real name, their recipient list is enforced by the issuer when it
 is pulled, and a carrier would either read them or enforce the list on the
-issuer's behalf. Until that is decided, the screens of an outgoing-only node
-say that an attestation it publishes is not delivered.
+issuer's behalf. Until that is decided (issue #632), the screens of an
+outgoing-only node say that an attestation it publishes is not delivered.
 
 Distinct fingerprints do not prove independence. Automatic policy counts
 locally assigned trust domains:
@@ -10219,7 +10219,7 @@ wire peer does not.** `resolve_known_signing_key` is for checking something a
 third party delivered. Every route that authenticates its caller keeps
 `resolve_peer_signing_key`.
 
-**Decision 6 — attestations wait for their own decision.** The likely shape is
+**Decision 6 — attestations wait for their own decision (issue #632).** The likely shape is
 sealing each attestation to its recipient node's key and delivering it through
 the relay mailbox, which already carries sealed envelopes. Until then the
 Published identity screen and the Profile toggle of an outgoing-only node say
