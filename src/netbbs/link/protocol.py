@@ -2551,6 +2551,70 @@ class LinkNode:
             seen.pop(next(iter(seen)))
         seen[replay_key] = received_at
 
+    def handle_trust_deposit(
+        self, sender_fingerprint: str, authorization: "InventoryRequest", raw_objects: object
+    ) -> tuple[list, int]:
+        """Authenticate a deposit of a node's own trust objects (issue #627).
+
+        Returns the objects that verify and the number that do not. The
+        sender must be a completed peer this node has agreed to relay for:
+        relay consent (§8.5) is the existing opt-in and the existing cap on
+        whom this node holds things for. `authorization` is the signed, fresh,
+        replay-bounded envelope the file route also borrows. The objects are
+        issuer-signed and would verify whoever sent them, but the *order* they
+        are stored in is the order subscribers read them in, and a third party
+        replaying a withdrawn vouch ahead of its revocation would bring it
+        back to life. Only the issuer may deposit, so only the issuer orders.
+
+        An object that does not verify under the sender's *current* key is
+        counted and left out, not refused: an issuer's own store keeps what
+        its earlier keys signed, nobody holding its current key can use those,
+        and it re-signs what still matters when it rotates.
+        """
+        from netbbs.link.trust_wire import (
+            MAX_TRUST_OBJECTS_PER_RESPONSE, SignedTrustObject, TrustPayloadError,
+            TrustSignatureError, TrustWireError,
+        )
+
+        if sender_fingerprint not in self.relaying_for:
+            raise LinkProtocolError(
+                f"this node does not relay for {sender_fingerprint}, and carries trust objects "
+                "only for nodes it relays for"
+            )
+        self.handle_inventory_request(sender_fingerprint, authorization)
+        if authorization.boards or authorization.channels or authorization.file_areas:
+            raise LinkProtocolError("trust deposit authorization must carry an empty inventory")
+        if not isinstance(raw_objects, list) or len(raw_objects) > MAX_TRUST_OBJECTS_PER_RESPONSE:
+            raise LinkProtocolError(
+                f"a trust deposit is a list of at most {MAX_TRUST_OBJECTS_PER_RESPONSE} objects"
+            )
+        verify_key = self.resolve_peer_signing_key(sender_fingerprint, "trust deposit")
+        verified = []
+        unverifiable = 0
+        for raw in raw_objects:
+            try:
+                obj = SignedTrustObject.from_dict(raw, issuer_verify_key=verify_key)
+            except TrustSignatureError:
+                unverifiable += 1
+                continue
+            except TrustPayloadError:
+                # Authentic, and not something this release understands: a
+                # newer issuer's object type or version. A carrier has no use
+                # for the payload, and refusing would stop that issuer's
+                # deposits at this object for as long as this relay stays on
+                # its version. Carried as it is; a subscriber that
+                # understands it is who it is for.
+                obj = SignedTrustObject(
+                    envelope=raw["envelope"], signature=base64.b64decode(raw["signature"])
+                )
+            except TrustWireError as exc:
+                raise LinkProtocolError(f"malformed trust object in deposit: {exc}") from exc
+            payload = obj.envelope.get("payload")
+            if not isinstance(payload, dict) or payload.get("issuer_fingerprint") != sender_fingerprint:
+                raise LinkProtocolError("a node may deposit only the trust objects it issued itself")
+            verified.append(obj)
+        return verified, unverifiable
+
     def handle_identity_request(
         self,
         sender_fingerprint: str,
@@ -2625,7 +2689,12 @@ class LinkNode:
         """
         bundles: list[dict] = []
         for fingerprint in subjects:
-            record = self.known_identity(fingerprint) if fingerprint in self.served_signers else None
+            # Also for a node this one relays for (issue #627): it chose this
+            # node to be reached through and publishes that in its own
+            # descriptor, and a subscriber to what it deposits here has to be
+            # able to learn who it is.
+            answerable = fingerprint in self.served_signers or fingerprint in self.relaying_for
+            record = self.known_identity(fingerprint) if answerable else None
             if record is None:
                 continue
             bundles.append(
@@ -2700,6 +2769,29 @@ class LinkNode:
             raise LinkProtocolError(f"unknown issuer {fingerprint}")
         return self._resolve_sender_signing_key(self.peers[fingerprint], fingerprint, kind)
 
+    def resolve_known_signing_key(
+        self, fingerprint: str, kind: str = "signed object"
+    ) -> nacl.signing.VerifyKey:
+        """The current signing key of a node this one can verify: a peer, or one
+        known by introduction (issue #627).
+
+        For checking a signature on something that node issued and a third
+        party delivered, which is all a trust object fetched from a carrier is.
+        Anything that authenticates a *wire peer* keeps using
+        `resolve_peer_signing_key`.
+        """
+        record = self.known_identity(fingerprint)
+        if record is None:
+            raise LinkProtocolError(f"unknown issuer {fingerprint}")
+        return self._resolve_sender_signing_key(record, fingerprint, kind)
+
+    def resolve_known_superseded_signing_keys(self, fingerprint: str) -> list[nacl.signing.VerifyKey]:
+        """`resolve_peer_superseded_signing_keys`, for a peer or an introduced node."""
+        record = self.known_identity(fingerprint)
+        if record is None:
+            raise LinkProtocolError(f"unknown issuer {fingerprint}")
+        return self._superseded_signing_keys(record)
+
     def resolve_peer_superseded_signing_keys(self, fingerprint: str) -> list[nacl.signing.VerifyKey]:
         """The signing keys a completed peer used before its current one.
 
@@ -2710,7 +2802,10 @@ class LinkNode:
         """
         if fingerprint not in self.peers:
             raise LinkProtocolError(f"unknown issuer {fingerprint}")
-        peer = self.peers[fingerprint]
+        return self._superseded_signing_keys(self.peers[fingerprint])
+
+    def _superseded_signing_keys(self, peer: "PeerRecord") -> list[nacl.signing.VerifyKey]:
+        fingerprint = peer.fingerprint
         keys: list[nacl.signing.VerifyKey] = []
         for key in superseded_operational_keys(
             peer.transitions, root_verify_key=peer.root_verify_key,

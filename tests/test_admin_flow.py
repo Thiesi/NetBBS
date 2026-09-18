@@ -9594,3 +9594,65 @@ def test_a_trust_decision_about_a_node_stops_holding_back_what_it_sent(db, lane,
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     assert list(held.entries) == ["d" * 64]
+
+
+# -- what a node nobody can dial publishes (issue #627) --------------------------
+
+
+def _vouch_screen_text(db, lane, sysop, *, link_context=None):
+    _vouchable_subject(db)
+    session = FakeSession(["s", "p", "s", "0", "1", "v", "b", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+    return " ".join(_visible(_written_text(session)).split())
+
+
+def test_the_vouch_screen_says_nothing_more_on_a_node_that_can_be_dialed(db, lane, sysop):
+    from netbbs.link.onboarding import record_link_reachability
+
+    record_link_reachability(db, outgoing_only=False)
+
+    assert "Nobody can dial this node" not in _vouch_screen_text(db, lane, sysop)
+
+
+def test_the_vouch_screen_says_how_a_vouch_leaves_a_node_nobody_can_dial(db, lane, sysop):
+    from netbbs.link.onboarding import record_link_reachability
+
+    record_link_reachability(db, outgoing_only=True)
+    link_context = _link_context()
+    link_context.link_node.relays_serving_me["a-relay"] = "2026-09-18T12:00:00+00:00"
+
+    text = _vouch_screen_text(db, lane, sysop, link_context=link_context)
+
+    assert "handed to the 1 node that relays for it, and fetched from there" in text
+
+
+def test_the_vouch_screen_warns_when_nothing_relays_for_a_node_nobody_can_dial(db, lane, sysop):
+    from netbbs.link.onboarding import record_link_reachability
+
+    record_link_reachability(db, outgoing_only=True)
+
+    text = _vouch_screen_text(db, lane, sysop, link_context=_link_context())
+
+    assert "no node relays for it yet, so a vouch issued now reaches nobody until one does" in text
+
+
+def test_published_identity_does_not_imply_delivery_on_a_node_nobody_can_dial(db, lane, sysop):
+    """An attestation is fetched from its issuer, and relays do not carry them."""
+    from netbbs.link.onboarding import record_link_reachability
+    from netbbs.link.remote_attestation import configure_attestation_recipient
+
+    _shared_attestation(db, sysop=sysop)
+    _publish(db)
+    configure_attestation_recipient(db, "a" * 32, reason="a friend")
+
+    def screen():
+        session = FakeSession(["s", "p", "p", "b", "b", "b", "b"])
+        _run(session, lane, sysop)
+        return " ".join(_visible(_written_text(session)).split())
+
+    record_link_reachability(db, outgoing_only=False)
+    assert "no recipient receives any of this yet" not in screen()
+    record_link_reachability(db, outgoing_only=True)
+    text = screen()
+    assert "Given to 1 recipient node." in text
+    assert "Nobody can dial this node" in text and "no recipient receives any of this yet" in text

@@ -194,13 +194,19 @@ from netbbs.link.remote_attestation import (
     UnknownAttestationPullCursor,
     load_issued_attestation_page,
 )
+from netbbs.link.trust_carriage import (
+    TrustCarriageFull,
+    load_trust_page_for_pull,
+    store_deposited_trust_objects,
+)
 from netbbs.link.trust_wire import (
     MAX_EMBEDDED_EVIDENCE_BYTES,
     UNKNOWN_PULL_CURSOR_REASON_CODE,
     TrustPullRequest,
     TrustWireError,
     UnknownTrustPullCursor,
-    load_trust_object_page,
+    ingest_trust_objects,
+    list_trusted_reporter_fingerprints,
     verify_evidence_bytes,
 )
 from netbbs.net.throttle import LinkRequestThrottle
@@ -1693,6 +1699,9 @@ class LinkServer:
         app.router.add_post(f"{LINK_PATH_PREFIX}/inventory/{{fingerprint}}", self._handle_inventory)
         app.router.add_post(f"{LINK_PATH_PREFIX}/trust-pull/{{fingerprint}}", self._handle_trust_pull)
         app.router.add_post(
+            f"{LINK_PATH_PREFIX}/trust-deposit/{{fingerprint}}", self._handle_trust_deposit
+        )
+        app.router.add_post(
             f"{LINK_PATH_PREFIX}/attestation-pull/{{fingerprint}}", self._handle_attestation_pull
         )
         app.router.add_post(
@@ -1931,7 +1940,8 @@ class LinkServer:
             if decision is not None and not decision.allowed:
                 return self._policy_rejection(decision)
             objects, more = await self._lane.run(
-                load_trust_object_page,
+                load_trust_page_for_pull,
+                own_fingerprint=self._node.identity.fingerprint,
                 issuer_fingerprint=pull.issuer_fingerprint,
                 after_content_id=pull.after_content_id,
                 limit=pull.limit,
@@ -1944,6 +1954,54 @@ class LinkServer:
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=403)
         return web.json_response({"objects": objects, "more_available": more})
+
+    async def _handle_trust_deposit(self, request: web.Request) -> web.Response:
+        """Take a node's own signed trust objects into carriage (issue #627).
+
+        For an issuer nobody can dial, which is most of them. Accepted only
+        from a node this one relays for, authenticated as that node, and kept
+        apart from everything this node has admitted for itself: see
+        `netbbs.link.trust_carriage`. If this node's own SysOp has named the
+        depositor a trusted reporter, the same objects are also offered to the
+        ordinary admission path, since this node cannot pull from the
+        depositor any more than anyone else can.
+        """
+        fingerprint = request.match_info["fingerprint"]
+        try:
+            body = await request.json(loads=strict_json_loads)
+            if not isinstance(body, dict) or set(body) != {"authorization", "objects"}:
+                raise ValueError("a trust deposit carries exactly an authorization and objects")
+            authorization = InventoryRequest.from_dict(body["authorization"])
+        except (KeyError, TypeError, ValueError) as exc:
+            return web.json_response({"error": f"malformed trust deposit: {exc}"}, status=400)
+        try:
+            verified, unverifiable = self._node.handle_trust_deposit(
+                fingerprint, authorization, body["objects"]
+            )
+        except LinkProtocolError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        decision = await self._decide(fingerprint, LinkPolicyAction.RELAY)
+        if decision is not None and not decision.allowed:
+            return self._policy_rejection(decision)
+        try:
+            stored, held = await self._lane.run(store_deposited_trust_objects, fingerprint, verified)
+        except TrustCarriageFull as exc:
+            return web.json_response({"error": str(exc)}, status=507)
+        except TrustWireError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        if verified and fingerprint in await self._lane.run(list_trusted_reporter_fingerprints):
+            try:
+                await self._lane.run(ingest_trust_objects, verified)
+            except TrustWireError as exc:
+                # Carried all the same: what this node will not act on it can
+                # still hand to those who will.
+                _logger.warning(
+                    "Link trust deposit: %s's objects are carried but were not admitted here: %s",
+                    fingerprint, exc,
+                )
+        return web.json_response(
+            {"stored": len(stored), "already_held": len(held), "unverifiable": unverifiable}
+        )
 
     async def _handle_identity_request(self, request: web.Request) -> web.Response:
         """Serve the hello bundles this node holds for the fingerprints named (issue #630).
@@ -2524,6 +2582,43 @@ async def request_identities(
         return [HelloMessage.from_dict(entry) for entry in entries]
     except Exception as exc:  # noqa: BLE001 -- unvalidated peer input; from_dict raises many kinds
         raise LinkTransportError(f"malformed identity response from {url}: {exc}") from exc
+
+
+async def deposit_trust_objects(
+    node: LinkNode,
+    session: ClientSession,
+    base_url: str,
+    authorization: InventoryRequest,
+    objects: list[dict],
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> dict:
+    """Hand this node's own signed trust objects to a node that relays for it (issue #627).
+
+    Returns the relay's own count of what it stored, already held and could
+    not verify. `LinkTransportError.status` is set for a refusal, so that the
+    caller can tell a relay that has stopped serving this node, or never had
+    the route, from one worth trying again.
+    """
+    url = f"{base_url}{LINK_PATH_PREFIX}/trust-deposit/{node.identity.fingerprint}"
+    try:
+        async with session.post(
+            url, json={"authorization": authorization.to_dict(), "objects": objects},
+            timeout=ClientTimeout(total=timeout),
+        ) as response:
+            text = await _read_bounded(response, _MAX_ERROR_BODY_BYTES)
+            if response.status != 200:
+                failure = LinkTransportError(
+                    f"trust deposit at {url} failed: HTTP {response.status}: {text}"
+                )
+                failure.status = response.status
+                raise failure
+            body = strict_json_loads(text)
+    except (ClientError, TimeoutError, ValueError) as exc:
+        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
+    if not isinstance(body, dict):
+        raise LinkTransportError(f"malformed trust deposit response from {url}")
+    return body
 
 
 async def request_trust_objects(

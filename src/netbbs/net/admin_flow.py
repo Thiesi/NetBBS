@@ -260,6 +260,7 @@ from netbbs.link.onboarding import (
     get_configured_link_enabled,
     get_participation,
     link_has_ever_run,
+    link_is_outgoing_only,
     set_participation,
 )
 from netbbs.link.reliable_nodes import effective_reliable_nodes, reliable_nodes_source
@@ -2362,6 +2363,39 @@ def _trust_subject_stable_id(subject: TrustSubject) -> int:
     return int(subject.subject_id[:12], 16)
 
 
+async def _how_vouches_leave_this_node(
+    lane: DatabaseLane, link_context: LinkContext | None
+) -> tuple[str, str] | None:
+    """What to say on the vouch screen of a node nobody can dial (issue #627).
+
+    A vouch is fetched from its issuer, which works only for a node that can be
+    dialed. Any other node hands what it signs to the nodes that relay for it,
+    and with no relay a vouch goes nowhere, which the SysOp issuing one has to
+    be told. Nothing to add for a node that can be dialed.
+    """
+    if not await lane.run(link_is_outgoing_only):
+        return None
+    relays = len(link_context.link_node.relays_serving_me) if link_context is not None else 0
+    if relays:
+        return (
+            f"Nobody can dial this node, so what it vouches for is handed to the "
+            f"{relays} node{'s' if relays != 1 else ''} that relay{'s' if relays == 1 else ''} "
+            "for it, and fetched from there.",
+            MUTED_COLOR,
+        )
+    if link_context is None:
+        return (
+            "Nobody can dial this node, so what it vouches for is handed to the nodes that relay "
+            "for it once it is running.",
+            MUTED_COLOR,
+        )
+    return (
+        "Nobody can dial this node and no node relays for it yet, so a vouch issued now reaches "
+        "nobody until one does.",
+        WARNING_COLOR,
+    )
+
+
 def _retry_deferred_events(link_context: LinkContext | None, subject: TrustSubject) -> None:
     """After a trust decision about a node, stop holding back what it sent (issue #630).
 
@@ -2468,6 +2502,9 @@ async def _vouch_screen(
                 fg_color=MUTED_COLOR,
             )
         )
+        travel = await _how_vouches_leave_this_node(lane, link_context)
+        if travel is not None:
+            await session.write_line(colored(travel[0], fg_color=travel[1]))
         if intent is None:
             await session.write_line("This node does not vouch for this identity.")
         else:
@@ -3890,6 +3927,15 @@ async def _published_identity_screen(
                     fg_color=METADATA_COLOR,
                 )
             )
+            if await lane.run(link_is_outgoing_only):
+                # Issue #627: said here because the line above reads as delivery.
+                await session.write_line(
+                    colored(
+                        "Nobody can dial this node, and an attestation is only ever fetched from "
+                        "the node that issued it, so no recipient receives any of this yet.",
+                        fg_color=WARNING_COLOR,
+                    )
+                )
         else:
             await session.write_line(
                 colored(

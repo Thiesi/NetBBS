@@ -2880,4 +2880,35 @@ MIGRATIONS = [
              WHERE fingerprint NOT IN (SELECT fingerprint FROM link_peers);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #627: the signed trust objects of nodes nobody can dial, deposited here "
+            "by their issuers so that subscribers can fetch them. Deliberately not rows in "
+            "`link_trust_wire_objects`: that table is what this node has admitted and acts "
+            "on, where an object already present counts as replayed and is never applied, "
+            "so a deposit stored there would be swallowed if the SysOp later named its "
+            "issuer a reporter, and until then would make a vouch this node merely carries "
+            "look like one it counts. Served in `rowid` order for the reason the admitted "
+            "store is. `link_trust_deposit_cursors` is the other side: how far into its own "
+            "objects this node has got at each relay that serves it."
+        ),
+        sql="""
+        CREATE TABLE link_trust_carried_objects (
+            content_id         TEXT PRIMARY KEY,
+            issuer_fingerprint TEXT NOT NULL,
+            object_type        TEXT NOT NULL,
+            envelope_json      TEXT NOT NULL,
+            signature_b64      TEXT NOT NULL,
+            expires_at         TEXT,
+            received_at        TEXT NOT NULL
+        );
+        CREATE INDEX idx_link_trust_carried_issuer ON link_trust_carried_objects(issuer_fingerprint);
+
+        CREATE TABLE link_trust_deposit_cursors (
+            relay_fingerprint  TEXT PRIMARY KEY,
+            last_rowid         INTEGER NOT NULL,
+            updated_at         TEXT NOT NULL
+        );
+        """,
+    ),
 ]

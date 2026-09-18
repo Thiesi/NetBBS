@@ -2686,6 +2686,17 @@ describing it.
 A bare `LinkNode` also does not know its own board genesis; a started node
 gets it from `load_link_node`, and a harness should too.
 
+`link_trust_wire_objects` is what this node has *admitted*, and being present
+there means "already applied": `ingest_trust_objects` reports it as replayed.
+What a relay holds for a node nobody can dial lives in
+`link_trust_carried_objects` for that reason (issue #627), and
+`load_trust_page_for_pull` serves an issuer from exactly one of the two.
+`resolve_known_signing_key` verifies something a third party delivered and
+accepts an introduced identity; `resolve_peer_signing_key` authenticates a
+wire peer and must not. The Profile and Published identity screens have a
+database and no node configuration, so whether this node can be dialed is
+recorded at startup (`record_link_reachability`).
+
 `link_known_identities` is the first view over `link_peers`. SQLite refuses
 to rename or rebuild a table a view depends on, so a migration that rebuilds
 `link_peers` has to drop the view first and recreate it after.

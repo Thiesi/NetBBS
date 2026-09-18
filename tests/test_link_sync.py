@@ -3358,3 +3358,94 @@ def test_a_request_that_merely_failed_is_repeated_on_the_next_occasion(tmp_path,
         assert len(asked) >= 2
     finally:
         net.close()
+
+
+# -- what a node nobody can dial issues, reaching a subscriber (issue #627) ----------------
+
+
+def test_a_vouch_from_a_node_nobody_can_dial_reaches_a_subscriber_through_its_relay(tmp_path):
+    """Trust objects are pulled from their issuer, and nobody can dial an
+    outgoing-only node, which is what most nodes are. A deposits what it signs
+    at R, which relays for it; B, which has never met A, learns who A is from R,
+    pulls A's objects from R and checks them against A's own key. R acts on
+    none of it."""
+    net = _ThreeNodes(tmp_path, enforce=True)
+    subject = TrustSubject.node("a-fourth-node-fingerprint")
+    a = net.ids["A"].fingerprint
+    register_subject(
+        net.dbs["A"].db, subject,
+        first_accepted_at="2026-08-01T12:00:00+00:00", now_iso="2026-09-15T12:00:00+00:00",
+    )
+    record_vouch_intent(net.dbs["A"].db, subject, explanation="known operator")
+    configure_trust_domain(net.dbs["B"].db, "friends", display_name="Friends")
+    configure_trusted_reporter(
+        net.dbs["B"].db, a, domain_id="friends", scopes=[], can_vouch_nodes=True,
+    )
+    net.establish("B", "A")
+
+    def held_on(name):
+        return net.dbs[name].db.connection.execute(
+            "SELECT revoked_at FROM link_trust_vouches WHERE subject_id = ?", (subject.subject_id,)
+        ).fetchall()
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                # A's first pass wins R's consent to relay and deposits; its
+                # second carries a hello that names R as its relay.
+                await net.dial("A", session)
+                await net.dial("A", session)
+                assert a in net.nodes["R"].relaying_for
+                await net.dial("B", session)
+                await net.dial("B", session)
+                assert [row[0] for row in held_on("B")] == [None]
+                assert a in net.nodes["B"].introduced and a not in net.nodes["B"].peers
+
+                withdraw_vouch_intent(net.dbs["A"].db, subject)
+                await net.dial("A", session)
+                await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        [row] = held_on("B")
+        assert row[0] is not None
+        # Carried, and not admitted: R never named A a reporter.
+        assert held_on("R") == []
+        assert net.dbs["R"].db.connection.execute(
+            "SELECT COUNT(*) FROM link_trust_carried_objects WHERE issuer_fingerprint = ?", (a,)
+        ).fetchone()[0] == 2
+    finally:
+        net.close()
+
+
+def test_a_relay_that_has_named_the_depositor_a_reporter_also_admits_what_it_carries(tmp_path):
+    """The relay cannot pull from the depositor any more than anyone else can."""
+    net = _ThreeNodes(tmp_path, enforce=True)
+    subject = TrustSubject.node("a-fourth-node-fingerprint")
+    a = net.ids["A"].fingerprint
+    register_subject(
+        net.dbs["A"].db, subject,
+        first_accepted_at="2026-08-01T12:00:00+00:00", now_iso="2026-09-15T12:00:00+00:00",
+    )
+    record_vouch_intent(net.dbs["A"].db, subject, explanation="known operator")
+    configure_trust_domain(net.dbs["R"].db, "friends", display_name="Friends")
+    configure_trusted_reporter(net.dbs["R"].db, a, domain_id="friends", scopes=[], can_vouch_nodes=True)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.dial("A", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert net.dbs["R"].db.connection.execute(
+            "SELECT COUNT(*) FROM link_trust_vouches WHERE subject_id = ?", (subject.subject_id,)
+        ).fetchone()[0] == 1
+    finally:
+        net.close()

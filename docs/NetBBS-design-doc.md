@@ -3825,14 +3825,63 @@ them, plus `more_available`. Storage order rather than receipt time, because
 a revocation is always stored after the object it retires whatever the wall
 clock said, and a subscriber that met them the other way round would skip the
 revocation and then admit what it revoked. A node's own signed objects are
-stored with the ones it carries, under its own fingerprint, so the same pull
-serves them. A carrier therefore gains no authority: the request
+stored with the ones it has admitted, under its own fingerprint, so the same
+pull serves them. A carrier gains no authority: the request
 is addressed to the carrier, while every returned object's independent issuer
 signature and local reporter configuration still control admission.
 When a configured reporter is quarantined, ordinary subscription sync stops;
 the receiver may use only `revocations_only=true`, which serves unchanged
 signal/vouch revocation objects and never advances the ordinary subscription
 cursor. A manually blocked reporter receives no containment exchange.
+
+**An issuer nobody can dial (issue #627).** A pull needs an address, and an
+outgoing-only node (§8.4) advertises none, which is the ordinary case for a
+node behind a home connection. Such a node deposits what it signs at the
+nodes that relay for it (§8.5): `POST /link/v1/trust-deposit/{fingerprint}`,
+carrying the node's own objects in the order it signed them and the signed,
+fresh, replay-bounded authorization the file route also uses. A relay accepts
+a deposit only from a node it has agreed to relay for, which is the existing
+opt-in and the existing cap on whom it holds things for; only objects the
+depositor issued itself; and only those that verify under the depositor's
+current key, counting the rest and leaving them out, since an issuer's store
+keeps what its earlier keys signed and re-signs what still matters. Only the
+issuer may deposit, although the objects would verify whoever sent them: the
+order they are stored in is the order subscribers read them in, and a third
+party replaying a withdrawn vouch ahead of its revocation would revive it.
+The depositor keeps a position per relay and starts over at a relay it
+selects afresh.
+
+What is deposited is *carried*, and kept apart from what the relay has
+admitted. Admission is application: an object already in the admitted store
+counts as replayed and is never applied, so a deposit stored there would be
+swallowed if the relay's SysOp later named its issuer a reporter, and until
+then would make a vouch the relay merely carries look like one it counts. A
+relay that has named the depositor a reporter offers the same objects to the
+ordinary admission path as well, since it cannot pull from the depositor any
+more than anyone else can. Carriage is bounded per depositor at 4,000 objects
+and 32 MiB, refused visibly beyond that, and an object stops being carried
+when its own expiry passes. An issuer's stream is served from exactly one
+store, the carried one if anything was ever deposited for it, because a
+cursor is a position in one; a cursor from the other reads as unknown and
+the subscriber starts over.
+
+A subscriber whose reporter cannot be dialed reads the relays that reporter
+publishes in its own descriptor, and pulls the carrier form of the request
+from one it has itself completed a hello with and can dial. It verifies what
+comes back against the reporter's identity however it learned it, by hello or
+by introduction (§8.11); a relay answers an identity request for a node it
+relays for, and a page that stops at a key the subscriber has not learned
+makes it ask that relay for a fresher bundle. A reporter named by fingerprint
+alone, of whom nothing is known yet, is asked about at up to three dialable
+peers. None of this relaxes what §12.4 requires of a reporter: it has to be
+established here before it is pulled at all, which for a node never met
+means by override.
+
+Remote attestations (§5.5) are not carried this way. They hold a caller's
+birthdate or real name, their recipient list is enforced by the issuer when it
+is pulled, and a carrier would either read them or enforce the list on the
+issuer's behalf. Until that is decided, the screens of an outgoing-only node
+say that an attestation it publishes is not delivered.
 
 Distinct fingerprints do not prove independence. Automatic policy counts
 locally assigned trust domains:
@@ -10135,6 +10184,53 @@ fetching its files. Persistence of the set-aside list, which is rebuilt at
 the cost of one repeat per event after a restart. A way for a requester to
 tell a responder which signers to leave out, which is what would lift the
 10,000-event bound.
+
+### Issue #627 — what a node nobody can dial issues — trust objects closed, attestations open
+
+Found while working out how the Phase 4 exercise could run on the three live
+nodes, two of which are outgoing-only. Trust objects and attestations are both
+pulled from their issuer, and an outgoing-only node has no address, so a vouch
+its SysOp issued was signed, stored and served to nobody, and said nothing
+about that. Normative description: §12.7.
+
+**Decision 1 — the issuer deposits at its relays; subscribers pull the
+carrier form.** The wire already defined a pull whose responder is not the
+issuer, and the cursor was already kept per responder and issuer. Rejected:
+flooding trust objects with content, which §12.7 rules out for the reason it
+always did, and having subscribers wait to be dialed, which an outgoing-only
+subscriber never is.
+
+**Decision 2 — deposited objects are stored apart from admitted ones.**
+Carriage and authority are different facts about an object, as "introduced"
+and "met" are about a node (#630). Rejected: a flag in the admitted store,
+where an object present counts as replayed and would never be applied after a
+later reporter grant.
+
+**Decision 3 — relay consent is the gate.** A relay already decides whom it
+holds mail for and how many; the same decision covers trust objects. Rejected:
+accepting deposits from any established peer, which would make every full
+node a store for every node it knows.
+
+**Decision 4 — only the issuer deposits.** The objects authenticate
+themselves; their order does not.
+
+**Decision 5 — verification accepts an introduced issuer; authentication of a
+wire peer does not.** `resolve_known_signing_key` is for checking something a
+third party delivered. Every route that authenticates its caller keeps
+`resolve_peer_signing_key`.
+
+**Decision 6 — attestations wait for their own decision.** The likely shape is
+sealing each attestation to its recipient node's key and delivering it through
+the relay mailbox, which already carries sealed envelopes. Until then the
+Published identity screen and the Profile toggle of an outgoing-only node say
+that nothing is delivered, and the vouch screen says how a vouch travels, or
+that it does not yet.
+
+**Not done, deliberately.** A relay does not forget what it carries when it
+stops relaying for a node; expiry and the per-depositor bound are what limit
+it, and revocations, which do not expire, count against that bound. A
+subscriber does not try relays it has not met. SysOp-written trust signals
+remain #589's next slice.
 
 ### SFTP over the SSH transport — declined
 
