@@ -102,6 +102,7 @@ from netbbs.managed_dns.state import (
     get_node_fingerprint as get_cached_node_fingerprint,
     get_admin_token as get_managed_dns_admin_token,
     get_local_listeners as get_managed_dns_local_listeners,
+    get_contact_problem as get_managed_dns_contact_problem,
     get_published as get_managed_dns_published,
     get_recovery_note as get_managed_dns_recovery_note,
     get_service_contact as get_managed_dns_service_contact,
@@ -6602,11 +6603,24 @@ async def _draw_managed_dns_status(
         ]
         if previous_name is not None:
             registration.append(Field("Current name", f"{previous_name}.netbbs.org", bold=True))
+        # Issue #640: only a name the service is waiting to hear from
+        # has a contact problem worth stating; the other states explain
+        # themselves below.
+        contact_problem = (
+            await lane.run(get_managed_dns_contact_problem)
+            if status in _MANAGED_DNS_ACTIVE_STATUSES else None
+        )
         if last_contact_at is not None:
             registration.append(Field(
                 "Last contact",
                 format_for_display(last_contact_at, override_format=display_format, override_timezone=display_timezone),
                 color=DATE_COLOR,
+            ))
+        elif status in _MANAGED_DNS_ACTIVE_STATUSES:
+            # The row used to be left out, which made a registration the
+            # service had never heard from look the same as a healthy one.
+            registration.append(Field(
+                "Last contact", "never", color=WARNING_COLOR if contact_problem is not None else VALUE_COLOR,
             ))
         sections.append(Section("Registration", registration))
 
@@ -6627,6 +6641,7 @@ async def _draw_managed_dns_status(
             meaning.extend(Note(line) for line in _managed_dns_state_guidance(
                 status, published, recovery_refused=note is not None,
                 recovery_final=note is not None and note.final, contact=contact,
+                contact_failing=contact_problem is not None,
             ))
             if note is not None:
                 when = format_for_display(
@@ -6645,6 +6660,16 @@ async def _draw_managed_dns_status(
                 meaning.append(Note("Both names were revoked together; the change cannot be cancelled."))
             else:
                 meaning.append(Note("The new name is reserved and maturing."))
+        if contact_problem is not None:
+            when = format_for_display(
+                contact_problem.at, override_format=display_format, override_timezone=display_timezone
+            )
+            # The text can quote a service's or a proxy's answer, so it
+            # is sanitised and bounded here where it is shown.
+            meaning.append(Note(
+                f"Last check-in attempt ({when}): {sanitize_text(contact_problem.text)[:400]}.",
+                color=WARNING_COLOR,
+            ))
         if meaning:
             sections.append(Section("What this means", meaning))
         if status in _MANAGED_DNS_ACTIVE_STATUSES:
@@ -6679,6 +6704,7 @@ def _managed_dns_state_guidance(
     status: ManagedDnsRegistrationStatus, published: bool, *, recovery_refused: bool = False,
     recovery_final: bool = False,
     contact: str | None = None,
+    contact_failing: bool = False,
 ) -> list[str]:
     """One or two plain sentences per registration state: what it means
     and what happens next, for a standalone (not mid-rename) name. The
@@ -6687,7 +6713,27 @@ def _managed_dns_state_guidance(
     hedged as such. `recovery_refused` is whether an automatic reclaim
     has already been turned down since this abandonment: then the
     service may no longer hold the name for this node, and the screen
-    must not claim it does (Codex review of PR #608)."""
+    must not claim it does (Codex review of PR #608). `contact_failing`
+    is whether the node's latest check-in never reached the service
+    (issue #640): then "nothing to do" is false for every active state,
+    and the screen used to say it for a week until the name was swept."""
+    if contact_failing and status in _MANAGED_DNS_ACTIVE_STATUSES:
+        if status is ManagedDnsRegistrationStatus.PENDING:
+            consequence = (
+                "Reserved, but not on its way into DNS: it goes live only after about a day of "
+                "uninterrupted contact, and this node's check-ins are not reaching the service (below)."
+            )
+        elif published:
+            consequence = "Live, but this node's check-ins are not reaching the service (below)."
+        else:
+            consequence = (
+                "Accepted, but not in DNS: the record is published on a check-in, and this node's are "
+                "not reaching the service (below)."
+            )
+        return [
+            consequence + " A name the service has not heard from for about a week is taken out of DNS "
+            "and held for this node. The node retries every 15 minutes."
+        ]
     if status is ManagedDnsRegistrationStatus.PENDING:
         return [
             "Reserved but not yet in DNS: it goes live once this node has stayed in contact with the "

@@ -31,7 +31,7 @@ from netbbs.managed_dns.state import (
     set_service_url,
 )
 from netbbs.net.managed_dns_flow import (
-    cancel_registration_rename, offer_managed_dns_opt_in, register_via_prompt,
+    cancel_registration_rename, offer_deferred_registration, offer_managed_dns_opt_in, register_via_prompt,
     release_registration, rename_registration,
 )
 from netbbs.storage.database import Database
@@ -42,7 +42,7 @@ from services.managed_dns.server import ManagedDnsServer
 # this file -- they are genuinely two different, independent classes
 # (see services.managed_dns.store's own module docstring for why).
 from services.managed_dns.store import Database as ManagedDnsServerDatabase
-from tests.test_admin_flow import FakeSession
+from tests.test_admin_flow import FakeSession, _visible
 
 
 def test_offer_opt_in_is_a_no_op_once_already_decided(tmp_path):
@@ -215,6 +215,9 @@ def test_offer_opt_in_releases_the_decision_lock_before_registration(tmp_path, m
         # node has a service address (issue #583), and the stand-in
         # below is never dialed.
         set_service_url(db, "http://127.0.0.1:1")
+        # ...and a fingerprint: a node that has never started defers the
+        # registration instead (issue #634).
+        set_node_fingerprint(db, "fp-1")
         lane = DatabaseLane(db.path)
         registration_started = asyncio.Event()
         finish_registration = asyncio.Event()
@@ -1142,3 +1145,209 @@ def test_operator_screen_survives_a_refresh_that_brings_a_new_row(tmp_path):
     text = " ".join(_visible("".join(session.written)).split())
     assert "03. 3 gamma" in text
     assert "Node fingerprint: fp-3" in text
+
+
+def _flat(session) -> str:
+    """Everything written, colour stripped and re-flowed, so a sentence
+    can be matched across the terminal-width wrap."""
+    return " ".join(_visible(" ".join(session.written)).split())
+
+
+# -- issue #640: registering checks in at once, and says so when it cannot ---
+
+
+def test_registering_after_declining_the_opt_in_accepts_it_and_checks_in_at_once(tmp_path):
+    """Issue #640 as filed: a SysOp who declined at first run and later
+    registers from the console must end up heartbeating. The opt-in half
+    has held since v7.6.0 (`set_registration_result_state`); what was
+    missing is that nothing contacted the service until the next
+    scheduled pass, so a node that could not was told to wait anyway."""
+    from netbbs.managed_dns.state import get_contact_problem, get_last_contact_at
+    from services.managed_dns.store import get_registration_by_name
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_opt_in(db, OptIn.DECLINED)
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            lane = DatabaseLane(db.path)
+            session = FakeSession(["n", "myboard", "r"])
+            await register_via_prompt(session, lane)
+            lane.close()
+            return db, session, get_registration_by_name(backend_db, "myboard")
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, session, row = asyncio.run(scenario())
+    assert get_opt_in(db) is OptIn.ACCEPTED
+    assert get_last_contact_at(db) is not None
+    assert get_contact_problem(db) is None
+    assert row.contact_started_at is not None  # the service heard from the node, not just of it
+    assert any("Registered myboard.netbbs.org -- it will go live" in line for line in session.written)
+    db.close()
+
+
+def test_registering_says_so_when_the_first_check_in_cannot_reach_the_service(tmp_path, monkeypatch):
+    """The Emptiness Machine (issue #640): `/register` went out through
+    the proxy and succeeded, every heartbeat was refused, and the SysOp
+    read "it will go live once this node has stayed in contact"."""
+    from netbbs.managed_dns.client import ManagedDnsError
+    from netbbs.managed_dns.state import get_contact_problem, get_last_contact_at
+
+    async def unreachable(_session, base_url, *, credential):
+        raise ManagedDnsError(f"could not reach {base_url}/heartbeat: Connection refused")
+
+    monkeypatch.setattr("netbbs.managed_dns.updater.heartbeat", unreachable)
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            lane = DatabaseLane(db.path)
+            session = FakeSession(["n", "myboard", "r"])
+            await register_via_prompt(session, lane)
+            lane.close()
+            return db, session
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, session = asyncio.run(scenario())
+    text = _flat(session)
+    assert "Registered myboard.netbbs.org, but this node's first check-in with the service failed" in text
+    assert "never through an HTTP proxy" in text
+    assert "it will go live once" not in text
+    # The registration itself stands; only the promise changed.
+    assert get_registered_name(db) == "myboard"
+    assert load_credential(credential_path_for(db.path)) is not None
+    assert get_last_contact_at(db) is None
+    problem = get_contact_problem(db)
+    assert problem is not None and "Connection refused" in problem.text
+    db.close()
+
+
+# -- issue #634: an opt-in accepted before the node could register -----------
+
+
+def test_accepting_the_opt_in_before_the_node_has_started_defers_the_registration(tmp_path):
+    """`netbbs.admin`'s first-SysOp bootstrap is the earlier of the
+    prompt's two anchors and runs before the node has ever started, so
+    the fingerprint the service knows a node by is not cached yet. The
+    accept used to dead-end on "identity isn't ready yet -- try again
+    after a restart", with nothing to restart and no route back."""
+    from netbbs.managed_dns.state import get_registration_deferred
+
+    db = Database(tmp_path / "node.db")
+    set_service_url(db, "http://127.0.0.1:1")
+    lane = DatabaseLane(db.path)
+    session = FakeSession(["y"])  # no editor opens: nothing more is read
+
+    asyncio.run(offer_managed_dns_opt_in(session, lane))
+
+    text = _flat(session)
+    assert get_opt_in(db) is OptIn.ACCEPTED
+    assert get_registration_deferred(db)
+    assert "once this node has started for the first time" in text
+    assert "restart" not in text
+
+    # Still not started: the deferred offer stays silent rather than
+    # repeat itself in the same bootstrap session.
+    quiet = FakeSession([])
+    asyncio.run(offer_deferred_registration(quiet, lane))
+    assert quiet.written == []
+    assert get_registration_deferred(db)
+    lane.close()
+    db.close()
+
+
+def test_the_deferred_registration_is_offered_once_the_node_has_started(tmp_path):
+    from netbbs.managed_dns.state import get_registration_deferred, set_registration_deferred
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_registration_deferred(db, True)
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")  # what netbbs.__main__.run caches at startup
+            lane = DatabaseLane(db.path)
+            session = FakeSession(["n", "myboard", "r"])
+            await offer_deferred_registration(session, lane)
+            again = FakeSession([])
+            await offer_deferred_registration(again, lane)
+            lane.close()
+            return db, session, again
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, session, again = asyncio.run(scenario())
+    assert get_registered_name(db) == "myboard"
+    assert not get_registration_deferred(db)
+    assert "before it had started" in _flat(session)
+    assert again.written == []
+    db.close()
+
+
+def test_backing_out_of_the_deferred_registration_is_a_final_answer(tmp_path):
+    from netbbs.managed_dns.state import get_registration_deferred, set_registration_deferred
+
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registration_deferred(db, True)
+    set_service_url(db, "http://127.0.0.1:1")
+    set_node_fingerprint(db, "fp-1")
+    lane = DatabaseLane(db.path)
+
+    session = FakeSession(["b"])
+    asyncio.run(offer_deferred_registration(session, lane))
+
+    assert get_registered_name(db) is None
+    assert not get_registration_deferred(db)
+    assert "DNS screen" in _flat(session)
+    again = FakeSession([])
+    asyncio.run(offer_deferred_registration(again, lane))
+    assert again.written == []
+    lane.close()
+    db.close()
+
+
+def test_registering_from_the_dns_screen_settles_a_deferred_registration(tmp_path):
+    from netbbs.managed_dns.state import (
+        get_registration_deferred, set_registration_deferred, set_registration_result_state,
+    )
+
+    db = Database(tmp_path / "node.db")
+    set_registration_deferred(db, True)
+    set_registration_result_state(
+        db, name="myboard", status=RegistrationStatus.PENDING, dynamic=True, service_url="https://dns.example",
+    )
+    assert not get_registration_deferred(db)
+    db.close()
+
+
+def test_register_on_a_node_that_never_started_says_to_start_it_not_restart_it(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_service_url(db, "http://127.0.0.1:1")
+    lane = DatabaseLane(db.path)
+    session = FakeSession([])
+
+    assert asyncio.run(register_via_prompt(session, lane)) is True
+
+    text = _flat(session)
+    assert "has never been started" in text and "Start the node once" in text
+    assert "restart" not in text
+    lane.close()
+    db.close()

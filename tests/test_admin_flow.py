@@ -7337,6 +7337,69 @@ def test_managed_dns_status_explains_pending_and_states_the_ports_convention(db,
     assert "is configured for 2222, so a caller dialling 22 needs a" in text
 
 
+def test_managed_dns_status_shows_a_registration_the_service_has_never_heard_from(db, lane, sysop):
+    """Issue #640: two nodes registered, were told to wait, and never
+    reached the service again. For the week until the names were swept
+    this screen showed PENDING, no "Last contact" row at all, and
+    "Nothing to do." It now says never, says why, and drops the
+    reassurance."""
+    from netbbs.managed_dns.state import (
+        ContactProblem, OptIn, RegistrationStatus, set_contact_problem, set_opt_in, set_registered_name,
+        set_registration_status,
+    )
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_contact_problem(db, ContactProblem(
+        at="2026-09-18T18:24:50+00:00",
+        text="could not reach https://dns.netbbs.org/heartbeat: Connection refused. Check-ins connect to "
+        "the service directly, never through an HTTP proxy",
+    ))
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Last contact: never" in text
+    assert "check-ins are not reaching the service" in text
+    assert "Last check-in attempt" in text and "Connection refused" in text
+    assert "never through an HTTP proxy" in text
+    assert "Nothing to do" not in text
+
+
+def test_managed_dns_status_says_never_contacted_without_inventing_a_problem(db, lane, sysop):
+    """Registered a moment ago, first pass not yet run: "never" is a
+    fact worth a row, and nothing else has changed."""
+    from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.PENDING)
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Last contact: never" in text
+    assert "Last check-in attempt" not in text
+    assert "goes live once this node has stayed in contact" in text
+
+
+def test_managed_dns_status_keeps_a_stale_contact_problem_off_a_released_name(db, lane, sysop):
+    from netbbs.managed_dns.state import (
+        ContactProblem, OptIn, RegistrationStatus, set_contact_problem, set_opt_in, set_registered_name,
+        set_registration_status,
+    )
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.RELEASED)
+    set_contact_problem(db, ContactProblem(at="2026-09-18T18:24:50+00:00", text="Connection refused"))
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    assert "Last check-in attempt" not in _visible(_written_text(session))
+
+
 def test_managed_dns_status_explains_abandonment_and_the_last_automatic_attempt(db, lane, sysop):
     """Design doc §16 Decision 10 (issue #600): an ABANDONED badge over a
     name the node is quietly trying to get back every pass told the

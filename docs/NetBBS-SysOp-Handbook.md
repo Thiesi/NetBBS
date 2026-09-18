@@ -166,6 +166,17 @@ First-run onboarding offers two independent choices:
 Read the choices before pressing Enter: the first-run choices default to yes.
 If not completed here, onboarding is offered at the first SysOp login.
 
+On a node that has never been started, accepting the managed subdomain records
+your answer but cannot pick the name yet: the service knows a node by an
+identity it creates on its first start. Start the node, then sign in as SysOp or
+run `netbbs.admin` again, and the name editor opens by itself, once. After that
+it is **[R]egister** on the DNS screen.
+
+Run `netbbs.admin` as the account the node runs as, as shown above. It writes
+owner-only files beside the database (the managed-DNS credential among them),
+and a copy written as root is one the node cannot read; if you had to use root,
+`chown` the state directory back afterwards.
+
 Transport and path settings come from the TOML file and command-line options;
 accounts, content, and many live settings are stored in the database. Command-line
 options override TOML settings. Run `python -m netbbs --help` using the installed
@@ -562,6 +573,13 @@ until it succeeds. **Release** is the one exit the node never undoes, and a
 name the service operator has **revoked** on a complaint is the other: the
 screen says so, names the operator's contact channel, and a different name
 can be registered as usual.
+
+Registering sends the first check-in at once and tells you if it failed. From
+then on the DNS screen shows **Last contact** (or *never*) and, whenever the
+node's latest check-in did not get through, why. Check-ins always connect to
+the service directly, never through an HTTP proxy, because the service
+publishes the address they arrive from; a node whose only way out is a proxy
+can register a name but cannot keep one.
 
 Callers reach a managed name on the standard ports (SSH 22, Telnet 23, HTTPS
 443); the record itself carries no port. NetBBS listens on 2222/2323/8080 by

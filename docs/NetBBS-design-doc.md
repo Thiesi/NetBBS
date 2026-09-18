@@ -9141,6 +9141,24 @@ prompt's bare-Enter default is now accept (both first-run choices are pre-set
 to accept so accepting everything is two keystrokes); an explicit "n" still
 declines, and the decision is recorded once either way.
 
+*The accept and the registration are separable in time (issue #634).*
+Accepting continues straight into choosing a name, because an opt-in
+that gets the SysOp nothing without a second trip through the console
+loses the friction argument above. But the earlier of the two anchors —
+first-SysOp bootstrap in `netbbs.admin` — runs before the node has ever
+started, and the fingerprint the service knows a node by is cached by
+the node's own startup; `netbbs.admin` is given a database path, not the
+node's configuration, so it cannot load or create the identity itself
+without risking a second one in the wrong directory. On such a node the
+accept is recorded as always, the SysOp is told the name is picked once
+the node has started, and the registration is *owed*: the next
+interactive surface that can register — a SysOp's authenticated login,
+or `netbbs.admin` run again, which is the only one a headless deployment
+ever uses — opens the name editor, once, exactly as the prompt would
+have. Backing out of it is a final answer, like declining the prompt;
+registering by any route settles it; the DNS screen's `[R]egister` is
+the same editor from then on.
+
 **Decision 2 (locked in) — the managed-service credential is a separate,
 auto-generated, per-registration secret, not the node's own Ed25519 key.**
 Both the self-hosted path (SysOp supplies their own dynamic-DNS
@@ -9665,6 +9683,32 @@ restored from a backup taken before it would otherwise undo it on its
 first pass — the node adopts the service's word instead; and a
 `revoked` row refuses the automatic path exactly as it refuses the
 manual one (Decision 4).
+
+*A check-in that does not happen is never silent (issue #640).* Because
+the name depends on contact, a node that holds a `pending` or `matured`
+name and did not reach the service says so on the DNS screen: "Last
+contact: never" rather than no row, the reason the latest attempt
+failed, and no "nothing to do". Two independent v7.9.0 nodes registered,
+were told the name would go live once the node had stayed in contact,
+and never contacted the service again, and every way that can happen was
+silent: a credential file the node's account cannot read (written by
+`netbbs.admin` run as another account) raised and ended the updater task
+for the rest of the node's uptime, and a node whose only route out is an
+HTTP proxy failed every check-in into the log. Hence three rules. The first check-in is
+sent by the register flow itself, the moment a registration succeeds, so
+the SysOp is told of a failure while still looking rather than promised
+a wait. Every reason a pass sends nothing for such a name — unreadable
+or missing credential, no service address, a credential another service
+issued, an opt-in that is not `accepted`, a request that got no usable
+answer, a pass that raised — is recorded for that screen, and the task
+survives a pass that raises, since what raises there is repaired without
+a restart. And the heartbeat's direct connection stays: the service
+publishes the address a check-in arrives from, which through a forward
+proxy is the proxy's, so `/register` honouring `HTTPS_PROXY` while
+`/heartbeat` does not is deliberate — it is stated where the failure is
+shown, since a SysOp cannot guess it. A node with no direct route cannot
+hold a managed name today; letting one declare a static address instead
+is an open question, not something the node works around.
 
 **Implemented.** Node-side client (`src/netbbs/managed_dns/`, shipped
 inside the installable `netbbs` package: opt-in prompt, credential

@@ -226,3 +226,30 @@ def test_blurbs_are_word_wrapped_to_the_terminal_width(tmp_path):
         if "[Y/n]" in line or "[y/N]" in line:
             continue
         assert len(line) <= 40, line
+
+
+def test_a_sysop_login_picks_up_the_registration_bootstrap_could_not_make(tmp_path):
+    """Issue #634: both first-run choices were answered at `netbbs.admin`
+    bootstrap, before the node had started and could register a managed
+    name. The login anchor used to return at once ("both decided"); it
+    now opens the name editor that accept was owed, once."""
+    from netbbs.managed_dns.state import (
+        get_registration_deferred, set_node_fingerprint, set_registration_deferred, set_service_url,
+    )
+
+    db = Database(tmp_path / "node.db")
+    set_participation(db, Participation.DECLINED)
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registration_deferred(db, True)
+    set_service_url(db, "http://127.0.0.1:1")
+    set_node_fingerprint(db, "fp-1")
+
+    session = FakeSession(["b"])  # looks at the editor, backs out
+    _run(session, db.path)
+    assert "Managed DNS registration" in _written(session)
+    assert not get_registration_deferred(db)
+
+    again = FakeSession([])
+    _run(again, db.path)
+    assert _written(again) == ""
+    db.close()

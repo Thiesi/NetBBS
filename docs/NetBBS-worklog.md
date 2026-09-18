@@ -4278,6 +4278,39 @@ HTTP, never imports it.
   texts on the service are therefore addressed to a person: the
   cumulative-cap refusal says what frees a slot and names
   `MANAGED_DNS_CONTACT`, and must never again say "try again later".
+- **`/register` and `/heartbeat` leave the node by different routes,
+  on purpose (issue #640).** Registration uses `outbound_session`
+  (`trust_env=True`, so it honours `HTTPS_PROXY`); the heartbeat and the
+  automatic reclaim use `trust_env=False`, because the service publishes
+  the address those arrive from and through a forward proxy that is the
+  proxy's. A node whose only route out is a proxy therefore registers
+  and can never check in. Do not "fix" the asymmetry by proxying the
+  heartbeat; the register flow sends the first check-in itself
+  (`updater.check_in_now`) so the SysOp hears of it at once, and the
+  failure text names the rule.
+- **Nothing between a registered name and the service may fail
+  silently.** Every early return in `_run_managed_dns_update_pass` for
+  a `pending`/`matured` name records a `ContactProblem`
+  (`managed_dns_contact_problem`) that the DNS screen shows; any
+  authoritative answer or a fresh registration clears it. A new early
+  return needs a `_note_contact_problem` call. The task also survives a
+  pass that raises: the credential is a 0600 file, so one written by
+  `netbbs.admin` run as another account (root, on the documented
+  deployment) makes `load_credential` raise `PermissionError` in the
+  node, which used to end heartbeats for the rest of its uptime even
+  after the file was chowned back. Tests that want to observe a failure
+  inside a pass call `_run_managed_dns_update_pass` directly --
+  `run_scheduled_managed_dns_updater` no longer propagates it, and a
+  test that awaits it for one will sleep for the real interval.
+- **The node fingerprint is cached by the node's startup, so
+  `netbbs.admin` on a node that has never started cannot register
+  (issue #634).** `netbbs.admin` is given `--db`, not the node's
+  configuration, and so cannot load or create the identity without
+  risking a second one beside the wrong path. An opt-in accepted there
+  sets `managed_dns_registration_deferred`; `offer_deferred_registration`
+  (SysOp login via `offer_onboarding`, and `run_admin_session`) opens the
+  editor once when the fingerprint exists, clearing the marker *before*
+  the editor so it is once-only under the opt-in's own lock.
 
 ### `examples/` is not installed package data (issue #169)
 

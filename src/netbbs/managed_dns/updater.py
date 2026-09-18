@@ -30,6 +30,7 @@ from netbbs.managed_dns.credential import (
     managed_dns_transition_lock, recover_credential_transition, stage_credential_cancellation,
 )
 from netbbs.managed_dns.state import (
+    ContactProblem,
     OptIn,
     RecoveryNote,
     RegistrationStatus,
@@ -45,6 +46,7 @@ from netbbs.managed_dns.state import (
     get_registration_status,
     get_service_url,
     foreign_credential_service_url,
+    set_contact_problem,
     set_heartbeat_reconciliation_state,
     set_recovery_note,
     set_registration_result_state,
@@ -84,18 +86,86 @@ async def run_scheduled_managed_dns_updater(
 
     A no-op pass whenever the opt-in decision isn't `ACCEPTED`, no name
     is registered, the service URL isn't configured, or the credential
-    file is missing -- every one of these just means "nothing to
-    heartbeat yet," not a failure. A failed heartbeat call
-    (`ManagedDnsError`) logs and leaves this node's cached status/
-    last-contact state untouched -- the same "a stale reachability claim
-    only ever costs a failed connection attempt" tolerance
-    `run_scheduled_reliable_nodes_refresh` already established for its own fetch
-    failures.
+    file is missing -- on a node that has not registered, every one of
+    these just means "nothing to heartbeat yet," not a failure. Once a
+    name *is* registered each of them is one (issue #640): the name
+    never goes live and is swept a week later while the DNS screen shows
+    a healthy registration, so the pass records a `ContactProblem` for
+    that screen instead of returning silently. A failed heartbeat call
+    (`ManagedDnsError`) is recorded the same way and otherwise leaves
+    this node's cached status/last-contact state untouched -- the same
+    "a stale reachability claim only ever costs a failed connection
+    attempt" tolerance `run_scheduled_reliable_nodes_refresh` already
+    established for its own fetch failures.
+
+    A pass that *raises* does not end the task. It used to, for the rest
+    of the node's uptime, and what raises here is ordinary: the
+    credential is a 0600 file, so one written by `netbbs.admin` run as
+    another account (root, on the documented deployment) cannot be read
+    by the node's, and the standalone console is a second writer that
+    can hold the database past `busy_timeout`. Both are repaired without
+    a restart, so the next pass has to be there to notice.
     """
     while True:
-        async with managed_dns_transition_lock(db.path):
-            await _run_managed_dns_update_pass(db)
+        try:
+            async with managed_dns_transition_lock(db.path):
+                await _run_managed_dns_update_pass(db)
+        except Exception as exc:
+            _report_failed_pass(db, exc)
         await sleep(interval_seconds)
+
+
+# The last failed-pass error each node database was warned about -- one
+# traceback per actual change, as for the other per-pass reports here.
+_reported_failed_passes: dict[Path, str] = {}
+
+
+def _report_failed_pass(db: Database, exc: Exception) -> None:
+    detail = f"{type(exc).__name__}: {exc}"
+    if _reported_failed_passes.get(db.path) != detail:
+        _reported_failed_passes[db.path] = detail
+        _logger.error("managed-DNS updater pass failed; retrying next pass", exc_info=exc)
+    try:
+        # Not "was never sent": a pass can raise while applying an answer.
+        _note_contact_problem(db, f"this node's check-in did not complete ({detail})", log=False)
+    except Exception:
+        # The database itself may be what failed; the log line above is
+        # then the whole of what can be said, and the task still lives.
+        _logger.debug("could not record the failed managed-DNS pass", exc_info=True)
+
+
+_CONTACT_EXPECTED_STATUSES = (RegistrationStatus.PENDING, RegistrationStatus.MATURED)
+
+# The last contact problem each node database was warned about.
+_reported_contact_problems: dict[Path, tuple[str, str]] = {}
+
+
+def _note_contact_problem(db: Database, text: str, *, log: bool = True) -> None:
+    """Record why this pass sent no heartbeat, or sent one that never
+    arrived, for a name the service is waiting to hear from -- shown on
+    the SysOp console's DNS screen. A no-op on a node with nothing the
+    service expects contact for: never registered, released, revoked, or
+    abandoned (whose own reclaim path keeps a `RecoveryNote`), where the
+    same condition is not a fault."""
+    name = get_registered_name(db)
+    if name is None or get_registration_status(db) not in _CONTACT_EXPECTED_STATUSES:
+        return
+    set_contact_problem(db, ContactProblem(at=utc_now_iso(), text=text))
+    if not log or _reported_contact_problems.get(db.path) == (name, text):
+        return
+    _reported_contact_problems[db.path] = (name, text)
+    _logger.warning(
+        "Managed-DNS registration %r is not being kept alive: %s. Until a check-in succeeds the name "
+        "stays out of DNS, or is taken out of it after about a week.", name, text,
+    )
+
+
+def _unreadable_credential_text(db_path: Path, exc: OSError) -> str:
+    return (
+        f"the registration's credential file beside the database ({credential_path_for(db_path).name}) "
+        f"could not be read: {exc.strerror or exc}. It is an owner-only file, so it must belong to the "
+        "account the node runs as -- one written by running netbbs.admin as a different account does not"
+    )
 
 
 # Which foreign issuer each node database has already been warned about
@@ -119,13 +189,28 @@ def _report_foreign_credential(db_path: Path, issuer: str, base_url: str) -> Non
 
 async def _run_managed_dns_update_pass(db: Database) -> None:
     """Heartbeat and reconcile one credential generation under its lock."""
+    global _last_heartbeat_failure
+    _last_heartbeat_failure = None
     if get_opt_in(db) is not OptIn.ACCEPTED:
+        # Registering records the decision in the same transaction as
+        # the name, so this pairing is a restored or hand-edited
+        # database -- but it is what issue #640 was filed as, and saying
+        # so costs one line.
+        _note_contact_problem(
+            db, "managed DNS is not opted in on this node although a name is registered; [R]egister on "
+            "the SysOp console's DNS screen records the decision again",
+        )
         return
-    recover_credential_transition(db.path)
+    try:
+        recover_credential_transition(db.path)
+        previous_credential = load_credential(previous_credential_path_for(db.path))
+        credential = load_credential(credential_path_for(db.path))
+    except OSError as exc:
+        _note_contact_problem(db, _unreadable_credential_text(db.path, exc))
+        return
     name = get_registered_name(db)
     base_url = get_service_url(db)
     status = get_registration_status(db)
-    previous_credential = load_credential(previous_credential_path_for(db.path))
     # An abandoned replacement can coexist with a still-live previous
     # name after the old heartbeat failed transiently. Keep servicing
     # that outstanding rename so the next successful old heartbeat
@@ -136,9 +221,15 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
         # Decision 5) and revoked is the operator's (Decision 4): nothing
         # here overrides either. The SysOp's next `[R]egister` is where
         # both end.
+        if base_url is None:
+            _note_contact_problem(db, "no managed-DNS service address is configured on this node")
         return
-    credential = load_credential(credential_path_for(db.path))
     if credential is None:
+        _note_contact_problem(
+            db, f"the registration's credential file beside the database "
+            f"({credential_path_for(db.path).name}) is missing; restore it from a backup, or [R]egister "
+            "again once the service has freed the name",
+        )
         return
     issuer = foreign_credential_service_url(db, base_url)
     if issuer is not None:
@@ -149,6 +240,10 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
         # issuer is left to lapse on its own, and the SysOp is told what
         # to do about it the moment they touch the DNS screen.
         _report_foreign_credential(db.path, issuer, base_url)
+        _note_contact_problem(
+            db, f"this node's credential was issued by {issuer} but the node is configured to use "
+            f"{base_url}, so check-ins are paused rather than present it there", log=False,
+        )
         return
     if status is RegistrationStatus.ABANDONED and not has_outstanding_rename:
         note = get_recovery_note(db)
@@ -248,6 +343,65 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
                 previous_inactive and previous_credential is not None
             ),
         )
+    else:
+        # No usable answer. `_send_heartbeat` has logged it; the DNS
+        # screen is where a SysOp who was told to wait will look.
+        _note_contact_problem(db, failed_check_in_text(_last_heartbeat_failure), log=False)
+
+
+# Why the most recent `_send_heartbeat` failed, kept for the one pass
+# that reads it straight afterwards. A module global rather than a third
+# return value because tests substitute `_send_heartbeat` with two-tuple
+# fakes, and one updater runs per process.
+_last_heartbeat_failure: ManagedDnsError | None = None
+
+
+def failed_check_in_text(exc: ManagedDnsError | None) -> str:
+    """The sentence for a check-in that got no usable answer. For one
+    that never reached the service at all, the second half is the part a
+    SysOp cannot guess: `/register` honours `HTTPS_PROXY`, the heartbeat
+    deliberately does not (the service publishes the address it arrives
+    from, which through a forward proxy is the proxy's), so a node whose
+    only way out is a proxy registers without trouble and can then never
+    check in (issue #640)."""
+    if exc is None:
+        return "the service could not be reached"
+    if exc.status_code is not None:
+        return str(exc)
+    return (
+        f"{exc}. Check-ins connect to the service directly, never through an HTTP proxy, because the "
+        "service publishes the address they arrive from"
+    )
+
+
+async def check_in_now(base_url: str, credential: str) -> tuple[HeartbeatResult | None, str | None]:
+    """One heartbeat outside the schedule, for the register flow to send
+    the moment a registration succeeds: `(result, None)`, or `(None,
+    why)`. Network only; `record_check_in` is the database half.
+
+    Registering used to end on "it will go live once this node has
+    stayed in contact", with the first contact up to 15 minutes away and
+    its failure visible only in the log -- so a SysOp whose node could
+    never check in was told to wait for something that was not going to
+    happen (issue #640). Sent from wherever `[R]egister` was pressed,
+    which for the standalone console is not the node's own process; it is
+    the same host, which is all the service reads from it."""
+    try:
+        async with ClientSession(trust_env=False) as session:
+            return await heartbeat(session, base_url, credential=credential), None
+    except ManagedDnsError as exc:
+        _logger.warning("Managed-DNS check-in after registering failed: %s", exc)
+        return None, failed_check_in_text(exc)
+
+
+def record_check_in(db: Database, result: HeartbeatResult | None, problem: str | None) -> None:
+    """Apply `check_in_now`'s outcome. A failure is only ever recorded,
+    never acted on: what a 401 means for a rename or a revocation is the
+    scheduled pass's business, with both credentials in hand."""
+    if result is not None:
+        _apply_heartbeat_result(db, result, previous_result=None, has_previous_credential=False)
+    elif problem is not None:
+        _note_contact_problem(db, problem, log=False)
 
 
 # The last automatic-reclaim failure each node database was warned about
@@ -359,6 +513,8 @@ async def _send_heartbeat(
     names travels with it -- read from `ManagedDnsError.service_status`,
     never from the message text. Tests substitute this function with
     fakes returning plain bools, which stay valid."""
+    global _last_heartbeat_failure
+    _last_heartbeat_failure = None
     try:
         # trust_env=True: honor HTTP_PROXY/HTTPS_PROXY/NO_PROXY, same as
         # every other outbound call this project makes to project-
@@ -371,6 +527,7 @@ async def _send_heartbeat(
             result = await heartbeat(session, base_url, credential=credential)
     except ManagedDnsError as exc:
         _logger.warning("Managed-DNS heartbeat failed: %s", exc)
+        _last_heartbeat_failure = exc
         inactive = exc.status_code == 401
         return None, (exc if inactive and exc.revoked else inactive)
     return result, False

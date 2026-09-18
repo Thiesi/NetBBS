@@ -76,6 +76,8 @@ LISTENERS_CONFIG_KEY = "managed_dns_listeners"
 RECOVERY_NOTE_CONFIG_KEY = "managed_dns_recovery_note"
 SERVICE_CONTACT_CONFIG_KEY = "managed_dns_service_contact"
 ADMIN_TOKEN_CONFIG_KEY = "managed_dns_admin_token"
+CONTACT_PROBLEM_CONFIG_KEY = "managed_dns_contact_problem"
+REGISTRATION_DEFERRED_CONFIG_KEY = "managed_dns_registration_deferred"
 
 # The address of the project's own `services.managed_dns` instance, as
 # shipped -- what a node reaches when its operator configures nothing,
@@ -145,6 +147,12 @@ def set_registration_result_state(
         (PREVIOUS_STATUS_CONFIG_KEY, ""),
         (PREVIOUS_PUBLISHED_CONFIG_KEY, "0"),
         (RECOVERY_NOTE_CONFIG_KEY, ""),
+        # A new registration is a new credential generation: whatever kept
+        # the last one from checking in is not known to apply to this one.
+        (CONTACT_PROBLEM_CONFIG_KEY, ""),
+        # And a name registered by any route is the end of a first-run
+        # registration that was waiting for the node's first start.
+        (REGISTRATION_DEFERRED_CONFIG_KEY, ""),
     ))
 
 
@@ -179,6 +187,9 @@ def set_heartbeat_reconciliation_state(
         # *after* the current abandonment; any authoritative answer from
         # the service supersedes it (`get_recovery_note`).
         (RECOVERY_NOTE_CONFIG_KEY, ""),
+        # Likewise a contact problem: the service answered, so whatever
+        # kept the node from reaching it no longer does.
+        (CONTACT_PROBLEM_CONFIG_KEY, ""),
     )
     # None means preserve an absent/existing contact timestamp; inactive-only
     # reconciliation has no successful contact to record.
@@ -521,6 +532,61 @@ def get_recovery_note(db: Database) -> RecoveryNote | None:
     return RecoveryNote(at=data["at"], text=data["text"], final=data.get("final") is True)
 
 
+@dataclass(frozen=True)
+class ContactProblem:
+    """Why this node's most recent check-in for a registered name never
+    reached the service (issue #640) -- an unreadable or missing
+    credential file, a service the node cannot dial directly, a pass that
+    raised. Every one of these used to be a silent no-op or a log line,
+    while the DNS screen went on showing a healthy PENDING registration
+    and the SysOp had been told to wait; the name was then swept as
+    abandoned a week later. Distinct from `RecoveryNote`, which is the
+    *service's* refusal of a reclaim: this is the node never getting as
+    far as being answered. Cleared by whatever proves contact works --
+    any authoritative answer from the service, or a fresh registration."""
+
+    at: str
+    text: str
+
+
+_MAX_CONTACT_PROBLEM_CHARS = 500
+
+
+def set_contact_problem(db: Database, problem: ContactProblem | None) -> None:
+    set_config(
+        db, CONTACT_PROBLEM_CONFIG_KEY,
+        json.dumps({"at": problem.at, "text": problem.text[:_MAX_CONTACT_PROBLEM_CHARS]}) if problem else "",
+    )
+
+
+def get_contact_problem(db: Database) -> ContactProblem | None:
+    raw = get_config(db, CONTACT_PROBLEM_CONFIG_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("at"), str) or not isinstance(data.get("text"), str):
+        return None
+    return ContactProblem(at=data["at"], text=data["text"])
+
+
+def get_registration_deferred(db: Database) -> bool:
+    """Whether the SysOp accepted the managed-DNS opt-in at a moment the
+    node could not register yet -- first-SysOp bootstrap on a node that
+    has never started, so `get_node_fingerprint` is still `None` (issue
+    #634). The accept is recorded either way (design doc §16 Decision 1:
+    asked exactly once); this remembers that the inline registration
+    Decision 1 promises with it is still owed, so the next interactive
+    surface that *can* register offers it, once."""
+    return get_config(db, REGISTRATION_DEFERRED_CONFIG_KEY) == "1"
+
+
+def set_registration_deferred(db: Database, deferred: bool) -> None:
+    set_config(db, REGISTRATION_DEFERRED_CONFIG_KEY, "1" if deferred else "")
+
+
 def set_service_contact(db: Database, contact: str | None) -> None:
     """The operator's contact channel as the service last named it in a
     refusal (design doc §16 Decision 3/4) -- kept so the DNS screen can
@@ -549,6 +615,7 @@ def set_revoked_state(db: Database, *, name: str, contact: str | None) -> None:
         (PREVIOUS_STATUS_CONFIG_KEY, RegistrationStatus.REVOKED.value if previous_name else ""),
         (PREVIOUS_PUBLISHED_CONFIG_KEY, "0"),
         (RECOVERY_NOTE_CONFIG_KEY, ""),
+        (CONTACT_PROBLEM_CONFIG_KEY, ""),
         (SERVICE_CONTACT_CONFIG_KEY, (contact or "")[:512]),
     ))
 
