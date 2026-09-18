@@ -1118,9 +1118,9 @@ def build_voidrunner_played(door_name: str, door: pathlib.Path, state: pathlib.P
 
 
 FIXTURE_BUILDERS = {
+    ("voidrunner", "outclassed"): build_voidrunner_outclassed,
     ("voidrunner", "combat"): build_voidrunner_combat,
     ("voidrunner", "played"): build_voidrunner_played,
-    ("voidrunner", "outclassed"): build_voidrunner_outclassed,
 }
 
 
