@@ -16,6 +16,7 @@ round trip is driven end to end in `test_a_toggle_reaches_a_subscriber` and
 from __future__ import annotations
 
 import base64
+import json
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -35,20 +36,27 @@ from netbbs.link.remote_attestation import (
     AttestationPullRequest,
     MAX_ACTIVE_ATTESTATIONS_PER_ISSUER,
     MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
+    NotAnAttestationRecipient,
     REMOTE_ATTESTATION_OBJECT_TYPE,
     REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE,
     UnknownAttestationSubject,
     build_remote_attestation,
     build_attestation_pull_request,
     configure_attestation_authority,
+    configure_attestation_recipient,
+    count_attestation_recipients,
+    forget_retired_remote_attestations,
     get_remote_attestation_state,
     ingest_remote_attestation,
     list_attestation_authority_fingerprints,
+    list_attestation_recipients,
     list_issued_attestations,
+    list_remote_attestation_audit,
     load_attestation_pull_cursor,
     load_issued_attestation_page,
     reconcile_issued_attestations,
     remote_meets_age,
+    remove_attestation_recipient,
     save_attestation_pull_cursor,
 )
 from netbbs.identity.keys import Identity, IdentityKind
@@ -60,6 +68,10 @@ from netbbs.timeutil import utc_now_iso
 
 NOW = datetime(2026, 9, 15, 12, tzinfo=timezone.utc)
 HOME = "home-node-fingerprint"
+#: The one node the issuer's SysOp has named (issue #596). Every served-page
+#: assertion below reads as this node; a test about anyone else says so.
+RECIPIENT = "subscriber-node-fingerprint"
+STRANGER = "unnamed-node-fingerprint"
 
 
 def stamp(value: datetime) -> str:
@@ -69,8 +81,24 @@ def stamp(value: datetime) -> str:
 @pytest.fixture
 def db(tmp_path):
     database = Database(tmp_path / "issuer.db")
+    configure_attestation_recipient(
+        database, RECIPIENT, reason="the subscriber under test", now_iso=stamp(NOW)
+    )
     yield database
     database.close()
+
+
+def page(db, *, at=None, requester=RECIPIENT, **kwargs):
+    """One served page, read as `requester` at a pinned instant.
+
+    Pinned because the page filters on liveness when it is read: left to the
+    wall clock, every assertion here would start failing ninety days after
+    `NOW`.
+    """
+    return load_issued_attestation_page(
+        db, requester_fingerprint=requester,
+        now_iso=stamp(at if at is not None else NOW + timedelta(hours=2)), **kwargs,
+    )
 
 
 @pytest.fixture
@@ -103,8 +131,8 @@ def reconcile(db, node_identity, *, at=NOW):
     )
 
 
-def served(db):
-    objects, more = load_issued_attestation_page(db)
+def served(db, *, at=None):
+    objects, more = page(db, at=at)
     assert not more
     return objects
 
@@ -171,11 +199,11 @@ def test_switching_the_toggle_off_signs_a_revocation(db, node_identity, alice):
     changes = reconcile(db, node_identity, at=NOW + timedelta(hours=1))
 
     assert [(c.action, c.reason) for c in changes] == [("revoked", "consent_withdrawn")]
+    # The retired object itself is no longer served (issue #596); what a
+    # subscriber holding it needs is the revocation, which names it.
     objects = served(db)
-    assert object_types(objects) == [
-        REMOTE_ATTESTATION_OBJECT_TYPE, REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE,
-    ]
-    assert objects[1]["envelope"]["payload"]["revoked_content_id"] == issued_id
+    assert object_types(objects) == [REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE]
+    assert objects[0]["envelope"]["payload"]["revoked_content_id"] == issued_id
 
 
 def test_re_verifying_a_value_retires_the_old_object(db, node_identity, alice):
@@ -189,13 +217,12 @@ def test_re_verifying_a_value_retires_the_old_object(db, node_identity, alice):
     changes = reconcile(db, node_identity, at=NOW + timedelta(hours=1))
 
     assert [(c.action, c.reason) for c in changes] == [("revoked", "consent_withdrawn")]
-    published = [
-        item["envelope"]["payload"].get("attested_value")
-        for item in served(db)
-        if item["envelope"]["object_type"] == REMOTE_ATTESTATION_OBJECT_TYPE
-    ]
-    assert published == ["Alice Example"]
-    assert "Alice Different" not in published
+    # Neither value is served now: the old one was retired and blanked with
+    # its consent, and the new one has no consent of its own yet.
+    assert object_types(served(db)) == [REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE]
+    everything = json.dumps(_issued_rows(db)) + json.dumps(served(db))
+    assert "Alice Example" not in everything
+    assert "Alice Different" not in everything
 
 
 def test_a_deleted_account_is_revoked_rather_than_left_standing(db, node_identity, alice):
@@ -246,16 +273,19 @@ def test_an_object_is_renewed_before_it_expires(db, node_identity, alice):
 # -- the served page ----------------------------------------------------------
 
 
-def test_the_page_keeps_revoked_and_expired_objects(db, node_identity, alice):
+def test_a_retired_attestation_is_not_served_but_its_revocation_always_is(db, node_identity, alice):
     """A subscriber that has been away needs the revocation that retired an
-    object it still holds, so the stream cannot depend on when it is read."""
+    object it still holds. It does not need the retired object, and must not
+    be handed the value inside it (issue #596, Decision 5)."""
     set_attestation_link_visible(db, alice, "name", True)
     reconcile(db, node_identity)
     set_attestation_link_visible(db, alice, "name", False)
     reconcile(db, node_identity, at=NOW + timedelta(hours=1))
 
-    much_later = load_issued_attestation_page(db)[0]
-    assert len(much_later) == 2
+    for when in (NOW + timedelta(hours=2), NOW + timedelta(days=4000)):
+        objects = served(db, at=when)
+        assert object_types(objects) == [REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE]
+        assert "Alice Example" not in json.dumps(objects)
 
 
 def test_the_cursor_resumes_rather_than_restarts(db, node_identity, alice):
@@ -264,16 +294,16 @@ def test_the_cursor_resumes_rather_than_restarts(db, node_identity, alice):
     set_attestation_link_visible(db, alice, "age", True)
     reconcile(db, node_identity, at=NOW + timedelta(hours=1))
 
-    first, more = load_issued_attestation_page(db, limit=1)
+    first, more = page(db, limit=1)
     assert more
-    rest, more = load_issued_attestation_page(db, after_content_id=_content_id(first[0]), limit=1)
+    rest, more = page(db, after_content_id=_content_id(first[0]), limit=1)
     assert not more
     assert _content_id(rest[0]) != _content_id(first[0])
 
 
 def test_an_unknown_cursor_is_refused(db, node_identity):
     with pytest.raises(ValueError, match="unknown attestation pull cursor"):
-        load_issued_attestation_page(db, after_content_id="f" * 64)
+        page(db, after_content_id="f" * 64)
 
 
 def test_the_pull_cursor_round_trips(db):
@@ -689,7 +719,7 @@ def test_rotating_the_signing_key_reissues_a_live_attestation(db, node_identity,
     silently broken for months."""
     set_attestation_link_visible(db, alice, "name", True)
     reconcile(db, node_identity)
-    first = load_issued_attestation_page(db)[0]
+    first = page(db)[0]
 
     rotated = Identity(
         kind=IdentityKind.NODE, label="issuer",
@@ -700,7 +730,7 @@ def test_rotating_the_signing_key_reissues_a_live_attestation(db, node_identity,
     )
 
     assert [(c.action, c.reason) for c in changes] == [("renewed", "signing_key_rotated")]
-    served = load_issued_attestation_page(db)[0]
+    served = page(db)[0]
     assert len(served) == 2
     # The replacement verifies against the key a subscriber would now resolve.
     newest = served[-1]
@@ -724,7 +754,7 @@ def test_a_value_that_can_never_be_exported_is_reported_not_swallowed(db, node_i
 
     assert [(c.action, c.attribute) for c in changes] == [("refused", "name")]
     assert "not_exportable" in changes[0].reason
-    assert load_issued_attestation_page(db)[0] == []
+    assert page(db)[0] == []
 
 
 def test_the_served_stream_survives_the_issuers_clock_going_backwards(db, node_identity, alice):
@@ -733,14 +763,287 @@ def test_the_served_stream_survives_the_issuers_clock_going_backwards(db, node_i
     subscriber would keep trusting withdrawn identity data."""
     set_attestation_link_visible(db, alice, "name", True)
     reconcile(db, node_identity)
-    cursor = _content_id(load_issued_attestation_page(db)[0][0])
+    cursor = _content_id(page(db)[0][0])
 
     # The clock steps back an hour, and consent is withdrawn in that window.
     set_attestation_link_visible(db, alice, "name", False)
     reconcile(db, node_identity, at=NOW - timedelta(hours=1))
 
-    page, _ = load_issued_attestation_page(db, after_content_id=cursor)
+    objects, _ = page(db, after_content_id=cursor)
 
-    assert [item["envelope"]["object_type"] for item in page] == [
+    assert [item["envelope"]["object_type"] for item in objects] == [
         REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE
     ]
+
+
+# -- who may read the page, and what opting out retracts (issue #596) ---------
+
+
+def _issued_rows(db):
+    return [dict(row) for row in db.connection.execute(
+        "SELECT * FROM link_issued_remote_attestations ORDER BY rowid"
+    ).fetchall()]
+
+
+def test_a_node_the_sysop_has_not_named_is_refused(db, node_identity, alice):
+    """The defect itself: the page took no requester, so every peer the trust
+    policy admitted read every value this node had ever signed."""
+    set_attestation_link_visible(db, alice, "age", True)
+    reconcile(db, node_identity)
+
+    with pytest.raises(NotAnAttestationRecipient):
+        page(db, requester=STRANGER)
+    assert object_types(served(db)) == [REMOTE_ATTESTATION_OBJECT_TYPE]
+
+
+def test_the_recipient_list_starts_empty(tmp_path, node_identity):
+    """Nothing seeds it -- not the authorities this node accepts, which point
+    the other way. An upgraded node shares with nobody until told to."""
+    database = Database(tmp_path / "fresh.db")
+    try:
+        configure_attestation_authority(
+            database, RECIPIENT, attributes=["age", "name"], reason="we accept theirs",
+            now_iso=stamp(NOW),
+        )
+        assert list_attestation_recipients(database) == []
+        assert count_attestation_recipients(database) == 0
+        with pytest.raises(NotAnAttestationRecipient):
+            page(database)
+    finally:
+        database.close()
+
+
+def test_a_refused_node_cannot_probe_for_content_ids(db, node_identity, alice):
+    """The recipient check comes before the cursor lookup, or "unknown cursor"
+    versus a refusal would tell a stranger which objects exist here."""
+    set_attestation_link_visible(db, alice, "age", True)
+    reconcile(db, node_identity)
+    real = _content_id(served(db)[0])
+
+    for cursor in (real, "f" * 64):
+        with pytest.raises(NotAnAttestationRecipient):
+            page(db, requester=STRANGER, after_content_id=cursor)
+
+
+def test_naming_and_removing_a_recipient_is_audited(db):
+    configure_attestation_recipient(db, STRANGER, reason="met at a con", now_iso=stamp(NOW))
+    configure_attestation_recipient(db, STRANGER, reason="met at a con, twice", now_iso=stamp(NOW))
+    assert [(r.fingerprint, r.reason) for r in list_attestation_recipients(db)] == [
+        (RECIPIENT, "the subscriber under test"), (STRANGER, "met at a con, twice"),
+    ]
+    assert count_attestation_recipients(db) == 2
+
+    remove_attestation_recipient(db, STRANGER, now_iso=stamp(NOW))
+    assert count_attestation_recipients(db) == 1
+    with pytest.raises(ValueError, match="missing or already removed"):
+        remove_attestation_recipient(db, STRANGER, now_iso=stamp(NOW))
+
+    trail = [
+        (entry.object_id, entry.action)
+        for entry in list_remote_attestation_audit(db)
+        if entry.object_kind == "recipient" and entry.object_id == STRANGER
+    ]
+    assert sorted(trail) == sorted([(STRANGER, "created"), (STRANGER, "updated"), (STRANGER, "removed")])
+
+
+def test_a_recipient_needs_a_reason(db):
+    with pytest.raises(ValueError, match="required"):
+        configure_attestation_recipient(db, STRANGER, reason="   ")
+
+
+def test_a_removed_recipient_resumes_where_it_stopped_when_named_again(db, node_identity, alice):
+    """Why a refusal and not a revocations-only stream: a refused node's
+    cursor never moves, so a later grant delivers what it missed."""
+    set_attestation_link_visible(db, alice, "age", True)
+    reconcile(db, node_identity)
+    cursor = _content_id(served(db)[0])
+
+    remove_attestation_recipient(db, RECIPIENT, now_iso=stamp(NOW))
+    set_attestation_link_visible(db, alice, "name", True)
+    reconcile(db, node_identity, at=NOW + timedelta(hours=1))
+    with pytest.raises(NotAnAttestationRecipient):
+        page(db, after_content_id=cursor)
+
+    configure_attestation_recipient(db, RECIPIENT, reason="back", now_iso=stamp(NOW))
+    objects, _ = page(db, after_content_id=cursor)
+    assert [item["envelope"]["payload"]["attribute"] for item in objects] == ["name"]
+
+
+def test_revoking_blanks_the_value_and_keeps_the_row(db, node_identity, alice):
+    set_attestation_link_visible(db, alice, "age", True)
+    reconcile(db, node_identity)
+    issued_id = _content_id(served(db)[0])
+    assert "1990-04-01" in json.dumps(_issued_rows(db))
+
+    set_attestation_link_visible(db, alice, "age", False)
+    reconcile(db, node_identity, at=NOW + timedelta(hours=1))
+
+    rows = _issued_rows(db)
+    assert "1990-04-01" not in json.dumps(rows)
+    tombstone = next(row for row in rows if row["content_id"] == issued_id)
+    assert tombstone["attested_value"] is None
+    assert tombstone["envelope_json"] == "" and tombstone["signature_b64"] == ""
+    assert tombstone["redacted_at"] is not None and tombstone["revoked_at"] is not None
+    # The revocation itself carries no value and is left whole.
+    revocation = next(row for row in rows if row["object_type"] == REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE)
+    assert revocation["envelope_json"] and revocation["redacted_at"] is None
+
+
+def test_a_cursor_naming_a_redacted_object_still_resumes(db, node_identity, alice):
+    """The stated reason for serving history whole was resumability. It
+    survives: the tombstone keeps its position, and the revocation a
+    returning subscriber needs is after it."""
+    set_attestation_link_visible(db, alice, "age", True)
+    reconcile(db, node_identity)
+    cursor = _content_id(served(db)[0])
+
+    set_attestation_link_visible(db, alice, "age", False)
+    reconcile(db, node_identity, at=NOW + timedelta(hours=1))
+
+    objects, more = page(db, after_content_id=cursor)
+    assert not more
+    assert object_types(objects) == [REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE]
+    assert objects[0]["envelope"]["payload"]["revoked_content_id"] == cursor
+
+
+def test_an_expired_object_is_not_served_even_before_the_sweep_runs(db, node_identity, alice):
+    """Liveness is a read-time filter, so what is served never depends on when
+    a sync pass last ran -- a node whose Link was down for a year does not
+    come back serving last year's values."""
+    set_attestation_link_visible(db, alice, "age", True)
+    reconcile(db, node_identity)
+    after_expiry = NOW + timedelta(days=91)
+
+    assert served(db, at=after_expiry) == []
+    assert "1990-04-01" in json.dumps(_issued_rows(db))  # not swept yet
+
+    # Consent was withdrawn meanwhile, so the pass re-issues nothing; it
+    # still blanks what ran out, which no revocation ever covers.
+    set_attestation_link_visible(db, alice, "age", False)
+    reconcile(db, node_identity, at=after_expiry)
+    assert "1990-04-01" not in json.dumps(_issued_rows(db))
+    assert served(db, at=after_expiry) == []
+
+
+def test_a_page_of_retired_objects_does_not_claim_more_and_return_nothing(db, node_identity, alice):
+    """The subscriber treats "more, but no objects" as a protocol error, so
+    the filter has to be in the query that sizes the page, not after it."""
+    set_attestation_link_visible(db, alice, "age", True)
+    set_attestation_link_visible(db, alice, "name", True)
+    reconcile(db, node_identity)
+    after_expiry = NOW + timedelta(days=91)
+
+    objects, more = page(db, at=after_expiry, limit=1)
+    assert objects == [] and not more
+
+
+def test_a_subscriber_forgets_a_value_it_is_told_is_withdrawn(db, node_identity, alice, subscriber):
+    subject = _subscribe(subscriber, node_identity)
+    set_attestation_link_visible(db, alice, "age", True)
+    reconcile(db, node_identity)
+    original = served(db)[0]
+    ingest_remote_attestation(
+        subscriber, original, issuer_verify_key=node_identity.verify_key, now_iso=stamp(NOW)
+    )
+
+    set_attestation_link_visible(db, alice, "age", False)
+    later = NOW + timedelta(hours=1)
+    reconcile(db, node_identity, at=later)
+    for item in served(db):
+        ingest_remote_attestation(
+            subscriber, item, issuer_verify_key=node_identity.verify_key, now_iso=stamp(later)
+        )
+
+    def held():
+        return [dict(row) for row in subscriber.connection.execute(
+            "SELECT * FROM link_remote_attestations"
+        ).fetchall()]
+
+    assert len(held()) == 1
+    assert "1990-04-01" not in json.dumps(held())
+    assert held()[0]["redacted_at"] is not None
+    assert not remote_meets_age(subscriber, subject, 18, now_iso=stamp(later))
+
+    # A copy of the original offered again is a no-op, not a way back in.
+    ingest_remote_attestation(
+        subscriber, original, issuer_verify_key=node_identity.verify_key, now_iso=stamp(later)
+    )
+    assert "1990-04-01" not in json.dumps(held())
+    assert not remote_meets_age(subscriber, subject, 18, now_iso=stamp(later))
+
+
+def test_a_subscriber_forgets_a_value_that_has_expired(db, node_identity, alice, subscriber):
+    subject = _subscribe(subscriber, node_identity)
+    set_attestation_link_visible(db, alice, "name", True)
+    reconcile(db, node_identity)
+    for item in served(db):
+        ingest_remote_attestation(
+            subscriber, item, issuer_verify_key=node_identity.verify_key, now_iso=stamp(NOW)
+        )
+
+    assert forget_retired_remote_attestations(subscriber, now_iso=stamp(NOW + timedelta(days=1))) == 0
+    assert get_remote_attestation_state(
+        subscriber, subject, "name", now_iso=stamp(NOW + timedelta(days=1))
+    ).attestation.attested_value == "Alice Example"
+
+    after_expiry = NOW + timedelta(days=91)
+    assert forget_retired_remote_attestations(subscriber, now_iso=stamp(after_expiry)) == 1
+    assert forget_retired_remote_attestations(subscriber, now_iso=stamp(after_expiry)) == 0
+    dump = json.dumps([dict(row) for row in subscriber.connection.execute(
+        "SELECT * FROM link_remote_attestations"
+    ).fetchall()])
+    assert "Alice Example" not in dump
+    assert not get_remote_attestation_state(
+        subscriber, subject, "name", now_iso=stamp(after_expiry)
+    ).accepted
+
+
+def test_the_migration_redacts_what_was_already_revoked(tmp_path, monkeypatch):
+    """v7.7.0 and v7.8.x revoked by stamping the row. An upgraded node must
+    not keep those values, on either side of the wire."""
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if m.description.startswith("Issue #596:"))
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    path = tmp_path / "pre-596.db"
+    old = Database(path)
+    subject = TrustSubject.user(HOME, "alice")
+    register_subject(old, subject, first_accepted_at=stamp(NOW), now_iso=stamp(NOW))
+    envelope = json.dumps({"payload": {"attested_value": "1990-04-01"}})
+    for content_id, revoked_at in (("a" * 64, stamp(NOW)), ("b" * 64, None)):
+        old.connection.execute(
+            """INSERT INTO link_issued_remote_attestations
+               (content_id, object_type, user_id, attribute, attested_value, envelope_json,
+                signature_b64, issued_at, expires_at, signing_key_fingerprint, revoked_at, created_at)
+               VALUES (?, 'remote_identity_attestation', NULL, 'age', '1990-04-01', ?, 'sig',
+                       ?, ?, 'key', ?, ?)""",
+            (content_id, envelope, stamp(NOW), stamp(NOW + timedelta(days=90)), revoked_at, stamp(NOW)),
+        )
+        old.connection.execute(
+            """INSERT INTO link_remote_attestations
+               (content_id, issuer_fingerprint, subject_id, attribute, attested_value,
+                subject_opt_in, issued_at, expires_at, envelope_json, signature_b64,
+                received_at, revoked_at)
+               VALUES (?, ?, ?, 'age', '1990-04-01', 1, ?, ?, ?, 'sig', ?, ?)""",
+            (content_id, HOME, subject.subject_id, stamp(NOW), stamp(NOW + timedelta(days=90)),
+             envelope, stamp(NOW), revoked_at),
+        )
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+
+    upgraded = Database(path)
+    try:
+        for table in ("link_issued_remote_attestations", "link_remote_attestations"):
+            rows = {
+                row["content_id"]: dict(row)
+                for row in upgraded.connection.execute(f"SELECT * FROM {table}").fetchall()
+            }
+            assert "1990-04-01" not in json.dumps(rows["a" * 64]), table
+            assert rows["a" * 64]["redacted_at"] == stamp(NOW), table
+            assert rows["b" * 64]["attested_value"] == "1990-04-01", table
+            assert rows["b" * 64]["redacted_at"] is None, table
+        assert list_attestation_recipients(upgraded) == []
+    finally:
+        upgraded.close()

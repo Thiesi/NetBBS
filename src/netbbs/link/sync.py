@@ -192,6 +192,7 @@ from netbbs.link.store import build_inventory_request, delete_relay_consent, sav
 from netbbs.link.remote_attestation import (
     UnknownAttestationSubject,
     build_attestation_pull_request,
+    forget_retired_remote_attestations,
     ingest_remote_attestation,
     list_attestation_authority_fingerprints,
     load_attestation_pull_cursor,
@@ -199,6 +200,7 @@ from netbbs.link.remote_attestation import (
     save_attestation_pull_cursor,
 )
 from netbbs.link.transport import (
+    AttestationRecipientRefused,
     LinkTransportError,
     deposit_into_relay_mailbox,
     dial_hello,
@@ -436,6 +438,7 @@ async def run_link_sync(
         await _pull_attestation_authorities(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
+        await _forget_retired_attestations(lane)
         # Issue #58: relay selection/pickup only makes sense
         # for an outgoing-only node -- a full peer is directly dialable
         # by definition, so it has nothing to gain from seeking relays
@@ -904,6 +907,20 @@ async def _reconcile_own_attestations(node: LinkNode, lane: DatabaseLane) -> Non
         )
 
 
+async def _forget_retired_attestations(lane: DatabaseLane) -> None:
+    """Blank the values of received attestations that have expired (issue #596).
+
+    A revoked one is forgotten as its revocation is ingested. Expiry has no
+    event, so it is swept here, after the pull: every pass, and whether or not
+    any authority is still configured, since removing an authority leaves its
+    rows behind.
+    """
+    try:
+        await lane.run(forget_retired_remote_attestations)
+    except (ValueError, sqlite3.Error) as exc:
+        _logger.warning("Link attestations: could not forget retired values: %s", exc)
+
+
 async def _pull_attestation_authorities(
     node: LinkNode, session: ClientSession, lane: DatabaseLane,
     *, enforce_trust_policy: bool = False,
@@ -1013,6 +1030,18 @@ async def _pull_one_attestation_authority(
                     issuer, _MAX_TRUST_PULL_PAGES_PER_PASS,
                 )
             break
+        except AttestationRecipientRefused:
+            # Not a fault and not worth another address: the authority's SysOp
+            # has not named this node. A WARNING so it reaches the bounded
+            # diagnostic log, where the SysOp who configured the authority and
+            # is wondering why nothing arrives will look.
+            _logger.warning(
+                "Link attestation pull: authority %s has not named this node as an "
+                "attestation recipient, so nothing will arrive from it. Its SysOp adds "
+                "this node under Published identity -> Recipients.",
+                issuer,
+            )
+            return
         except (LinkTransportError, LinkProtocolError, ValueError) as exc:
             _logger.warning(
                 "Link attestation pull: rejected a response from authority %s: %s", issuer, exc

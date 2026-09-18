@@ -42,9 +42,11 @@ from netbbs.link.remote_attestation import (
     reconcile_issued_attestations,
     build_remote_attestation,
     configure_attestation_authority,
+    configure_attestation_recipient,
     get_remote_attestation_state,
     ingest_remote_attestation,
     list_attestation_authorities,
+    list_attestation_recipients,
 )
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.maintenance import MaintenanceMode
@@ -9108,3 +9110,88 @@ def test_a_revoked_row_is_dated_by_its_revocation_not_its_expiry(db, lane, sysop
     rows = [line for line in text.splitlines() if line.startswith("alice ")]
     assert rows, text
     assert "expires" not in rows[-1]
+
+
+# -- attestation recipients: which nodes any of it goes to (issue #596) ------
+
+
+def test_published_identity_screen_warns_that_nothing_leaves_with_no_recipients(db, lane, sysop):
+    """A list of published objects beside an empty recipient list publishes
+    nothing, and the SysOp should not have to infer that."""
+    _shared_attestation(db, sysop=sysop)
+    _publish(db)
+    session = FakeSession(["s", "p", "p", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "No recipient nodes are named, so none of this leaves the node." in text
+
+
+def test_published_identity_screen_counts_its_recipients(db, lane, sysop):
+    configure_attestation_recipient(db, "a" * 32, reason="first")
+    configure_attestation_recipient(db, "b" * 32, reason="second")
+    session = FakeSession(["s", "p", "p", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "Given to 2 recipient nodes." in text
+    assert "No recipient nodes are named" not in text
+
+
+def test_sysop_can_name_an_attestation_recipient(db, lane, sysop):
+    recipient_node = "abcdefghijklmnopqrstuvwxyz234567"
+    # Published identity -> [R]ecipients -> [A]dd/update -> [N]ode -> "(type
+    # it)" -> the fingerprint -> [R]eason -> [S]ave.
+    session = FakeSession(
+        [
+            "s", "p", "p", "r", "a", "n", "0", "1", recipient_node,
+            "r", "their SysOp asked at the meet", "s", "b", "b", "b", "b", "b",
+        ]
+    )
+
+    _run(session, lane, sysop)
+
+    recipients = list_attestation_recipients(db)
+    assert [(r.fingerprint, r.reason) for r in recipients] == [
+        (recipient_node, "their SysOp asked at the meet")
+    ]
+    text = _visible(_written_text(session))
+    assert "Attestation recipient changed and audited." in text
+    # The screen is reached without answering anything, and says what an
+    # empty list means before it is changed.
+    assert "No verified age or name leaves this node" in " ".join(text.split())
+    # A recipient is a node: there is no attribute scope to set (Decision 2).
+    assert "]ttributes" not in text.split("Attestation recipient")[1].split("changed and audited")[0]
+
+
+def test_sysop_can_stop_sharing_with_a_recipient_and_is_told_what_that_does(db, lane, sysop):
+    recipient_node = "abcdefghijklmnopqrstuvwxyz234567"
+    configure_attestation_recipient(db, recipient_node, reason="asked")
+    session = FakeSession(["s", "p", "p", "r", "r", "0", "1", "y", "b", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    assert list_attestation_recipients(db) == []
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Attestation recipient removed and audited." in text
+    assert "What the node already holds stays with it until each attestation expires" in text
+
+
+def test_declining_the_confirm_keeps_the_recipient(db, lane, sysop):
+    recipient_node = "abcdefghijklmnopqrstuvwxyz234567"
+    configure_attestation_recipient(db, recipient_node, reason="asked")
+    session = FakeSession(["s", "p", "p", "r", "r", "0", "1", "n", "b", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    assert [r.fingerprint for r in list_attestation_recipients(db)] == [recipient_node]
+
+
+def test_recipients_screen_can_be_left_without_writing_anything(db, lane, sysop):
+    session = FakeSession(["s", "p", "p", "r", "b", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    assert list_attestation_recipients(db) == []

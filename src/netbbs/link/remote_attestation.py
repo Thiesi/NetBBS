@@ -45,6 +45,15 @@ class UnknownAttestationSubject(ValueError):
     """
 
 
+class NotAnAttestationRecipient(Exception):
+    """The requester is not on this node's attestation recipient list.
+
+    Deliberately not a `ValueError`: the pull handler answers a malformed
+    request with HTTP 400, and this is a well-formed request from a node the
+    SysOp has not chosen to tell (design doc §16, issue #596, Decision 3).
+    """
+
+
 REMOTE_ATTESTATION_OBJECT_TYPE = "remote_identity_attestation"
 REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE = "remote_identity_attestation_revocation"
 _ATTRIBUTES = frozenset({"age", "name"})
@@ -58,6 +67,15 @@ _FUTURE_TOLERANCE = timedelta(minutes=5)
 class AttestationAuthority:
     fingerprint: str
     attributes: tuple[str, ...]
+    reason: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class AttestationRecipient:
+    """One node this node serves its own signed attestations to."""
+
+    fingerprint: str
     reason: str
     created_at: str
 
@@ -421,6 +439,9 @@ def ingest_remote_attestation(
                    WHERE content_id = ? AND revoked_at IS NULL""",
                 (content_id, now_value, revoked_id),
             )
+            # Issue #596, Decision 6: told that the subject withdrew it, this
+            # node forgets the value rather than merely stops relying on it.
+            _forget_received_values(db, now_value, content_id=revoked_id)
             _audit(db, target["subject_id"], "attestation", revoked_id, "revoked", {"revocation_content_id": content_id}, None, now_value)
             _recompute_subject_id(db, target["subject_id"], now_value)
         return content_id
@@ -474,6 +495,42 @@ def ingest_remote_attestation(
         _audit(db, subject.subject_id, "attestation", content_id, "received", {"issuer": issuer, "attribute": attribute}, None, now_value)
         _recompute_subject_id(db, subject.subject_id, now_value)
     return content_id
+
+
+def _forget_received_values(
+    db: Database, now_value: str, *, content_id: str | None = None
+) -> int:
+    """Blank the value-bearing bytes of received attestations that are retired.
+
+    The row stays: `link_remote_attestation_revocations`, the effective
+    projection and the audit trail all reference it, and its content ID is what
+    makes a re-offered copy of the same object an `INSERT OR IGNORE` no-op
+    rather than a way to get the value back. `_recompute` selects only
+    unrevoked, unexpired candidates, so nothing that reads a value can reach a
+    row this has touched.
+    """
+    where = "redacted_at IS NULL AND (revoked_at IS NOT NULL OR expires_at <= ?)"
+    parameters: list[object] = [now_value, now_value]
+    if content_id is not None:
+        where += " AND content_id = ?"
+        parameters.append(content_id)
+    return db.connection.execute(
+        f"""UPDATE link_remote_attestations
+            SET attested_value = '', envelope_json = '', signature_b64 = '', redacted_at = ?
+            WHERE {where}""",
+        parameters,
+    ).rowcount
+
+
+def forget_retired_remote_attestations(db: Database, *, now_iso: str | None = None) -> int:
+    """Forget every received value whose attestation has been revoked or has expired.
+
+    A revocation is forgotten as it is ingested; expiry has no event to hang
+    that on, so the sync pass calls this. Returns how many rows it blanked.
+    """
+    now_value, _ = _now(now_iso)
+    with db.connection:
+        return _forget_received_values(db, now_value)
 
 
 def _issuer_is_locally_usable(db: Database, fingerprint: str) -> tuple[bool, str]:
@@ -799,6 +856,11 @@ def _audit(
 
 ATTESTATION_PULL_REQUEST_OBJECT_TYPE = "remote_attestation_pull_request"
 
+# What the pull endpoint answers a node that is not on the recipient list, in
+# the `reason_code` field a policy rejection already carries. Wire-visible: a
+# subscriber matches on it to tell its SysOp what to ask for.
+NOT_AN_ATTESTATION_RECIPIENT_REASON_CODE = "not_an_attestation_recipient"
+
 MAX_ATTESTATION_OBJECTS_PER_RESPONSE = 100
 MAX_ATTESTATION_RESPONSE_BYTES = 1024 * 1024
 
@@ -834,6 +896,96 @@ class IssuedAttestationChange:
     user_id: int | None
     attribute: str
     reason: str
+
+
+def configure_attestation_recipient(
+    db: Database,
+    fingerprint: str,
+    *,
+    reason: str,
+    actor_user_id: int | None = None,
+    now_iso: str | None = None,
+) -> None:
+    """Name `fingerprint` as a node this one serves its signed attestations to.
+
+    The issuing mirror of `configure_attestation_authority`, and deliberately
+    narrower: a recipient is a node, with no attribute scope (design doc §16,
+    issue #596, Decision 2). The caller already scopes per attribute with two
+    toggles, and a per-attribute grant would make a requester's stream depend
+    on its grant history, which a subscriber-owned position cursor cannot
+    express.
+    """
+    if not fingerprint or not reason.strip():
+        raise ValueError("recipient fingerprint and reason are required")
+    now_value, _ = _now(now_iso)
+    with db.connection:
+        exists = db.connection.execute(
+            "SELECT 1 FROM link_attestation_recipients WHERE fingerprint = ?", (fingerprint,)
+        ).fetchone()
+        db.connection.execute(
+            """INSERT INTO link_attestation_recipients
+               (fingerprint, reason, actor_user_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(fingerprint) DO UPDATE SET reason = excluded.reason,
+                 actor_user_id = excluded.actor_user_id, updated_at = excluded.updated_at""",
+            (fingerprint, reason, actor_user_id, now_value, now_value),
+        )
+        _audit(
+            db, None, "recipient", fingerprint, "updated" if exists else "created",
+            {"reason": reason}, actor_user_id, now_value,
+        )
+
+
+def remove_attestation_recipient(
+    db: Database,
+    fingerprint: str,
+    *,
+    actor_user_id: int | None = None,
+    now_iso: str | None = None,
+) -> None:
+    """Stop serving `fingerprint`. A statement about the future only.
+
+    What the node already pulled stays with it until each object's own expiry;
+    a removed recipient is refused outright, so it receives no further
+    revocations either (Decision 3 records why that cost is accepted).
+    """
+    now_value, _ = _now(now_iso)
+    with db.connection:
+        row = db.connection.execute(
+            "SELECT reason FROM link_attestation_recipients WHERE fingerprint = ?", (fingerprint,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("attestation recipient is missing or already removed")
+        db.connection.execute(
+            "DELETE FROM link_attestation_recipients WHERE fingerprint = ?", (fingerprint,)
+        )
+        _audit(db, None, "recipient", fingerprint, "removed", {"reason": row["reason"]}, actor_user_id, now_value)
+
+
+def list_attestation_recipients(db: Database) -> list[AttestationRecipient]:
+    return [
+        AttestationRecipient(row["fingerprint"], row["reason"], row["created_at"])
+        for row in db.connection.execute(
+            "SELECT fingerprint, reason, created_at FROM link_attestation_recipients ORDER BY fingerprint"
+        ).fetchall()
+    ]
+
+
+def count_attestation_recipients(db: Database) -> int:
+    """How many nodes a caller's shared attestation can currently reach.
+
+    What the Profile toggle shows (Decision 4): the caller is told how many,
+    the SysOp sees which.
+    """
+    return int(
+        db.connection.execute("SELECT COUNT(*) FROM link_attestation_recipients").fetchone()[0]
+    )
+
+
+def is_attestation_recipient(db: Database, fingerprint: str) -> bool:
+    return db.connection.execute(
+        "SELECT 1 FROM link_attestation_recipients WHERE fingerprint = ?", (fingerprint,)
+    ).fetchone() is not None
 
 
 def list_attestation_authority_fingerprints(db: Database) -> list[str]:
@@ -887,6 +1039,25 @@ def _store_issued(
          issued_at, expires_at, signing_key_fingerprint, now_value),
     )
     return content_id
+
+
+def _redact_retired_issued(db: Database, now_value: str) -> int:
+    """Blank the value-bearing columns of issued attestations that are retired.
+
+    Issue #596, Decision 5. Revocation used to stamp the row and leave the
+    envelope, with `attested_value` inside it, to be served to whoever pulled
+    from the start next year. The row stays as a tombstone: a subscriber whose
+    cursor names it must still resolve to a position, and the SysOp's history
+    listing still has something to show. Revocation objects carry no value and
+    are never touched.
+    """
+    return db.connection.execute(
+        """UPDATE link_issued_remote_attestations
+           SET attested_value = NULL, envelope_json = '', signature_b64 = '', redacted_at = ?
+           WHERE object_type = ? AND redacted_at IS NULL
+             AND (revoked_at IS NOT NULL OR expires_at <= ?)""",
+        (now_value, REMOTE_ATTESTATION_OBJECT_TYPE, now_value),
+    ).rowcount
 
 
 def _revoke_issued(
@@ -1034,6 +1205,10 @@ def reconcile_issued_attestations(
                 signing_key_fingerprint=signing_fingerprint,
             )
             changes.append(IssuedAttestationChange(action, content_id, user_id, attribute, reason))
+        # After the revocations above, so an object retired this pass loses its
+        # value in the transaction that retires it; and unconditionally, so an
+        # object that merely ran out -- which nothing revokes -- loses it too.
+        _redact_retired_issued(db, now_value)
     return changes
 
 
@@ -1129,18 +1304,37 @@ def list_issued_attestations(
 def load_issued_attestation_page(
     db: Database,
     *,
+    requester_fingerprint: str,
     after_content_id: str | None = None,
     limit: int = MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
+    now_iso: str | None = None,
 ) -> tuple[list[dict[str, object]], bool]:
-    """Return one stable, byte-bounded page of this node's signed objects.
+    """Return one byte-bounded page of what `requester_fingerprint` may read.
 
-    Ordered by `(created_at, content_id)` and served whole -- expired and
-    revoked objects included.  A subscriber that has been away needs the
-    revocation that retired an object it still holds, and an expired object
-    costs it nothing: `_recompute` already ignores both.  Dropping them here
-    would instead make the stream depend on *when* it is read, and a cursor
-    into a stream like that skips objects rather than resuming.
+    `requester_fingerprint` is required, not defaulted: issue #596 was this
+    function taking no requester at all, so every peer the ordinary trust
+    policy admitted read every value this node had ever signed. A requester
+    that is not a recipient raises `NotAnAttestationRecipient` -- refused
+    outright rather than served the value-free part of the stream, because
+    any page advances the requester's cursor, and a cursor that has moved past
+    attestations it was not shown would never deliver them after a later grant.
+    Checked before the cursor is looked up, so a node that is not a recipient
+    cannot use "unknown cursor" to ask which content IDs exist here.
+
+    Ordered by insertion. Serves every revocation, and only those attestations
+    that are live as of this read: a retired one has had its value blanked
+    (`_redact_retired_issued`), and filtering on liveness here as well means
+    what is served never depends on when that sweep last ran. The stream stays
+    resumable because a cursor names a position and a redacted row keeps its
+    position: a returning subscriber needs the revocation of anything it
+    holds, and that revocation is always later in the stream than the object
+    it retires.
     """
+    if not is_attestation_recipient(db, requester_fingerprint):
+        raise NotAnAttestationRecipient(
+            "this node has not named the requester as an attestation recipient"
+        )
+    now_value, _ = _now(now_iso)
     limit = max(1, min(limit, MAX_ATTESTATION_OBJECTS_PER_RESPONSE))
     after_rowid = 0
     if after_content_id:
@@ -1154,8 +1348,11 @@ def load_issued_attestation_page(
     rows = db.connection.execute(
         """SELECT content_id, envelope_json, signature_b64
            FROM link_issued_remote_attestations
-           WHERE rowid > ? ORDER BY rowid LIMIT ?""",
-        (after_rowid, limit + 1),
+           WHERE rowid > ?
+             AND (object_type = ?
+                  OR (redacted_at IS NULL AND revoked_at IS NULL AND expires_at > ?))
+           ORDER BY rowid LIMIT ?""",
+        (after_rowid, REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE, now_value, limit + 1),
     ).fetchall()
     more = len(rows) > limit
     result: list[dict[str, object]] = []

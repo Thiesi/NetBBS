@@ -53,6 +53,7 @@ from netbbs.directory import (
     set_bio_visible,
 )
 from netbbs.files.categories import get_category_by_id as get_file_area_category_by_id
+from netbbs.link.remote_attestation import count_attestation_recipients
 from netbbs.messaging_preferences import accepts_direct_messages, set_accepts_direct_messages
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled, set_breadcrumb_collapsed_enabled
@@ -1520,6 +1521,9 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         "verified_badge_visible": await lane.run(is_verified_badge_visible, user),
         "age_attestation": await lane.run(get_attestation, user, "age"),
         "name_attestation": await lane.run(get_attestation, user, "name"),
+        # Issue #596: how many nodes a shared attestation can reach right now.
+        # The caller is told how many; which ones is the SysOp's screen.
+        "recipient_count": await lane.run(count_attestation_recipients),
     }
 
     async def _display_name_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
@@ -1606,6 +1610,9 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             shown = draft.get(key)
             toggled, attestation = await lane.run(_toggle_if_unchanged, shown)
             draft[key] = attestation
+            # Re-read with the toggle, so the number beside "on" is the one
+            # that was true when the caller switched it on.
+            draft["recipient_count"] = await lane.run(count_attestation_recipients)
             if toggled:
                 return
             if attestation is None:
@@ -1635,7 +1642,15 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             attestation = d[key]
             if attestation is None:
                 return "(not verified)"
-            return "on" if attestation.link_visible else "off"
+            if not attestation.link_visible:
+                return "off"
+            # Said beside the value rather than only in the help, because
+            # "on" with nobody to receive it shares nothing, and a caller
+            # waiting for a remote age gate to open should be able to see that.
+            count = d.get("recipient_count", 0)
+            if count == 0:
+                return "on (your SysOp shares with no node yet)"
+            return f"on (reaches {count} node{'s' if count != 1 else ''})"
 
         return render
 
@@ -1760,12 +1775,13 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
                 "board with an age gate can let you in. Off by default -- this "
                 "node's own verification of you isn't shared elsewhere unless you opt in, "
                 "and a fresh verification switches it off again. While it is on, your "
-                "verified date of birth can be read by any node this one has linked with "
-                "that your SysOp's trust policy admits -- not only the nodes that chose to "
-                "accept this node's verifications. Switching it back off tells those nodes "
-                "to stop relying on it, but cannot take the date back: it stays in this "
-                "node's signed history, which any such node can still read. Treat opting "
-                "in as a decision you cannot reverse."
+                "verified date of birth is given only to the nodes your SysOp has named to "
+                "receive this node's verifications; the number beside 'on' is how many that "
+                "is now, and your SysOp may name more later. Switching it back off makes this "
+                "node stop giving the date out and delete its signed copy, and tells the "
+                "nodes it shares with to forget it. A node running NetBBS does; nothing can "
+                "force a node that already copied the date to, and a node your SysOp has "
+                "since stopped sharing with keeps its copy until that expires, within 90 days."
             ),
             section="SysOp-verified",
         ),
@@ -1780,12 +1796,14 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
                 "remote board that requires a verified name can let you in. Off "
                 "by default -- this node's own verification of you isn't shared elsewhere "
                 "unless you opt in, and a fresh verification switches it off again. While "
-                "it is on, your verified real name can be read by any node this one has "
-                "linked with that your SysOp's trust policy admits -- not only the nodes "
-                "that chose to accept this node's verifications. Switching it back off "
-                "tells those nodes to stop relying on it, but cannot take the name back: "
-                "it stays in this node's signed history, which any such node can still "
-                "read. Treat opting in as a decision you cannot reverse."
+                "it is on, your verified real name is given only to the nodes your SysOp "
+                "has named to receive this node's verifications; the number beside 'on' is "
+                "how many that is now, and your SysOp may name more later. Switching it back "
+                "off makes this node stop giving the name out and delete its signed copy, "
+                "and tells the nodes it shares with to forget it. A node running NetBBS does; "
+                "nothing can force a node that already copied the name to, and a node your "
+                "SysOp has since stopped sharing with keeps its copy until that expires, "
+                "within 90 days."
             ),
             section="SysOp-verified",
         ),

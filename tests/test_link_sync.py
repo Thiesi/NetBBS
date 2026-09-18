@@ -16,6 +16,7 @@ see `tests/test_link_transport.py`'s module docstring for why a
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date
 
 import aiohttp
@@ -34,6 +35,7 @@ from netbbs.link.onboarding import Participation, set_participation
 from netbbs.link.reliable_nodes import ReliableNode, set_cached_reliable_nodes
 from netbbs.link.remote_attestation import (
     configure_attestation_authority,
+    configure_attestation_recipient,
     remote_meets_age,
 )
 from netbbs.link.sync import run_link_sync
@@ -2248,7 +2250,7 @@ async def _one_pass(node, session, seeds, hello_provider, lane):
 class _AttestationPair:
     """An issuer with one Link-visible attestation and a subscriber to it."""
 
-    def __init__(self, tmp_path, label: str) -> None:
+    def __init__(self, tmp_path, label: str, *, named: bool = True) -> None:
         self.issuer_identity = bootstrap_node_identity(f"{label}-issuer")
         self.subscriber_identity = bootstrap_node_identity(f"{label}-subscriber")
         self.issuer_node = LinkNode(identity=self.issuer_identity)
@@ -2273,6 +2275,16 @@ class _AttestationPair:
         configure_attestation_authority(
             self.subscriber.db, self.issuer_identity.fingerprint, attributes=["age"],
             reason="peer operator", now_iso="2026-09-15T12:00:00+00:00",
+        )
+        # Issue #596: the other half of the relationship. The subscriber
+        # accepting this issuer is its own SysOp's decision; the issuer telling
+        # the subscriber anything is the issuer's.
+        if named:
+            self.name_the_subscriber()
+
+    def name_the_subscriber(self) -> None:
+        configure_attestation_recipient(
+            self.issuer.db, self.subscriber_identity.fingerprint, reason="peer operator asked",
         )
 
     def issuer_hello(self):
@@ -2379,6 +2391,54 @@ def test_a_withdrawn_opt_in_reaches_the_subscriber_over_the_loop(tmp_path):
         assert pair.subscriber.db.connection.execute(
             "SELECT COUNT(*) FROM link_remote_attestation_revocations"
         ).fetchone()[0] == 1
+        # Issue #596: withdrawn means forgotten, on both nodes, not merely no
+        # longer relied on. The rows stay; the birthdate does not.
+        for database, table in (
+            (pair.subscriber.db, "link_remote_attestations"),
+            (pair.issuer.db, "link_issued_remote_attestations"),
+        ):
+            rows = [tuple(row) for row in database.connection.execute(f"SELECT * FROM {table}")]
+            assert rows and "1990-04-01" not in repr(rows), table
+    finally:
+        pair.close()
+
+
+def test_a_subscriber_the_issuer_has_not_named_gets_nothing_and_is_told_why(tmp_path, caplog):
+    """Issue #596 over the loop. Configuring an authority is one SysOp's
+    decision and being told anything is the other's, so a subscriber the
+    issuer never named pulls nothing -- and its cursor must not move, or
+    being named later would deliver nothing either."""
+    pair = _AttestationPair(tmp_path, "unnamed", named=False)
+
+    def held():
+        return pair.subscriber.db.connection.execute(
+            "SELECT COUNT(*) FROM link_remote_attestations"
+        ).fetchone()[0]
+
+    async def scenario():
+        server = await pair.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await pair.issuer_pass(session)
+                with caplog.at_level(logging.WARNING, logger="netbbs.link.sync"):
+                    await pair.subscriber_pass(session)
+                assert held() == 0
+                assert pair.subscriber.db.connection.execute(
+                    "SELECT COUNT(*) FROM link_attestation_pull_cursors"
+                ).fetchone()[0] == 0
+
+                pair.name_the_subscriber()
+                await pair.subscriber_pass(session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        refusals = [r.getMessage() for r in caplog.records if "attestation recipient" in r.getMessage()]
+        assert len(refusals) == 1
+        assert pair.issuer_identity.fingerprint in refusals[0]
+        assert held() == 1
+        assert remote_meets_age(pair.subscriber.db, pair.subject, 18)
     finally:
         pair.close()
 

@@ -1073,6 +1073,7 @@ not cause the real name to leak into unrelated screens.
 Remote propagation of attestations requires:
 
 - the subject’s explicit opt-in;
+- the issuing node's SysOp having named the receiving node as a recipient;
 - Phase-4 trust rules allowing the receiving node to decide whether to trust the
   remote verifier.
 
@@ -1085,7 +1086,10 @@ stable issuer fingerprint, the subject's `node_vouched_user` identity pair,
 attribute/value, explicit opt-in assertion, issuance time, and expiry. The
 maximum active lifetime is 365 days. Revocation is a separate signed
 `remote_identity_attestation_revocation` object naming the exact original
-content ID; neither expiry nor revocation deletes the signed historical row.
+content ID. Expiry and revocation both retire an attestation, and a retired
+attestation has the columns that carry its value blanked (the stored value,
+the envelope and the signature) while its row stays, on the issuer and on
+every receiver running this software (issue #596).
 
 Issuance is reconciled once per sync pass against current local consent, not
 performed by the screen that records it: the signature must be made by the
@@ -1126,17 +1130,50 @@ subscription set is the receiver's configured attestation authorities, never
 its trust reporters. A node serves only the objects it signed itself: unlike a
 trust signal, which any carrier may re-serve unchanged, an attestation is a
 statement about the issuer's own users, so a pull naming a third-party issuer
-is refused rather than answered. The served stream includes expired and revoked
-objects, so a subscriber returning after an absence still receives the
-revocation that retired an object it holds; a stream that depended on when it
-was read could not be resumed from a cursor. There is no `revocations_only`
-containment mode: an attestation only ever loosens a local gate, so a
-quarantined authority is simply not pulled.
+is refused rather than answered.
+
+Who may pull is the issuer's decision, and separate from every decision the
+receiver makes. A node serves its attestations only to the nodes its SysOp has
+named as recipients, a list that starts empty, is seeded from nothing, and is
+per node rather than per attribute: the caller's two toggles already decide
+which attributes leave at all. A requester that is not a recipient is refused
+outright, with HTTP 403 and `reason_code` `not_an_attestation_recipient`,
+after it has authenticated and passed trust policy. It is not served the
+value-free part of the stream instead, because any page advances the
+requester's cursor and a cursor that has moved past attestations it was not
+shown would deliver none of them after a later grant. A node removed from the
+list therefore receives no further revocations; what it holds lapses at its
+own expiry.
+
+The served stream is every revocation, plus the attestations that are live
+when the page is read. A subscriber returning after an absence still receives
+the revocation that retired an object it holds, and that is all it needs from
+history. The stream stays resumable although it omits retired attestations,
+because a cursor names a position and a retired row keeps its position; only
+its value is gone. There is no `revocations_only` containment mode: an
+attestation only ever loosens a local gate, so a quarantined authority is
+simply not pulled.
+
+A receiver forgets what it is told is withdrawn. Ingesting a revocation blanks
+the stored value and envelope of the attestation it names, and each sync pass
+does the same for attestations that have expired. The rows stay, because the
+revocation, the effective projection and the audit trail reference them, and
+because a retained content ID makes a re-offered copy of the same object a
+no-op. This is the whole of what opting out can promise: the issuer stops
+serving the value and removes its signed copy from its live database, a
+receiver running NetBBS does the same, and nothing forces a node that copied
+it to. Removal is from the live, served database and is not forensic erasure:
+the write-ahead log until its next checkpoint, freed pages, and backups taken
+while the value was shared can still hold the bytes.
 
 A SysOp can see everything their node currently asserts about its own users,
-and stop any of it. That listing names the subject, the attribute, and the
-expiry, but never the attested value: it is a screen about what leaves the
-node, not a place a verified real name belongs. Withdrawal clears the
+which nodes any of it is given to, and stop any of it. The same screen holds
+the recipient list and says so plainly when that list is empty, since
+published objects beside no recipients publish nothing. A caller sees how many
+recipients there are beside their own sharing toggle, never which. The listing
+names the subject, the attribute, and the expiry, but never the attested
+value: it is a screen about what leaves the node, not a place a verified real
+name belongs. Withdrawal clears the
 subject's consent and lets the ordinary reconcile sign the revocation, so the
 operator action and the sync pass can never disagree about whether an object
 should exist. There is deliberately no operator way to switch sharing *on*:
@@ -9538,7 +9575,7 @@ disable the account, which does. No self-service recovery exists: there is no
 email or other out-of-band channel to send anything through, so "forgot my
 password" is a SysOp action, and the Profile help text says so.
 
-### Issue #596 — who may pull an attestation, and what opting out retracts — decided
+### Issue #596 — who may pull an attestation, and what opting out retracts — closed
 
 Found by the review of the v7.7.0 release. Two facets of one gap between what
 a caller is told when they share a SysOp-verified birthdate or real name over
@@ -9557,9 +9594,8 @@ that links next year and pulls from the start reads a value whose subject
 opted out this year.
 
 v7.7.0 shipped consent text that says both things honestly and enforces
-neither. These decisions replace that text with enforcement. They are decided
-here and not yet implemented; §5.5 changes when the code does, and until then
-§5.5 and the v7.7.0 consent text describe what runs.
+neither. These decisions replace that text with enforcement. Normative
+description: §5.5.
 
 **Decision 1 — an issuer-side recipient list, and it starts empty.** A new
 SysOp-configured, audited set of node fingerprints: the nodes this node tells.
@@ -9611,9 +9647,11 @@ party the caller trusted with the verified value itself; choosing where the
 node's assertion of it goes is the same trust, not a new one.
 
 **Decision 5 — a retired attestation stops being served and loses its
-value.** When an issued attestation is revoked or expires, the issuer destroys
-the bytes that carry the value (`attested_value`, the envelope, the signature)
-and keeps the row: content ID, attribute, timestamps, what revoked it. The
+value.** When an issued attestation is revoked or expires, the issuer blanks
+the columns that carry the value (`attested_value`, the envelope, the
+signature) and keeps the row: content ID, attribute, timestamps, what revoked
+it. That removes the value from the live, served database; it is not forensic
+erasure, and "Not done" below says what it leaves. The
 page query serves only live attestations and every revocation, and filters on
 liveness at read time so that what is served never depends on when a sweep
 last ran. The migration redacts rows already revoked. This supersedes two
@@ -9641,7 +9679,13 @@ forget it.
 **Not done, deliberately.** No per-caller recipient choice and no
 per-attribute recipient scope, for the reasons above. No revocation delivery
 to a removed recipient. No way for an issuer to learn what a recipient did
-with a value.
+with a value. No secure erasure: redaction blanks columns in the live
+database, so the write-ahead log until its next checkpoint, freed pages, and
+any backup taken while a value was shared can still hold it, and the issuing
+node's own verification record keeps the value for as long as the SysOp keeps
+the verification. The threat answered is a peer pulling a value, not someone
+reading the disk; turning on SQLite's `secure_delete` for the whole node to
+narrow that further was not judged worth its write cost.
 
 **On upgrade.** Attestation sharing stops until the SysOp names recipients.
 That is the intended default, and the release notes have to say it, because a

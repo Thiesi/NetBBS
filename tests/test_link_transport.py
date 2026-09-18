@@ -41,6 +41,7 @@ from netbbs.link.remote_attestation import (
     MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
     MAX_ATTESTATION_RESPONSE_BYTES,
     build_attestation_pull_request,
+    configure_attestation_recipient,
     build_remote_attestation,
     configure_attestation_authority,
     ingest_remote_attestation,
@@ -64,6 +65,7 @@ from netbbs.link.protocol import (
 )
 from netbbs.link.store import build_inventory_request, load_link_node
 from netbbs.link.transport import (
+    AttestationRecipientRefused,
     LINK_PATH_PREFIX,
     LinkRealtimeConnector,
     LinkRealtimeServer,
@@ -2957,15 +2959,31 @@ def test_attestation_pull_uses_real_transport_and_refuses_a_third_party_issuer(t
                     subscriber_node, session, base_url,
                     _hello_for(subscriber_node), subscriber.lane,
                 )
-                pull = build_attestation_pull_request(
-                    signing_identity=subscriber_identity.signing_key,
-                    requester_fingerprint=subscriber_identity.fingerprint,
-                    responder_fingerprint=issuer_identity.fingerprint,
-                    issuer_fingerprint=issuer_identity.fingerprint,
+                def _pull():
+                    return build_attestation_pull_request(
+                        signing_identity=subscriber_identity.signing_key,
+                        requester_fingerprint=subscriber_identity.fingerprint,
+                        responder_fingerprint=issuer_identity.fingerprint,
+                        issuer_fingerprint=issuer_identity.fingerprint,
+                    )
+
+                # Issue #596: a completed, policy-admitted peer that has named
+                # this issuer as an authority is still not someone the
+                # *issuer's* SysOp chose to tell. Refused over the wire, in a
+                # form the subscriber can tell apart from a transport fault.
+                with pytest.raises(AttestationRecipientRefused):
+                    await request_remote_attestations(
+                        subscriber_node, session, base_url, _pull()
+                    )
+                await issuer.lane.run(
+                    configure_attestation_recipient, subscriber_identity.fingerprint,
+                    reason="peer operator asked",
                 )
+                pull = _pull()
                 raw, more = await request_remote_attestations(
                     subscriber_node, session, base_url, pull
                 )
+                assert len(raw) == 1
                 with pytest.raises(LinkTransportError, match="recent nonce"):
                     await request_remote_attestations(
                         subscriber_node, session, base_url, pull
