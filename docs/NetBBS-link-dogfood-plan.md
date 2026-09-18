@@ -217,6 +217,15 @@ Use test identities and non-sensitive evidence.
       their narrowly scoped reporters through `[S]ysOp` → `[S]ystem` →
       `[P]olicy trust`. Record the node fingerprints, category scopes, and
       configuration times.
+- [ ] Two nodes that never meet. With the full node R originating a linked
+      board that both outgoing-only nodes A and B carry, post on A. On B,
+      confirm R's own posts keep arriving, that A appears under `[S]ubjects`
+      with the note that it was learned from R, and that A's post is absent.
+      Establish A on B with `[O]verride` for identity integrity and resource
+      behavior and confirm the post arrives on the next pass, pending in the
+      board's approval queue because its author is a probationary remote
+      user. Check B's log over several passes before establishing A: the
+      refusal is recorded once an hour, not on every pass.
 - [ ] Propagate a vouch end to end, which needs nothing outside the product.
       On node A, open the test subject under `[P]olicy trust` → `[S]ubjects`,
       choose `[V]ouch`, give a reason and confirm. On node B, name A a trusted

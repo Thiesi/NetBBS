@@ -1211,7 +1211,7 @@ async def _browse_remote_files(
 
 
 def _remote_file_origin_label(link_context: LinkContext, remote_file: RemoteFile) -> str:
-    peer = link_context.link_node.peers.get(remote_file.origin_fingerprint)
+    peer = link_context.link_node.known_identity(remote_file.origin_fingerprint)
     return identity_for_peer(peer).label if peer is not None else remote_file.origin_fingerprint
 
 
@@ -1253,6 +1253,19 @@ async def _fetch_remote_file(
         fetch_next_file_chunk,
     )
 
+    if remote_file.origin_fingerprint in link_context.link_node.introduced:
+        # Issue #630: the catalogue arrived through a node that carries the
+        # area, and its origin is known here only by introduction. "Try again
+        # later" would be a promise nothing keeps.
+        await session.write_line(
+            colored(
+                "\r\nThis node has never been in direct contact with this file's origin, and a "
+                "file is only ever fetched from its origin directly. It can be listed here, "
+                "but not fetched.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return
     base_urls = dialable_base_urls_for_peer(link_context.link_node, remote_file.origin_fingerprint)
     if not base_urls:
         await session.write_line(

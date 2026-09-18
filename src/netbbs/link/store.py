@@ -61,7 +61,7 @@ from netbbs.link.events import (
     sign_inventory_request,
 )
 from netbbs.link.node_identity import NodeIdentity
-from netbbs.link.protocol import InventoryRequest, LinkNode, PeerRecord
+from netbbs.link.protocol import MAX_INTRODUCED_IDENTITIES, InventoryRequest, LinkNode, PeerRecord
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -120,6 +120,25 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
         "SELECT fingerprint, root_public_key, transitions_json, descriptor_json FROM link_peers"
     ):
         node.peers[row["fingerprint"]] = PeerRecord(
+            fingerprint=row["fingerprint"],
+            root_public_key=base64.b64decode(row["root_public_key"]),
+            transitions=tuple(KeyTransition.from_dict(t) for t in json.loads(row["transitions_json"])),
+            descriptor=EndpointDescriptor.from_dict(json.loads(row["descriptor_json"])),
+        )
+
+    # Issue #630: identities learned from a carrier. Loaded after the peers so
+    # that a fingerprint present in both -- a hello completed since -- stays a
+    # peer and nothing else.
+    introduced_rows = db.connection.execute(
+        """SELECT fingerprint, root_public_key, transitions_json, descriptor_json
+           FROM link_introduced_identities ORDER BY updated_at DESC, fingerprint LIMIT ?""",
+        (MAX_INTRODUCED_IDENTITIES,),
+    ).fetchall()
+    # Oldest first, so that memory displaces them in the order the table does.
+    for row in reversed(introduced_rows):
+        if row["fingerprint"] in node.peers:
+            continue
+        node.introduced[row["fingerprint"]] = PeerRecord(
             fingerprint=row["fingerprint"],
             root_public_key=base64.b64decode(row["root_public_key"]),
             transitions=tuple(KeyTransition.from_dict(t) for t in json.loads(row["transitions_json"])),
@@ -366,7 +385,100 @@ def save_peer(db: Database, peer: PeerRecord) -> None:
         ),
     )
     db.connection.execute("DELETE FROM link_peer_candidates WHERE fingerprint = ?", (peer.fingerprint,))
+    # Issue #630: a completed hello supersedes an introduction, on disk as in
+    # `PeerDirectory.admit`.
+    db.connection.execute("DELETE FROM link_introduced_identities WHERE fingerprint = ?", (peer.fingerprint,))
     db.connection.commit()
+    # Issue #630: and now that this node is met, any node known only by
+    # introduction that wears its name is the one to flag, even if its name
+    # was on file first.
+    from netbbs.link.node_profiles import recheck_introduced_identities_against
+
+    recheck_introduced_identities_against(db, peer)
+
+
+def introduced_by(db: Database, fingerprint: str) -> str | None:
+    """The carrier this node learned `fingerprint` from, or `None` if it has met
+    the node directly or does not know it (issue #630). For the SysOp's screen:
+    an identity nobody here has ever spoken to should say so."""
+    row = db.connection.execute(
+        """SELECT introduced_by FROM link_introduced_identities
+           WHERE fingerprint = ? AND fingerprint NOT IN (SELECT fingerprint FROM link_peers)""",
+        (fingerprint,),
+    ).fetchone()
+    return row["introduced_by"] if row is not None else None
+
+
+def save_introduced_identity(db: Database, record: PeerRecord, *, introduced_by: str) -> None:
+    """Persist an identity a carrier introduced (issue #630), and make it visible.
+
+    Never over a real peer's row. Records the same identity observation
+    `save_peer` does, so a familiar friendly name arriving under a different
+    key raises the same warning for a node met this way as for one met
+    directly -- more needed here, if anything, since a carrier chose to serve
+    it. Registers the node as a trust subject, so that the SysOp can see it
+    under Policy trust and establish it: until they do it is probationary, and
+    policy refuses its content however well it verifies.
+    """
+    from netbbs.link.enforcement import ensure_node_subject
+    from netbbs.link.node_profiles import record_peer_identity_observation
+
+    if db.connection.execute(
+        "SELECT 1 FROM link_peers WHERE fingerprint = ?", (record.fingerprint,)
+    ).fetchone() is not None:
+        return
+    record_peer_identity_observation(db, record, met=False)
+    db.connection.execute(
+        """
+        INSERT INTO link_introduced_identities
+            (fingerprint, root_public_key, transitions_json, descriptor_json, introduced_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(fingerprint) DO UPDATE SET
+            root_public_key = excluded.root_public_key,
+            transitions_json = excluded.transitions_json,
+            descriptor_json = excluded.descriptor_json,
+            introduced_by = excluded.introduced_by,
+            updated_at = excluded.updated_at
+        """,
+        (
+            record.fingerprint,
+            base64.b64encode(record.root_public_key).decode("ascii"),
+            json.dumps([t.to_dict() for t in record.transitions]),
+            json.dumps(record.descriptor.to_dict()),
+            introduced_by,
+            utc_now_iso(),
+        ),
+    )
+    db.connection.commit()
+    ensure_node_subject(db, record.fingerprint)
+    _displace_oldest_introduced_identities(db)
+
+
+def _displace_oldest_introduced_identities(db: Database) -> None:
+    """Keep the table within the bound memory has (`PeerDirectory.introduce`).
+
+    What a carrier serves is remotely influenced, and a carrier can mint
+    identities as fast as it can name them. A displaced identity takes with it
+    what its introduction alone created: its name observations, and its trust
+    subject unless somebody has made a decision about it or holds evidence on
+    it. One that is needed again is simply asked for again.
+    """
+    from netbbs.link.trust import forget_untouched_node_subject
+
+    displaced = [
+        row["fingerprint"] for row in db.connection.execute(
+            """SELECT fingerprint FROM link_introduced_identities
+               ORDER BY updated_at DESC, fingerprint LIMIT -1 OFFSET ?""",
+            (MAX_INTRODUCED_IDENTITIES,),
+        )
+    ]
+    for fingerprint in displaced:
+        db.connection.execute("DELETE FROM link_introduced_identities WHERE fingerprint = ?", (fingerprint,))
+        db.connection.execute(
+            "DELETE FROM link_node_identity_observations WHERE node_fingerprint = ?", (fingerprint,)
+        )
+        db.connection.commit()
+        forget_untouched_node_subject(db, fingerprint)
 
 
 def save_candidate_descriptor(db: Database, fingerprint: str, descriptor: EndpointDescriptor) -> None:
@@ -606,6 +718,7 @@ def build_inventory_request(
     requester_fingerprint: str,
     responder_fingerprint: str,
     include_inventory: bool = True,
+    also_declare: dict[str, dict[str, set[str]]] | None = None,
 ) -> InventoryRequest:
     """
     This node's own `InventoryRequest` to send as requester (design doc
@@ -641,6 +754,21 @@ def build_inventory_request(
         {area_id: tuple(_all_file_area_events(db, area_id)) for area_id in carried_file_area_ids(db)}
         if include_inventory else {}
     )
+    # Issue #630: events this node was offered and could not use yet, declared
+    # as seen so that they are not sent again on every pass; see
+    # `protocol.DeferredEvents` for why this is safe. Also under a resource this
+    # node does not carry, which is the case that matters most: a board whose
+    # origin is a node on probation here is not carried *because* its genesis
+    # was set aside, and everything posted to it would otherwise be downloaded
+    # and refused on every pass. A responder walks the union of what is
+    # requested and what it carries, so a resource it has never heard of costs
+    # it nothing.
+    if include_inventory:
+        for kind, mapping in (("boards", boards), ("channels", channels), ("file_areas", file_areas)):
+            for resource_id, content_ids in (also_declare or {}).get(kind, {}).items():
+                mapping[resource_id] = tuple(
+                    dict.fromkeys([*mapping.get(resource_id, ()), *sorted(content_ids)])
+                )
     created_at = utc_now_iso()
     nonce = secrets.token_hex(16)
     signature = sign_inventory_request(

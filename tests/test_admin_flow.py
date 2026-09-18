@@ -9537,3 +9537,60 @@ def test_the_console_reports_on_the_identity_it_acted_on_not_on_the_whole_pass(d
     assert db.connection.execute(
         "SELECT COUNT(*) FROM link_trust_wire_objects WHERE object_type = 'trust_vouch'"
     ).fetchone()[0] == 2
+
+
+# -- an identity learned from a carrier, never met (issue #630) ----------------
+
+
+def test_the_subject_screen_says_when_a_node_was_learned_from_a_carrier(db, lane, sysop):
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_introduced_identity, save_peer
+
+    receiver = LinkNode(identity=bootstrap_node_identity("receiver"))
+    carrier = LinkNode(identity=bootstrap_node_identity("carrier"))
+    author = LinkNode(identity=bootstrap_node_identity("author"))
+
+    def _hello(node, name):
+        return node.build_hello(
+            addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00",
+            friendly_name=name,
+        )
+
+    save_peer(db, receiver.handle_hello(_hello(carrier, "Carrier Node")))
+    save_introduced_identity(
+        db, receiver.handle_introduction(_hello(author, "Author Node")),
+        introduced_by=carrier.identity.fingerprint,
+    )
+    # Introducing the node is what lists it: it is the only subject here.
+    session = FakeSession(["s", "p", "s", "0", "1", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Author Node" in text
+    assert "has never exchanged a hello with that one" in text
+    assert "learned from Carrier Node" in text
+    assert "identity integrity and its resource behavior to established with [O]verride" in text
+
+
+def test_a_trust_decision_about_a_node_stops_holding_back_what_it_sent(db, lane, sysop):
+    """Issue #630: content refused by policy is set aside for an hour. A SysOp
+    who has just established its author must not have to wait that hour out."""
+    subject = TrustSubject.node("remote-node")
+    register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")
+    link_context = _link_context()
+    held = link_context.link_node.deferred_events
+    held.entries["c" * 64] = ("boards", "a" * 64, "remote-node", 9e12)
+    held.entries["d" * 64] = ("boards", "a" * 64, "some-other-node", 9e12)
+    session = FakeSession(
+        [
+            "s", "p", "s", "0", "1",
+            "o", "d", "r", "t", "e", "r", "known operator", "s", "y",
+            "b", "b", "b", "b",
+        ]
+    )
+
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    assert list(held.entries) == ["d" * 64]

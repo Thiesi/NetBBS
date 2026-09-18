@@ -563,7 +563,7 @@ async def _compose_mail(
 
         if link_context is not None and "@" in recipient_text:
             remote_user, node_reference = recipient_text.split("@", 1)
-            resolved = await lane.run(resolve_stored_peer_reference, node_reference)
+            resolved = await lane.run(resolve_stored_peer_reference, node_reference, met_only=True)
             if isinstance(resolved, list):
                 if resolved:
                     candidates = []

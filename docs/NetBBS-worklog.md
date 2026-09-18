@@ -2647,6 +2647,49 @@ audited, and reversible. Operator screens must catch stale mutations (for
 example, an override already cleared elsewhere) and report them as concurrent
 state changes rather than claiming success.
 
+**`peers` means "completed a hello", and everything that grants authority
+asks it (issue #630).** Pushing events, every pull, relay consent and Link
+mail all check membership of `LinkNode.peers` or a row in `link_peers`. An
+identity learned from a carrier is therefore kept in `PeerDirectory.introduced`
+and `link_introduced_identities`, never in either of those, and only
+`LinkNode.known_identity` consults both. `resolve_peer_signing_key` and the
+trust and attestation pulls still ask `peers`; letting them accept an
+introduced issuer is issue #627. A new check of "do I know this node" has to
+decide which question it is asking. The display layer and the trust console's
+name lookup read the `link_known_identities` view, so names and the
+familiar-name warning cover introduced nodes. Nothing that decides authority
+may read it, and name resolution for mail passes `met_only=True` for that
+reason. `_record_identity_observation` takes `met`: a met node is compared
+only with met nodes, or a stranger could get a real peer flagged by wearing
+its name.
+
+`handle_events` refuses with `MissingDependency` when an event's signer is
+unknown or what it builds on has not arrived, and with a plain
+`LinkProtocolError` when the event is wrong. Only `handle_events_tolerantly`,
+used for a carrier's inventory response, treats the two differently, and it
+returns a refusal instead of raising so that what was accepted before it
+still reaches `persist_accepted_events`. A new refusal of the first kind has
+to raise the subclass or it ends whole responses again. Which identity a
+failed signature check was made against comes from
+`_resolve_sender_signing_key`, not from the payload: closures, tombstones
+and file descriptors do not name their signer. The inventory
+is a diff and not a cursor, which is why a skip alone is not enough: a
+skipped event is offered again every pass, and a page of 200 of them is the
+last thing a node receives. `DeferredEvents` declares them as seen; it lives
+in memory on purpose.
+
+A running node always passes `enforce_trust_policy=True`, and most loop tests
+do not. Under enforcement the policy filter runs *before* `handle_events`, so
+a defect in the protocol layer can be hidden in production and a defect in the
+interplay hidden in tests. Reproduce a Link defect under both settings before
+describing it.
+A bare `LinkNode` also does not know its own board genesis; a started node
+gets it from `load_link_node`, and a harness should too.
+
+`link_known_identities` is the first view over `link_peers`. SQLite refuses
+to rename or rebuild a table a view depends on, so a migration that rebuilds
+`link_peers` has to drop the view first and recreate it after.
+
 **On the Link an account is its username, so a deleted account's name is
 retired (issue #594).** `local_user_id` on the wire is `users.username`, and
 that column is unique only among live rows. `delete_user` therefore writes

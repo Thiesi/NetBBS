@@ -2241,9 +2241,9 @@ verify via its own previously-established trust — while correctly relocating
 *which* fingerprint that trust check applies to: the content's author, not
 whoever happened to relay the bytes. The wire-level `sender_fingerprint`
 must still itself be a completed peer (unchanged, checked at the top of
-`handle_events` as before) — relay only ever happens between two nodes each
-independently already known, never introducing a genuine stranger on
-either end. `key_transition` and the `link_message` family are explicitly
+`handle_events` as before) — relay only ever happens between two nodes that
+have completed a hello with each other. The *author* of what is relayed need
+not have: see §8.11. `key_transition` and the `link_message` family are explicitly
 untouched — messages remain point-to-point by design (§10) and were never
 part of this issue's scope.
 
@@ -2255,19 +2255,18 @@ implementation surface is (a) the `handle_events` fix above, (b) the
 responder's three-source diff query, and (c) a client-side loop that issues
 the request and applies the response.
 
-**A real, worth-stating limitation this implies:** a receiving node can
-only accept relayed content whose author/origin it has *at some point*
-directly completed a hello with — multi-hop propagates *content* through
-an intermediary, but does not substitute for a receiving node's own
-independent identity verification of who ultimately signed it. In practice
-this is rarely restrictive at this project's declared scale (§14): seed
-configuration plus peer-list-driven candidate fallback (§8.3) already tend
-to bring most nodes in a small-to-medium deployment into direct contact
-with each other over time. A node that has truly never verified a given
-origin's identity by any means still cannot accept that origin's content
-via a relay, exactly as it already could not accept it directly — this
-issue does not weaken that boundary, only lets it be satisfied through a
-past hello rather than requiring the origin to be *currently* reachable.
+**Who signed it has to be verifiable, and a hello is not the only way to
+learn that (issue #630, §8.11).** Multi-hop propagates *content* through an
+intermediary; it does not substitute for the receiving node's own
+verification of who signed it. Requiring a completed hello with the author
+or origin is not an option: a node dials its seeds and turns to candidates
+(§8.3) only when they fail, onboarding gives every new node the same seed,
+and two outgoing-only nodes cannot dial each other at all, so two nodes that
+share a board through a common seed have, as a rule, never met. The
+receiving node learns such an author's identity from the carrier, as §8.11
+describes, and verifies the content against that. A node whose identity it
+cannot learn cannot have its content accepted, and an event in that position
+is set aside without costing the rest of the response.
 
 **Empty inventory is discovery, not "ask about nothing" (issue #94).**
 Although each request dictionary lists what the requester currently
@@ -2740,6 +2739,109 @@ right now" -- pointing at Link mail; nothing fails silently. Cross-node
 
 ---
 
+### 8.11 Learning a third node's identity from a carrier (issue #630)
+
+A hello bundle authenticates itself (§8.2, §10.6): only the holder of a root
+key can produce a transition chain that verifies against it and a descriptor
+signed by the key that chain currently authorizes. Who delivers the bundle
+therefore does not enter into its verification, and a carrier can serve a
+third node's bundle without being trusted for anything. It can withhold one;
+it cannot forge one.
+
+**The exchange.** A node that meets, in a carrier's inventory response, an
+author or origin it cannot verify asks that carrier for the identities
+concerned: `POST /link/v1/identities/{requester}` with a signed
+`identity_request` naming up to 32 fingerprints. The request is authenticated
+as every other pull is (a completed hello with the requester, the signed
+requester matching the wire peer, this node named as responder, a signature
+under the requester's current key, a five-minute freshness window, a bounded
+nonce cache) and is gated by the same policy action as the inventory it
+accompanies. The response carries the bundles the carrier holds and omits the
+rest. A carrier answers only for nodes behind content it has recently served
+(a bounded, in-memory set of 4,096): the authors and origins its events name,
+and the current origin of each event's resource, which is who signs a
+closure, a tombstone, a moderator's edit or a file descriptor without being
+named in it. Answering for any fingerprint a peer names would let a peer on
+probation, which is refused the peer list (§8.3), read the carrier's peer set
+one guess at a time, addresses included. A page of events can name more nodes
+than one request may, so a requester sends up to four requests at a time,
+once before policy is consulted and once more for signers that only handling
+the events revealed: a bundle gone stale, or an origin its event does not
+name. An identity a carrier answered without, or could not be asked for
+because it lacks the route, is not asked of it again for an hour; a request
+that merely failed is repeated on the next occasion. A carrier serves the identities of its peers and of nodes it was itself
+introduced to: the peer list shares only first-hand knowledge because a
+secondhand address is a weaker claim the further it travels, but a bundle is
+not a claim, and refusing to pass one on would break a board carried across
+two hops. The requester accepts only bundles it asked for, and verifies each
+exactly as it verifies a hello received directly.
+
+**What an introduced identity is.** It can be used to verify the carried
+board, channel and file-area events it signed. It is not a peer. Membership of the peer set is what every route checks
+to decide who may push events, pull, serve as a relay or be sent Link mail,
+and an introduction grants none of that; all of it still requires a completed
+hello. Introduced identities are stored apart from peers for that reason. A
+completed hello supersedes an introduction, and an introduction never
+replaces a peer's record. At most 1,024 are kept, in memory and on disk; at
+the cap the oldest goes, since a displaced identity is simply asked for again
+when next needed. It takes with it what its introduction alone created: its
+name observations, and its trust subject unless a SysOp has decided something
+about it or evidence is held on it. A file area whose origin is known only by
+introduction can be listed and not fetched from, since chunk transfer is
+never relayed (§11.3), and the file screen says so.
+
+**Trust.** An introduced node is registered as a trust subject and starts on
+probation like any other (§12.4). Under the policy a running node enforces,
+its content is therefore verified and still withheld until the SysOp
+establishes it, by setting both its identity integrity and its resource
+behavior. That is the point of introducing it *before* policy is consulted:
+a node that is not a subject reads as probationary too, and its content is
+refused with no way for the SysOp to see the node, let alone establish it.
+It never graduates on its own: the thirty-day age requirement counts from the
+introduction, but graduation also needs days of direct activity, which a node
+never met cannot have. Establishing the node does not establish its callers.
+A remote user is a subject of its own (§12.4) and starts on probation, so its
+first posts arrive pending approval in the board's queue like any other
+probationary remote user's. The familiar-name warning of §4.4 applies to an
+introduced node, and matters more than for a peer: its name is what callers
+read beside every post. The comparison is one-sided. An introduced node is
+compared with every node on file; a node this one has met is compared only
+with others it has met, and meeting a node re-judges any introduced node that
+wears its name. Otherwise anyone could have a real peer flagged as an
+impostor across the network by naming a node after it and posting once on a
+shared board. Mail addressing resolves names among met nodes only, for the
+same reason.
+
+**Stale bundles.** A third node's key transitions are not gossiped; a
+transition is accepted only from its own subject. After such a node rotates,
+the bundle on file no longer verifies what it signs. The requester knows
+which identity the failed check was made against, whether or not the event
+names it, and asks the carrier for a fresher bundle. An event that builds on
+one set aside is set aside with it, whatever its own check reports: the second
+edit in a chain fails as not extending the current head, which is otherwise a
+refusal. The fresher bundle replaces the one on file unless its chain is
+shorter or its descriptor older.
+
+**Events that cannot be used yet.** The inventory is a diff (§8.8): a node
+declares what it holds and is sent the rest, one page of 200 events per pass.
+An event it cannot accept would be sent again on every pass, and 200 of them
+would be all it ever received. A carrier's response is therefore handled one
+event at a time. One whose signer is unknown, or that builds on something not
+yet received, or that policy refuses, is set aside and declared in later
+requests as seen, so it is neither downloaded again nor allowed to crowd the
+page. It is declared under its resource whether or not this node
+carries that resource: a board whose origin is on probation here is not
+carried *because* its genesis was set aside. It is asked for again when the
+identity it waited for becomes known, when the SysOp overrides or clears an
+override for that node in the trust console, or after an hour; a change that arrives
+any other way, a vouch or a trust anchor, waits out the hour. At most 10,000
+events are set aside, a third of what an inventory request can declare. Past
+that the oldest are offered again and can crowd a page, and the remedy is the
+SysOp's: establish or block the nodes concerned. Declaring it is not a claim to hold it, and costs nothing if read as
+one: a responder that lacks the event would ask for it back, and a node only
+ever pushes what it originated. An event that is *wrong*, from a peer, still
+ends the response there; what was accepted before it is kept and persisted.
+
 ## 9. Linked boards and resource lifecycle
 
 ### 9.1 Promotion and genesis
@@ -3164,30 +3266,24 @@ cryptographic consistency. Today's requirement that this always happens
 via a completed two-way hello is a stronger condition than the
 verification itself actually needs.
 
-**Issue #85 does not provide tier-2 reachability, and was never going to.**
-It was tempting to assume inventory/pull-based relay already closes this
-gap, since it does let a node receive board content authored by someone
-it never directly synced with. It doesn't generalize to messages: #85's
-own `handle_events` fix requires the content's claimed origin/author to
-*already* be a peer this node has independently completed a hello with
-(`self.peers.get(origin_fingerprint)`) — it relays already-authored
-*content* between two ends that both already know the author, it never
-bootstraps a receiving node's knowledge of a brand-new peer's identity.
-Nothing in this codebase today lets a node learn a *new* peer's verified
-root key/transition chain except a direct hello.
+**Neither issue #85 nor issue #630 provides tier-2 reachability.** Relay
+(#85) carries content between nodes; introduction (#630, §8.11) lets a
+receiving node verify content signed by a node it has never met, by
+fetching that node's self-certifying bundle from the carrier. Neither
+reaches mail. An introduced identity is kept apart from peers precisely so
+that it cannot be addressed, pushed to or pulled from, and the carrier
+answers only for nodes whose content it has just served, which a mail
+recipient need not be.
 
-**What a real tier-2 design would require, concretely.** Because
-`HelloMessage`s are self-certifying, a third party *could* safely relay
-one on a peer's behalf — the sender would verify it exactly as if that
-peer had dialed in directly, independent of whether the relaying node is
-honest, since a tampered or fabricated bundle simply fails verification
-rather than being silently trusted. The same applies in reverse for the
-recipient verifying the sender. This would need: a new relayed-hello
-bundle exchange (distinct from `PeerListMessage`'s own unverified
-address-only exchange, §8.3 — this one must carry the *complete*
-self-certifying bundle, not just an address worth trying), and encryption
-proceeding once independent verification succeeds, with no other change
-to §10.2's confidentiality model.
+**What a real tier-2 design would require, concretely.** The bundle
+exchange exists (§8.11) and verifies a bundle exactly as if its subject had
+dialed in directly, whoever served it: a tampered or fabricated bundle
+simply fails verification. Still missing for mail: a way to ask for the
+identity of a *recipient*, who has signed nothing the asker was served; the
+same in reverse for the recipient verifying the sender; a delivery path,
+since a node known only by introduction was never dialed and may not be
+dialable; and the decision to let an identity learned that way be
+encrypted to, with no other change to §10.2's confidentiality model.
 
 **Confidentiality and abuse implications, if built.** No new
 confidentiality exposure to message *content* — encryption still targets
@@ -3203,9 +3299,7 @@ trusted" property peer-list exchange already established for addresses.
 **Decision: deferred, not scoped as active work.** Unlike
 `tier2_personal_key`, this is not a permanent non-goal — there is no
 architectural blocker, only that it is not needed to unblock or validate
-current Phase 3 work, and building it now would add real new wire surface
-(a relayed-hello bundle exchange) ahead of the cadence discipline §84
-already states. Revisit if a real deployment need appears (e.g. issue #83's
+current work. Revisit if a real deployment need appears (e.g. issue #83's
 dogfood run surfaces callers who actually want to message someone they've
 never directly synced with) rather than building it speculatively now.
 
@@ -6980,14 +7074,14 @@ already established for `link_diagnostic_log`.
 §10.6 now states the complete answer: distinct from the unrelated,
 already-decided `tier2_personal_key` non-goal (§10.2, a hard architectural
 blocker); this is a recipient-*reachability* question with no equivalent
-blocker, just not built. Confirmed that issue #85's inventory/relay work
-does *not* provide tier-2 reachability — it relays content whose author
-must already be a directly-known peer, never bootstraps a new peer's
-identity. A real design exists if this is ever picked up (a relayed,
-self-certifying `HelloMessage` bundle exchange, reusing the same
-self-authentication property §12 already relies on), but is deliberately
-deferred rather than scoped as active work — no architectural blocker,
-just not needed to unblock or validate current Phase 3 work.
+blocker, just not built. Neither issue #85's relay nor issue #630's
+identity introduction provides tier-2 reachability: the first carries
+content, the second lets a receiver verify the author of carried content,
+and Link mail still requires a completed hello with the recipient's node.
+The relayed, self-certifying `HelloMessage` bundle exchange this entry
+first named as the missing piece was built for #630, for verification only;
+§10.6 lists what mail would need beyond it. Deliberately deferred rather
+than scoped as active work: no architectural blocker, just not needed yet.
 
 ### Issue #87 — linked channels — closed
 
@@ -9965,6 +10059,82 @@ the same change for the same reason.
 itself. No trust signals. No carrier pulls in the sync loop, which still asks
 each reporter directly. A subscriber told nothing about *why* an object was
 skipped beyond its diagnostics log.
+
+### Issue #630 — content from a node this one has never met — closed
+
+Found by running the planned three-node deployment in the loop harness: one
+full node and two outgoing-only nodes that seed off it and share one of its
+boards. Normative description: §8.11.
+
+A node could verify nothing signed by a node it had not completed a hello
+with, and two nodes complete one only when one dials the other. §8.8 accepted
+that as "rarely restrictive" on the expectation that small deployments end up
+fully meshed. They do not: a node dials its seeds, everyone is given the same
+seed, and two outgoing-only nodes cannot dial each other. So in the ordinary
+topology the two never saw each other's posts. Under enforced policy the
+unknown author read as probationary and was refused quietly, was not listed
+as a trust subject, and so could not be established; each refusal was
+downloaded again every pass, and 200 of them starved the subscription. With
+the author established by some other route, the stranger check rejected the
+carrier's whole response from the first post.
+
+**Decision 1 — a carrier may serve a third node's hello bundle.** §10.6 and
+the #90 entry had already worked out why this is safe and deferred it as not
+needed. It is needed. The bundle verifies against itself, so the carrier is
+trusted with nothing and can at worst withhold.
+
+**Decision 2 — introduced is not met.** An introduced identity verifies what
+it signed and does nothing else. It cannot push, pull, relay or be mailed,
+and it is stored apart from peers so that no present or future check of "is
+this a peer" can mistake it for one. Rejected: a flag on the peer record,
+which would have made every reader of that table responsible for remembering
+it, the mail path among them.
+
+**Decision 3 — introduce before policy, and start on probation.** The
+introduction grants nothing, and it is what makes the node visible to the
+SysOp who alone can establish it. Rejected: introducing only authors policy
+already admits, which is circular, since a node that is not a subject is
+never admitted.
+
+**Decision 4 — carriers pass on introduced identities too.** Rejected: the
+peer list's first-hand-only rule. That rule exists because a secondhand
+address degrades with distance; a bundle does not.
+
+**Decision 5 — one unusable event costs one event.** Responses from a carrier
+are handled per event, and an event that cannot be used yet is set aside and
+declared as seen. Rejected: only skipping it, which leaves it to be sent
+again every pass and lets a page fill with such events. A refusal that does end
+a response is returned with what was accepted before it, which the caller
+persists: a batch that raised half-way had already put its earlier events
+into memory, the caller persisted none of them, and being now "known" they
+were never accepted, and so never persisted, again.
+
+**Decision 6 — a stale bundle is refreshed from the carrier.** Key
+transitions of third nodes are not gossiped, and this slice does not change
+that; it asks again instead.
+
+**Decision 7 — a met node outranks an introduced one by name.** Introduction
+puts names on file that nobody here vouched for by dialing. The
+familiar-name comparison is therefore one-sided (§8.11), mail addresses
+resolve among met nodes only, and meeting a node re-judges every introduced
+node that wears its name, whichever was on file first. Rejected: first-seen
+wins throughout, which hands a real peer's name to whoever posts first.
+Between two nodes neither of which this node has met it is still the rule,
+there being nothing to tell them apart.
+
+**Decision 8 — a carrier answers only for whose content it served.**
+Rejected: gating the route like the peer list, which a peer on probation is
+refused. A new node is on probation at its seed for its first month, so that
+would have withheld introductions from exactly the nodes that need them.
+
+**Not done, deliberately.** Verifying §12 trust objects and §5.5 attestations
+against an introduced identity, which is issue #627's subject. Link mail to
+an introduced node (§10.6 stays deferred). Automatic graduation for nodes
+never met. Any way for an introduced node to be dialled, which includes
+fetching its files. Persistence of the set-aside list, which is rebuilt at
+the cost of one repeat per event after a restart. A way for a requester to
+tell a responder which signers to leave out, which is what would lift the
+10,000-event bound.
 
 ### SFTP over the SSH transport — declined
 

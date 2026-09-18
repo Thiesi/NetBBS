@@ -2993,3 +2993,368 @@ def test_the_sync_pass_survives_a_revocation_re_signed_after_a_rotation(tmp_path
         ).fetchone()[0] == 2
     finally:
         pair.close()
+
+
+# -- two nodes that have never met, sharing a board through one seed (issue #630) --
+
+
+class _ThreeNodes:
+    """R is full and originates a linked board. A and B are outgoing-only, seed
+    off R, and never exchange a hello with each other: the shape of the
+    project's own three live nodes, and of most real networks."""
+
+    def __init__(self, tmp_path, *, enforce: bool) -> None:
+        from netbbs.boards.boards import create_board
+        from netbbs.link.store import load_link_node
+
+        self.enforce = enforce
+        self.ids = {name: bootstrap_node_identity(f"three-{name}") for name in ("R", "A", "B")}
+        self.dbs = {name: _NodeDb(tmp_path, f"three-{name}") for name in self.ids}
+        self.sysops = {
+            name: create_user(self.dbs[name].db, "sysop", password="password1", user_level=SYSOP_LEVEL)
+            for name in self.ids
+        }
+        board = create_board(self.dbs["R"].db, "general", creator=self.sysops["R"])
+        link_board(self.dbs["R"].db, board, node_identity=self.ids["R"])
+        # As a started node would: R knows its own genesis from its database.
+        self.nodes = {"R": load_link_node(self.dbs["R"].db, self.ids["R"])}
+        self.nodes.update({name: LinkNode(identity=self.ids[name]) for name in ("A", "B")})
+        self.port = 0
+        if enforce:
+            # Under policy nothing moves between a dialer and its seed until
+            # each has established the other, which is a SysOp's act.
+            for dialer in ("A", "B"):
+                self.establish(dialer, "R")
+                self.establish("R", dialer)
+
+    def establish(self, on: str, who: str) -> None:
+        from netbbs.link.trust import TrustDimension, TrustState, set_trust_override
+
+        subject = TrustSubject.node(self.ids[who].fingerprint)
+        register_subject(self.dbs[on].db, subject, first_accepted_at="2026-08-01T00:00:00+00:00")
+        for dimension in (TrustDimension.IDENTITY_INTEGRITY, TrustDimension.RESOURCE_BEHAVIOR):
+            set_trust_override(
+                self.dbs[on].db, subject, dimension, TrustState.ESTABLISHED,
+                reason="known operator", actor_user_id=None,
+            )
+
+    def r_hello(self):
+        return self.nodes["R"].build_hello(
+            addresses=[{"protocol": "http", "address": "127.0.0.1", "port": self.port}],
+            outgoing_only=False, created_at="2026-01-01T00:00:00+00:00",
+        )
+
+    async def start(self):
+        server = LinkServer(
+            host="127.0.0.1", port=0, node=self.nodes["R"], lane=self.dbs["R"].lane,
+            own_hello_provider=self.r_hello, enforce_trust_policy=self.enforce,
+        )
+        await server.start()
+        self.port = server.port
+        self.seeds = [f"http://127.0.0.1:{server.port}"]
+        return server
+
+    async def dial(self, name, session):
+        await _one_pass(
+            self.nodes[name], session, self.seeds, lambda: _hello_for(self.nodes[name]),
+            self.dbs[name].lane, enforce_trust_policy=self.enforce,
+        )
+
+    def post(self, name, subject, board_name="general"):
+        from netbbs.boards.boards import get_board_by_name
+
+        board = get_board_by_name(self.dbs[name].db, board_name)
+        post = create_post(self.dbs[name].db, board, author=self.sysops[name], subject=subject, body="hi")
+        assert queue_board_post_if_linked(self.dbs[name].db, post, board, node_identity=self.ids[name])
+
+    def subjects_on(self, name):
+        rows = self.dbs[name].db.connection.execute(
+            """SELECT p.subject FROM posts AS p JOIN boards AS b ON b.id = p.board_id
+               WHERE b.name = 'general' ORDER BY p.id"""
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def close(self):
+        for node_db in self.dbs.values():
+            node_db.close()
+
+
+def test_two_nodes_that_never_met_see_each_others_posts_through_their_common_seed(tmp_path):
+    """The defect, with policy out of the way. B had never completed a hello
+    with A, refused A's post as coming from a stranger, and with it the whole
+    inventory response, on every pass: it never received anything from R
+    again, R's own posts included."""
+    net = _ThreeNodes(tmp_path, enforce=False)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                for name in ("A", "B"):
+                    await net.dial(name, session)
+                net.post("A", "hello from A")
+                await net.dial("A", session)
+                await net.dial("B", session)
+                net.post("R", "hello from R")
+                await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert net.subjects_on("B") == ["hello from A", "hello from R"]
+        a = net.ids["A"].fingerprint
+        assert a in net.nodes["B"].introduced and a not in net.nodes["B"].peers
+        assert net.dbs["B"].db.connection.execute(
+            "SELECT introduced_by FROM link_introduced_identities WHERE fingerprint = ?", (a,)
+        ).fetchone()[0] == net.ids["R"].fingerprint
+    finally:
+        net.close()
+
+
+def test_under_production_policy_an_unmet_author_is_withheld_visible_and_establishable(tmp_path, caplog):
+    """What a real node does, since it always enforces trust policy. An author
+    from a node B has never met is on probation, so its post is withheld --
+    but B keeps receiving everything else, the refusal is not downloaded and
+    logged again on every pass, and the SysOp can see the node and establish
+    it, after which the post arrives. Before, the node was not even listed,
+    and establishing it by any other route wedged the subscription outright."""
+    from netbbs.link.trust import TrustDimension, TrustState, get_effective_trust_state
+
+    net = _ThreeNodes(tmp_path, enforce=True)
+    a_subject = TrustSubject.node(net.ids["A"].fingerprint)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                for name in ("A", "B"):
+                    await net.dial(name, session)
+                net.post("A", "hello from A")
+                await net.dial("A", session)
+                with caplog.at_level(logging.WARNING, logger="netbbs.link.sync"):
+                    for _ in range(3):
+                        await net.dial("B", session)
+                net.post("R", "hello from R")
+                await net.dial("B", session)
+                assert net.subjects_on("B") == ["hello from R"]
+                assert get_effective_trust_state(
+                    net.dbs["B"].db, a_subject, TrustDimension.IDENTITY_INTEGRITY
+                ).state == TrustState.PROBATIONARY
+
+                net.establish("B", "A")
+                net.nodes["B"].deferred_events.release_identity(net.ids["A"].fingerprint)
+                await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        refusals = [r for r in caplog.records if "rejected inventory event" in r.getMessage()]
+        assert len(refusals) == 1
+        assert sorted(net.subjects_on("B")) == ["hello from A", "hello from R"]
+        # Establishing the node does not establish its callers: a remote user
+        # is a subject of its own, so the post waits in the approval queue.
+        assert net.dbs["B"].db.connection.execute(
+            "SELECT status FROM posts WHERE subject = 'hello from A'"
+        ).fetchone()[0] == "pending"
+    finally:
+        net.close()
+
+
+def test_a_carrier_that_cannot_introduce_an_author_costs_that_post_and_nothing_else(tmp_path, monkeypatch):
+    """The introduction can fail: the carrier predates it, refuses, or does not
+    hold the bundle. The post is then set aside, not the response."""
+    from netbbs.link import sync as sync_module
+    from netbbs.link.transport import LinkTransportError
+
+    asked: list[int] = []
+
+    async def _refuses(*args, **kwargs):
+        asked.append(1)
+        failure = LinkTransportError("identity request failed: HTTP 404")
+        failure.status = 404
+        raise failure
+
+    monkeypatch.setattr(sync_module, "request_identities", _refuses)
+    net = _ThreeNodes(tmp_path, enforce=False)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                for name in ("A", "B"):
+                    await net.dial(name, session)
+                net.post("A", "hello from A")
+                await net.dial("A", session)
+                net.post("R", "hello from R")
+                for _ in range(2):
+                    await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert net.subjects_on("B") == ["hello from R"]
+        assert len(net.nodes["B"].deferred_events.entries) == 1
+        # A carrier without the route is asked once, not on every pass. One
+        # that merely failed to answer is another matter; see the next test.
+        assert len(asked) == 1
+    finally:
+        net.close()
+
+
+def test_a_board_whose_origin_is_on_probation_is_not_downloaded_again_on_every_pass(tmp_path, caplog):
+    """The board is not carried *because* its genesis was withheld, so nothing
+    about it is in what this node declares as held. Its genesis and everything
+    posted to it used to be downloaded, refused and logged on every pass, and
+    two hundred such events were the last thing the node received."""
+    from netbbs.boards.boards import create_board
+    from netbbs.link.store import load_link_node
+
+    net = _ThreeNodes(tmp_path, enforce=True)
+    board = create_board(net.dbs["A"].db, "from-a", creator=net.sysops["A"])
+    link_board(net.dbs["A"].db, board, node_identity=net.ids["A"])
+    net.nodes["A"] = load_link_node(net.dbs["A"].db, net.ids["A"])
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.dial("A", session)
+                net.post("A", "on A's own board", board_name="from-a")
+                await net.dial("A", session)
+                with caplog.at_level(logging.WARNING, logger="netbbs.link.sync"):
+                    for _ in range(3):
+                        await net.dial("B", session)
+                net.post("R", "hello from R")
+                await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        carried_on_r = net.dbs["R"].db.connection.execute(
+            "SELECT COUNT(*) FROM boards WHERE name = 'from-a'"
+        ).fetchone()[0]
+        assert carried_on_r == 1, "the scenario needs R to carry A's board"
+        refusals = [r for r in caplog.records if "rejected inventory event" in r.getMessage()]
+        # The genesis and the post, once each, and not once per pass.
+        assert len(refusals) == 2
+        assert net.subjects_on("B") == ["hello from R"]
+    finally:
+        net.close()
+
+
+def test_a_carrier_is_not_asked_again_on_every_pass_for_an_identity_it_could_not_supply(tmp_path, monkeypatch):
+    from netbbs.link import sync as sync_module
+
+    asked: list[tuple[str, ...]] = []
+
+    async def _knows_nobody(node, session, base_url, identity_request):
+        asked.append(identity_request.subjects)
+        return []
+
+    monkeypatch.setattr(sync_module, "request_identities", _knows_nobody)
+    net = _ThreeNodes(tmp_path, enforce=False)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                for name in ("A", "B"):
+                    await net.dial(name, session)
+                net.post("A", "hello from A")
+                await net.dial("A", session)
+                for _ in range(3):
+                    await net.dial("B", session)
+                    # As the retry interval would: the event is offered again.
+                    net.nodes["B"].deferred_events.entries.clear()
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert asked == [(net.ids["A"].fingerprint,)]
+    finally:
+        net.close()
+
+
+def test_a_wrong_event_ends_a_response_without_losing_what_was_accepted_before_it(tmp_path, monkeypatch):
+    """What was accepted is in the node's memory and counts as known. Unless it
+    is persisted too, it is never accepted, and so never persisted, again."""
+    import base64
+
+    from netbbs.link import sync as sync_module
+
+    net = _ThreeNodes(tmp_path, enforce=False)
+    real_request_inventory = sync_module.request_inventory
+    forge = {"on": True}
+
+    async def _with_a_forgery(node, session, base_url, inventory_request):
+        events, more, wanted = await real_request_inventory(node, session, base_url, inventory_request)
+        if forge["on"] and len(events) >= 2:
+            forged = {**events[-1], "signature": base64.b64encode(b"x" * 64).decode("ascii")}
+            events = [*events[:-1], forged]
+        return events, more, wanted
+
+    monkeypatch.setattr(sync_module, "request_inventory", _with_a_forgery)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                net.post("R", "one")
+                net.post("R", "two")
+                await net.dial("B", session)
+                first = net.subjects_on("B")
+                forge["on"] = False
+                await net.dial("B", session)
+                return first
+        finally:
+            await server.stop()
+
+    try:
+        first = asyncio.run(scenario())
+        assert len(first) == 1, "the pass with the forgery keeps what came before it"
+        assert sorted(net.subjects_on("B")) == ["one", "two"]
+    finally:
+        net.close()
+
+
+def test_a_request_that_merely_failed_is_repeated_on_the_next_occasion(tmp_path, monkeypatch):
+    """A timeout, a 429 or a 5xx says nothing about what the carrier knows. Only
+    a carrier without the route, or one that answered without the identity, is
+    left alone for the hour."""
+    from netbbs.link import sync as sync_module
+    from netbbs.link.transport import LinkTransportError
+
+    asked: list[int] = []
+
+    async def _times_out(*args, **kwargs):
+        asked.append(1)
+        raise LinkTransportError("could not reach the carrier: timed out")
+
+    monkeypatch.setattr(sync_module, "request_identities", _times_out)
+    net = _ThreeNodes(tmp_path, enforce=False)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                for name in ("A", "B"):
+                    await net.dial(name, session)
+                net.post("A", "hello from A")
+                await net.dial("A", session)
+                for _ in range(2):
+                    await net.dial("B", session)
+                    net.nodes["B"].deferred_events.entries.clear()
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert net.nodes["B"].unanswered_identities == {}
+        assert len(asked) >= 2
+    finally:
+        net.close()

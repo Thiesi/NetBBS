@@ -254,6 +254,7 @@ from netbbs.link.remote_attestation import (
     remove_attestation_recipient,
     set_remote_attestation_override,
 )
+from netbbs.link.store import introduced_by
 from netbbs.link.onboarding import (
     Participation,
     get_configured_link_enabled,
@@ -2361,6 +2362,19 @@ def _trust_subject_stable_id(subject: TrustSubject) -> int:
     return int(subject.subject_id[:12], 16)
 
 
+def _retry_deferred_events(link_context: LinkContext | None, subject: TrustSubject) -> None:
+    """After a trust decision about a node, stop holding back what it sent (issue #630).
+
+    Content refused by policy is set aside for an hour rather than downloaded
+    and refused on every pass. A SysOp who has just established its author
+    should not wait out that hour, so whatever was waiting on this node is
+    asked for again on the next pass. Nothing to do offline: the set-aside list
+    lives in the running node.
+    """
+    if link_context is not None:
+        link_context.link_node.deferred_events.release_identity(subject.node_fingerprint)
+
+
 _VOUCH_STATUS_TONE = {
     "published": "success", "pending": "warning", "suspended": "error", "refused": "error",
 }
@@ -2651,6 +2665,20 @@ async def _trust_subjects_screen(
         await _warn_about_changed_node_identity(
             session, lane, selected.node_fingerprint, role="This subject's"
         )
+        carrier = (
+            await lane.run(introduced_by, selected.node_fingerprint) if selected.kind == "node" else None
+        )
+        if carrier is not None:
+            carrier_label = (await lane.run(identity_for_fingerprint, carrier)).label
+            await session.write_line(
+                colored(
+                    f"This node has never exchanged a hello with that one. Its identity was learned "
+                    f"from {sanitize_text(carrier_label)}, and verifies on its own. It stays on "
+                    "probation, and its content is withheld, until you set both its identity "
+                    "integrity and its resource behavior to established with [O]verride.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
         for state in states:
             await session.write_line(
                 f"{state.dimension.value}: {status_badge(state.state.value, tone=_TRUST_STATE_TONE[state.state], unicode_style=unicode_style)} ({state.reason_code})"
@@ -2719,8 +2747,10 @@ async def _trust_subjects_screen(
             return
         if choice == "o":
             await _set_trust_override_screen(session, lane, actor, selected)
+            _retry_deferred_events(link_context, selected)
         elif choice == "c":
             await _clear_trust_override_screen(session, lane, actor, selected)
+            _retry_deferred_events(link_context, selected)
         elif choice == "h":
             await _trust_decision_history_screen(session, lane, selected)
         elif choice == "v":
