@@ -3153,6 +3153,11 @@ def test_under_production_policy_an_unmet_author_is_withheld_visible_and_establi
         refusals = [r for r in caplog.records if "rejected inventory event" in r.getMessage()]
         assert len(refusals) == 1
         assert sorted(net.subjects_on("B")) == ["hello from A", "hello from R"]
+        # Establishing the node does not establish its callers: a remote user
+        # is a subject of its own, so the post waits in the approval queue.
+        assert net.dbs["B"].db.connection.execute(
+            "SELECT status FROM posts WHERE subject = 'hello from A'"
+        ).fetchone()[0] == "pending"
     finally:
         net.close()
 
@@ -3263,5 +3268,47 @@ def test_a_carrier_is_not_asked_again_on_every_pass_for_an_identity_it_could_not
     try:
         asyncio.run(scenario())
         assert asked == [(net.ids["A"].fingerprint,)]
+    finally:
+        net.close()
+
+
+def test_a_wrong_event_ends_a_response_without_losing_what_was_accepted_before_it(tmp_path, monkeypatch):
+    """What was accepted is in the node's memory and counts as known. Unless it
+    is persisted too, it is never accepted, and so never persisted, again."""
+    import base64
+
+    from netbbs.link import sync as sync_module
+
+    net = _ThreeNodes(tmp_path, enforce=False)
+    real_request_inventory = sync_module.request_inventory
+    forge = {"on": True}
+
+    async def _with_a_forgery(node, session, base_url, inventory_request):
+        events, more, wanted = await real_request_inventory(node, session, base_url, inventory_request)
+        if forge["on"] and len(events) >= 2:
+            forged = {**events[-1], "signature": base64.b64encode(b"x" * 64).decode("ascii")}
+            events = [*events[:-1], forged]
+        return events, more, wanted
+
+    monkeypatch.setattr(sync_module, "request_inventory", _with_a_forgery)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                net.post("R", "one")
+                net.post("R", "two")
+                await net.dial("B", session)
+                first = net.subjects_on("B")
+                forge["on"] = False
+                await net.dial("B", session)
+                return first
+        finally:
+            await server.stop()
+
+    try:
+        first = asyncio.run(scenario())
+        assert len(first) == 1, "the pass with the forgery keeps what came before it"
+        assert sorted(net.subjects_on("B")) == ["one", "two"]
     finally:
         net.close()

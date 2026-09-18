@@ -2255,21 +2255,18 @@ implementation surface is (a) the `handle_events` fix above, (b) the
 responder's three-source diff query, and (c) a client-side loop that issues
 the request and applies the response.
 
-**Who signed it still has to be verifiable, and a hello is no longer the only
-way to learn that (issue #630, §8.11).** Multi-hop propagates *content*
-through an intermediary; it does not substitute for the receiving node's own
-verification of who signed it. This section first required a completed hello
-with the author or origin, on the expectation that seed configuration and
-candidate fallback (§8.3) would bring most nodes of a small deployment into
-direct contact over time. That expectation was wrong in the ordinary case. A
-node dials its seeds and turns to candidates only when they fail, onboarding
-gives every new node the same seed, and two outgoing-only nodes can never
-dial each other at all. Two nodes that share a board through a common seed
-have therefore, as a rule, never met. The receiving node now learns such an
-author's identity from the carrier, as §8.11 describes, and verifies the
-content against that. A node whose identity it cannot learn still cannot
-have its content accepted, and an event in that position is set aside rather
-than allowed to cost the rest of the response.
+**Who signed it has to be verifiable, and a hello is not the only way to
+learn that (issue #630, §8.11).** Multi-hop propagates *content* through an
+intermediary; it does not substitute for the receiving node's own
+verification of who signed it. Requiring a completed hello with the author
+or origin is not an option: a node dials its seeds and turns to candidates
+(§8.3) only when they fail, onboarding gives every new node the same seed,
+and two outgoing-only nodes cannot dial each other at all, so two nodes that
+share a board through a common seed have, as a rule, never met. The
+receiving node learns such an author's identity from the carrier, as §8.11
+describes, and verifies the content against that. A node whose identity it
+cannot learn cannot have its content accepted, and an event in that position
+is set aside without costing the rest of the response.
 
 **Empty inventory is discovery, not "ask about nothing" (issue #94).**
 Although each request dictionary lists what the requester currently
@@ -2760,13 +2757,17 @@ requester matching the wire peer, this node named as responder, a signature
 under the requester's current key, a five-minute freshness window, a bounded
 nonce cache) and is gated by the same policy action as the inventory it
 accompanies. The response carries the bundles the carrier holds and omits the
-rest. A carrier answers only for nodes named by content it has recently
-served (a bounded, in-memory set of 4,096): that is all a requester can need,
-and answering for any fingerprint a peer names would let a peer on probation,
-which is refused the peer list (§8.3), read the carrier's peer set one guess
-at a time, addresses included. A page of events can name more nodes than one
-request may, so up to four requests follow one page; an identity a carrier
-could not supply is not asked of it again for an hour. A carrier serves the identities of its peers and of nodes it was itself
+rest. A carrier answers only for nodes behind content it has recently served
+(a bounded, in-memory set of 4,096): the authors and origins its events name,
+and the current origin of each event's resource, which is who signs a
+closure, a tombstone, a moderator's edit or a file descriptor without being
+named in it. Answering for any fingerprint a peer names would let a peer on
+probation, which is refused the peer list (§8.3), read the carrier's peer set
+one guess at a time, addresses included. A page of events can name more nodes
+than one request may, so a requester sends up to four requests at a time,
+once before policy is consulted and once more for bundles that turned out
+stale. An identity a carrier did not supply, for whatever reason, is not
+asked of it again for an hour. A carrier serves the identities of its peers and of nodes it was itself
 introduced to: the peer list shares only first-hand knowledge because a
 secondhand address is a weaker claim the further it travels, but a bundle is
 not a claim, and refusing to pass one on would break a board carried across
@@ -2790,34 +2791,40 @@ never relayed (§11.3), and the file screen says so.
 **Trust.** An introduced node is registered as a trust subject and starts on
 probation like any other (§12.4). Under the policy a running node enforces,
 its content is therefore verified and still withheld until the SysOp
-establishes it. That is the point of introducing it *before* policy is
-consulted: a node this one has never met was not a subject at all, so its
-content was refused with no way for the SysOp to see the node, let alone
-establish it. It never graduates on its own, because graduation needs direct
-interaction it cannot have. The familiar-name warning of §4.4 applies to an
+establishes it, by setting both its identity integrity and its resource
+behavior. That is the point of introducing it *before* policy is consulted:
+a node that is not a subject reads as probationary too, and its content is
+refused with no way for the SysOp to see the node, let alone establish it.
+It never graduates on its own: the thirty-day age requirement counts from the
+introduction, but graduation also needs days of direct activity, which a node
+never met cannot have. Establishing the node does not establish its callers.
+A remote user is a subject of its own (§12.4) and starts on probation, so its
+first posts arrive pending approval in the board's queue like any other
+probationary remote user's. The familiar-name warning of §4.4 applies to an
 introduced node, and matters more than for a peer: its name is what callers
 read beside every post. The comparison is one-sided. An introduced node is
 compared with every node on file; a node this one has met is compared only
-with others it has met. Otherwise anyone could have a real peer flagged as an
+with others it has met, and meeting a node re-judges any introduced node that
+wears its name. Otherwise anyone could have a real peer flagged as an
 impostor across the network by naming a node after it and posting once on a
 shared board. Mail addressing resolves names among met nodes only, for the
 same reason.
 
 **Stale bundles.** A third node's key transitions are not gossiped; a
 transition is accepted only from its own subject. After such a node rotates,
-the bundle on file no longer verifies what it signs. An event in that
-position names the identity, and the requester asks the carrier for a fresher
-bundle, which replaces the one on file unless its chain is shorter or its
+the bundle on file no longer verifies what it signs. The requester knows
+which identity the failed check was made against, whether or not the event
+names it, and asks the carrier for a fresher bundle, which replaces the one on file unless its chain is shorter or its
 descriptor older.
 
 **Events that cannot be used yet.** The inventory is a diff (§8.8): a node
 declares what it holds and is sent the rest, one page of 200 events per pass.
-An event it could not accept was therefore sent again on every pass, and once
-200 such events stood in the diff nothing else arrived. A response is now
-handled one event at a time. One whose signer is unknown, or that builds on
-something not yet received, or that policy refuses, is set aside and declared
-in later requests as seen, which stops both the repeated download and the
-starvation. It is declared under its resource whether or not this node
+An event it cannot accept would be sent again on every pass, and 200 of them
+would be all it ever received. A carrier's response is therefore handled one
+event at a time. One whose signer is unknown, or that builds on something not
+yet received, or that policy refuses, is set aside and declared in later
+requests as seen, so it is neither downloaded again nor allowed to crowd the
+page. It is declared under its resource whether or not this node
 carries that resource: a board whose origin is on probation here is not
 carried *because* its genesis was set aside. It is asked for again when the
 identity it waited for becomes known, when the SysOp overrides or clears an
@@ -10103,9 +10110,12 @@ that; it asks again instead.
 
 **Decision 7 — a met node outranks an introduced one by name.** Introduction
 puts names on file that nobody here vouched for by dialing. The
-familiar-name comparison is therefore one-sided (§8.11), and mail addresses
-resolve among met nodes only. Rejected: first-seen wins, which hands the
-name to whoever posts first.
+familiar-name comparison is therefore one-sided (§8.11), mail addresses
+resolve among met nodes only, and meeting a node re-judges every introduced
+node that wears its name, whichever was on file first. Rejected: first-seen
+wins throughout, which hands a real peer's name to whoever posts first.
+Between two nodes neither of which this node has met it is still the rule,
+there being nothing to tell them apart.
 
 **Decision 8 — a carrier answers only for whose content it served.**
 Rejected: gating the route like the peer list, which a peer on probation is

@@ -9572,3 +9572,25 @@ def test_the_subject_screen_says_when_a_node_was_learned_from_a_carrier(db, lane
     assert "has never exchanged a hello with that one" in text
     assert "learned from Carrier Node" in text
     assert "identity integrity and its resource behavior to established with [O]verride" in text
+
+
+def test_a_trust_decision_about_a_node_stops_holding_back_what_it_sent(db, lane, sysop):
+    """Issue #630: content refused by policy is set aside for an hour. A SysOp
+    who has just established its author must not have to wait that hour out."""
+    subject = TrustSubject.node("remote-node")
+    register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")
+    link_context = _link_context()
+    held = link_context.link_node.deferred_events
+    held.entries["c" * 64] = ("boards", "a" * 64, "remote-node", 9e12)
+    held.entries["d" * 64] = ("boards", "a" * 64, "some-other-node", 9e12)
+    session = FakeSession(
+        [
+            "s", "p", "s", "0", "1",
+            "o", "d", "r", "t", "e", "r", "known operator", "s", "y",
+            "b", "b", "b", "b",
+        ]
+    )
+
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    assert list(held.entries) == ["d" * 64]

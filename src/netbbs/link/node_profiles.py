@@ -309,6 +309,37 @@ def record_peer_identity_observation(db: Database, peer, *, met: bool = True) ->
     _record_identity_observation(db, identity_for_peer(peer), met=met)
 
 
+def recheck_introduced_identities_against(db: Database, peer) -> None:
+    """Re-judge nodes known only by introduction once `peer` has been met (issue #630).
+
+    A met node is never compared with an introduced one, so that a stranger
+    cannot get a real peer flagged. That leaves the other arrival order: the
+    stranger's name on file first, the real node met later, and nobody flagged.
+    Called after the peer's row is written, so that the introduced node's own
+    comparison finds it.
+    """
+    met = identity_for_peer(peer)
+    claims = {
+        name_key(value) for value in (met.friendly_name, met.dns_name)
+        if value and value != UNNAMED_NODE_NAME
+    }
+    if not claims:
+        return
+    rows = db.connection.execute(
+        """SELECT fingerprint, descriptor_json FROM link_introduced_identities
+           WHERE fingerprint NOT IN (SELECT fingerprint FROM link_peers)"""
+    ).fetchall()
+    for row in rows:
+        introduced = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
+        introduced_claims = {
+            name_key(value) for value in (introduced.friendly_name, introduced.dns_name)
+            if value and value != UNNAMED_NODE_NAME
+        }
+        if claims & introduced_claims:
+            _record_identity_observation(db, introduced, met=False)
+    db.connection.commit()
+
+
 def _record_identity_observation(db: Database, current: NodeDisplayIdentity, *, met: bool = True) -> None:
     """`met` is whether this node has completed a hello with `current`.
 

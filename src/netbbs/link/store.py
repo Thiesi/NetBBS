@@ -389,6 +389,12 @@ def save_peer(db: Database, peer: PeerRecord) -> None:
     # `PeerDirectory.admit`.
     db.connection.execute("DELETE FROM link_introduced_identities WHERE fingerprint = ?", (peer.fingerprint,))
     db.connection.commit()
+    # Issue #630: and now that this node is met, any node known only by
+    # introduction that wears its name is the one to flag, even if its name
+    # was on file first.
+    from netbbs.link.node_profiles import recheck_introduced_identities_against
+
+    recheck_introduced_identities_against(db, peer)
 
 
 def introduced_by(db: Database, fingerprint: str) -> str | None:

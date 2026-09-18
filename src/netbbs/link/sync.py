@@ -914,22 +914,29 @@ async def _introduce_identities(
     for start in range(0, min(len(wanted), _MAX_IDENTITY_REQUESTS_PER_PAGE * MAX_IDENTITIES_PER_REQUEST),
                        MAX_IDENTITIES_PER_REQUEST):
         asked = wanted[start:start + MAX_IDENTITIES_PER_REQUEST]
+        gave_up = False
         try:
             learned_now = await _introduce_identities_once(
                 node, session, base_url, carrier_fingerprint, lane, asked
             )
         except (LinkTransportError, ValueError) as exc:
+            # A carrier that predates the route answers 404 to every request.
+            # Marked unanswered like any other, or this line is logged twice a
+            # pass for as long as that carrier stays on its version.
             _logger.warning("Link sync: could not ask %s who its content is from: %s", base_url, exc)
-            break
+            learned_now = set()
+            gave_up = True
         except Exception:  # noqa: BLE001 -- an escape here ends the whole background sync task
             _logger.exception("Link sync: learning identities from %s failed", base_url)
             break
-        for fingerprint in asked:
+        for fingerprint in (wanted[start:] if gave_up else asked):
             if fingerprint not in learned_now:
                 while len(unanswered) >= _MAX_UNANSWERED_IDENTITIES:
                     unanswered.pop(next(iter(unanswered)))
                 unanswered[(carrier_fingerprint, fingerprint)] = now + DEFERRED_EVENT_RETRY_SECONDS
         learned = learned or bool(learned_now)
+        if gave_up:
+            break
     return learned
 
 

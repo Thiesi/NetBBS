@@ -1407,7 +1407,12 @@ class DeferredEvents:
         resource = _event_resource(raw)
         if resource is None:
             return
-        content_id = event_content_id(raw["envelope"])
+        try:
+            content_id = event_content_id(raw["envelope"])
+        except Exception:  # noqa: BLE001 -- unvalidated input; canonicalization refuses e.g. a float
+            # Not set aside, so offered again: the cost of one malformed event,
+            # where an escape from here would end the whole sync task.
+            return
         self.entries.pop(content_id, None)
         while len(self.entries) >= _MAX_DEFERRED_EVENTS:
             self.entries.pop(next(iter(self.entries)))
@@ -2147,7 +2152,15 @@ class LinkNode:
         included.
         """
         for raw in raw_events:
-            for fingerprint in referenced_identities(raw):
+            signers = referenced_identities(raw)
+            # A closure, a tombstone, a moderator's edit or a file descriptor
+            # is signed by its resource's origin and does not say so in its
+            # payload. A requester that has to refresh that origin's bundle
+            # names it all the same, and must not be told it is unknown.
+            origin = self._resource_origin(_event_resource(raw))
+            if origin is not None and origin not in signers:
+                signers.append(origin)
+            for fingerprint in signers:
                 self.served_signers.pop(fingerprint, None)
                 self.served_signers[fingerprint] = None
         while len(self.served_signers) > _MAX_SERVED_SIGNERS:
@@ -2541,6 +2554,17 @@ class LinkNode:
         while len(seen) >= _MAX_SEEN_TRUST_PULL_NONCES:
             seen.pop(next(iter(seen)))
         seen[replay_key] = received_at
+
+    def _resource_origin(self, resource: tuple[str, str] | None) -> str | None:
+        """The node currently authoritative for a carried resource, if this node knows it."""
+        if resource is None:
+            return None
+        kind, resource_id = resource
+        if kind == "boards":
+            return self.current_board_origin(resource_id) if resource_id in self.boards else None
+        genesis = (self.channels if kind == "channels" else self.file_areas).get(resource_id)
+        origin = genesis.payload.get("origin_fingerprint") if genesis is not None else None
+        return origin if isinstance(origin, str) and origin else None
 
     def build_identity_response(self, subjects: tuple[str, ...]) -> list[dict]:
         """The hello bundles this node holds for `subjects`, among the nodes whose

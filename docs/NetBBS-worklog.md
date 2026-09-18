@@ -2681,8 +2681,8 @@ in memory on purpose.
 A running node always passes `enforce_trust_policy=True`, and most loop tests
 do not. Under enforcement the policy filter runs *before* `handle_events`, so
 a defect in the protocol layer can be hidden in production and a defect in the
-interplay hidden in tests. #630 was first reported from a run with the flag
-off, and the report was wrong about the ordinary case. Reproduce under both.
+interplay hidden in tests. Reproduce a Link defect under both settings before
+describing it.
 A bare `LinkNode` also does not know its own board genesis; a started node
 gets it from `load_link_node`, and a harness should too.
 

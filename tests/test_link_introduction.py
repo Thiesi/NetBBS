@@ -303,6 +303,38 @@ def test_a_carrier_answers_only_for_nodes_whose_content_it_has_served(cast):
     assert len(r.build_identity_response((a.identity.fingerprint,))) == 1
 
 
+def test_a_carrier_also_answers_for_the_origin_of_an_event_that_does_not_name_its_signer(cast):
+    """The other half of recognizing a stale identity. A requester that has to
+    refresh the origin behind a closure, a tombstone or a file descriptor names
+    that origin; a carrier that judged only by payloads would call it unknown,
+    on every pass, for good."""
+    from netbbs.link.events import build_board_closure
+
+    r, a = cast["R"], cast["A"]
+    genesis = genesis_by(a)
+    r.handle_events(a.identity.fingerprint, [genesis.to_dict()])
+    r.served_signers.clear()
+    closure = build_board_closure(
+        signing_identity=a.identity.signing_key, board_id=BOARD,
+        previous_event_id=genesis.content_id, reason=None, created_at=WHEN,
+    ).to_dict()
+
+    r.note_served_signers([closure])
+
+    assert len(r.build_identity_response((a.identity.fingerprint,))) == 1
+
+
+def test_setting_aside_an_event_that_cannot_be_canonicalized_is_a_no_op(cast):
+    """It reads unvalidated input, in a loop where an escape ends the sync task."""
+    deferred = DeferredEvents()
+    junk = post_by(cast["A"]).to_dict()
+    junk["envelope"]["netbbs_protocol"] = 1.0
+
+    deferred.defer(junk, waiting_for=None, now=0.0)
+
+    assert deferred.entries == {}
+
+
 def test_what_a_carrier_remembers_having_served_is_bounded(cast, monkeypatch):
     from netbbs.link import protocol as protocol_module
 
@@ -519,6 +551,9 @@ def test_a_node_nobody_here_has_met_cannot_get_a_real_peer_flagged_by_wearing_it
 
     observation = latest_identity_observation(db, genuine.identity.fingerprint)
     assert observation is None or observation.severity != "security"
+    # And the newcomer is the one flagged, although its name was on file first:
+    # meeting the real node re-judges whoever wears its name.
+    assert latest_identity_observation(db, impostor.identity.fingerprint).severity == "security"
     # Mail is addressed among the nodes this one has met, so the name stays unambiguous.
     assert resolve_stored_peer_reference(db, "Roanoke", met_only=True) == genuine.identity.fingerprint
     assert len(resolve_stored_peer_reference(db, "Roanoke")) == 2
